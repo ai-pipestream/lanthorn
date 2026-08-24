@@ -729,7 +729,13 @@ pub fn fill_story_page_clear(
 /// gap either side — right across window 0's text panel. That flood must yield to
 /// the story page; the labels a game deliberately printed inside window 0's box
 /// must not.
-pub fn chrome_text_rects(chrome: &[&PositionedWindow], cell: V6Cell) -> Vec<(u32, u32, u32, u32)> {
+pub fn chrome_text_rects(
+    chrome: &[&PositionedWindow],
+    // The cell, the face and the PEN as one value (SQ-1054) — a rect that spares
+    // what the draw claimed has to be measured the way the draw measures.
+    tf: &crate::native_font::TextFace,
+) -> Vec<(u32, u32, u32, u32)> {
+    let cell = tf.cell();
     let font_w = u32::from(cell.w);
     let font_h = u32::from(cell.h);
     let mut rects = Vec::new();
@@ -738,13 +744,24 @@ pub fn chrome_text_rects(chrome: &[&PositionedWindow], cell: V6Cell) -> Vec<(u32
         // (SQ-0729), so the story page must spare them exactly as it spares a
         // grid's runs — else fmvpoker's menu bar, printed inside window 0's box,
         // is painted out the moment it is painted in.
-        rects.extend(buffer_line_rects(it, cell));
+        rects.extend(buffer_line_rects(it, tf));
         let WinNode::Grid(g) = &it.node else { continue };
         if !g.px_texts.is_empty() {
             for t in &g.px_texts {
                 let x = t.x.max(1) as u32 - 1;
                 let y = t.y.max(1) as u32 - 1;
-                rects.push((x, y, x + t.text.chars().count().max(1) as u32 * font_w, y + font_h));
+                // **The PEN's span, not the declared one** (SQ-1054). The glyph
+                // loop in `build_chrome_canvas` steps `advance_styled`, so that is
+                // the width of ink standing on the canvas; sparing
+                // `chars * font_w` instead spares the box the GAME reserved, and
+                // where the face is wider than the cell the page fill then lands
+                // on the tail of the run and slices whichever glyph straddles the
+                // boundary. Macintosh Zork Zero's hint menu is the report: its
+                // topics stop dead at `x + chars * 7` with a half-drawn letter at
+                // the cut — `GREAT HALL AREA` inked to 195 against a pen ending at
+                // 203, `FOR YOUR AMUSEMENT` to 433 against 443.
+                let w = tf.run_px_styled(&t.text, t.style).max(font_w);
+                rects.push((x, y, x + w, y + font_h));
             }
             continue;
         }
@@ -789,9 +806,9 @@ pub fn fill_story_page_under_chrome_text(
     page: Rgba<u8>,
     chrome: &[&PositionedWindow],
     paint: Option<&RgbaImage>,
-    cell: V6Cell,
+    tf: &crate::native_font::TextFace,
 ) {
-    let text: Vec<(u32, u32, u32, u32)> = chrome_text_rects(chrome, cell)
+    let text: Vec<(u32, u32, u32, u32)> = chrome_text_rects(chrome, tf)
         .into_iter()
         .filter(|&(x0, y0, x1, y1)| x0 < bx + bw && bx < x1 && y0 < by + bh && by < y1)
         .collect();
@@ -1776,7 +1793,7 @@ pub fn draw_secondary_prose(
             None => ink,
         };
         let right = it.x_px as u32 + it.w_px as u32;
-        let rects = buffer_line_rects(it, cell);
+        let rects = buffer_line_rects(it, tf);
         for (line, &(x0, y0, _, _)) in b.lines.iter().zip(&rects) {
             let mut pen = x0;
             for ch in line.chars() {
@@ -1900,9 +1917,8 @@ pub fn draw_story_canvas_runs(
 ///
 /// A PRIMARY buffer is the transcript and is not drawn here at all — it yields
 /// nothing.
-fn buffer_line_rects(it: &PositionedWindow, cell: V6Cell) -> Vec<(u32, u32, u32, u32)> {
-    let font_w = u32::from(cell.w);
-    let font_h = u32::from(cell.h);
+fn buffer_line_rects(it: &PositionedWindow, tf: &crate::native_font::TextFace) -> Vec<(u32, u32, u32, u32)> {
+    let font_h = u32::from(tf.cell().h);
     let WinNode::Buffer(b) = &it.node else { return Vec::new() };
     if b.primary {
         return Vec::new();
@@ -1916,7 +1932,11 @@ fn buffer_line_rects(it: &PositionedWindow, cell: V6Cell) -> Vec<(u32, u32, u32,
         if y0 + font_h > bottom {
             break;
         }
-        let x1 = (x0 + line.chars().count() as u32 * font_w).min(right);
+        // The PEN again (SQ-1054): `draw_secondary_prose` steps `tf.advance` down
+        // this very list, so the rect and the draw must agree. The doc above
+        // already said "spare exactly the pixels the draw claims" — they were
+        // measured twice, in two different units.
+        let x1 = (x0 + tf.run_px(line)).min(right);
         out.push((x0, y0, x1, y0 + font_h));
     }
     out
@@ -2785,6 +2805,91 @@ mod tests {
     use super::*;
     use crate::engine::{BorderPref, BufferWindow, GraphicsWindow, GridCell, GridWindow, PxText};
     use std::sync::Arc;
+
+    /// **A chrome run's spare rect is the PEN's span, not the declared one**
+    /// (SQ-1054).
+    ///
+    /// `chrome_text_rects` names the pixels `fill_story_page_under_chrome_text`
+    /// must not paint over, and the glyph loop that put them there steps
+    /// `advance_styled`. Measured as `chars * cell.w` instead, the rect is the box
+    /// the GAME reserved — and where the face is wider than the cell the page fill
+    /// lands on the tail of the run and slices whichever glyph straddles the edge.
+    ///
+    /// Macintosh Zork Zero's InvisiClues menu is the report, drawn in Geneva 12
+    /// (advances 3–11 against a declared 7): every topic stopped dead at
+    /// `x + chars * 7` with a half-drawn letter at the cut. Measured on
+    /// `stories/Zork Zero Disk.image` — `GREAT HALL AREA` inked to 195 against a
+    /// pen ending at 203, `AS A LAST RESORT` to 419 against 425,
+    /// `FOR YOUR AMUSEMENT` to 433 against 443.
+    ///
+    /// A unit case rather than a real-media one because that press draws with
+    /// Geneva, which ships with the MACHINE and with no game (SQ-1036) — a case
+    /// resolving the real cascade would answer out of whatever the person running
+    /// it keeps in `~/.lanthorn/`, which is the trap SQ-1052's first case fell
+    /// into. Only the pen matters here and a synthetic one states it exactly.
+    ///
+    /// FALSIFY by restoring `t.text.chars().count().max(1) as u32 * font_w`.
+    #[test]
+    fn a_chrome_runs_spare_rect_is_the_pens_span_not_the_declared_one() {
+        let profile = crate::interpreter::InterpreterProfile::Macintosh;
+        let glyph = |w: u8| blorb::bitmap_font::Glyph {
+            width: w,
+            rows: (0..15).map(|r| if r == 12 { 0xFF } else { 0x00 }).collect(),
+        };
+        let font = blorb::bitmap_font::BitmapFont {
+            width: 11,
+            height: 15,
+            baseline: 12,
+            bold_smear: 0,
+            proportional: true,
+            lo: b' ',
+            // Advances 7..11 against a declared 7, so a run is reliably WIDER than
+            // the box the game reserved — which is the direction Geneva 12 runs on
+            // the Macintosh's own cell and the only direction that clips.
+            glyphs: (b'\x20'..=b'\x7e').map(|c| glyph(7 + (c % 5))).collect(),
+        };
+        let tf = crate::native_font::TextFace::new(
+            profile,
+            crate::native_font::FaceSet::release(font, profile, Some((1, 1))),
+            Some((1, 1)),
+        );
+        assert!(tf.proportional(), "the precondition: a pen that varies");
+
+        const TOPIC: &str = "GREAT HALL AREA";
+        let pen = tf.run_px_styled(TOPIC, 0);
+        let declared = u32::from(tf.cell().w) * TOPIC.chars().count() as u32;
+        assert!(
+            pen > declared,
+            "non-vacuity: this face must be WIDER than the cell here ({pen} vs {declared}),              or the two measures agree and the case proves nothing",
+        );
+
+        let mut grid = grid_item(0);
+        grid.w_px = 640;
+        grid.h_px = 400;
+        match &mut grid.node {
+            WinNode::Grid(g) => {
+                g.px_texts = vec![PxText {
+                    y: 1,
+                    x: 1,
+                    text: TOPIC.to_string(),
+                    style: 0,
+                    fg: 0,
+                    bg: 0,
+                    grow: 0,
+                    gcol: 0,
+                }]
+            }
+            _ => unreachable!(),
+        }
+        let rects = chrome_text_rects(&[&grid], &tf);
+        assert_eq!(rects.len(), 1, "one run, one rect: {rects:?}");
+        let (x0, _, x1, _) = rects[0];
+        assert_eq!(
+            x1 - x0,
+            pen,
+            "the spared width is the pen's, so the page fill stops where the ink does",
+        );
+    }
 
     /// **The over-art question belongs to a GLYPH, not to a joined chain** (SQ-1052).
     ///

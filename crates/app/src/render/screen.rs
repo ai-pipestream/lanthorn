@@ -3940,7 +3940,7 @@ pub fn build_v6_raster_canvas(
             page,
             &layout.chrome,
             state.v6_paint.borrow().as_deref(),
-            state.v6_text.cell(),
+            &state.v6_text,
         );
         // …then the story window's OWN absolutely-placed artwork, before any
         // prose: Arthur's intro centres a 584×392 plate in window 0, so the plate
@@ -4016,7 +4016,7 @@ pub fn build_v6_raster_canvas(
             cols,
             rows,
             ink,
-            &v6::chrome_text_rects(&layout.chrome, state.v6_text.cell()),
+            &v6::chrome_text_rects(&layout.chrome, &state.v6_text),
             &state.v6_text,
         );
         // [more] pager indicator (SQ-0455): when a single turn's output

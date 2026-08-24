@@ -861,6 +861,73 @@ fn glyph_edges(run: &V6Text, metric: &V6Metric) -> Vec<i32> {
     edges
 }
 
+/// The contiguous run of GLYPH INDICES `(first, last)` that the screen rect
+/// `(top, left)..(top+h, left+w)` covers, or `None` when it covers none.
+///
+/// Glyph `i` occupies `[rx + edges[i], rx + edges[i+1])` — the PEN's cumulative
+/// offsets, not `i * cell.w` — and is covered when that span meets the rect at
+/// all, because paint replaces whole glyphs and sub-glyph residue cannot be
+/// represented as text. The covered glyphs are always contiguous.
+///
+/// Extracted so [`trim_run_against_rect`] and the blanks-only erase ask the
+/// question once (SQ-1054): two copies of this arithmetic, one of them
+/// hand-maintained beside the other, is the shape CLAUDE.md's refactoring policy
+/// exists to refuse.
+fn covered_glyphs(
+    run: &V6Text,
+    top: i32,
+    left: i32,
+    h: i32,
+    w: i32,
+    metric: &V6Metric,
+) -> Option<(usize, usize)> {
+    let cell = metric.cell();
+    let ry = run.y as i32;
+    if ry + cell.h as i32 <= top || ry >= top + h {
+        return None;
+    }
+    let rx = run.x as i32;
+    let edges = glyph_edges(run, metric);
+    let n = edges.len() - 1;
+    if rx + edges[n] <= left || rx >= left + w {
+        return None;
+    }
+    let mut span: Option<(usize, usize)> = None;
+    for i in 0..n {
+        if rx + edges[i + 1] > left && rx + edges[i] < left + w {
+            span = Some(span.map_or((i, i), |(f, _)| (f, i)));
+        }
+    }
+    span
+}
+
+/// The GROUND a run paints: its video state and its colour pair. Two runs sharing
+/// one ground put the same pixels in a blank cell, whoever printed it.
+type Ground = (bool, ZColour, ZColour);
+
+fn ground_of(run: &V6Text) -> Ground {
+    (run.style & STYLE_REVERSE != 0, run.fg, run.bg)
+}
+
+/// Whether every glyph `rect` covers in `run` is a BLANK — a cell carrying a
+/// background and no letter — **on a ground other than `by`**.
+///
+/// The ground test is what keeps this from erasing a blank the covering run would
+/// have painted identically. See [`V6Windows::erase_blank_cells_in_rect`].
+fn covers_only_blanks(
+    run: &V6Text,
+    by: Ground,
+    top: i32,
+    left: i32,
+    h: i32,
+    w: i32,
+    metric: &V6Metric,
+) -> bool {
+    ground_of(run) != by
+        && covered_glyphs(run, top, left, h, w, metric)
+            .is_some_and(|(a, b)| run.text.chars().skip(a).take(b - a + 1).all(|c| c == ' '))
+}
+
 /// Trim `run` against the screen rect `(top, left)..(top+h, left+w)` in pixels:
 /// drop it entirely, keep it, or split it into up-to-two remnants. A glyph is
 /// erased when its cell intersects the rect at all (paint replaces whole
@@ -879,24 +946,11 @@ fn trim_run_against_rect(
     if ry + cell.h as i32 <= top || ry >= top + h {
         return vec![run];
     }
-    let rx = run.x as i32;
-    let edges = glyph_edges(&run, metric);
-    let n = edges.len() - 1;
-    if rx + edges[n] <= left || rx >= left + w {
-        return vec![run];
-    }
-    // Glyph i covers [rx + edges[i], rx + edges[i+1]); erased iff it intersects
-    // [left, left+w). Chars form one contiguous erased span, leaving at most a
-    // left and a right remnant.
-    let mut span: Option<(usize, usize)> = None;
-    for i in 0..n {
-        if rx + edges[i + 1] > left && rx + edges[i] < left + w {
-            span = Some(span.map_or((i, i), |(f, _)| (f, i)));
-        }
-    }
-    let Some((first_erased, last_erased)) = span else {
+    let Some((first_erased, last_erased)) = covered_glyphs(&run, top, left, h, w, metric) else {
         return vec![run];
     };
+    let rx = run.x as i32;
+    let edges = glyph_edges(&run, metric);
     let chars: Vec<char> = run.text.chars().collect();
     let mut out = Vec::new();
     if first_erased > 0 {
@@ -963,27 +1017,105 @@ impl V6Windows {
         // a proportional run are not the same width, so the pixels an erasing
         // segment covers are the pen's cumulative offsets (SQ-1009).
         let edges = glyph_edges(&run, metric);
-        let mut seg_start: Option<usize> = None; // char index of current erasing segment
         let chars: Vec<char> = run.text.chars().collect();
-        for i in 0..=chars.len() {
-            let erases = i < chars.len() && (bg_opaque || clearing || chars[i] != ' ');
-            match (erases, seg_start) {
-                (true, None) => seg_start = Some(i),
-                (false, Some(s)) => {
-                    self.erase_screen_rect(
-                        run.y as i32,
-                        run.x as i32 + edges[s],
-                        cell.h as i32,
-                        edges[i] - edges[s],
-                        metric,
-                    );
-                    seg_start = None;
-                }
-                _ => {}
+        let erases = |i: usize| bg_opaque || clearing || chars[i] != ' ';
+        // Walk the run in segments of equal opacity. An OPAQUE segment erases
+        // everything under it; a transparent one — a padding space — erases only
+        // the BLANK cells under it (SQ-1054), which is the whole of the
+        // distinction below.
+        let mut i = 0usize;
+        while i < chars.len() {
+            let e = erases(i);
+            let mut j = i + 1;
+            while j < chars.len() && erases(j) == e {
+                j += 1;
             }
+            let (top, left) = (run.y as i32, run.x as i32 + edges[i]);
+            let (h, w) = (cell.h as i32, edges[j] - edges[i]);
+            if e {
+                self.erase_screen_rect(top, left, h, w, metric);
+            } else {
+                self.erase_blank_cells_in_rect(top, left, h, w, metric, ground_of(&run));
+            }
+            i = j;
         }
         if let Some(w) = self.windows.get_mut(win) {
             w.texts.push(run);
+        }
+    }
+
+    /// Erase only the BLANK cells a rect covers — a cell carrying a background
+    /// and no letter (SQ-1054).
+    ///
+    /// # The two frames this sits between
+    ///
+    /// A SPACE printed with inherited colours deposits no pixels, so
+    /// [`Self::paint_run`] has always let it pass over whatever is beneath it.
+    /// That is right for Shogun, which pads its status fields with spaces whose
+    /// span reaches a neighbouring label painted earlier in the same row: erasing
+    /// there would eat a label that is on the screen.
+    ///
+    /// It is wrong for a cell whose only content IS a background. Macintosh Zork
+    /// Zero's InvisiClues menu highlights the selected topic in reverse video —
+    /// `GREAT HALL AREA` plus a trailing reversed space — and deselects it by
+    /// re-printing the same characters in normal video. The letters overwrite
+    /// their own cells, but the two INTER-WORD spaces do not, so the reversed
+    /// blocks the old highlight left at native x=132 and x=167 outlived the
+    /// highlight itself and stood on the row as stray marks. Arthur's hint page
+    /// shows the same thing, for the same reason.
+    ///
+    /// A letter cannot be overstruck by a space in a text-run model, and that
+    /// approximation stays. A BLANK has no letter to preserve: two spaces cannot
+    /// both own one pixel span, so the later one wins and the earlier one goes.
+    /// Shogun's neighbours are letters; Zork Zero's leftovers are not.
+    ///
+    /// # …and the erase is gated on the GROUND, because of a third frame
+    ///
+    /// `advent.z6`'s help bar is a pure reverse-video row painted as reversed
+    /// SPACERS first and the labels over them, so its spacers at native x=17, 33
+    /// and 73 sit inside `N = next subject`'s span and the label's own spaces cover
+    /// them. Those spacers are the bar: erase them and it comes out moth-eaten,
+    /// which is SQ-0504's defect returning. `v6_advent_help_bar` failed on exactly
+    /// that when this erase was unconditional.
+    ///
+    /// What separates it from Zork Zero is not the blank, it is what is printing
+    /// over it. advent's label is REVERSED, like the spacer beneath it, so the two
+    /// runs would put identical pixels in that cell and the record may as well
+    /// stand. Zork Zero's deselected topic is NOT reversed while the blank beneath
+    /// it is, so the old block is a ground the new run does not paint and has to
+    /// go. Hence [`Ground`]: same ground, same pixels, leave it alone.
+    fn erase_blank_cells_in_rect(
+        &mut self,
+        top: i32,
+        left: i32,
+        h: i32,
+        w: i32,
+        metric: &V6Metric,
+        by: Ground,
+    ) {
+        if h <= 0 || w <= 0 {
+            return;
+        }
+        for win in self.windows.iter_mut() {
+            // The same three layers `erase_screen_rect` walks, for the same
+            // reason: an erase is about pixels and does not care which of them
+            // recorded the glyph.
+            for layer in [&mut win.texts, &mut win.retired, &mut win.streamed] {
+                if !layer.iter().any(|t| covers_only_blanks(t, by, top, left, h, w, metric)) {
+                    continue;
+                }
+                let old = std::mem::take(layer);
+                *layer = old
+                    .into_iter()
+                    .flat_map(|t| {
+                        if covers_only_blanks(&t, by, top, left, h, w, metric) {
+                            trim_run_against_rect(t, top, left, h, w, metric)
+                        } else {
+                            vec![t]
+                        }
+                    })
+                    .collect();
+            }
         }
     }
 
@@ -2490,6 +2622,10 @@ impl Default for V6Cell {
     }
 }
 
+/// ZMSD §8.7.1 style bit 0 — reverse video. Named here because a blank cell's
+/// only content is its ground, and reverse is half of what a ground IS (SQ-1054).
+const STYLE_REVERSE: u8 = 1;
+
 /// ZMSD §8.7.1 style bit 1 — bold. Named here because the pen has to know:
 /// the Amiga emboldens by smearing a glyph right and advancing by the same
 /// amount, so a bold run is genuinely WIDER than the same letters in roman.
@@ -2953,6 +3089,85 @@ pub fn compute_status_line(mem: &Memory) -> StatusLine {
 
 #[cfg(test)]
 mod tests {
+
+    /// A run at `(x, y)` in `style`, with inherited colours and its declared grid
+    /// cell — what a game's own `print` deposits.
+    fn run_at(x: u16, y: u16, text: &str, style: u8) -> V6Text {
+        V6Text {
+            y,
+            x,
+            text: text.to_string(),
+            style,
+            fg: ZColour::Default,
+            bg: ZColour::Default,
+            grow: (y.max(1) - 1) / 15,
+            gcol: (x.max(1) - 1) / 7,
+        }
+    }
+
+    /// **A space erases a BLANK cell under it, and still spares a letter**
+    /// (SQ-1054).
+    ///
+    /// A space printed with inherited colours deposits no pixels, so `paint_run`
+    /// has always let one pass over whatever is beneath. That is right when a
+    /// letter is beneath — Shogun pads its status fields with spaces whose span
+    /// reaches a neighbouring label painted earlier in the same row, and a text-run
+    /// model cannot overstrike. It is wrong when the thing beneath is a cell whose
+    /// only content IS a background: two spaces cannot both own one pixel span.
+    ///
+    /// Macintosh Zork Zero's InvisiClues menu is the report. It highlights a topic
+    /// in reverse video and deselects it by re-printing the same characters in
+    /// normal video; the letters overwrote their own cells and the INTER-WORD
+    /// spaces did not, so the old highlight's reversed blocks outlived it. Measured
+    /// on `stories/Zork Zero Disk.image` with Geneva 12: after two `n` presses the
+    /// deselected row still carried reversed spaces at native x=132 and x=167.
+    ///
+    /// FALSIFY by routing the transparent segment of `paint_run` to nothing again
+    /// (drop the `erase_blank_cells_in_rect` arm): the reversed blank survives the
+    /// second print and the first assertion fails.
+    #[test]
+    fn a_printed_space_clears_a_blank_cell_but_not_a_letter() {
+        let metric = V6Metric::fixed(V6Cell { w: 7, h: 15 });
+        // The highlight: a reversed space sitting alone at x=8 (native 7..14).
+        let mut w = V6Windows::default();
+        w.paint_run(0, run_at(8, 1, " ", 1), &metric);
+        assert_eq!(w.windows[0].texts.len(), 1, "the highlight is on the screen");
+
+        // Deselecting prints `A A` over it — the letters land either side and the
+        // SPACE lands exactly on the reversed blank.
+        w.paint_run(0, run_at(1, 1, "A A", 0), &metric);
+        let left: Vec<&V6Text> = w.windows[0].texts.iter().collect();
+        assert!(
+            !left.iter().any(|t| t.style & 1 != 0),
+            "the reversed blank the space covered is gone: {:?}",
+            left.iter().map(|t| (t.x, t.style, &t.text)).collect::<Vec<_>>(),
+        );
+
+        // …and the same space does NOT eat a LETTER, which is Shogun's padding.
+        let mut w2 = V6Windows::default();
+        w2.paint_run(0, run_at(8, 1, "L", 0), &metric);
+        w2.paint_run(0, run_at(1, 1, "A A", 0), &metric);
+        assert!(
+            w2.windows[0].texts.iter().any(|t| t.text.contains('L')),
+            "a padding space still spares a neighbouring label: {:?}",
+            w2.windows[0].texts.iter().map(|t| (t.x, &t.text)).collect::<Vec<_>>(),
+        );
+
+        // …and it spares a blank on its OWN ground, which is advent.z6's help bar:
+        // reversed spacers painted first, reversed labels over them, and the
+        // spacers ARE the bar. Same pixels either way, so the record stands.
+        // `v6_advent_help_bar` failed on exactly this when the erase was
+        // unconditional — the third frame, and the one that fixes the rule's shape.
+        let mut w3 = V6Windows::default();
+        w3.paint_run(0, run_at(8, 1, " ", 1), &metric);
+        w3.paint_run(0, run_at(1, 1, "A A", 1), &metric);
+        assert!(
+            w3.windows[0].texts.iter().any(|t| t.x == 8 && t.text == " "),
+            "a reversed spacer under a REVERSED label survives — it is the bar: {:?}",
+            w3.windows[0].texts.iter().map(|t| (t.x, t.style, &t.text)).collect::<Vec<_>>(),
+        );
+    }
+
     // ── SQ-1030: the one clamp ───────────────────────────────────────────────
 
     /// `put_prop` is the crate's only writer of the eight geometry properties
