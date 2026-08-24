@@ -912,6 +912,20 @@ impl InterpreterProfile {
         self.machine()
             .map_or((1, 1), |m| m.v6_face_space.text_scale(art_scale))
     }
+
+    /// Whether this machine draws §8.7.1's Italic bit as an UNDERLINE rather than a
+    /// slope (SQ-1028).
+    ///
+    /// Both machines Infocom shipped a Version 6 interpreter for do, measured on one
+    /// frame of one game: `machine-screenshots/amiga-shogun-game.png` and
+    /// `mac-shogun.jpg` both rule under `Erasmus` in "the Erasmus, a Dutch merchant"
+    /// and under nothing beside it. The standard licenses either — §8.7.1 offers
+    /// "rendering italic with underlining" as its own example — so this is a
+    /// fidelity fact, not a compliance one. See [`zvm::interpreter::V6Emphasis`].
+    pub fn underlines_emphasis(self) -> bool {
+        self.machine()
+            .is_some_and(|m| m.v6_emphasis == zvm::interpreter::V6Emphasis::Underline)
+    }
 }
 
 /// The §11.1.3 interpreter numbers, from [`zvm::interpreter`] — the machine

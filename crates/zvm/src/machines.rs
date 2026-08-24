@@ -240,14 +240,14 @@ pub fn table() -> String {
     let mut s = format!("ZMSD §11.1.3 machine profiles — what zvm models, in number order.\n\n{TOLD_INTRO}\n");
     let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
     s.push_str(&format!(
-        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {}\n",
+        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {}\n",
         "#", "machine", "default page / ink ($2C/$2D)", "palette", "global pens", "v6 screen page",
-        "one screen palette", "v6 cell", "face space", "v6 std window"
+        "one screen palette", "v6 cell", "face space", "emphasis", "v6 std window"
     ));
-    s.push_str(&format!("  {}\n", "-".repeat(name_w + 130)));
+    s.push_str(&format!("  {}\n", "-".repeat(name_w + 141)));
     for m in MACHINES {
         s.push_str(&format!(
-            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {}\n",
+            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {}\n",
             m.number,
             m.name,
             colours(m),
@@ -273,6 +273,13 @@ pub fn table() -> String {
             match m.v6_face_space {
                 crate::interpreter::V6FaceSpace::Art => "art",
                 crate::interpreter::V6FaceSpace::Native => "native px",
+            },
+            // §8.7.1's Italic bit: a rule under the cell, or a synthesised slope
+            // (SQ-1028). Only the two machines Infocom shipped a v6 interpreter for
+            // have a capture to measure, and both underline.
+            match m.v6_emphasis {
+                crate::interpreter::V6Emphasis::Underline => "underline",
+                crate::interpreter::V6Emphasis::Slope => "slope",
             },
             // A machine that states none defers to the story's own container, and
             // to any artwork the host mounted ahead of it (SQ-0838).
@@ -468,6 +475,7 @@ mod tests {
                 one_screen_palette,
                 v6_cell,
                 v6_face_space,
+                v6_emphasis,
                 v6_std_window,
                 period_look,
             } = *m;
@@ -496,6 +504,13 @@ mod tests {
                     crate::interpreter::V6FaceSpace::Native => "native px",
                 }),
                 "{name}: v6_face_space not in\n{all}",
+            );
+            assert!(
+                all.contains(match v6_emphasis {
+                    crate::interpreter::V6Emphasis::Underline => "underline",
+                    crate::interpreter::V6Emphasis::Slope => "slope",
+                }),
+                "{name}: v6_emphasis not in\n{all}",
             );
             // The three booleans share one spelling, so count rather than search:
             // the machine table row holds exactly these three yes/no columns.

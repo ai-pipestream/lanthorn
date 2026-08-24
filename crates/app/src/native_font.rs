@@ -284,6 +284,10 @@ pub struct TextFace {
     /// — SQ-1026 and SQ-1035 are a matched pair of exactly that — so there is
     /// one, and everything below delegates to it.
     metric: zvm::screen::V6Metric,
+    /// Whether this machine rules under an emphasised run instead of sloping it
+    /// (SQ-1028). A machine fact, carried here because `TextFace` is what already
+    /// reaches every glyph the raster path draws.
+    underline_emphasis: bool,
 }
 
 impl TextFace {
@@ -319,12 +323,18 @@ impl TextFace {
             }
             _ => zvm::screen::V6Metric::fixed(cell),
         };
-        TextFace { face, fit, scale, metric }
+        TextFace { face, fit, scale, metric, underline_emphasis: profile.underlines_emphasis() }
     }
 
     /// A cell with no release face behind it — a bare story, or a host default.
     pub fn cell_only(cell: zvm::screen::V6Cell) -> TextFace {
-        TextFace { face: None, fit: None, scale: (1, 1), metric: zvm::screen::V6Metric::fixed(cell) }
+        TextFace {
+            face: None,
+            fit: None,
+            scale: (1, 1),
+            metric: zvm::screen::V6Metric::fixed(cell),
+            underline_emphasis: false,
+        }
     }
 
     /// What the STORY was told: [`zvm::screen::V6Cell`], declared metrics.
@@ -350,6 +360,12 @@ impl TextFace {
     /// Native pixels per face pixel, on each axis.
     pub fn scale(&self) -> (u32, u32) {
         self.scale
+    }
+
+    /// Whether an emphasised run is RULED rather than sloped — see
+    /// [`crate::interpreter::InterpreterProfile::underlines_emphasis`].
+    pub fn underlines_emphasis(&self) -> bool {
+        self.underline_emphasis
     }
 
     /// Whether the pen advances per glyph rather than by a fixed cell.

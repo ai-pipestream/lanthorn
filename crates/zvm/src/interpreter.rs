@@ -595,6 +595,38 @@ const APPLE_PERIOD_LOOK: PeriodLook = PeriodLook {
 };
 
 
+/// How a machine renders ZMSD §8.7.1's **Italic** style bit (SQ-1028).
+///
+/// The standard leaves this open in as many words: *"An interpreter need not
+/// provide Bold or Italic (even for font 1) and is free to interpret them broadly.
+/// (For example, rendering bold-face by changing the colour, or rendering italic
+/// with underlining.)"* — §8.7.1, verified against
+/// <https://inform-fiction.org/zmachine/standards/z1point1/sect08.html>. So neither
+/// answer is a compliance question; the only question is what the machine DID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6Emphasis {
+    /// A rule along the bottom of the cell, the text's own colour, abutting the
+    /// glyphs with no gap.
+    ///
+    /// **Both machines Infocom shipped a Version 6 interpreter for**, measured on
+    /// the same frame of the same game. `machine-screenshots/amiga-shogun-game.png`
+    /// draws `Erasmus` in "This is the bridge of the Erasmus, a Dutch merchant" with
+    /// a solid rule under that word and nothing under the words beside it; row by
+    /// row at the capture's 2x, the glyph ink runs 336..349 and the rule is 350..351
+    /// against a 16-row line pitch — the cell's LAST ROW, directly below the
+    /// letters. `mac-shogun.jpg` underlines the same word on the same frame, and
+    /// that machine had real italics available and did not use them.
+    Underline,
+    /// A synthesised slope — the top of the glyph sheared one column right.
+    ///
+    /// What lanthorn has always drawn, and what every row keeps until a capture says
+    /// otherwise. No PC capture in `machine-screenshots/` shows an emphasised run —
+    /// `dos-shogun.png` is a title screen — so the IBM PC is UNMEASURED rather than
+    /// known to slope, and a bare story file has no machine to be faithful to
+    /// anyway.
+    Slope,
+}
+
 /// The coordinate space a machine's own TYPEFACE bitmaps are authored in — which
 /// is not always the space its ARTWORK is authored in (SQ-1039).
 ///
@@ -717,6 +749,9 @@ pub struct MachineProfile {
     /// should not have to rediscover, somewhere else, whether a face it admits
     /// scales with the artwork.
     pub v6_face_space: V6FaceSpace,
+    /// How this machine draws §8.7.1's Italic bit — see [`V6Emphasis`], which holds
+    /// the measurements and the standard's own licence to choose.
+    pub v6_emphasis: V6Emphasis,
     /// The Version 6 standard window this machine presents, in pixels, or `None`
     /// where the machine states none.
     ///
@@ -859,6 +894,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
@@ -872,6 +908,9 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: true,
         v6_cell: MACINTOSH_V6_CELL,
         v6_face_space: V6FaceSpace::Native,
+        // Measured on `mac-shogun.jpg`, and the interesting row: this machine HAD
+        // real italics and underlined anyway.
+        v6_emphasis: V6Emphasis::Underline,
         v6_std_window: Some(MACINTOSH_STD_WINDOW),
         // mac-zork1.jpg: Zork I r88/840726 on a Mac Plus, screen 512x342. A 1-bit
         // screen, so no palette can move these; the status line is set apart by
@@ -896,6 +935,7 @@ pub const MACHINES: &[MachineProfile] = &[
         // The one row that is not Native, and the one row with a typeface to
         // measure — see `V6FaceSpace::Art`.
         v6_face_space: V6FaceSpace::Art,
+        v6_emphasis: V6Emphasis::Underline,
         v6_std_window: Some(AMIGA_STD_WINDOW),
         // amiga-spellbreaker.png (r87/860904) and amiga-lurking.png, both v3 and
         // both giving the identical palette in 7-8 exact colours. Note the page
@@ -925,6 +965,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // SQ-0933, from `machine-screenshots/st-zork1.png` — Zork I revision 88 /
         // serial 840726, the same release `stories/` carries. A v3 story, so it has
@@ -980,6 +1021,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // SQ-0873/SQ-0928, from `machine-screenshots/dos-hitchhiker.png` — the last
         // period-look capture bar the Atari ST's. Hitchhiker's r47/840914 under a
@@ -1051,6 +1093,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // c128-trinity.png: Trinity (v4) at the first prompt, two colours exactly.
         // #55FFFF is RGBI light cyan on the nose, so this row is as close to
@@ -1075,6 +1118,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // c64-zork1-solidgold.png: Zork I release 52 / serial 871125, whose own
         // banner reads "Interpreter 8 Version J" — the machine naming itself, which
@@ -1100,6 +1144,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },
@@ -1113,6 +1158,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
     },

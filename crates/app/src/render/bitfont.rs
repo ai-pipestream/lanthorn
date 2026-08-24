@@ -413,6 +413,19 @@ pub fn blit_glyph_styled(
     // the same wrong condition. What survives here is the cheap structural check
     // that the face is this cell — a guard against a mismatched pair reaching the
     // sampler, not a second opinion on fitness.
+    // **§8.7.1's Italic bit is a RULE on the machines that shipped Version 6**
+    // (SQ-1028). The standard offers "rendering italic with underlining" as its own
+    // example, so neither answer is a compliance question — and both machines with a
+    // capture to measure underline. `machine-screenshots/amiga-shogun-game.png` and
+    // `mac-shogun.jpg` rule under `Erasmus` in "the Erasmus, a Dutch merchant" and
+    // under nothing beside it; the Macintosh had real italics and used them anyway
+    // not at all. Where a machine has no capture, the synthesised slope stands.
+    //
+    // The shear is REMOVED rather than added to, because sloping and ruling are two
+    // renderings of one bit and drawing both would be neither machine.
+    let rule = tf.is_some_and(|t| t.underlines_emphasis()) && style & STYLE_ITALIC != 0;
+    let style = if rule { style & !STYLE_ITALIC } else { style };
+
     // **A PROPORTIONAL face is drawn at its OWN size, not stretched to the cell**
     // (SQ-1009). It has no single advance to match `cw` against — that is what
     // makes it proportional — so the `Cell` test below can never admit one and the
@@ -427,7 +440,7 @@ pub fn blit_glyph_styled(
             u8::try_from(u32::from(glyph)).ok().and_then(|c| f.glyph(c)).map(|g| (f, g))
         }) {
             let row_bytes = g.row_bytes(f.height);
-            blit_metric_glyph(canvas, g, row_bytes, px, py, ch, t.scale(), fg, bg, style, t.bold_smear(style));
+            blit_metric_glyph(canvas, g, row_bytes, px, py, ch, t.scale(), fg, bg, style, t.bold_smear(style), rule);
             return;
         }
         // A code the typeface does not carry falls through to the masters below,
@@ -490,6 +503,12 @@ pub fn blit_glyph_styled(
                 // font8x8 packs each row LSB = leftmost column.
                 short.is_some_and(|g| g[row] & (1 << col) != 0)
             };
+            // The rule, at the bottom of the cell and across its full width so
+            // neighbouring cells join into an unbroken line (SQ-1028). One MASTER row
+            // thick — `ch / 8` for the 8-row masters this chain draws, which is the
+            // two native rows `amiga-shogun-game.png` measures against its
+            // sixteen-row line, and one row on the Macintosh's fifteen-row cell.
+            let on = on || (rule && dy + (ch / 8).max(1) >= ch);
             if on {
                 canvas.put_pixel(ox, oy, fg);
             } else if let Some(b) = bg {
@@ -529,6 +548,8 @@ fn blit_metric_glyph(
     bg: Option<Rgba<u8>>,
     style: u8,
     smear: u8,
+    // §8.7.1's Italic bit as a RULE rather than a slope (SQ-1028).
+    rule: bool,
 ) {
     let (sx, sy) = (scale.0.max(1), scale.1.max(1));
     let rows = synthesize_rows(&g.rows, row_bytes, style, smear);
@@ -551,7 +572,14 @@ fn blit_metric_glyph(
                 break;
             }
             let col = (dx / sx) as usize;
-            let on = col < row_cols && blorb::bitmap_font::row_bit(&rows, row_bytes, src_row, col);
+            // The rule is ONE FACE ROW thick at the bottom of the cell, spanning the
+            // whole advance so consecutive glyphs join into an unbroken line — which
+            // is what the captures show under `Erasmus` and what makes it read as
+            // one underlined WORD rather than seven underlined letters (SQ-1028).
+            let ruled = rule && dy + sy >= ch;
+            let on = ruled
+                || (col < row_cols
+                    && blorb::bitmap_font::row_bit(&rows, row_bytes, src_row, col));
             if on {
                 canvas.put_pixel(ox, oy, fg);
             } else if let Some(b) = bg {
@@ -912,6 +940,25 @@ mod tests {
 
     /// Read the rendered 8×16 cell back as sixteen row bitmaps, MSB-leftmost, so
     /// a test can compare a blit against a face's own rows.
+    fn rendered_rows_with(
+        glyph: char,
+        style: u8,
+        tf: Option<&crate::native_font::TextFace>,
+    ) -> [u8; 16] {
+        let fg = Rgba([255, 0, 0, 255]);
+        let mut canvas = RgbaImage::from_pixel(8, 16, Rgba([0, 0, 0, 0]));
+        blit_glyph_styled(&mut canvas, glyph, 0, 0, 8, 16, fg, None, style, tf);
+        let mut rows = [0u8; 16];
+        for (y, row) in rows.iter_mut().enumerate() {
+            for x in 0..8u32 {
+                if *canvas.get_pixel(x, y as u32) == fg {
+                    *row |= 0x80 >> x;
+                }
+            }
+        }
+        rows
+    }
+
     fn rendered_rows(glyph: char, style: u8) -> [u8; 16] {
         let fg = Rgba([255, 0, 0, 255]);
         let mut canvas = RgbaImage::from_pixel(8, 16, Rgba([0, 0, 0, 0]));
@@ -1191,6 +1238,83 @@ mod tests {
             (0..7).map(|dx| source_col(dx, 7, true)).collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 4, 5, 7],
             "a tiling glyph maps its endpoints and drops an interior column instead",
+        );
+    }
+
+    /// A `TextFace` with no face behind it, on `profile` — the cell path with that
+    /// machine's emphasis rule.
+    fn face_for(profile: crate::interpreter::InterpreterProfile) -> crate::native_font::TextFace {
+        crate::native_font::TextFace::new(profile, None, None)
+    }
+
+    /// **§8.7.1's Italic bit is a RULE on the machines that shipped Version 6, and
+    /// the rule is the bottom of the cell** (SQ-1028).
+    ///
+    /// The standard offers "rendering italic with underlining" as its own example, so
+    /// this is a fidelity question rather than a compliance one, and the two machines
+    /// Infocom wrote a v6 interpreter for both answer it the same way. Measured on
+    /// `machine-screenshots/amiga-shogun-game.png`: `Erasmus` in "This is the bridge
+    /// of the Erasmus, a Dutch merchant" carries a solid rule and the words beside it
+    /// carry none. Row by row, the glyph ink runs 336..349 and the rule 350..351
+    /// against a sixteen-row line pitch — the cell's last row, abutting the letters
+    /// with no gap. `mac-shogun.jpg` rules under the same word on the same frame.
+    ///
+    /// Falsified by restoring the shear: the bottom row comes back empty and the top
+    /// half comes back displaced.
+    #[test]
+    fn an_emphasised_run_is_ruled_not_sloped_on_the_machines_that_shipped_v6() {
+        for profile in
+            [crate::interpreter::InterpreterProfile::Amiga, crate::interpreter::InterpreterProfile::Macintosh]
+        {
+            let tf = face_for(profile);
+            assert!(tf.underlines_emphasis(), "{profile:?} rules under an emphasised run");
+            let fg = Rgba([255, 0, 0, 255]);
+            let mut canvas = RgbaImage::from_pixel(8, 16, Rgba([0, 0, 0, 0]));
+            blit_glyph_styled(&mut canvas, 'n', 0, 0, 8, 16, fg, None, STYLE_ITALIC, Some(&tf));
+            // The rule spans the cell's full width, so the glyph beside it joins on.
+            let bottom: Vec<bool> = (0..8).map(|x| *canvas.get_pixel(x, 15) == fg).collect();
+            assert!(bottom.iter().all(|&b| b), "{profile:?}: the rule must span the cell, got {bottom:?}");
+            // …and it is ONE MASTER ROW thick against a sixteen-row line, which is
+            // the two rows the Amiga capture measures.
+            assert!(
+                (0..8).all(|x| *canvas.get_pixel(x, 14) == fg),
+                "{profile:?}: the rule is one master row (two native rows at ch=16)",
+            );
+            assert!(
+                !(0..8).all(|x| *canvas.get_pixel(x, 13) == fg),
+                "{profile:?}: and no thicker than that",
+            );
+            // The glyph itself is ROMAN — a sloped-and-ruled glyph is neither machine.
+            let roman = rendered_rows('n', 0);
+            let ruled = rendered_rows_with('n', STYLE_ITALIC, Some(&tf));
+            for row in 0..13usize {
+                assert_eq!(
+                    ruled[row], roman[row],
+                    "{profile:?} row {row}: an emphasised glyph must not ALSO be sheared",
+                );
+            }
+        }
+    }
+
+    /// A machine with no capture keeps the synthesised slope — `machine-screenshots/`
+    /// has no PC frame with an emphasised run in it, so the IBM PC is UNMEASURED
+    /// rather than known, and a bare story file has no machine to be faithful to
+    /// (SQ-1028).
+    #[test]
+    fn an_unmeasured_machine_keeps_the_slope() {
+        let tf = face_for(crate::interpreter::InterpreterProfile::IbmPc);
+        assert!(!tf.underlines_emphasis(), "the IBM PC has no capture and does not move");
+        let fg = Rgba([255, 0, 0, 255]);
+        let mut canvas = RgbaImage::from_pixel(8, 16, Rgba([0, 0, 0, 0]));
+        blit_glyph_styled(&mut canvas, 'n', 0, 0, 8, 16, fg, None, STYLE_ITALIC, Some(&tf));
+        assert!(
+            !(0..8).all(|x| *canvas.get_pixel(x, 15) == fg),
+            "no rule on a machine that slopes",
+        );
+        assert_eq!(
+            rendered_rows_with('L', STYLE_ITALIC, Some(&tf)),
+            rendered_rows('L', STYLE_ITALIC),
+            "and the slope is exactly what it always was",
         );
     }
 
