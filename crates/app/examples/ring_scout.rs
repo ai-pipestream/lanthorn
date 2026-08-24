@@ -274,7 +274,17 @@ fn scout(
         // follows — omit it and Arthur's Amiga floppy is measured on a 16-row line
         // where the app gives it 20. The third omission this instrument would have
         // made, after `native_std_window` and the cell itself.
-        app::native_font::resolve(p, entry, profile, profile_source),
+        // SQ-1037: the WHOLE cascade, including the player's own boot disks, so this
+        // instrument reports the face the app would actually draw with rather than
+        // the release rung alone.
+        app::native_font::resolve(&app::native_font::FaceRequest {
+            story_path: p,
+            entry,
+            profile,
+            source: profile_source,
+            art_scale: picts.art_scale(),
+            disks: Some(&app::system_fonts::UserDisks::new("")),
+        }),
     );
     let (std_win, art_scale) = (boot.screen_px, boot.art_scale);
     println!(
@@ -290,7 +300,7 @@ fn scout(
         "  cell {}x{}  ·  face {}",
         boot.cell.w,
         boot.cell.h,
-        boot.face.as_ref().map_or("(none)".to_string(), |f| format!(
+        boot.faces.body().map_or("(none)".to_string(), |f| format!(
             "{}x{}{}",
             f.width,
             f.height,

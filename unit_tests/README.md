@@ -164,3 +164,42 @@ the real one still skips on CI.
 Loaded by `crates/blorb/src/resource_fork.rs` and `crates/blorb/src/mac_font.rs`
 via `include_bytes!`, so a vanished fixture is a compile error rather than a
 vacuous skip.
+
+`sysfont.hfs` and `relfont.hfs` — the two halves of the **face cascade**
+(SQ-1037), built by one generator from the same primitives. The cascade ranks a
+release's own typeface against the machine's system typeface off a boot disk the
+player supplies, and testing it needs one volume of each kind.
+
+| volume | plays | resources |
+|---|---|---|
+| `sysfont.hfs` | a Mac OS System startup disk | `FONT` 12, 394, 396 — a family of proportional faces |
+| `relfont.hfs` | an Infocom Macintosh release | `FONT` 524 — one fixed-pitch face, 7x15 |
+
+The System disk carries the three discriminators a real one carries, which is why
+it carries three rather than one: `FONT` 12 is the RIGHT HEIGHT in the WRONG
+FAMILY (family 0, fifteen rows), `FONT` 394 is the right family at the WRONG
+HEIGHT (Geneva at 10pt, twelve rows), and `FONT` 396 is the one the machine drew
+with (Geneva 12, fifteen rows — the `lineHeight := 15` `mac/xzip.lst` declares).
+A `FONT` id is family × 128 + point size, so family 3 owns 384–511. The real
+`MacOS_6.0.8_System_Startup.img` lists exactly those three at 14x15, 12x12 and
+15x15.
+
+`relfont.hfs` exists because `macfont.hfs` cannot play the release here: its
+`FONT` 524 carries SQ-0916's deliberately narrow `D`, so it reads as a *typeface*
+rather than as the cell — the opposite of what the real resource does, whose
+printable set is uniformly 7. `relfont.hfs` is the same resource without that
+trap, so `native_font::fit` calls it `FaceFit::Cell` and it fills the
+fixed-pitch role the Macintosh's real `FONT` 524 fills.
+
+Regenerate BOTH with:
+
+```sh
+python3 unit_tests/mk_sysfont_hfs.py unit_tests
+```
+
+The generator imports `mk_macfont_hfs.py` rather than restating the formats, so
+there is still one description of HFS and one of the resource fork in this
+directory. Loaded by `crates/app/tests/suites/system_face_cascade.rs`, which
+copies them into a temp directory standing in for `~/.lanthorn/` — never the
+real one, since a case that read the tester's own disks would pass or fail on
+what they happen to own.

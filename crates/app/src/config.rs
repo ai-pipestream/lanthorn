@@ -823,6 +823,7 @@ pub mod keys {
     pub const ENABLE_SOUND: &str = "enable_sound";
     pub const INTERPRETER_NUMBER: &str = "interpreter_number";
     pub const V6_PIXEL_LOCK: &str = "v6_pixel_lock";
+    pub const SYSTEM_FONT_DISK: &str = "system_font_disk";
 }
 
 /// A value a one-run source pinned, in the shape the TOML key holds it.
@@ -1085,6 +1086,32 @@ pub struct Config {
     /// `crate::render::graphics::v6_pixel_lock_applies` for the measurement.
     #[serde(default)]
     pub v6_pixel_lock: bool,
+    /// Which of the player's own boot disks under `~/.lanthorn/` answers first
+    /// when several carry the machine's system typeface (SQ-1037).
+    ///
+    /// A case-insensitive SUBSTRING of the disk image's filename — `1.3` picks the
+    /// Workbench 1.3 floppy out of a directory holding both. **Empty is the
+    /// default and means no preference**, which is why this is a `String` rather
+    /// than an `Option`: the template documents `system_font_disk = ""`, and a
+    /// key whose written default cannot round-trip to the default VALUE is what
+    /// `config_template`'s own test exists to catch.
+    ///
+    /// # It breaks a tie; it does not choose the disk
+    ///
+    /// Every disk of the right kind is read and its faces pool, because every
+    /// pick-one rule is bad in a way a player can see: first-found is filesystem
+    /// order, newest-version needs a version parsed off a name they may have
+    /// renamed, most-fonts is arbitrary. So this only orders the pool, and a
+    /// preferred disk that does not carry the face being asked for falls through
+    /// to the rest rather than losing it. Absent a preference the pool is ordered
+    /// by filename, which is stable and visible.
+    ///
+    /// Worth setting when two disks carry the same face from different releases of
+    /// the operating system — a System 7 Geneva is not the 1988 one — and worth
+    /// leaving alone otherwise: Workbench 1.2 and 1.3 ship IDENTICAL font drawers,
+    /// so on those two the key changes nothing but the name in the report.
+    #[serde(default)]
+    pub system_font_disk: String,
     /// Keymap overrides: command_name → key-spec string(s).
     #[serde(default)]
     pub keymap: KeymapConfig,
@@ -1444,6 +1471,7 @@ impl Default for Config {
             glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: true,
             v6_pixel_lock: false,
+            system_font_disk: String::new(),
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: None,
@@ -1570,6 +1598,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.glk_pixel_scale = from_file.glk_pixel_scale;
             cfg.v6_arrow_keys = from_file.v6_arrow_keys;
             cfg.v6_pixel_lock = from_file.v6_pixel_lock;
+            cfg.system_font_disk = from_file.system_font_disk;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
             cfg.style = from_file.style;
@@ -1856,6 +1885,11 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("glk_pixel_scale", scale_val, cfg.glk_pixel_scale == def.glk_pixel_scale);
     doc.put("v6_arrow_keys", cfg.v6_arrow_keys.into(), cfg.v6_arrow_keys == def.v6_arrow_keys);
     doc.put("v6_pixel_lock", cfg.v6_pixel_lock.into(), cfg.v6_pixel_lock == def.v6_pixel_lock);
+    doc.put(
+        "system_font_disk",
+        cfg.system_font_disk.as_str().into(),
+        cfg.system_font_disk == def.system_font_disk,
+    );
     doc.put("show_room_numbers", cfg.show_room_numbers.into(), cfg.show_room_numbers == def.show_room_numbers);
     doc.put("show_status_bar", cfg.show_status_bar.into(), cfg.show_status_bar == def.show_status_bar);
     doc.put("hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
@@ -2640,6 +2674,7 @@ use_defaults = false
             glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: true,
             v6_pixel_lock: false,
+            system_font_disk: "Workbench 1.3".into(),
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: Some("neon".into()),

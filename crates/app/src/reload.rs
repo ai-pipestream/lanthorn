@@ -177,10 +177,13 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     // hours into a session, with nothing on screen to say why. The face itself is
     // kept — only the medium can produce one and this scope has no medium — and
     // re-tested against the new profile, so a face that no longer fits declines
-    // exactly as it would have at launch.
+    // exactly as it would have at launch. BOTH of them (SQ-1036): a machine's
+    // fixed-pitch alternate is as much a resolved fact as its body face, and
+    // dropping it here would put a Macintosh status bar back into Geneva on the
+    // next style reload.
     state.v6_text = crate::native_font::TextFace::new(
         state.config.interpreter_profile,
-        state.v6_text.face().cloned(),
+        state.v6_text.faces().clone(),
         Some(state.v6_art_scale),
     );
     state.period_look = crate::period::resolve(

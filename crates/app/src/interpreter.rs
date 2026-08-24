@@ -913,6 +913,20 @@ impl InterpreterProfile {
             .map_or((1, 1), |m| m.v6_face_space.text_scale(art_scale))
     }
 
+    /// What this machine's own SYSTEM body face is called on its boot media, or
+    /// `None` where it has none to name (SQ-1037).
+    ///
+    /// The two machines Infocom wrote a Version 6 interpreter for both painted
+    /// prose with a face that lives on the operating system rather than on the
+    /// game disk — Geneva in the Macintosh System file, topaz in the Amiga's ROM
+    /// and `FONTS:` drawer — so a release's own medium can answer for the
+    /// fixed-pitch ALTERNATE and not for the body. See
+    /// [`zvm::interpreter::V6SystemFace`], and `crate::system_fonts` for the
+    /// reading of the player's own disks.
+    pub fn v6_system_face(self) -> Option<zvm::interpreter::V6SystemFace> {
+        self.machine().and_then(|m| m.v6_system_face)
+    }
+
     /// Whether this machine draws §8.7.1's Italic bit as an UNDERLINE rather than a
     /// slope (SQ-1028).
     ///

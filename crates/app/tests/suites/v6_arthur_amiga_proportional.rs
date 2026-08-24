@@ -87,14 +87,24 @@ fn boot() -> Option<(GameSession, app::machine_boot::MachineBoot)> {
     app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
-    let face = app::native_font::resolve(&path, None, profile, source);
+    // The whole cascade, exactly as `startup.rs` asks it — but with `disks: None`,
+    // because a case here must not depend on what the person running it happens to
+    // keep in `~/.lanthorn/` (SQ-1037). Arthur's floppy answers on the first rung.
+    let faces = app::native_font::resolve(&app::native_font::FaceRequest {
+        story_path: &path,
+        entry: None,
+        profile,
+        source,
+        art_scale: picts.art_scale(),
+        disks: None,
+    });
     let machine = app::machine_boot::MachineBoot::resolve(
         profile,
         &picts,
         None,
         profile.interpreter_number(),
         profile.default_colours(),
-        face,
+        faces,
     );
     let mut s =
         GameSession::new_for_machine(bytes, true, false, false, picture_dims, None, None, &machine)
@@ -202,7 +212,7 @@ fn ink_span(canvas: &image::RgbaImage, rows: std::ops::Range<u32>, xs: std::ops:
 fn the_amiga_floppy_declares_the_faces_own_twenty_row_line() {
     let _g = app::v6_palette_at_boot();
     let Some((session, machine)) = boot() else { return };
-    let face = machine.face.as_ref().expect("Arthur's floppy carries char.data");
+    let face = machine.faces.body().expect("Arthur's floppy carries char.data");
     assert_eq!((face.width, face.height), (10, 10), "char.data is 10x10 nominal");
     assert!(face.proportional, "…and a TYPEFACE, which is what admits it at all");
     assert_eq!(machine.art_scale, Some((2, 2)), "a 320-wide press doubles onto the unit screen");
@@ -237,9 +247,16 @@ fn only_a_proportional_face_moves_a_machines_cell() {
             continue;
         }
         let (p, source) = InterpreterProfile::resolve_with_source(&path, None, None, None);
-        let face = app::native_font::resolve(&path, None, p, source);
+        let faces = app::native_font::resolve(&app::native_font::FaceRequest {
+            story_path: &path,
+            entry: None,
+            profile: p,
+            source,
+            art_scale: Some((2, 2)),
+            disks: None,
+        });
         assert_eq!(
-            app::native_font::declared_cell(profile, face.as_ref(), (2, 2)),
+            app::native_font::declared_cell(profile, faces.body(), (2, 2)),
             profile.v6_font_cell(),
             "{disk}: a fixed-pitch face declares nothing — the machine's cell stands",
         );
@@ -459,7 +476,7 @@ fn the_score_bar_advances_by_the_faces_own_table() {
 fn a_bold_run_advances_by_the_faces_own_smear() {
     let _g = app::v6_palette_at_boot();
     let Some((_session, machine)) = boot() else { return };
-    let face = machine.face.as_ref().expect("char.data");
+    let face = machine.faces.body().expect("char.data");
     assert_eq!(face.bold_smear, 1, "Arthur's char.data states tf_BoldSmear = 1");
     let tf = machine.text_face();
     // §8.7.1 bit 2 is bold.
@@ -609,7 +626,7 @@ fn wrap_px(font: &blorb::bitmap_font::BitmapFont, text: &str, px: u32) -> Vec<St
 fn no_declared_width_reproduces_the_machines_wrap_but_a_measured_one_does() {
     let _g = app::v6_palette_at_boot();
     let Some((_session, machine)) = boot() else { return };
-    let font = machine.face.as_ref().expect("char.data");
+    let font = machine.faces.body().expect("char.data");
 
     // (a) No integer declared width lands on the capture.
     for w in 6u32..=16 {

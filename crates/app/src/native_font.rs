@@ -38,26 +38,248 @@ use crate::render::bitfont::STYLE_BOLD;
 use blorb::bitmap_font::BitmapFont;
 use std::path::Path;
 
-/// The release's own face for `profile`'s cell, or `None` to keep `vga16`.
+/// Everything the face cascade is asked about ONE launch (SQ-1037).
 ///
-/// # Why `ProfileSource` gates this
+/// # Why a value and not six parameters
 ///
-/// The face lives in the mounted volume's resource fork, so it exists only when
-/// the MEDIUM named the machine. `InterpreterProfile::resolve_with_source` reaches
-/// `Macintosh` three ways and only one of them has a fork behind it:
+/// CLAUDE.md's refactoring policy, and the same tell as [`TextFace`]: every field
+/// here comes from the same scope — the launch, or the restart that repeats it —
+/// and a caller who supplies a subset gets a plausible answer rather than an
+/// error. `art_scale` is the one that would go missing, exactly as
+/// `native_std_window` and the Version 6 cell did four times over (SQ-0901,
+/// SQ-1020, SQ-1021, SQ-1022), and its absence is invisible: on the Macintosh the
+/// text scale is `(1, 1)` whatever the artwork does, so an omission there is
+/// silent on the only press that reads a system face today.
+pub struct FaceRequest<'a> {
+    /// The story file or disk image this session opened.
+    pub story_path: &'a Path,
+    /// Which story on a multi-game image — [`crate::config::Config::disk_entry`].
+    pub entry: Option<&'a str>,
+    /// The machine, as the MEDIUM named it.
+    pub profile: InterpreterProfile,
+    /// How it was named — see [`resolve`] for why the release rung gates on this
+    /// and the system rung does not.
+    pub source: ProfileSource,
+    /// The archive's art density (SQ-0790), converted to a TEXT scale inside —
+    /// `None` for an undoubled rendition.
+    pub art_scale: Option<(u32, u32)>,
+    /// The player's own boot disks, or `None` to consult none at all: a test that
+    /// must not depend on what the person running it keeps in `~/.lanthorn/`, and
+    /// every harness that predates this.
+    pub disks: Option<&'a crate::system_fonts::UserDisks>,
+}
+
+impl FaceRequest<'_> {
+    /// Native pixels per FACE pixel on this launch — [`InterpreterProfile::text_scale`]
+    /// with the request's own art scale, so no caller has to remember which of the
+    /// two densities a typeface is measured in (SQ-1039).
+    fn text_scale(&self) -> (u32, u32) {
+        self.profile.text_scale(self.art_scale.unwrap_or((1, 1)))
+    }
+}
+
+/// Where an admitted face came from, for the info panel and for a report.
 ///
-/// * [`ProfileSource::Medium`] — an HFS volume is mounted. The font is there.
-/// * [`ProfileSource::Asked`] — `--interpreter 3`, or `--pictures Pic.data` beside
-///   a bare story file. A deliberate instruction from the player, with no volume
-///   to read.
-/// * [`ProfileSource::Fallback`] — never the Macintosh.
+/// Worth carrying because a System 7 Geneva must not quietly stand in for a
+/// System 6 one: two disks can hand back a face that reads identically and came
+/// off different releases of the operating system, and the only honest answer to
+/// "which" is the disk's own name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FaceOrigin {
+    /// The story's own medium — the release shipped it.
+    Release,
+    /// A boot disk the player put under `~/.lanthorn/`.
+    SystemDisk {
+        /// The disk image's filename.
+        disk: String,
+        /// How that disk names the face — `FONT 396`, `fonts/topaz/11`.
+        name: String,
+    },
+}
+
+/// The faces a machine draws with: its BODY face and its FIXED-PITCH alternate.
 ///
-/// So the fallback path is not a fallback at all in ordinary use: a bare `.z6`
-/// resolves to `IbmPc` and keeps its 8x16 cell, and the only way to hold a
-/// Macintosh cell with no face is to have asked for one by hand.
+/// # Two faces because the machines had two
 ///
-/// **The CELL is not conditional on this.** What the story is told must not depend
-/// on which glyphs the host happens to have; only the drawing does.
+/// `mac/xzip.lst` names them in as many words — `ZSTD: TextFont (stdFont)` with
+/// `stdFont := geneva`, and `ZMONO: TextFont (monaco)` — and
+/// `machine-screenshots/mac-zorkzero-game.png` shows both on one screen: `Banquet
+/// Hall` in the status bar steps a uniform 7 px per character while the prose two
+/// lines below advances 7, 7, 5. *Zork Zero* brackets that bar in `@set_font 4` /
+/// `@set_font 1`, which `zvm` folds into §8.7.1's fixed-pitch bit so that one
+/// question — [`TextFace::face_for`] — answers for both halves.
+///
+/// # And the two rungs supply different halves
+///
+/// The Macintosh's release medium carries `FONT` 524, Monaco 12, which IS its 7x15
+/// cell — so the game disk answers for the alternate and cannot answer for the
+/// body, because Geneva is in the System file and on no Infocom platter at all
+/// (SQ-1036). A player's own System disk answers for the body. Arthur's Amiga
+/// floppy is the mirror image: `char.data` is a body face and there is no
+/// alternate.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FaceSet {
+    body: Option<BitmapFont>,
+    fixed: Option<BitmapFont>,
+    body_origin: Option<FaceOrigin>,
+    fixed_origin: Option<FaceOrigin>,
+}
+
+impl FaceSet {
+    /// No face at all — a bare story, or a machine whose media carry none.
+    pub fn none() -> FaceSet {
+        FaceSet::default()
+    }
+
+    /// One face off a release's own medium, sorted into whichever role [`fit`]
+    /// gives it on `profile` — the first rung of [`resolve`]'s cascade, on its own.
+    ///
+    /// For a caller that already holds a face and only needs it paired: a harness
+    /// with a synthetic one, and `reload.rs`'s re-test against a changed profile.
+    /// The RANKING is still `resolve`'s and this cannot express one, which is the
+    /// point — there is no way to spell "system face" here.
+    pub fn release(face: BitmapFont, profile: InterpreterProfile) -> FaceSet {
+        let mut set = FaceSet::none();
+        set.admit(face, profile, FaceOrigin::Release);
+        set
+    }
+
+    /// The face body text is drawn with.
+    pub fn body(&self) -> Option<&BitmapFont> {
+        self.body.as_ref()
+    }
+
+    /// The face a §8.7.1 fixed-pitch run is drawn with, where the machine has one.
+    pub fn fixed(&self) -> Option<&BitmapFont> {
+        self.fixed.as_ref()
+    }
+
+    /// Where the body face came from.
+    pub fn body_origin(&self) -> Option<&FaceOrigin> {
+        self.body_origin.as_ref()
+    }
+
+    /// Whether `face` is one of the two this set actually draws with — what the
+    /// info panel's `used` column asks, and asked of the CASCADE's answer rather
+    /// than re-derived (see [`detected`]).
+    pub fn draws(&self, face: &BitmapFont) -> bool {
+        self.body.as_ref() == Some(face) || self.fixed.as_ref() == Some(face)
+    }
+
+    /// Offer a face to the set, in cascade order: it lands in whichever slot
+    /// [`fit`] names, and the FIRST offer for a slot keeps it.
+    ///
+    /// **This is the only place a face is sorted into a role**, and it asks `fit`
+    /// rather than repeating its rule — SQ-1011 shipped INERT TWICE because the
+    /// fitness test existed in two places and only one of them was corrected.
+    ///
+    /// A [`FaceFit::Cell`] face also becomes the BODY when nothing proportional
+    /// has been admitted, which is every configuration that shipped before this:
+    /// the Macintosh with no System disk keeps drawing all of its text in Monaco,
+    /// byte for byte as it did.
+    fn admit(&mut self, face: BitmapFont, profile: InterpreterProfile, origin: FaceOrigin) {
+        match fit(&face, profile) {
+            Some(FaceFit::Metric) => {
+                if self.body.is_none() || self.body_is_borrowed_alternate() {
+                    self.body_origin = Some(origin);
+                    self.body = Some(face);
+                }
+            }
+            Some(FaceFit::Cell) if self.fixed.is_none() => {
+                if self.body.is_none() {
+                    self.body = Some(face.clone());
+                    self.body_origin = Some(origin.clone());
+                }
+                self.fixed_origin = Some(origin);
+                self.fixed = Some(face);
+            }
+            Some(FaceFit::Cell) => {}
+            None => {}
+        }
+    }
+
+    /// Whether the body slot is holding the fixed alternate for want of anything
+    /// better — the state a later proportional face is allowed to displace.
+    fn body_is_borrowed_alternate(&self) -> bool {
+        self.body.is_some() && self.body == self.fixed
+    }
+}
+
+/// The faces `request` resolves to — the ONE statement of the order.
+///
+/// # The order
+///
+/// 1. **the release's own face, on the story's own medium** — Arthur's Amiga
+///    `char.data`, the Macintosh's `FONT` 524. It is the release's, so it is the
+///    most specific thing anyone has;
+/// 2. **the machine's system face, off a boot disk the player supplied** — Geneva
+///    out of a Mac OS System file, topaz out of a Workbench `FONTS:` drawer. The
+///    machine NAMES it ([`InterpreterProfile::v6_system_face`]) and the player
+///    supplies it, so it is the machine's own face without lanthorn shipping a
+///    byte of it;
+/// 3. **the built-in**, which is no face at all here: [`FaceSet::none`] leaves the
+///    renderer on `crate::render::vga16` exactly as before.
+///
+/// This is the existing "a release disk's own resources outrank a `.blb` beside
+/// the story" rule extended one notch, and it keeps SQ-1016's embedded substitute
+/// useful rather than redundant — it is what CI and a player with no boot disk get.
+///
+/// # Why only the FIRST rung gates on `ProfileSource`
+///
+/// The release's face lives in the story's own medium, so it exists only when the
+/// MEDIUM named the machine: `--interpreter 3` beside a bare `.z6` reaches
+/// `Macintosh` with no volume to read. A SYSTEM disk is a different medium
+/// entirely — the player's — so a machine asked for by hand can still be drawn
+/// with its own face, and a machine nobody named resolves to `IbmPc`, which names
+/// no system face and therefore reads nothing.
+///
+/// # Which SIZE, on a rung that offers seven
+///
+/// A release ships one face and states its own line height, and the declared cell
+/// FOLLOWS it ([`declared_cell`]). A System disk ships a family — Geneva at 9, 10,
+/// 12, 14, 18, 20 and 24 point on `MacOS_6.0.8_System_Startup.img` — and the
+/// machine drew with exactly one of them. The machine says which: `mac/xzip.lst`
+/// declares `lineHeight := 15`, so the size whose face is fifteen rows tall is the
+/// size it painted, and that is Geneva 12 (`FONT` 396, 15x15). Measured, not
+/// chosen: `machine-screenshots/mac-zorkzero-game.png` puts consecutive prose
+/// baselines 15 rows apart (y = 136, 151, 166, 181, 196, 211).
+///
+/// The comparison is in NATIVE pixels, so it goes through the TEXT scale rather
+/// than the art scale (SQ-1039) — `(1, 1)` on every Macintosh press, the archive's
+/// on the Amiga. The Macintosh colour press cannot falsify that on its own and the
+/// monochrome one cannot falsify it at all.
+pub fn resolve(request: &FaceRequest<'_>) -> FaceSet {
+    let mut set = FaceSet::none();
+    // Rung 1 — the release's own medium.
+    if request.source == ProfileSource::Medium {
+        if let Some(face) = release_face(request.story_path, request.entry) {
+            set.admit(face, request.profile, FaceOrigin::Release);
+        }
+    }
+    // Rung 2 — the machine's own system face, off a disk the player supplied.
+    if let Some(disks) = request.disks {
+        let scale = request.text_scale();
+        let cell = request.profile.v6_font_cell();
+        for found in crate::system_fonts::named_faces_in(disks, request.profile) {
+            if u32::from(found.font.height) * scale.1 != u32::from(cell.h) {
+                continue; // a size of the family the machine did not draw with
+            }
+            set.admit(
+                found.font,
+                request.profile,
+                FaceOrigin::SystemDisk { disk: found.disk, name: found.name },
+            );
+        }
+    }
+    set
+}
+
+/// The face the STORY's own medium carries, whichever kind of medium it is.
+///
+/// An HFS volume keeps its faces in a resource fork; every other medium keeps them
+/// as FILES, and Arthur's Amiga floppy is the second kind. Ask the volume that can
+/// answer, and let [`FaceSet::admit`] decide what came back is good for.
+///
 /// # And it is paired with ONE story, not with the disc
 ///
 /// `entry` is which story on the image the session opened, as
@@ -67,19 +289,8 @@ use std::path::Path;
 /// Masterpieces CD, where the first application on the platter ships no `FONT`
 /// and every graphical game on it therefore drew its 7x15 cell with the 8-wide
 /// fallback.
-pub fn resolve(
-    story_path: &Path,
-    entry: Option<&str>,
-    profile: InterpreterProfile,
-    source: ProfileSource,
-) -> Option<BitmapFont> {
-    if source != ProfileSource::Medium {
-        return None;
-    }
-    // An HFS volume keeps its faces in a resource fork; every other medium keeps
-    // them as FILES, and Arthur's Amiga floppy is the second kind. Ask the volume
-    // that can answer, and let `fit` decide whether what came back is usable.
-    let face = match blorb::hfs::Hfs::mount(std::fs::read(story_path).ok()?) {
+fn release_face(story_path: &Path, entry: Option<&str>) -> Option<BitmapFont> {
+    match blorb::hfs::Hfs::mount(std::fs::read(story_path).ok()?) {
         Ok(hfs) => {
             // `entry` is `None` for every loose file and single-story floppy — and
             // also for a direct launch of a multi-game image, where `Hfs::story` is
@@ -94,8 +305,7 @@ pub fn resolve(
             }
         }
         Err(_) => amiga_face(story_path),
-    }?;
-    fit(&face, profile).is_some().then_some(face)
+    }
 }
 
 /// The disk font an AmigaDOS volume carries, if it carries one.
@@ -270,7 +480,11 @@ pub fn declared_cell(
 /// measures to the pixel on three separate runs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextFace {
-    face: Option<BitmapFont>,
+    /// The body face and the machine's FIXED-PITCH alternate, as the cascade
+    /// resolved them (SQ-1036/SQ-1037). Kept whole rather than split into two
+    /// fields so a style reload can rebuild this value from it without losing
+    /// which disk answered — see [`Self::faces`].
+    faces: FaceSet,
     fit: Option<FaceFit>,
     scale: (u32, u32),
     /// The declared cell and the pen as [`zvm`] holds them — see
@@ -310,8 +524,11 @@ fn wrap_fingerprint_of(metric: &zvm::screen::V6Metric) -> u64 {
     cell.h.hash(&mut h);
     // Every §8.7.1 face the pen can be asked for, not just roman: the raster wrap
     // measures the run it is about to break, and an emphasised run is measured
-    // with the emphasised advances.
-    for style in [0u8, 2, 4, 6] {
+    // with the emphasised advances. **Fixed pitch (bit 3) is in the list** because
+    // on a machine with an alternate it is a different pen entirely, and a wrap
+    // cache that could not see it would keep a Geneva line for a Monaco run
+    // (SQ-1036).
+    for style in [0u8, 2, 4, 6, 8, 10, 12, 14] {
         for b in 0u16..=255 {
             metric.advance(b as u8 as char, style).hash(&mut h);
         }
@@ -326,7 +543,7 @@ impl TextFace {
     /// that settle it — launch, style reload, `@restart` — cannot disagree.
     pub fn new(
         profile: InterpreterProfile,
-        face: Option<BitmapFont>,
+        faces: FaceSet,
         art_scale: Option<(u32, u32)>,
     ) -> TextFace {
         // The TEXT scale (SQ-1039). Stored rather than the art scale because all
@@ -334,9 +551,9 @@ impl TextFace {
         // below, and `render::bitfont`'s per-glyph blit. The artwork's own density
         // travels separately, in `AppState::v6_art_scale`.
         let scale = profile.text_scale(art_scale.unwrap_or((1, 1)));
-        let fit = face.as_ref().and_then(|f| fit(f, profile));
-        let cell = declared_cell(profile, face.as_ref(), scale);
-        let metric = match (face.as_ref(), fit) {
+        let fit = faces.body().and_then(|f| fit(f, profile));
+        let cell = declared_cell(profile, faces.body(), scale);
+        let metric = match (faces.body(), fit) {
             (Some(f), Some(FaceFit::Metric)) => {
                 // Every byte carries a usable number, so `V6Metric` never has to
                 // guess: a glyph the face does not cover falls back to the cell,
@@ -348,19 +565,40 @@ impl TextFace {
                     }
                 }
                 let bold = (u32::from(f.bold_smear) * scale.0).min(u32::from(u16::MAX)) as u16;
-                zvm::screen::V6Metric::proportional(cell, advances, bold)
+                let m = zvm::screen::V6Metric::proportional(cell, advances, bold);
+                // The alternate IS the declared cell — that is what `FaceFit::Cell`
+                // means and why `with_fixed_alternate` takes no width — so a
+                // fixed-pitch run advances by it and the machine's status bar lines
+                // its columns up (SQ-1036). Without an alternate the bit stays the
+                // no-op it has always been: there would be no face to draw the run
+                // in, and a pen that moved anyway would only be wrong twice.
+                if faces.fixed().is_some() { m.with_fixed_alternate() } else { m }
             }
             _ => zvm::screen::V6Metric::fixed(cell),
         };
         let wrap_fp = wrap_fingerprint_of(&metric);
-        TextFace { face, fit, scale, metric, underline_emphasis: profile.underlines_emphasis(), wrap_fp }
+        TextFace {
+            faces,
+            fit,
+            scale,
+            metric,
+            underline_emphasis: profile.underlines_emphasis(),
+            wrap_fp,
+        }
     }
 
     /// A cell with no release face behind it — a bare story, or a host default.
     pub fn cell_only(cell: zvm::screen::V6Cell) -> TextFace {
         let metric = zvm::screen::V6Metric::fixed(cell);
         let wrap_fp = wrap_fingerprint_of(&metric);
-        TextFace { face: None, fit: None, scale: (1, 1), metric, underline_emphasis: false, wrap_fp }
+        TextFace {
+            faces: FaceSet::none(),
+            fit: None,
+            scale: (1, 1),
+            metric,
+            underline_emphasis: false,
+            wrap_fp,
+        }
     }
 
     /// A digest of everything about this face that can move a wrap boundary — the
@@ -380,9 +618,49 @@ impl TextFace {
         &self.metric
     }
 
-    /// The face the renderer may draw with, if the release shipped a usable one.
+    /// The face the renderer may draw BODY text with, if a usable one was admitted.
     pub fn face(&self) -> Option<&BitmapFont> {
-        self.face.as_ref()
+        self.faces.body()
+    }
+
+    /// The faces this was paired from, so a style reload can rebuild the pairing
+    /// against a changed profile without going back to the medium — which it
+    /// cannot do, having no medium in scope (see `reload.rs`).
+    pub fn faces(&self) -> &FaceSet {
+        &self.faces
+    }
+
+    /// The face a run carrying §8.7.1 `style` is drawn with (SQ-1036).
+    ///
+    /// The body face, except that a **fixed-pitch** run takes the machine's
+    /// alternate where it has one. That bit reaches here two ways and means one
+    /// thing — `@set_text_style 8`, or `@set_font 4`, which `zvm` folds into it —
+    /// so this is the single question the renderer asks, and it is asked HERE
+    /// rather than in `render::bitfont` because the pen
+    /// ([`zvm::screen::V6Metric::advance`]) has to answer it the same way. Two
+    /// implementations of one rule are SQ-1026 and SQ-1035, a matched pair.
+    ///
+    /// With no alternate this is the body face for everything, which is every
+    /// configuration that shipped before this.
+    pub fn face_for(&self, style: u8) -> Option<&BitmapFont> {
+        if style & zvm::screen::STYLE_FIXED_PITCH != 0 {
+            if let Some(alt) = self.faces.fixed() {
+                return Some(alt);
+            }
+        }
+        self.faces.body()
+    }
+
+    /// Whether a run in `style` is drawn with a PROPORTIONAL pen.
+    ///
+    /// [`Self::proportional`] is about the face; this is about one run, and they
+    /// differ on exactly the case SQ-1036 introduced — a fixed-pitch run on a
+    /// machine that has an alternate to draw it with is stamped into the declared
+    /// cell, not stepped by Geneva's advances. The renderer asks this instead of
+    /// testing the style bit itself, so the rule stays in one file.
+    pub fn draws_proportionally(&self, style: u8) -> bool {
+        self.proportional()
+            && !(style & zvm::screen::STYLE_FIXED_PITCH != 0 && self.faces.fixed().is_some())
     }
 
     /// How that face may be drawn — see [`FaceFit`].
@@ -432,7 +710,7 @@ impl TextFace {
 
     /// How far a run in `style` smears, in FACE pixels — 0 unless it is bold.
     pub fn bold_smear(&self, style: u8) -> u8 {
-        match self.face.as_ref() {
+        match self.face_for(style) {
             Some(f) if style & STYLE_BOLD != 0 => f.bold_smear,
             _ => 0,
         }
@@ -482,8 +760,10 @@ pub struct DiskFace {
 ///
 /// # Why this reports rather than re-deciding
 ///
-/// `used` is settled by asking [`resolve`] and comparing the face it returns,
-/// not by re-deriving which one wins. That costs a second mount and is worth it:
+/// `used` is settled by asking [`resolve`] and comparing the faces it returns —
+/// BOTH of them, since a release's `FONT` 524 is genuinely in use as the machine's
+/// fixed-pitch alternate even when a System disk supplies the body face (SQ-1036)
+/// — not by re-deriving which one wins. That costs a second mount and is worth it:
 /// SQ-1011 shipped INERT TWICE because a fitness rule existed in two places and
 /// correcting one left the other, and both false branches fell back silently. A
 /// panel that decided for itself would be a third copy of the same question, and
@@ -492,15 +772,15 @@ pub struct DiskFace {
 /// Had this surface existed, SQ-1018 would have been visible on sight rather
 /// than reported as crowded text: the Masterpieces CD would have shown the face
 /// present and unused.
-pub fn detected(story_path: &Path, entry: Option<&str>) -> Vec<DiskFace> {
-    let (profile, source) = InterpreterProfile::resolve_with_source(story_path, None, None, None);
-    let chosen = resolve(story_path, entry, profile, source);
+pub fn detected(request: &FaceRequest<'_>) -> Vec<DiskFace> {
+    let (story_path, entry) = (request.story_path, request.entry);
+    let chosen = resolve(request);
     let mark = |name: String, f: &BitmapFont| DiskFace {
         name,
         width: f.width,
         height: f.height,
         proportional: f.proportional,
-        used: chosen.as_ref() == Some(f),
+        used: chosen.draws(f),
     };
 
     // A Macintosh names its faces, so report the ids: an id is family × 128 +

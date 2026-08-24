@@ -745,12 +745,18 @@ pub(crate) fn boot_story(
             // can ask, since the font lives on the medium and the answer depends on
             // how the profile was decided (a machine asked for by hand has no
             // volume to read).
-            let launch_face = app::native_font::resolve(
-                &story_path,
-                disk_entry,
-                cfg.interpreter_profile,
-                cfg.interpreter_source,
-            );
+            // SQ-1037: and the machine's OWN system face, off a boot disk the player
+            // keeps under `~/.lanthorn/`. Second rung of one cascade, not a second
+            // lookup — the order lives in `native_font::resolve` and nowhere else.
+            let user_disks = app::system_fonts::UserDisks::new(&cfg.system_font_disk);
+            let launch_faces = app::native_font::resolve(&app::native_font::FaceRequest {
+                story_path: &story_path,
+                entry: disk_entry,
+                profile: cfg.interpreter_profile,
+                source: cfg.interpreter_source,
+                art_scale: picts.art_scale(),
+                disks: Some(&user_disks),
+            });
             let boot = app::machine_boot::MachineBoot::resolve(
                 cfg.interpreter_profile,
                 &picts,
@@ -759,7 +765,7 @@ pub(crate) fn boot_story(
                 // names the IBM PC rather than falling through to zvm's default.
                 cfg.advertised_interpreter_number(),
                 host_default_colours,
-                launch_face,
+                launch_faces,
             );
             // SQ-0790: how DENSE that art is, which only a native archive knows.
             // A 320-wide rendition doubles onto the unit screen exactly as a

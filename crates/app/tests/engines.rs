@@ -93,5 +93,7 @@ mod volume_chooser;
 mod font3_shipped_font;
 #[path = "suites/native_disk_font.rs"]
 mod native_disk_font;
+#[path = "suites/system_face_cascade.rs"]
+mod system_face_cascade;
 #[path = "suites/native_disk_sound.rs"]
 mod native_disk_sound;

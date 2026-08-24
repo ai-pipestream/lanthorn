@@ -385,9 +385,26 @@ fn the_macintosh_face_resolves_for_the_renderer() {
         "and it came from the MEDIUM — `native_font::resolve` gates on this",
     );
 
-    // 3. so the resolver hands the renderer a face
-    let resolved = app::native_font::resolve(&path, None, profile, source);
-    assert!(resolved.is_some(), "native_font::resolve must find it — the renderer takes this or nothing");
+    // 3. so the resolver hands the renderer a face. `disks: None` — this is the
+    // RELEASE rung's claim, and a case here must not depend on what the person
+    // running it keeps in `~/.lanthorn/` (SQ-1037).
+    let resolved = app::native_font::resolve(&app::native_font::FaceRequest {
+        story_path: &path,
+        entry: None,
+        profile,
+        source,
+        art_scale: None,
+        disks: None,
+    });
+    assert!(
+        resolved.body().is_some(),
+        "native_font::resolve must find it — the renderer takes this or nothing",
+    );
+    assert!(
+        resolved.fixed().is_some(),
+        "and it is the machine's FIXED-PITCH face, which is the role it fills once a \
+         System disk can supply the body one (SQ-1036)",
+    );
 }
 
 /// A compilation volume pairs the face with ONE story, not with the platter
@@ -450,7 +467,16 @@ fn a_compilation_pairs_the_face_with_the_story_beside_it() {
     assert_eq!(profile, app::interpreter::InterpreterProfile::Macintosh, "the medium names the Mac");
     assert_eq!(source, app::interpreter::ProfileSource::Medium, "off the volume");
     assert!(
-        app::native_font::resolve(&path, None, profile, source).is_some(),
+        app::native_font::resolve(&app::native_font::FaceRequest {
+            story_path: &path,
+            entry: None,
+            profile,
+            source,
+            art_scale: None,
+            disks: None,
+        })
+        .body()
+        .is_some(),
         "the renderer takes this or nothing — `None` here is the reported defect",
     );
 }
@@ -472,8 +498,19 @@ fn the_panel_sees_both_macintosh_faces_and_only_one_in_use() {
         eprintln!("SKIP: gitignored compilation volume absent");
         return;
     }
-    let faces =
-        app::native_font::detected(&path, Some("InfocomMasterpieces/ARTHUR FOLDER/STORY.DATA"));
+    let (profile, source) =
+        app::interpreter::InterpreterProfile::resolve_with_source(&path, None, None, None);
+    let panel = |entry: &'static str| {
+        app::native_font::detected(&app::native_font::FaceRequest {
+            story_path: &path,
+            entry: Some(entry),
+            profile,
+            source,
+            art_scale: None,
+            disks: None,
+        })
+    };
+    let faces = panel("InfocomMasterpieces/ARTHUR FOLDER/STORY.DATA");
     let named = |n: &str| {
         faces.iter().find(|f| f.name == n).unwrap_or_else(|| panic!("{n} listed: {faces:?}"))
     };
@@ -488,7 +525,7 @@ fn the_panel_sees_both_macintosh_faces_and_only_one_in_use() {
 
     // Zork Zero ships only the body face, which is why its InvisiClues banner
     // cannot be explained by a second one (SQ-0934).
-    let zz = app::native_font::detected(&path, Some("InfocomMasterpieces/ZORK ZERO/STORY.DATA"));
+    let zz = panel("InfocomMasterpieces/ZORK ZERO/STORY.DATA");
     assert_eq!(zz.len(), 1, "Zork Zero carries one face, not two: {zz:?}");
     assert_eq!(zz[0].name, "FONT 524");
     assert!(zz[0].used);
@@ -590,8 +627,10 @@ fn the_pen_and_the_blit_take_the_text_scale_too() {
     use app::native_font::TextFace;
 
     let face = proportional_face(15);
-    let mac = TextFace::new(P::Macintosh, Some(face.clone()), Some((2, 2)));
-    let amiga = TextFace::new(P::Amiga, Some(face), Some((2, 2)));
+    let mac =
+        TextFace::new(P::Macintosh, app::native_font::FaceSet::release(face.clone(), P::Macintosh), Some((2, 2)));
+    let amiga =
+        TextFace::new(P::Amiga, app::native_font::FaceSet::release(face, P::Amiga), Some((2, 2)));
 
     assert_eq!(mac.scale(), (1, 1), "the Macintosh draws one native pixel per face pixel");
     assert_eq!(amiga.scale(), (2, 2), "the Amiga doubles its face with its artwork");

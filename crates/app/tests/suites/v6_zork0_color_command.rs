@@ -238,7 +238,7 @@ fn boot(file: &str, user_honours: bool) -> Option<Booted> {
         named_art_std_window,
         cfg.advertised_interpreter_number(),
         honoured.then_some(reported).flatten(),
-        None,
+        app::native_font::FaceSet::none(),
     );
     eprintln!(
         "{file}: r{RELEASE} profile={profile:?}/{source:?} screen={:?} \

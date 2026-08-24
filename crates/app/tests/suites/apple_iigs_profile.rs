@@ -168,7 +168,7 @@ fn boot(path: &Path, honor: bool, interpreter_override: Option<u8>) -> Option<Ga
         None,
         interpreter_override.or_else(|| profile.interpreter_number()),
         profile.default_colours(),
-        None,
+        app::native_font::FaceSet::none(),
     );
     let s = GameSession::new_for_machine(
         loaded.bytes().to_vec(),

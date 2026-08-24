@@ -187,7 +187,7 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
-        None,
+        app::native_font::FaceSet::none(),
     );
     let mut s = GameSession::new_for_machine(bytes, true, false, false, picture_dims, None, None, &machine)
     .unwrap_or_else(|e| panic!("{file}: should boot without a ZError: {e:?}"));
@@ -236,7 +236,7 @@ fn boot_named(story: &str, archive: &str, release: (u16, &str)) -> Option<GameSe
         None,
         profile.interpreter_number(),
         profile.default_colours(),
-        None,
+        app::native_font::FaceSet::none(),
     );
     let mut s =
         GameSession::new_for_machine(bytes, true, false, false, picture_dims, None, None, &machine)

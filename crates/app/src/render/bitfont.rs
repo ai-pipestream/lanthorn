@@ -435,8 +435,14 @@ pub fn blit_glyph_styled(
     // text_scale.1` the declared cell height in the first place. `TextFace` holds
     // that scale, and it is NOT always the art scale — see
     // `zvm::interpreter::V6FaceSpace` (SQ-1039).
-    if let Some(t) = tf.filter(|t| t.proportional()) {
-        if let Some((f, g)) = t.face().and_then(|f| {
+    // `draws_proportionally` and not `proportional()`: a §8.7.1 FIXED-PITCH run on
+    // a machine that has an alternate to draw it with is stamped into the declared
+    // cell instead, which is how a Macintosh status bar keeps its columns while the
+    // prose beside it steps Geneva's own advances (SQ-1036). The rule is asked of
+    // `TextFace` rather than tested here, because `zvm`'s pen has to answer it the
+    // same way and two copies of one rule is SQ-1026/SQ-1035.
+    if let Some(t) = tf.filter(|t| t.draws_proportionally(style)) {
+        if let Some((f, g)) = t.face_for(style).and_then(|f| {
             u8::try_from(u32::from(glyph)).ok().and_then(|c| f.glyph(c)).map(|g| (f, g))
         }) {
             let row_bytes = g.row_bytes(f.height);
@@ -447,7 +453,7 @@ pub fn blit_glyph_styled(
         // drawn in the cell exactly as it would be with no face at all.
     }
     let native_face = tf
-        .and_then(|t| t.face())
+        .and_then(|t| t.face_for(style))
         .filter(|f| u32::from(f.width) == cw && u32::from(f.height) == ch);
     // `rows.len() as u32 == ch` (== `f.height`) is what makes this single-byte-per-
     // row read below safe: it holds only when this GLYPH's own row is exactly one
@@ -1244,7 +1250,7 @@ mod tests {
     /// A `TextFace` with no face behind it, on `profile` — the cell path with that
     /// machine's emphasis rule.
     fn face_for(profile: crate::interpreter::InterpreterProfile) -> crate::native_font::TextFace {
-        crate::native_font::TextFace::new(profile, None, None)
+        crate::native_font::TextFace::new(profile, crate::native_font::FaceSet::none(), None)
     }
 
     /// **§8.7.1's Italic bit is a RULE on the machines that shipped Version 6, and

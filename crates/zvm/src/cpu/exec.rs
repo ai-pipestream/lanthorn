@@ -4007,6 +4007,32 @@ impl Machine {
     /// the line count) moving, not to place pixels.
     ///
     /// No-op below v6.
+    /// The §8.7.1 style byte a Version 6 run is DRAWN with: the live style, plus
+    /// [`crate::screen::STYLE_FIXED_PITCH`] whenever font 4 is selected (SQ-1036).
+    ///
+    /// # Why font 4 becomes a style bit
+    ///
+    /// Because a story asks for fixed-pitch text two ways and means one thing —
+    /// `@set_text_style 8`, or `@set_font 4` — and everything downstream (the pen
+    /// here, the face the host blits with) has exactly one question to answer.
+    /// *Zork Zero*'s Macintosh press brackets its whole status bar in
+    /// `@set_font 4` / `@set_font 1` and never touches the style word, so a
+    /// machine drawing a proportional body face has no other way to know that
+    /// `Banquet Hall` is meant to line its columns up — and
+    /// `machine-screenshots/mac-zorkzero-game.png` shows it doing exactly that, a
+    /// uniform 7 px per character above prose that advances 7, 7, 5.
+    ///
+    /// Nothing changes on a machine with no fixed alternate: the bit was a no-op
+    /// before this and [`crate::screen::V6Metric::advance`] still ignores it
+    /// unless a host has paired it with a face.
+    fn v6_run_style(&self) -> u8 {
+        let mut style = self.screen.text_style;
+        if self.screen.current_font == 4 {
+            style |= crate::screen::STYLE_FIXED_PITCH;
+        }
+        style
+    }
+
     fn v6_advance_prose_cursor(&mut self, s: &str, shadow: bool) {
         // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
         // SQ-1009: and its PEN, because on a machine that drew proportionally the
@@ -4015,7 +4041,7 @@ impl Machine {
         let cell = metric.cell();
         // The style/colours this text is going out in, for the SQ-0697 shadow
         // below — read before the window borrow.
-        let (style, fg, bg) = (self.screen.text_style, self.screen.current_fg, self.screen.current_bg);
+        let (style, fg, bg) = (self.v6_run_style(), self.screen.current_fg, self.screen.current_bg);
         let Some(v6) = self.screen.v6.as_mut() else {
             return;
         };
@@ -4199,7 +4225,7 @@ impl Machine {
             let cur = v6.current;
             let paint_mode = v6.windows[cur as usize].attributes & 0b11 != 0b11;
             if paint_mode {
-                let style = self.screen.text_style;
+                let style = self.v6_run_style();
                 let idx = cur as usize;
                 // Read the header before taking &mut self.screen — mirrors the
                 // v1-5 upper-window grow bound below. Screen width (px, word
@@ -10578,6 +10604,38 @@ pub(crate) mod tests {
         assert_eq!(w2.texts.len(), 1);
         assert_eq!((w2.texts[0].y, w2.texts[0].x), (169, 24), "run keeps its painted screen position");
         assert_eq!(w2.texts[0].text, "START the game");
+    }
+
+    #[test]
+    fn v6_font_four_marks_a_run_fixed_pitch_and_font_one_unmarks_it() {
+        // SQ-1036. A story asks for fixed-pitch text two ways and means one thing:
+        // `@set_text_style 8`, or `@set_font 4`. *Zork Zero*'s Macintosh press uses
+        // the SECOND — it brackets its whole status bar in `@set_font 4` /
+        // `@set_font 1` and never touches the style word — so without this fold
+        // there is nothing in a run to tell the bar from the prose, and a machine
+        // with a body face and a fixed alternate cannot choose between them.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 1, 1, 64, 320);
+        m.print_text("prose");
+        m.exec_ext(0x04, &[4], None, None); // set_font(4) — fixed pitch
+        m.exec_var(0x0F, &[17, 1, 2], None, None); // set_cursor, so this is its own run
+        m.print_text("BAR");
+        m.exec_ext(0x04, &[1], None, None); // set_font(1) — back to normal
+        m.exec_var(0x0F, &[33, 1, 2], None, None);
+        m.print_text("more");
+
+        let w2 = &m.screen.v6.as_ref().unwrap().windows[2];
+        let styled: Vec<(&str, u8)> =
+            w2.texts.iter().map(|t| (t.text.as_str(), t.style)).collect();
+        assert_eq!(
+            styled,
+            vec![("prose", 0), ("BAR", crate::screen::STYLE_FIXED_PITCH), ("more", 0)],
+            "font 4 sets §8.7.1 bit 3 on the runs printed under it, and font 1 clears it",
+        );
+        // And the style WORD is untouched throughout — the fold is at the run, not
+        // in the story's own state, so `@get_wind_prop 10` still reports what the
+        // story set.
+        assert_eq!(m.screen.text_style, 0, "the story never asked for a style and is not told it did");
     }
 
     #[test]

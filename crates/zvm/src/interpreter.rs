@@ -676,6 +676,57 @@ impl V6FaceSpace {
         }
     }
 }
+
+/// How a machine's own SYSTEM body face is named on that machine's boot media
+/// (SQ-1037).
+///
+/// # Why a machine states a face it did not ship with the game
+///
+/// The two machines Infocom wrote a Version 6 interpreter for both drew body text
+/// with a face that lives on the OPERATING SYSTEM, not on the game disk.
+/// `mac/xzip.lst` says `ZSTD: TextFont (stdFont)` with `stdFont := geneva`, and
+/// Geneva is in the System file on every Macintosh and on no Infocom platter
+/// (SQ-1036); the Amiga's topaz is in ROM and in a Workbench `FONTS:` drawer, not
+/// on Arthur's floppy. So the release's own medium can answer for the ALTERNATE
+/// — the Macintosh ships `FONT` 524, Monaco 12, which is exactly its 7x15 cell —
+/// and cannot answer for the body face at all.
+///
+/// This names what to go looking for when the player supplies the machine's own
+/// boot media. It is a NAME and nothing more: whether the face that comes back may
+/// actually be drawn is one question asked in one place, the host's `fit`.
+///
+/// # `None` is the answer for every other row
+///
+/// Not "unmeasured" — no other machine in this table has a Version 6 interpreter
+/// whose body face could be recovered from a boot disk, so there is nothing to
+/// name. A row that states `None` reads a supplied disk and finds nothing, which
+/// is the same outcome as having no disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6SystemFace {
+    /// A Macintosh font FAMILY number. A `FONT` resource id is
+    /// `family * `[`MAC_FONT_FAMILY_STRIDE`]` + point size`, so a family names a
+    /// RUN of ids rather than one, and the size is the host's to choose against
+    /// the machine's declared line height.
+    ///
+    /// Geneva is family 3 — `FONT` 396 is Geneva 12, against the 524 (family 4,
+    /// Monaco 12) the games ship.
+    MacFamily(i16),
+    /// An AmigaDOS `FONTS:` drawer name, as `fonts/<name>/<size>` spells it.
+    ///
+    /// `topaz`, which is the Amiga's system face and what *Shogun* and *Zork Zero*
+    /// took on that machine, neither having shipped one of their own.
+    AmigaDrawer(&'static str),
+}
+
+/// A Macintosh `FONT`/`NFNT` resource id is `family * 128 + point size`.
+///
+/// Stated here because it is what makes [`V6SystemFace::MacFamily`] a family
+/// rather than an id; the arithmetic itself belongs to whoever reads the resource
+/// fork.
+pub const MAC_FONT_FAMILY_STRIDE: i16 = 128;
+
+/// Geneva — the Macintosh's system body face, `stdFont` in `mac/xzip.lst`.
+pub const MAC_GENEVA_FONT_FAMILY: i16 = 3;
 /// A row is the machine's *bundle*: the byte it writes into `$1E`, the page and
 /// ink it reports in `$2C`/`$2D`, the palette its colour numbers resolve through,
 /// and the §8.3 screen rules the standard gives it by name. Any member a row
@@ -749,6 +800,14 @@ pub struct MachineProfile {
     /// should not have to rediscover, somewhere else, whether a face it admits
     /// scales with the artwork.
     pub v6_face_space: V6FaceSpace,
+    /// What this machine's own SYSTEM body face is called on its boot media, or
+    /// `None` where the machine has none to name — see [`V6SystemFace`].
+    ///
+    /// Beside the cell and the face space for the third time and the same reason:
+    /// an embedder holding this machine's interpreter number should not have to
+    /// rediscover, somewhere else, which typeface the machine actually painted
+    /// prose with.
+    pub v6_system_face: Option<V6SystemFace>,
     /// How this machine draws §8.7.1's Italic bit — see [`V6Emphasis`], which holds
     /// the measurements and the standard's own licence to choose.
     pub v6_emphasis: V6Emphasis,
@@ -894,6 +953,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
@@ -908,6 +968,11 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: true,
         v6_cell: MACINTOSH_V6_CELL,
         v6_face_space: V6FaceSpace::Native,
+        // `mac/xzip.lst`: `ZSTD: TextFont (stdFont)` with `stdFont := geneva`.
+        // The games ship Monaco (family 4) as their ZMONO alternate and no
+        // Geneva at all, so this is only ever answered by a System disk the
+        // player supplies (SQ-1036, SQ-1037).
+        v6_system_face: Some(V6SystemFace::MacFamily(MAC_GENEVA_FONT_FAMILY)),
         // Measured on `mac-shogun.jpg`, and the interesting row: this machine HAD
         // real italics and underlined anyway.
         v6_emphasis: V6Emphasis::Underline,
@@ -935,6 +1000,10 @@ pub const MACHINES: &[MachineProfile] = &[
         // The one row that is not Native, and the one row with a typeface to
         // measure — see `V6FaceSpace::Art`.
         v6_face_space: V6FaceSpace::Art,
+        // The Amiga's system face, in ROM and in a Workbench `FONTS:` drawer.
+        // *Shogun* and *Zork Zero* shipped no face of their own on that machine
+        // and took this one; *Arthur* ships `char.data` and outranks it.
+        v6_system_face: Some(V6SystemFace::AmigaDrawer("topaz")),
         v6_emphasis: V6Emphasis::Underline,
         v6_std_window: Some(AMIGA_STD_WINDOW),
         // amiga-spellbreaker.png (r87/860904) and amiga-lurking.png, both v3 and
@@ -965,6 +1034,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // SQ-0933, from `machine-screenshots/st-zork1.png` — Zork I revision 88 /
@@ -1021,6 +1091,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // SQ-0873/SQ-0928, from `machine-screenshots/dos-hitchhiker.png` — the last
@@ -1093,6 +1164,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // c128-trinity.png: Trinity (v4) at the first prompt, two colours exactly.
@@ -1118,6 +1190,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // c64-zork1-solidgold.png: Zork I release 52 / serial 871125, whose own
@@ -1144,6 +1217,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
@@ -1158,6 +1232,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
         v6_face_space: V6FaceSpace::Native,
+        v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
@@ -1758,5 +1833,47 @@ mod tests {
         .map(|n| machine(n).expect("modelled").period_look)
         .collect();
         assert!(apples.windows(2).all(|w| w[0] == w[1]), "one interpreter, one text screen");
+    }
+
+    /// Two machines name a system body face, and they name the right one
+    /// (SQ-1037).
+    ///
+    /// Both had a Version 6 interpreter and both drew prose with a face that
+    /// lives on the operating system: `mac/xzip.lst` says `stdFont := geneva`,
+    /// and the Amiga's topaz is in ROM and in a Workbench `FONTS:` drawer. Every
+    /// other row names nothing, which is a shortage of Version 6 interpreters
+    /// rather than a shortage of measurement.
+    ///
+    /// The Amiga row is the one worth pinning by NAME: a Workbench floppy carries
+    /// seven other faces, all of them proportional, and `ruby 8` at that machine's
+    /// text scale would pass every test but this one.
+    #[test]
+    fn only_the_two_version_six_machines_name_a_system_face() {
+        assert_eq!(
+            machine(MACINTOSH_INTERPRETER_NUMBER).expect("modelled").v6_system_face,
+            Some(V6SystemFace::MacFamily(MAC_GENEVA_FONT_FAMILY)),
+            "the Macintosh paints Geneva — family 3, so FONT 396 at 12pt",
+        );
+        assert_eq!(
+            MAC_GENEVA_FONT_FAMILY * MAC_FONT_FAMILY_STRIDE + 12,
+            396,
+            "…which is the id arithmetic, stated once here and read in `blorb::mac_font`",
+        );
+        assert_eq!(
+            machine(AMIGA_INTERPRETER_NUMBER).expect("modelled").v6_system_face,
+            Some(V6SystemFace::AmigaDrawer("topaz")),
+            "the Amiga takes topaz, and not the seven display faces beside it",
+        );
+        for n in 1u8..=11 {
+            let Some(m) = machine(n) else { continue };
+            if n == MACINTOSH_INTERPRETER_NUMBER || n == AMIGA_INTERPRETER_NUMBER {
+                continue;
+            }
+            assert_eq!(
+                m.v6_system_face, None,
+                "{} names no system face — nothing to name, not something unmeasured",
+                m.name,
+            );
+        }
     }
 }

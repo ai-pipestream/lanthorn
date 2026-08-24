@@ -2495,6 +2495,18 @@ impl Default for V6Cell {
 /// amount, so a bold run is genuinely WIDER than the same letters in roman.
 const STYLE_BOLD: u8 = 2;
 
+/// ZMSD §8.7.1 style bit 3 — fixed pitch.
+///
+/// A run carries it two ways and they mean one thing: the story asked for it with
+/// `@set_text_style 8`, or it selected **font 4**, which `exec.rs` folds in here so
+/// that everything downstream has a single question to ask. On a machine drawing a
+/// proportional body face this is not decoration — it is the difference between
+/// Geneva and Monaco, and *Zork Zero*'s Macintosh press brackets its whole status
+/// bar in `@set_font 4` / `@set_font 1` (measured on
+/// `machine-screenshots/mac-zorkzero-game.png`, where `Banquet Hall` steps a
+/// uniform 7 px per character while the prose two lines below advances 7, 7, 5).
+pub const STYLE_FIXED_PITCH: u8 = 8;
+
 /// What the story is TOLD about its cell, together with the pen the machine
 /// actually drew with (SQ-1009).
 ///
@@ -2532,13 +2544,23 @@ pub struct V6Metric {
     /// Native pixels a **bold** glyph adds to its own advance, so the smeared
     /// column has somewhere to live. Zero for a fixed pen.
     bold_extra: u16,
+    /// The advance of one character in a §8.7.1 [`STYLE_FIXED_PITCH`] run, where
+    /// the machine has a fixed-pitch face to draw such a run WITH (SQ-1036).
+    ///
+    /// `None` — every machine before this, and every machine today whose media
+    /// carry no fixed alternate — means the fixed-pitch bit does not move the pen,
+    /// which is what it has always meant. It is not a licence to invent a second
+    /// pitch: a host sets this only when it has admitted a face that *is* the
+    /// declared cell, so the number is the cell's width by construction rather
+    /// than by choice.
+    fixed_pitch: Option<u16>,
 }
 
 impl V6Metric {
     /// A machine that advances by its declared cell — every one but Arthur's
     /// Amiga press, and every path that existed before SQ-1009.
     pub fn fixed(cell: V6Cell) -> V6Metric {
-        V6Metric { cell, advances: None, bold_extra: 0 }
+        V6Metric { cell, advances: None, bold_extra: 0, fixed_pitch: None }
     }
 
     /// A machine drawing a proportional face: `advances[b]` is the native pixel
@@ -2549,7 +2571,20 @@ impl V6Metric {
     /// number — a glyph the face does not cover is the caller's to fill with the
     /// cell width, so that this type never has to guess.
     pub fn proportional(cell: V6Cell, advances: Box<[u16; 256]>, bold_extra: u16) -> V6Metric {
-        V6Metric { cell, advances: Some(advances), bold_extra }
+        V6Metric { cell, advances: Some(advances), bold_extra, fixed_pitch: None }
+    }
+
+    /// State that a §8.7.1 [`STYLE_FIXED_PITCH`] run advances by the DECLARED
+    /// cell, because the machine has a fixed-pitch face that is that cell.
+    ///
+    /// Only meaningful on a proportional pen — a fixed one already answers the
+    /// cell for everything — and it takes no width, because a face admitted as
+    /// the machine's fixed alternate has already been tested against the cell and
+    /// there is no other number it could be. Pairing the two here is what stops a
+    /// caller inventing a pitch to go with a face it never checked.
+    pub fn with_fixed_alternate(mut self) -> V6Metric {
+        self.fixed_pitch = Some(self.cell.w);
+        self
     }
 
     /// The DECLARED cell — what the story was told.
@@ -2568,9 +2603,19 @@ impl V6Metric {
     /// machine but one does and what this crate did before SQ-1009.
     pub fn advance(&self, ch: char, style: u8) -> u16 {
         let Some(advances) = self.advances.as_ref() else { return self.cell.w };
-        let Ok(b) = u8::try_from(u32::from(ch)) else { return self.cell.w };
+        // A fixed-pitch run is drawn with the machine's fixed ALTERNATE, so it
+        // advances by that face's pitch rather than the body face's — the whole
+        // reason *Zork Zero*'s Macintosh status bar lines its columns up
+        // (SQ-1036). Bold still widens it: the smear needs a column on any face.
+        let base = match self.fixed_pitch {
+            Some(w) if style & STYLE_FIXED_PITCH != 0 => w,
+            _ => {
+                let Ok(b) = u8::try_from(u32::from(ch)) else { return self.cell.w };
+                advances[usize::from(b)]
+            }
+        };
         let extra = if style & STYLE_BOLD != 0 { self.bold_extra } else { 0 };
-        advances[usize::from(b)].saturating_add(extra).max(1)
+        base.saturating_add(extra).max(1)
     }
 
     /// Native pixels a whole run occupies at this pen — the width that WRAPS,
@@ -3018,6 +3063,45 @@ mod tests {
     /// SQ-0804: `stream_origin` is where the FIRST glyph of a burst landed — set
     /// once and then left alone until it is cleared, so the host can compare it
     /// against the cursor the window had before the burst.
+    /// A fixed-pitch run advances by the DECLARED cell, once the host has paired
+    /// it with a face that is that cell (SQ-1036).
+    ///
+    /// The pairing is the rule: `with_fixed_alternate` takes no width, because a
+    /// face admitted as the machine's fixed alternate has already been tested
+    /// against the cell and there is no other number it could be. Without the
+    /// pairing the bit is the no-op it has always been.
+    #[test]
+    fn a_fixed_pitch_run_advances_by_the_cell_only_where_an_alternate_exists() {
+        let cell = V6Cell::new(7, 15);
+        let mut advances = Box::new([9u16; 256]);
+        advances[usize::from(b'i')] = 3;
+        let bare = V6Metric::proportional(cell, advances.clone(), 1);
+        let paired = V6Metric::proportional(cell, advances, 1).with_fixed_alternate();
+
+        // Roman: both pens are the body face's, and both are proportional.
+        for m in [&bare, &paired] {
+            assert_eq!(m.advance('i', 0), 3);
+            assert_eq!(m.advance('W', 0), 9);
+        }
+        // Fixed pitch: the paired pen answers the cell for everything, and the bare
+        // one goes on answering the body face's advances.
+        assert_eq!(paired.advance('i', STYLE_FIXED_PITCH), 7, "the declared cell");
+        assert_eq!(paired.advance('W', STYLE_FIXED_PITCH), 7, "for every character alike");
+        assert_eq!(bare.advance('i', STYLE_FIXED_PITCH), 3, "no alternate, no second pitch");
+
+        // Bold still widens a fixed-pitch run: the smear needs a column on any face.
+        assert_eq!(paired.advance('i', STYLE_FIXED_PITCH | STYLE_BOLD), 8);
+
+        // And a run measures the same way, which is what wraps.
+        assert_eq!(paired.run_px("iiii", STYLE_FIXED_PITCH), 28);
+        assert_eq!(paired.run_px("iiii", 0), 12);
+
+        // A machine with no face at all is untouched by any of it.
+        let fixed = V6Metric::fixed(cell);
+        assert_eq!(fixed.advance('i', STYLE_FIXED_PITCH), 7);
+        assert_eq!(fixed.advance('i', 0), 7);
+    }
+
     #[test]
     fn stream_origin_records_the_first_glyph_of_a_burst_only() {
         let mut w = ZWindow { x_coord: 5, y_coord: 9, x_cursor: 3, y_cursor: 1, ..Default::default() };

@@ -1,5 +1,6 @@
-//! Typefaces on the user's OWN disk images under `~/.lanthorn/`, reported for
-//! display only (SQ-1038).
+//! Typefaces on the user's OWN disk images under `~/.lanthorn/` — reported to
+//! the browser's info panel, and supplied to the face cascade (SQ-1038,
+//! SQ-1037).
 //!
 //! This exists to make SQ-1038's fix visible: before it, `blorb::mac_font` and
 //! `blorb::amiga_font` refused every proportional system face (`Glyph::rows` was
@@ -11,14 +12,18 @@
 //! reasons (a Workbench boot floppy, a System Startup disk) rather than any
 //! one game's release.
 //!
-//! # Display-only, like [`crate::native_font::DiskFace`]
+//! # Reporting and supplying are two doors on one lookup
 //!
-//! Nothing downstream consumes a [`SystemFace`]. Choosing WHEN a system face is
-//! used by the renderer is SQ-1037, and is not this module's job — this only
-//! reports what is readable, mirroring `native_font::detected`'s own "it ends at
-//! a person's eyes" property. There is accordingly no `used` field: no story
-//! wires a system face into rendering yet, so every row here is "present" and
-//! none is "in use".
+//! [`scan`] REPORTS what is readable, for the browser's info panel;
+//! [`named_faces_in`] SUPPLIES the faces a machine's own body face names, for
+//! [`crate::native_font::resolve`] to rank. Both walk the same [`faces_on`], so
+//! a panel cannot list a face the cascade would not see, or miss one it would.
+//!
+//! **Neither decides.** Whether a face that comes back may actually be DRAWN is
+//! one question asked in one place — `native_font::fit` — and this module never
+//! asks it (SQ-1011 shipped inert twice over a fitness rule that lived in two
+//! places). What this module knows is a NAME: the family a Macintosh id encodes,
+//! the drawer an AmigaDOS path names, and which machine a volume speaks for.
 //!
 //! # One lookup, reused rather than rewritten
 //!
@@ -41,11 +46,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// One typeface found on one of the user's own disks under `~/.lanthorn/`.
+/// One typeface found on one of the user's own disks under `~/.lanthorn/`, as a
+/// person reads it.
 ///
 /// Mirrors [`crate::native_font::DiskFace`]'s fields (name/width/height/
-/// proportional) minus `used` — see the module docs for why there is no
-/// `used` here.
+/// proportional); [`UserFace`] is the same row with the face itself attached,
+/// which is what the cascade takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemFace {
     /// The disk it came off — the filename directly under `~/.lanthorn/`, so a
@@ -72,6 +78,132 @@ pub struct SystemFace {
     pub machine: crate::interpreter::InterpreterProfile,
 }
 
+/// One typeface off a user disk, WITH the face — what the cascade ranks.
+///
+/// [`SystemFace`] is this projected onto what a reader needs; the glyph bitmaps
+/// stay here rather than on the panel's row, because a full System 6 disk parses
+/// to eighteen faces and the picker holds one of these per story.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserFace {
+    /// The disk image it came off, named as the filename under the media dir —
+    /// so a face that reads identically off two disks still says which answered,
+    /// which is the whole reason a System 7 Geneva cannot quietly stand in for a
+    /// System 6 one.
+    pub disk: String,
+    /// How the medium names it — `FONT 396` on a Macintosh, the path on an Amiga
+    /// volume.
+    pub name: String,
+    /// The `FONT`/`NFNT` resource id, on a Macintosh volume only. The FAMILY is
+    /// read out of it ([`blorb::mac_font::family_of`]), which is how a request
+    /// for Geneva tells 396 from 524.
+    pub mac_id: Option<i16>,
+    /// The machine this disk speaks for — see [`SystemFace::machine`].
+    pub machine: crate::interpreter::InterpreterProfile,
+    /// The face itself.
+    pub font: blorb::bitmap_font::BitmapFont,
+}
+
+impl UserFace {
+    /// This row as the info panel reads it.
+    pub fn described(&self) -> SystemFace {
+        SystemFace {
+            disk: self.disk.clone(),
+            name: self.name.clone(),
+            width: self.font.width,
+            height: self.font.height,
+            proportional: self.font.proportional,
+            machine: self.machine,
+        }
+    }
+
+    /// Whether this face is the one `want` NAMES — family on a Macintosh, drawer
+    /// on an Amiga.
+    ///
+    /// A name and nothing else. Whether it FITS is `native_font::fit`'s, and
+    /// which of a family's sizes the machine drew with is the cascade's, since
+    /// only it holds the declared cell.
+    fn answers(&self, want: zvm::interpreter::V6SystemFace) -> bool {
+        match want {
+            zvm::interpreter::V6SystemFace::MacFamily(family) => {
+                self.mac_id.is_some_and(|id| blorb::mac_font::family_of(id) == family)
+            }
+            zvm::interpreter::V6SystemFace::AmigaDrawer(drawer) => {
+                blorb::amiga_font::drawer_of(&self.name)
+                    .is_some_and(|d| d.eq_ignore_ascii_case(drawer))
+            }
+        }
+    }
+}
+
+/// Where the player's own boot disks live, and which one answers first.
+///
+/// # Several disks COMPOSE; the key only breaks a tie
+///
+/// The obvious pick-one rules are all bad (SQ-1037): first-found is filesystem
+/// order, so the answer changes for no reason a player can see; newest-version
+/// needs a version parsed off a filename they may have renamed; most-fonts is
+/// arbitrary and wrong the moment one disk has more faces but not the one being
+/// asked for. So every disk of the right kind is read and the faces pool, and the
+/// REQUEST — family, drawer, size — picks out of the pool.
+///
+/// `prefer` exists because a pool still has to be ordered when two disks carry
+/// the same face, and "whichever the filesystem listed first" is not an answer a
+/// person can predict or change. It is `config`'s `system_font_disk`: a substring
+/// of the disk's filename, matched case-insensitively, promoted to the front.
+/// Nothing is EXCLUDED by it — a preferred disk that lacks the face falls through
+/// to the rest, because a naming preference must not be able to lose you a face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserDisks {
+    /// The directory to read — [`user_media_dir`] in production, a temp
+    /// directory of our own in a test, which is the only way a case here can
+    /// pass without depending on what the person running it keeps in
+    /// `~/.lanthorn/`.
+    pub dir: std::path::PathBuf,
+    /// `config`'s `system_font_disk`, or `None` for no preference.
+    pub prefer: Option<String>,
+}
+
+impl UserDisks {
+    /// The player's own media directory, with `config`'s `system_font_disk` as
+    /// the preference. An EMPTY key is no preference, which is the default and
+    /// what the template documents.
+    pub fn new(prefer: &str) -> UserDisks {
+        UserDisks {
+            dir: user_media_dir(),
+            prefer: (!prefer.is_empty()).then(|| prefer.to_string()),
+        }
+    }
+}
+
+/// The faces `machine`'s own system body face NAMES, pooled from every disk in
+/// `disks.dir` and ordered so the answer never depends on filesystem order.
+///
+/// Empty for a machine that names no system face (every row but the Macintosh and
+/// the Amiga), for an absent or fontless directory, and for a disk speaking for
+/// another machine. The caller decides which of the sizes that come back the
+/// machine actually drew with — see [`crate::native_font::resolve`], which holds
+/// the declared cell that settles it.
+pub fn named_faces_in(
+    disks: &UserDisks,
+    machine: crate::interpreter::InterpreterProfile,
+) -> Vec<UserFace> {
+    let Some(want) = machine.v6_system_face() else { return Vec::new() };
+    let prefer = disks.prefer.as_deref().map(str::to_ascii_lowercase);
+    let mut out: Vec<UserFace> = scan_fonts(&disks.dir)
+        .into_iter()
+        .filter(|f| f.machine == machine && f.answers(want))
+        .collect();
+    // Preferred disk first, then by disk name, then in the order the volume's own
+    // catalog gave them — a total order over facts a person can see, so two runs
+    // on one machine and the same disks cannot disagree.
+    out.sort_by_key(|f| {
+        let lower = f.disk.to_ascii_lowercase();
+        let promoted = !prefer.as_ref().is_some_and(|p| !p.is_empty() && lower.contains(p));
+        (promoted, lower)
+    });
+    out
+}
+
 /// Every typeface on every mountable disk image directly inside `dir`.
 ///
 /// Quiet on anything short of a parsed face: an absent `dir`, an empty one, one
@@ -84,6 +216,11 @@ pub struct SystemFace {
 /// user's own machine, which this module must never depend on for a passing
 /// test (`unit_tests/macfont.hfs` is the one committed here).
 pub fn scan(dir: &Path) -> Vec<SystemFace> {
+    scan_fonts(dir).iter().map(UserFace::described).collect()
+}
+
+/// [`scan`] with the faces still attached — the one walk both doors take.
+fn scan_fonts(dir: &Path) -> Vec<UserFace> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut out = Vec::new();
     for entry in entries.flatten() {
@@ -109,7 +246,7 @@ pub fn scan(dir: &Path) -> Vec<SystemFace> {
 
 /// Every face `bytes` (one disk image's contents, at `path` and named `disk`)
 /// carries.
-fn faces_on(path: &Path, disk: &str, bytes: Vec<u8>) -> Vec<SystemFace> {
+fn faces_on(path: &Path, disk: &str, bytes: Vec<u8>) -> Vec<UserFace> {
     // A Macintosh volume: every resource fork on it, not only an `APPL`'s — see
     // the module docs for why (`ZSYS`, the System file, is where a system disk's
     // fonts live).
@@ -122,13 +259,12 @@ fn faces_on(path: &Path, disk: &str, bytes: Vec<u8>) -> Vec<SystemFace> {
             .filter_map(|e| hfs.read_resource(e))
             .filter_map(|fork| blorb::resource_fork::ResourceFork::parse(&fork))
             .flat_map(|rf| blorb::mac_font::faces_in_fork(&rf))
-            .map(|(id, f)| SystemFace {
+            .map(|(id, f)| UserFace {
                 disk: disk.to_string(),
                 name: format!("FONT {id}"),
-                width: f.width,
-                height: f.height,
-                proportional: f.proportional,
+                mac_id: Some(id),
                 machine: crate::interpreter::InterpreterProfile::Macintosh,
+                font: f,
             })
             .collect();
     }
@@ -145,13 +281,12 @@ fn faces_on(path: &Path, disk: &str, bytes: Vec<u8>) -> Vec<SystemFace> {
     let files = mounted.contents();
     blorb::amiga_font::faces_in_volume(files.iter().map(|(n, b)| (n.as_str(), b.as_slice())))
         .into_iter()
-        .map(|(name, f)| SystemFace {
+        .map(|(name, f)| UserFace {
             disk: disk.to_string(),
             name,
-            width: f.width,
-            height: f.height,
-            proportional: f.proportional,
+            mac_id: None,
             machine: crate::interpreter::InterpreterProfile::Amiga,
+            font: f,
         })
         .collect()
 }

@@ -43,9 +43,11 @@
 //! * the **interpreter number** and **default colours**, which at launch pass
 //!   through `Config::advertised_interpreter_number` and the two-colour-card rule
 //!   (SQ-0930, SQ-0956) and at a restart are simply what the launch settled;
-//! * the **face** the release's own medium carries (`crate::native_font::resolve`),
-//!   because reaching it needs the story path, the disc entry and how the profile
-//!   was decided — three facts a caller owns and this module never sees.
+//! * the **faces** the cascade resolves (`crate::native_font::resolve`) — the
+//!   release's own off the story's medium, then the machine's system face off a
+//!   boot disk the player supplied — because reaching them needs the story path,
+//!   the disc entry, how the profile was decided and where the player keeps their
+//!   media: facts a caller owns and this module never sees.
 //!
 //! The face is TAKEN and the CELL is derived from it (SQ-1009). A proportional
 //! typeface off a release disk states its own line height, so on Arthur's Amiga
@@ -80,10 +82,12 @@ pub struct MachineBoot {
     /// the admitted FACE's where the release shipped a proportional one
     /// ([`crate::native_font::declared_cell`], SQ-1009).
     pub cell: zvm::screen::V6Cell,
-    /// The typeface the release's own medium carries, when it carries a usable one
-    /// — [`crate::native_font::resolve`]. `None` for every other launch, which is
-    /// every machine but the Macintosh and Arthur's Amiga floppy.
-    pub face: Option<blorb::bitmap_font::BitmapFont>,
+    /// The typefaces this machine draws with — its body face and its fixed-pitch
+    /// alternate, resolved through [`crate::native_font::resolve`]'s cascade: the
+    /// release's own medium first, then the machine's own system face off a boot
+    /// disk the player supplied (SQ-1037). Empty for every launch that reaches
+    /// neither, which is every machine but the Macintosh and Arthur's Amiga floppy.
+    pub faces: crate::native_font::FaceSet,
 }
 
 impl MachineBoot {
@@ -113,7 +117,7 @@ impl MachineBoot {
         named_art_std_window: Option<(u16, u16)>,
         interpreter_number: Option<u8>,
         default_colours: Option<(u8, u8)>,
-        face: Option<blorb::bitmap_font::BitmapFont>,
+        faces: crate::native_font::FaceSet,
     ) -> MachineBoot {
         let art_scale = picts.art_scale();
         MachineBoot {
@@ -130,10 +134,10 @@ impl MachineBoot {
             // a rule each of `startup.rs`, `reload.rs` and `reset.rs` remembers.
             cell: crate::native_font::declared_cell(
                 profile,
-                face.as_ref(),
+                faces.body(),
                 art_scale.unwrap_or((1, 1)),
             ),
-            face,
+            faces,
         }
     }
 
@@ -142,7 +146,7 @@ impl MachineBoot {
     /// [`crate::state::AppState`] holds this rather than the two halves, so the
     /// draw paths cannot be handed a cell from one boot and a face from another.
     pub fn text_face(&self) -> crate::native_font::TextFace {
-        crate::native_font::TextFace::new(self.profile, self.face.clone(), self.art_scale)
+        crate::native_font::TextFace::new(self.profile, self.faces.clone(), self.art_scale)
     }
 
     /// A story with no medium behind it — a bare `.z5`, or a Blorb.
@@ -159,7 +163,7 @@ impl MachineBoot {
             art_scale: None,
             default_colours: None,
             cell: InterpreterProfile::IbmPc.v6_font_cell(),
-            face: None,
+            faces: crate::native_font::FaceSet::none(),
         }
     }
 }
@@ -177,7 +181,14 @@ mod tests {
         for profile in
             [InterpreterProfile::Macintosh, InterpreterProfile::Amiga, InterpreterProfile::IbmPc]
         {
-            let boot = MachineBoot::resolve(profile, &PictSource::new(None), None, None, None, None);
+            let boot = MachineBoot::resolve(
+                profile,
+                &PictSource::new(None),
+                None,
+                None,
+                None,
+                crate::native_font::FaceSet::none(),
+            );
             assert_eq!(
                 boot.cell,
                 profile.v6_font_cell(),
@@ -192,7 +203,7 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
+                crate::native_font::FaceSet::none(),
             )
             .cell,
             zvm::interpreter::MACINTOSH_V6_CELL,
@@ -205,7 +216,14 @@ mod tests {
     #[test]
     fn a_named_archive_outranks_the_machines_standard_window() {
         let bare = PictSource::new(None);
-        let machine = MachineBoot::resolve(InterpreterProfile::Amiga, &bare, None, None, None, None);
+        let machine = MachineBoot::resolve(
+            InterpreterProfile::Amiga,
+            &bare,
+            None,
+            None,
+            None,
+            crate::native_font::FaceSet::none(),
+        );
         assert_eq!(
             machine.screen_px,
             InterpreterProfile::Amiga.std_window(),
@@ -217,7 +235,7 @@ mod tests {
             Some((560, 384)),
             None,
             None,
-            None,
+            crate::native_font::FaceSet::none(),
         );
         assert_eq!(
             named.screen_px,

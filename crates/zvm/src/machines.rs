@@ -240,14 +240,14 @@ pub fn table() -> String {
     let mut s = format!("ZMSD §11.1.3 machine profiles — what zvm models, in number order.\n\n{TOLD_INTRO}\n");
     let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
     s.push_str(&format!(
-        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {}\n",
+        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {:<14}  {}\n",
         "#", "machine", "default page / ink ($2C/$2D)", "palette", "global pens", "v6 screen page",
-        "one screen palette", "v6 cell", "face space", "emphasis", "v6 std window"
+        "one screen palette", "v6 cell", "face space", "emphasis", "system face", "v6 std window"
     ));
-    s.push_str(&format!("  {}\n", "-".repeat(name_w + 141)));
+    s.push_str(&format!("  {}\n", "-".repeat(name_w + 157)));
     for m in MACHINES {
         s.push_str(&format!(
-            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {}\n",
+            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {:<14}  {}\n",
             m.number,
             m.name,
             colours(m),
@@ -280,6 +280,21 @@ pub fn table() -> String {
             match m.v6_emphasis {
                 crate::interpreter::V6Emphasis::Underline => "underline",
                 crate::interpreter::V6Emphasis::Slope => "slope",
+            },
+            // What this machine's own SYSTEM body face is called on its boot media
+            // (SQ-1037). Only the two machines Infocom shipped a v6 interpreter for
+            // name one, because only they had a body face to go looking for: Geneva
+            // is in the Macintosh System file, topaz in the Amiga's ROM and its
+            // `FONTS:` drawer, and neither is on any game disk. A dash is "nothing
+            // to name", not "unmeasured".
+            match m.v6_system_face {
+                Some(crate::interpreter::V6SystemFace::MacFamily(f)) => {
+                    format!("FONT family {f}")
+                }
+                Some(crate::interpreter::V6SystemFace::AmigaDrawer(d)) => {
+                    format!("fonts/{d}")
+                }
+                None => "-".to_string(),
             },
             // A machine that states none defers to the story's own container, and
             // to any artwork the host mounted ahead of it (SQ-0838).
@@ -475,6 +490,7 @@ mod tests {
                 one_screen_palette,
                 v6_cell,
                 v6_face_space,
+                v6_system_face,
                 v6_emphasis,
                 v6_std_window,
                 period_look,
@@ -511,6 +527,15 @@ mod tests {
                     crate::interpreter::V6Emphasis::Slope => "slope",
                 }),
                 "{name}: v6_emphasis not in\n{all}",
+            );
+            assert!(
+                all.contains(&match v6_system_face {
+                    Some(crate::interpreter::V6SystemFace::MacFamily(f)) =>
+                        format!("FONT family {f}"),
+                    Some(crate::interpreter::V6SystemFace::AmigaDrawer(d)) => format!("fonts/{d}"),
+                    None => "-".to_string(),
+                }),
+                "{name}: v6_system_face not in\n{all}",
             );
             // The three booleans share one spelling, so count rather than search:
             // the machine table row holds exactly these three yes/no columns.
