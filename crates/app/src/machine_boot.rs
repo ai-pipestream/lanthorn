@@ -40,9 +40,13 @@
 //!   than be re-derived from the path (SQ-0876 — a hybrid disc carries DOS builds
 //!   in a Macintosh volume, and answering "HFS" for all of them told every PC
 //!   story it was a Macintosh);
-//! * the **interpreter number** and **default colours**, which at launch pass
-//!   through `Config::advertised_interpreter_number` and the two-colour-card rule
-//!   (SQ-0930, SQ-0956) and at a restart are simply what the launch settled;
+//! * the **interpreter number** and **default colours**, which pass through
+//!   `Config::advertised_interpreter_number` and the two-colour-card rule
+//!   (SQ-0930, SQ-0956) — at launch AND at a restart, through the same call in
+//!   both places. This line used to say a restart carried "simply what the launch
+//!   settled", which was never true: the launch's answer is not stored anywhere,
+//!   and `reset.rs` re-derived it by hand with rung 2 of that cascade missing
+//!   (SQ-1058). A restart re-asks, and re-asks the one implementation;
 //! * the **faces** the cascade resolves (`crate::native_font::resolve`) — the
 //!   release's own off the story's medium, then the machine's system face off a
 //!   boot disk the player supplied — because reaching them needs the story path,

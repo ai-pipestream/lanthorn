@@ -190,11 +190,6 @@ fn pre_boot_host_screen(
     cs: &app::colors::ColorScheme,
     garglk_overlay: &Option<app::garglk_ini::GarglkOverlay>,
 ) -> Option<(u16, u16)> {
-    let (term_cols, term_rows) = crossterm::terminal::size().ok()?;
-    let frame = Rect::new(0, 0, term_cols, term_rows);
-    if frame.width == 0 || frame.height == 0 {
-        return None;
-    }
     let mut boot_state = AppState::default();
     boot_state.colors = cs.clone();
     boot_state.config = cfg.clone();
@@ -205,8 +200,33 @@ fn pre_boot_host_screen(
         inv_dock_pct: cfg.inv_dock_pct,
         room_dock_pct: cfg.room_dock_pct,
     };
-    let pane_layout = app::layout::compute_pane_layout(frame, &boot_state, 0);
-    app::render::screen::story_screen_dims(pane_layout.story, &boot_state)
+    host_story_screen(&boot_state)
+}
+
+/// The story pane the LIVE terminal gives `state`, in character cells — the
+/// `host_screen` a boot is seeded with.
+///
+/// Split out of [`pre_boot_host_screen`] so a RESTART can ask the same question
+/// of the real `AppState` (SQ-1061). Restarting passed a bare `None` here, under
+/// a comment three dozen lines above promising "the same four links `startup.rs`
+/// resolves, in the same order" — so `GameSession::new_for_machine` took neither
+/// the `set_screen_dims` branch nor the `boot_screen_cols` one, and a v3/v4/v5
+/// story whose status routine lays itself out once at boot came back on zvm's
+/// 80x24 fallback. The launch had to synthesise an `AppState` because it runs
+/// before there is one; a restart holds the real one, and the only thing that
+/// kept the two apart was that this was a positional argument nobody had to fill.
+///
+/// `None` when the terminal size cannot be queried (piped/non-terminal stdout,
+/// e.g. some test harnesses) or the query reports a zero-area frame; the
+/// constructor then falls back to the 80x24 boot default.
+pub(crate) fn host_story_screen(state: &AppState) -> Option<(u16, u16)> {
+    let (term_cols, term_rows) = crossterm::terminal::size().ok()?;
+    let frame = Rect::new(0, 0, term_cols, term_rows);
+    if frame.width == 0 || frame.height == 0 {
+        return None;
+    }
+    let pane_layout = app::layout::compute_pane_layout(frame, state, 0);
+    app::render::screen::story_screen_dims(pane_layout.story, state)
 }
 
 /// Build the per-story engine + mapper + UI state + terminal for `story_path`,

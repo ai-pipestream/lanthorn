@@ -146,11 +146,23 @@ pub(crate) fn reset_game(
                 art_scale: picts.art_scale(),
                 disks: Some(&user_disks),
             });
+            // **The number is `Config`'s cascade, not a second copy of it**
+            // (SQ-1058). This read `interpreter_number.or_else(|| profile
+            // .interpreter_number())` — rungs 1 and 3 of
+            // `Config::advertised_interpreter_number`, with rung 2 missing.
+            // That rung is SQ-0930's whole point: a DOS MEDIUM names the IBM PC,
+            // whose own `interpreter_number()` is deliberately `None` because the
+            // honest answer is version-dependent. Without it a restart fell
+            // through to zvm's default rule — Frotz's, 6 for Version 6 and 1
+            // otherwise — so a v5 story off `floppy1.ima` advertised `$1E = 6` at
+            // launch and `$1E = 1` after `@restart`, and *Beyond Zork* silently
+            // swapped its CP437 box graphics back to Font 3 arrows mid-session.
+            // Version 6 masked it, because both roads reach 6.
             let boot = app::machine_boot::MachineBoot::resolve(
                 profile,
                 &picts,
                 named_art_std_window,
-                state.config.interpreter_number.or_else(|| profile.interpreter_number()),
+                state.config.advertised_interpreter_number(),
                 host_default_colours,
                 faces,
             );
@@ -166,7 +178,17 @@ pub(crate) fn reset_game(
                 // the Glulx arm below does.
                 state.persist_debug_trace,
                 picture_dims,
-                None,
+                // The host pane, as `startup.rs` seeds it (SQ-1061). This was a
+                // bare `None` — the only argument in this call with no comment
+                // above it — so the constructor took neither `set_screen_dims`
+                // nor the `boot_screen_cols` branch, and a v3/v4/v5 story whose
+                // status routine lays itself out once at boot (Zork 1, SQ-0680)
+                // came back laid out for zvm's 80x24 fallback. Nothing re-seeds
+                // it afterwards: `loop_tick::poll_zvm_screen_dims` runs
+                // post-boot, which is exactly what SQ-0680 established is too
+                // late. The v6 arm never saw it, because that arm takes its
+                // screen from `boot.screen_px`.
+                crate::startup::host_story_screen(state),
                 // A restart re-draws the seed the same way the launch did
                 // (SQ-0811): a pinned `random_seed` replays the same game, and an
                 // unpinned one deals a fresh one — which is what restarting a
@@ -330,6 +352,152 @@ pub(crate) fn reset_game(
 mod tests {
     /// SQ-0546: restarting a v6 story must rebuild it the way LAUNCH does.
     ///
+    /// **A restart advertises the number the LAUNCH advertised** (SQ-1058).
+    ///
+    /// `Config::advertised_interpreter_number` is a three-rung cascade and this
+    /// file reproduced rungs 1 and 3 by hand, omitting rung 2 — SQ-0930's
+    /// `IbmPc + ProfileSource::Medium -> 6`. `IbmPc::interpreter_number()` is
+    /// deliberately `None`, so a restart fell through to zvm's own default rule
+    /// (Frotz's: 6 for Version 6, **1** otherwise) and a **v5** story off a DOS
+    /// medium came back claiming to be a DECSystem-20.
+    ///
+    /// `floppy1.ima` is the frame the rule was written for: *Beyond Zork* swaps
+    /// Font 3's arrows for CP437 character graphics when it believes it is on an
+    /// IBM PC, and zvm gates that on this byte. Version 6 masks the defect
+    /// entirely — both roads reach 6 — so the specimen has to be a v5.
+    ///
+    /// FALSIFY by restoring
+    /// `state.config.interpreter_number.or_else(|| profile.interpreter_number())`:
+    /// the launch reads 6 and the restart reads 1.
+    #[test]
+    fn a_restart_advertises_the_interpreter_number_the_launch_advertised() {
+        use app::interpreter::{InterpreterProfile, ProfileSource};
+        let story = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/floppy1.ima");
+        let Ok((loaded, medium)) = app::hints::load_mounted_story(&story) else {
+            eprintln!("SKIP: gitignored medium missing at {}", story.display());
+            return;
+        };
+        let app::hints::LoadedStory::ZCode(bytes) = loaded else {
+            panic!("floppy1.ima carries Z-code");
+        };
+        let (profile, source) =
+            InterpreterProfile::resolve_with_source(&story, None, None, medium);
+        // The premise, stated rather than assumed: this really is the DOS medium
+        // that names the IBM PC, and the story really is the version that can
+        // show the difference.
+        assert_eq!(profile, InterpreterProfile::IbmPc, "a DOS medium names the IBM PC");
+        assert_eq!(source, ProfileSource::Medium, "and it is the MEDIUM that named it");
+        assert_ne!(bytes[0], 6, "a Version 6 story would mask this — both roads reach 6");
+
+        let mut state = app::state::AppState::default();
+        state.config.interpreter_profile = profile;
+        state.config.interpreter_source = source;
+        let advertised = state.config.advertised_interpreter_number();
+        assert_eq!(advertised, Some(6), "the launch advertises the IBM PC");
+
+        let boot = app::machine_boot::MachineBoot::resolve(
+            profile,
+            &app::graphics::PictSource::new(None),
+            None,
+            advertised,
+            None,
+            app::native_font::FaceSet::none(),
+        );
+        let s = app::session::GameSession::new_for_machine(
+            bytes.clone(), true, false, false, Default::default(), None, None, &boot,
+        )
+        .expect("Beyond Zork boots off the DOS medium");
+        let mut engine: Box<dyn app::engine::Engine> = Box::new(s);
+        assert_eq!(
+            crate::engine_helpers::zvm_session_mut(&mut *engine).machine.mem.read_byte(0x1e),
+            6,
+            "launch: header $1E is the IBM PC",
+        );
+
+        let mut mapper = mapper::mapper::Mapper::default();
+        super::reset_game(
+            &mut *engine, &mut mapper, &mut state, &bytes, &story,
+            std::path::Path::new(""), false, false,
+        );
+        assert_eq!(
+            crate::engine_helpers::zvm_session_mut(&mut *engine).machine.mem.read_byte(0x1e),
+            6,
+            "restart: and so is it after @restart — not zvm's DECSystem-20 fallback",
+        );
+    }
+
+    /// **The host pane reaches the boot, and a restart seeds it too** (SQ-1061).
+    ///
+    /// Two halves, because the second cannot be driven headlessly.
+    ///
+    /// The MECHANISM is pinned here: `host_screen` is what makes a v4/v5 story's
+    /// boot-time status layout come out at the pane's width rather than zvm's
+    /// 80-column fallback (SQ-0680), and `GameSession::new_for_machine` writes it
+    /// into header `$21`.
+    ///
+    /// That reset.rs SUPPLIES it is a source-level guard, for the reason
+    /// CLAUDE.md gives for `palette_lock_discipline`: the wrong spelling cannot be
+    /// made unreachable here. `startup::host_story_screen` asks the LIVE terminal,
+    /// which a test has none of — it answers `None` in this process whatever
+    /// reset.rs passes, so a behavioural restart case would be green either way
+    /// and would prove nothing. The omission it replaced was a bare `None`, so
+    /// what the guard watches is that the call still names the shared helper.
+    #[test]
+    fn the_host_pane_reaches_a_boot_and_reset_still_seeds_one() {
+        // A **v5** specimen, because §8.4 writes the screen size into `$20`/`$21`
+        // from Version 4 on; Zork 1 is SQ-0680's own report but its v3 header has
+        // no width to read, and the fact under test is that the pane reaches the
+        // boot at all.
+        let story = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/beyondzork-r57-s871221.z5");
+        if let Ok(bytes) = std::fs::read(&story) {
+            assert_eq!(bytes[0], 5, "the specimen is the version that records $21");
+            let boot = app::machine_boot::MachineBoot::resolve(
+                app::interpreter::InterpreterProfile::IbmPc,
+                &app::graphics::PictSource::new(None),
+                None,
+                None,
+                None,
+                app::native_font::FaceSet::none(),
+            );
+            let seeded = app::session::GameSession::new_for_machine(
+                bytes.clone(), true, false, false, Default::default(), Some((24, 60)), None, &boot,
+            )
+            .expect("Beyond Zork boots");
+            let bare = app::session::GameSession::new_for_machine(
+                bytes, true, false, false, Default::default(), None, None, &boot,
+            )
+            .expect("Beyond Zork boots");
+            assert_eq!(seeded.machine.mem.read_byte(0x21), 60, "the pane's own width reaches $21");
+            assert_eq!(
+                bare.machine.mem.read_byte(0x21),
+                zvm::screen::DEFAULT_SCREEN_COLS,
+                "and without it the story is told zvm's fallback — the argument is not inert",
+            );
+        } else {
+            eprintln!("SKIP: gitignored story missing at {}", story.display());
+        }
+
+        // The guard: a restart still asks the same question the launch asks.
+        // Matched on the whole file rather than on a sliced argument list, because
+        // the arguments carry comments and a paren-balanced slice of prose is its
+        // own small parser to get wrong. This call is the only reader of the
+        // helper, so losing the call loses the string.
+        let src = include_str!("reset.rs");
+        // Assembled from two pieces so this line is not itself a match — the file
+        // `include_str!` reads is this one.
+        let needle = format!("crate::startup::host_story_screen{}", "(state)");
+        let uses = src.matches(needle.as_str()).count();
+        assert_eq!(
+            uses, 1,
+            "reset.rs must seed the host pane through `startup::host_story_screen`, the same \
+             helper `startup.rs` uses. It passed a bare `None` here until SQ-1061, and no \
+             behavioural test can catch that: the helper asks the LIVE terminal and this \
+             process has none, so a restart case is green either way."
+        );
+    }
+
     /// `reset_game`'s Z-machine arm used the bare `GameSession::new`, which
     /// carries no Pict dimension table, no Blorb `Reso` standard window and no
     /// host colour pair, and never attached a Pict source or flushed the boot
