@@ -1400,21 +1400,18 @@ fn render_node(
                         // picture shares its rows. That band is a bitmap of a `│` the game
                         // printed as a character — 16x900 px per frame to draw one rule.
                         // Classify a strip by what is in it, not by where it sits.
-                        let strip_has_art = |r: &Rect| -> bool {
-                            let cw = cell_px.0.max(1) as f32;
-                            let ch = cell_px.1.max(1) as f32;
-                            let s = scale.s.max(0.001);
-                            let inv_x = |c: u16| {
-                                (((c.saturating_sub(area.x)) as f32 * cw - scale.off_x as f32) / s).max(0.0) as u32
-                            };
-                            let top = ((r.y.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32) / s;
-                            let bot = ((r.bottom().saturating_sub(area.y)) as f32 * ch - scale.off_y as f32) / s;
-                            let y0 = top.max(0.0) as u32;
-                            let h = (bot.max(0.0) as u32).saturating_sub(y0).max(1);
-                            let x0 = inv_x(r.x).min(gfx.width());
-                            let x1 = inv_x(r.right()).min(gfx.width()).max(x0);
-                            crate::render::v6_layout::region_has_opaque(&gfx, x0, y0, (x1 - x0).max(1), h)
-                        };
+                        // …and it asks the ORACLE, rather than carrying its own copy
+                        // of the inverse (SQ-1059). `ChromeRowOracle::region_has_art`
+                        // is that same mapping, built from the same `area`, `scale`,
+                        // `cell_px` and `gfx` this closure captured — and its doc has
+                        // always claimed to be "shared with the caller's art test so
+                        // the two do not drift", which was false in the commit that
+                        // wrote it: SQ-0894 pasted this body into the oracle instead
+                        // of calling it, in a commit whose own message said "the fix
+                        // should not add a fourth instance of it". Nothing in the
+                        // language kept the two equal; they simply had not diverged
+                        // yet, which is what SQ-1020 is in this same file.
+                        let strip_has_art = |r: &Rect| -> bool { row_oracle.region_has_art(*r) };
                         // SQ-0894 MEASURED THIS FOR REMOVAL AND KEPT IT. The
                         // content-built ring was expected to subsume the walk: a flank
                         // now owns its rows by what is in its own columns, so the
@@ -6326,10 +6323,21 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     ///
     /// The device→native inverse of the ring's letterbox scale, asked of a rect
     /// rather than of a row, because SQ-0750's rule is to classify a strip by what
-    /// is IN it and not by where it sits. Shared with the caller's art test so the
-    /// two do not drift — §6 of the pipeline document lists `strip_has_art` and
-    /// `over_art` as two implementations of one question with different rounding,
-    /// and a third would be worse.
+    /// is IN it and not by where it sits.
+    ///
+    /// **Shared with the caller's art test, and now actually shared** (SQ-1059).
+    /// This sentence used to promise it while `strip_has_art` carried a
+    /// byte-identical copy of the body — SQ-0894 pasted it in rather than calling
+    /// it, in a commit whose own message said "the fix should not add a fourth
+    /// instance of it". The two never diverged, which is the only reason nothing
+    /// was mis-rendered; SQ-1020 is what happens in this same file when a pair like
+    /// that finally does. `strip_has_art` is now a one-line call to this.
+    ///
+    /// One other implementation of the question remains, deliberately:
+    /// [`Self::over_art`] asks it in EXACT native coordinates rather than through
+    /// this truncating inverse. §6 finding 4 of the pipeline document is the open
+    /// question of whether those two can disagree at a boundary; settling it needs
+    /// a boundary-crafted fixture and is not this quest.
     fn region_has_art(&self, r: Rect) -> bool {
         let cw = self.cell_px.0.max(1) as f32;
         let ch = self.cell_px.1.max(1) as f32;
@@ -7047,10 +7055,14 @@ fn backend_flattens_alpha_to_black(picker: &ratatui_image::picker::Picker) -> bo
     matches!(picker.protocol_type(), ratatui_image::picker::ProtocolType::Halfblocks)
 }
 
-/// The cells one run puts on screen: column, row and character per glyph that
-/// landed inside an art strip. Named for [`stamp_runs_over_art`], which groups its
-/// work by run so the colour rule is asked once each rather than once per glyph.
-type StampedCells = Vec<(u16, u16, char)>;
+/// The cells one run puts on screen, per glyph that landed inside an art strip:
+/// its pane column and row, the character, and the NATIVE x of the declared cell
+/// it was published at.
+///
+/// The native x rides along because the colour rule is asked per glyph (SQ-1060)
+/// and the over-art probe needs game pixels, while the first two are pane cells.
+/// Grouping by run remains, because a run's STYLE bits are the run's.
+type StampedCells = Vec<(u16, u16, char, u32)>;
 
 /// Stamp the runs a game printed ON its artwork as terminal glyphs, over the art
 /// band that has already been drawn into these cells (SQ-0944).
@@ -7068,7 +7080,12 @@ type StampedCells = Vec<(u16, u16, char)>;
 ///
 /// Colour comes from [`v6_layout::chrome_run_ink`], the same rule that decides
 /// what the RASTER would have drawn, so the glyph is the rasterised glyph made
-/// crisp rather than a second opinion about it. A run the game gave a real
+/// crisp rather than a second opinion about it — and since SQ-1060 it is asked
+/// with the same ARGUMENT too, per glyph at its own declared cell. The rule was
+/// always shared; the argument was not, and SQ-1052 moved the raster to a
+/// per-glyph probe while this side went on asking once per run. A run straddling
+/// the edge of the artwork then resolved its block once for its whole length here
+/// and per cell there, which is one frame rendering two ways. A run the game gave a real
 /// background keeps that background, opaque, exactly as the pixels would; a run
 /// with inherited colours gets the sampled ground and sits in the picture.
 #[allow(clippy::too_many_arguments)]
@@ -7109,18 +7126,24 @@ fn stamp_runs_over_art(
     // cell, and sampling as we stamp would read the first glyph's own background
     // back as if it were the picture.
     //
-    // Grouped by run rather than flattened so the colour rule — whose over-art
-    // arm costs a region scan — is asked ONCE per run and not once per character.
+    // Grouped by run because the STYLE bits are the run's; the colour rule is
+    // asked per cell (SQ-1060), so each glyph carries the NATIVE x of its own
+    // declared cell alongside the pane cell it lands in.
     let mut placed: Vec<(&crate::engine::PxText, StampedCells)> = Vec::new();
     for t in runs {
         let (col0, row) = run_cell(t, scale, cell_px, pane, cell);
-        let cells: Vec<(u16, u16, char)> = t
+        // The cell path places by the DECLARED cell — `col0 + i` above — so glyph
+        // `i` occupies native `[px0 + i*font_w, +font_w)`. `pen_chains` does not
+        // run here, so a run is what the game published.
+        let px0 = t.x.max(1) as u32 - 1;
+        let cells: StampedCells = t
             .text
             .chars()
             .enumerate()
             .filter_map(|(i, ch)| {
                 let col = col0 + i as i32;
-                (col >= 0 && row >= 0 && in_art(col, row)).then_some((col as u16, row as u16, ch))
+                (col >= 0 && row >= 0 && in_art(col, row))
+                    .then(|| (col as u16, row as u16, ch, px0 + i as u32 * font_w))
             })
             .collect();
         if !cells.is_empty() {
@@ -7128,7 +7151,7 @@ fn stamp_runs_over_art(
         }
     }
     let mut ground: HashMap<(u16, u16), ratatui::style::Color> = HashMap::new();
-    for (col, row, _) in placed.iter().flat_map(|(_, cells)| cells) {
+    for (col, row, _, _) in placed.iter().flat_map(|(_, cells)| cells) {
         let Some(cell) = buf.cell((*col, *row)) else { continue };
         let mean = match (cell.fg, cell.bg) {
             (ratatui::style::Color::Rgb(r0, g0, b0), ratatui::style::Color::Rgb(r1, g1, b1)) => {
@@ -7146,28 +7169,41 @@ fn stamp_runs_over_art(
     }
 
     for (t, cells) in placed {
-        let span_w = t.text.chars().count().max(1) as u32 * font_w;
-        let (px0, py) = (t.x.max(1) as u32 - 1, t.y.max(1) as u32 - 1);
-        let (ink, block) = crate::render::v6_layout::chrome_run_ink(t, default_fg, default_bg, colors, || {
-            crate::render::v6_layout::region_has_opaque(gfx, px0, py, span_w, font_h)
-        });
+        let py = t.y.max(1) as u32 - 1;
         // Reverse is already resolved into the pair by `chrome_run_ink`, so the
         // REVERSED modifier must NOT be set as well — the terminal would swap the
         // pair a second time and paint the picture's own colour as ink on a solid
         // block, which is exactly the block SQ-0487 says must not be there.
-        let mut base_style = ratatui::style::Style::default().fg(rgb(ink));
+        let mut base_style = ratatui::style::Style::default();
         if t.style & 2 != 0 {
             base_style = base_style.add_modifier(ratatui::style::Modifier::BOLD);
         }
         if t.style & 4 != 0 {
             base_style = base_style.add_modifier(ratatui::style::Modifier::ITALIC);
         }
-        for (col, row, ch) in cells {
+        for (col, row, ch, gx) in cells {
+            // **The over-art question is the GLYPH's** (SQ-1060). It was asked once
+            // per run, over `chars * font_w` at the run's origin — and
+            // `region_has_opaque` answers "is ANY pixel here opaque?", so one stray
+            // pixel anywhere beneath a run decided for every cell of it. SQ-1052
+            // fixed exactly that on the raster side and left this one, under a doc
+            // promising the glyph here is "the rasterised glyph made crisp rather
+            // than a second opinion about it". The rule was shared; the ARGUMENT
+            // was not, so a run straddling the edge of the frame art resolved its
+            // block once for its whole length here and per cell there — same frame,
+            // two backends, two ribbons.
+            //
+            // Not more work in total: a run-wide scan covers the same area this
+            // splits into `font_w`-wide pieces, and `chrome_run_ink` only reaches
+            // the closure at all on an inherited-colour reverse run.
+            let (ink, block) = crate::render::v6_layout::chrome_run_ink(t, default_fg, default_bg, colors, || {
+                crate::render::v6_layout::region_has_opaque(gfx, gx, py, font_w, font_h)
+            });
             // A run the game gave a real background keeps it, opaque, exactly as
             // the pixels would; otherwise the ground is the art this cell held.
             let bg = block
                 .map_or_else(|| ground.get(&(col, row)).copied().unwrap_or(rgb(default_bg)), rgb);
-            buf.set_stringn(col, row, ch.to_string(), 1, base_style.bg(bg));
+            buf.set_stringn(col, row, ch.to_string(), 1, base_style.fg(rgb(ink)).bg(bg));
         }
     }
 }
@@ -8038,6 +8074,111 @@ fn place_anchored_row(
 
 #[cfg(test)]
 mod tests {
+    /// **The over-art question is the GLYPH's on the CELL path too** (SQ-1060).
+    ///
+    /// `region_has_opaque` answers "is ANY pixel in this rectangle opaque?", and
+    /// `stamp_runs_over_art` asked it once per run over `chars * font_w`. One
+    /// stray opaque pixel anywhere beneath a run therefore decided SQ-0487's
+    /// no-block arm for every cell of it. SQ-1052 fixed exactly that on the raster
+    /// side and left this one, under a doc promising the glyph here is "the
+    /// rasterised glyph made crisp rather than a second opinion about it" — the
+    /// RULE was shared, the ARGUMENT was not.
+    ///
+    /// Half-blocks only, because [`backend_layers_glyphs_over_art`] admits nothing
+    /// else — which is why this is a unit case on a canvas of its own rather than a
+    /// real-media one. The frame: one inherited-reverse run of six characters over
+    /// artwork opaque under exactly one of them.
+    ///
+    /// FALSIFY by hoisting the probe back out of the cell loop and asking it once
+    /// at `px0` over `chars * font_w`: the patch condemns the whole run and every
+    /// cell loses its block.
+    #[test]
+    fn a_chrome_run_over_art_resolves_its_block_per_cell_on_the_cell_path() {
+        let cell = zvm::screen::V6Cell::DEFAULT;
+        let (fw, fh) = (u32::from(cell.w), u32::from(cell.h));
+        // Artwork opaque under the FOURTH glyph alone.
+        const OVER: usize = 3;
+        let mut gfx = image::RgbaImage::new(fw as u32 * 8, fh);
+        for y in 0..fh {
+            for x in (OVER as u32 * fw)..((OVER as u32 + 1) * fw) {
+                gfx.put_pixel(x, y, image::Rgba([9, 9, 9, 255]));
+            }
+        }
+        let run = crate::engine::PxText {
+            y: 1,
+            x: 1,
+            text: "ABCDEF".to_string(),
+            style: 1, // reverse, inherited colours — SQ-0487's arm
+            fg: 0,
+            bg: 0,
+            grow: 0,
+            gcol: 0,
+        };
+        // One pane cell per native cell, no letterboxing, so a glyph's column IS
+        // its index and the geometry cannot confuse the reading.
+        let scale = crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 };
+        let pane = Rect::new(0, 0, 8, 1);
+        let art = [pane];
+        let fg = image::Rgba([220, 220, 220, 255]);
+        let bg = image::Rgba([0, 0, 0, 255]);
+        let mut buf = Buffer::empty(pane);
+        super::stamp_runs_over_art(
+            &[&run], &art, &scale, (cell.w, cell.h), pane, &gfx, fg, bg,
+            &ColorScheme::terminal_default(), &mut buf, cell,
+        );
+
+        let block = ratatui::style::Color::Rgb(220, 220, 220);
+        let seen: Vec<(char, bool)> = (0..6u16)
+            .map(|c| {
+                let cell = buf.cell((c, 0)).expect("in the pane");
+                (cell.symbol().chars().next().unwrap_or(' '), cell.bg == block)
+            })
+            .collect();
+        assert!(
+            seen.iter().enumerate().all(|(i, (ch, _))| *ch == b"ABCDEF"[i] as char),
+            "the run was stamped: {seen:?}",
+        );
+        for (i, (ch, blocked)) in seen.iter().enumerate() {
+            if i == OVER {
+                assert!(!blocked, "{ch:?} sits ON the artwork and keeps ink without a block");
+            } else {
+                assert!(
+                    blocked,
+                    "{ch:?} is clear of the artwork and keeps its reversed block — one opaque \
+                     patch under a neighbour must not speak for it: {seen:?}",
+                );
+            }
+        }
+    }
+
+    /// **One truncating device→native inverse in this file, not several**
+    /// (SQ-1059).
+    ///
+    /// `ChromeRowOracle::region_has_art`'s doc has always said it is "shared with
+    /// the caller's art test so the two do not drift", and it was not: SQ-0894
+    /// pasted the body into the oracle rather than calling it, in a commit whose
+    /// own message said "the fix should not add a fourth instance of it". The two
+    /// copies never diverged, so nothing was mis-rendered — SQ-1020 is what
+    /// happens in this same file when a pair like that finally does.
+    ///
+    /// A de-duplication has no behaviour to falsify, so what is pinned is the
+    /// property: the inverse is written ONCE. `inv_x` is its signature — the
+    /// column→native mapping with the `as u32` truncation where the rounding bugs
+    /// live. `over_art` is deliberately not counted: it asks in exact native
+    /// coordinates and never builds this inverse at all.
+    #[test]
+    fn the_device_to_native_inverse_is_written_once() {
+        let src = include_str!("screen.rs");
+        let needle = format!("let inv_x = |c: {}|", "u16");
+        assert_eq!(
+            src.matches(needle.as_str()).count(),
+            1,
+            "the truncating device→native inverse must exist once in render/screen.rs — a \
+             second copy is what SQ-1059 removed, and what SQ-0894 added while promising \
+             it had not",
+        );
+    }
+
 
     /// **No native-pixel arithmetic in this file may spell the Version 6 cell as a
     /// number** (SQ-1020).
