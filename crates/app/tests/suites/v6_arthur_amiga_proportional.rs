@@ -1209,3 +1209,71 @@ fn reversed_spaces_rule_the_inventory_page_instead_of_flooding_it() {
         }
     }
 }
+
+/// **…and the same in RASTER, where the fill that floods is a different routine
+/// entirely** (SQ-1026).
+///
+/// The cell backend and the pixel backend reached this defect by different roads and
+/// only the cell one is fixed by `row_is_reverse_bar`. `v6_layout::fill_reverse_row_gaps`
+/// fills the GAPS around a pure reverse-video row, and the two frames it has to serve
+/// have nearly identical runs:
+///
+/// * Journey's IbmPc menu paints ONE reversed space, at x=233, on every row. Its
+///   frame's side borders are not runs at all — they ARE these gaps, reaching the
+///   screen edges while the over-art test suppresses the middle because the picture
+///   is there. `journey_amiga_flank_border_is_a_stroke_not_a_filled_block` pins it.
+/// * Arthur's F3 inventory paints TWO reversed spaces, at x=213 and x=413 — its column
+///   rules — on a page with no picture at all, so nothing was suppressed and the same
+///   code flooded seven rows white.
+///
+/// The runs do not separate them; the ARTWORK does. A row carrying TEXT is a band and
+/// fills regardless (Arthur's own status row, all-reversed and holding `Churchyard`,
+/// which `machine-screenshots/amiga-arthur-inventory.png` shows filled edge to edge).
+/// A textless row fills only where part of it sits over a picture. A textless,
+/// pictureless row is furniture on a bare page.
+///
+/// Falsified by dropping the artwork clause: rows 3..9 come back at 576 of 580 pixels.
+#[test]
+fn the_raster_inventory_page_keeps_its_rules_and_loses_the_flood() {
+    let _g = app::v6_palette_at_boot();
+    let Some((mut session, state)) = in_the_churchyard() else { return };
+    let _ = session.submit_char(135); // F3 — the inventory screen
+    let canvas = raster(&session, &state);
+    let row_h = u32::from(state.v6_text.cell().h);
+    let ground = *canvas.get_pixel(canvas.width() - 3, canvas.height() - 3);
+
+    // Ink across the middle of text row `r`, ignoring the outer margins.
+    let ink = |r: u32| -> Vec<u32> {
+        let y = r * row_h + row_h / 2;
+        (30..canvas.width() - 30).filter(|&x| *canvas.get_pixel(x, y) != ground).collect()
+    };
+    let usable = canvas.width() - 60;
+
+    // The BAR: all-reversed AND carrying text, so it floods. Found by being the
+    // widest inked row, and guarded as a real band rather than assumed.
+    let bar = (0..canvas.height() / row_h)
+        .max_by_key(|&r| ink(r).len())
+        .expect("the frame has rows");
+    assert!(
+        ink(bar).len() as u32 > usable * 3 / 4,
+        "non-vacuity: the status row is a band filled edge to edge, got {} of {usable}",
+        ink(bar).len(),
+    );
+
+    // The PAGE above it: the two column rules and nothing else. Twelve pixels — two
+    // six-wide rules — against the 576 a flooded row gives.
+    let rules = ink(bar - 1);
+    assert!(
+        (2..=24).contains(&(rules.len() as u32)),
+        "the inventory page carries two thin rules, not a band: {} px of {usable}",
+        rules.len(),
+    );
+    let (first, last) = (rules[0], rules[rules.len() - 1]);
+    assert!(
+        first > 150 && last < 500,
+        "the rules are interior columns (the game paints them at x=213 and x=413), got {first}..{last}",
+    );
+    for r in 3..bar {
+        assert_eq!(ink(r), rules, "row {r} of the inventory page must be the same two rules");
+    }
+}

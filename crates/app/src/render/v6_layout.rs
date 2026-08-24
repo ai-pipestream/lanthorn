@@ -1140,6 +1140,35 @@ fn fill_reverse_row_gaps(
         if cursor < full_w {
             gaps.push((cursor, full_w));
         }
+        // **A pure reverse-video row is only a BAND if there is something to make it
+        // one** (SQ-1026). Two frames go through here and the routine cannot tell them
+        // apart by their runs, because their runs are nearly identical:
+        //
+        //   * Journey's IbmPc menu paints ONE reversed space, at x=233, on every row.
+        //     Its frame's side borders are NOT runs at all — they are these gaps,
+        //     reaching the screen edges while the over-art test below suppresses the
+        //     middle because the picture is there. `journey_amiga_flank_border_is_a_
+        //     stroke_not_a_filled_block` pins that border, and it is the behaviour to
+        //     preserve.
+        //   * Arthur's F3 inventory paints TWO reversed spaces, at x=213 and x=413, on
+        //     every row — its column rules. There is no picture on that page, so no gap
+        //     is suppressed and the same code floods it white, seven rows of it, against
+        //     a capture (`machine-screenshots/amiga-arthur-inventory.png`) showing a
+        //     bare page with two thin rules down it.
+        //
+        // So the runs do not separate them and the ARTWORK does. A row that carries
+        // TEXT is a real band and fills regardless — Arthur's own status row, one window
+        // below, is all-reversed AND holds `Churchyard`, and the same capture shows it
+        // filled edge to edge. A row with no text fills only where some part of it sits
+        // over a picture, which is the case the fill was built for and the only case it
+        // can be right about. A textless, pictureless row is furniture on a bare page:
+        // whatever the game painted there is already exactly what it wanted.
+        let over_art = gaps
+            .iter()
+            .any(|&(gs, ge)| region_has_opaque(art, gs, py, ge.saturating_sub(gs), font_h));
+        if !crate::render::screen::row_is_reverse_bar(runs.iter().copied()) && !over_art {
+            continue;
+        }
         for (gs, ge) in gaps {
             let block = match explicit_block {
                 Some(b) => Some(b),
