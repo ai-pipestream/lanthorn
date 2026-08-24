@@ -256,7 +256,7 @@ fn only_a_proportional_face_moves_a_machines_cell() {
             disks: None,
         });
         assert_eq!(
-            app::native_font::declared_cell(profile, faces.body(), (2, 2)),
+            app::native_font::declared_cell(profile, &faces, (2, 2)),
             profile.v6_font_cell(),
             "{disk}: a fixed-pitch face declares nothing — the machine's cell stands",
         );

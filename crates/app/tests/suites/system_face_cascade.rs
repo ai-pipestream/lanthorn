@@ -250,7 +250,7 @@ fn geneva_leaves_the_declared_cell_alone_on_both_macintosh_presses() {
             "{press}: non-vacuity — the fifteen-row SYSTEM face is the body, not the 7-wide \
              alternate, so the cell below is being asked about a face that could move it",
         );
-        let cell = app::native_font::declared_cell(P::Macintosh, faces.body(), art_scale);
+        let cell = app::native_font::declared_cell(P::Macintosh, &faces, art_scale);
         assert_eq!(
             cell,
             zvm::interpreter::MACINTOSH_V6_CELL,
@@ -260,10 +260,20 @@ fn geneva_leaves_the_declared_cell_alone_on_both_macintosh_presses() {
         assert_eq!(tf.scale(), (1, 1), "{press}: text is one native pixel per face pixel");
     }
 
-    // And the Amiga, whose face IS in the picture space, genuinely does scale —
-    // the contrast that makes the assertion above a claim rather than a constant.
-    assert_eq!(P::Amiga.text_scale((2, 2)), (2, 2), "the Amiga doubles its face with its artwork");
-    assert_eq!(P::Macintosh.text_scale((2, 2)), (1, 1), "the Macintosh does not");
+    // And the Amiga, whose RELEASE face IS in the picture space, genuinely does
+    // scale — the contrast that makes the assertion above a claim rather than a
+    // constant. Its SYSTEM face is a third answer again (SQ-1053), pinned in
+    // `amiga_rom_face`.
+    assert_eq!(
+        P::Amiga.release_face_space().text_scale((2, 2)),
+        (2, 2),
+        "the Amiga doubles its release face with its artwork",
+    );
+    assert_eq!(
+        P::Macintosh.release_face_space().text_scale((2, 2)),
+        (1, 1),
+        "the Macintosh does not",
+    );
 }
 
 // ── the fixed-pitch alternate ───────────────────────────────────────────────
@@ -338,7 +348,7 @@ fn the_wrap_fingerprint_moves_when_the_fixed_pen_does() {
         // than by a second cascade, so the ONLY difference is the fixed pen.
         let faces = cascade(&release, P::Macintosh, None, Some(&boot.disks(None)));
         let body = faces.body().cloned().expect("the system disk supplied one");
-        TextFace::new(P::Macintosh, FaceSet::release(body, P::Macintosh), None)
+        TextFace::new(P::Macintosh, FaceSet::release(body, P::Macintosh, None), None)
     };
     assert_eq!(
         with_alt.face_for(0),
@@ -452,17 +462,18 @@ fn an_amiga_story_is_offered_topaz_and_never_the_workbench_display_faces() {
     );
 }
 
-/// And what the Amiga is offered, it currently DECLINES — honestly and by the one
-/// fitness rule (SQ-1037).
+/// And what a Workbench FLOPPY offers, the Amiga still declines — honestly and by
+/// the one fitness rule (SQ-1037, SQ-1053).
 ///
-/// A Workbench disk carries `fonts/topaz/11`: fixed-pitch, 8 wide, 11 rows. The
-/// Amiga's declared cell is 8x16, so it is neither the cell (`FaceFit::Cell`
-/// needs the height too) nor a typeface (`FaceFit::Metric` needs a varying
-/// advance), and `fit` refuses it. The machine's own topaz-8 lives in ROM and is
-/// on no floppy at all.
+/// A Workbench disk carries `fonts/topaz/11`: fixed-pitch, 8 wide, 11 rows. At
+/// the Amiga's system-face scale of (1, 2) that is 8x22 against an 8x16 cell, so
+/// it is neither the cell (`FaceFit::Cell` needs the height too) nor a typeface
+/// (`FaceFit::Metric` needs a varying advance), and `fit` refuses it.
 ///
-/// Stated as a case rather than left implicit, because "the Amiga rung reads a
-/// disk and draws nothing" is a claim someone will otherwise read as a bug.
+/// The machine's own topaz **8** is a different face in a different place — 8x8,
+/// in Kickstart ROM, on no floppy at all — and SQ-1053 is what reads it. The
+/// contrast is the non-vacuity below: the SIZE is the whole of the refusal here,
+/// and the size the machine actually drew with sails through.
 #[test]
 fn the_amigas_disk_topaz_is_not_its_version_six_cell_and_declines() {
     let cell = P::Amiga.v6_font_cell();
@@ -480,22 +491,27 @@ fn the_amigas_disk_topaz_is_not_its_version_six_cell_and_declines() {
             .map(|_| blorb::bitmap_font::Glyph { width: 8, rows: vec![0b0101_0101; 11] })
             .collect(),
     };
+    // At the Amiga's SYSTEM face scale, which is the one a `FONTS:` face is judged
+    // at (SQ-1053): (1, 2) on a doubled press, so eleven face rows are twenty-two
+    // native against a sixteen-row cell.
+    let system = P::Amiga.system_face_space().text_scale((2, 2));
+    assert_eq!(system, (1, 2), "topaz is drawn in the machine's hires text space");
     assert_eq!(
-        app::native_font::fit(&topaz, P::Amiga),
+        app::native_font::fit(&topaz, P::Amiga, system),
         None,
         "8x11 is neither the 8x16 cell nor a typeface, so nothing draws with it",
     );
     // Non-vacuity: the same face IS admitted where it does happen to be the cell,
     // so the refusal above is the height and not a blanket no.
     let mut as_cell = topaz.clone();
-    as_cell.height = 16;
+    as_cell.height = 8;
     for g in &mut as_cell.glyphs {
-        g.rows = vec![0b0101_0101; 16];
+        g.rows = vec![0b0101_0101; 8];
     }
     assert_eq!(
-        app::native_font::fit(&as_cell, P::Amiga),
+        app::native_font::fit(&as_cell, P::Amiga, system),
         Some(app::native_font::FaceFit::Cell),
-        "…and a fixed 8x16 face would be the cell exactly",
+        "…and an 8x8 face at that scale IS the cell exactly — which is topaz 8",
     );
 }
 

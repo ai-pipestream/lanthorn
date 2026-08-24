@@ -588,30 +588,39 @@ fn a_metric_faces_declared_line_takes_the_text_scale_not_the_archives() {
     use app::native_font::{declared_cell, fit, FaceFit};
 
     let face = proportional_face(15);
+    // A RELEASE face — the space that follows a story's own medium (SQ-1053), which
+    // is the picture space on the Amiga and native pixels on the Macintosh.
+    let released = |p: P, art: (u32, u32)| {
+        app::native_font::FaceSet::release(face.clone(), p, Some(art))
+    };
     // Non-vacuity: the whole quest is about `Metric` faces, and a face that fell to
     // `Cell` — or was declined — would pass every assertion below for free.
-    assert_eq!(fit(&face, P::Macintosh), Some(FaceFit::Metric), "admitted on the Macintosh");
-    assert_eq!(fit(&face, P::Amiga), Some(FaceFit::Metric), "admitted on the Amiga");
+    assert_eq!(
+        fit(&face, P::Macintosh, (1, 1)),
+        Some(FaceFit::Metric),
+        "admitted on the Macintosh",
+    );
+    assert_eq!(fit(&face, P::Amiga, (2, 2)), Some(FaceFit::Metric), "admitted on the Amiga");
 
     assert_eq!(
-        declared_cell(P::Macintosh, Some(&face), (2, 2)).h,
+        declared_cell(P::Macintosh, &released(P::Macintosh, (2, 2)), (2, 2)).h,
         15,
         "the Macintosh COLOUR press declares the face's own fifteen rows, not thirty",
     );
     assert_eq!(
-        declared_cell(P::Macintosh, Some(&face), (1, 1)).h,
+        declared_cell(P::Macintosh, &released(P::Macintosh, (1, 1)), (1, 1)).h,
         15,
         "the monochrome press agrees, as it does under either rule",
     );
     assert_eq!(
-        declared_cell(P::Amiga, Some(&face), (2, 2)).h,
+        declared_cell(P::Amiga, &released(P::Amiga, (2, 2)), (2, 2)).h,
         30,
-        "the Amiga's face IS in the picture space, so a doubled press doubles it",
+        "the Amiga's RELEASE face IS in the picture space, so a doubled press doubles it",
     );
     // The WIDTH never follows the face on either machine: a proportional face has no
     // single advance, and this repo does not guess a declared metric.
-    assert_eq!(declared_cell(P::Macintosh, Some(&face), (2, 2)).w, 7);
-    assert_eq!(declared_cell(P::Amiga, Some(&face), (2, 2)).w, 8);
+    assert_eq!(declared_cell(P::Macintosh, &released(P::Macintosh, (2, 2)), (2, 2)).w, 7);
+    assert_eq!(declared_cell(P::Amiga, &released(P::Amiga, (2, 2)), (2, 2)).w, 8);
 }
 
 /// **The PEN takes the same scale the cell does** (SQ-1039).
@@ -627,10 +636,16 @@ fn the_pen_and_the_blit_take_the_text_scale_too() {
     use app::native_font::TextFace;
 
     let face = proportional_face(15);
-    let mac =
-        TextFace::new(P::Macintosh, app::native_font::FaceSet::release(face.clone(), P::Macintosh), Some((2, 2)));
-    let amiga =
-        TextFace::new(P::Amiga, app::native_font::FaceSet::release(face, P::Amiga), Some((2, 2)));
+    let mac = TextFace::new(
+        P::Macintosh,
+        app::native_font::FaceSet::release(face.clone(), P::Macintosh, Some((2, 2))),
+        Some((2, 2)),
+    );
+    let amiga = TextFace::new(
+        P::Amiga,
+        app::native_font::FaceSet::release(face, P::Amiga, Some((2, 2))),
+        Some((2, 2)),
+    );
 
     assert_eq!(mac.scale(), (1, 1), "the Macintosh draws one native pixel per face pixel");
     assert_eq!(amiga.scale(), (2, 2), "the Amiga doubles its face with its artwork");

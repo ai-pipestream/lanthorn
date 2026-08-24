@@ -1086,10 +1086,16 @@ pub struct Config {
     /// `crate::render::graphics::v6_pixel_lock_applies` for the measurement.
     #[serde(default)]
     pub v6_pixel_lock: bool,
-    /// Which of the player's own boot disks under `~/.lanthorn/` answers first
-    /// when several carry the machine's system typeface (SQ-1037).
+    /// Which of the player's own boot media under `~/.lanthorn/` answers first
+    /// when several carry the machine's system typeface (SQ-1037, SQ-1053).
     ///
-    /// A case-insensitive SUBSTRING of the disk image's filename — `1.3` picks the
+    /// **Media, not only disks**: an Amiga Kickstart ROM (`*.rom`) is read here
+    /// too, and it is the only place topaz 8 exists — the Amiga's real Version 6
+    /// body face is in ROM and on no floppy. One key covers both because the rule
+    /// is the same one, a substring of the FILENAME, and a second key would be a
+    /// second rule to keep in step.
+    ///
+    /// A case-insensitive SUBSTRING of the file's name — `1.3` picks the
     /// Workbench 1.3 floppy out of a directory holding both. **Empty is the
     /// default and means no preference**, which is why this is a `String` rather
     /// than an `Option`: the template documents `system_font_disk = ""`, and a

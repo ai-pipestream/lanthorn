@@ -37,6 +37,14 @@
 /unit_tests/*.z8
 /unit_tests/*.zblorb
 /unit_tests/*.dat
+# Kickstart ROM images, for the same reason one notch over (SQ-1053). A real
+# Amiga Kickstart is copyrighted Commodore code and must never be committed here;
+# a dump dropped in this directory to try something out is exactly the accident
+# the `.z6` rule above was written for. The ONE exception is our own synthetic
+# fixture, which is invented byte for byte by `mk_kickfont_rom.py` and is the
+# only `.rom` in the tree.
+/unit_tests/*.rom
+!/unit_tests/kickfont.rom
 # ...and the files those test games WRITE when the suite drives them
 # (Glk external files, autosave/save-state dirs, generated blorbs)
 /unit_tests/*.glkdata

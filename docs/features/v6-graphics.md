@@ -3127,7 +3127,11 @@ is itself traffic, so bytes-per-frame taken that way describes the palette's fra
 "ctrl+t" = "dump-terminal"
 ```
 
-## Your own boot disk, your machine's own typeface
+## Your own boot media, your machine's own typeface
+
+Neither machine Infocom wrote a Version 6 interpreter for kept its body face on
+a game disk. The Macintosh kept Geneva in the System file; the Amiga kept topaz
+in Kickstart ROM. Both are recoverable, and both are yours to supply.
 
 Infocom's Macintosh games ship one face, and it isn't the one the machine drew
 with. `FONT` 524 is **Monaco 12** — the fixed-pitch alternate `mac/xzip.lst`
@@ -3138,19 +3142,19 @@ screen: the status bar's `Banquet Hall` steps a metronome 7 pixels a character,
 and the prose two lines below advances 7, 7, 5 through `n`, `o`, `t`. Nothing on
 a game disk can draw that second line.
 
-So lanthorn asks you. Drop a **Mac OS System startup disk** or an **Amiga
-Workbench floppy** into `~/.lanthorn/` — an `.img`, an `.adf`, any image the
-mounter already reads — and a Version 6 game off that machine's own media is
-drawn with the face the machine really used. Nothing is shipped, nothing is
-copied, nothing is licensed: the disks stay yours, exactly the arrangement
-`stories/` has always run on, and a player with none there sees the built-in face
-answering as it always did.
+So lanthorn asks you. Drop a **Mac OS System startup disk**, an **Amiga Workbench
+floppy** or an **Amiga Kickstart ROM** into `~/.lanthorn/` — an `.img`, an `.adf`,
+a `.rom`, any image the mounter already reads — and a Version 6 game off that
+machine's own media is drawn with the face the machine really used. Nothing is
+shipped, nothing is copied, nothing is licensed: the media stay yours, exactly the
+arrangement `stories/` has always run on, and a player with none there sees the
+built-in face answering as it always did.
 
 The order is one sentence, and it lives in one function:
 
 1. **the release's own face**, off the story's own medium — Arthur's Amiga
    `char.data`, the Macintosh's `FONT` 524;
-2. **the machine's system face**, off a boot disk you supplied;
+2. **the machine's system face**, off a boot medium you supplied;
 3. **the built-in**, which is what CI and an empty `~/.lanthorn/` get.
 
 On the Macintosh those first two rungs answer at once and land in *different*
@@ -3185,26 +3189,61 @@ care which answers (a System 7 Geneva is not the 1988 one), name it:
 
 ```toml
 system_font_disk = "1.3"      # any case-insensitive piece of the filename
+                              # ("Kick" would promote your Kickstart ROM)
 ```
 
-It only breaks a tie. A disk named there that doesn't carry the face being asked
+It only breaks a tie. A file named there that doesn't carry the face being asked
 for falls through to the others, because a naming preference must never lose you
 a face; with no preference the pool is ordered by filename, which is stable and
-visible. The browser's info panel lists every face it found, grouped by the disk
+visible. The browser's info panel lists every face it found, grouped by the medium
 it came off, so you can see what a disk is worth before a game is even launched.
 
-The Amiga's half is wired the same way and currently draws nothing, which is
-honest rather than broken: a Workbench floppy's `fonts/topaz/11` is fixed-pitch
-at 8×11 against that machine's 8×16 cell, so it is neither the cell nor a
-typeface and the fitness test declines it — the topaz the machine actually used
-is in ROM and on no floppy at all. The seven display faces beside it (`ruby`,
-`garnet`, `emerald`…) are *not* candidates: the machine names `topaz` and only
-`topaz`, which is what stops an Amiga game being quietly drawn in Ruby.
+### The Amiga's face is in the ROM
 
-And a disk in `~/.lanthorn/` is whatever you put there. A truncated image, a
-header claiming an enormous glyph, a file only pretending to be a volume — every
-one of them is refused quietly, without a panic, an unbounded allocation, or a
-game that won't start.
+The Amiga's half went the same way and for a while drew nothing, which was honest
+rather than broken — and honestly wrong. A Workbench floppy's `fonts/topaz/11` is
+fixed-pitch at 8×11 against that machine's 8×16 cell, so it is neither the cell
+nor a typeface and the fitness test declines it. The seven display faces beside it
+(`ruby`, `garnet`, `emerald`…) are *not* candidates either: the machine names
+`topaz` and only `topaz`, which is what stops an Amiga game being quietly drawn in
+Ruby. The trouble is that the topaz the interpreter actually painted with is
+**topaz 8**, and topaz 8 is on no floppy Commodore ever shipped. It is in
+**Kickstart**.
+
+So point lanthorn at a Kickstart dump — `Kick12.rom`, `kick13.rom`, whatever you
+call it, as long as it ends in `.rom` — and *Shogun* and *Zork Zero* on the Amiga
+draw in the face the machine drew in. Zoom into
+`machine-screenshots/amiga-shogun-game.png` over `Erasmus` in "This is the bridge
+of the Erasmus" and the measurement is right there: ten distinct scanlines across
+a twenty-row line, so every face row is drawn **twice**, and sixty pixels of
+underline across seven characters, so the pen steps **eight**. An 8×8 face at a
+text scale of (1, 2) — which is exactly the 8×16 cell the machine declares, and
+exactly the Amiga's 640×200 hires mode, where a text pixel is 1:1 across and a
+square-pixel screen doubles the 200 rows.
+
+That (1, 2) is the interesting part, because *Arthur*'s own `char.data` on the
+same machine wants (2, 2): it is authored in the game's 320-wide picture space and
+doubles with the artwork, which is why its ten face rows become a twenty-row
+declared line. **Two faces on one machine wanting two different scales**, so which
+space a face is drawn in follows where the face came from rather than which
+machine is drawing it — a release's face from the release, the system's face from
+the system. Arthur keeps its own face regardless: rung 1 is the release's medium
+and a ROM is rung 2.
+
+Nothing is pinned to a Kickstart revision. The image is identified by its length
+(256 KiB maps at `$FC0000`, 512 KiB at `$F80000` — every Kickstart ends at
+`$1000000`, so the base is just that minus the size) and by the `JMP` every
+Kickstart opens with; then the whole image is swept for `TextFont`-shaped records
+that name themselves `<something>.font`. On Kickstart 1.2 that finds exactly two,
+`topaz/8` and `topaz/9`, with no false positives, and it is the same parser and
+the same name rule that read a font out of a `FONTS:` drawer — so the machine's
+"topaz, and the size whose line matches my cell" picks topaz 8 without a single
+rule written twice.
+
+And a file in `~/.lanthorn/` is whatever you put there. A truncated image, a
+header claiming an enormous glyph, a ROM with a pointer into hyperspace, a file
+only pretending to be a volume — every one of them is refused quietly, without a
+panic, an unbounded allocation, or a game that won't start.
 
 ## Not yet there
 - **Proportional fonts, one machine so far.** Arthur's Amiga floppy carries a

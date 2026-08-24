@@ -639,17 +639,19 @@ pub enum V6Emphasis {
 /// typeface makes them meet, and then one native pixel means two different things
 /// in one frame — see `CLAUDE.md`'s art-versus-text density table.
 ///
-/// Only a [`crate::screen::V6Metric`]-bearing face is affected, so this is
-/// unobservable on any row whose releases carry no typeface. Those rows state
-/// [`Self::Native`] because that is the answer that changes nothing, NOT because
-/// anything measured them.
+/// It is unobservable on any row that draws with no face at all, and those rows
+/// state [`Self::Native`] because that is the answer that changes nothing, NOT
+/// because anything measured them. Where a face IS admitted the space governs
+/// every one of them — a proportional face's declared line and advances, and a
+/// FIXED face's blit, which is how topaz 8's eight rows fill the Amiga's
+/// sixteen-row cell (SQ-1053).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum V6FaceSpace {
     /// The face is drawn in the ARCHIVE's picture space, so one face pixel is one
     /// art pixel and scales with the artwork.
     ///
-    /// **The Amiga**, and measured rather than assumed: Arthur's `char.data`
-    /// advance table averages 5.21 face px per character while
+    /// **The Amiga's own RELEASES**, and measured rather than assumed: Arthur's
+    /// `char.data` advance table averages 5.21 face px per character while
     /// `machine-screenshots/amiga-arthur-text.png` measures 4.70 ART px per
     /// character — which agree at 1:1 and are out by a factor of two at 2:1. Its
     /// ten face rows are a ten-row text pitch in the machine's own 320x200 frame
@@ -665,6 +667,28 @@ pub enum V6FaceSpace {
     /// Geneva 12 — fifteen rows — as thirty, and the monochrome press hides it
     /// because `Pic.data` is 480x300 at (1, 1) and 15 x 1 is still 15.
     Native,
+    /// The face is drawn in the machine's own **hires text space**: one face pixel
+    /// is one native pixel across, and as tall as the artwork's own doubling makes
+    /// a row.
+    ///
+    /// **The Amiga's system topaz**, and the reason a face space cannot be read off
+    /// the machine's row alone (SQ-1053). A game's face and the operating system's
+    /// are authored in different spaces on the same machine: *Arthur* draws
+    /// `char.data` in its 320-wide PICTURE space ([`Self::Art`]), while topaz is a
+    /// `FONTS:`/ROM face drawn in the 640x200 hires mode the interpreter ran in.
+    ///
+    /// Measured on `machine-screenshots/amiga-shogun-game.png`, over `Erasmus` in
+    /// "This is the bridge of the Erasmus": the glyph band holds **10 distinct
+    /// scanlines across a 20-row pitch** — every face row drawn twice — and the
+    /// underline spans 60 px over 7 characters, so **~8 native pixels per
+    /// character** across. An 8x8 face at (1, 2) lands exactly on the 8x16 cell
+    /// this machine declares.
+    ///
+    /// The vertical two is the artwork's own, not a second constant: the frame is
+    /// 200 rows and a square-pixel screen doubles it to 400, which is precisely
+    /// what `art_scale.1` already says. An undoubled rendition therefore answers
+    /// (1, 1) here and needs no special case.
+    Hires,
 }
 
 impl V6FaceSpace {
@@ -673,6 +697,7 @@ impl V6FaceSpace {
         match self {
             V6FaceSpace::Art => art_scale,
             V6FaceSpace::Native => (1, 1),
+            V6FaceSpace::Hires => (1, art_scale.1),
         }
     }
 }
@@ -715,7 +740,37 @@ pub enum V6SystemFace {
     ///
     /// `topaz`, which is the Amiga's system face and what *Shogun* and *Zork Zero*
     /// took on that machine, neither having shipped one of their own.
+    ///
+    /// It is also the drawer a **Kickstart ROM** spells, because `blorb` names a
+    /// ROM face `<face>/<size>` for exactly this reason: the machine's real topaz
+    /// 8 is in ROM and on no floppy, and a face out of ROM must be ranked by the
+    /// same rule as a face out of `FONTS:` rather than by a second one (SQ-1053).
     AmigaDrawer(&'static str),
+}
+
+impl V6SystemFace {
+    /// The space a face found THIS way is authored in — which is not always the
+    /// space the same machine's RELEASE faces are authored in.
+    ///
+    /// # Why the provenance decides and not the row
+    ///
+    /// SQ-1053. The Amiga has two faces wanting two different scales at once. Its
+    /// releases author theirs in the picture space — *Arthur*'s `char.data`, whose
+    /// ten face rows are the twenty-row line the captures measure — while the
+    /// operating system's topaz is drawn in the 640x200 hires mode the interpreter
+    /// ran in and wants (1, 2). One number per machine could express only one of
+    /// them, and the one it expressed would silently mis-scale the other; see
+    /// [`V6FaceSpace::Hires`] for the measurement.
+    ///
+    /// The Macintosh's two agree, which is why this went unnoticed until a machine
+    /// had a system face to read: Geneva out of a System file and Monaco off a
+    /// game disk are both painted at one native pixel per face pixel.
+    pub fn face_space(self) -> V6FaceSpace {
+        match self {
+            V6SystemFace::MacFamily(_) => V6FaceSpace::Native,
+            V6SystemFace::AmigaDrawer(_) => V6FaceSpace::Hires,
+        }
+    }
 }
 
 /// A Macintosh `FONT`/`NFNT` resource id is `family * 128 + point size`.
@@ -792,14 +847,20 @@ pub struct MachineProfile {
     /// this machine's interpreter number from zvm should not have to rediscover
     /// its cell somewhere else.
     pub v6_cell: V6Cell,
-    /// The space this machine's own typefaces are authored in — see
-    /// [`V6FaceSpace`], which is where the reasoning and the measurements are.
+    /// The space the typefaces this machine's own RELEASES ship are authored in —
+    /// see [`V6FaceSpace`], which is where the reasoning and the measurements are.
+    ///
+    /// **The release's, not every face this machine can draw** (SQ-1053). A
+    /// machine's OPERATING SYSTEM face is a separate claim and the Amiga answers
+    /// the two differently: *Arthur* authors `char.data` in the picture space and
+    /// topaz is drawn in the hires text space. That half lives on
+    /// [`V6SystemFace::face_space`], beside the name it belongs to.
     ///
     /// It sits beside [`Self::v6_cell`] because it is the same kind of claim: an
     /// embedder that gets this machine's interpreter number and cell from zvm
     /// should not have to rediscover, somewhere else, whether a face it admits
     /// scales with the artwork.
-    pub v6_face_space: V6FaceSpace,
+    pub v6_release_face_space: V6FaceSpace,
     /// What this machine's own SYSTEM body face is called on its boot media, or
     /// `None` where the machine has none to name — see [`V6SystemFace`].
     ///
@@ -952,7 +1013,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
-        v6_face_space: V6FaceSpace::Native,
+        v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
@@ -967,7 +1028,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: true,
         v6_cell: MACINTOSH_V6_CELL,
-        v6_face_space: V6FaceSpace::Native,
+        v6_release_face_space: V6FaceSpace::Native,
         // `mac/xzip.lst`: `ZSTD: TextFont (stdFont)` with `stdFont := geneva`.
         // The games ship Monaco (family 4) as their ZMONO alternate and no
         // Geneva at all, so this is only ever answered by a System disk the
@@ -997,9 +1058,11 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: true,
         v6_screen_page: true,
         v6_cell: V6Cell::DEFAULT,
-        // The one row that is not Native, and the one row with a typeface to
-        // measure — see `V6FaceSpace::Art`.
-        v6_face_space: V6FaceSpace::Art,
+        // The one row whose RELEASES are not Native, and the one row with a
+        // typeface to measure — see `V6FaceSpace::Art`. Its SYSTEM face is a
+        // different space again (`V6SystemFace::face_space`), which is the whole
+        // of SQ-1053.
+        v6_release_face_space: V6FaceSpace::Art,
         // The Amiga's system face, in ROM and in a Workbench `FONTS:` drawer.
         // *Shogun* and *Zork Zero* shipped no face of their own on that machine
         // and took this one; *Arthur* ships `char.data` and outranks it.
@@ -1033,7 +1096,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
-        v6_face_space: V6FaceSpace::Native,
+        v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
@@ -1090,7 +1153,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
-        v6_face_space: V6FaceSpace::Native,
+        v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
@@ -1163,7 +1226,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
-        v6_face_space: V6FaceSpace::Native,
+        v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
@@ -1189,7 +1252,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
-        v6_face_space: V6FaceSpace::Native,
+        v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
@@ -1216,7 +1279,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
-        v6_face_space: V6FaceSpace::Native,
+        v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
@@ -1231,7 +1294,7 @@ pub const MACHINES: &[MachineProfile] = &[
         one_screen_palette: false,
         v6_screen_page: false,
         v6_cell: V6Cell::DEFAULT,
-        v6_face_space: V6FaceSpace::Native,
+        v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,

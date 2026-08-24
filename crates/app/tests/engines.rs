@@ -91,6 +91,8 @@ mod release_enumeration;
 mod volume_chooser;
 #[path = "suites/font3_shipped_font.rs"]
 mod font3_shipped_font;
+#[path = "suites/amiga_rom_face.rs"]
+mod amiga_rom_face;
 #[path = "suites/native_disk_font.rs"]
 mod native_disk_font;
 #[path = "suites/system_face_cascade.rs"]

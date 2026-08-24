@@ -203,3 +203,32 @@ directory. Loaded by `crates/app/tests/suites/system_face_cascade.rs`, which
 copies them into a temp directory standing in for `~/.lanthorn/` — never the
 real one, since a case that read the tester's own disks would pass or fail on
 what they happen to own.
+
+`kickfont.rom` — the **Amiga** side of the same cascade (SQ-1053). The Amiga's
+Version 6 body face is topaz 8, which is in Kickstart ROM and on no floppy
+Commodore shipped, so exercising that rung needs a ROM. **A real Kickstart is
+copyrighted Commodore code and is never committed here**; this is a 256 KiB
+image whose every byte is invented, shaped like one: the length that maps it at
+`$FC0000`, the `JMP` a Kickstart opens with, and three `TextFont` records.
+
+| record | plays | why it is there |
+|---|---|---|
+| `topaz/8` | the face the machine drew with | 8x8, which at the Amiga's system-face scale of (1, 2) IS the 8x16 cell |
+| `topaz/9` | the right family at the wrong size | 10x9 — eighteen native rows against sixteen, so the cascade declines it (Kickstart 1.2 really carries a second topaz of that geometry) |
+| `ruby/8` | a Workbench display face | byte-identical geometry to `topaz/8`, so it passes every fitness test there is and **only the name** keeps it out |
+
+It is also a shape test for the finder: the two topazes put their name pointers
+in *different* slots of the uninitialised `tf_Message` preamble, because a ROM
+image does not set those link fields and `blorb::amiga_font` looks for the name
+rather than indexing a fixed offset. Glyph bitmaps are reproducible without a
+table — row `y` of code `c` is the byte `(c + y) & 0xFF` — so a test can assert
+on the pixels.
+
+```sh
+python3 unit_tests/mk_kickfont_rom.py
+```
+
+Loaded by `crates/app/tests/suites/amiga_rom_face.rs`, alongside one case that
+reads the player's own `~/.lanthorn/*.rom` and skips vacuously without one — the
+only thing in the suite that can say whether the *question* was right rather
+than whether the code answers it.

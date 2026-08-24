@@ -268,11 +268,15 @@ pub fn table() -> String {
             yes_no(m.v6_screen_page),
             yes_no(m.one_screen_palette),
             format!("{}x{}", m.v6_cell.w, m.v6_cell.h),
-            // Which space this machine's own TYPEFACES are authored in, which is not
-            // always the space its ARTWORK is (SQ-1039). Only the Amiga says `art`.
-            match m.v6_face_space {
+            // Which space this machine's own RELEASE typefaces are authored in,
+            // which is not always the space its ARTWORK is (SQ-1039), and not always
+            // the space its SYSTEM face is either (SQ-1053). Only the Amiga says
+            // `art`; its own topaz is `hires`, and that is the system face's fact
+            // rather than the row's.
+            match m.v6_release_face_space {
                 crate::interpreter::V6FaceSpace::Art => "art",
                 crate::interpreter::V6FaceSpace::Native => "native px",
+                crate::interpreter::V6FaceSpace::Hires => "hires",
             },
             // §8.7.1's Italic bit: a rule under the cell, or a synthesised slope
             // (SQ-1028). Only the two machines Infocom shipped a v6 interpreter for
@@ -489,7 +493,7 @@ mod tests {
                 v6_screen_page,
                 one_screen_palette,
                 v6_cell,
-                v6_face_space,
+                v6_release_face_space,
                 v6_system_face,
                 v6_emphasis,
                 v6_std_window,
@@ -515,11 +519,12 @@ mod tests {
             };
             assert!(all.contains(palette_name), "{name}: palette");
             assert!(
-                all.contains(match v6_face_space {
+                all.contains(match v6_release_face_space {
                     crate::interpreter::V6FaceSpace::Art => "art",
                     crate::interpreter::V6FaceSpace::Native => "native px",
+                    crate::interpreter::V6FaceSpace::Hires => "hires",
                 }),
-                "{name}: v6_face_space not in\n{all}",
+                "{name}: v6_release_face_space not in\n{all}",
             );
             assert!(
                 all.contains(match v6_emphasis {
