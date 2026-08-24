@@ -3127,6 +3127,85 @@ is itself traffic, so bytes-per-frame taken that way describes the palette's fra
 "ctrl+t" = "dump-terminal"
 ```
 
+## Your own boot disk, your machine's own typeface
+
+Infocom's Macintosh games ship one face, and it isn't the one the machine drew
+with. `FONT` 524 is **Monaco 12** — the fixed-pitch alternate `mac/xzip.lst`
+selects as `ZMONO` — while the body text it declares is `stdFont := geneva`, and
+Geneva lives in the System file that came with every Macintosh and no game. Zoom
+in on `machine-screenshots/mac-zorkzero-game.png` and both faces are on one
+screen: the status bar's `Banquet Hall` steps a metronome 7 pixels a character,
+and the prose two lines below advances 7, 7, 5 through `n`, `o`, `t`. Nothing on
+a game disk can draw that second line.
+
+So lanthorn asks you. Drop a **Mac OS System startup disk** or an **Amiga
+Workbench floppy** into `~/.lanthorn/` — an `.img`, an `.adf`, any image the
+mounter already reads — and a Version 6 game off that machine's own media is
+drawn with the face the machine really used. Nothing is shipped, nothing is
+copied, nothing is licensed: the disks stay yours, exactly the arrangement
+`stories/` has always run on, and a player with none there sees the built-in face
+answering as it always did.
+
+The order is one sentence, and it lives in one function:
+
+1. **the release's own face**, off the story's own medium — Arthur's Amiga
+   `char.data`, the Macintosh's `FONT` 524;
+2. **the machine's system face**, off a boot disk you supplied;
+3. **the built-in**, which is what CI and an empty `~/.lanthorn/` get.
+
+On the Macintosh those first two rungs answer at once and land in *different*
+jobs, which is the whole point: Geneva 12 off your System disk becomes the body
+face, and the game's own Monaco keeps the fixed-pitch role it was drawn for. A
+story asks for that role two ways and means one thing — `@set_text_style 8`, or
+`@set_font 4` — and *Zork Zero* uses the second, bracketing its entire status bar
+in `@set_font 4` / `@set_font 1` without ever touching the style word. So the bar
+keeps its columns while the prose beside it steps Geneva's own advances, which is
+what the capture shows and what no single face can do.
+
+What the story is **told** does not move an inch. `mac/xzip.lst` declares
+`colWidth := 7; lineHeight := 15`, Geneva 12 is fifteen rows tall, and the
+declared cell comes out 7×15 either way — the machine's grid is exactly the grid
+it always was, and only the drawing changed. That is not luck: a Macintosh paints
+text at one native pixel per face pixel however dense its artwork is, so the
+colour press can double `CPic.data` onto the unit screen without doubling
+Geneva's line into thirty rows. (`zvm::interpreter::V6FaceSpace` is where that
+rule lives; the Amiga is the row that answers the other way.)
+
+The **size** is the machine's too, not a guess. A System disk carries a whole
+family — Geneva at 9, 10, 12, 14, 18, 20 and 24 point on a System 6.0.8 startup
+disk — and the declared line height says which one was painted. Fifteen rows,
+so Geneva 12. Ask for a family the disk doesn't carry, or a size the machine
+never declared a line for, and the cascade falls through rather than
+improvising.
+
+Several disks **compose**. Keep Workbench 1.2 and 1.3 side by side and both are
+read; the faces pool, and the request — family, drawer, size — picks out of the
+pool rather than one disk winning. When two disks carry the same face and you
+care which answers (a System 7 Geneva is not the 1988 one), name it:
+
+```toml
+system_font_disk = "1.3"      # any case-insensitive piece of the filename
+```
+
+It only breaks a tie. A disk named there that doesn't carry the face being asked
+for falls through to the others, because a naming preference must never lose you
+a face; with no preference the pool is ordered by filename, which is stable and
+visible. The browser's info panel lists every face it found, grouped by the disk
+it came off, so you can see what a disk is worth before a game is even launched.
+
+The Amiga's half is wired the same way and currently draws nothing, which is
+honest rather than broken: a Workbench floppy's `fonts/topaz/11` is fixed-pitch
+at 8×11 against that machine's 8×16 cell, so it is neither the cell nor a
+typeface and the fitness test declines it — the topaz the machine actually used
+is in ROM and on no floppy at all. The seven display faces beside it (`ruby`,
+`garnet`, `emerald`…) are *not* candidates: the machine names `topaz` and only
+`topaz`, which is what stops an Amiga game being quietly drawn in Ruby.
+
+And a disk in `~/.lanthorn/` is whatever you put there. A truncated image, a
+header claiming an enormous glyph, a file only pretending to be a volume — every
+one of them is refused quietly, without a panic, an unbounded allocation, or a
+game that won't start.
+
 ## Not yet there
 - **Proportional fonts, one machine so far.** Arthur's Amiga floppy carries a
   real proportional typeface, and lanthorn draws it at the face's own per-glyph
@@ -3145,14 +3224,7 @@ is itself traffic, so bytes-per-frame taken that way describes the palette's fra
   same in hybrid as in raster and its right edge is honestly ragged; a run
   carries the grid cell it was written at, and the cell and the pixel are
   measured in one pass so they cannot disagree about which word ends a line
-  or which blank a wrap swallowed. The Macintosh doesn't get
-  a proportional face at all yet — its games carry only Monaco (`FONT` 524), a
-  monospaced stand-in; the real body face, Geneva, lives in the Macintosh
-  System file that shipped with every Mac and no game, so there is nothing on
-  a game disk to draw it from. Reading Geneva (and the Amiga's own system
-  faces, for *Shogun* and *Zork Zero*, which carry no font at all and take the
-  system's topaz) off a user-supplied boot disk is planned but not yet built
-  (SQ-1036, SQ-1037).
+  or which blank a wrap swallowed.
 - **Save State across v6** — the host Save State snapshot captures the
   underlying machine as it does for any Z-machine game; carrying the v6-
   specific render state (window geometry, floats, pictures) across a restore

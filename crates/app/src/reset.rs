@@ -132,19 +132,27 @@ pub(crate) fn reset_game(
             // face — omit it and an `@restart` of Arthur's Amiga floppy re-boots
             // the story on 8x16 where its launch gave it 8x20, which is SQ-1022's
             // defect with a different fact in the hole.
-            let face = app::native_font::resolve(
+            // SQ-1037: the same cascade, including the system rung — a restart that
+            // re-read only the release's medium would drop a Macintosh game's Geneva
+            // and re-boot it in Monaco, which is SQ-1022's defect with a different
+            // fact in the hole.
+            let user_disks =
+                app::system_fonts::UserDisks::new(&state.config.system_font_disk);
+            let faces = app::native_font::resolve(&app::native_font::FaceRequest {
                 story_path,
-                state.config.disk_entry.as_deref(),
+                entry: state.config.disk_entry.as_deref(),
                 profile,
-                state.config.interpreter_source,
-            );
+                source: state.config.interpreter_source,
+                art_scale: picts.art_scale(),
+                disks: Some(&user_disks),
+            });
             let boot = app::machine_boot::MachineBoot::resolve(
                 profile,
                 &picts,
                 named_art_std_window,
                 state.config.interpreter_number.or_else(|| profile.interpreter_number()),
                 host_default_colours,
-                face,
+                faces,
             );
             // Republish the render's copy for the same reason `v6_art_scale` is
             // republished above: a restart may have landed on a different archive,

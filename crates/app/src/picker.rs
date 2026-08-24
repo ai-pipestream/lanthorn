@@ -381,7 +381,23 @@ pub fn resolve_aux(
     // Same tier again, and paired with this story's own entry for the same reason
     // the artwork scan is (SQ-0876/SQ-1018): a compilation carries one
     // application per game, and only one of them is this row's.
-    let disk_fonts = crate::native_font::detected(&entry.path, entry.meta.disk_entry.as_deref());
+    // The MEDIUM names the machine, the same door the launch takes — not the path,
+    // and not a guess (SQ-0876).
+    let (profile, profile_source) =
+        crate::interpreter::InterpreterProfile::resolve_with_source(&entry.path, None, None, None);
+    // `disks: None` — this column is about the STORY's own medium, and asking the
+    // system rung as well would cost a second mount of every boot disk per row for
+    // an answer it cannot change: a release face the cascade admits is drawn either
+    // as the body or as the machine's fixed-pitch alternate, and `FaceSet::draws`
+    // counts both (SQ-1036). `art_scale` likewise only ever reaches the system rung.
+    let disk_fonts = crate::native_font::detected(&crate::native_font::FaceRequest {
+        story_path: &entry.path,
+        entry: entry.meta.disk_entry.as_deref(),
+        profile,
+        source: profile_source,
+        art_scale: None,
+        disks: None,
+    });
     // Same tier again. Not paired with `entry` at all — the user's own disks
     // under `~/.lanthorn/` are not any one game's release — but resolved here
     // rather than on every frame, for the same reason the three scans above are.
@@ -395,10 +411,6 @@ pub fn resolve_aux(
     let system_fonts = if entry.meta.engine == Engine::ZCode
         && entry.meta.version.as_deref() == Some("6")
     {
-        // The MEDIUM names the machine, the same door `native_font::detected`
-        // takes — not the path, and not a guess (SQ-0876).
-        let (profile, _) =
-            crate::interpreter::InterpreterProfile::resolve_with_source(&entry.path, None, None, None);
         crate::system_fonts::detected_for(profile)
     } else {
         Vec::new()

@@ -134,7 +134,7 @@ fn shape(path: &str, keys: &str, archive: Option<&str>, taps: usize, cols: u32, 
         None,
         profile_.interpreter_number(),
         profile_.default_colours(),
-        None,
+        app::native_font::FaceSet::none(),
     );
     let std_win = boot.screen_px;
     println!(

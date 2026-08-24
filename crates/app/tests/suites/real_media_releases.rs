@@ -626,7 +626,7 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
-        None,
+        app::native_font::FaceSet::none(),
     );
     let mut s = GameSession::new_for_machine(bytes, honor_game_colours, false, false, picture_dims, None, None, &boot)
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", ctx(m)));

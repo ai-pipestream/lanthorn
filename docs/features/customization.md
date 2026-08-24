@@ -523,6 +523,25 @@ re-seed the new template, or hand-write the new shape from
   key) and remembers the answer in that story's own sidecar, below — your global
   `config.toml` is never written by it. See
   [Graphical v6](v6-graphics.md#v6_pixel_lock--a-whole-number-of-device-pixels-per-art-pixel).
+- **Which boot disk answers for a system typeface** — `system_font_disk`
+  (default empty) picks between the disk images you keep in `~/.lanthorn/` when
+  more than one carries the face a machine is asking for. Drop a Mac OS System
+  startup disk or an Amiga Workbench floppy in there and a Version 6 game off
+  that machine's own media is drawn with the typeface the machine really used —
+  Geneva on a Macintosh, which lives in the System file and on no Infocom disk.
+  Nothing is shipped and nothing is copied; the disks stay yours, the same
+  arrangement `stories/` runs on, and with none there the built-in face answers
+  exactly as before. This key is only a **tiebreak**: every disk of the right
+  kind is read and the faces pool together, so a case-insensitive piece of a
+  filename (`"1.3"` finds the Workbench 1.3 floppy in a drawer holding both)
+  promotes that disk to the front without excluding any other — name a disk that
+  lacks the face and the rest still answer. Worth setting when two disks carry
+  the same face from different releases of the operating system, since a System 7
+  Geneva is not the 1988 one; not worth setting otherwise, and on Workbench 1.2
+  versus 1.3 it changes nothing at all, because those two ship identical font
+  drawers. The browser's info panel lists every face found, grouped by the disk
+  it came off. See
+  [Graphical v6](v6-graphics.md#your-own-boot-disk-your-machines-own-typeface).
 - **Story text margins** — `text_margin_x` / `text_margin_y` (default 0) reserve
   blank columns on each side / rows top and bottom *inside* the story text pane,
   for a little breathing room around the transcript. The margin applies to the

@@ -200,6 +200,26 @@ where
         .max_by_key(|f| f.glyphs.len())
 }
 
+/// The `FONTS:` drawer an AmigaDOS font path names — `topaz` out of
+/// `fonts/topaz/11`, whatever the case and whatever leads up to it.
+///
+/// A disk font is `<dir>/<name>/<size>`, and the DRAWER is the typeface's real
+/// name: the size is a separate directory entry and `dfh_Name` is empty on every
+/// Infocom face measured (see the module docs), so a caller looking for a face by
+/// name has nothing else to look at. `None` for a path with no such shape, which
+/// is every loose `char.data` beside a game.
+///
+/// Matched case-insensitively by the caller, since a volume's own case varies —
+/// this returns the drawer exactly as the path spells it.
+pub fn drawer_of(path: &str) -> Option<&str> {
+    let (parent, size) = path.rsplit_once('/')?;
+    if size.is_empty() || !size.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let drawer = parent.rsplit('/').next().unwrap_or(parent);
+    (!drawer.is_empty()).then_some(drawer)
+}
+
 /// Every font a volume carries, each with the file it was found in.
 ///
 /// [`from_volume`]'s companion: that one CHOOSES, this one REPORTS, for a
@@ -211,4 +231,31 @@ where
     I: IntoIterator<Item = (&'a str, &'a [u8])>,
 {
     files.into_iter().filter_map(|(name, bytes)| parse(bytes).map(|f| (name.to_string(), f))).collect()
+}
+
+#[cfg(test)]
+mod drawer_tests {
+    /// `fonts/<name>/<size>` — the drawer is the typeface's real name (SQ-1037).
+    ///
+    /// It matters because a Workbench floppy carries eight of them and a machine
+    /// wants exactly one. Take "whatever parses" off that disk and an Amiga game
+    /// is drawn in `ruby`; the drawer name is the only thing that says otherwise,
+    /// since `dfh_Name` is empty on every face measured (see the module docs).
+    #[test]
+    fn a_disk_font_path_names_its_drawer() {
+        for (path, want) in [
+            ("fonts/topaz/11", Some("topaz")),
+            ("FONTS/Topaz/8", Some("Topaz")),
+            ("Workbench/fonts/garnet/16", Some("garnet")),
+            ("fonts/sapphire/19", Some("sapphire")),
+        ] {
+            assert_eq!(super::drawer_of(path), want, "{path}");
+        }
+        // Anything that is not `<drawer>/<digits>` names no drawer, which is every
+        // loose font file beside a game — `char.data` is matched by SIGNATURE and
+        // never by name, and must not be mistaken for a system face.
+        for path in ["char.data", "Char.data", "fonts/topaz", "fonts/topaz/eleven", "11", ""] {
+            assert_eq!(super::drawer_of(path), None, "{path:?} names no drawer");
+        }
+    }
 }

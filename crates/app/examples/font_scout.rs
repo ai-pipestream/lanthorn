@@ -75,7 +75,19 @@ fn scout(path: &std::path::Path, entry: Option<&str>, glyphs: &[char]) {
     if let Some(e) = entry {
         println!("  entry: {e}");
     }
-    for f in app::native_font::detected(path, entry) {
+    let disks = app::system_fonts::UserDisks::new("");
+    let request = app::native_font::FaceRequest {
+        story_path: path,
+        entry,
+        profile,
+        source,
+        // The instrument has no `PictSource` in hand, and on the only machine that
+        // reads a system face today the text scale is `(1, 1)` whatever the artwork
+        // does — see `zvm::interpreter::V6FaceSpace` (SQ-1039).
+        art_scale: None,
+        disks: Some(&disks),
+    };
+    for f in app::native_font::detected(&request) {
         println!(
             "  detected: {:<10} {}x{}{}{}",
             f.name,
@@ -85,9 +97,12 @@ fn scout(path: &std::path::Path, entry: Option<&str>, glyphs: &[char]) {
             if f.used { "  <- in use" } else { "" },
         );
     }
+    let faces = app::native_font::resolve(&request);
     println!(
-        "  native_font::resolve -> {:?}",
-        app::native_font::resolve(path, entry, profile, source).map(|f| (f.width, f.height)),
+        "  native_font::resolve -> body {:?} from {:?}, fixed alternate {:?}",
+        faces.body().map(|f| (f.width, f.height)),
+        faces.body_origin(),
+        faces.fixed().map(|f| (f.width, f.height)),
     );
 
     // Below here is the Macintosh volume itself: the layer the two lookups differ

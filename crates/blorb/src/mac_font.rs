@@ -217,6 +217,31 @@ pub fn from_volume_beside(hfs: &crate::hfs::Hfs, path: &str) -> Option<BitmapFon
         .or_else(|| from_volume(hfs))
 }
 
+/// A `FONT`/`NFNT` resource id is `family * `[`FAMILY_STRIDE`]` + point size`.
+///
+/// The arithmetic lives here because this is the module that reads the ids; the
+/// FAMILY NUMBERS themselves are machine knowledge and are stated where the rest
+/// of a machine's facts are (`zvm::interpreter::V6SystemFace`).
+pub const FAMILY_STRIDE: i16 = 128;
+
+/// The font family a `FONT`/`NFNT` id belongs to — `524` is family 4 (Monaco),
+/// `396` family 3 (Geneva), `1033` family 8.
+///
+/// Negative ids do not occur in a real font resource, and answering the
+/// truncating quotient for one is harmless: it can only fail to match a family a
+/// caller asked for.
+pub fn family_of(id: i16) -> i16 {
+    id / FAMILY_STRIDE
+}
+
+/// The point size a `FONT`/`NFNT` id encodes — `524` is 12pt, `1033` is 9pt.
+///
+/// Size 0 is the `FOND` family-name record rather than a face, and carries no
+/// bitmap; [`parse`] refuses it on its own terms, so nothing here has to.
+pub fn point_size_of(id: i16) -> i16 {
+    id.rem_euclid(FAMILY_STRIDE)
+}
+
 /// Every face in one fork, with the resource id it is stored under.
 ///
 /// [`from_fork`] answers with the ONE face worth drawing body text in; this
@@ -280,6 +305,35 @@ pub fn from_fork(fork: &crate::resource_fork::ResourceFork) -> Option<BitmapFont
 
 #[cfg(test)]
 mod tests {
+    /// The id arithmetic, against the four ids this tree actually names (SQ-1037).
+    ///
+    /// `family * 128 + point size`. `524` is Monaco 12, the resource every
+    /// Macintosh v6 release ships; `396` is Geneva 12, which lives in the System
+    /// file and on no game disk (SQ-1036); `1033` is the font-3 graphics set
+    /// (SQ-1017); `512` is the family-name record, size 0 and no bitmap.
+    #[test]
+    fn a_font_id_splits_into_a_family_and_a_point_size() {
+        for (id, family, size) in [(524i16, 4i16, 12i16), (396, 3, 12), (1033, 8, 9), (512, 4, 0)] {
+            assert_eq!(super::family_of(id), family, "FONT {id}: family");
+            assert_eq!(super::point_size_of(id), size, "FONT {id}: point size");
+            assert_eq!(
+                family * super::FAMILY_STRIDE + size,
+                id,
+                "FONT {id}: and the two halves reconstruct it",
+            );
+        }
+        // Geneva's whole family is one run of ids, which is what makes a FAMILY a
+        // usable request: 9, 10, 12, 14, 18, 20 and 24 point on a real System 6.0.8
+        // disk all answer 3.
+        for size in [9i16, 10, 12, 14, 18, 20, 24] {
+            assert_eq!(
+                super::family_of(3 * super::FAMILY_STRIDE + size),
+                3,
+                "Geneva {size}pt is family 3",
+            );
+        }
+    }
+
     use super::*;
     use crate::hfs::Hfs;
     use crate::resource_fork::tests::{FORK_LEN, VOLUME, fork_bytes};

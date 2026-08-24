@@ -86,7 +86,7 @@ fn boot(name: &str, keys: u8, taps: usize) -> Option<GameSession> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
-        None,
+        app::native_font::FaceSet::none(),
     );
     let mut session = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
     .expect("the story should boot without a ZError");
