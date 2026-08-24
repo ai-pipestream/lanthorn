@@ -1369,9 +1369,11 @@ fn draw_str_cells(
 /// `draw_str_clipped`; with empty `runs` and a search it matches
 /// `draw_str_highlighted`.
 ///
-/// `scheme` is always supplied (for palette + per-Glk-style theme slots); `honor`
-/// gates the GAME's own run colours (garglk `stylehint 0/1`): when off, a run's
-/// game-set fg/bg is IGNORED, but the theme slot and element base still apply
+/// `ink` ([`crate::render::TextInk`]) carries the two facts a run's colours resolve
+/// against, which always come from the same place and so travel together (SQ-1028):
+/// the theme, always supplied (palette + per-Glk-style theme slots), and `honor`,
+/// which gates the GAME's own run colours (garglk `stylehint 0/1`) — when off, a
+/// run's game-set fg/bg is IGNORED, but the theme slot and element base still apply
 /// (SQ-0331). Style bits (bold/italic/reverse) and the hyperlink affordance are
 /// unaffected by `honor`, exactly as before.
 ///
@@ -1391,12 +1393,12 @@ pub(crate) fn draw_str_runs(
     runs: &[StyleRun],
     search: Option<(&str, Style)>,
     area: ratatui::layout::Rect,
-    scheme: &crate::colors::ColorScheme,
-    honor: bool,
+    ink: crate::render::TextInk,
 ) {
     if y < area.y || y >= area.bottom() {
         return;
     }
+    let (scheme, honor) = (ink.colors(), ink.honor());
     let hi: Vec<bool> = match search {
         Some((q, _)) if !q.is_empty() => highlight_mask(text, q),
         _ => Vec::new(),
@@ -2440,7 +2442,7 @@ fn render_middle(
         }
         let text_x = body_area.x + text_origin_col(wr.kind);
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
-        draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, &state.colors, state.config.honor_game_colours);
+        draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, crate::render::TextInk::of(state));
 
         // Record cell→link for every linked span on this row. `run.start/end` are
         // CHAR offsets within `wr.text` (re-based by `rebase_runs`), while the
@@ -3486,7 +3488,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
         let runs = vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]; // bold chars 2..4
-        draw_str_runs(&mut buf, 0, 0, "abcdef", Style::default(), &runs, None, area, &crate::colors::ColorScheme::terminal_default(), false);
+        draw_str_runs(&mut buf, 0, 0, "abcdef", Style::default(), &runs, None, area, crate::render::TextInk::new(false, &crate::colors::ColorScheme::terminal_default()));
         assert!(!buf[(0, 0)].modifier.contains(Modifier::BOLD));
         assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD));
         assert!(buf[(3, 0)].modifier.contains(Modifier::BOLD));
@@ -3502,7 +3504,7 @@ mod tests {
         cs.theme = theme_with_overrides(&[("hyperlink", Color::Magenta)]);
         // chars 2..5 carry link 7 (bold too, to prove the link layers on top).
         let runs = vec![StyleRun { start: 2, end: 5, bits: 0x02, fg: 0, bg: 0, link: 7, glk_style: 0 }];
-        draw_str_runs(&mut buf, 0, 0, "abcdefgh", Style::default(), &runs, None, area, &cs, true);
+        draw_str_runs(&mut buf, 0, 0, "abcdefgh", Style::default(), &runs, None, area, crate::render::TextInk::new(true, &cs));
         for x in 2..5u16 {
             assert!(buf[(x, 0)].modifier.contains(Modifier::UNDERLINED), "linked cell {x} underlined");
             assert_eq!(buf[(x, 0)].fg, Color::Magenta, "linked cell {x} uses hyperlink fg");
@@ -3528,7 +3530,7 @@ mod tests {
         let draw = |glk_style: u8, fg: u32, honor: bool| {
             let mut b = Buffer::empty(area);
             let runs = vec![StyleRun { start: 0, end: 3, bits: 0, fg, bg: 0, link: 0, glk_style }];
-            draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, &cs, honor);
+            draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, crate::render::TextInk::new(honor, &cs));
             b[(0, 0)].fg
         };
 
@@ -3539,7 +3541,7 @@ mod tests {
         assert_eq!(draw(4, 0, false), Color::Green, "Subheader slot applies");
         // Normal run (empty runs) → element base (white).
         let mut b = Buffer::empty(area);
-        draw_str_runs(&mut b, 0, 0, "abc", base, &[], None, area, &cs, false);
+        draw_str_runs(&mut b, 0, 0, "abc", base, &[], None, area, crate::render::TextInk::new(false, &cs));
         assert_eq!(b[(0, 0)].fg, Color::White, "Normal → element base");
 
         // honor gate: a game-set red fg on an Input run — honor ON → game red wins
@@ -3559,7 +3561,7 @@ mod tests {
         let draw = |glk_style: u8| {
             let mut b = Buffer::empty(area);
             let runs = vec![StyleRun { start: 0, end: 3, bits: 0, fg: 0, bg: 0, link: 0, glk_style }];
-            draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, &cs, false);
+            draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, crate::render::TextInk::new(false, &cs));
             b[(0, 0)].modifier
         };
 
@@ -3578,7 +3580,7 @@ mod tests {
 
         let mut b = Buffer::empty(area);
         let runs = vec![StyleRun { start: 0, end: 3, bits: 0, fg: 0, bg: 0, link: 0, glk_style: 3 }];
-        draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, &cs, false);
+        draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, crate::render::TextInk::new(false, &cs));
         assert!(b[(0, 0)].modifier.contains(Modifier::BOLD), "Header run renders bold");
     }
 
@@ -3700,7 +3702,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut a = Buffer::empty(area);
         let mut b = Buffer::empty(area);
-        draw_str_runs(&mut a, 0, 0, "hello", Style::default(), &[], None, area, &crate::colors::ColorScheme::terminal_default(), false);
+        draw_str_runs(&mut a, 0, 0, "hello", Style::default(), &[], None, area, crate::render::TextInk::new(false, &crate::colors::ColorScheme::terminal_default()));
         crate::render::draw_str_clipped(&mut b, 0, 0, "hello", Style::default(), area);
         assert_eq!(a, b, "empty runs render identically to draw_str_clipped");
     }
@@ -3713,7 +3715,7 @@ mod tests {
         let hl = Style::new().fg(Color::Black).bg(Color::Yellow);
         let mut a = Buffer::empty(area);
         let mut b = Buffer::empty(area);
-        draw_str_runs(&mut a, 0, 0, "the cat sat", base, &[], Some(("cat", hl)), area, &crate::colors::ColorScheme::terminal_default(), false);
+        draw_str_runs(&mut a, 0, 0, "the cat sat", base, &[], Some(("cat", hl)), area, crate::render::TextInk::new(false, &crate::colors::ColorScheme::terminal_default()));
         draw_str_highlighted(&mut b, 0, 0, "the cat sat", base, "cat", hl, area);
         assert_eq!(a, b, "empty runs + search render identically to draw_str_highlighted");
     }
@@ -3942,7 +3944,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut b = Buffer::empty(area);
         let cs = crate::colors::ColorScheme::terminal_default();
-        draw_str_runs(&mut b, 0, 0, "日本x", Style::default(), &[], None, area, &cs, false);
+        draw_str_runs(&mut b, 0, 0, "日本x", Style::default(), &[], None, area, crate::render::TextInk::new(false, &cs));
         assert_eq!(b[(0, 0)].symbol(), "日");
         assert_eq!(b[(1, 0)].symbol(), " ", "the wide glyph's trailing cell is blanked…");
         assert_eq!(b[(2, 0)].symbol(), "本", "…so the next glyph is not swallowed by the cell skip");
@@ -3957,7 +3959,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut b = Buffer::empty(area);
         let cs = crate::colors::ColorScheme::terminal_default();
-        draw_str_runs(&mut b, 0, 0, "e\u{0301}!", Style::default(), &[], None, area, &cs, false);
+        draw_str_runs(&mut b, 0, 0, "e\u{0301}!", Style::default(), &[], None, area, crate::render::TextInk::new(false, &cs));
         assert_eq!(b[(0, 0)].symbol(), "e\u{0301}");
         assert_eq!(b[(1, 0)].symbol(), "!");
     }
@@ -3971,7 +3973,7 @@ mod tests {
         let mut b = Buffer::empty(area);
         let cs = crate::colors::ColorScheme::terminal_default();
         let runs = vec![StyleRun { start: 1, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }];
-        draw_str_runs(&mut b, 0, 0, "日本x", Style::default(), &runs, None, area, &cs, false);
+        draw_str_runs(&mut b, 0, 0, "日本x", Style::default(), &runs, None, area, crate::render::TextInk::new(false, &cs));
         assert!(!b[(0, 0)].modifier.contains(Modifier::BOLD));
         assert!(b[(2, 0)].modifier.contains(Modifier::BOLD), "run lands on 本's own cell");
         assert!(b[(3, 0)].modifier.contains(Modifier::BOLD), "…and on its trailing cell");
