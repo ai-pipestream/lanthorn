@@ -2866,7 +2866,16 @@ impl GameSession {
     /// `cells` is the last frame's mapping (`AppState::v6_cell_map`), matched back to
     /// windows by native rect. Empty when the caller has none — the engine-only view
     /// still shows the game and model halves.
-    pub fn v6_window_dump(&self, cells: &[crate::state::V6CellRect]) -> Vec<String> {
+    ///
+    /// `face` is the live [`crate::native_font::TextFace`] — `AppState::v6_text`,
+    /// which is where it lives because a style reload rebuilds it (SQ-1047). `None`
+    /// for the engine-only view, which says so rather than reporting a default face
+    /// nobody is drawing with.
+    pub fn v6_window_dump(
+        &self,
+        cells: &[crate::state::V6CellRect],
+        face: Option<&crate::native_font::TextFace>,
+    ) -> Vec<String> {
         let Some(v6) = self.machine.screen.v6.as_ref() else {
             return Vec::new();
         };
@@ -2892,6 +2901,7 @@ impl GameSession {
             let vp = find("viewport").map(|v| fmt_cells(v.cells)).unwrap_or_else(|| "—".into());
             out.push(format!("  pane {} · story viewport {vp}", fmt_cells(pane.cells)));
         }
+        out.extend(v6_face_lines(face));
 
         for (i, w) in v6.windows.iter().enumerate() {
             if w.x_size == 0 && w.y_size == 0 && w.texts.is_empty() && w.prose.is_empty() {
@@ -2967,6 +2977,24 @@ impl GameSession {
                     .saturating_sub(w.left_margin)
                     .saturating_sub(w.right_margin)
                     / cell.w.max(1),
+            ));
+            // **What the WINDOW says it is set in** (SQ-1047). ZMSD §8.8.3.2
+            // properties 12 and 13: the font number, and the size as
+            // `(height << 8) | width`. The engine seeds both from the declared cell
+            // at `restart_screen` and restates them on every `set_v6_text`, so a
+            // window that disagrees with the cell is a window the GAME re-sized —
+            // Shogun reads the width back out of prop 13 to size its input buffer.
+            // Printed per window because it is per window; the FACE those metrics
+            // came from is one launch fact and is reported once, above.
+            let (fw, fh) = (w.font_size & 0xff, w.font_size >> 8);
+            out.push(format!(
+                "          font: number {} · size {fw}x{fh}px (props 12/13){}",
+                w.font_number,
+                if (fw, fh) == (cell.w, cell.h) {
+                    String::new()
+                } else {
+                    format!(" <- not the {}x{} cell", cell.w, cell.h)
+                },
             ));
             // What the model made of this window, matched by its native rect.
             let node = items.iter().find(|pw| (pw.x_px, pw.y_px, pw.w_px, pw.h_px) == native);
@@ -3425,6 +3453,100 @@ impl GameSession {
             content_size,
         }
     }
+}
+
+/// The `face:` block of `/dump-windows` — which TYPEFACE the metrics below came
+/// from (SQ-1047).
+///
+/// # One block per frame, and it says so
+///
+/// Every other block in the dump is per window because its subject is. This one
+/// is not: the face is a LAUNCH fact, resolved once by
+/// [`crate::native_font::resolve`] from the medium the mount returned, and every
+/// window on the screen is drawn with the answer. Printing it under each window
+/// would invite the reader to look for a difference that cannot exist; leaving it
+/// out entirely is what the dump did, and the cost was that a DISK-FONT defect
+/// and a METRIC defect are indistinguishable by looking — the same wrong column
+/// count comes back whether the wrong face was admitted or the right one was
+/// measured wrong.
+///
+/// # What it has to answer
+///
+/// Which face is the body and which is the machine's fixed-pitch alternate (a
+/// Macintosh has both, and off DIFFERENT media — SQ-1036); where each came from;
+/// and the three numbers that differ on a real press and are routinely confused
+/// for one another — the face's own size, the cell the story was DECLARED, and
+/// the text scale between them (SQ-1039). Then the pen, because "proportional"
+/// versus "steps the cell" is the first thing a wrap defect wants to know.
+///
+/// # The names it can give, and the one it cannot
+///
+/// [`crate::native_font::FaceOrigin`] already carries a system face's disk and
+/// resource name, so nothing here re-derives provenance — the report asks the
+/// cascade's own answer, the way `native_font::detected`'s `used` column does. A
+/// RELEASE face has no name to give: `resolve` picks it through
+/// `mac_font::from_volume_beside` / `amiga_font::from_volume`, which return the
+/// face alone, and naming it here would mean a second copy of the pick — the
+/// exact shape that shipped SQ-1011 inert twice. So it is reported by its medium
+/// and its size, which is what the resolved value knows.
+fn v6_face_lines(face: Option<&crate::native_font::TextFace>) -> Vec<String> {
+    use crate::native_font::{FaceFit, FaceOrigin};
+    let Some(face) = face else {
+        return vec!["  face: not supplied — engine-only view".to_string()];
+    };
+    let from = |o: Option<&FaceOrigin>| match o {
+        Some(FaceOrigin::Release) => "the release's own medium".to_string(),
+        Some(FaceOrigin::SystemDisk { disk, name }) => format!("{disk} · {name}"),
+        None => "nowhere".to_string(),
+    };
+    let (cell, scale) = (face.cell(), face.scale());
+    let mut out = vec!["  face: one launch fact — every window below is set in it".to_string()];
+    match face.face() {
+        // No face admitted at all: the renderer is on the built-in, which is not a
+        // failure and has to read as a resolved state rather than a missing line.
+        None => out.push("    body: none — the built-in render::vga16".to_string()),
+        Some(f) => out.push(format!(
+            "    body: {}x{}px from {} · fit {}",
+            f.width,
+            f.height,
+            from(face.faces().body_origin()),
+            match face.fit() {
+                Some(FaceFit::Metric) => "Metric",
+                Some(FaceFit::Cell) => "Cell",
+                None => "—",
+            },
+        )),
+    }
+    out.push(match face.faces().fixed() {
+        Some(f) => format!(
+            "    fixed: {}x{}px from {}",
+            f.width,
+            f.height,
+            from(face.faces().fixed_origin())
+        ),
+        None => "    fixed: none — a fixed-pitch run takes the body face".to_string(),
+    });
+    out.push(format!(
+        "    declared cell {}x{}px · text scale {}x{} native px per face px",
+        cell.w, cell.h, scale.0, scale.1
+    ));
+    // The pen. A proportional one is reported by its RANGE over the printable set,
+    // because that is the range a wrap is computed from — and by its bold smear,
+    // which widens the advance rather than only the ink (SQ-1009).
+    if face.proportional() {
+        let (lo, hi) = (' '..='~').fold((u32::MAX, 0u32), |(lo, hi), c| {
+            let a = face.advance(c);
+            (lo.min(a), hi.max(a))
+        });
+        let smear = u32::from(face.bold_smear(crate::render::bitfont::STYLE_BOLD));
+        out.push(format!(
+            "    pen: proportional {lo}–{hi}px over printable ASCII · bold +{}px (smear {smear})",
+            smear * scale.0
+        ));
+    } else {
+        out.push(format!("    pen: steps the cell — {}px for every character", cell.w));
+    }
+    out
 }
 
 /// The MACHINE's own screen pair for a Version 6 frame, `(foreground,
@@ -4555,7 +4677,7 @@ impl Engine for GameSession {
     /// v1–5 and for a caller with no render mapping to hand.
     fn window_dump(&self) -> Vec<String> {
         if self.machine.screen.v6.is_some() {
-            return self.v6_window_dump(&[]);
+            return self.v6_window_dump(&[], None);
         }
         let screen = &self.machine.screen;
         let mut out = vec![format!("Z-machine v{} layout — Grid over Buffer", self.machine.mem.version())];

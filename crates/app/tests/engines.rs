@@ -95,6 +95,8 @@ mod font3_shipped_font;
 mod amiga_rom_face;
 #[path = "suites/native_disk_font.rs"]
 mod native_disk_font;
+#[path = "suites/v6_dump_windows_face.rs"]
+mod v6_dump_windows_face;
 #[path = "suites/system_face_cascade.rs"]
 mod system_face_cascade;
 #[path = "suites/native_disk_sound.rs"]

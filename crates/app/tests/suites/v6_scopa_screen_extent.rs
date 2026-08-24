@@ -126,7 +126,7 @@ fn a_measuring_window_never_inflates_the_published_screen() {
     // size straight back through `get_wind_prop` (ZMSD §8.8.3.2) — clipping the
     // VM's stored size would make `textwidth` measure against a 640px window and
     // wrap the very string it is sizing. `/dump-windows` reports both halves.
-    let dump = session.v6_window_dump(&[]).join("\n");
+    let dump = session.v6_window_dump(&[], None).join("\n");
     assert!(
         dump.contains("win5  1000x1000"),
         "zvm still stores the size the game wrote, so get_wind_prop is unaffected:\n{dump}"
