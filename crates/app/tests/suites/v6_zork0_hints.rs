@@ -359,6 +359,136 @@ fn a_withdrawn_buffer_leaves_the_menu_grid_as_the_story_surface() {
     assert!(!any || seen > 0, "stories are present but none was read");
 }
 
+/// **A promoted menu grid is a RECT, not a transcript surface** (SQ-1026).
+///
+/// With no primary `Buffer` on the frame, `classify_windows` promotes the `Grid`
+/// filling the clear middle of the ring — the case pinned directly above. It does
+/// that for the RECT, so the ring has a viewport to lay out around, and the grid
+/// stays in `chrome` so its own topic runs still reach the canvas. Its own doc
+/// comment says as much: *"a `Grid` in this slot contributes its rect and nothing
+/// else"*, and lists the readers that pattern-match for a `Buffer` and decline
+/// otherwise.
+///
+/// `build_v6_raster_canvas` was not one of them. It took the promoted grid's box as
+/// a prose box and stamped the host transcript into it, so the whole scrollback was
+/// re-wrapped underneath the topics. Reported on Amiga Shogun **r295/890321** off
+/// `James Clavell's Shogun.adf`: 78 rows of transcript inside the 500x330 topic
+/// list at native (70, 70). The tell that settled it was the player's own
+/// `/dump-windows` output appearing inside the menu — only the HOST transcript can
+/// put that there, since the game never printed it.
+///
+/// **Hybrid was already right** and is the reason the rule is not invented here:
+/// `render_node` dispatches the story surface on its node kind, sending a `Buffer`
+/// to `render_transcript` and a `Grid` to `draw_grid`. This restores parity.
+///
+/// Asked by POISONING the transcript and requiring the canvas not to move: a
+/// hundred rows of a marker string reach a frame that must not show them, so the
+/// case says "the transcript does not reach this screen" rather than pinning any
+/// particular pixel. Guarded against passing vacuously on a blank canvas by
+/// requiring the menu's own topics to be on it — those come from `chrome` and must
+/// survive.
+///
+/// FALSIFY by removing the `WinNode::Buffer` guard in `build_v6_raster_canvas`: the
+/// two canvases diverge and `RasterMetrics` comes back `Some`, which is the report.
+#[test]
+fn a_promoted_menu_grid_is_not_a_transcript_surface_in_raster() {
+    let specimens: &[(&str, u16)] = &[("zork0-r393-s890714.z6", 393), ("shogun-r322-s890706.z6", 322)];
+    let mut seen = 0;
+    for (file, release) in specimens {
+        let path = stories_dir().join(file);
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: gitignored story missing at {}", path.display());
+            continue;
+        };
+        seen += 1;
+        let _g = app::v6_palette_at_boot();
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), *release, "{file} is not the pinned release");
+        let mut picts = PictSource::new(blorb::resolve_resource_blorb(&path).map(|(b, _)| b));
+        let dims = picts.all_pict_dims();
+        let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, picts.std_window(), None, None)
+            .expect("boots");
+        s.set_pict_source(Some(picts));
+        s.flush_boot_pictures();
+        let _ = s.take_transcript();
+        for _ in 0..8 {
+            match s.pending_input() {
+                InputKind::Line => break,
+                InputKind::Char => {
+                    let _ = s.submit_char(13);
+                }
+                InputKind::Event => {
+                    let _ = s.submit("");
+                }
+            }
+        }
+        s.submit("hint");
+        let entered = s.submit_char(b'y');
+        assert!(entered.fault.is_none(), "{file}: entering hints faulted: {:?}", entered.fault);
+
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("{file}: v6 publishes a layered composite") };
+        let cell = zvm::screen::V6Cell::DEFAULT;
+        let native = app::render::v6_layout::native_extent(items, cell);
+        let layout = app::render::v6_layout::classify_windows(items, cell);
+        // The premise, restated so this case cannot pass on a frame that never
+        // promoted anything: the story slot holds a Grid, and it is still chrome.
+        let story = layout.story.unwrap_or_else(|| panic!("{file}: a story surface"));
+        assert!(matches!(&story.node, WinNode::Grid(_)), "{file}: the promoted surface is a Grid");
+        let topics = match &story.node {
+            WinNode::Grid(g) => g.px_texts.len(),
+            _ => 0,
+        };
+        assert!(topics >= 8, "{file}: the menu carries its topics ({topics} runs)");
+
+        // Both honour modes: the guard must not be colour-dependent, and the ring's
+        // page IS.
+        for honor in [true, false] {
+            let state = |lines: usize| {
+                let mut st = app::state::AppState::default();
+                st.colors = app::colors::ColorScheme::terminal_default();
+                st.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+                st.config.v6_render = app::config::V6RenderMode::Raster;
+                st.config.honor_game_colours = honor;
+                st.transcript = (0..lines).map(|i| format!("ZZ transcript row {i} ZZ")).collect();
+                st.transcript_runs = vec![Vec::new(); lines];
+                st.transcript_images = vec![None; lines];
+                st
+            };
+            let (clean, m_clean) =
+                app::render::screen::build_v6_raster_canvas(&layout, native, &state(0));
+            let (poisoned, m_poisoned) =
+                app::render::screen::build_v6_raster_canvas(&layout, native, &state(100));
+            let where_ = format!("{file} honor={honor}");
+            assert!(
+                m_clean.is_none() && m_poisoned.is_none(),
+                "{where_}: there is no transcript on this frame, so no scroll metrics                  (got {m_clean:?} / {m_poisoned:?})"
+            );
+            assert!(
+                clean == poisoned,
+                "{where_}: a hundred rows of host transcript changed the menu screen —                  the promoted grid was taken for a prose box"
+            );
+            // Non-vacuity: the topics the grid carries really are on that canvas, so
+            // the equality above is not two blank images agreeing.
+            let (mx, my) = (u32::from(story.x_px), u32::from(story.y_px));
+            let (mw, mh) = (u32::from(story.w_px), u32::from(story.h_px));
+            let page = *clean.get_pixel(mx + mw / 2, my + mh - 2);
+            let rows: std::collections::BTreeSet<u32> = (my..(my + mh).min(clean.height()))
+                .filter(|&y| {
+                    (mx..(mx + mw).min(clean.width())).any(|x| *clean.get_pixel(x, y) != page)
+                })
+                .map(|y| (y - my) / u32::from(cell.h))
+                .collect();
+            assert!(
+                rows.len() >= 4,
+                "{where_}: the menu's own topics are drawn — only {} text row(s) carry ink",
+                rows.len(),
+            );
+        }
+    }
+    let any = specimens.iter().any(|(f, _)| stories_dir().join(f).is_file());
+    assert!(!any || seen > 0, "stories are present but none was read");
+}
+
 /// SQ-0937: every topic the game prints inside the story box reaches the screen,
 /// at every pane width — including the column that starts one pixel inside the
 /// box's left edge.

@@ -3960,6 +3960,27 @@ pub fn build_v6_raster_canvas(
             v6::draw_story_canvas_runs(&mut canvas, layout.story, ink, page, honor, &state.colors, &state.v6_text);
             return finish_v6_raster_canvas(canvas, page, raster_metrics);
         }
+        // **A `Grid` in the story slot contributes its RECT and nothing else**
+        // (SQ-1026). With no primary `Buffer` on the frame, `classify_windows`
+        // falls back to the `Grid` filling the clear middle of a ring of artwork —
+        // it wants the rect, so the ring has a viewport to lay out around, and the
+        // grid stays in `chrome` so its own runs still reach the canvas. Every
+        // reader that wants a BUFFER pattern-matches for one and declines
+        // otherwise; this was the one that did not, and the host transcript is the
+        // most buffer-shaped thing there is.
+        //
+        // Amiga Shogun r295/890321 is the report. Its InvisiClues screen publishes
+        // no buffer at all — a full-screen graphics frame plus three grids — so
+        // window 0 resolved to the 500x330 topic list at native (70, 70) and the
+        // whole scrollback was re-wrapped into it: 78 rows of it, under the topics.
+        // The tell that settled it was the player's own `/dump-windows` output
+        // appearing inside the menu, which only the HOST transcript can put there.
+        //
+        // No prose box and no scroll metrics, exactly as when a plate owns the
+        // screen — there is no transcript on this frame.
+        if !matches!(layout.story.map(|s| &s.node), Some(WinNode::Buffer(_))) {
+            return finish_v6_raster_canvas(canvas, page, raster_metrics);
+        }
         // Whether any prose belongs on THIS frame, and where (SQ-0707). An
         // absolutely-placed plate is drawn INSTEAD of prose, not under it: the
         // game erases, draws, and waits, so the narration is its own picture-less
