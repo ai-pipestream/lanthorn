@@ -27,7 +27,42 @@ group names is never built. Reaching one suite costs nothing extra, because the
 module path still carries the old filename: filter by **name** under nextest, as
 above, rather than by `--test`.
 
-**Full test gate** (run before any commit):
+**Which tests to run when.** COMPILATION dominates turnaround here, not the tests.
+Measured at 12 cores: a warm targeted suite is **5.8s** and the full gate **170s**,
+but the REBUILD after touching `app` is **151s** and after `zvm` **277s** — and a
+filtered run pays that too, because `-p app` links all fourteen group binaries
+whatever the filter selects. So selection roughly halves the loop (321s → 157s) and
+cannot do better than the build. The linker is already Apple's fast `ld-1267` and the
+volume is an SSD; neither is worth chasing.
+
+- **While iterating**, run the suites that cover what you touched — by NAME under
+  nextest (`cargo nextest run -p app v6_arthur_status`), never by `--test`, since the
+  module path still carries the old filename.
+- **Before you PUSH**, run the full gate below. Before the push that makes commits
+  public, not before every commit.
+- **GitHub Actions runs `cargo test` on every push** and is the real backstop — and
+  the only thing that can see a shared-process race, which per-test-process nextest
+  structurally cannot (see the palette section below).
+
+Where to look, by what you changed. Prefer more than the obvious one; these are the
+floor, not the ceiling:
+
+| changed | run at least |
+|---|---|
+| `crates/zvm/**` | `-p zvm`, plus the presses you touched (`v6_arthur_advent`, `v6_journey`, `v6_shogun`, `v6_zork0`) |
+| `crates/app/src/render/screen.rs` | `v6_render`, `v6_windows`, `zmachine_screen`, `zork_classic` |
+| `crates/app/src/render/v6_layout.rs` | `v6_render`, `v6_arthur_advent`, `v6_journey`, `v6_scopa` |
+| `crates/app/src/render/transcript.rs` | `zork_classic`, `zmachine_screen`, `-p app --lib` |
+| `crates/app/src/native_font.rs`, `crates/blorb/**` | `-p blorb`, `engines`, `v6_zork0` |
+| `crates/mapper/**` | `-p mapper`, `mapper_ui` |
+| anything touching the PALETTE | the gate **and** `cargo test --workspace` |
+
+**Two things have justified the full gate**, so do not let the loop above replace it
+before a push: a SEMANTIC merge conflict between two parallel lanes that was textually
+clean (one lane calling a signature the other had replaced), and the shared-process
+palette races of SQ-0904. Nothing narrower sees either.
+
+**Full test gate** (run before any push):
 
 ```sh
 cargo nextest run --workspace 2>&1 | grep -acE "^error(\[|:)| [1-9][0-9]* failed"
@@ -51,7 +86,8 @@ Three consequences of nextest's model worth knowing: it runs **each test in its 
 
 **Every writer now does, and there is no other way to write** (SQ-0987). Three locks on one route, and you only ever meet the first one that catches you: the shared lock is **private to `app`**, so a suite cannot take it raw — that is a compile error, not a convention; `app::v6_set_palette` is the only reachable setter and **panics** unless the calling thread holds a guard; and `palette_lock_discipline` fails any file under `tests/suites/` that reaches `zvm::screen::set_palette` directly, which is the one spelling the other two cannot see. So the two ways in are `let _g = app::v6_palette(p);` when the case can name its table at the lock site, and `let _g = app::v6_palette_at_boot();` when it cannot — thirty harnesses resolve an `InterpreterProfile` from a medium deep inside their own `boot()` and set `profile.palette()` there, several rows below where the lock is taken. `v6_palette_at_boot` is exactly `v6_palette(Standard)` with permission to name another table later: it still installs a known palette rather than leaving whatever was there, because "leave whatever was there" is how SQ-0958 happened. **Do not add a "lock now, set later" helper that skips that** — the pairing is the rule. The invariant this buys is that the palette outside the lock is always `Standard`, so the table a case inherits under `cargo test` is the one nextest's fresh process would have given it.
 
-**Clippy gate**: `cargo clippy --workspace --all-targets -- -D warnings` must be clean. It costs ~149s the first time after a test build (separate fingerprints, so it shares nothing) and ~0.3s when already warm — cheap to re-run, so re-run it rather than assuming.
+**Clippy gate** (before any push, alongside the test gate):
+`cargo clippy --workspace --all-targets -- -D warnings` must be clean. It costs ~149s the first time after a test build (separate fingerprints, so it shares nothing) and ~0.3s when already warm — cheap to re-run, so re-run it rather than assuming.
 
 ## Hard rules
 
