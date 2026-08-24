@@ -70,11 +70,48 @@ pub struct FaceRequest<'a> {
 }
 
 impl FaceRequest<'_> {
-    /// Native pixels per FACE pixel on this launch — [`InterpreterProfile::text_scale`]
-    /// with the request's own art scale, so no caller has to remember which of the
-    /// two densities a typeface is measured in (SQ-1039).
-    fn text_scale(&self) -> (u32, u32) {
-        self.profile.text_scale(self.art_scale.unwrap_or((1, 1)))
+    /// The archive's density, with `None` meaning an undoubled rendition — the
+    /// number every face space is resolved against (SQ-0790).
+    fn art(&self) -> (u32, u32) {
+        self.art_scale.unwrap_or((1, 1))
+    }
+
+    /// Native pixels per FACE pixel for a face off the player's own BOOT MEDIA,
+    /// which is not the number a face off the RELEASE's medium takes (SQ-1053).
+    ///
+    /// The Amiga is the machine where the two differ: its releases author a face
+    /// in the 320-wide picture space and its system topaz is drawn in the 640x200
+    /// hires mode, so this is (1, 2) on a doubled press where
+    /// [`InterpreterProfile::release_face_space`] gives (2, 2). Getting it from
+    /// the row instead is what would size topaz 8 as a 16x16 face and refuse it.
+    fn system_text_scale(&self) -> (u32, u32) {
+        self.profile.system_face_space().text_scale(self.art())
+    }
+}
+
+/// The space an admitted face's bitmaps are authored in, from WHERE IT CAME FROM
+/// and the machine drawing it.
+///
+/// # The provenance decides, not the machine alone
+///
+/// SQ-1053. One machine can want two different scales at once: the Amiga draws
+/// *Arthur*'s `char.data` in the picture space (its ten face rows are the
+/// twenty-row line `machine-screenshots/amiga-arthur-text.png` measures) and
+/// topaz in the 640x200 hires space (its eight rows are the sixteen-row line
+/// `machine-screenshots/amiga-shogun-game.png` measures). A single number per
+/// machine can express one of those and silently mis-scales the other.
+///
+/// It is derived from the ORIGIN the cascade already records rather than stored
+/// beside it, so a face re-tested against a changed profile — which is exactly
+/// what `reload.rs` does on every style reload — is re-scaled against the new
+/// machine instead of carrying the old one's answer forward.
+fn face_space(
+    profile: InterpreterProfile,
+    origin: Option<&FaceOrigin>,
+) -> zvm::interpreter::V6FaceSpace {
+    match origin {
+        Some(FaceOrigin::SystemDisk { .. }) => profile.system_face_space(),
+        Some(FaceOrigin::Release) | None => profile.release_face_space(),
     }
 }
 
@@ -88,11 +125,19 @@ impl FaceRequest<'_> {
 pub enum FaceOrigin {
     /// The story's own medium — the release shipped it.
     Release,
-    /// A boot disk the player put under `~/.lanthorn/`.
+    /// A boot MEDIUM the player put under `~/.lanthorn/` — a Mac OS System disk,
+    /// a Workbench floppy, or an Amiga Kickstart ROM (SQ-1053).
+    ///
+    /// A ROM is not a disk and the field names say "disk" anyway, because what
+    /// this records is the FILE that answered and the rung it answered on. There
+    /// is one system rung, not one per kind of medium, and a variant per medium
+    /// would be a second spelling of the same fact for every reader downstream to
+    /// match on.
     SystemDisk {
-        /// The disk image's filename.
+        /// The file's name, directly under `~/.lanthorn/`.
         disk: String,
-        /// How that disk names the face — `FONT 396`, `fonts/topaz/11`.
+        /// How that medium names the face — `FONT 396`, `fonts/topaz/11`,
+        /// `topaz/8`.
         name: String,
     },
 }
@@ -138,9 +183,13 @@ impl FaceSet {
     /// with a synthetic one, and `reload.rs`'s re-test against a changed profile.
     /// The RANKING is still `resolve`'s and this cannot express one, which is the
     /// point — there is no way to spell "system face" here.
-    pub fn release(face: BitmapFont, profile: InterpreterProfile) -> FaceSet {
+    pub fn release(
+        face: BitmapFont,
+        profile: InterpreterProfile,
+        art_scale: Option<(u32, u32)>,
+    ) -> FaceSet {
         let mut set = FaceSet::none();
-        set.admit(face, profile, FaceOrigin::Release);
+        set.admit(face, profile, art_scale.unwrap_or((1, 1)), FaceOrigin::Release);
         set
     }
 
@@ -177,8 +226,19 @@ impl FaceSet {
     /// has been admitted, which is every configuration that shipped before this:
     /// the Macintosh with no System disk keeps drawing all of its text in Monaco,
     /// byte for byte as it did.
-    fn admit(&mut self, face: BitmapFont, profile: InterpreterProfile, origin: FaceOrigin) {
-        match fit(&face, profile) {
+    fn admit(
+        &mut self,
+        face: BitmapFont,
+        profile: InterpreterProfile,
+        art_scale: (u32, u32),
+        origin: FaceOrigin,
+    ) {
+        // The face's OWN scale, from its provenance — see [`face_space`]. Judging a
+        // system face at the release space is what refused topaz 8 outright: at (2,
+        // 2) its eight rows measure sixteen NATIVE and its eight columns sixteen
+        // too, against an eight-wide cell (SQ-1053).
+        let scale = face_space(profile, Some(&origin)).text_scale(art_scale);
+        match fit(&face, profile, scale) {
             Some(FaceFit::Metric) => {
                 if self.body.is_none() || self.body_is_borrowed_alternate() {
                     self.body_origin = Some(origin);
@@ -212,11 +272,12 @@ impl FaceSet {
 /// 1. **the release's own face, on the story's own medium** — Arthur's Amiga
 ///    `char.data`, the Macintosh's `FONT` 524. It is the release's, so it is the
 ///    most specific thing anyone has;
-/// 2. **the machine's system face, off a boot disk the player supplied** — Geneva
-///    out of a Mac OS System file, topaz out of a Workbench `FONTS:` drawer. The
-///    machine NAMES it ([`InterpreterProfile::v6_system_face`]) and the player
-///    supplies it, so it is the machine's own face without lanthorn shipping a
-///    byte of it;
+/// 2. **the machine's system face, off a boot medium the player supplied** —
+///    Geneva out of a Mac OS System file, topaz out of a Workbench `FONTS:`
+///    drawer or, on the machine that keeps its real face there, out of a
+///    **Kickstart ROM** (SQ-1053). The machine NAMES it
+///    ([`InterpreterProfile::v6_system_face`]) and the player supplies it, so it
+///    is the machine's own face without lanthorn shipping a byte of it;
 /// 3. **the built-in**, which is no face at all here: [`FaceSet::none`] leaves the
 ///    renderer on `crate::render::vga16` exactly as before.
 ///
@@ -245,20 +306,23 @@ impl FaceSet {
 /// baselines 15 rows apart (y = 136, 151, 166, 181, 196, 211).
 ///
 /// The comparison is in NATIVE pixels, so it goes through the TEXT scale rather
-/// than the art scale (SQ-1039) — `(1, 1)` on every Macintosh press, the archive's
-/// on the Amiga. The Macintosh colour press cannot falsify that on its own and the
-/// monochrome one cannot falsify it at all.
+/// than the art scale (SQ-1039) — and the SYSTEM face's text scale, which on the
+/// Amiga is not the one its releases take (SQ-1053). `(1, 1)` on every Macintosh
+/// press; `(1, 2)` for topaz on a doubled Amiga press, which is what makes topaz
+/// 8's eight rows the sixteen-row line and topaz 11's eleven a refusal. The
+/// Macintosh colour press cannot falsify that on its own and the monochrome one
+/// cannot falsify it at all.
 pub fn resolve(request: &FaceRequest<'_>) -> FaceSet {
     let mut set = FaceSet::none();
     // Rung 1 — the release's own medium.
     if request.source == ProfileSource::Medium {
         if let Some(face) = release_face(request.story_path, request.entry) {
-            set.admit(face, request.profile, FaceOrigin::Release);
+            set.admit(face, request.profile, request.art(), FaceOrigin::Release);
         }
     }
-    // Rung 2 — the machine's own system face, off a disk the player supplied.
+    // Rung 2 — the machine's own system face, off a boot medium the player supplied.
     if let Some(disks) = request.disks {
-        let scale = request.text_scale();
+        let scale = request.system_text_scale();
         let cell = request.profile.v6_font_cell();
         for found in crate::system_fonts::named_faces_in(disks, request.profile) {
             if u32::from(found.font.height) * scale.1 != u32::from(cell.h) {
@@ -267,6 +331,7 @@ pub fn resolve(request: &FaceRequest<'_>) -> FaceSet {
             set.admit(
                 found.font,
                 request.profile,
+                request.art(),
                 FaceOrigin::SystemDisk { disk: found.disk, name: found.name },
             );
         }
@@ -382,16 +447,56 @@ pub enum FaceFit {
 /// Gating on the flag is what made SQ-1011 ship INERT: the face resolved, failed
 /// here, and the renderer silently kept `vga16` while four before/after frames came
 /// back byte-identical. Ask the question the renderer actually depends on — does
-/// every character a game prints advance by one cell. That same question, answered
-/// the other way, is what now admits the Amiga's.
-pub fn fit(face: &BitmapFont, profile: InterpreterProfile) -> Option<FaceFit> {
+/// every character a game prints advance by the same amount. That same question,
+/// answered the other way, is what now admits the Amiga's.
+///
+/// # The `scale` is the FACE's, and it is what lets topaz 8 in
+///
+/// SQ-1053. `scale` is native pixels per FACE pixel, resolved from the face's own
+/// provenance ([`face_space`]) — never the art scale, and never the machine's row
+/// on its own. A face IS the cell when it is the cell **once drawn**, and the
+/// Amiga's system topaz is 8x8 drawn at (1, 2), which is exactly the 8x16 that
+/// machine declares. Measured on `machine-screenshots/amiga-shogun-game.png`: ten
+/// distinct scanlines across a twenty-row band, ~8 native px per character.
+///
+/// The three tests below are separate on purpose, because collapsing them is how
+/// this admits something it must not:
+///
+/// * **fixed pitch** is "every printable glyph advances the SAME", asked of the
+///   face alone. It is deliberately not "advances by one cell": *Journey*'s and
+///   *Beyond Zork*'s 8x8 `Char.data` is a font-3 BOX-DRAWING set, not letters
+///   (SQ-1017), and folding the cell into this test would make it read as
+///   proportional and admit it as a typeface;
+/// * **the pitch fills the cell** — `advance * scale.0 == cell.w`;
+/// * **the bitmap fills the cell** — `width * scale.0 == cell.w` and
+///   `height * scale.1 == cell.h`.
+///
+/// A fixed-pitch face failing either of the last two declines, exactly as
+/// `fonts/topaz/11` does (8x11 is 22 native rows against a 16-row cell) and
+/// exactly as those font-3 sets do. Only a genuinely PROPORTIONAL face is admitted
+/// without measuring against the cell, because it has no single advance to measure
+/// — and the NAME filter in [`crate::system_fonts::named_faces_in`] is what keeps
+/// that door from swinging open for a Workbench display face, which is why it is
+/// load-bearing rather than decorative.
+pub fn fit(
+    face: &BitmapFont,
+    profile: InterpreterProfile,
+    scale: (u32, u32),
+) -> Option<FaceFit> {
     let cell = profile.v6_font_cell();
-    let uniform =
-        (b'!'..=b'~').all(|c| face.glyph(c).is_none_or(|g| u16::from(g.width) == cell.w));
-    if u16::from(face.width) == cell.w && u16::from(face.height) == cell.h && uniform {
-        return Some(FaceFit::Cell);
+    let mut advances = (b'!'..=b'~').filter_map(|c| face.glyph(c)).map(|g| u32::from(g.width));
+    // A face covering none of printable ASCII has no advance to disagree with
+    // itself, so it falls to the nominal cell below and is measured there.
+    let pitch = advances.next();
+    let fixed = pitch.is_none_or(|first| advances.all(|a| a == first));
+    if !fixed {
+        return Some(FaceFit::Metric);
     }
-    (!uniform).then_some(FaceFit::Metric)
+    let (sx, sy) = (scale.0.max(1), scale.1.max(1));
+    let fills = pitch.unwrap_or(u32::from(face.width)) * sx == u32::from(cell.w)
+        && u32::from(face.width) * sx == u32::from(cell.w)
+        && u32::from(face.height) * sy == u32::from(cell.h);
+    fills.then_some(FaceFit::Cell)
 }
 
 /// The Version 6 cell a machine declares once its own face has been admitted.
@@ -438,19 +543,18 @@ pub fn fit(face: &BitmapFont, profile: InterpreterProfile) -> Option<FaceFit> {
 /// place knows the machine's rule.
 pub fn declared_cell(
     profile: InterpreterProfile,
-    face: Option<&BitmapFont>,
+    faces: &FaceSet,
     art_scale: (u32, u32),
 ) -> zvm::screen::V6Cell {
     let cell = profile.v6_font_cell();
-    match face.and_then(|f| fit(f, profile).map(|k| (f, k))) {
+    // The TEXT scale, not the art scale (SQ-1039), and the BODY FACE'S text scale
+    // rather than the machine's (SQ-1053) — which is why this takes the whole
+    // `FaceSet` and not a bare face. The set records where each face came from, and
+    // the space follows the provenance: a face off the Amiga's own release medium
+    // scales with the artwork, one off a Kickstart ROM does not.
+    let text = face_space(profile, faces.body_origin()).text_scale(art_scale);
+    match faces.body().and_then(|f| fit(f, profile, text).map(|k| (f, k))) {
         Some((f, FaceFit::Metric)) => {
-            // The TEXT scale, not the art scale (SQ-1039). They are the same number
-            // on the Amiga — the only press with a typeface today, and one that
-            // draws it in the picture space — and they are not on the Macintosh,
-            // whose colour press doubles `CPic.data` while painting text at one
-            // native pixel per face pixel. `art_scale.1` there would declare Geneva
-            // 12's fifteen rows as thirty.
-            let text = profile.text_scale(art_scale);
             zvm::screen::V6Cell::new(cell.w, u16::from(f.height).saturating_mul(text.1 as u16))
         }
         _ => cell,
@@ -546,13 +650,15 @@ impl TextFace {
         faces: FaceSet,
         art_scale: Option<(u32, u32)>,
     ) -> TextFace {
-        // The TEXT scale (SQ-1039). Stored rather than the art scale because all
-        // three consumers of `scale` are text: the declared cell, the advance table
-        // below, and `render::bitfont`'s per-glyph blit. The artwork's own density
-        // travels separately, in `AppState::v6_art_scale`.
-        let scale = profile.text_scale(art_scale.unwrap_or((1, 1)));
-        let fit = faces.body().and_then(|f| fit(f, profile));
-        let cell = declared_cell(profile, faces.body(), scale);
+        // The TEXT scale (SQ-1039), and the BODY FACE'S rather than the machine's
+        // (SQ-1053). Stored rather than the art scale because all three consumers
+        // of `scale` are text: the declared cell, the advance table below, and
+        // `render::bitfont`'s per-glyph blit. The artwork's own density travels
+        // separately, in `AppState::v6_art_scale`.
+        let art = art_scale.unwrap_or((1, 1));
+        let scale = face_space(profile, faces.body_origin()).text_scale(art);
+        let fit = faces.body().and_then(|f| fit(f, profile, scale));
+        let cell = declared_cell(profile, &faces, art);
         let metric = match (faces.body(), fit) {
             (Some(f), Some(FaceFit::Metric)) => {
                 // Every byte carries a usable number, so `V6Metric` never has to
@@ -661,6 +767,24 @@ impl TextFace {
     pub fn draws_proportionally(&self, style: u8) -> bool {
         self.proportional()
             && !(style & zvm::screen::STYLE_FIXED_PITCH != 0 && self.faces.fixed().is_some())
+    }
+
+    /// Whether the face a `style` run draws with has to go through the SCALED,
+    /// per-glyph blit rather than being stamped 1:1 into the declared cell.
+    ///
+    /// Two faces need it and for different reasons (SQ-1053). A **proportional**
+    /// face is drawn at its own size because it has no single advance to stretch
+    /// to the cell — that is [`Self::draws_proportionally`]. A **fixed** face at a
+    /// scale other than (1, 1) is the cell, but only after its pixels are
+    /// replicated: the Amiga's topaz 8 is an 8x8 face on an 8x16 cell, every face
+    /// row drawn twice, which is what `machine-screenshots/amiga-shogun-game.png`
+    /// shows over `Erasmus`.
+    ///
+    /// Asked here rather than tested in `render::bitfont` so the rule has one home
+    /// — the same reason [`Self::draws_proportionally`] is. With no face at all
+    /// this is false whatever the scale says, because there is nothing to blit.
+    pub fn draws_scaled(&self, style: u8) -> bool {
+        self.face_for(style).is_some() && (self.draws_proportionally(style) || self.scale != (1, 1))
     }
 
     /// How that face may be drawn — see [`FaceFit`].

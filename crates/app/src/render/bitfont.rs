@@ -441,7 +441,12 @@ pub fn blit_glyph_styled(
     // prose beside it steps Geneva's own advances (SQ-1036). The rule is asked of
     // `TextFace` rather than tested here, because `zvm`'s pen has to answer it the
     // same way and two copies of one rule is SQ-1026/SQ-1035.
-    if let Some(t) = tf.filter(|t| t.draws_proportionally(style)) {
+    //
+    // A FIXED face at a scale is drawn here too (SQ-1053): the Amiga's system topaz
+    // is 8x8 on an 8x16 cell and needs each face row twice, which the cell blit
+    // below cannot do — its `f.height == ch` filter would decline it and quietly
+    // fall back to `vga16`. `draws_scaled` is that whole question, in one place.
+    if let Some(t) = tf.filter(|t| t.draws_scaled(style)) {
         if let Some((f, g)) = t.face_for(style).and_then(|f| {
             u8::try_from(u32::from(glyph)).ok().and_then(|c| f.glyph(c)).map(|g| (f, g))
         }) {

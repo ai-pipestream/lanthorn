@@ -1,6 +1,17 @@
-//! Typefaces on the user's OWN disk images under `~/.lanthorn/` — reported to
+//! Typefaces on the user's OWN boot media under `~/.lanthorn/` — reported to
 //! the browser's info panel, and supplied to the face cascade (SQ-1038,
-//! SQ-1037).
+//! SQ-1037, SQ-1053).
+//!
+//! # Media, not only disks
+//!
+//! Two of the three media a machine keeps its system face on are volumes and one
+//! is not. A Macintosh keeps Geneva in the System file on an HFS disk; an Amiga
+//! keeps `topaz/11` in a Workbench `FONTS:` drawer — and keeps **topaz 8**, the
+//! face its Version 6 interpreter actually painted prose with, in **Kickstart
+//! ROM**, which has no filesystem at all. A `.rom` under `~/.lanthorn/` is read
+//! here for that one reason (see [`ROM_EXTENSION`] and
+//! [`blorb::amiga_font::faces_in_rom`]); without it every Amiga rung declines and
+//! only *Arthur*, which ships its own face on its own floppy, ever gets one.
 //!
 //! This exists to make SQ-1038's fix visible: before it, `blorb::mac_font` and
 //! `blorb::amiga_font` refused every proportional system face (`Glyph::rows` was
@@ -27,10 +38,12 @@
 //!
 //! # One lookup, reused rather than rewritten
 //!
-//! Faces are found through [`blorb::mac_font::faces_in_fork`] and
-//! [`blorb::amiga_font::faces_in_volume`] — the same parsers
-//! `native_font::detected` calls for a story's own medium — rather than a third
-//! copy of the fitness question. SQ-1011 shipped inert twice because a fitness
+//! Faces are found through [`blorb::mac_font::faces_in_fork`],
+//! [`blorb::amiga_font::faces_in_volume`] and
+//! [`blorb::amiga_font::faces_in_rom`] — the same parsers
+//! `native_font::detected` calls for a story's own medium, and the LAST of those
+//! is the same `TextFont` reader as the middle one with its pointers relocated,
+//! not a second one — rather than a third copy of the fitness question. SQ-1011 shipped inert twice because a fitness
 //! rule existed in two places and correcting one left the other; there is no
 //! fitness rule here at all, only "does it parse", which is one function.
 //!
@@ -45,6 +58,13 @@
 //! fix for the same gap.
 
 use std::path::{Path, PathBuf};
+
+/// The extension a Kickstart ROM image carries. It is NOT in
+/// [`blorb::medium::image_extensions`] and must not be: that table is what the
+/// story browser offers to MOUNT, and a ROM is not a volume with a game on it.
+/// This module reads it for one thing — the Amiga's own system typeface, which
+/// lives in ROM and on no floppy (SQ-1053).
+const ROM_EXTENSION: &str = "rom";
 
 /// One typeface found on one of the user's own disks under `~/.lanthorn/`, as a
 /// person reads it.
@@ -231,7 +251,10 @@ fn scan_fonts(dir: &Path) -> Vec<UserFace> {
         let is_image = path
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|ext| blorb::medium::image_extensions().any(|known| known.eq_ignore_ascii_case(ext)));
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case(ROM_EXTENSION)
+                    || blorb::medium::image_extensions().any(|known| known.eq_ignore_ascii_case(ext))
+            });
         if !is_image {
             continue;
         }
@@ -277,17 +300,29 @@ fn faces_on(path: &Path, disk: &str, bytes: Vec<u8>) -> Vec<UserFace> {
     // platter_alone`), even though a font drawer never spans volumes the way a
     // paged Apple II release does: there is one seam, not one seam plus an
     // exception for callers that believe they don't need it.
+    //
+    // A KICKSTART ROM is the other Amiga boot medium, and it is NOT a volume — it
+    // has no filesystem, so it never reaches the mounter at all (SQ-1053). The
+    // machine's real topaz 8 is in there and on no floppy, which is why an Amiga
+    // story drew in `vga16` however many Workbench disks a player owned.
+    let amiga = |name: String, font: blorb::bitmap_font::BitmapFont| UserFace {
+        disk: disk.to_string(),
+        name,
+        mac_id: None,
+        machine: crate::interpreter::InterpreterProfile::Amiga,
+        font,
+    };
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case(ROM_EXTENSION)) {
+        return blorb::amiga_font::faces_in_rom(&bytes)
+            .into_iter()
+            .map(|(name, f)| amiga(name, f))
+            .collect();
+    }
     let Ok(mounted) = crate::disk_set::mount_at(path, bytes) else { return Vec::new() };
     let files = mounted.contents();
     blorb::amiga_font::faces_in_volume(files.iter().map(|(n, b)| (n.as_str(), b.as_slice())))
         .into_iter()
-        .map(|(name, f)| UserFace {
-            disk: disk.to_string(),
-            name,
-            mac_id: None,
-            machine: crate::interpreter::InterpreterProfile::Amiga,
-            font: f,
-        })
+        .map(|(name, f)| amiga(name, f))
         .collect()
 }
 

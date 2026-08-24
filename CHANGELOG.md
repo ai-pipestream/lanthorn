@@ -160,6 +160,42 @@ proportional text actually reaches: the status bar's right-hand date field
 overruns the end of its own bar, and Arthur's F5 crystal-ball description
 wraps later than the real machine did. Tracked as SQ-1009.
 
+### The Amiga's own typeface, out of a Kickstart ROM
+
+Drop a Kickstart dump — any `*.rom` — into `~/.lanthorn/` and *Shogun* and
+*Zork Zero* on their Amiga floppies are set in **topaz 8**, the face Infocom's
+Amiga interpreter actually painted prose with, instead of the built-in VGA
+substitute.
+
+It needs a ROM because topaz 8 is *only* in ROM. A Workbench 1.2/1.3 floppy's
+`FONTS:` drawer carries `topaz/11` and six proportional display faces — ruby,
+opal, sapphire, diamond, garnet, emerald — and no Infocom interpreter drew with
+any of them, which is why the boot-media cascade had a rung for the Amiga that
+declined every time. Nothing is shipped, nothing is copied and nothing is
+licensed: the ROM stays yours, exactly the arrangement `stories/` runs on, and
+with none there the built-in face answers as it always did.
+
+Zoom into `machine-screenshots/amiga-shogun-game.png` over `Erasmus` in "This is
+the bridge of the Erasmus" and the face is measurable: ten distinct scanlines
+across a twenty-row line, so every face row is drawn twice, and sixty pixels of
+underline across seven characters, so the pen steps eight. An 8×8 face at (1, 2)
+— exactly the 8×16 cell the machine declares, and exactly the Amiga's 640×200
+hires mode. *Arthur* keeps its own `char.data`, which is authored in the game's
+320-wide picture space and doubles with the artwork: **two faces on one machine
+wanting two different scales**, so which space a face is drawn in now follows
+where the face came from rather than which machine is drawing it.
+
+Nothing is pinned to a Kickstart revision. The image is identified by its length
+(256 KiB maps at `$FC0000`, 512 KiB at `$F80000` — every Kickstart ends at
+`$1000000`) and by the `JMP` it opens with, then swept for `TextFont`-shaped
+records that name themselves `<something>.font`; on Kickstart 1.2 that finds
+`topaz/8` and `topaz/9` and nothing else. It is the same parser and the same name
+rule that already read a font out of a `FONTS:` drawer, so "topaz, at the size
+whose line matches my cell" picks the right one without a rule written twice. A
+ROM off the internet is untrusted input and treated as such: truncated, flipped,
+encrypted or pointing into hyperspace, it is refused quietly rather than
+crashing a launch.
+
 ### Kitty terminals redraw faster
 
 A v6 graphics window, the chrome ring and the raster composite each keep the same

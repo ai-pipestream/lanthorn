@@ -134,7 +134,7 @@ impl MachineBoot {
             // a rule each of `startup.rs`, `reload.rs` and `reset.rs` remembers.
             cell: crate::native_font::declared_cell(
                 profile,
-                faces.body(),
+                &faces,
                 art_scale.unwrap_or((1, 1)),
             ),
             faces,
