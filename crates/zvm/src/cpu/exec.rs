@@ -4280,28 +4280,24 @@ impl Machine {
                     let (win_row, win_col) =
                         (cell.row_of(w.y_coord.max(1)), cell.col_of(w.x_coord.max(1)));
 
-                    // Both measures of the same text, as break INDICES so one pass
-                    // over the string can honour both: the PIXEL wrap is the game's
-                    // truth (it is what `@get_cursor` reports and what the raster
-                    // draws), the COLUMN wrap fills the hybrid backend's own width.
-                    // One routine, two calls — see `screen::wrap_text`.
-                    let px_breaks = crate::screen::wrap_text(
+                    // ONE measurement of the text in BOTH units, as break INDICES
+                    // (SQ-1009). The PIXEL measure is the game's truth — it is what
+                    // `@get_cursor` reports and what the raster draws — and the
+                    // COLUMN measure is what a cell backend can place. A line ends at
+                    // whichever fills first, and that break moves BOTH pens, so a
+                    // run's grid cell and its pixel origin agree character for
+                    // character. Two independent passes cannot promise that: each
+                    // assumes it is the only one breaking, and they swallow different
+                    // blanks. See `screen::wrap_text`.
+                    let breaks = crate::screen::wrap_text(
                         s,
-                        u32::from(w.x_cursor.max(1)),
-                        margin_px,
-                        limit_px,
+                        (u32::from(w.x_cursor.max(1)), u32::from(c)),
+                        (margin_px, u32::from(margin_col)),
+                        (limit_px, limit_cols),
                         word_wrap,
-                        &mut |ch| u32::from(metric.advance(glyph(ch), style)),
+                        &mut |ch| (u32::from(metric.advance(glyph(ch), style)), 1),
                     );
-                    let gr_breaks = crate::screen::wrap_text(
-                        s,
-                        u32::from(c),
-                        u32::from(margin_col),
-                        limit_cols,
-                        word_wrap,
-                        &mut |_| 1,
-                    );
-                    let (mut pi, mut gi) = (0usize, 0usize);
+                    let mut bi = 0usize;
                     let mut run: Option<crate::screen::V6Text> = None;
                     for (i, ch) in s.chars().enumerate() {
                         if ch == '\n' {
@@ -4323,29 +4319,19 @@ impl Machine {
                             c = margin_col;
                             continue;
                         }
-                        let px_here = px_breaks.get(pi).filter(|b| b.at == i).copied();
-                        if px_here.is_some() {
-                            pi += 1;
-                        }
-                        let gr_here = gr_breaks.get(gi).filter(|b| b.at == i).copied();
-                        if gr_here.is_some() {
-                            gi += 1;
-                        }
-                        // A run addresses ONE pixel origin and ONE grid cell, so
-                        // either measure breaking ends it.
-                        if px_here.is_some() || gr_here.is_some() {
+                        let here = breaks.get(bi).filter(|b| b.at == i).copied();
+                        if here.is_some() {
+                            bi += 1;
+                            // A run addresses ONE pixel origin and ONE grid cell, so
+                            // the break ends it — and moves both pens together.
                             if let Some(done) = run.take() {
                                 finished.push(done);
                             }
-                        }
-                        if px_here.is_some() {
                             if w.scrolling() {
                                 w.tick_line_count();
                             }
                             w.y_cursor = w.y_cursor.saturating_add(fh);
                             w.x_cursor = w.left_margin.saturating_add(1);
-                        }
-                        if gr_here.is_some() {
                             r = r.saturating_add(1);
                             c = margin_col;
                         }
@@ -4362,14 +4348,15 @@ impl Machine {
                                 continue; // clipped at the screen edge; cursor pinned
                             }
                         }
-                        // The blank a word wrap broke on is drawn on neither line,
-                        // and the two measures drop DIFFERENT blanks — so each side
-                        // asks its own.
+                        // The blank a word wrap broke on is drawn on neither line —
+                        // ONE blank now, dropped by both measures, which is what lets
+                        // the grid and the runs stay the same character sequence.
                         // Captured BEFORE the grid pen moves: this is the cell
                         // the run's first glyph is written at, and the tag has to
                         // name that one rather than the next.
                         let (cell_row, cell_col) = (r, c);
-                        if !gr_here.is_some_and(|b| b.consumed) {
+                        let consumed = here.is_some_and(|b| b.consumed);
+                        if !consumed {
                             if r > w.grid.rows
                                 && u32::from(r.saturating_sub(1)) * u32::from(fh)
                                     < u32::from(bound)
@@ -4379,7 +4366,7 @@ impl Machine {
                             w.grid.put(r, c, out_ch, style, fg, bg);
                             c = c.saturating_add(1);
                         }
-                        if !px_here.is_some_and(|b| b.consumed) {
+                        if !consumed {
                             run.get_or_insert_with(|| crate::screen::V6Text {
                                 y: w.y_coord.max(1).saturating_add(w.y_cursor.max(1)).saturating_sub(1),
                                 x: w.x_coord.max(1).saturating_add(w.x_cursor.max(1)).saturating_sub(1),

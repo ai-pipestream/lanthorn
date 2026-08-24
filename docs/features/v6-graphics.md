@@ -3140,7 +3140,12 @@ is itself traffic, so bytes-per-frame taken that way describes the palette's fra
   That is what puts Arthur's date field ten pixels inside its own score bar
   and wraps the F5 crystal-ball description exactly where a real Amiga wraps
   it, instead of thirty pixels past the bar's end and a word and a half late
-  (SQ-1009). The Macintosh doesn't get
+  (SQ-1009). The half-block and kitty backends take the same break rather
+  than re-wrapping to the story's declared column count, so a line reads the
+  same in hybrid as in raster and its right edge is honestly ragged; a run
+  carries the grid cell it was written at, and the cell and the pixel are
+  measured in one pass so they cannot disagree about which word ends a line
+  or which blank a wrap swallowed. The Macintosh doesn't get
   a proportional face at all yet — its games carry only Monaco (`FONT` 524), a
   monospaced stand-in; the real body face, Geneva, lives in the Macintosh
   System file that shipped with every Mac and no game, so there is nothing on

@@ -33,9 +33,14 @@
 //!    table the renderer draws with is what also puts the bar's right-hand date
 //!    field where the machine put it (the game right-aligns it from header `$30`)
 //!    and wraps the F5 description where the machine wraps it (`exec.rs` breaks the
-//!    line at the window's real pixel width). The hybrid backend keeps its own
-//!    measure: the character grid still fills the window's 73 DECLARED columns,
-//!    from the same wrap routine called with a different unit.
+//!    line at the window's real pixel width). **Both backends take that break.**
+//!    Hybrid was first given a second wrap of its own, so its grid could fill the
+//!    window's 73 declared columns while the runs kept the machine's 584-pixel
+//!    lines; two passes cannot agree character for character — each assumes it is
+//!    the only one breaking, and they swallow different blanks — so a word landed
+//!    on one row carrying the other's cell. One pass in both units now, breaking at
+//!    whichever fills first, which leaves hybrid's lines honestly shorter than the
+//!    window and identical to the machine's.
 //!
 //! # Fixtures
 //!
@@ -846,22 +851,35 @@ fn the_engine_wraps_the_description_where_the_machine_wraps_it() {
     assert_eq!(CAPTURE_IS_NATIVE_SCALE, 1, "a span in the capture is a span in native px");
 }
 
-/// **The hybrid grid keeps filling its own width, in DECLARED columns.**
+/// **The grid and the pixel runs are ONE layout** (SQ-1009).
 ///
-/// A v6 window carries two representations of one text and SQ-1009 made them
-/// disagree: the raster draws pixel-positioned runs at the face's advances, and
-/// hybrid draws terminal cells on the story's own grid. The user chose hybrid
-/// filling its own width rather than sharing raster's break points, so the same
-/// wrap routine is called twice with two measures —
-/// [`zvm::screen::wrap_text`] — and only the PIXEL wrap is the game's truth.
+/// A v6 window carries two representations of one text: the raster backend draws
+/// pixel-positioned runs at the face's advances, and a cell backend places the same
+/// characters on the story's grid. They are two units of one print, and they have to
+/// agree character for character — a run's grid cell is the address hybrid places it
+/// by, so a cell the pixel measure disagrees with draws a hole.
 ///
-/// So the grid still carries the 73-column lines it always did, while the runs
-/// beside it carry the machine's. Both come out of one print, and the case exists
-/// because "hybrid still works" is exactly what a pixel-only change silently breaks.
+/// This first shipped as two independent wrap passes, one per unit, on the theory
+/// that hybrid could fill the window's 73 DECLARED columns while raster kept the
+/// machine's 584-pixel breaks. It cannot, and the reason is structural rather than a
+/// slip: each pass assumes it is the only one breaking, so its indices are stale the
+/// moment the other breaks first, and the two swallow DIFFERENT blanks at a soft
+/// break, so their line-sets are not even the same character sequence. On this frame
+/// that put `in a`, `is a large` and `church entrance lies` on the next row while
+/// still tagged with the previous row's cell, at columns 68, 64 and 55 running off a
+/// 73-column window, and overwrote `churchyard`'s `d` with the `.` after it.
+///
+/// So there is one pass, one break list, and a break moves both pens. Hybrid wraps
+/// where the Amiga wrapped and its lines are honestly shorter than the window.
+///
+/// Falsified by restoring the second wrap: `grow` stops matching the row the run's
+/// own `y` falls in, and the overlap check below fails on the same three words.
 #[test]
-fn the_hybrid_grid_still_wraps_at_the_windows_own_columns() {
+fn the_hybrid_grid_and_the_pixel_runs_are_one_layout() {
     let _g = app::v6_palette_at_boot();
     let Some((mut session, state)) = in_the_churchyard() else { return };
+    assert!(state.v6_text.proportional(), "non-vacuity: the pen under test is the face's");
+    let cell = state.v6_text.cell();
 
     // The score bar first, because it is the case that needs the grid to keep its
     // OWN pen: Arthur prints it one character per call, so a column DERIVED from
@@ -891,35 +909,67 @@ fn the_hybrid_grid_still_wraps_at_the_windows_own_columns() {
         .find(|it| it.y_px == 0 && u32::from(it.w_px) == PROSE_WINDOW_PX)
         .expect("F5 opens a full-width description window at the top");
     let WinNode::Grid(g) = &win.node else { panic!("a v6 prose window is a Grid") };
-    let cols = PROSE_WINDOW_PX / u32::from(state.v6_text.cell().w);
-    assert_eq!(u32::from(g.cols), cols, "the grid is the window over the DECLARED width");
-    let grid_rows: Vec<String> = (1..=g.rows)
-        .map(|r| {
-            (1..=g.cols).map(|c| g.cell(r, c).ch).collect::<String>().trim_end().to_string()
-        })
-        .filter(|l| !l.is_empty())
-        .collect();
-    assert!(grid_rows.len() >= 5, "non-vacuity: the grid carries the description, got {grid_rows:?}");
-    // The same text, broken at 73 columns rather than at 584 pixels — so the grid's
-    // lines are LONGER in characters than the pixel-wrapped runs beside them.
-    // The window also carries the line that follows the description, so this is a
-    // prefix rather than an equality.
-    assert!(
-        grid_rows.join(" ").starts_with(DESCRIPTION),
-        "the grid holds the description, column-wrapped: {grid_rows:?}",
-    );
+    let cols = PROSE_WINDOW_PX / u32::from(cell.w);
+
+    // 1. Every run's grid ROW is the row its own pixel y falls in. This is the
+    //    invariant two passes cannot hold, and it is the one that put a word on the
+    //    wrong line.
+    let mut runs: Vec<&app::engine::PxText> =
+        g.px_texts.iter().filter(|t| !t.text.trim().is_empty()).collect();
+    assert!(runs.len() >= 8, "non-vacuity: F5's description arrives as several runs, got {runs:?}");
+    runs.sort_by_key(|t| (t.y, t.x));
+    for t in &runs {
+        assert_eq!(
+            t.grow,
+            cell.row_of(t.y),
+            "run {:?} at y={} is tagged row {} but its pixel lands on row {}",
+            t.text,
+            t.y,
+            t.grow,
+            cell.row_of(t.y),
+        );
+    }
+
+    // 2. No two runs on a row claim the same column — a dropped blank on one side
+    //    only shows up as an overlap, which is how the `.` came to sit on the `d`.
+    for pair in runs.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if a.grow != b.grow {
+            continue;
+        }
+        let a_end = u32::from(a.gcol) + a.text.chars().count() as u32;
+        assert!(
+            u32::from(b.gcol) >= a_end,
+            "{:?} ends at column {a_end} and {:?} starts at {} on row {}",
+            a.text,
+            b.text,
+            b.gcol,
+            a.grow,
+        );
+    }
+
+    // 3. Both representations are the same lines, and they fit the window.
     let px_rows = f5_rows(&win.node);
     assert!(
-        grid_rows[0].chars().count() > px_rows[0].chars().count(),
-        "the column wrap fits more characters on a line than the pen does: {:?} vs {:?}",
-        grid_rows[0],
-        px_rows[0],
+        px_rows.join(" ").starts_with(DESCRIPTION),
+        "the runs carry the description: {px_rows:?}",
     );
-    for l in &grid_rows[..grid_rows.len() - 1] {
+    for l in &px_rows {
         assert!(
             l.chars().count() <= cols as usize,
             "{l:?} is {} characters in a {cols}-column window",
             l.chars().count(),
+        );
+    }
+    let grid_rows: Vec<String> = (1..=g.rows)
+        .map(|r| (1..=g.cols).map(|c| g.cell(r, c).ch).collect::<String>().trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !grid_rows.is_empty() {
+        assert_eq!(
+            grid_rows[..px_rows.len().min(grid_rows.len())],
+            px_rows[..px_rows.len().min(grid_rows.len())],
+            "the grid and the runs are one layout, not two",
         );
     }
 }

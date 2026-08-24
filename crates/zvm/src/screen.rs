@@ -2602,106 +2602,120 @@ pub struct WrapBreak {
     pub consumed: bool,
 }
 
-/// Where `s` breaks under ONE measure, whatever that measure is — as character
-/// indices, so two measures of the same string can be walked together.
+/// Where `s` breaks — measured in PIXELS and in COLUMNS at once, as character
+/// indices into the printed string.
 ///
-/// # Why this is parameterised rather than written twice
+/// # Why one pass and not two
 ///
-/// A Version 6 window carries two representations of the same text and SQ-1009
-/// made them disagree. [`ZWindow::grid`] is the character grid the hybrid backend
-/// draws with terminal cells, measured in DECLARED columns; [`ZWindow::texts`] are
-/// the pixel-positioned runs the raster backend draws, measured in the face's real
-/// advances. At ~10.4 native pixels against a declared 8 they break in different
-/// places, and both break points are correct for their own surface.
+/// A v6 print has two measures of the same text. The PIXEL measure is the game's
+/// truth: it is what `@get_cursor` reports, what header `$30` records and what the
+/// raster backend draws. The COLUMN measure is what a terminal backend can
+/// actually place, one glyph per cell. On every machine whose pen IS the declared
+/// cell the two are the same statement twice; on Arthur's Amiga press, where the
+/// pen advances the face's own 3-to-11 pixels against a declared 8, they are not.
 ///
-/// So this is called twice per print — once with `advance` answering the pen and
-/// `limit` the window's pixel width, once with `advance` answering 1 and `limit`
-/// the column count — and the print loop walks both answers over one pass of the
-/// string. Two call sites of one function cannot drift; two functions will, and
-/// that drift is what made SQ-1026 and SQ-1035 a matched pair.
+/// Running them as two independent passes and correlating the answers afterwards
+/// does not work, and the reason is worth stating because it looks like it should
+/// (SQ-1009). Each pass assumes it is the only one breaking, so its indices are
+/// only valid until the other one breaks first — and they disagree about which
+/// blank a soft break swallows, so the two line-sets are not even the same
+/// character sequence. The observable result on Arthur's F5 description: the pixel
+/// measure fills the 584px window before the column measure fills its 73 columns,
+/// so every wrapped line ends with a word painted on the next row while still
+/// tagged with the previous row's cell, at columns 68, 64, 55 that run off the
+/// window — and `churchyard`'s `d` is overwritten by the `.` that follows it,
+/// because one measure dropped a blank the other kept.
 ///
-/// # Why INDICES and not laid-out lines
+/// So there is ONE pass, one break list, and a break moves both pens. A line ends
+/// at whichever limit is reached first, which on a proportional face is nearly
+/// always the pixel one — so hybrid wraps where the machine wrapped, and its lines
+/// are honestly shorter than the window rather than filled to a column count the
+/// game never used. A run's grid cell and its pixel origin then agree character
+/// for character, which is the invariant a cell backend needs and could not get.
 ///
-/// Because the caller has to correlate them. A soft break drops a space, and the
-/// two measures drop DIFFERENT spaces, so the two line-sets are not the same
-/// character sequence and cannot be matched up after the fact. Indices into the
-/// printed string are the one currency both answers share — which is what lets a
-/// printed run carry the grid CELL it was written at as well as the pixel it was
-/// drawn at, and those two facts have to agree character for character or hybrid
-/// draws holes.
-///
-/// * `at` — the 1-based unit position of the first character.
-/// * `margin` — the 1-based unit position a fresh line begins at
-///   (`left_margin + 1` in pixels; its column in the grid).
-/// * `limit` — the last usable unit on a line, inclusive. [`u32::MAX`] for a
-///   window with wrapping off, which never breaks.
+/// * `at` — the 1-based `(pixel, column)` position of the first character.
+/// * `margin` — the 1-based `(pixel, column)` a fresh line begins at
+///   (`left_margin + 1`, and its column).
+/// * `limit` — the last usable `(pixel, column)` on a line, inclusive.
+///   [`u32::MAX`] in both for a window with wrapping off, which never breaks.
 /// * `word_wrap` — ZMSD §8.8.3.1.2.2, wrapping AND buffered printing.
+/// * `advance` — one character's `(pixel, column)` cost. The column term is 1 for
+///   every glyph a grid holds; it is a parameter so the pair stays one value.
 ///
 /// Hard newlines are NOT reported: they are in the string, both measures honour
 /// them identically, and the caller sees them itself. They are still obeyed here,
-/// because a new line resets the position every later break depends on.
+/// because a new line resets the positions every later break depends on.
 ///
 /// The word-wrap probe fires at a space, and once at the very first character:
 /// the buffer spans one print call, exactly as it did before this was extracted.
 pub fn wrap_text(
     s: &str,
-    at: u32,
-    margin: u32,
-    limit: u32,
+    at: (u32, u32),
+    margin: (u32, u32),
+    limit: (u32, u32),
     word_wrap: bool,
-    advance: &mut dyn FnMut(char) -> u32,
+    advance: &mut dyn FnMut(char) -> (u32, u32),
 ) -> Vec<WrapBreak> {
     let chars: Vec<char> = s.chars().collect();
     let mut breaks = Vec::new();
-    let mut x = at;
+    let (mut x, mut col) = at;
     let mut i = 0;
     while i < chars.len() {
         let ch = chars[i];
         i += 1;
         if ch == '\n' {
-            x = margin;
+            (x, col) = margin;
             continue;
         }
-        // Measure the word about to start and break ahead of it if it cannot fit.
-        // Frotz buffers a word together with its leading space and drops that
-        // space at the break (`screen_word`), so a wrapped line does not begin
-        // with a stray blank. A word longer than a whole line is left to the
-        // character wrap below.
+        // Measure the word about to start and break ahead of it if it cannot fit
+        // under EITHER measure. Frotz buffers a word together with its leading
+        // space and drops that space at the break (`screen_word`), so a wrapped
+        // line does not begin with a stray blank. A word longer than a whole line
+        // is left to the character wrap below.
         if word_wrap {
             let at_space = ch == ' ';
             if at_space || i == 1 {
                 let start = if at_space { i } else { i - 1 };
-                let word: u32 = chars[start..]
-                    .iter()
-                    .take_while(|c| **c != ' ' && **c != '\n')
-                    .map(|c| advance(*c))
-                    .sum();
-                let need = word + if at_space { advance(' ') } else { 0 };
-                if word > 0
-                    && x > margin
-                    && word <= limit
-                    && x.saturating_add(need).saturating_sub(1) > limit
-                {
+                let (mut word, mut word_cols) = (0u32, 0u32);
+                for c in chars[start..].iter().take_while(|c| **c != ' ' && **c != '\n') {
+                    let (a, ac) = advance(*c);
+                    word += a;
+                    word_cols += ac;
+                }
+                let (sp, sp_cols) = if at_space { advance(' ') } else { (0, 0) };
+                let need = word + sp;
+                let need_cols = word_cols + sp_cols;
+                // Each measure judges itself against its own limit, and either one
+                // that cannot fit the word ends the line for both.
+                let px_full =
+                    word > 0 && x > margin.0 && word <= limit.0 && x.saturating_add(need).saturating_sub(1) > limit.0;
+                let col_full = word_cols > 0
+                    && col > margin.1
+                    && word_cols <= limit.1
+                    && col.saturating_add(need_cols).saturating_sub(1) > limit.1;
+                if px_full || col_full {
                     // `i - 1` is this character's own index. At a space the break
                     // consumes it and the new line starts on the word behind it;
                     // at the call's first character nothing is consumed.
                     breaks.push(WrapBreak { at: i - 1, consumed: at_space });
-                    x = margin;
+                    (x, col) = margin;
                     if at_space {
                         continue; // the break consumes the space
                     }
                 }
             }
         }
-        x = x.saturating_add(advance(ch));
+        let (a, ac) = advance(ch);
+        x = x.saturating_add(a);
+        col = col.saturating_add(ac);
         // The character wrap is a POST-check and deliberately so: a glyph that
         // ends exactly ON the limit is drawn on this line, and the break happens
         // after it. Checked ahead of the glyph instead, a run that exactly fills
         // its line would leave the cursor at the end of that line rather than at
         // the start of the next — which a story reads back through `@get_cursor`.
-        if x > limit {
+        if x > limit.0 || col > limit.1 {
             breaks.push(WrapBreak { at: i, consumed: false });
-            x = margin;
+            (x, col) = margin;
         }
     }
     breaks
