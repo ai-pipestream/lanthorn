@@ -497,6 +497,96 @@ fn a_bold_run_advances_by_the_faces_own_smear() {
     );
 }
 
+/// **The wrap has to measure the style it is going to DRAW in** (SQ-1050).
+///
+/// The raster prose wrap (`render::wrap_cache::raster_wrap_extend`) measured every
+/// row with `TextFace::run_px`, which is `run_px_styled(s, 0)` — the ROMAN pen —
+/// while `v6_layout::draw_story_text` steps each glyph by `advance_styled(ch,
+/// row_styles[col])`. Two different questions about one row, and on the one press
+/// with both a proportional face and a bold smear the answers differ by the smear.
+///
+/// The user's report is the line Arthur prints after the soldiers leave, reached
+/// through their `bold-overflow` state and reproduced here as the string alone so
+/// the wrap is the only variable. Measured on this floppy's own `char.data`:
+///
+/// | measure | width | vs the 584 px window |
+/// |---|---|---|
+/// | roman | 564 px | fits — so the wrap put all 62 characters on one row |
+/// | bold | 688 px | **104 px past the right edge**, thirteen characters' worth |
+///
+/// `zvm`'s own pen has measured with the style since SQ-1009 and breaks the same
+/// line inside the window, so this is the renderer disagreeing with the engine
+/// about a line they both lay out.
+///
+/// FALSIFY by putting `tf.run_px(&cur) + tf.advance(' ') + tf.run_px(word)` back in
+/// `raster_wrap_extend`: the line comes back as ONE row measuring 688 px drawn,
+/// which is the overflow as reported.
+///
+/// Colour-independent by construction — every number here is an advance — so it is
+/// not one of the areas that pins both `honor_game_colours` modes.
+#[test]
+fn a_bold_prose_line_wraps_at_the_width_it_will_be_drawn_at() {
+    let _g = app::v6_palette_at_boot();
+    let Some((_session, machine)) = boot() else { return };
+    let tf = machine.text_face();
+    const BOLD: u8 = 2;
+    const LINE: &str =
+        "[You have earned five experience points and two quest points.]";
+
+    // Non-vacuity, both halves: the string fits the window when measured ROMAN —
+    // so nothing but the style can make it wrap — and does NOT fit when measured
+    // as it will be drawn, so the defect is reachable at all.
+    assert!(
+        tf.run_px(LINE) <= PROSE_WINDOW_PX,
+        "roman, this line fits on one row ({} px in {PROSE_WINDOW_PX}) — that is what made          the wrap keep it there",
+        tf.run_px(LINE),
+    );
+    assert!(
+        tf.run_px_styled(LINE, BOLD) > PROSE_WINDOW_PX,
+        "and bold it does not ({} px) — otherwise this case proves nothing",
+        tf.run_px_styled(LINE, BOLD),
+    );
+
+    let mut state = raster_state(&machine);
+    state.transcript = vec![LINE.to_string()];
+    state.transcript_runs = vec![vec![app::state::StyleRun {
+        start: 0,
+        end: LINE.chars().count(),
+        bits: BOLD,
+        fg: 0,
+        bg: 0,
+        link: 0,
+        glk_style: 0,
+    }]];
+    state.transcript_images = vec![None];
+
+    let cols = (PROSE_WINDOW_PX / u32::from(tf.cell().w)) as u16;
+    let (main, _) = app::render::screen::build_main_text(&state, cols, 12);
+    let rows: Vec<(&String, u8)> = main
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.is_empty())
+        .map(|(r, l)| (l, main.styles.get(r).and_then(|v| v.first()).copied().unwrap_or(0)))
+        .collect();
+    assert!(!rows.is_empty(), "the line reached the wrap");
+    assert!(
+        rows.iter().all(|(_, st)| st & BOLD != 0),
+        "the emphasis survives the wrap — otherwise the widths below are measured roman          and the case tests nothing: {rows:?}"
+    );
+    for (row, style) in &rows {
+        assert!(
+            tf.run_px_styled(row, *style) <= PROSE_WINDOW_PX,
+            "a wrapped row is drawn inside its window: {} px of {PROSE_WINDOW_PX} for {row:?}",
+            tf.run_px_styled(row, *style),
+        );
+    }
+    // …and it is the WRAP doing it, not a truncation: put back together, the rows
+    // are the line the game printed.
+    let rejoined = rows.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>().join(" ");
+    assert_eq!(rejoined, LINE, "the rows are the whole line, wrapped — nothing was dropped");
+}
+
 // ── 5. what the machine did that a DECLARED width cannot ─────────────────────
 
 /// The room description as Arthur prints it, transcribed from the runs the F5

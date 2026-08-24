@@ -512,12 +512,49 @@ pub(crate) fn raster_wrap_extend(cache: &mut RasterWrapCache, state: &AppState, 
         };
         // Word-wrap with per-row width: rows beside an active float are narrower.
         let tf = &state.v6_text;
+        // **A row is measured in the style it will be DRAWN in** (SQ-1050).
+        //
+        // `run_px` is `run_px_styled(s, 0)` — the ROMAN pen — and `draw_story_text`
+        // steps each glyph by `advance_styled(ch, row_styles[col])`. So the wrap
+        // was asking a different question than the draw answered, and a bold row
+        // ran past the edge by exactly the smear it had not been measured with.
+        //
+        // Amiga Arthur is the report (the user's `bold-overflow` state, r54/890606
+        // off `Arthur - The Quest for Excalibur.adf`, one `wait` after the restore):
+        // `[You have earned five experience points and two quest points.]` measures
+        // **564 px roman**, fits the 584 px box, and is drawn at **688 px** — 104 px
+        // past the right edge, thirteen characters' worth. `zvm`'s own pen, which
+        // has measured with the style since SQ-1009, breaks the same line at 50
+        // characters / 574 px, which is the answer this now agrees with.
+        //
+        // Italic costs nothing here and is measured all the same: `V6Metric::advance`
+        // widens for `STYLE_BOLD` only, so an italic row answers the roman width on
+        // both sides and stays byte-identical. `line_bits` carries no other bit —
+        // reverse and fixed-pitch are masked off above — so this cannot reach for a
+        // fixed alternate the prose is not drawn with.
+        let span_px = |from: usize, s: &str| -> u32 {
+            match &line_bits {
+                Some(bits) => s
+                    .chars()
+                    .enumerate()
+                    .map(|(j, c)| tf.advance_styled(c, bits.get(from + j).copied().unwrap_or(0)))
+                    .sum(),
+                None => tf.run_px(s),
+            }
+        };
+        // The separating blank is the source line's own character, so it is measured
+        // at ITS bits too — a bold space is a wider space.
+        let gap_px = |at: usize| -> u32 {
+            let bit = line_bits.as_ref().and_then(|b| b.get(at).copied()).unwrap_or(0);
+            tf.advance_styled(' ', bit)
+        };
         let mut cur = String::new();
         let mut cur_start = 0usize; // source char offset of `cur`'s first char
         let mut src = 0usize; // source char offset of `word`
         for word in line.split(' ') {
             let width = (cols.saturating_sub(reserve_at(floats, wrapped.len())).max(1) as u32) * font_w;
-            if !cur.is_empty() && tf.run_px(&cur) + tf.advance(' ') + tf.run_px(word) > width {
+            let gap = src.checked_sub(1).map_or_else(|| tf.advance(' '), gap_px);
+            if !cur.is_empty() && span_px(cur_start, &cur) + gap + span_px(src, word) > width {
                 let n = cur.chars().count();
                 wrapped.push(std::mem::take(&mut cur));
                 let row = wrapped.len() - 1;
