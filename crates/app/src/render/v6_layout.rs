@@ -2786,6 +2786,127 @@ mod tests {
     use crate::engine::{BorderPref, BufferWindow, GraphicsWindow, GridCell, GridWindow, PxText};
     use std::sync::Arc;
 
+    /// **The over-art question belongs to a GLYPH, not to a joined chain** (SQ-1052).
+    ///
+    /// `region_has_opaque` answers *"is ANY pixel in this rectangle opaque?"* — a
+    /// fair question about one character cell and a meaningless one about a long
+    /// run. It was safe while a v6 grid published ONE RUN PER CHARACTER, because
+    /// every probe was then one cell wide, and stopped being safe when
+    /// [`pen_chains`] began joining those runs into lines for a proportional pen.
+    ///
+    /// This is the RULE, on a canvas built here so it holds whatever any shipped
+    /// game happens to publish. The real-media half is
+    /// `v6_arthur_status::mac_arthur_raster_score_bar_is_one_ribbon_not_the_location_alone`,
+    /// which needs the Macintosh's own Geneva and therefore a boot disk the repo
+    /// cannot carry — so this case is the one that runs everywhere, and the two
+    /// together are the pair CLAUDE.md asks for.
+    ///
+    /// The frame: one inherited-reverse row of single-character runs laid at the
+    /// pen's own advances, so they join into a single chain, over frame art that is
+    /// opaque in ONE ten-pixel patch near the right end.
+    ///
+    /// FALSIFY by hoisting the probe back out of the glyph loop and asking it once
+    /// per run over `cell.run_px(&t.text).max(font_w)`: the patch condemns the whole
+    /// chain, every cell takes SQ-0487's no-block arm, and the bar comes out as
+    /// page — which is the reported screen.
+    #[test]
+    fn a_joined_reverse_chain_resolves_its_block_per_glyph_not_per_run() {
+        let profile = crate::interpreter::InterpreterProfile::Macintosh;
+        // A varying pen is the whole precondition: without one nothing joins and
+        // the defect cannot exist. Synthetic, because the Macintosh's own body face
+        // ships with the machine and with no game (SQ-1036).
+        // Inked on ONE row, not solid: a glyph must carry SOME ink to count as
+        // defined (a blank one measures as a zero advance), and a solid one would
+        // paint over the very block this case is about.
+        let glyph = |w: u8| blorb::bitmap_font::Glyph {
+            width: w,
+            rows: (0..15).map(|r| if r == 12 { 0xFF } else { 0x00 }).collect(),
+        };
+        let font = blorb::bitmap_font::BitmapFont {
+            width: 11,
+            height: 15,
+            baseline: 12,
+            bold_smear: 0,
+            proportional: true,
+            lo: b' ',
+            glyphs: (b'\x20'..=b'\x7e').map(|c| glyph(3 + (c % 9))).collect(),
+        };
+        let tf = crate::native_font::TextFace::new(
+            profile,
+            crate::native_font::FaceSet::release(font, profile, Some((1, 1))),
+            Some((1, 1)),
+        );
+        assert!(tf.proportional(), "the precondition: a pen that varies");
+        let (cw, ch) = (u32::from(tf.cell().w), u32::from(tf.cell().h));
+
+        // The art: transparent everywhere but one patch, which is what a frame's
+        // own rule or a pole looks like to the probe.
+        const ART_X: u32 = 500;
+        const PY: u32 = 195;
+        let mut art = image::RgbaImage::new(640, 400);
+        for y in PY..PY + ch {
+            for x in ART_X..ART_X + 10 {
+                art.put_pixel(x, y, Rgba([9, 9, 9, 255]));
+            }
+        }
+        let frame = PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(GraphicsWindow { win: 7, canvas: Arc::new(art), version: 0, upscale: false }),
+        };
+
+        // The bar: one reversed run per character at the pen's own positions, so
+        // `pen_chains` joins them into ONE chain reaching past the patch.
+        let bar = "Churchyard                                                        Compline";
+        let mut px_texts = Vec::new();
+        let mut pen = 28u32;
+        for c in bar.chars() {
+            px_texts.push(PxText {
+                y: PY as u16 + 1,
+                x: pen as u16 + 1,
+                text: c.to_string(),
+                style: 1, // reverse, inherited colours — SQ-0487's arm
+                fg: 0,
+                bg: 0,
+                grow: 13,
+                gcol: ((pen - 28) / cw) as u16,
+            });
+            pen += tf.advance_styled(c, 1);
+        }
+        assert!(pen > ART_X + 10, "the chain must reach past the patch (ended at {pen})");
+        let mut grid = grid_item(28);
+        grid.y_px = PY as u16;
+        grid.w_px = 584;
+        grid.h_px = ch as u16;
+        match &mut grid.node {
+            WinNode::Grid(g) => g.px_texts = px_texts,
+            _ => unreachable!(),
+        }
+
+        let chrome: Vec<&PositionedWindow> = vec![&frame, &grid];
+        let fg = Rgba([220, 220, 220, 255]);
+        let canvas = build_chrome_canvas(
+            &chrome, (640, 400), fg, Rgba([0, 0, 0, 255]), &colors(), TextLayer::All, &tf,
+        );
+
+        // Counted rather than sampled: a proportional pen can advance further than
+        // the declared cell a block is drawn at, so the ribbon inside a chain is
+        // blocks with hairlines between them rather than one solid fill. What
+        // separates the two answers is not a pixel, it is whether the blocks are
+        // there at all.
+        let mid = PY + ch / 2;
+        let block_px = |xs: std::ops::Range<u32>| xs.filter(|&x| *canvas.get_pixel(x, mid) == fg).count();
+        let clear = block_px(100..400);
+        assert!(
+            clear > 150,
+            "glyphs clear of the artwork paint their reversed blocks — one opaque patch 500 px away must not speak for them (only {clear} of 300 px)",
+        );
+        // …and the cells ON the patch still do not, which is the rule SQ-0487 added
+        // and this must not undo.
+        let over = block_px(ART_X..ART_X + 10);
+        assert_eq!(over, 0, "a glyph over the artwork still draws ink on it rather than a block");
+    }
+
     fn grid_item(x_px: u16) -> PositionedWindow {
         PositionedWindow {
             x: 0, y: 0, w: 1, h: 1, x_px, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,

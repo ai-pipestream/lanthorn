@@ -603,19 +603,37 @@ fn arthur_screen_swaps_do_not_move_the_frame() {
 
 // ── the MACINTOSH press, in RASTER (SQ-1052) ─────────────────────────────────
 
-/// Arthur off `InfocomMasterpieces.img`, the Macintosh compilation volume — the
-/// press whose face is PROPORTIONAL, which is what makes it the one that can
-/// falsify SQ-1052.
+/// Arthur off `InfocomMasterpieces.img`, the Macintosh compilation volume, drawn
+/// with the PROPORTIONAL body face — the configuration that reproduces SQ-1052.
+/// The bare `.z6` under `--interpreter 3` renders the same bar correctly and
+/// cannot reproduce it at all.
 ///
-/// Booted the way `startup.rs` boots (SQ-0901): the profile from the medium, the
-/// face cascade off that same medium, and every per-machine fact through one
-/// [`app::machine_boot::MachineBoot`] — so the 7x15 cell, the (2, 2) art scale and
-/// the release's own `FONT 524` all reach the story and the renderer together.
-/// Skip vacuously when the gitignored volume is absent.
+/// # This case cannot run everywhere, and says so rather than pretending
+///
+/// The volume's OWN face is `FONT` 524, a fixed 7x15 — a fixed pen joins nothing,
+/// so the defect does not exist under it. What the machine actually drew with is
+/// **Geneva**, and Geneva ships with the machine and with no game (SQ-1036): it
+/// lives in a System file that no medium under `stories/` carries and the repo
+/// cannot redistribute. So the pen this needs comes from a boot disk in the
+/// player's own `~/.lanthorn/`, and where there is none the case **skips with a
+/// message** instead of asserting something untrue about the volume.
+///
+/// A synthetic face is not a substitute here and was tried: with different
+/// advances the GAME lays its bar out differently — 76 runs against the real 123,
+/// and a padding chain that stops short of the frame art — so the frame under test
+/// is no longer the frame that was reported. The RULE is pinned unconditionally
+/// instead, by
+/// `render::v6_layout::tests::a_joined_reverse_chain_resolves_its_block_per_glyph_not_per_run`,
+/// which builds its own canvas and runs on every machine. This is that pair's
+/// real-media half: it proves a shipped game publishes the shape.
+///
+/// Booted the way `startup.rs` boots (SQ-0901) — the profile from the medium, the
+/// face cascade off that medium and the player's disks, and every per-machine fact
+/// through one [`app::machine_boot::MachineBoot`].
 ///
 /// **Turn count: 12** blank lines / returns from cold, which answers the restore
-/// question and lands in the Churchyard with the bar painted (SQ-0883 — say how
-/// you got to a frame, because a frame is a fixture).
+/// question and lands in the Churchyard with the bar painted (SQ-0883 — say how you
+/// got to a frame, because a frame is a fixture).
 fn mac_arthur_at_status(honor: bool) -> Option<(app::session::GameSession, app::native_font::TextFace)> {
     const ENTRY: &str = "InfocomMasterpieces/ARTHUR FOLDER/STORY.DATA";
     let path = stories_dir().join("InfocomMasterpieces.img");
@@ -625,6 +643,7 @@ fn mac_arthur_at_status(honor: bool) -> Option<(app::session::GameSession, app::
     }
     let (profile, source) =
         app::interpreter::InterpreterProfile::resolve_with_source(&path, None, None, None);
+    assert_eq!(profile, app::interpreter::InterpreterProfile::Macintosh, "the volume names the machine");
     app::v6_set_palette(profile.palette());
     let bytes = match app::hints::load_mounted_story_from(&path, Some(ENTRY)).ok()?.0 {
         app::hints::LoadedStory::ZCode(b) => b,
@@ -633,6 +652,8 @@ fn mac_arthur_at_status(honor: bool) -> Option<(app::session::GameSession, app::
     let mut picts = PictSource::resolve_with_override(&path, app::graphics::PictureOverride::Unset, Some(ENTRY));
     let picture_dims = picts.all_pict_dims();
     let honoured = honor && !picts.declines_game_colours(profile.default_colours());
+    // The player's own media, deliberately: see the header. `UserDisks::new` reads
+    // `~/.lanthorn/` whatever key it is given, so this is the real cascade.
     let disks = app::system_fonts::UserDisks::new("");
     let faces = app::native_font::resolve(&app::native_font::FaceRequest {
         story_path: &path,
@@ -652,7 +673,15 @@ fn mac_arthur_at_status(honor: bool) -> Option<(app::session::GameSession, app::
     );
     assert_eq!(boot.cell, zvm::interpreter::MACINTOSH_V6_CELL, "the Macintosh's 7x15 cell");
     let face = boot.text_face();
-    assert!(face.proportional(), "the volume's own FONT is the proportional face SQ-1052 needs");
+    if !face.proportional() {
+        eprintln!(
+            "SKIP: no Macintosh System disk in ~/.lanthorn/, so the body face is the \
+             volume's fixed FONT 524 and no run chain forms. The rule this case covers \
+             is pinned unconditionally by render::v6_layout::tests::\
+             a_joined_reverse_chain_resolves_its_block_per_glyph_not_per_run.",
+        );
+        return None;
+    }
     let mut session = app::session::GameSession::new_for_machine(
         bytes, honoured, false, false, picture_dims, None, None, &boot,
     )
