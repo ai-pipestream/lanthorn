@@ -2458,16 +2458,37 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
         // with no `styles` entry — or a char past its end — is roman.
         let row_styles = main.styles.get(row as usize);
         // The pen starts at the float's text column and advances per glyph
-        // (SQ-1009). `build_main_text` has already wrapped this row to the pixels
-        // available, so the take() below only ever clips a row nothing wrapped.
+        // (SQ-1009), and the row is CLIPPED BY PIXELS — the same budget
+        // `build_main_text` wrapped it to.
+        //
+        // This used to be `line.chars().take(avail)`, a CHARACTER cap, on the
+        // reasoning that the wrap had already fitted the row so the cap could only
+        // ever catch a row nothing wrapped. That holds exactly while one character
+        // costs one column. It stops holding the moment the pen is proportional: the
+        // wrap packs whatever FITS in `avail * font_w` pixels, and Geneva at about
+        // 6.4px against a declared 7 fits SEVENTY-TWO characters into a 66-column
+        // box — so the cap threw the last six away and the line lost its tail with
+        // the space still visibly there. Measured on Zork Zero's Banquet Hall off
+        // `stories/Zork Zero Disk.image`, raster, where `…the thousands of reveling`
+        // was drawn as `…the thousands of reveli` and `to the west` as `to th`
+        // (SQ-1051).
+        //
+        // A pixel cap keeps the guarantee the character cap was there for — a row
+        // that was never wrapped still cannot run past its box — without discarding
+        // glyphs the wrap correctly fitted.
         let mut pen = ox + text_col * font_w;
+        let row_limit = pen + avail * font_w;
         let py = oy + row * font_h;
-        for (col, glyph) in line.chars().take(avail as usize).enumerate() {
+        for (col, glyph) in line.chars().enumerate() {
             let style = row_styles.and_then(|s| s.get(col)).copied().unwrap_or(0);
+            let adv = tf.advance_styled(glyph, style);
+            if pen + adv > row_limit {
+                break;
+            }
             if !blocked(pen, py) {
                 crate::render::bitfont::blit_glyph_styled(canvas, glyph, pen, py, font_w, font_h, fg, None, style, Some(tf));
             }
-            pen += tf.advance_styled(glyph, style);
+            pen += adv;
         }
         last_row_px = pen - ox;
         row += 1;

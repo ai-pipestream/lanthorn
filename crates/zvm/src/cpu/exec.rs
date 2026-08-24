@@ -4047,16 +4047,51 @@ impl Machine {
         };
         let idx = (v6.current as usize).min(7);
         let w = &mut v6.windows[idx];
-        for ch in s.chars() {
+        // **Prose breaks between WORDS, not between letters** (SQ-1049).
+        //
+        // This used to test each glyph against the right edge on its own and drop a
+        // line the moment one did not fit, which is a character wrap — ZMSD
+        // §8.8.3.1.2.2 asks a WRAPPING, BUFFERED window for a word one. The paint
+        // path one screen regime over has always asked `screen::wrap_text` for
+        // exactly that; this path had its own loop and therefore its own answer, and
+        // two implementations of one rule drift, which is the whole of SQ-1009.
+        //
+        // It stayed invisible while every machine's pen was its declared cell,
+        // because the shadow these positions feed is only READ when a window is
+        // frozen. A proportional pen makes it visible: the Macintosh admitting Geneva
+        // put Zork Zero's Banquet Hall on screen as `…his most trusted adv` / `isors.`
+        // and `we'll in` / `crease the tax levy`, in raster, on both presses.
+        //
+        // The bound is the window's own `x_size - right_margin` (§8.8's property 7),
+        // and the COLUMN limit rides along so a run can never outgrow the grid a cell
+        // backend has to place it on — the same pair, in the same order, that the
+        // paint path passes.
+        let right_edge = w.x_size.saturating_sub(w.right_margin);
+        let cols = u32::from(right_edge / cell.w.max(1));
+        let breaks = crate::screen::wrap_text(
+            s,
+            (u32::from(w.x_cursor.max(1)), u32::from(w.grid_cursor(cell).1)),
+            (u32::from(w.left_margin.saturating_add(1)), 1),
+            if w.wrapping() { (u32::from(right_edge), cols) } else { (u32::MAX, u32::MAX) },
+            w.wrapping() && w.buffered(),
+            &mut |c| (u32::from(metric.advance(c, style)), 1),
+        );
+        let mut bi = 0usize;
+        for (i, ch) in s.chars().enumerate() {
             if ch == '\n' {
                 w.prose_new_line(cell);
                 continue;
             }
-            let adv = metric.advance(ch, style);
-            let right_edge = w.x_size.saturating_sub(w.right_margin);
-            if w.x_cursor.saturating_add(adv).saturating_sub(1) > right_edge {
+            let here = breaks.get(bi).filter(|b| b.at == i).copied();
+            if here.is_some() {
+                bi += 1;
                 w.prose_new_line(cell);
+                // The blank a word wrap broke on is drawn on neither line.
+                if here.is_some_and(|b| b.consumed) {
+                    continue;
+                }
             }
+            let adv = metric.advance(ch, style);
             // Shadow where this glyph landed, so the prose can be frozen in place
             // if the window is later moved or resized (SQ-0697, ZMSD §15 —
             // "does not change the current display"). Recorded at the cursor,

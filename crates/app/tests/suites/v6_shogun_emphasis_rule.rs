@@ -107,7 +107,19 @@ fn boot(file: &str, release: u16, serial: &str) -> Option<(GameSession, app::mac
     app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
-    let face = app::native_font::resolve(&path, None, profile, source);
+    // `disks: None` on purpose: a case here must not depend on what the person
+    // running it keeps in `~/.lanthorn/` (SQ-1037). Shogun carries no typeface on
+    // either press, so every rung declines and the built-in answers — which is what
+    // this suite wants, since it is measuring where the STYLE BIT goes and not which
+    // face draws it.
+    let face = app::native_font::resolve(&app::native_font::FaceRequest {
+        story_path: &path,
+        entry: None,
+        profile,
+        source,
+        art_scale: picts.art_scale(),
+        disks: None,
+    });
     let machine = app::machine_boot::MachineBoot::resolve(
         profile,
         &picts,
