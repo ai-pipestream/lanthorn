@@ -3245,6 +3245,38 @@ header claiming an enormous glyph, a ROM with a pointer into hyperspace, a file
 only pretending to be a volume — every one of them is refused quietly, without a
 panic, an unbounded allocation, or a game that won't start.
 
+### And `/dump-windows` says which face won
+
+All of that resolves once, at launch, out of sight — so when a line breaks in the
+wrong place the first question is whether the wrong face was admitted or the right
+one was measured wrong, and until now the dump could not tell you. It reports the
+answer above the windows, once, because the face is a launch fact and every window
+shares it:
+
+```
+  face: one launch fact — every window below is set in it
+    body: 10x10px from the release's own medium · fit Metric
+    fixed: none — a fixed-pitch run takes the body face
+    declared cell 8x20px · text scale 2x2 native px per face px
+    pen: proportional 4–18px over printable ASCII · bold +2px (smear 1)
+```
+
+That is *Arthur* off its Amiga floppy. Point it at the Macintosh compilation
+volume with a System disk in `~/.lanthorn/` and the same five lines name two
+different faces off two different media — `body: 15x15px from
+MacOS_6.0.8_System_Startup.img · FONT 396`, `fixed: 7x15px from the release's own
+medium` — which is the split described above, stated rather than inferred. With no
+face at all the body line says so and names the built-in.
+
+The three sizes are on one line on purpose, because they are the three that get
+confused for one another: what the face *is*, what the story was *told*, and the
+scale between them. A Macintosh colour press doubles its artwork and not its text,
+so `2x2` on that line would be a real defect wearing a plausible number.
+
+Each window then reports the font properties the *game* can read back — §8.8.3.2's
+properties 12 and 13 — against that declared cell, so a window a story re-sized for
+itself stands out from seven that never touched theirs.
+
 ## Not yet there
 - **Proportional fonts, one machine so far.** Arthur's Amiga floppy carries a
   real proportional typeface, and lanthorn draws it at the face's own per-glyph

@@ -208,6 +208,15 @@ impl FaceSet {
         self.body_origin.as_ref()
     }
 
+    /// Where the fixed-pitch alternate came from — the other half of the same
+    /// question, and not the same answer: the Macintosh's release medium supplies
+    /// the alternate and a player's System disk the body (SQ-1036), so a report
+    /// that showed only one of them would name the wrong disk half the time
+    /// (SQ-1047).
+    pub fn fixed_origin(&self) -> Option<&FaceOrigin> {
+        self.fixed_origin.as_ref()
+    }
+
     /// Whether `face` is one of the two this set actually draws with — what the
     /// info panel's `used` column asks, and asked of the CASCADE's answer rather
     /// than re-derived (see [`detected`]).

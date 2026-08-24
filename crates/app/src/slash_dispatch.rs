@@ -109,7 +109,9 @@ pub(crate) fn dispatch_slash_outcome(
                 .map(|(label, n)| if *n > 1 { format!("{label} x{n}") } else { label.clone() })
                 .collect();
             let mut out: Vec<String> = match session.as_any().downcast_ref::<app::session::GameSession>() {
-                Some(gs) if !gs.v6_window_dump(&cells).is_empty() => gs.v6_window_dump(&cells),
+                Some(gs) if !gs.v6_window_dump(&cells, Some(&state.v6_text)).is_empty() => {
+                    gs.v6_window_dump(&cells, Some(&state.v6_text))
+                }
                 _ => session.window_dump(),
             };
             out.push(frame_line);
