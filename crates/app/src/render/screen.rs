@@ -4202,191 +4202,24 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
 /// prose stops above it and resumes below, never beside or over it. Keeps the
 /// newest `rows-1` wrapped rows (one row is left for the input line).
 pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render::v6_layout::MainText, RasterMetrics) {
-    // Non-square 8×16 v6 cell (SQ-0479). Picture pixels arriving here are already
-    // in unit space (session scales v6 art ×2 before storing), so a float spans
-    // height/font_h text rows and indents width/font_w columns.
-    let font_w = u32::from(state.v6_text.cell().w);
-    let font_h = u32::from(state.v6_text.cell().h);
-    // A prose column narrower than this (cells) isn't worth floating a picture
-    // beside — fall back to a full-width band.
-    const MIN_TEXT_COLS: u16 = 8;
-    struct AbsFloat {
-        row: usize,
-        rows: u16,
-        /// Columns removed from the text width on the covered rows.
-        reserve: u16,
-        /// Column where covered rows' text begins.
-        text_col: u16,
-        /// Column where the picture blits.
-        img_col: u16,
-        img: std::sync::Arc<image::RgbaImage>,
-    }
-    // Columns reserved (subtracted from wrap width) by any float covering `row`.
-    let reserve_at = |floats: &[AbsFloat], row: usize| -> u16 {
-        floats
-            .iter()
-            .filter(|f| f.row <= row && row < f.row + f.rows as usize)
-            .map(|f| f.reserve)
-            .max()
-            .unwrap_or(0)
-    };
-    // The §8.7.1 style bits the raster font can synthesize a face for (SQ-0540):
-    // bold and italic. Reverse and fixed-pitch are meaningless in the prose
-    // raster (no block to swap, one fixed-pitch face) and are dropped here.
-    const EMPHASIS: u8 = 2 | 4;
-    let mut wrapped: Vec<String> = Vec::new();
-    // Per-char emphasis for wrapped rows that carry any, parallel to `wrapped`
-    // and self-padding with empty (= all-roman) rows, so an unemphasised
-    // transcript allocates nothing.
-    let mut wrapped_styles: Vec<Vec<u8>> = Vec::new();
-    fn set_row_styles(styles: &mut Vec<Vec<u8>>, row: usize, bits: Vec<u8>) {
-        if bits.iter().all(|&b| b == 0) {
-            return;
-        }
-        if styles.len() <= row {
-            styles.resize(row + 1, Vec::new());
-        }
-        styles[row] = bits;
-    }
-    let mut floats: Vec<AbsFloat> = Vec::new();
-    // Wrapped row each source line starts on, so the screen-clear anchor can be
-    // mapped into the wrap — the raster twin of `wrap_lines_kinded_indexed`'s
-    // `starts` (SQ-0640).
-    let mut line_starts: Vec<usize> = Vec::with_capacity(state.transcript.len() + 1);
-    for (i, line) in state.transcript.iter().enumerate() {
-        line_starts.push(wrapped.len());
-        if let Some(Some(img)) = state.transcript_images.get(i) {
-            // SQ-0461's `ContentSplash` skip stood here: the raster path draws the
-            // graphics window canvas itself, so a band anchored for the frameless
-            // mode had to be stepped over or the art drew twice. SQ-0895 removed
-            // the mode and with it the only emitter, so there is nothing left to
-            // skip — every entry reaching this point is window-0 story content.
-            let px = &img.pixels;
-            // Rows the picture spans: ceil(h/FONT), so a picture whose height
-            // isn't a cell multiple never has a full-width line drawn across
-            // its bottom pixels. (Infocom's own countdown used floor and let
-            // the overlap happen; with our whole-cell glyphs the ceil reads
-            // far cleaner.)
-            let img_rows = (px.height().div_ceil(font_h) as u16).max(1);
-            let img_cols = (px.width().div_ceil(font_w) as u16).max(1);
-            let band = |floats: &mut Vec<AbsFloat>, wrapped: &mut Vec<String>| {
-                // A full-width band: reserve blank text rows so the wrap below
-                // can't place prose beside or over the picture.
-                floats.push(AbsFloat { row: wrapped.len(), rows: img_rows, reserve: 0, text_col: 0, img_col: 0, img: std::sync::Arc::clone(px) });
-                for _ in 0..img_rows {
-                    wrapped.push(String::new());
-                }
-            };
-            match img.align {
-                crate::inline_image::ImageAlign::MarginLeft => {
-                    // A drop-cap floats at the LEFT: it occupies no text row of
-                    // its own — the wrap below narrows the rows beside it, and the
-                    // text is pushed right past the picture.
-                    let indent_px = img.margin_px.unwrap_or(px.width() + font_w);
-                    let reserve = indent_px.div_ceil(font_w) as u16;
-                    floats.push(AbsFloat {
-                        row: wrapped.len(),
-                        rows: img_rows,
-                        reserve,
-                        text_col: reserve,
-                        img_col: 0,
-                        img: std::sync::Arc::clone(px),
-                    });
-                }
-                crate::inline_image::ImageAlign::MarginRight => {
-                    // A right-margin picture (Shogun's opening, ZMSD §15) floats at
-                    // the RIGHT edge: text stays flush left and wraps in the
-                    // narrowed column, then reclaims full width once the picture
-                    // ends. Reserve the picture's own cell width plus a gutter; if
-                    // that leaves no prose column, fall back to a full-width band.
-                    let reserve = (img_cols + 1).min(cols);
-                    if cols.saturating_sub(reserve) >= MIN_TEXT_COLS {
-                        floats.push(AbsFloat {
-                            row: wrapped.len(),
-                            rows: img_rows,
-                            reserve,
-                            text_col: 0,
-                            img_col: cols.saturating_sub(img_cols),
-                            img: std::sync::Arc::clone(px),
-                        });
-                    } else {
-                        band(&mut floats, &mut wrapped);
-                    }
-                }
-                _ => band(&mut floats, &mut wrapped),
-            }
-            continue;
-        }
-        if line.is_empty() {
-            wrapped.push(String::new());
-            continue;
-        }
-        // Per-char emphasis for this logical line (SQ-0540), materialised only
-        // when the line actually carries some — `transcript_runs` is parallel to
-        // `transcript`, with char offsets into the UNWRAPPED line.
-        let line_bits: Option<Vec<u8>> = state.transcript_runs.get(i).and_then(|runs| {
-            runs.iter().any(|r| r.bits & EMPHASIS != 0).then(|| {
-                let n = line.chars().count();
-                let mut v = vec![0u8; n];
-                for r in runs {
-                    let end = r.end.min(n);
-                    for b in v.iter_mut().take(end).skip(r.start.min(end)) {
-                        *b = r.bits & EMPHASIS;
-                    }
-                }
-                v
-            })
-        });
-        // Slice `line_bits` for a wrapped row of `n` chars starting at source
-        // char offset `from`. Wrapping only ever drops the single space at a
-        // break, so each row is a contiguous run of the source line.
-        let row_bits = |from: usize, n: usize| -> Vec<u8> {
-            match &line_bits {
-                Some(bits) => (0..n).map(|j| bits.get(from + j).copied().unwrap_or(0)).collect(),
-                None => Vec::new(),
-            }
-        };
-        // Word-wrap with per-row width: rows beside an active float are narrower.
-        //
-        // **By PIXEL, not by column** (SQ-1009). Every full prose line in
-        // `machine-screenshots/amiga-arthur-text.png` ends within one word's width
-        // of the same margin — 596 to 634 device px — while carrying different
-        // character counts, 71 on the first and fewer on the fourth. No column
-        // count reproduces that, and the wrap width is what makes proportional text
-        // FILL a line rather than stopping two thirds of the way across.
-        //
-        // The prose wrap is the HOST's: window 0 is wrap+scroll, so it falls past
-        // zvm's grid path to the stream and the game never learns where the breaks
-        // fell. Nothing in the engine has to move for this.
-        //
-        // Identical to the character arithmetic it replaces for every fixed-pitch
-        // face, which is every configuration but Arthur's Amiga floppy:
-        // `run_px` is `chars * cell.w` there and the comparison scales by `font_w`
-        // on both sides.
-        let tf = &state.v6_text;
-        let mut cur = String::new();
-        let mut cur_start = 0usize; // source char offset of `cur`'s first char
-        let mut src = 0usize; // source char offset of `word`
-        for word in line.split(' ') {
-            let width =
-                (cols.saturating_sub(reserve_at(&floats, wrapped.len())).max(1) as u32) * font_w;
-            if !cur.is_empty() && tf.run_px(&cur) + tf.advance(' ') + tf.run_px(word) > width {
-                let n = cur.chars().count();
-                wrapped.push(std::mem::take(&mut cur));
-                set_row_styles(&mut wrapped_styles, wrapped.len() - 1, row_bits(cur_start, n));
-            }
-            if cur.is_empty() {
-                cur_start = src;
-            } else {
-                cur.push(' ');
-            }
-            cur.push_str(word);
-            src += word.chars().count() + 1; // +1 for the separating space
-        }
-        let n = cur.chars().count();
-        wrapped.push(cur);
-        set_row_styles(&mut wrapped_styles, wrapped.len() - 1, row_bits(cur_start, n));
-    }
+    // THE WRAP IS NOT DONE HERE ANY MORE (SQ-1034). It lives in
+    // `render::wrap_cache`, alongside the cell path's, under one key type and one
+    // append-or-rebuild rule — because two copies of "has the wrap moved?" is
+    // exactly what drifted: this path had no cache at all and sat behind a
+    // whole-canvas gate that hashes `input.value`, so one keystroke re-wrapped
+    // 20,000 turns of scrollback (25.058 ms measured).
+    //
+    // What is left here is the WINDOWING, which is per frame and cheap: the
+    // newest visible rows, the floats that reach into them, the live input line
+    // and the caret. Raster's `cols` come from `story_prose_box` over the NATIVE
+    // v6 screen rect, so they do not move with the pane — which is why this path
+    // takes the append branch essentially always.
+    crate::render::wrap_cache::raster_wrap_refresh(state, cols);
+    let cache = state.raster_wrap.borrow();
+    let cache = cache.as_ref().expect("refreshed above");
+    let wrapped = &cache.rows;
+    let wrapped_styles = &cache.styles;
+    let line_starts = &cache.starts;
     // One row is reserved for the live input line, so the transcript body budget
     // is `rows - 1` — this is the raster viewport height the [more] pager and the
     // scroll keybindings measure against.
@@ -4415,7 +4248,7 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     // cleared, nothing printed since — reads as an EMPTY screen on both, rather
     // than as an absent anchor that bottom-sticks the erased scrollback (SQ-0748).
     let anchor_row = (scroll == 0)
-        .then(|| crate::render::transcript::anchor_row_at(&line_starts, total, state.clear_anchor))
+        .then(|| crate::render::transcript::anchor_row_at(line_starts, total, state.clear_anchor))
         .flatten();
     if let Some(a) = anchor_row.filter(|&a| total - a <= budget) {
         start = a;
@@ -4423,22 +4256,24 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     }
     let visible_len = end - start;
     let lines = wrapped[start..end].to_vec();
-    // Emphasis travels with the visible slice (padded first: `wrapped_styles`
-    // only reaches the last row that carried any).
-    wrapped_styles.resize(total, Vec::new());
-    let styles = wrapped_styles[start..end].to_vec();
+    // Emphasis travels with the visible slice. `wrapped_styles` self-pads — it
+    // only reaches the last row that carried any emphasis — so a row past its end
+    // is all-roman rather than missing.
+    let styles: Vec<Vec<u8>> =
+        (start..end).map(|r| wrapped_styles.get(r).cloned().unwrap_or_default()).collect();
     // Shift floats into the visible window; keep those still (partially) visible.
-    let floats: Vec<crate::render::v6_layout::RasterFloat> = floats
-        .into_iter()
+    let floats: Vec<crate::render::v6_layout::RasterFloat> = cache
+        .floats
+        .iter()
         .filter_map(|f| {
             let rel = f.row as i64 - start as i64;
-            (rel + f.rows as i64 > 0 && rel < visible_len as i64).then_some(crate::render::v6_layout::RasterFloat {
+            (rel + f.rows as i64 > 0 && rel < visible_len as i64).then(|| crate::render::v6_layout::RasterFloat {
                 row: rel as i32,
                 rows: f.rows,
                 reserve_cols: f.reserve,
                 text_col: f.text_col,
                 img_col: f.img_col,
-                img: f.img,
+                img: std::sync::Arc::clone(&f.img),
             })
         })
         .collect();

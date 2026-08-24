@@ -227,25 +227,19 @@ fn stat(samples: &[Duration]) -> Stat {
 /// Time `render_story_pane` once (`cold`), then `repeats` more times with
 /// nothing at all changed (`idle`), then `repeats` more times toggling one
 /// character of the live input line between calls with the TRANSCRIPT
-/// untouched (`keystroke`). ALSO calls `render::screen::build_main_text` —
-/// the raster wrap builder itself — directly, twice in a row with nothing
-/// changed between the two calls, bypassing `render_story_pane`'s
-/// whole-canvas `v6_wants_build` gate entirely. That gate is coarse (it skips
-/// the ENTIRE raster rebuild, not just the wrap) and can mask the question
-/// SQ-1033 actually asks — whether `build_main_text` itself has a cache. It
-/// does not: these two calls should cost the same, both scaling with
-/// transcript size, on every path (raster, hybrid, cell alike — the function
-/// takes any `AppState`, it just is not on the hybrid/cell paths' call graph
-/// in production).
+/// untouched (`keystroke`).
 ///
-/// Returns `(cold_ms, idle Stat, keystroke Stat, raw_wrap_1st_ms,
-/// raw_wrap_2nd_ms, StoryPaneMetrics from the cold call)`.
+/// The raw-wrap probe used to live here too; it is [`probe_raw_wrap`] now,
+/// because it has to run after everything else a checkpoint times.
+///
+/// Returns `(cold_ms, idle Stat, keystroke Stat, StoryPaneMetrics from the cold
+/// call)`.
 #[allow(clippy::type_complexity)]
 fn measure(
     model: &app::engine::ScreenModel,
     state: &mut AppState,
     repeats: usize,
-) -> (f64, Stat, Stat, f64, f64, app::render::screen::StoryPaneMetrics) {
+) -> (f64, Stat, Stat, app::render::screen::StoryPaneMetrics) {
     // The v6 raster path backgrounds its picture ENCODE (`spawn_v6_encode`) and
     // relies on the host tick calling `AppState::poll_v6_encode_job` once per
     // loop before the draw (`main.rs`) to reap it — without that poll,
@@ -303,6 +297,25 @@ fn measure(
         );
     }
 
+    (cold_ms, stat(&idle_samples), stat(&keystroke_samples), cold_metrics)
+}
+
+/// Call `build_main_text` — the raster wrap builder itself — twice in a row with
+/// nothing changed between the two calls, bypassing `render_story_pane`'s
+/// whole-canvas `v6_wants_build` gate entirely. That gate is coarse (it skips the
+/// ENTIRE raster rebuild, not just the wrap) and can mask the question SQ-1033
+/// asks: does `build_main_text` have a cache of its own?
+///
+/// Before SQ-1034 it did not, and the two calls cost the same, both scaling with
+/// transcript size, on every path. After it, the SECOND call is the answer — it
+/// must be flat regardless of scrollback.
+///
+/// **Run this LAST in a checkpoint.** It deliberately wraps at its own width,
+/// which is not the width any frame uses, so it leaves the wrap cache keyed to a
+/// width the next frame will have to rebuild from. Run before `measure_one_turn`
+/// it charges that rebuild to the turn and reports the harness's own footprint as
+/// a render cost — which it did, at 29.276 ms against a true 0.169 ms.
+fn probe_raw_wrap(state: &AppState) -> (f64, f64) {
     let wrap_cols = AREA.width.saturating_sub(2);
     let wrap_rows = AREA.height.saturating_sub(3);
     let t0 = Instant::now();
@@ -312,16 +325,15 @@ fn measure(
     let raw2 = std::hint::black_box(app::render::screen::build_main_text(state, wrap_cols, wrap_rows));
     let raw_wrap_2nd_ms = t1.elapsed().as_secs_f64() * 1000.0;
     drop((raw1, raw2));
-
-    (cold_ms, stat(&idle_samples), stat(&keystroke_samples), raw_wrap_1st_ms, raw_wrap_2nd_ms, cold_metrics)
+    (raw_wrap_1st_ms, raw_wrap_2nd_ms)
 }
 
 fn print_header(title: &str) {
     println!("=== {title} ===");
     println!(
-        "{:>7}  {:>9}  {:>10}  {:>8}  {:>9}  {:>18}  {:>18}  {:>19}",
+        "{:>7}  {:>9}  {:>10}  {:>8}  {:>9}  {:>18}  {:>18}  {:>8}  {:>19}",
         "turns", "txn_lines", "total_rows", "mem_kb", "cold_ms", "idle mean/max ms", "keystroke mean/max ms",
-        "raw_wrap 1st/2nd ms"
+        "turn_ms", "raw_wrap 1st/2nd ms"
     );
 }
 #[allow(clippy::too_many_arguments)]
@@ -333,12 +345,14 @@ fn print_row(
     cold: f64,
     idle: &Stat,
     key: &Stat,
+    turn: Option<f64>,
     raw1: f64,
     raw2: f64,
 ) {
+    let turn = turn.map(|t| format!("{t:.3}")).unwrap_or_else(|| "-".to_string());
     println!(
-        "{:>7}  {:>9}  {:>10}  {:>8.1}  {:>9.3}  {:>8.3}/{:<8.3}  {:>8.3}/{:<8.3}  {:>8.3}/{:<8.3}",
-        turns, lines, total_rows, mem_kb, cold, idle.mean_ms, idle.max_ms, key.mean_ms, key.max_ms, raw1, raw2
+        "{:>7}  {:>9}  {:>10}  {:>8.1}  {:>9.3}  {:>8.3}/{:<8.3}  {:>8.3}/{:<8.3}  {:>8}  {:>8.3}/{:<8.3}",
+        turns, lines, total_rows, mem_kb, cold, idle.mean_ms, idle.max_ms, key.mean_ms, key.max_ms, turn, raw1, raw2
     );
 }
 
@@ -507,11 +521,36 @@ fn drive_and_measure(engine: &mut dyn Engine, state: &mut AppState, turns: &[usi
         let lines = state.transcript.len();
         let mem_kb = transcript_mem_estimate(state) as f64 / 1024.0;
         let model = engine.screen();
-        let (cold, idle, key, raw1, raw2, m) = measure(&model, state, repeats);
-        print_row(turns_done, lines, m.total_rows, mem_kb, cold, &idle, &key, raw1, raw2);
+        let (cold, idle, key, m) = measure(&model, state, repeats);
+        let turn = (!quit).then(|| measure_one_turn(engine, state, &mut turns_done));
+        // Last, and see `probe_raw_wrap`: it leaves the wrap cache at a width no
+        // frame uses, so anything timed after it pays for a rebuild it caused.
+        let (raw1, raw2) = probe_raw_wrap(state);
+        print_row(turns_done, lines, m.total_rows, mem_kb, cold, &idle, &key, turn, raw1, raw2);
         if quit {
             println!("  (game quit at turn {turns_done}; larger checkpoints skipped)");
             break;
         }
     }
+}
+
+/// One REAL turn at this scrollback depth, then one frame — and time the frame.
+///
+/// This is the number a player feels, and it is not `cold_ms` (SQ-1034).
+/// `cold_ms` is the frame after the whole BATCH that reached a checkpoint —
+/// 15,000 turns between the 5,000 and 20,000 rows — so it is dominated by lines
+/// that arrived while nobody was looking and grows with the batch however
+/// incremental the wrap is. A live app renders once per turn, so what has to stop
+/// growing with total scrollback is THIS.
+///
+/// `turns_done` is advanced so the next checkpoint drives one turn fewer and the
+/// reported turn counts stay true.
+fn measure_one_turn(engine: &mut dyn Engine, state: &mut AppState, turns_done: &mut usize) -> f64 {
+    let mut buf = Buffer::empty(AREA);
+    *turns_done += drive_n(engine, state, 1);
+    let model = engine.screen();
+    state.poll_v6_encode_job();
+    let t = Instant::now();
+    std::hint::black_box(render_story_pane(&model, false, None, state, AREA, &mut buf));
+    t.elapsed().as_secs_f64() * 1000.0
 }

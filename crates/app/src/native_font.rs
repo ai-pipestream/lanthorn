@@ -288,6 +288,35 @@ pub struct TextFace {
     /// (SQ-1028). A machine fact, carried here because `TextFace` is what already
     /// reaches every glyph the raster path draws.
     underline_emphasis: bool,
+    /// A digest of everything above that moves a WRAP BOUNDARY: the declared cell
+    /// and the advance of every byte the pen can measure (SQ-1034).
+    ///
+    /// Computed once here rather than compared per frame because the honest
+    /// comparison — `PartialEq` on the whole face — walks a `BitmapFont`'s glyph
+    /// bitmaps, and the wrap cache has to ask "has the face moved?" on every
+    /// frame of both render paths. It is derived from the same `metric` the
+    /// renderer and `zvm` both measure with, so a face that wraps differently
+    /// cannot fingerprint the same.
+    wrap_fp: u64,
+}
+
+/// Digest the wrap-relevant half of a resolved [`zvm::screen::V6Metric`]: the
+/// cell and the advance of every byte. See [`TextFace::wrap_fingerprint`].
+fn wrap_fingerprint_of(metric: &zvm::screen::V6Metric) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let cell = metric.cell();
+    cell.w.hash(&mut h);
+    cell.h.hash(&mut h);
+    // Every §8.7.1 face the pen can be asked for, not just roman: the raster wrap
+    // measures the run it is about to break, and an emphasised run is measured
+    // with the emphasised advances.
+    for style in [0u8, 2, 4, 6] {
+        for b in 0u16..=255 {
+            metric.advance(b as u8 as char, style).hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 impl TextFace {
@@ -323,18 +352,22 @@ impl TextFace {
             }
             _ => zvm::screen::V6Metric::fixed(cell),
         };
-        TextFace { face, fit, scale, metric, underline_emphasis: profile.underlines_emphasis() }
+        let wrap_fp = wrap_fingerprint_of(&metric);
+        TextFace { face, fit, scale, metric, underline_emphasis: profile.underlines_emphasis(), wrap_fp }
     }
 
     /// A cell with no release face behind it — a bare story, or a host default.
     pub fn cell_only(cell: zvm::screen::V6Cell) -> TextFace {
-        TextFace {
-            face: None,
-            fit: None,
-            scale: (1, 1),
-            metric: zvm::screen::V6Metric::fixed(cell),
-            underline_emphasis: false,
-        }
+        let metric = zvm::screen::V6Metric::fixed(cell);
+        let wrap_fp = wrap_fingerprint_of(&metric);
+        TextFace { face: None, fit: None, scale: (1, 1), metric, underline_emphasis: false, wrap_fp }
+    }
+
+    /// A digest of everything about this face that can move a wrap boundary — the
+    /// declared cell and every advance the pen answers. The transcript wrap cache
+    /// keys on this rather than on the face itself (SQ-1034); see the field.
+    pub fn wrap_fingerprint(&self) -> u64 {
+        self.wrap_fp
     }
 
     /// What the STORY was told: [`zvm::screen::V6Cell`], declared metrics.
