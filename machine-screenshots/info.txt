@@ -596,3 +596,51 @@ everyone else does.` at native (89,81), `[No more hints.]` at (89,97), and all
 four header runs. Calibration is the same as the Shogun Amiga capture (the
 reddish frame spans image x 44..683). Note the label really is `1>`, a chevron;
 at 1:1 it reads as `1)` and magnifying 6x is what settles it.
+
+
+THE TWO DOS JOURNEY CAPTURES (2026-08-25)
+
+  dos-journey.png    The title screen — illustration left, credits right, the
+                     party/command boxes below, in the emulator's window chrome.
+  dos-journey-2.png  Gameplay at the lake, verb menu populated, `SCOUT` selected
+                     (a reverse-video highlight). 640x400, native.
+
+WHAT THEY SETTLE: THE FRAME'S RULES ARE VERTICAL, AND THE MENU HEADER IS A REAL BAR
+
+The frame's white furniture is a vertical rule between illustration and text, a
+vertical divider per menu box, and a horizontal rule under the text. **No upper
+border band** — nothing white spans the top of the screen.
+
+But the MENU HEADER is a full-width bar, and dos-journey-2.png measures it: rows
+304..319 carry **596 to 638 light pixels of 640, spanning 0..639**, with the dips
+being the dark glyphs of `The Party` and `Individual Commands` sitting ON the bar.
+So the header really does fill from the left edge, between the two labels, and out
+to the right — which is what `v6_journey_menu::journey_raster_reverse_header_bar_is_solid_body_untouched`
+asserts, and it is right to.
+
+WHY THAT MATTERS TO SQ-1076
+
+The quest is that Arthur's and Shogun's status bands render across the whole pane
+where the machine insets them. Three rules were tried against the corpus and the
+captures, and each is refuted by one frame:
+
+  | rule | Journey header | Arthur status | Arthur hint page |
+  |---|---|---|---|
+  | reach the screen (today) | 640 OK | 640, want 582 | full row, want ~156 |
+  | fill only between runs | thins Journey's rules | 582 OK | OK |
+  | fill between runs iff the row has TEXT | header collapses | 582 OK | OK |
+  | bound by the owning window | 640 OK | 582 OK | 80% of a row, want ~156 |
+
+The machine's own numbers, for whoever picks this up:
+
+  * Journey's menu header — **640 px**, full width (dos-journey-2.png).
+  * Arthur's status band — **582 px** at image x 71..652, on all three of
+    amiga-arthur-map.png, -inventory.png and -church.png.
+  * Arthur's InvisiClues title — a centred block at image 264..419, about
+    **156 px**, on amiga-arthur-hint.png. mac-zorkzero-hint.png shows the same
+    shape.
+
+No single one of "screen", "runs" or "window" fits all three, so the next attempt
+needs a fourth fact — most likely the RUN COUNT, since the two frames that want
+their window's width have several runs on the row while the one that wants its own
+extent has one.
