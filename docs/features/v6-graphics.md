@@ -2306,6 +2306,30 @@ the screen the header states, which is the same extent and the same coordinate
 space as the canvas the ring composites onto: 640×400 for an IBM PC press, 560×384
 for an Apple IIgs one.
 
+### A window's own ground is its page, not an obstruction of it
+
+The ground is *paint*, and the raster path used to hand it to the probe that decides
+where a story window's prose can go. That probe — `story_clear_native` — walks the
+story window's own edges inward until nothing under them is opaque, so the only
+pixels it can ever read are the ones **inside that same window**. Give it a ground
+covering the window and it insets past all of it and reports nothing left.
+
+Which is exactly what a game does when it erases its own story window. Macintosh
+*Shogun* (release 292) leaves InvisiClues with an `erase_window` on window 0 —
+548×370 at native (46, 30), the story window to the pixel — and the story box went
+from the declared 548×370 to a degenerate 180×0. A degenerate interior trips the
+floor that exists so a full-screen picture can own the screen, so the frame shipped
+with its score bar and both ornaments and an empty page between them. Nothing short
+of `restart` brought the prose back, because nothing else clears the ground.
+
+The window *pages* had known this since they were introduced — `fill_pages_where`
+skips every window overlapping the story box for precisely this reason — and the
+painted ground simply had no counterpart rule. Hybrid was never affected: it measures
+against the chrome art alone, and art is the only thing that question was ever asking
+about. Both paths now put it to the same canvas, which is the only thing that makes
+them reliably agree. A page is a colour a window was told to present on; a ground is
+a rectangle the game filled. Neither is artwork, and only artwork moves the prose.
+
 ### The ground has to survive a restore too
 
 The painted ground rides *beside* the window tree rather than inside it, and for a

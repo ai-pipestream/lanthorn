@@ -3843,7 +3843,8 @@ pub fn build_v6_raster_canvas(
     v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors, panel_input, &state.v6_text);
     // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
     // pixels before the story is stamped — the story box itself is skipped (see
-    // `fill_window_pages`), so `story_clear_native` below still finds it clear.
+    // `fill_window_pages`). This runs on the COMPOSITE only: the clear-interior
+    // probe below reads the art canvas, which no ground ever touches (SQ-1056).
     // The game's own painted ground — erase_window fills (SQ-0706) — goes UNDER
     // the art and glyphs already on the canvas and BEFORE the window pages claim
     // what is left, because a fill is the oldest thing on the screen: the game
@@ -3890,13 +3891,33 @@ pub fn build_v6_raster_canvas(
     // rows — and Journey's 392x304 text panel came back 392x0. Against the art it is
     // the box each game declared. Same lesson as `build_graphics_canvas` on the
     // hybrid side (SQ-0500): "opaque" is not "artwork".
-    let mut obstruction = v6::build_graphics_canvas(&layout.chrome, native);
+    //
+    // And it is the ART and NOTHING ELSE (SQ-1056). A GROUND is not artwork either,
+    // and the probe walks the story window's own edges inward, so the only pixels it
+    // can ever read are the ones INSIDE that window — which makes any ground laid
+    // there a self-obstruction. `fill_window_pages` has always known this and skips
+    // every window overlapping the story box for exactly this reason; the painted
+    // ground (`blit_paint_ground`, the game's `erase_window` fills) had no such rule,
+    // and a game that erases its OWN story window shrinks the box to nothing:
+    //
+    //   stories/Shogun.toast (Macintosh r292/890314), leaving InvisiClues with `q`
+    //     against art             (46, 30) 548x370   — the box the game declared
+    //     + the painted ground   (230, 215) 180x0    — degenerate, so SQ-0578's
+    //                                                  `w >= 8 && h >= 16` floor
+    //                                                  ships a chrome-only canvas
+    //
+    // The ground grew by 202,760 px on that one frame — 548x370, the story window to
+    // the pixel — so the screen came back with its score bar and both ornaments and
+    // no prose at all, and only `restart` recovered. Hybrid was unaffected because it
+    // measures against `build_graphics_canvas` alone (`frame_art`, SQ-0896); this is
+    // now the same oracle on both paths, which is the only reason they can agree.
+    // SQ-0894 said as much when it measured the corpus "against the ART-ONLY canvas
+    // (the oracle §3(b) says it needs)".
+    let obstruction = v6::build_graphics_canvas(&layout.chrome, native);
     // SQ-0793: …and the side border art is extended to the bottom of that native
     // screen before anything is scaled, exactly as the hybrid ring extends it
-    // (SQ-0698). `obstruction` is still the bare graphics canvas at this point —
-    // the same image hybrid classifies from — so this must run BEFORE `grounds`
-    // gives it the window pages. The chrome runs come along because a game with a
-    // command menu under its story window has no border to extend (SQ-0819). See
+    // (SQ-0698). The chrome runs come along because a game with a command menu
+    // under its story window has no border to extend (SQ-0819). See
     // `extend_raster_flanks`.
     let chrome_runs: Vec<&crate::engine::PxText> = layout
         .chrome
@@ -3908,7 +3929,6 @@ pub fn build_v6_raster_canvas(
         .flatten()
         .collect();
     extend_raster_flanks(&mut canvas, &obstruction, layout.story, &chrome_runs, native, state.v6_text.cell());
-    grounds(&mut obstruction);
     let mut raster_metrics: Option<RasterMetrics> = None;
     // SQ-0578: only stamp the story when its clear interior can hold at least
     // one full 8x16 text cell. A full-screen picture (Zork Zero's rebus) grows

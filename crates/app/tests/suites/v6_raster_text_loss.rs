@@ -469,3 +469,103 @@ fn journey_text_panel_survives_the_menu_fill_theme_only() {
     let _g = standard_palette();
     journey_text_panel_survives_the_menu_fill(false);
 }
+
+// ── SQ-1056: a window's own erase is its PAGE, not an obstruction of itself ──
+
+/// The game's painted ground (`erase_window` fills, SQ-0706) must not shrink the
+/// story window's clear interior, because the probe that measures that interior
+/// only ever reads pixels INSIDE that same window.
+///
+/// `stories/Shogun.toast` (Macintosh, release 292 / serial 890314) is the report,
+/// on the frame after leaving InvisiClues with `q`: the game erases window 0 on the
+/// way out, 548x370 at native (46, 30) — the story window to the pixel — and that
+/// fill went into the obstruction the interior is measured against. Measured under
+/// `examples/pty_capture` at the reporter's own 172x68 pane:
+///
+/// ```text
+///   against the art          (46, 30) 548x370   the box the game declared
+///   + the painted ground    (230, 215) 180x0    degenerate
+/// ```
+///
+/// A degenerate interior trips SQ-0578's `w >= 8 && h >= 16` floor, which ships the
+/// chrome and no prose — the score bar and both ornaments on screen with an empty
+/// page between them, recoverable only by `restart`. Hybrid never saw it: it measures
+/// against `build_graphics_canvas` alone (SQ-0896).
+///
+/// Driven here on a TRACKED fixture rather than the commercial press, because the
+/// mechanism needs no particular game — any v6 story whose ground covers its own
+/// story window reproduces it, and CI has no `stories/`.
+fn a_ground_over_the_story_window_is_not_artwork(honor: bool) {
+    let Some(mut session) = boot("advent.z6", honor) else { return };
+    let mut state = raster_state(honor);
+    for _ in 0..10 {
+        match session.pending_input() {
+            InputKind::Line => break,
+            InputKind::Char => {
+                session.submit_char(13);
+            }
+            InputKind::Event => {
+                session.submit("");
+            }
+        }
+    }
+    app::state::apply_transcript_elems(&mut state, &Engine::take_transcript_elems(&mut session));
+
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(
+        items,
+        &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
+    );
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+    let story = layout.story.expect("advent publishes a story window");
+    let (bx, by, bw, bh) =
+        (story.x_px as u32, story.y_px as u32, story.w_px as u32, story.h_px as u32);
+    assert!(
+        bw >= 8 && bh >= 16,
+        "harness sanity: advent's story window is {bw}x{bh} at ({bx},{by}) — too small to measure"
+    );
+
+    // Premise: with no ground at all the composite carries prose.
+    let before = composite(&session, &state)
+        .1
+        .unwrap_or_else(|| panic!("honor={honor}: advent reports no story metrics even before the ground"));
+    assert!(
+        before.viewport_rows > 0,
+        "harness sanity (honor={honor}): advent's clean frame measures 0 visible row(s)"
+    );
+
+    // …now the game erases its OWN story window, exactly as Shogun does leaving
+    // InvisiClues. An opaque fill covering the box, and nothing else on the screen
+    // changed.
+    let mut ground = image::RgbaImage::new(u32::from(native.0), u32::from(native.1));
+    for y in by..(by + bh).min(ground.height()) {
+        for x in bx..(bx + bw).min(ground.width()) {
+            ground.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+        }
+    }
+    *state.v6_paint.borrow_mut() = Some(std::sync::Arc::new(ground));
+
+    let after = composite(&session, &state).1;
+    let rows = after.map(|m| m.viewport_rows).unwrap_or(0);
+    assert_eq!(
+        rows, before.viewport_rows,
+        "honor={honor}: the game's own erase of its {bw}x{bh} story window at ({bx},{by}) took the \
+         story box from {} visible row(s) to {rows} — a window's ground is its PAGE, and the \
+         clear-interior probe reads only pixels inside that window, so counting it obstructs the \
+         box against itself and the raster ships chrome with no prose (SQ-1056)",
+        before.viewport_rows
+    );
+}
+
+#[test]
+fn a_ground_over_the_story_window_is_not_artwork_honoring_game_colours() {
+    let _g = standard_palette();
+    a_ground_over_the_story_window_is_not_artwork(true);
+}
+
+#[test]
+fn a_ground_over_the_story_window_is_not_artwork_theme_only() {
+    let _g = standard_palette();
+    a_ground_over_the_story_window_is_not_artwork(false);
+}
