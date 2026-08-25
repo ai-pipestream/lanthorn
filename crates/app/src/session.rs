@@ -3182,7 +3182,29 @@ impl GameSession {
             if !win.retired.is_empty() {
                 let (mut rx0, mut ry0, mut rx1, mut ry1) = (u16::MAX, u16::MAX, 0u16, 0u16);
                 for t in &win.retired {
-                    let w = (t.text.chars().count() as u16).saturating_mul(font_w);
+                    // **The prose's own extent is the PEN's, not the declared
+                    // cell's** (SQ-1062). This measured `chars * cell.w`, which is
+                    // `V6Cell::run_px` — documented there as "uniform on purpose,
+                    // even for a machine that painted proportionally". That is the
+                    // right number for the box a GAME reserved, and the wrong one
+                    // here: the comment three lines above says this box is "the
+                    // frozen prose's own extent, not the window's", and a retired
+                    // entry has no game-declared box to inherit.
+                    //
+                    // It matters because `build_chrome_canvas` turns this `w_px`
+                    // into the proportional pen's CLIP BOUND, and floods
+                    // `fill_explicit_bg_rows` to the same width. On Arthur's Amiga
+                    // press the face advances ~10.4 native px against a declared 8,
+                    // so the box under-measured its own runs by about a quarter and
+                    // the tail of every frozen line fell outside the bound. Every
+                    // fixed-pen machine is byte-identical, because `V6Metric::advance`
+                    // answers `cell.w` for every style there — which is why this
+                    // outlived the SQ-1054 sweep.
+                    let w = self
+                        .machine
+                        .v6_metric
+                        .run_px(&t.text, t.style)
+                        .min(u32::from(u16::MAX)) as u16;
                     rx0 = rx0.min(t.x.saturating_sub(1));
                     ry0 = ry0.min(t.y.saturating_sub(1));
                     rx1 = rx1.max(t.x.saturating_sub(1).saturating_add(w));

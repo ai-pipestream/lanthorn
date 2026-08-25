@@ -8098,7 +8098,7 @@ mod tests {
         let (fw, fh) = (u32::from(cell.w), u32::from(cell.h));
         // Artwork opaque under the FOURTH glyph alone.
         const OVER: usize = 3;
-        let mut gfx = image::RgbaImage::new(fw as u32 * 8, fh);
+        let mut gfx = image::RgbaImage::new(fw * 8, fh);
         for y in 0..fh {
             for x in (OVER as u32 * fw)..((OVER as u32 + 1) * fw) {
                 gfx.put_pixel(x, y, image::Rgba([9, 9, 9, 255]));

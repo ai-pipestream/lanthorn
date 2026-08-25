@@ -290,3 +290,105 @@ fn the_canvas_keeps_the_credits_and_the_transcript_keeps_the_prompt() {
         }
     }
 }
+
+// ── the frozen layer's BOX is the pen's extent (SQ-1062) ─────────────────────
+
+/// **A retired entry's box is measured with the PEN, not the declared cell.**
+///
+/// `session::v6_screen_model` synthesises a box for the frozen-prose layer, and
+/// its own comment says what that box is meant to be: *"the frozen prose's own
+/// extent, not the window's"*. It measured `chars * cell.w` — which is
+/// `V6Cell::run_px`, documented in `zvm` as *"uniform on purpose, even for a
+/// machine that painted proportionally"*. That is the right number for a box a
+/// GAME reserved and the wrong one for an extent recovered from runs, and
+/// `build_chrome_canvas` then turns this `w_px` into the proportional pen's CLIP
+/// BOUND and floods `fill_explicit_bg_rows` to the same short width.
+///
+/// # Why the metric is swapped rather than a proportional press booted
+///
+/// The two facts have to meet — a proportional pen AND retired prose — and no
+/// medium in `stories/` puts them together. Measured across the corpus: Arthur's
+/// Amiga floppy is the one press with a proportional release face and it produces
+/// **no** retired runs on any route driven here; Shogun's Amiga floppy produces
+/// **nine** and its face is fixed; the Macintosh presses are proportional only
+/// with a System disk the repo cannot carry (SQ-1036, and the trap SQ-1052's first
+/// case fell into).
+///
+/// The model is a pure function of the windows and the metric, so this boots the
+/// real frame that HAS the runs and hands it the pen. The runs keep the positions
+/// the fixed pen gave them, which is exactly right: what is under test is how the
+/// box is measured FROM them.
+///
+/// FALSIFY by restoring `(t.text.chars().count() as u16) * font_w`: `w_px` comes
+/// back as the declared width and the assertion reports both numbers.
+#[test]
+fn a_frozen_prose_box_is_the_pens_extent_not_the_declared_one() {
+    let _g = app::v6_palette_at_boot();
+    let r = &RENDITIONS[0]; // the Amiga floppy — the press that freezes its credits
+    let Some((mut s, _banner, _turn)) = boot(r) else { return };
+
+    // The premise: this frame really does carry a frozen layer.
+    let retired: Vec<(String, u8)> = s
+        .machine
+        .screen
+        .v6
+        .as_ref()
+        .map(|v6| {
+            v6.windows.iter().flat_map(|w| w.retired.iter()).map(|t| (t.text.clone(), t.style)).collect()
+        })
+        .unwrap_or_default();
+    assert!(!retired.is_empty(), "{}: this frame freezes its credits", r.file);
+
+    // A pen that VARIES, so the two measures can differ at all. Synthetic for the
+    // reason in the header; only its advances matter here.
+    let glyph = |w: u8| blorb::bitmap_font::Glyph { width: w, rows: vec![0xFF; 16] };
+    let font = blorb::bitmap_font::BitmapFont {
+        width: 12,
+        height: 16,
+        baseline: 13,
+        bold_smear: 0,
+        proportional: true,
+        lo: b' ',
+        glyphs: (b'\x20'..=b'\x7e').map(|c| glyph(9 + (c % 4))).collect(),
+    };
+    let profile = InterpreterProfile::Amiga;
+    let tf = app::native_font::TextFace::new(
+        profile,
+        app::native_font::FaceSet::release(font, profile, Some((1, 1))),
+        Some((1, 1)),
+    );
+    assert!(tf.proportional(), "the precondition: a pen that varies");
+    let cell = s.machine.v6_cell();
+    let declared: u32 =
+        retired.iter().map(|(t, _)| u32::from(cell.w) * t.chars().count() as u32).max().unwrap_or(0);
+    let penned: u32 = retired.iter().map(|(t, st)| tf.run_px_styled(t, *st)).max().unwrap_or(0);
+    assert!(
+        penned > declared,
+        "non-vacuity: the pen must be WIDER than the declared cell here ({penned} vs \
+         {declared}), or the two measures agree and this proves nothing",
+    );
+
+    s.machine.v6_metric = tf.metric().clone();
+    let model = Engine::screen(&s);
+    let WinNode::Layered(items) = &model.root else { panic!("{}: v6 Layered root", r.file) };
+
+    // The frozen entry is the one whose runs are the retired ones: it is a Grid
+    // carrying them, and the widest run in it decides the box.
+    let widest_declared = declared as u16;
+    let frozen = items
+        .iter()
+        .filter(|pw| {
+            matches!(&pw.node, WinNode::Grid(g)
+                if g.px_texts.iter().any(|t| retired.iter().any(|(r, _)| *r == t.text)))
+        })
+        .max_by_key(|pw| pw.w_px)
+        .unwrap_or_else(|| panic!("{}: the frozen layer reaches the model", r.file));
+    assert!(
+        frozen.w_px > widest_declared,
+        "{}: the frozen box is the PEN's extent — got {} px, which is the declared \
+         `chars * {}` measure ({widest_declared} px) rather than the pen's ({penned} px)",
+        r.file,
+        frozen.w_px,
+        cell.w,
+    );
+}
