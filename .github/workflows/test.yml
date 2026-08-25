@@ -37,6 +37,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev
 
+      # `.cargo/config.toml` caps build parallelism at 8 so a rebuild leaves the
+      # DEVELOPER's 12-core machine usable while it runs. A runner has 3-4 cores,
+      # where eight concurrent rustc processes are slower AND put a crate the size
+      # of `app` near the memory ceiling — so give the runner its own core count
+      # back. The environment variable wins over the config file, and `getconf`
+      # answers on all three of Linux, macOS and Git-bash.
+      - name: Un-cap build jobs for the runner
+        shell: bash
+        run: echo "CARGO_BUILD_JOBS=$(getconf _NPROCESSORS_ONLN)" >> "$GITHUB_ENV"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

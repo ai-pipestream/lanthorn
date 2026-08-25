@@ -53,6 +53,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev
 
+      # Same as test.yml: `.cargo/config.toml` caps build jobs at 8 for the
+      # developer's machine, and a runner should use its own core count.
+      - name: Un-cap build jobs for the runner
+        shell: bash
+        run: echo "CARGO_BUILD_JOBS=$(getconf _NPROCESSORS_ONLN)" >> "$GITHUB_ENV"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
