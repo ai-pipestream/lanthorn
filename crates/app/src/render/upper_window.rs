@@ -319,6 +319,13 @@ pub fn draw_grid(
 /// (`ch == ' ' && bg == 0`); those cells are left UNTOUCHED so an earlier
 /// composited layer (e.g. a v6 graphics window) shows through the gaps
 /// ("cell-text-wins", Phase 1b).
+///
+/// `show_cursor` draws the caret the same way [`draw_grid`] does — XOR the reverse
+/// bit of the cell the game's cursor sits in. It exists because the hybrid ring
+/// reaches this function for a v6 story window that is a Grid (SQ-1074), and that
+/// window is one the player is often reading a keypress in: InvisiClues parks a
+/// caret after its `6>` prompt. The v6 layered composite passes `false` and is
+/// unchanged.
 pub fn draw_grid_transparent(
     grid: &GridWindow,
     area: Rect,
@@ -326,6 +333,7 @@ pub fn draw_grid_transparent(
     honor_game_colours: bool,
     colors: &ColorScheme,
     links: &mut Vec<((u16, u16), u32)>,
+    show_cursor: bool,
 ) {
     let rows = area.height.min(grid.rows);
     let cols = area.width.min(grid.cols);
@@ -334,7 +342,16 @@ pub fn draw_grid_transparent(
         for dx in 0..cols {
             let grid_col = dx + 1; // 1-based
             let cell = grid.cell(grid_row, grid_col);
-            if cell.ch == ' ' && cell.bg == 0 {
+            // **A REVERSED space is ink, not a gap** (SQ-1074). A highlight block is
+            // built out of reversed spaces — the run's own §8.7.1 style bit, with no
+            // background colour set — so testing only `ch`/`bg` reads the gaps between
+            // a selected item's words as blank and leaves the layer beneath showing
+            // through them. Shogun's InvisiClues selection is the report: `What must I
+            // do to survive?` came out highlighted a word at a time, five separate
+            // blocks with the page between them, where the machine draws one bar.
+            // Same rule `draw_painted_screen` already states for the run path
+            // ("a reversed space fills its cell of the selection bar", SQ-0484).
+            if cell.ch == ' ' && cell.bg == 0 && cell.style & 0x01 == 0 {
                 continue; // blank: leave the layer beneath showing through
             }
             let bx = area.x + dx;
@@ -352,6 +369,22 @@ pub fn draw_grid_transparent(
                 // Control chars would trip ratatui's cell_width debug assert.
                 let ch = if cell.ch.is_control() { ' ' } else { cell.ch };
                 buf_cell.set_symbol(ch.encode_utf8(&mut ch_buf)).set_style(style);
+            }
+        }
+    }
+    // The caret, on the same XOR rule as `draw_grid` — and reached through the same
+    // 1:1 mapping as the cells above, since there is no border, centering or scroll
+    // offset here to account for.
+    if show_cursor {
+        let (crow, ccol) = (grid.cursor.0.saturating_sub(1), grid.cursor.1.saturating_sub(1));
+        if crow < rows && ccol < cols {
+            let cur = grid.cell(crow + 1, ccol + 1);
+            let mut z = grid_cell_to_zvm(cur);
+            z.style ^= 0x01;
+            let style = cell_style(z, cur.glk_style, colors, honor_game_colours, grid.bg);
+            if let Some(c) = buf.cell_mut((area.x + ccol, area.y + crow)) {
+                c.modifier = ratatui::style::Modifier::empty();
+                c.set_style(style);
             }
         }
     }
@@ -481,6 +514,94 @@ mod tests {
         assert!(
             s.add_modifier.contains(Modifier::REVERSED),
             "C1: reverse cell with default colours must carry REVERSED modifier"
+        );
+    }
+
+    /// **A REVERSED space is ink, not a gap** (SQ-1074). `draw_grid_transparent`
+    /// skips blanks so an earlier composited layer shows through, and a highlight
+    /// block is built out of spaces carrying the §8.7.1 reverse bit with NO
+    /// background colour — so a blank test that reads only `ch`/`bg` punches holes
+    /// through a selection bar wherever its words are separated.
+    ///
+    /// Amiga Shogun's InvisiClues selection is the report: `What must I do to
+    /// survive?` highlighted a word at a time, five blocks with the page showing
+    /// between them, where `machine-screenshots/amiga-shogun-hint.png` draws one bar.
+    /// The reporter noticed the tell that pins the mechanism — it came out correct on
+    /// the SECOND visit to the menu, because by then those cells had inherited a real
+    /// background from the clue screen's erase and so were no longer "blank".
+    #[test]
+    fn draw_grid_transparent_paints_a_reversed_space_and_skips_a_plain_one() {
+        let mut upper = GridWindow::default();
+        upper.resize(1, 3);
+        upper.put(1, 1, 'A', 0x01); // reversed glyph
+        upper.put(1, 2, ' ', 0x01); // reversed SPACE — the gap inside a highlight bar
+        upper.put(1, 3, ' ', 0x00); // a genuinely blank cell
+
+        let colors = make_colors();
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        // A sentinel under the grid: whatever this function declines to paint keeps it.
+        for x in 0..3 {
+            buf.cell_mut((x, 0)).unwrap().set_symbol("~");
+        }
+        draw_grid_transparent(&upper, area, &mut buf, true, &colors, &mut Vec::new(), false);
+
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "A", "a reversed glyph is painted");
+        assert_eq!(
+            buf.cell((1, 0)).unwrap().symbol(),
+            " ",
+            "a REVERSED space must be painted — it is one cell of a highlight bar, and \
+             leaving it transparent breaks the bar at every word gap (SQ-1074)"
+        );
+        assert!(
+            buf.cell((1, 0)).unwrap().modifier.contains(Modifier::REVERSED),
+            "…and it must carry the reverse the bar is made of"
+        );
+        assert_eq!(
+            buf.cell((2, 0)).unwrap().symbol(),
+            "~",
+            "a plain blank stays transparent so the layer beneath shows through"
+        );
+    }
+
+    /// `draw_grid_transparent` places 1:1 from the rect it is given — no centring —
+    /// and touches nothing outside the cells the game wrote (SQ-1074).
+    ///
+    /// Both halves are the Amiga Shogun hint screen. `draw_grid` centres by column
+    /// COUNT and floods its region with the theme's `upper_window` page, which for a
+    /// v6 window put the topic list thirteen columns right of its own left edge and
+    /// left a 62x9 black rectangle over the rows the game had not written since the
+    /// clue screen.
+    #[test]
+    fn draw_grid_transparent_does_not_centre_or_flood() {
+        let mut upper = GridWindow::default();
+        upper.resize(2, 4);
+        upper.put(1, 1, 'Z', 0x00); // one written cell, row 1 column 1
+
+        let colors = make_colors();
+        let area = Rect::new(0, 0, 20, 5); // far wider/taller than the 4x2 grid
+        let mut buf = Buffer::empty(area);
+        for y in 0..5 {
+            for x in 0..20 {
+                buf.cell_mut((x, y)).unwrap().set_symbol("~");
+            }
+        }
+        draw_grid_transparent(&upper, area, &mut buf, true, &colors, &mut Vec::new(), false);
+
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().symbol(),
+            "Z",
+            "the grid is drawn from the rect's own first column — centring a v6 window, \
+             which has an absolute native origin, moves it off its own left edge (SQ-1074)"
+        );
+        let untouched = (0..5)
+            .flat_map(|y| (0..20).map(move |x| (x, y)))
+            .filter(|&(x, y)| (x, y) != (0, 0))
+            .all(|(x, y)| buf.cell((x, y)).unwrap().symbol() == "~");
+        assert!(
+            untouched,
+            "every cell the game did not write must be left alone — flooding them with the \
+             theme's grid page is the black box of SQ-1074"
         );
     }
 

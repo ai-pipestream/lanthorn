@@ -2375,33 +2375,24 @@ fn render_node(
                             //
                             // SQ-0951: which is exactly what the COLUMN span had become.
                             // A promoted story GRID — Zork Zero's and Shogun's InvisiClues
-                            // topic list — is not drawn by the in-box run packing at all;
-                            // `render_node` hands it to `draw_grid`, which places the
+                            // topic list — was not drawn by the in-box run packing at all:
+                            // `render_node` handed it to `draw_grid`, which placed the
                             // GAME's screen (`cols` wide) CENTRED in the pane rather than
-                            // flush to the viewport's left edge. At a 190x60 pane that is
-                            // a 58-column grid in a 138-column viewport, so every topic is
+                            // flush to the viewport's left edge. At a 190x60 pane that is a
+                            // 58-column grid in a 138-column viewport, so every topic was
                             // drawn forty columns right of where this map claimed it was,
                             // and the player had to click far to the LEFT of a topic to
-                            // select it. Ask the drawing where it put the first column.
+                            // select it. SQ-0951 taught the map to follow that centring.
+                            //
+                            // SQ-1074 removed the centring — a v6 window has an absolute
+                            // native origin and is drawn where the ring put it — so the two
+                            // arms collapse back into one and the map is once again the
+                            // viewport's own first column, for prose and grid alike. That
+                            // is what SQ-0951 wanted in the first place: "recorded from the
+                            // SAME numbers the drawing used", rather than a second
+                            // implementation that has to chase the first.
                             if viewport.width > 0 && viewport.height > 0 {
-                                let (left, cols) = match &story.node {
-                                    WinNode::Grid(g) => {
-                                        // `render_node` draws a game-managed grid FRAMELESS
-                                        // at its exact rect (SQ-0303), so resolve the span
-                                        // against that border preference and not the theme's.
-                                        let frameless = crate::engine::GridWindow {
-                                            cols: g.cols,
-                                            border: crate::engine::BorderPref::NoBorder,
-                                            ..Default::default()
-                                        };
-                                        crate::render::upper_window::grid_content_x_span(
-                                            &frameless, grid_colors, viewport,
-                                        )
-                                    }
-                                    // Prose wraps to the viewport, so its first column is
-                                    // the viewport's own.
-                                    _ => (viewport.x, viewport.width),
-                                };
+                                let (left, cols) = (viewport.x, viewport.width);
                                 packed_text.push(crate::render::graphics::PackedText {
                                     rows: (viewport.y, viewport.height, vp_native.1 as u16),
                                     cols: Some((left, cols, vp_native.0 as u16)),
@@ -2418,6 +2409,44 @@ fn render_node(
                         // raster does on the same frame, so the scrollbar and the [more]
                         // machinery agree that nothing is showing. SQ-0896.
                         let metrics = if viewport.width == 0 || viewport.height == 0 {
+                            None
+                        } else if let WinNode::Grid(g) = &story.node {
+                            // **A Grid in the story slot is drawn where the ring PUT it,
+                            // and only where the game wrote** (SQ-1074/SQ-1075). This is
+                            // SQ-1026's rule on the hybrid side: the InvisiClues screen
+                            // publishes no buffer at all, so `classify_windows` resolves
+                            // window 0 to a Grid, and the line below is the primary-Buffer
+                            // path — `render_node`'s Grid arm then handed it to
+                            // `draw_grid`, which is the GLULX/v3-v5 renderer and does
+                            // three things that are right there and wrong here:
+                            //
+                            //   * it sizes the region as `grid.cols` TERMINAL columns,
+                            //     when a v6 grid's columns are 8px NATIVE cells;
+                            //   * it CENTRES that region in the area, when a v6 window
+                            //     has an absolute native origin;
+                            //   * it floods the region with the theme's `upper_window`
+                            //     page, when a v6 window's ground is the game's.
+                            //
+                            // Amiga Shogun r295/890321 at a 115x34 pane is the report.
+                            // Window 0 is 500x330 at native (70,70) — a 62x20 grid — and
+                            // the ring gives it an 89x28 viewport at (13,6). Centring 62
+                            // in 89 put the topic list at column 26, thirteen columns
+                            // right of the window's own left edge, and the flood showed
+                            // through the nine rows the game had not written since the
+                            // clue screen: a 62x9 black rectangle, `Rgb(0, 0, 12)`, the
+                            // theme's grid page. `machine-screenshots/amiga-shogun-hint.png`
+                            // settles both halves — calibrated at native = image - 37, its
+                            // topics start at image x=108, i.e. **native 71**, flush with
+                            // the window's left edge, and the page runs the window's whole
+                            // height with nothing black anywhere in it.
+                            //
+                            // `draw_grid_transparent` is the renderer that states all
+                            // three correctly: 1:1 into the rect it is given, no centring,
+                            // and only the cells the game actually wrote.
+                            let show_cursor = char_mode && g.cursor_active;
+                            draw_grid_transparent(g, viewport, buf, state.config.honor_game_colours, grid_colors, links, show_cursor);
+                            // No metrics, exactly as `render_node`'s Grid arm reported
+                            // before: there is no transcript on this frame.
                             None
                         } else {
                             render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors)
@@ -3281,7 +3310,7 @@ fn render_node(
                 }
                 match &item.node {
                     WinNode::Grid(g) => {
-                        draw_grid_transparent(g, sub, buf, state.config.honor_game_colours, grid_colors, links);
+                        draw_grid_transparent(g, sub, buf, state.config.honor_game_colours, grid_colors, links, false);
                     }
                     WinNode::Buffer(_) => {
                         // Transparent composite (cell-text-wins for the buffer, like

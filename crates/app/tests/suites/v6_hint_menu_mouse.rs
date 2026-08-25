@@ -214,11 +214,16 @@ fn a_click_on_a_topic_selects_that_topic(honor: bool) {
                 .clone()
                 .unwrap_or_else(|| panic!("{file} {w}x{h}: a v6 frame records a click map"));
 
-            // Shape guards. This screen is a ring, its topic list is drawn with
-            // GLYPHS, and — at the wide pane — the grid is centred well right of
-            // the viewport's left edge, which is the condition that made the
-            // column defect visible at all. Without the last one a 190x60 case
-            // would assert nothing this suite is about.
+            // Shape guards. This screen is a ring and its topic list is drawn with
+            // GLYPHS. The wide pane's guard used to assert the opposite of the one
+            // below: SQ-0951 pinned the topic list as CENTRED — forty columns right
+            // of the viewport's left edge — because that is where `draw_grid` put it,
+            // and taught the click map to chase it there. SQ-1074 established that
+            // centring is wrong for a v6 window at all (it has an absolute native
+            // origin, and `machine-screenshots/amiga-shogun-hint.png` draws its
+            // topics flush with the window's own left edge), so the wide pane now
+            // guards the property that replaced it. The assertion between them —
+            // the map must equal the drawing — is unchanged and is the real subject.
             assert_eq!(
                 st.v6_path_log.borrow().last().map(|(l, _)| l.clone()),
                 Some("hybrid-ring".into()),
@@ -239,12 +244,16 @@ fn a_click_on_a_topic_selects_that_topic(honor: bool) {
                  topic list is drawn on — the two disagreeing by the grid's centring is SQ-0951"
             );
             if w == 190 {
-                assert!(
-                    col >= 40,
-                    "{file} {w}x{h}: non-vacuity — a wide pane centres the game's own {} columns \
-                     far right of the viewport's left edge, and {first:?} at column {col} means \
-                     this case is not exercising that",
-                    map.packed_text.iter().filter_map(|p| p.cols.map(|(_, n, _)| n)).max().unwrap_or(0)
+                // The pane is far wider than the game's own 58 columns, so a renderer
+                // that centres the grid has plenty of room to show it: this is the
+                // case that caught SQ-0951's defect, and it is the case that would
+                // catch the centring coming back. The topic list must begin ON the
+                // viewport's first column, not somewhere inside it (SQ-1074).
+                assert_eq!(
+                    col, packed_left,
+                    "{file} {w}x{h}: a wide pane must not push the topic list right of the \
+                     viewport's own first column — {first:?} is drawn at column {col} against a \
+                     viewport starting at {packed_left}, which is the grid being centred (SQ-1074)"
                 );
             }
 
