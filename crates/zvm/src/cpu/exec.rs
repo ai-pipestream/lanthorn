@@ -4064,14 +4064,40 @@ impl Machine {
         //
         // The bound is the window's own `x_size - right_margin` (§8.8's property 7),
         // and the COLUMN limit rides along so a run can never outgrow the grid a cell
-        // backend has to place it on — the same pair, in the same order, that the
-        // paint path passes.
+        // backend has to place it on — the same pair, in the same order, the paint
+        // path passes.
+        //
+        // **The same ORDER and the same shape; not, on every window, the same
+        // numbers** (SQ-1064). Two differences, and only one of them is settled:
+        //
+        // * the LEFT margin column was a literal `1` here against the paint path's
+        //   `cell.col_of(left_margin + 1) + 1`. Those agree only while
+        //   `left_margin < cell.w`, and the paint path's is simply the right
+        //   expression, so this now uses it too.
+        // * the RIGHT edge genuinely differs: the paint path bounds at
+        //   `grid.cols * cell.w`, the window's full width, and consults
+        //   `right_margin` nowhere. Its own comment says why — "keeping it there
+        //   is what makes every fixed-pen machine byte-identical through this
+        //   rewrite" — and anticipates the change: "if a declared width is ever
+        //   chosen that does NOT divide, this has to become the window's own
+        //   `x_size - right_margin`".
+        //
+        // That change is NOT made here. It needs a window on the paint route that
+        // has the wrap bit set AND a nonzero right margin, and no shipped release
+        // has been shown to produce one — Shogun's large right margin, the case
+        // `v6_set_margins_snaps_cursor_past_right_edge` cites, is on window 0,
+        // which is wrap+scroll and therefore takes THIS path. Unifying the two on
+        // reasoning alone would be choosing a rule with only one frame in hand,
+        // which is how the last several of these went wrong.
         let right_edge = w.x_size.saturating_sub(w.right_margin);
         let cols = u32::from(right_edge / cell.w.max(1));
         let breaks = crate::screen::wrap_text(
             s,
             (u32::from(w.x_cursor.max(1)), u32::from(w.grid_cursor(cell).1)),
-            (u32::from(w.left_margin.saturating_add(1)), 1),
+            (
+                u32::from(w.left_margin.saturating_add(1)),
+                u32::from(cell.col_of(w.left_margin.saturating_add(1)) + 1),
+            ),
             if w.wrapping() { (u32::from(right_edge), cols) } else { (u32::MAX, u32::MAX) },
             w.wrapping() && w.buffered(),
             &mut |c| (u32::from(metric.advance(c, style)), 1),
@@ -4372,8 +4398,17 @@ impl Machine {
                             // clamp on the stored value can bound one: a paint
                             // window never scrolls, so a story that keeps printing
                             // walks the cursor down a cell per new-line for as long
-                            // as it likes (SQ-1030). Same spelling as
-                            // `ZWindow::prose_new_line`, one file away.
+                            // as it likes (SQ-1030).
+                            //
+                            // **Deliberately NOT the same spelling as
+                            // `ZWindow::prose_new_line`** (SQ-1065 — this used to
+                            // claim it was). That one is a bounded `+=` guarded by
+                            // `y_cursor + 2*fh - 1 <= y_size`, with an `else` that
+                            // scrolls the shadow; a paint window has nothing to
+                            // scroll and no bound to test, which is why this one
+                            // saturates instead. Different operator, different
+                            // guard, different failure mode — matching them up
+                            // would break one of the two.
                             w.y_cursor = w.y_cursor.saturating_add(fh);
                             w.x_cursor = w.left_margin.saturating_add(1);
                             r = r.saturating_add(1);
@@ -10594,6 +10629,69 @@ pub(crate) mod tests {
         let w = &m.screen.v6.as_ref().unwrap().windows[0];
         assert_eq!(w.right_margin, 328, "right margin stored (prop 7)");
         assert_eq!(w.x_cursor, 3, "cursor past the right edge snapped to left margin+1 (px)");
+    }
+
+    /// **The prose wrap starts its COLUMN pen at the left margin's own column**
+    /// (SQ-1064).
+    ///
+    /// `v6_advance_prose_cursor` passed a literal `1` where the paint path passes
+    /// `cell.col_of(left_margin + 1) + 1`, under a comment claiming the two send
+    /// "the same pair, in the same order". They agree only while
+    /// `left_margin < cell.w`, and the paint path's is simply the right
+    /// expression.
+    ///
+    /// It takes a PROPORTIONAL pen to see: on a fixed one the pixel measure and the
+    /// column measure are the same statement twice and the pixel one always binds
+    /// first, so the column margin cannot decide anything. With a pen narrower than
+    /// the cell the pixel budget outruns the column budget and the column measure
+    /// is what ends the line — which is the whole reason `wrap_text` carries both
+    /// (SQ-1009).
+    ///
+    /// FALSIFY by restoring the literal `1`: the first line gains the two columns
+    /// the margin should have taken from it.
+    #[test]
+    fn v6_prose_wrap_starts_its_column_pen_at_the_left_margins_column() {
+        let cell = crate::screen::V6Cell::DEFAULT; // 8x16
+        // A 4-px pen against an 8-px cell, so the COLUMN measure binds.
+        let advances = Box::new([4u16; 256]);
+        let line_lengths = |left_margin: u16| -> Vec<usize> {
+            let mut m = v6_exec_machine();
+            m.v6_metric = crate::screen::V6Metric::proportional(cell, advances.clone(), 0);
+            {
+                let w = &mut m.screen.v6.as_mut().unwrap().windows[0];
+                w.x_size = 200; // 25 columns of 8
+                w.right_margin = 0;
+                w.left_margin = left_margin;
+                w.attributes |= 1 | 8; // wrapping + buffered
+                // The CURSOR is held at 1 in every case: the margin decides where a
+                // BROKEN line restarts, so it is the second line that shows it, and
+                // starting the first at the margin would measure the cursor instead.
+                w.x_cursor = 1;
+                w.y_cursor = 1;
+            }
+            m.print_text(&"a ".repeat(60));
+            let v6 = m.screen.v6.as_ref().unwrap();
+            let mut by_row: std::collections::BTreeMap<u16, usize> = Default::default();
+            for t in &v6.windows[0].streamed {
+                *by_row.entry(t.y).or_default() += t.text.chars().count();
+            }
+            by_row.into_values().collect()
+        };
+        let (none, inside, past) = (line_lengths(0), line_lengths(4), line_lengths(16));
+        // Premises: the shadow records several lines, and a margin INSIDE one cell
+        // is the same column — which is the case the literal `1` got right and why
+        // this outlived every existing test.
+        assert!(none.len() >= 3, "the prose shadow records the lines: {none:?}");
+        assert_eq!(inside, none, "a 4-px margin on an 8-px cell is still column 1");
+        // The FIRST line is the cursor's, not the margin's, and is unchanged.
+        assert_eq!(past[0], none[0], "the first line starts at the cursor: {past:?} vs {none:?}");
+        // The lines after a break restart at the margin's own column, so they are
+        // shorter by the columns it covers. With the literal `1` they were not.
+        assert!(
+            past[1] < none[1],
+            "a 16-px left margin costs the broken line two columns — got {past:?} against \
+             {none:?}, which is the literal `1` the paint path never used",
+        );
     }
 
     #[test]
