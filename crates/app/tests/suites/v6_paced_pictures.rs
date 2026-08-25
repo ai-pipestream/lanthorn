@@ -371,7 +371,7 @@ fn raster_ships_the_paced_frame_and_then_the_settled_one() {
 
         let compose = |model: &app::engine::ScreenModel| {
             let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-            let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+            let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
             let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             app::render::screen::build_v6_raster_canvas(&layout, native, &state).0
         };

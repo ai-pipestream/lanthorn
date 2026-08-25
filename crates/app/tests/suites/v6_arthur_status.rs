@@ -752,7 +752,7 @@ fn mac_arthur_raster_score_bar_is_one_ribbon_not_the_location_alone() {
         state.config.honor_game_colours = honor;
         state.v6_text = face;
         let cell = state.v6_text.cell();
-        let native = app::render::v6_layout::native_extent(items, cell);
+        let native = app::render::v6_layout::native_extent(items, &state.v6_text);
         let layout = app::render::v6_layout::classify_windows(items, cell);
         let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
 

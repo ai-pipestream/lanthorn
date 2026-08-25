@@ -539,7 +539,7 @@ fn zork0_rebus_picture_shows_without_a_text_column() {
     // sliver too small for even one 8x16 text cell. (The map paints edge to
     // edge; the rebus is what exposed the degenerate-sliver stamp.)
     use app::render::v6_layout as v6;
-    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = v6::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let state = render_state(app::config::V6RenderMode::Hybrid);
     let canvas = v6::build_chrome_canvas(

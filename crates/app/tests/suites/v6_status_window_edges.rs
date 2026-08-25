@@ -176,7 +176,7 @@ fn shoguns_chrome_canvas_keeps_the_status_page_off_the_ring() {
     );
 
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items.as_slice(), &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
     // The rows the ring claims: Shogun prints its band at native y 1 and 17, so their
     // tops are 0 and 16 and between them they are the window's whole 32 rows.
@@ -441,7 +441,7 @@ fn shoguns_status_erase_reaches_past_the_story_window_on_the_painted_ground() {
     // The allocation those pixels depend on: the ground shares a coordinate space AND
     // an extent with the chrome canvas `blit_paint_ground` copies it into.
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items.as_slice(), &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     assert_eq!(
         (ground.width(), ground.height()),
         (u32::from(native.0), u32::from(native.1)),

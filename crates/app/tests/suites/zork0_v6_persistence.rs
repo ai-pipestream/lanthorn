@@ -60,7 +60,7 @@ fn composite(session: &GameSession) -> image::RgbaImage {
     let WinNode::Layered(items) = &screen.root else {
         panic!("v6 story's screen() root must be WinNode::Layered, got {:?}", screen.root);
     };
-    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = v6::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let colors = app::colors::ColorScheme::default();
     let default_fg = image::Rgba([220, 220, 220, 255]);

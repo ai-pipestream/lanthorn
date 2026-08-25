@@ -357,7 +357,7 @@ fn scout(
         }
         let m = s.screen();
         let app::engine::WinNode::Layered(it) = &m.root else { continue };
-        let nat = v6::native_extent(it.as_slice(), zvm::screen::V6Cell::DEFAULT);
+        let nat = v6::native_extent(it.as_slice(), &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let lay = v6::classify_windows(it.as_slice(), zvm::screen::V6Cell::DEFAULT);
         let pd = (pane_cells.0 as u32 * cell_px.0 as u32, pane_cells.1 as u32 * cell_px.1 as u32);
         let sc = v6::uniform_scale(nat, pd);
@@ -392,7 +392,7 @@ fn scout(
         return Err("not a Layered v6 frame".into());
     };
 
-    let native = v6::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
+    let native = v6::native_extent(items.as_slice(), &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = v6::classify_windows(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
     let pane_dev = (pane_cells.0 as u32 * cell_px.0 as u32, pane_cells.1 as u32 * cell_px.1 as u32);
     let scale = v6::uniform_scale(native, pane_dev);

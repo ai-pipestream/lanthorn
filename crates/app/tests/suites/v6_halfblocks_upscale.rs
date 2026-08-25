@@ -150,7 +150,7 @@ fn boot(spec: &Specimen) -> Option<GameSession> {
 fn composite(s: &GameSession) -> (image::RgbaImage, (u16, u16)) {
     let model = s.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let paint = Engine::paint_surface(s).expect("both specimens paint a ground of their own");
     (paint.as_ref().clone(), native)
 }

@@ -295,7 +295,7 @@ fn fmvpoker_bet_entry_keeps_its_frame(honor: bool) {
     let menu_shot = {
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         app::render::screen::build_v6_raster_canvas(&layout, native, &state).0
     };
@@ -309,7 +309,7 @@ fn fmvpoker_bet_entry_keeps_its_frame(honor: bool) {
 
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     // Premise: the story window did not move (SQ-0746) — it is window 0, the window
@@ -428,7 +428,7 @@ fn picture_takeover_arms_across_the_corpus(honor: bool) {
             {
                 let model = session.screen();
                 let WinNode::Layered(items) = &model.root else { panic!("{game}: v6 Layered root") };
-                let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+                let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
                 let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
                 match layout.story {
                     Some(story) => {
@@ -609,7 +609,7 @@ fn fmvpoker_menu_labels_are_clickable_where_drawn(honor: bool, mode: app::config
         state.config.v6_render = mode;
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let menu = layout
             .chrome
@@ -753,7 +753,7 @@ fn fmvpoker_composite_shows_its_menu_window(honor: bool) {
     let Some((session, state)) = fmvpoker_title(honor) else { return };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     // Premise: the menu is a NON-PRIMARY Buffer holding those lines…
@@ -829,7 +829,7 @@ fn fmvpoker_erased_banner_keeps_the_colour_the_game_named(honor: bool) {
     let Some((session, state)) = fmvpoker_title(honor) else { return };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     // Premise: window 1 is parked over the banner and the game printed NOTHING into
@@ -943,7 +943,7 @@ fn fmvpoker_the_draw_announcement_survives_the_transcript(honor: bool) {
     let Some((session, mut state)) = fmvpoker_dealt_hand(honor) else { return };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     // Premise: the announcement is in the bottom prose window, not the transcript…
@@ -1061,7 +1061,7 @@ fn fmvpoker_paints_the_runs_it_positions(honor: bool) {
     *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     // Premise: this frame's story window is a canvas…
@@ -1238,7 +1238,7 @@ fn fmvpoker_is_the_only_canvas_story_window() {
             {
                 let model = session.screen();
                 let WinNode::Layered(items) = &model.root else { panic!("{game}: v6 Layered root") };
-                let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+                let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
                 let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
                 *slot = app::render::screen::story_window_is_a_canvas(&layout, native);
             }
@@ -1314,7 +1314,7 @@ fn shot_and_shot_without(
 ) -> (image::RgbaImage, image::RgbaImage) {
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, state);
     let mut stripped = session.screen();
@@ -1499,7 +1499,7 @@ fn fmvpoker_echoes_the_digits_the_player_types(honor: bool) {
 
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (quiet, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
     state.input.value = "25".into();

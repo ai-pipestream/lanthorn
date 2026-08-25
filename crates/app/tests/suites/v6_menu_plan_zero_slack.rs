@@ -206,7 +206,7 @@ fn slack_of(native: (u16, u16), pane: (u16, u16)) -> u32 {
 
 fn native_of(model: &app::engine::ScreenModel) -> (u16, u16) {
     let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
-    app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT)
+    app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT))
 }
 
 // ── 1. Journey keeps its menu — and its panels — with no slack to reclaim ────

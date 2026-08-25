@@ -312,7 +312,7 @@ fn arthur_raster_composite_carries_the_plate() {
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
         let state = render_state(app::config::V6RenderMode::Raster, honor);
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let plate = layout.story_gfx.expect("a plate is up").clone();
         let WinNode::Graphics(gw) = &plate.node else { panic!("story_gfx is a Graphics leaf") };
@@ -450,7 +450,7 @@ fn arthur_plate_is_never_overpainted_by_scrollback_prose() {
             );
             let model = session.screen();
             let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-            let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+            let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
             let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             let plate = layout.story_gfx.expect("a plate is up").clone();
             let WinNode::Graphics(gw) = &plate.node else { panic!("story_gfx is a Graphics leaf") };

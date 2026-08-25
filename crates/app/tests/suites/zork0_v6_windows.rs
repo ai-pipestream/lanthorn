@@ -272,7 +272,7 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
 
     let colors = app::colors::ColorScheme::default();
     use app::render::v6_layout as v6;
-    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = v6::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let default_fg = image::Rgba([220, 220, 220, 255]);
     let default_bg = image::Rgba([0, 0, 0, 255]);
@@ -331,7 +331,7 @@ fn zork0_v6_story_classified_and_clear_interior_inside_frame() {
     };
 
     use app::render::v6_layout as v6;
-    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = v6::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     // Story is the primary buffer window (Zork0's window 0), inset inside the

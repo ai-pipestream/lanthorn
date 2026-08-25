@@ -239,7 +239,7 @@ fn journeys_frame_border_is_a_single_native_pixel_column() {
             _ => &[],
         };
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let colors = app::colors::ColorScheme::terminal_default();
         let canvas = app::render::v6_layout::build_chrome_canvas(
             &layout.chrome,

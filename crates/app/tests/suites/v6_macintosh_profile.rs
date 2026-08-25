@@ -623,7 +623,7 @@ fn banner_tally(session: &GameSession, honour: bool) -> BannerTally {
     let (ink, page) = app::render::screen::v6_host_pair(&state);
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let canvas = app::render::v6_layout::build_chrome_canvas(
         &layout.chrome,

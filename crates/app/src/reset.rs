@@ -534,7 +534,7 @@ mod tests {
         let mut engine: Box<dyn Engine> = Box::new(s);
 
         let native_before = match &engine.screen().root {
-            WinNode::Layered(items) => app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT),
+            WinNode::Layered(items) => app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT)),
             other => panic!("expected a v6 Layered root before reset, got {other:?}"),
         };
         assert_eq!(native_before, (640, 400), "launch sizes the v6 unit screen");
@@ -555,7 +555,7 @@ mod tests {
             other => panic!("v6 story must still present a Layered root after reset, got {other:?}"),
         };
         assert_eq!(
-            app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT),
+            app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT)),
             native_before,
             "the restarted v6 screen keeps its native size (the Reso standard window \
              reached the constructor)"

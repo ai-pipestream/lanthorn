@@ -799,7 +799,7 @@ fn render_node(
             if let Some(picker) = state.game_picker.as_ref() {
                 let (default_fg, default_bg) = v6_host_pair(state);
                 use crate::render::v6_layout as v6;
-                let native = v6::native_extent(items, state.v6_text.cell());
+                let native = v6::native_extent(items, &state.v6_text);
                 let layout = v6::classify_windows(items, state.v6_text.cell());
                 // The native chrome canvas is built per-branch below (SQ-0469):
                 // the raster arm skips the build entirely on an unchanged frame.
@@ -3019,7 +3019,7 @@ fn render_node(
                 };
                 // Native screen width in cells (v6 screens vary — Zork0 is
                 // 320px/40 cells, others differ) sets the anchor thresholds.
-                let (native_w, native_h) = crate::render::v6_layout::native_extent(items, state.v6_text.cell());
+                let (native_w, native_h) = crate::render::v6_layout::native_extent(items, &state.v6_text);
                 let ncols = (native_w as u32).div_ceil(8).max(1);
                 // v6 mouse input in the cell path (SQ-0532/A-F4): this branch draws
                 // no game image, so there is no letterbox to invert — but the pane
@@ -8582,7 +8582,7 @@ mod tests {
         assert_ne!(ink, page_default, "ink and page must never resolve to the same colour");
 
         // ── Compose exactly as the raster branch does ────────────────────────
-        let native = v6::native_extent(&items, zvm::screen::V6Cell::DEFAULT);
+        let native = v6::native_extent(&items, &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = v6::classify_windows(&items, zvm::screen::V6Cell::DEFAULT);
         let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, ink, page_default, &state.colors, v6::TextLayer::All, &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let chrome_only = canvas.clone(); // pre-fill artwork reference
@@ -11644,7 +11644,7 @@ mod tests {
         let (nw, nh) = crate::render::v6_layout::native_extent(match &model.root {
             WinNode::Layered(items) => items,
             _ => unreachable!("cell_path_v6_model is Layered"),
-        }, zvm::screen::V6Cell::DEFAULT);
+        }, &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         assert_eq!((map.native_w, map.native_h), (nw, nh));
 
         // Top-left cell → the top-left game pixel (1-based origin, ZMSD §8.8.1).
@@ -12116,7 +12116,7 @@ mod tests {
                     continue;
                 }
             };
-            let native = crate::render::v6_layout::native_extent(&items, zvm::screen::V6Cell::DEFAULT);
+            let native = crate::render::v6_layout::native_extent(&items, &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
 
             let mut state = AppState::default();
             state.colors = crate::colors::ColorScheme::terminal_default();

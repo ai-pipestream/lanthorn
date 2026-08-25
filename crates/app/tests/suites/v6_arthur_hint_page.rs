@@ -351,7 +351,7 @@ fn raster_and_hybrid_draw_the_same_page() {
     guard_shape(&st, &buf, area, &format!("{FIXTURE} hybrid-vs-raster"));
 
     let (ink, page) = app::render::screen::v6_host_pair(&st);
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &st);
     let mut census: std::collections::BTreeMap<[u8; 4], usize> = Default::default();
     for px in canvas.pixels() {

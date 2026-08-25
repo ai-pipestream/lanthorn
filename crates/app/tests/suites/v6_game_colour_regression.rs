@@ -206,7 +206,7 @@ fn raster_canvas(
     state: &app::state::AppState,
 ) -> (image::RgbaImage, Option<app::render::screen::RasterMetrics>) {
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     app::render::screen::build_v6_raster_canvas(&layout, native, state)
 }
@@ -376,7 +376,7 @@ fn shogun_splash_still_shows_its_art_in_hybrid() {
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         if let Some(story) = layout.story {
             assert!(
                 !(story.w_px >= native.0 && story.h_px >= native.1),
@@ -417,7 +417,7 @@ fn shogun_gets_its_story_window_back_once_the_game_uses_it() {
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let story = layout.story.expect("colours={colours}: in play, window 0 IS the story window");
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         assert!(
             story.w_px < native.0 || story.h_px < native.1,
             "colours={colours}: and it is the game's own box, not the whole screen"

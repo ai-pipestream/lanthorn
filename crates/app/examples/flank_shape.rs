@@ -165,7 +165,7 @@ fn shape(path: &str, keys: &str, archive: Option<&str>, taps: usize, cols: u32, 
     let app::engine::WinNode::Layered(items) = &model.root else {
         return Err("not a Layered v6 frame".into());
     };
-    let native = v6::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
+    let native = v6::native_extent(items.as_slice(), &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = v6::classify_windows(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
     let gfx = v6::build_graphics_canvas(&layout.chrome, native);
     let (w, h) = (native.0 as u32, native.1 as u32);

@@ -126,7 +126,7 @@ fn zork0_room_icons_rest_on_the_banner_windows_own_white_page() {
     let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
 
     let state = render_state(app::config::V6RenderMode::Hybrid, true);
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (default_fg, default_bg) = app::render::screen::v6_host_pair(&state);
 
@@ -270,7 +270,7 @@ fn zork0_declined_game_colours_keep_the_hosts_backdrop() {
     let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
 
     let state = render_state(app::config::V6RenderMode::Hybrid, false);
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (default_fg, default_bg) = app::render::screen::v6_host_pair(&state);
 
@@ -331,7 +331,7 @@ fn zork0_icon_strip_is_fully_resolved_by_the_grid_entry_at_the_same_rect() {
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 publishes a layered composite") };
     let state = render_state(app::config::V6RenderMode::Hybrid, true);
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (default_fg, default_bg) = app::render::screen::v6_host_pair(&state);
 

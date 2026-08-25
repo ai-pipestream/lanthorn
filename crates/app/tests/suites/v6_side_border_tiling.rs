@@ -363,7 +363,7 @@ fn frame(session: &GameSession, pane: (u16, u16)) -> (Buffer, Vec<Band>, (u16, u
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
     let bands = parse_bands(&state.graphics_render.borrow().band_log);
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     (buf, bands, native)
 }
 
@@ -387,7 +387,7 @@ fn frame_mags(session: &GameSession, pane: (u16, u16)) -> (Vec<app::render::grap
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let pane_dev = pane_dev(&state, pane);
     let s = app::render::v6_layout::uniform_scale(native, pane_dev).s;
     let mags = state.graphics_render.borrow().band_mags.clone();
@@ -860,7 +860,7 @@ fn every_zork_zero_rendition_tiles_only_its_pillar_shaft() {
         let name = rendition.unwrap_or("Zork0.blb");
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
         let story = layout.story.expect("a story window");
@@ -974,7 +974,7 @@ fn no_tile_join_steps_harder_than_the_pillar_shaft_itself() {
         let name = rendition.unwrap_or("Zork0.blb");
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
         let story = layout.story.expect("a story window");
@@ -1046,7 +1046,7 @@ fn each_specimen_is_recognised_as_its_own_layout() {
         drive(&mut s, sp.turns);
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
         let story = layout.story.expect("a story window");
@@ -1132,7 +1132,7 @@ fn every_rendition_is_recognised_as_its_own_titles_layout() {
         drive(&mut s, 12);
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
         let story_win = layout.story.expect("a story window");
@@ -1241,7 +1241,7 @@ fn the_raster_composite_extends_its_side_art_to_the_native_bottom() {
         for honor in [true, false] {
             let model = s.screen();
             let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-            let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+            let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
             let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
             let story = layout.story.expect("a story window");
@@ -1434,7 +1434,7 @@ fn zork_zeros_other_two_scene_borders_declare_no_shaft_and_agree_across_flanks()
         drive(&mut s, sp.turns);
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
         let story = layout.story.expect("a story window");
@@ -1650,7 +1650,7 @@ fn autocorrelation_cannot_separate_zork_zeros_scene_borders() {
         drive(&mut s, sp.turns);
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let story = layout.story.expect("a story window");
         let fw = story.x_px as u32;
@@ -1755,7 +1755,7 @@ fn the_raster_composite_leaves_a_command_menu_alone() {
         for honor in [true, false] {
             let model = s.screen();
             let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-            let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+            let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
             let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
             let story = layout.story.expect("a story window");
             let native_h = native.1 as u32;
@@ -1943,7 +1943,7 @@ fn a_divider_extension_replicates_a_rule_and_never_a_picture() {
         drive(&mut s, sp.turns);
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         for &(w, h) in &panes {
             for honor in [true, false] {
                 let state = render_state_with(honor);
@@ -2104,7 +2104,7 @@ fn extending_a_flank_lengthens_its_shaft_and_adds_no_band() {
         drive(&mut s, sp.turns);
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("{}: v6 Layered root", sp.title) };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
         let w = native.0 as u32;
@@ -2208,7 +2208,7 @@ fn frame_mags_locked(
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let pane_dev = pane_dev(&state, pane);
     let free = app::render::v6_layout::uniform_scale(native, pane_dev).s;
     let locked = app::render::v6_layout::FrameGeometry::new(native, art_scale, zvm::screen::V6Cell::DEFAULT).fitted_scale(pane_dev, true).0.s;
@@ -2325,7 +2325,7 @@ fn a_pane_below_the_smallest_rung_still_renders_freely() {
         let pane = (20u16, 6u16);
         let model = s.screen();
         let native = match &model.root {
-            WinNode::Layered(items) => app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT),
+            WinNode::Layered(items) => app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT)),
             other => panic!("v6 Layered root, got {other:?}"),
         };
         let pane_dev = pane_dev(&render_state(), pane);

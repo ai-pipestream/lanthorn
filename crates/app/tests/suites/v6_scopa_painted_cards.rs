@@ -129,7 +129,7 @@ fn the_painted_cards_reach_the_composite_in_both_modes() {
     let Some(paint) = session.paint_surface() else { return };
     let model = session.screen();
     let app::engine::WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
 
     // Sample where the game actually painted, so the test cannot pass vacuously.

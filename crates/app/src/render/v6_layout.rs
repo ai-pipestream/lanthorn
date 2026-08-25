@@ -244,8 +244,8 @@ pub struct MainText {
 /// v6 screen (~640 px) so it's treated as unresolved and skipped for that axis;
 /// clamping here (presentation) keeps zvm storing window props verbatim for the
 /// game to read back (ZMSD §8.8.3.2).
-pub fn native_extent(items: &[PositionedWindow], cell: V6Cell) -> (u16, u16) {
-    let font_w = u32::from(cell.w);
+pub fn native_extent(items: &[PositionedWindow], tf: &crate::native_font::TextFace) -> (u16, u16) {
+    let cell = tf.cell();
     let font_h = u32::from(cell.h);
     let mut w = 1u16;
     let mut h = 1u16;
@@ -264,8 +264,27 @@ pub fn native_extent(items: &[PositionedWindow], cell: V6Cell) -> (u16, u16) {
         // bottom. Runs carry 1-based top-left coords; a glyph spans FONT×FONT.
         if let WinNode::Grid(g) = &it.node {
             for t in &g.px_texts {
-                let n = t.text.chars().count() as u32;
-                let right = (t.x.max(1) as u32 - 1) + n * font_w;
+                // **The reach of a run is the PEN's** (SQ-1066). This was
+                // `chars * cell.w` — `V6Cell::run_px` written longhand — while
+                // `build_chrome_canvas` draws the very same run by stepping
+                // `advance_styled`, so the unit screen was sized by a measure
+                // nothing draws with. SQ-1054 was this one stage later: a
+                // declared-cell rect a pen-drawn run had to fit INSIDE; here it is
+                // one a pen-drawn run has to GROW.
+                //
+                // It is not a clip and loses no ink — it moves the whole frame.
+                // `native_extent` is the unit screen every downstream stage divides
+                // by, so an answer 18 px wide of the machine's own screen scales and
+                // letterboxes everything against a screen the machine never
+                // declared, which is the SQ-0901 shape. Measured on the Macintosh
+                // Zork Zero hint frame: 658x400 where the machine says 640x400.
+                //
+                // Nor is the direction fixed — Geneva 12 advances 3-11 px against a
+                // declared 7, so `chars * 7` can be narrower OR wider than the pen.
+                // The defect is not a size, it is that the extent was not the extent
+                // of what is drawn. Every fixed pen answers the declared cell for
+                // every style, so no other press moves by a pixel.
+                let right = (t.x.max(1) as u32 - 1) + tf.run_px_styled(&t.text, t.style);
                 let bottom = (t.y.max(1) as u32 - 1) + font_h;
                 w = w.max(right.min(u16::MAX as u32) as u16);
                 h = h.max(bottom.min(u16::MAX as u32) as u16);
@@ -449,7 +468,7 @@ pub fn classify_windows(items: &[PositionedWindow], cell: V6Cell) -> V6Layout<'_
         }
     }
     if story.is_none() {
-        story = ring_middle_grid(&chrome, native_extent(items, cell));
+        story = ring_middle_grid(&chrome, native_extent(items, &crate::native_font::TextFace::cell_only(cell)));
     }
     V6Layout { story, story_gfx, chrome }
 }
@@ -2806,6 +2825,92 @@ mod tests {
     use crate::engine::{BorderPref, BufferWindow, GraphicsWindow, GridCell, GridWindow, PxText};
     use std::sync::Arc;
 
+    /// **The unit screen grows by the PEN, not the declared cell** (SQ-1066).
+    ///
+    /// `native_extent`'s answer is the screen every downstream stage divides by, and
+    /// it grew a grid run by `chars * cell.w` — `V6Cell::run_px` written longhand —
+    /// while `build_chrome_canvas` draws that same run by stepping
+    /// `advance_styled`. So the frame was scaled and letterboxed against a screen
+    /// the machine never declared: the Macintosh Zork Zero hint frame measured
+    /// **658x400** where the machine says 640x400, and the whole picture shrank and
+    /// sat off-centre. Not a clip — no ink is lost — which is why it read as
+    /// nothing in particular. SQ-0901 is the same shape.
+    ///
+    /// Measured after the fix, across the presses that have a face: Macintosh Zork
+    /// Zero's hint frame 640x400 (was 658x400), Arthur's Amiga floppy 640x400
+    /// unchanged, Shogun's Amiga floppy 640x400 unchanged. Every fixed pen answers
+    /// the declared cell for every style, so no other press moves by a pixel — which
+    /// is also why the ninety-odd suites pinning `(640, 400)` through a
+    /// `cell_only` face needed no re-measuring.
+    ///
+    /// FALSIFY by restoring `n * font_w`: the extent comes back as the declared
+    /// answer, which this case computes alongside so the two are named together.
+    #[test]
+    fn native_extent_grows_a_grid_run_by_the_pen_not_the_declared_cell() {
+        let profile = crate::interpreter::InterpreterProfile::Macintosh; // 7x15
+        let glyph = |w: u8| blorb::bitmap_font::Glyph {
+            width: w,
+            rows: (0..15).map(|r| if r == 12 { 0xFF } else { 0x00 }).collect(),
+        };
+        let font = blorb::bitmap_font::BitmapFont {
+            width: 11,
+            height: 15,
+            baseline: 12,
+            bold_smear: 0,
+            proportional: true,
+            lo: b' ',
+            // 7..11 against a declared 7, so the pen reaches FURTHER than the cell.
+            glyphs: (b'\x20'..=b'\x7e').map(|c| glyph(7 + (c % 5))).collect(),
+        };
+        let tf = crate::native_font::TextFace::new(
+            profile,
+            crate::native_font::FaceSet::release(font, profile, Some((1, 1))),
+            Some((1, 1)),
+        );
+        const TOPIC: &str = "GENERAL QUESTIONS";
+        let pen = tf.run_px_styled(TOPIC, 0);
+        let declared = u32::from(tf.cell().w) * TOPIC.chars().count() as u32;
+        assert!(
+            pen != declared,
+            "non-vacuity: the two measures must differ ({pen} vs {declared})",
+        );
+
+        // A window of no width, so the RUN is what the extent has to grow for.
+        let mut grid = grid_item(0);
+        grid.w_px = 1;
+        grid.h_px = 1;
+        match &mut grid.node {
+            WinNode::Grid(g) => {
+                g.px_texts = vec![PxText {
+                    y: 1,
+                    x: 1,
+                    text: TOPIC.to_string(),
+                    style: 0,
+                    fg: 0,
+                    bg: 0,
+                    grow: 0,
+                    gcol: 0,
+                }]
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            native_extent(&[&grid].map(|g| g.clone()), &tf).0,
+            pen as u16,
+            "the screen reaches as far as the run is DRAWN",
+        );
+        assert_eq!(
+            native_extent(
+                &[&grid].map(|g| g.clone()),
+                &crate::native_font::TextFace::cell_only(tf.cell()),
+            )
+            .0,
+            declared as u16,
+            "…and the declared measure is the other answer, named here so the two cannot \
+             be confused for one",
+        );
+    }
+
     /// **A chrome run's spare rect is the PEN's span, not the declared one**
     /// (SQ-1054).
     ///
@@ -3542,10 +3647,10 @@ mod tests {
         // 320×200 screen size stands.
         let real = || PositionedWindow { x_px: 0, y_px: 0, w_px: 320, h_px: 200, ..buffer_item(0, true) };
         let bogus = PositionedWindow { x_px: 0, y_px: 0, w_px: 0xFFFE, h_px: 200, ..grid_item(0) };
-        assert_eq!(native_extent(&[real(), bogus], zvm::screen::V6Cell::DEFAULT), (320, 200), "sentinel width excluded");
+        assert_eq!(native_extent(&[real(), bogus], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT)), (320, 200), "sentinel width excluded");
         // A sentinel HEIGHT is likewise ignored on its axis.
         let bogus_h = PositionedWindow { x_px: 0, y_px: 0, w_px: 320, h_px: 0xFFFD, ..grid_item(0) };
-        assert_eq!(native_extent(&[real(), bogus_h], zvm::screen::V6Cell::DEFAULT), (320, 200), "sentinel height excluded");
+        assert_eq!(native_extent(&[real(), bogus_h], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT)), (320, 200), "sentinel height excluded");
     }
 
     #[test]

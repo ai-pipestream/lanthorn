@@ -486,7 +486,7 @@ fn shogun_hybrid_boot_menu_is_one_coherent_ring_screen_with_a_solid_selection_ba
         WinNode::Layered(items) => items,
         _ => panic!("v6 builds a Layered root"),
     };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
     let ground = canvas.get_pixel(180, 337).0; // the same row, left of the menu
@@ -977,7 +977,7 @@ fn shogun_raster_status_band_floods_game_white() {
     let WinNode::Layered(items) = &screen.root else {
         panic!("v6 story's screen() root must be WinNode::Layered, got {:?}", screen.root);
     };
-    let native = v6::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = v6::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = v6::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let colors = app::colors::ColorScheme::default();
     let default_fg = Rgba([220, 220, 220, 255]);

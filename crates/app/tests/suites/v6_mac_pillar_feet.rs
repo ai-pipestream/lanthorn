@@ -124,7 +124,7 @@ struct Flank {
 fn flanks(s: &GameSession) -> Vec<Flank> {
     let model = s.screen();
     let app::engine::WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
     let story = layout.story.expect("a story window");

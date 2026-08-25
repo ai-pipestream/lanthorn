@@ -428,7 +428,10 @@ fn a_promoted_menu_grid_is_not_a_transcript_surface_in_raster() {
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("{file}: v6 publishes a layered composite") };
         let cell = zvm::screen::V6Cell::DEFAULT;
-        let native = app::render::v6_layout::native_extent(items, cell);
+        let native = app::render::v6_layout::native_extent(
+            items,
+            &app::native_font::TextFace::cell_only(cell),
+        );
         let layout = app::render::v6_layout::classify_windows(items, cell);
         // The premise, restated so this case cannot pass on a frame that never
         // promoted anything: the story slot holds a Grid, and it is still chrome.

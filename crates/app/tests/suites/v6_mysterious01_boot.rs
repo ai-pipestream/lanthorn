@@ -197,7 +197,7 @@ fn mysterious01_boot_shows_both_cards(honor: bool) {
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 builds a Layered root") };
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let story = layout.story.expect("mysterious01 publishes a story window");
     assert_eq!(
         (story.x_px, story.y_px, story.w_px, story.h_px),

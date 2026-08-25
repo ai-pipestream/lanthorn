@@ -106,7 +106,7 @@ fn gen_and_composite(s: &GameSession) -> (u64, image::RgbaImage) {
     let state = frame_state(s);
     let picker = ratatui_image::picker::Picker::halfblocks();
     let gen = app::render::screen::v6_raster_gen(items, &state, PANE, &picker);
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
     (gen, canvas)

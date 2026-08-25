@@ -238,7 +238,7 @@ fn the_locked_letterbox_margins_carry_the_same_ground_on_both_sides() {
         let WinNode::Layered(items) = &model.root else {
             panic!("{}: a v6 frame has a Layered root", spec.file)
         };
-        let native = v6::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
+        let native = v6::native_extent(items.as_slice(), &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
 
         for (pw, ph) in PANES {
             let pane_dev = (pw as u32 * CELL.0 as u32, ph as u32 * CELL.1 as u32);
@@ -353,7 +353,7 @@ fn the_locked_fit_centres_the_game_screen_to_within_one_cell() {
         let WinNode::Layered(items) = &model.root else {
             panic!("{}: a v6 frame has a Layered root", spec.file)
         };
-        let native = v6::native_extent(items.as_slice(), zvm::screen::V6Cell::DEFAULT);
+        let native = v6::native_extent(items.as_slice(), &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         // Every pane width a terminal plausibly has, not the four the ring sweep uses:
         // the offset is a function of the width alone and the sub-cell remainders only
         // show up across a run of them.

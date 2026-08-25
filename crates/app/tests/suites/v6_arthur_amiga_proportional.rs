@@ -158,7 +158,7 @@ fn in_the_churchyard() -> Option<(GameSession, app::state::AppState)> {
 fn raster(session: &GameSession, state: &app::state::AppState) -> image::RgbaImage {
     let model = Engine::screen(session);
     let WinNode::Layered(items) = &model.root else { panic!("{FIXTURE}: a v6 frame is Layered") };
-    let native = v6::native_extent(items, state.v6_text.cell());
+    let native = v6::native_extent(items, &state.v6_text);
     let layout = v6::classify_windows(items, state.v6_text.cell());
     app::render::screen::build_v6_raster_canvas(&layout, native, state).0
 }
@@ -1130,7 +1130,7 @@ fn a_proportional_run_stops_at_its_windows_right_edge() {
         );
     }
 
-    let native = v6::native_extent(items, state.v6_text.cell());
+    let native = v6::native_extent(items, &state.v6_text);
     let layout = v6::classify_windows(items, state.v6_text.cell());
     let (canvas, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
     // Nothing is drawn right of the window, which is where the decorated flank is.

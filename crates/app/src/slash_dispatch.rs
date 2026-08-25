@@ -790,7 +790,7 @@ fn terminal_snapshot(
     } else {
         match session.screen().root {
             app::engine::WinNode::Layered(items) => {
-                let native = app::render::v6_layout::native_extent(&items, state.v6_text.cell());
+                let native = app::render::v6_layout::native_extent(&items, &state.v6_text);
                 let hybrid = state.config.v6_render == app::config::V6RenderMode::Hybrid;
                 Some(RenderFacts {
                     mode: if hybrid { "hybrid" } else { "raster" },

@@ -173,7 +173,7 @@ fn story_box(s: &GameSession) -> Option<app::engine::PositionedWindow> {
 fn chrome_pixels_inside_story(s: &GameSession) -> Option<usize> {
     let model = s.screen();
     let app::engine::WinNode::Layered(items) = &model.root else { return None };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
     let story = layout.story?;
     let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
@@ -224,7 +224,7 @@ fn render(s: &GameSession, state: &app::state::AppState, pane: (u16, u16)) -> Bu
 fn viewport(s: &GameSession, pane: (u16, u16)) -> (u16, u16, u16, u16) {
     let model = s.screen();
     let app::engine::WinNode::Layered(items) = &model.root else { return (0, pane.0, 0, pane.1) };
-    let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
     let story = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT).story.cloned().expect("window 0");
     let u = ((f32::from(pane.0) * 8.0) / native.0 as f32)
         .min((f32::from(pane.1) * 18.0) / native.1 as f32);
@@ -492,7 +492,7 @@ fn the_rule_above_the_prose_stays_whole_on_every_turn() {
     for t in 0..4 {
         let model = s.screen();
         let app::engine::WinNode::Layered(items) = &model.root else { panic!("layered") };
-        let native = app::render::v6_layout::native_extent(items, zvm::screen::V6Cell::DEFAULT);
+        let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
         let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
         let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
         let story = layout.story.expect("window 0");
