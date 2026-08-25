@@ -287,6 +287,33 @@ pub fn recognize(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32), native_h
     }
     let (lo, hi) = painted_widths(canvas, x0, x1, art)?;
     let inset = top + native_h.saturating_sub(bottom);
+    // **A side flank runs the height of the frame** (SQ-1010). Art that leaves
+    // more than a quarter of it unpainted is a PICTURE that happens to reach the
+    // screen's edge, and extending it down a taller pane reprints that picture
+    // instead of lengthening a border.
+    //
+    // Arthur's F2 map is the report. The game erases both pole windows and draws
+    // picture 137 — 320x96, so 640x192 at this press's (2, 2) art scale — across
+    // the top of window 7 at (1, 1). Its left columns really are the scroll's own
+    // end-cap, so the cap belongs at the screen edge and
+    // `machine-screenshots/amiga-arthur-map.png` shows it there. What does not
+    // belong is the copy of it running down the flank past the panel and behind
+    // the score bar, which is what the single-piece extender made of it: the arm
+    // below tests only `top == 0`, and the map starts at row 0 like a real border
+    // does.
+    //
+    // Measured, and the gap is wide enough that the bound is a threshold in name
+    // only — every real flank in the corpus insets by at most two text rows:
+    //
+    // | art | extent | inset |
+    // |---|---|---|
+    // | Shogun's single-piece border | (0, 400) | 0 |
+    // | Zork Zero's pillars | (0, 400) | 0 |
+    // | Arthur's poles | (11, 379) | 32 |
+    // | **Arthur's map backdrop** | **(0, 192)** | **208** |
+    if inset > native_h / 4 {
+        return None;
+    }
     // …and the wide part does not RECUR. A capital sits at the head of its pillar;
     // an ornament of one height repeats down a pole, and a column carrying several is
     // Arthur's however flush it sits. See [`repeats_an_ornament`] — SQ-0899.

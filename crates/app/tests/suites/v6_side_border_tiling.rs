@@ -2359,3 +2359,83 @@ fn a_pane_below_the_smallest_rung_still_renders_freely() {
     }
     assert!(ran > 0 || !stories_dir().exists(), "no border specimen present — every case skipped");
 }
+
+/// Arthur's **F2 map screen is not a side border** — SQ-1010.
+///
+/// The game erases both pole windows and draws picture 137 — 320x96, so 640x192
+/// at this press's (2, 2) art scale — across the top of window 7 at (1, 1). Its
+/// left and right columns are the scroll's own end-caps, so they genuinely reach
+/// the screen's edge and `machine-screenshots/amiga-arthur-map.png` shows them
+/// there.
+///
+/// What does not belong is a COPY of the cap running down the flank past the
+/// panel and behind the score bar, which is what `recognize` used to make of it:
+/// its single-piece arm tests `top == 0`, and this picture starts at row 0 like a
+/// real border does. It ends at row 192 of 400, though — an inset of 208, where
+/// every real flank in the corpus insets by at most two text rows — so it is now
+/// declined outright and nothing is extended.
+///
+/// Reported at a pane of 85x38 and visible at every pane swept (80x30 through
+/// 160x70); the classification is pane-independent, which is why this case
+/// asserts on it rather than on a rendered frame.
+#[test]
+fn arthurs_map_backdrop_is_not_mistaken_for_a_side_border() {
+    use app::render::v6_border::{art_extent, recognize};
+    let _g = app::v6_palette_at_boot();
+    let Some(mut s) = boot("Arthur - The Quest for Excalibur.adf", Some((54, "890606"))) else {
+        return;
+    };
+    drive(&mut s, 16);
+    // F2 — ZSCII 133..144 are function keys 1..12 (ZMSD §3.8).
+    let _ = s.submit_char(134);
+
+    let model = s.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(
+        items,
+        &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
+    );
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+    let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+
+    // The frame's own signature first: a release that stops drawing the backdrop,
+    // or a route that stops reaching the map, must fail HERE rather than pass
+    // vacuously below.
+    let rows = art_extent(&gfx, 0, 40);
+    assert_eq!(
+        rows,
+        (0, 192),
+        "the map backdrop spans the top 192 native rows of a 400-row frame; \
+         got {rows:?} — is this still the map screen?"
+    );
+
+    for x1 in [20u32, 28, 32, 40, 64] {
+        assert_eq!(
+            recognize(&gfx, 0, x1, art_extent(&gfx, 0, x1), native.1 as u32),
+            None,
+            "crop 0..{x1}: a picture that leaves over half the frame unpainted is \
+             not a side flank and must not be extended down the pane",
+        );
+    }
+
+    // …and the ordinary gameplay frame still IS a flank, so the guard has not
+    // simply switched flank extension off for this press.
+    let mut s = boot("Arthur - The Quest for Excalibur.adf", Some((54, "890606")))
+        .expect("the fixture is present — the case above returned otherwise");
+    drive(&mut s, 16);
+    let model = s.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(
+        items,
+        &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
+    );
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+    let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+    let rows = art_extent(&gfx, 0, 40);
+    assert_eq!(rows, (11, 379), "Arthur's poles, unchanged");
+    assert_eq!(
+        recognize(&gfx, 0, 40, rows, native.1 as u32),
+        Some(BorderArt::ArthurPoles),
+        "the poles inset by two text rows and are still recognised",
+    );
+}

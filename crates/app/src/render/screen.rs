@@ -5314,8 +5314,11 @@ fn flank_tiled_source(
 /// SQ-0793: extend the side border art down the RASTER composite, in place.
 ///
 /// The hybrid ring gained this in SQ-0698 and raster did not, so the two modes
-/// disagreed on the same frame: Shogun's Amiga border ends at native row 336 of
-/// 400 and Arthur's poles at 379, and the raster composite showed those last
+/// disagreed on the same frame: Shogun's Amiga border ended at native row 336 of
+/// 400 — **that 336 was itself a defect, fixed in SQ-1029: the border is 400 rows
+/// and `@split_window` was resetting window 0 to full width so the erase that
+/// followed took its bottom four text rows out of window 7** — and Arthur's poles
+/// at 379, and the raster composite showed those last
 /// rows as an unpainted band inside the frame's own lower edge — measured on
 /// `James Clavell's Shogun.adf` (release 295, serial 890321) as **64 native rows
 /// of one flat colour** in both flanks, and on `Arthur - The Quest for
