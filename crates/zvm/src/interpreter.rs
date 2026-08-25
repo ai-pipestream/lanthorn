@@ -627,6 +627,107 @@ pub enum V6Emphasis {
     Slope,
 }
 
+/// What a Version 6 window does with text that reaches its right margin — see
+/// [`V6WrapRegime`], which is where the machines disagree about how to choose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6TextFlow {
+    /// Break after the last WORD that fits, and start the next line at the left
+    /// margin (ZMSD §8.8.3.1.2.2).
+    WordWrap,
+    /// Break after the last CHARACTER that fits (ZMSD §8.8.3.1.2.2).
+    CharWrap,
+    /// *"characters will be printed until no more can be fitted in without hitting
+    /// the right margin, at which point the cursor will move to the right margin
+    /// and stay there, so that any further text will be ignored"* — §8.8.3.1.1.
+    ///
+    /// The margin is the WINDOW's, not the screen's: §8.8.3 says *"all text and
+    /// graphics plotting is always clipped to the current window"*.
+    CharClip,
+}
+
+/// How a machine decides which [`V6TextFlow`] a window is in (SQ-1071).
+///
+/// # The two machines Infocom shipped a Version 6 interpreter for both ignore the
+/// window attributes
+///
+/// §8.8.3.1.2.2's commentary tabulates what Infocom's own interpreters did, and
+/// it is not what §8.8.3.1.1 prescribes — verified against
+/// <https://inform-fiction.org/zmachine/standards/z1point1/sect08.html>:
+///
+/// ```text
+///                   Apple II      MSDOS         Macintosh   Amiga        Standard
+/// A0 off,  A3 off   char clip(LR) char clip()   ---         ---          char clip(LR)
+/// A0 off,  A3 on    char clip(LR) char clip(LR) ---         ---          char clip(LR)
+/// A0 on,   A3 off   word wrap     char wrap     ---         ---          char wrap
+/// A0 on,   A3 on    word wrap     word wrap     ---         ---          word wrap
+/// buffer_mode off   ---           ---           char wrap   char clip(L) ---
+/// buffer_mode on    ---           ---           word wrap   word wrap    ---
+/// ```
+///
+/// *"Here `---` means that the interpreter **ignores** the given state."* So on
+/// the Macintosh and the Amiga attributes 0 and 3 say nothing at all, and the
+/// `buffer_mode` opcode — which defaults ON, and which the V6 story files touch
+/// exactly once, to trickle out a "Please wait..." — decides instead. Both
+/// machines therefore WORD WRAP whatever the window's wrapping attribute says.
+///
+/// Measured, on the frame that prompted this: Shogun's InvisiClues clears window
+/// 0's wrapping attribute (`@window_style(win=0, flags=0b0001, op=2)`) and prints
+/// a clue longer than the 500-px window it just declared.
+/// `machine-screenshots/amiga-shogun-hintshown.png` and
+/// `machine-screenshots/mac-shogun-hintshown.png` both show it **word-wrapped
+/// onto a second line at the left margin**, at each machine's own break point —
+/// the Amiga after `from`, the Macintosh after `you`, which is its proportional
+/// Geneva in a wider box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6WrapRegime {
+    /// §8.8.3.1.1 and §8.8.3.1.2.2 as written: attribute 0 decides whether text
+    /// breaks at all, attribute 3 whether it breaks by word.
+    ///
+    /// The row every machine outside the table above keeps, and the row the
+    /// **Apple II** measurably has. The **IBM PC** keeps it too rather than the
+    /// MSDOS column, because the standard names that column's two departures as
+    /// BUGS and nothing in `machine-screenshots/` reaches either — reproducing a
+    /// defect we cannot observe would be reputation, not evidence.
+    Attributes,
+    /// Attributes 0 and 3 are ignored; the `buffer_mode` opcode decides.
+    /// **Macintosh and Amiga.**
+    ///
+    /// `unbuffered` is the flow with buffering OFF, and it rides along because the
+    /// two machines disagree about it — the Macintosh char-wraps, the Amiga
+    /// clips. Nothing in the corpus reaches it (buffer_mode is on for every frame
+    /// measured), so it is stated from the table rather than measured.
+    ///
+    /// The Amiga's entry is `char clip(L)` — the LEFT margin respected and the
+    /// right one not — which the standard itself calls a probable bug. We state
+    /// [`V6TextFlow::CharClip`], clipping at both, for the same reason the IBM PC
+    /// keeps `Attributes`: an unobservable bug is not worth a variant.
+    BufferMode {
+        /// The flow this machine uses when `buffer_mode` is off.
+        unbuffered: V6TextFlow,
+    },
+}
+
+impl V6WrapRegime {
+    /// Which flow a window with these `attributes` (ZMSD §8.8.3.1) is in, on a
+    /// machine whose `buffer_mode` (§15) is as given.
+    pub fn flow(self, attributes: u16, buffer_mode: bool) -> V6TextFlow {
+        match self {
+            V6WrapRegime::Attributes => match (attributes & 0b0001 != 0, attributes & 0b1000 != 0) {
+                (false, _) => V6TextFlow::CharClip,
+                (true, false) => V6TextFlow::CharWrap,
+                (true, true) => V6TextFlow::WordWrap,
+            },
+            V6WrapRegime::BufferMode { unbuffered } => {
+                if buffer_mode {
+                    V6TextFlow::WordWrap
+                } else {
+                    unbuffered
+                }
+            }
+        }
+    }
+}
+
 /// The coordinate space a machine's own TYPEFACE bitmaps are authored in — which
 /// is not always the space its ARTWORK is authored in (SQ-1039).
 ///
@@ -869,6 +970,15 @@ pub struct MachineProfile {
     /// rediscover, somewhere else, which typeface the machine actually painted
     /// prose with.
     pub v6_system_face: Option<V6SystemFace>,
+    /// How this machine chooses what a window does with text that reaches its
+    /// right margin — see [`V6WrapRegime`], which carries §8.8.3.1.2.2's table of
+    /// what Infocom's own interpreters did and the captures that confirm it.
+    ///
+    /// Beside the cell and the face spaces for the same reason they are beside
+    /// each other: it is machine knowledge, and an embedder holding this
+    /// machine's interpreter number should not have to rediscover elsewhere
+    /// whether this machine reads the window's wrapping attribute at all.
+    pub v6_wrap_regime: V6WrapRegime,
     /// How this machine draws §8.7.1's Italic bit — see [`V6Emphasis`], which holds
     /// the measurements and the standard's own licence to choose.
     pub v6_emphasis: V6Emphasis,
@@ -1015,6 +1125,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_cell: V6Cell::DEFAULT,
         v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
+        v6_wrap_regime: V6WrapRegime::Attributes,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
@@ -1036,6 +1147,9 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_system_face: Some(V6SystemFace::MacFamily(MAC_GENEVA_FONT_FAMILY)),
         // Measured on `mac-shogun.jpg`, and the interesting row: this machine HAD
         // real italics and underlined anyway.
+        // §8.8.3.1.2.2: this machine ignores attributes 0 and 3 and follows
+        // `buffer_mode`; unbuffered it CHAR-wraps. `mac-shogun-hintshown.png`.
+        v6_wrap_regime: V6WrapRegime::BufferMode { unbuffered: V6TextFlow::CharWrap },
         v6_emphasis: V6Emphasis::Underline,
         v6_std_window: Some(MACINTOSH_STD_WINDOW),
         // mac-zork1.jpg: Zork I r88/840726 on a Mac Plus, screen 512x342. A 1-bit
@@ -1067,6 +1181,9 @@ pub const MACHINES: &[MachineProfile] = &[
         // *Shogun* and *Zork Zero* shipped no face of their own on that machine
         // and took this one; *Arthur* ships `char.data` and outranks it.
         v6_system_face: Some(V6SystemFace::AmigaDrawer("topaz")),
+        // §8.8.3.1.2.2: this machine ignores attributes 0 and 3 and follows
+        // `buffer_mode`; unbuffered it CLIPS. `amiga-shogun-hintshown.png`.
+        v6_wrap_regime: V6WrapRegime::BufferMode { unbuffered: V6TextFlow::CharClip },
         v6_emphasis: V6Emphasis::Underline,
         v6_std_window: Some(AMIGA_STD_WINDOW),
         // amiga-spellbreaker.png (r87/860904) and amiga-lurking.png, both v3 and
@@ -1098,6 +1215,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_cell: V6Cell::DEFAULT,
         v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
+        v6_wrap_regime: V6WrapRegime::Attributes,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // SQ-0933, from `machine-screenshots/st-zork1.png` — Zork I revision 88 /
@@ -1155,6 +1273,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_cell: V6Cell::DEFAULT,
         v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
+        v6_wrap_regime: V6WrapRegime::Attributes,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // SQ-0873/SQ-0928, from `machine-screenshots/dos-hitchhiker.png` — the last
@@ -1228,6 +1347,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_cell: V6Cell::DEFAULT,
         v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
+        v6_wrap_regime: V6WrapRegime::Attributes,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // c128-trinity.png: Trinity (v4) at the first prompt, two colours exactly.
@@ -1254,6 +1374,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_cell: V6Cell::DEFAULT,
         v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
+        v6_wrap_regime: V6WrapRegime::Attributes,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         // c64-zork1-solidgold.png: Zork I release 52 / serial 871125, whose own
@@ -1281,6 +1402,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_cell: V6Cell::DEFAULT,
         v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
+        v6_wrap_regime: V6WrapRegime::Attributes,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
@@ -1296,6 +1418,7 @@ pub const MACHINES: &[MachineProfile] = &[
         v6_cell: V6Cell::DEFAULT,
         v6_release_face_space: V6FaceSpace::Native,
         v6_system_face: None,
+        v6_wrap_regime: V6WrapRegime::Attributes,
         v6_emphasis: V6Emphasis::Slope,
         v6_std_window: None,
         period_look: Some(MachineLook::Measured(APPLE_PERIOD_LOOK)),
@@ -1935,6 +2058,69 @@ mod tests {
             assert_eq!(
                 m.v6_system_face, None,
                 "{} names no system face — nothing to name, not something unmeasured",
+                m.name,
+            );
+        }
+    }
+
+    /// ZMSD §8.8.3.1.2.2's table, read back a row at a time (SQ-1071).
+    ///
+    /// The `---` cells are the interesting half: they say the interpreter IGNORES
+    /// the state, so the Macintosh and Amiga rows must answer the SAME flow for
+    /// every combination of attributes 0 and 3 and change only with `buffer_mode`.
+    #[test]
+    fn the_wrap_regime_reads_back_the_standards_own_table() {
+        // A0 off / A3 off, A0 off / A3 on, A0 on / A3 off, A0 on / A3 on.
+        const A: [u16; 4] = [0b0000, 0b1000, 0b0001, 0b1001];
+
+        let std = V6WrapRegime::Attributes;
+        assert_eq!(
+            A.map(|a| std.flow(a, true)),
+            [
+                V6TextFlow::CharClip,
+                V6TextFlow::CharClip,
+                V6TextFlow::CharWrap,
+                V6TextFlow::WordWrap
+            ],
+            "the Standard column",
+        );
+        assert_eq!(
+            A.map(|a| std.flow(a, false)),
+            A.map(|a| std.flow(a, true)),
+            "…and it ignores buffer_mode, which is the `---` in that column",
+        );
+
+        for (n, unbuffered) in [
+            (MACINTOSH_INTERPRETER_NUMBER, V6TextFlow::CharWrap),
+            (AMIGA_INTERPRETER_NUMBER, V6TextFlow::CharClip),
+        ] {
+            let m = machine(n).expect("modelled");
+            let r = m.v6_wrap_regime;
+            assert_eq!(
+                A.map(|a| r.flow(a, true)),
+                [V6TextFlow::WordWrap; 4],
+                "{}: buffer_mode on is word wrap whatever the attributes say",
+                m.name,
+            );
+            assert_eq!(
+                A.map(|a| r.flow(a, false)),
+                [unbuffered; 4],
+                "{}: buffer_mode off is one answer whatever the attributes say",
+                m.name,
+            );
+        }
+
+        // Every other row keeps the standard's own rule — including the IBM PC,
+        // whose MSDOS column the standard names two BUGS in.
+        for n in 1u8..=11 {
+            let Some(m) = machine(n) else { continue };
+            if n == MACINTOSH_INTERPRETER_NUMBER || n == AMIGA_INTERPRETER_NUMBER {
+                continue;
+            }
+            assert_eq!(
+                m.v6_wrap_regime,
+                V6WrapRegime::Attributes,
+                "{} reads the window attributes, per §8.8.3.1.1",
                 m.name,
             );
         }

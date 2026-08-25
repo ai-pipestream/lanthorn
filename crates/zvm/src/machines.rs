@@ -240,14 +240,15 @@ pub fn table() -> String {
     let mut s = format!("ZMSD §11.1.3 machine profiles — what zvm models, in number order.\n\n{TOLD_INTRO}\n");
     let name_w = MACHINES.iter().map(|m| m.name.len()).max().unwrap_or(0);
     s.push_str(&format!(
-        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {:<14}  {}\n",
+        "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {:<14}  {:<14}  {}\n",
         "#", "machine", "default page / ink ($2C/$2D)", "palette", "global pens", "v6 screen page",
-        "one screen palette", "v6 cell", "face space", "emphasis", "system face", "v6 std window"
+        "one screen palette", "v6 cell", "face space", "emphasis", "system face", "v6 std window",
+        "v6 wrap"
     ));
-    s.push_str(&format!("  {}\n", "-".repeat(name_w + 157)));
+    s.push_str(&format!("  {}\n", "-".repeat(name_w + 173)));
     for m in MACHINES {
         s.push_str(&format!(
-            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {:<14}  {}\n",
+            "  {:>2}  {:<name_w$}  {:<32}  {:<8}  {:<11}  {:<14}  {:<18}  {:<8}  {:<10}  {:<9}  {:<14}  {:<14}  {}\n",
             m.number,
             m.name,
             colours(m),
@@ -303,6 +304,22 @@ pub fn table() -> String {
             // A machine that states none defers to the story's own container, and
             // to any artwork the host mounted ahead of it (SQ-0838).
             m.v6_std_window.map_or("the archive's".to_string(), |(w, h)| format!("{w}x{h}")),
+            // How this machine decides what a v6 window does with text that reaches
+            // its right margin (SQ-1071). §8.8.3.1.2.2's commentary tabulates
+            // Infocom's own interpreters and the two that shipped a Version 6
+            // interpreter IGNORE the window attributes, following `buffer_mode`
+            // instead; the flow named is the one they use with buffering OFF, since
+            // buffering ON is word wrap on both.
+            match m.v6_wrap_regime {
+                crate::interpreter::V6WrapRegime::Attributes => "attributes".to_string(),
+                crate::interpreter::V6WrapRegime::BufferMode { unbuffered } => {
+                    format!("buffer_mode/{}", match unbuffered {
+                        crate::interpreter::V6TextFlow::WordWrap => "word",
+                        crate::interpreter::V6TextFlow::CharWrap => "char",
+                        crate::interpreter::V6TextFlow::CharClip => "clip",
+                    })
+                }
+            },
         ));
     }
     s.push_str(&format!("\n{LEGEND}"));
@@ -498,6 +515,7 @@ mod tests {
                 v6_emphasis,
                 v6_std_window,
                 period_look,
+                v6_wrap_regime,
             } = *m;
             let rows: Vec<&str> = t.lines().filter(|l| l.contains(name)).collect();
             assert!(!rows.is_empty(), "{name} has no row");
@@ -532,6 +550,18 @@ mod tests {
                     crate::interpreter::V6Emphasis::Slope => "slope",
                 }),
                 "{name}: v6_emphasis not in\n{all}",
+            );
+            assert!(
+                all.contains(&match v6_wrap_regime {
+                    crate::interpreter::V6WrapRegime::Attributes => "attributes".to_string(),
+                    crate::interpreter::V6WrapRegime::BufferMode { unbuffered } =>
+                        format!("buffer_mode/{}", match unbuffered {
+                            crate::interpreter::V6TextFlow::WordWrap => "word",
+                            crate::interpreter::V6TextFlow::CharWrap => "char",
+                            crate::interpreter::V6TextFlow::CharClip => "clip",
+                        }),
+                }),
+                "{name}: v6_wrap_regime not in\n{all}",
             );
             assert!(
                 all.contains(&match v6_system_face {

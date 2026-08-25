@@ -536,3 +536,63 @@ off it yet: no pitch, no advance, no pixel count. Treat it as good for layout
 and colour only until someone does that work. It exists to give SQ-1026
 ("Amiga Shogun's hint menu leaves the story text visible behind it in raster
 mode") a frame to reproduce against.
+
+
+THE THREE SQ-1071 INVISICLUES CAPTURES (2026-08-24)
+
+  amiga-shogun-hintshown.png  Shogun's InvisiClues clue page, Amiga. 722x570.
+                              Topic *Erasmus*, hint 6, reached by `hint`, `y`,
+                              Return x4 from a fresh boot.
+  mac-shogun-hintshown.png    The same clue on a Macintosh. 653x424.
+  amiga-zorkzero-hint-result.png
+                              Zork Zero's clue page, Amiga, release 366 /
+                              serial 890323. 723x572.
+
+THE FIRST TWO SETTLED WHETHER THE WRAPPING ATTRIBUTE MEANS ANYTHING
+
+Shogun's InvisiClues clears window 0's wrapping attribute — traced,
+`@window_style(win=0, flags=0b0001, op=2)` — sizes the window to 500x330 at
+native (71,71), and prints a clue longer than that. ZMSD §8.8.3.1.1 says a
+non-wrapping window prints "until no more can be fitted in without hitting the
+right margin", so on that reading the clue is truncated. §8.8.3.1.2.2's own
+commentary says otherwise about these two machines specifically, and these
+captures are which of the two is right:
+
+  Amiga      6> You have to do everything you can to keep your ship from
+             sinking before you get to Japan.
+             5>
+
+  Macintosh  6> You have to do everything you can to keep your ship from sinking before you
+             get to Japan.
+             5>
+
+Both WRAP, at a word, continuing at the window's own left margin — so both
+interpreters ignore the attribute, exactly as the standard's table says (it
+prints `---` in every attribute row of the Macintosh and Amiga columns). The two
+break points differ because the Amiga steps a fixed 8-px pen and the Macintosh
+draws proportional Geneva 12.
+
+MEASURED, AND BOTH ARE 1:1 HORIZONTALLY
+
+  amiga-shogun-hintshown.png  the reddish frame spans image x 44..683 — 640 px,
+                              so native = image - 44.
+  mac-shogun-hintshown.png    image x 7..646, so native = image - 7. Its first
+                              clue line is 486 native px over 78 characters,
+                              6.23 px/char; lanthorn draws 489 px over 75 in the
+                              same box. The PEN agrees to better than a pixel per
+                              glyph, which is what identified SQ-1072 (the column
+                              limit, not the advance table) as the reason
+                              lanthorn's line was a word short.
+
+Both frames are now pinned run for run by
+`crates/app/tests/suites/v6_hint_clue_wrap.rs`.
+
+THE ZORK ZERO CAPTURE IS A CONFIRMATION, NOT A FALSIFIER
+
+Its clue is 384 px in a 464-px window and fits on one line, so it says nothing
+about wrapping. What it does do is confirm the frame: lanthorn's runs match it
+glyph for glyph and position for position — `1> Just DIVE UNDER A TABLE when
+everyone else does.` at native (89,81), `[No more hints.]` at (89,97), and all
+four header runs. Calibration is the same as the Shogun Amiga capture (the
+reddish frame spans image x 44..683). Note the label really is `1>`, a chevron;
+at 1:1 it reads as `1)` and magnifying 6x is what settles it.

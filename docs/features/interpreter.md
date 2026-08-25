@@ -1042,6 +1042,26 @@ Amiga floppy or anywhere else.
   lanthorn follows whichever machine you are presenting as; `one screen palette`
   in the table above is the column that says which.
 
+  **Another decides where a line of text ends**, and it is the one place the
+  standard admits Infocom's own interpreters did not do what the standard says.
+  A Version 6 window has a *wrapping* attribute; §8.8.3.1.1 says that with it off,
+  characters print until the right margin and everything past that is ignored. The
+  Macintosh and Amiga interpreters never read it. §8.8.3.1.2.2's own commentary
+  tabulates them and puts a dash in every attribute row — "the interpreter ignores
+  the given state" — because both follow the `buffer_mode` opcode instead, which
+  is on by default. So on those two machines a window word-wraps whether or not
+  the game asked it to.
+
+  That is not a footnote. *Shogun*'s InvisiClues turns wrapping **off** to paint
+  its topic list, then prints a hint into the same 500-pixel window — and the hint
+  is longer than the window. Read the attribute and the clue runs across the frame
+  art and off the screen, cut mid-word at "…keep your ship from sinking bef". A
+  real Amiga and a real Macintosh both wrap it onto a second line, at their own
+  break points, and `machine-screenshots/amiga-shogun-hintshown.png` and
+  `mac-shogun-hintshown.png` are the proof. `v6 wrap` in the machine table is the
+  column that says which rule a press gets: `attributes` for the standard's own
+  reading, `buffer_mode/…` for the two machines that ignore it.
+
   **One byte in that neighbourhood is still unsourced**, and it is one a story
   can print. Header `$1F` is the interpreter *version*, and lanthorn writes `A`
   for every machine — a value that arrived in the same early commit as the

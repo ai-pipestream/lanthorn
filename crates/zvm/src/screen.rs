@@ -215,6 +215,22 @@ impl UpperWindow {
             .resize(new_rows as usize * self.cols as usize, Cell::default());
         self.rows = new_rows;
     }
+    /// Widen the grid, keeping every cell already in it (SQ-1072).
+    ///
+    /// The column counterpart of [`grow_rows`](Self::grow_rows), and it exists
+    /// for the same reason: a **proportional** pen fits more characters on a line
+    /// than the declared cell counts, so the row a v6 window prints can be wider
+    /// than `x_size / cell.w`. Bounding the LINE by that count instead — which is
+    /// what the print path used to do — ends it before the pixels do and draws a
+    /// screen the machine never drew.
+    ///
+    /// Row-major, so a widen cannot append in place the way `grow_rows` can; it
+    /// re-lays through [`resize_preserving`](Self::resize_preserving).
+    pub fn grow_cols(&mut self, new_cols: u16) {
+        if new_cols > self.cols {
+            self.resize_preserving(self.rows, new_cols);
+        }
+    }
     /// Scroll the grid vertically by whole rows (used by `scroll_window`,
     /// EXT:0x14, quantized to the character grid): positive shifts content
     /// forward/up (drops the top `rows`, appends blank rows at the bottom);

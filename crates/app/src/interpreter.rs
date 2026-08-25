@@ -893,6 +893,20 @@ impl InterpreterProfile {
         self.machine().map_or(zvm::screen::V6Cell::DEFAULT, |m| m.v6_cell)
     }
 
+    /// How this machine decides what a Version 6 window does with text that
+    /// reaches its right margin (SQ-1071).
+    ///
+    /// The two machines Infocom shipped a Version 6 interpreter for do **not**
+    /// read the window's wrapping attribute at all — see
+    /// [`zvm::interpreter::V6WrapRegime`], which carries §8.8.3.1.2.2's table of
+    /// what their interpreters actually did and the captures that confirm it. A
+    /// row with no machine keeps the standard's own rule, which is what a bare
+    /// story file with no medium to name a machine should get.
+    pub fn v6_wrap_regime(self) -> zvm::interpreter::V6WrapRegime {
+        self.machine()
+            .map_or(zvm::interpreter::V6WrapRegime::Attributes, |m| m.v6_wrap_regime)
+    }
+
     /// The space a face off this machine's OWN RELEASE MEDIA is authored in —
     /// Arthur's `char.data`, the Macintosh's `FONT` 524 (SQ-1039).
     ///

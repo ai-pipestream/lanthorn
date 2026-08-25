@@ -340,3 +340,108 @@ fn the_raster_composite_keeps_both_rows_right_justified() {
         }
     }
 }
+
+/// The band's VALUES sit on the band's last column, and nothing paints below it —
+/// SQ-1073.
+///
+/// Shogun right-aligns the score and the move count to native x **586**, which
+/// with an 8-px cell ends at 593: exactly the right edge of a 548-px window at
+/// native x 47. That final glyph is the one a wrap limit gets wrong, because
+/// **548 is 68.5 cells** — quantized to 68 the limit is 544, four pixels short,
+/// and the glyph trips a break that sends the value to the next line and out of a
+/// two-row band into the story.
+///
+/// # Why this case boots differently from the rest of the suite
+///
+/// [`shogun_in_play`] goes through `GameSession::new_with_trace`, which is the
+/// honest **no-machine** door: it takes an interpreter number and nothing else,
+/// so the session's wrap regime stays `Attributes` whatever profile the case
+/// names. That is fine for what those cases measure — they are about where the
+/// RENDERER puts columns the game has already aligned — but it means none of them
+/// can see this defect, and the full gate was green while the score sat in the
+/// story area. A case guarding a MACHINE's behaviour has to boot the way
+/// `startup.rs` boots (CLAUDE.md), through `MachineBoot` and `new_for_machine`.
+///
+/// Asserted on the engine's own painted runs rather than on a rendered pane: the
+/// defect is in the model, and both render paths were faithfully drawing it.
+#[test]
+fn the_band_values_sit_on_its_last_column_and_nothing_paints_below_it() {
+    let _g = app::v6_palette_at_boot();
+    let path = stories_dir().join(AMIGA_RELEASE);
+    let Ok((loaded, medium)) = app::hints::load_mounted_story(&path) else {
+        eprintln!("SKIP: gitignored medium missing at {}", path.display());
+        return;
+    };
+    let bytes = loaded.bytes().to_vec();
+    assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 295, "{AMIGA_RELEASE}: release");
+    assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), "890321", "{AMIGA_RELEASE}: serial");
+    let (profile, source) =
+        InterpreterProfile::resolve_with_source(&path, None, None, medium);
+    assert_eq!(profile, InterpreterProfile::Amiga, "the floppy names the machine");
+    let mut picts = PictSource::resolve(&path, None);
+    let dims = picts.all_pict_dims();
+    let boot = app::machine_boot::MachineBoot::resolve(
+        profile,
+        &picts,
+        None,
+        profile.interpreter_number(),
+        profile.default_colours(),
+        app::native_font::resolve(&app::native_font::FaceRequest {
+            story_path: &path,
+            entry: None,
+            profile,
+            source,
+            art_scale: picts.art_scale(),
+            disks: Some(&app::system_fonts::UserDisks::new("")),
+        }),
+    );
+    let mut s = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
+        .expect("Shogun boots off its Amiga floppy");
+    s.set_pict_source(Some(picts));
+    s.flush_boot_pictures();
+    for _ in 0..14 {
+        match s.pending_input() {
+            InputKind::Char => {
+                let _ = s.submit_char(13);
+            }
+            _ => {
+                s.submit("");
+            }
+        }
+    }
+    let r = s.submit("look");
+    assert!(r.fault.is_none(), "`look` faulted: {:?}", r.fault);
+
+    let w1 = &s.machine.screen.v6.as_ref().expect("v6").windows[1];
+    // The frame's own signature first: a band that stopped being 548 px wide, or a
+    // release that stopped right-aligning to 586, must fail here rather than pass
+    // vacuously below.
+    assert_eq!(
+        (w1.x_coord, w1.y_coord, w1.x_size, w1.y_size),
+        (47, 1, 548, 32),
+        "the Amiga's status band, two rows of a 548-px window",
+    );
+    let runs: Vec<(u16, u16, String)> =
+        w1.texts.iter().map(|t| (t.y, t.x, t.text.clone())).collect();
+
+    // Each of the two rows carries a NUMERAL on the band's last column.
+    for row in [1u16, 17] {
+        let value = runs
+            .iter()
+            .find(|(y, x, t)| *y == row && *x == 586 && t.chars().all(|c| c.is_ascii_digit()));
+        assert!(
+            value.is_some(),
+            "row {row}: the right-aligned value belongs at native x=586, on the band's \
+             last column; got\n{:#?}",
+            runs.iter().filter(|(y, _, _)| *y == row).collect::<Vec<_>>(),
+        );
+    }
+
+    // …and NOTHING is painted past the band's bottom edge. The defect put a
+    // numeral at native y=33, one row below a window that ends at 32.
+    let below: Vec<&(u16, u16, String)> = runs.iter().filter(|(y, _, _)| *y > 32).collect();
+    assert!(
+        below.is_empty(),
+        "the band is two rows tall and nothing may wrap out of it; got {below:#?}",
+    );
+}

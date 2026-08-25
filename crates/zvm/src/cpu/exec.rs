@@ -235,6 +235,15 @@ pub struct Machine {
     /// [`crate::screen::V6Metric`] for why the declared metric and the drawn
     /// advance are one value. [`Machine::v6_cell`] reads the declared half.
     pub v6_metric: crate::screen::V6Metric,
+    /// How this machine chooses what a Version 6 window does with text that
+    /// reaches its right margin (SQ-1071) — see
+    /// [`crate::interpreter::V6WrapRegime`], which carries §8.8.3.1.2.2's table.
+    ///
+    /// Beside [`Self::v6_metric`] and set the same way, by a host that knows which
+    /// machine it is presenting; [`crate::interpreter::V6WrapRegime::Attributes`]
+    /// — §8.8.3.1.1 as written — until one does, which is what every unit test in
+    /// this crate expects.
+    pub v6_wrap_regime: crate::interpreter::V6WrapRegime,
     /// Output stream routing: streams 1/2/3/4 state.
     pub streams: StreamState,
     /// Snapshot of the original dynamic memory (bytes 0..static_mem_base) taken
@@ -546,6 +555,7 @@ impl Machine {
             pending_input: None,
             screen,
             v6_metric: crate::screen::V6Metric::fixed(V6Cell::DEFAULT),
+            v6_wrap_regime: crate::interpreter::V6WrapRegime::Attributes,
             streams: StreamState::new(),
             original_dynamic,
             undo_stack: Vec::new(),
@@ -4297,6 +4307,10 @@ impl Machine {
                     0 => u16::MAX,
                     w => w,
                 };
+                // Read alongside the header, for the same reason: both are wanted
+                // inside the `&mut self.screen` borrow below (SQ-1071).
+                let wrap_regime = self.v6_wrap_regime;
+                let buffer_mode = self.screen.buffer_mode;
                 // Finished runs collect here with SCREEN-ABSOLUTE pixel coords
                 // stamped at paint time (window origin + cursor, both 1-based),
                 // then paint via `V6Windows::paint_run` after the window borrow
@@ -4311,42 +4325,113 @@ impl Machine {
                 if let Some(w) = self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(idx)) {
                     let fw = cell.w;
                     let fh = cell.h;
-                    let cols = w.grid.cols.max(1);
                     let (fg, bg) = (w.fg, w.bg);
                     let bound = screen_h.max(w.grid.rows) * fh; // px bound
-                    // Wrapping is the window's attribute bit 0 (ZMSD §8.8.3.2
-                    // prop 14; frotz update_attributes). With it CLEAR — the
-                    // boot default for windows 1-7 — text does NOT wrap at the
-                    // window's own width: Shogun prints its boot-menu items
-                    // through a 1-px caret window and they must paint rightward
-                    // on the screen, clipped only at the screen edge.
-                    let wrapping = w.attributes & 1 != 0;
+                    // What this window does with text that reaches its right
+                    // margin, decided by the MACHINE (SQ-1071). §8.8.3.1.2.2's
+                    // commentary tabulates Infocom's own interpreters, and the
+                    // two that shipped a Version 6 interpreter — Macintosh and
+                    // Amiga — IGNORE attributes 0 and 3 and follow `buffer_mode`,
+                    // which defaults on: both word wrap however the window's
+                    // wrapping attribute reads. `V6WrapRegime` carries the table,
+                    // the citation and the captures.
+                    //
+                    // This used to read attribute 0 on every machine and then clip
+                    // at the SCREEN edge, which no row of that table does. Shogun's
+                    // InvisiClues clears the bit and prints a clue longer than the
+                    // 500-px window it just declared, and both machines' own
+                    // captures show it wrapped onto a second line
+                    // (`{amiga,mac}-shogun-hintshown.png`) where lanthorn ran it
+                    // out to native x=639 and cut it mid-word.
+                    let flow = wrap_regime.flow(w.attributes, buffer_mode);
+                    // Whether it BREAKS at all — a clipping window never does, and
+                    // the per-glyph bound below stops it at the margin instead.
+                    let wrapping = flow != crate::interpreter::V6TextFlow::CharClip;
                     // ZMSD §8.8.3.1.2.2: "If 'buffered printing' is on, then
                     // text is wrapped after the last word which could fit on a
                     // line. If not, then text is wrapped after the last
-                    // character that could fit." Word wrapping therefore needs
-                    // BOTH wrapping (attribute 0) and buffered printing
-                    // (attribute 3); with buffering off the per-character wrap
-                    // stands (SQ-0535).
-                    let word_wrap = w.wrapping() && w.buffered();
-                    // The line's right edge, stated once per measure. In pixels
-                    // it is `cols * cell.w` rather than `x_size` so that a window
-                    // the cell does not divide breaks exactly where it always
-                    // has — that is where the character wrap has always been, and
-                    // keeping it there is what makes every fixed-pen machine
-                    // byte-identical through this rewrite.
+                    // character that could fit." (SQ-0535)
+                    let word_wrap = flow == crate::interpreter::V6TextFlow::WordWrap;
+                    // The line's right edge, stated once per measure: the
+                    // window's own **`x_size - right_margin`**, in pixels
+                    // (SQ-1071, SQ-1073).
                     //
-                    // The two are the same number whenever the cell divides the
-                    // window, which is every window SQ-1009 measured (Arthur's
-                    // 584 on a declared 8). **If a declared width is ever chosen
-                    // that does NOT divide, this has to become the window's own
-                    // `x_size - right_margin`** — the bound
-                    // `v6_advance_prose_cursor` already uses one screen regime
-                    // over. A declared 16 for the Amiga, which its F4 score
-                    // screen argues for, would leave 576 here and wrap the F5
-                    // description one word early.
+                    // This used to be `grid.cols * cell.w`, and both halves of that
+                    // were wrong.
+                    //
+                    // `grid.cols` is only rewritten by `window_size` (EXT:0x11), so
+                    // a game that resizes a window by writing property 3 through
+                    // `put_wind_prop` moves `x_size` and leaves the grid behind.
+                    // Arthur's Amiga floppy does exactly that on its InvisiClues
+                    // menu: windows 0 and 1 are 640 px wide with `grid.cols` still
+                    // 73 — 584/8, their width while the story frame was up — and a
+                    // 584-px limit broke "Return for hints." after "Return for" and
+                    // character-wrapped "P for previous item." into "revious item.".
+                    //
+                    // And CELL-QUANTIZING it throws away the remainder of a window
+                    // the cell does not divide. Shogun's Amiga status band is
+                    // **548** px — 68.5 cells — and the game right-aligns the score
+                    // to the last column, native 586..593, ending exactly on the
+                    // window's right edge. Quantized to 68 whole cells the limit is
+                    // 544, four pixels short, so that final glyph tripped a wrap and
+                    // the score and move counts fell out of the band and into the
+                    // story. The comment this replaces predicted it in as many
+                    // words — "if a declared width is ever chosen that does NOT
+                    // divide, this has to become the window's own
+                    // `x_size - right_margin`" — and Shogun had chosen one all
+                    // along; nothing consulted the limit on that window until
+                    // SQ-1071 gave the Amiga a wrap regime.
+                    //
+                    // The right margin is in it because §8.8.3.2.1 puts it there:
+                    // "if a window has character wrapping, then text is clipped to
+                    // stay inside the left and right margins". The CLIP bound below
+                    // is the window's bare edge for the same sentence's sake — that
+                    // branch is the window with no wrapping.
+                    //
+                    // Arthur's Amiga floppy (release 54) is the report and it is a
+                    // 56-pixel disagreement: on the InvisiClues menu, windows 0 and
+                    // 1 are **640** px wide with `grid.cols` still **73** — 584/8,
+                    // the width they had while the story frame was up. Measured
+                    // against `machine-screenshots/amiga-arthur-hint.png`, the
+                    // machine prints "Return for hints." at native 427..575 on one
+                    // line; a 73-column limit is 584 px, so lanthorn broke it after
+                    // "Return for" and then character-wrapped "P for previous
+                    // item." into "revious item." on the line below.
+                    //
+                    // It only became visible when SQ-1071 gave this window a wrap
+                    // regime at all — before, the Amiga's cleared wrapping
+                    // attribute meant no limit was consulted — but the staleness is
+                    // older than that, and the same number now bounds the clip
+                    // below, so the two cannot drift apart again.
+                    //
+                    // And the COLUMN half of the limit is only a limit on a FIXED
+                    // pen (SQ-1072). A proportional one fits more characters on a
+                    // line than the declared cell counts — Geneva 12 averages 6.25
+                    // px against a declared 7 — so a column limit of
+                    // `x_size / cell.w` ends the line before the pixels do. The
+                    // machine has only pixels; the column count is our bookkeeping,
+                    // for the grid cell a run carries (SQ-1009), and the grid grows
+                    // to hold it (`grow_cols`) rather than the line shrinking to fit
+                    // the grid. Measured: `mac-shogun-hintshown.png` puts 78
+                    // characters on the clue's first line where a 71-column limit
+                    // stopped at 67, and Arthur's Macintosh status ribbon lost the
+                    // `e` of `Compline` to the same edge.
+                    let usable_px =
+                        u32::from(w.x_size).saturating_sub(u32::from(w.right_margin)).max(1);
                     let (limit_px, limit_cols) = if wrapping {
-                        (u32::from(cols) * u32::from(fw), u32::from(cols))
+                        (
+                            usable_px,
+                            // Rounded UP, so the column measure never binds before
+                            // the pixel one on the partial cell a non-dividing width
+                            // leaves: 548 px is 69 columns of which the last is half
+                            // a cell wide, and the pixel limit is what stops a glyph
+                            // from using it.
+                            if metric.is_proportional() {
+                                u32::MAX
+                            } else {
+                                usable_px.div_ceil(u32::from(fw))
+                            },
+                        )
                     } else {
                         (u32::MAX, u32::MAX)
                     };
@@ -4434,14 +4519,39 @@ impl Machine {
                         let out_ch = glyph(ch);
                         let adv = metric.advance(out_ch, style);
                         if !wrapping {
+                            // §8.8.3.1.1: "characters will be printed until no more
+                            // can be fitted in without hitting the right margin, at
+                            // which point the cursor will move to the right margin
+                            // and stay there, so that any further text will be
+                            // ignored" — and §8.8.3: "all text and graphics plotting
+                            // is always clipped to the current window". So the bound
+                            // is the WINDOW's own right margin (SQ-1071); it was the
+                            // screen's, which is a bound no row of §8.8.3.1.2.2's
+                            // table has. The screen still bounds it as well, for a
+                            // window the game has placed or sized past the edge.
+                            //
                             // u32: both terms are capped (WINDOW_PX_CAP) but
                             // `x_cursor` ADVANCES past that cap as the story
                             // prints, and the sum of two u16 pixel coordinates
                             // does not fit a u16 (SQ-1030).
                             let abs_x =
                                 u32::from(w.x_coord.max(1)) + u32::from(w.x_cursor.max(1)) - 1;
-                            if abs_x + u32::from(adv) - 1 > u32::from(screen_w_px) {
-                                continue; // clipped at the screen edge; cursor pinned
+                            // The window's EDGE, not `x_size - right_margin`:
+                            // §8.8.3.2.1 conditions the margins on wrapping —
+                            // "IF a window has character wrapping, then text is
+                            // clipped to stay inside the left and right margins" —
+                            // and this branch is the window that has none. The
+                            // margin strip is the wrap limit's business, a few rows
+                            // up. (`v6_erase_line_is_clipped_inside_the_right_margin`
+                            // is the case that says so: it prints 40 glyphs across a
+                            // 320-px window whose right margin is 160, and all forty
+                            // are painted.)
+                            let win_right = (u32::from(w.x_coord.max(1))
+                                + u32::from(w.x_size))
+                            .saturating_sub(1);
+                            let bound = win_right.min(u32::from(screen_w_px));
+                            if abs_x + u32::from(adv) - 1 > bound {
+                                continue; // clipped at the margin; cursor pinned
                             }
                         }
                         // The blank a word wrap broke on is drawn on neither line —
@@ -4458,6 +4568,13 @@ impl Machine {
                                     < u32::from(bound)
                             {
                                 w.grid.grow_rows(r);
+                            }
+                            // …and wider, for a proportional pen whose line holds
+                            // more characters than `x_size / cell.w` (SQ-1072).
+                            // Inert on a fixed pen, whose column limit above stops
+                            // the line at exactly `cols_now`.
+                            if c > w.grid.cols && c <= crate::screen::GRID_CELL_CAP {
+                                w.grid.grow_cols(c);
                             }
                             w.grid.put(r, c, out_ch, style, fg, bg);
                             c = c.saturating_add(1);
@@ -11047,15 +11164,23 @@ pub(crate) mod tests {
         assert_eq!(m.state.eval_stack.pop(), Some(4), "window 2's prop 10 mirrors the style bitmask");
     }
 
+    /// A window with no wrapping paints ONE horizontal run — it does not break at
+    /// its own width and turn an item into a vertical column of glyphs.
+    ///
+    /// Shogun's boot menu is the report, and this case now uses the geometry the
+    /// game actually prints at. It used to print into a **1-px-wide caret window**
+    /// and assert the run survived whole, on the strength of a comment saying that
+    /// is what Shogun does. It is not: swept across every v6 press in `stories/`
+    /// (boot, gameplay and the whole InvisiClues route), **no shipped release ever
+    /// prints into a window narrower than its run** — Shogun's menu goes into
+    /// window 2 while that window is 169 px wide, and the 1-px caret is what the
+    /// window BECOMES afterwards. `v6_paint_runs_are_screen_absolute_and_survive_window_moves`
+    /// is that real sequence, and this case is the horizontal-run half of it.
+    /// (SQ-1071)
     #[test]
-    fn v6_no_wrap_window_prints_past_its_width() {
-        // Shogun's boot menu: items print into a 1-px-wide caret window
-        // (wrapping OFF, the boot default — frotz seeds attribute=8) and must
-        // paint rightward across the screen, clipped only at the screen edge —
-        // NOT wrap at the window's own width (which turned each item into a
-        // vertical column of glyphs).
+    fn v6_no_wrap_window_paints_one_horizontal_run() {
         let mut m = v6_exec_machine();
-        v6_place_window(&mut m, 2, 169, 159, 24, 1);
+        v6_place_window(&mut m, 2, 169, 159, 24, 169);
         m.print_text("START the game");
         let w2 = &m.screen.v6.as_ref().unwrap().windows[2];
         assert_eq!(w2.texts.len(), 1, "one horizontal run, got {:?}", w2.texts);
@@ -11063,13 +11188,36 @@ pub(crate) mod tests {
         assert_eq!(w2.texts[0].text, "START the game");
     }
 
+    /// ZMSD §8.8.3.1.1: with wrapping off "characters will be printed until no
+    /// more can be fitted in without hitting the right margin … so that any
+    /// further text will be ignored", and §8.8.3: "all text and graphics plotting
+    /// is always clipped to the current window".
+    ///
+    /// **The bound used to be the SCREEN's** (header `$22`), which is a bound no
+    /// row of §8.8.3.1.2.2's table of Infocom interpreters has — the Apple II and
+    /// the standard clip at the window, and MSDOS's `char clip()` and the Amiga's
+    /// `char clip(L)` are named there as bugs. (SQ-1071)
     #[test]
-    fn v6_no_wrap_window_clips_at_screen_edge() {
-        // sample_story(6) has no screen-dims written; write 320 px wide.
+    fn v6_no_wrap_window_clips_at_its_own_right_edge() {
         let mut m = v6_exec_machine();
         m.mem.write_word(0x22, 320);
-        v6_place_window(&mut m, 2, 1, 305, 24, 1);
-        m.print_text("ABCDEF"); // 6 glyphs from x=305 → only 305,313 fit fully
+        // 24 px wide at x=1: three glyphs fit, the rest are ignored.
+        v6_place_window(&mut m, 2, 1, 1, 24, 24);
+        m.print_text("ABCDEF");
+        let w2 = &m.screen.v6.as_ref().unwrap().windows[2];
+        let joined: String = w2.texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(joined, "ABC", "clipped at the window edge, got {:?}", w2.texts);
+    }
+
+    /// …and the SCREEN still bounds it as well, for a window the game has placed
+    /// or sized past the edge. Both bounds apply; the tighter one wins.
+    #[test]
+    fn v6_no_wrap_window_clips_at_the_screen_edge_too() {
+        let mut m = v6_exec_machine();
+        m.mem.write_word(0x22, 320);
+        // Wide enough for all six glyphs, but hanging off a 320-px screen.
+        v6_place_window(&mut m, 2, 1, 305, 24, 64);
+        m.print_text("ABCDEF"); // from x=305 → only 305, 313 fit fully
         let w2 = &m.screen.v6.as_ref().unwrap().windows[2];
         let joined: String = w2.texts.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(joined, "AB", "chars past the screen edge are dropped, got {:?}", w2.texts);
@@ -12177,8 +12325,15 @@ pub(crate) mod tests {
 
     /// The cursor ADVANCE is an accumulation, not a written value, so the clamp
     /// above cannot bound it: a paint window that never scrolls walks `y_cursor`
-    /// up by one cell per new-line for as long as the story keeps printing, and
-    /// `x_cursor` likewise per glyph.
+    /// up by one cell per new-line for as long as the story keeps printing.
+    ///
+    /// **The two axes stopped being symmetrical in SQ-1071.** `y_cursor` still
+    /// accumulates without limit — a paint window has nothing to scroll, so there
+    /// is no bound to test it against — and this case is about it saturating
+    /// rather than wrapping through zero. `x_cursor` is now BOUNDED by
+    /// construction: a non-wrapping window clips at its own right edge (§8.8.3),
+    /// so a flood of glyphs into one pins the cursor instead of running it up. The
+    /// x assertion is therefore that it stayed in the window, and above zero.
     #[test]
     fn hostile_print_flood_cannot_overflow_the_cursor_advance() {
         let mut m = v6_exec_machine();
@@ -12192,7 +12347,13 @@ pub(crate) mod tests {
         m.print_text(&"X".repeat(8000));
         let w = &m.screen.v6.as_ref().unwrap().windows[1];
         assert!(w.y_cursor >= WINDOW_PX_CAP, "y_cursor saturated rather than wrapping");
-        assert!(w.x_cursor >= WINDOW_PX_CAP, "x_cursor saturated rather than wrapping");
+        assert!(w.x_cursor >= 1, "x_cursor did not wrap through zero, got {}", w.x_cursor);
+        assert!(
+            u32::from(w.x_cursor) <= u32::from(w.x_size) + u32::from(m.v6_metric.cell().w),
+            "x_cursor stays inside the window it clips at, got {} in {}",
+            w.x_cursor,
+            w.x_size,
+        );
     }
 
     /// `print_table` loops height x width with both operands story-controlled.

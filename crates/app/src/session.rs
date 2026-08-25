@@ -889,7 +889,7 @@ impl GameSession {
         random_seed: Option<u32>,
         boot: &crate::machine_boot::MachineBoot,
     ) -> Result<GameSession, ZError> {
-        Self::new_with_art_scale(
+        let mut s = Self::new_with_art_scale(
             story,
             honor_game_colours,
             sound_available,
@@ -902,7 +902,14 @@ impl GameSession {
             host_screen,
             random_seed,
             Some(boot.text_face()),
-        )
+        )?;
+        // SQ-1071. Set here rather than threaded through the private constructor
+        // above, whose positional machine facts are the shape SQ-1021 closed the
+        // door on. `new_with_trace` — the honest no-machine door — leaves zvm's
+        // own default, §8.8.3.1.1 as written, which is what a story file with no
+        // medium to name a machine should get.
+        s.machine.v6_wrap_regime = boot.wrap_regime;
+        Ok(s)
     }
 
     /// **Private since SQ-1021.** Every machine fact as a separate positional

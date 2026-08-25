@@ -86,6 +86,11 @@ pub struct MachineBoot {
     /// the admitted FACE's where the release shipped a proportional one
     /// ([`crate::native_font::declared_cell`], SQ-1009).
     pub cell: zvm::screen::V6Cell,
+    /// How this machine decides what a Version 6 window does with text that
+    /// reaches its right margin (SQ-1071) — see
+    /// [`zvm::interpreter::V6WrapRegime`]. Beside the cell for the same reason:
+    /// a harness that resolves the machine must not be able to omit it.
+    pub wrap_regime: zvm::interpreter::V6WrapRegime,
     /// The typefaces this machine draws with — its body face and its fixed-pitch
     /// alternate, resolved through [`crate::native_font::resolve`]'s cascade: the
     /// release's own medium first, then the machine's own system face off a boot
@@ -127,6 +132,7 @@ impl MachineBoot {
         MachineBoot {
             profile,
             interpreter_number,
+            wrap_regime: profile.v6_wrap_regime(),
             screen_px: picts
                 .std_window()
                 .or(named_art_std_window)
@@ -167,6 +173,7 @@ impl MachineBoot {
             art_scale: None,
             default_colours: None,
             cell: InterpreterProfile::IbmPc.v6_font_cell(),
+            wrap_regime: InterpreterProfile::IbmPc.v6_wrap_regime(),
             faces: crate::native_font::FaceSet::none(),
         }
     }
