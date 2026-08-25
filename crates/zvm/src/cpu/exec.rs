@@ -2060,7 +2060,6 @@ impl Machine {
                     // instruction — gone from the pane, and left in the transcript
                     // above a screen-clear boundary where only a scroll could reach
                     // them and the bottom-stick snapped straight back (SQ-0745).
-                    let screen_w = self.mem.read_word(0x22);
                     let screen_h = self.mem.read_word(0x24);
                     let mut retired = false;
                     let mut whole = true;
@@ -2071,9 +2070,45 @@ impl Machine {
                             [(1usize, 1u16, rows), (0, rows.saturating_add(1), screen_h.saturating_sub(rows))];
                         for (win, y, h) in tiling {
                             let w = &mut v6.windows[win];
-                            let nw = if screen_w > 0 { screen_w } else { w.x_size };
-                            if (w.y_coord, w.x_coord, w.y_size, w.x_size) != (y, 1, h, nw)
-                                && w.retire_streamed(1, y, nw, h, &self.v6_metric)
+                            // **The tile is VERTICAL** (SQ-1076): it gives each
+                            // window its new top and height and leaves the
+                            // HORIZONTAL box exactly as the game set it.
+                            //
+                            // §8.8.4.1 says the two are "tiled together to fill the
+                            // screen", and this used to read that as full width —
+                            // `x_coord = 1`, `x_size = screen width`. Shogun's Amiga
+                            // release is the falsifier. It sets both windows inset
+                            // between its side ornaments (`move_window(win=1, y=1,
+                            // x=47)`, `window_size(win=1, y=32, x=548)` and the same
+                            // for window 0), THEN issues `@split_window(336)`. Reset
+                            // to full width, the very next instruction —
+                            // `erase_window(lower)` over the resulting
+                            // (1, 337, 640, 64) — wiped the bottom 64 native rows of
+                            // the frame art out of window 7, permanently: nothing
+                            // redraws the border, so every later frame inherited a
+                            // 336-row flank that either tiled (a pane taller than
+                            // the art) or simply stopped at the menu (a pane at or
+                            // below it). The same reset painted the status band
+                            // across the whole screen.
+                            //
+                            // `machine-screenshots/amiga-shogun-main.png` is that
+                            // exact frame on the machine: the gold ornament runs past
+                            // the menu text to the bottom, and the band sits between
+                            // the ornaments — measured 540 px wide from native x 47,
+                            // which is the box the game asked for and the split threw
+                            // away. `amiga-shogun-game.png` says the same of
+                            // gameplay.
+                            //
+                            // The standard's own remark is the other half: "Existing
+                            // Version 6 games seem to use this opcode only for
+                            // bounding cursor movement." A vertical tile is enough
+                            // for that, and it leaves every full-width caller —
+                            // Zork Zero's `@split_window(400)` splash, advent's
+                            // Inform library, mysterious01 — byte-identical, because
+                            // their windows already span the screen.
+                            let (nx, nw) = (w.x_coord.max(1), w.x_size);
+                            if (w.y_coord, w.x_coord, w.y_size, w.x_size) != (y, nx, h, nw)
+                                && w.retire_streamed(nx, y, nw, h, &self.v6_metric)
                             {
                                 retired = true;
                                 whole &= w.streamed.is_empty();
@@ -2081,9 +2116,7 @@ impl Machine {
                             // Through `put_prop` for the clamp — `y` and `h` are
                             // derived from the story's own `rows` operand
                             // (SQ-1030).
-                            w.put_prop(1, 1);
                             w.put_prop(0, y);
-                            w.put_prop(3, nw);
                             w.put_prop(2, h);
                         }
                     }

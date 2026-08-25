@@ -1033,7 +1033,16 @@ fn each_specimen_is_recognised_as_its_own_layout() {
     let _g = app::v6_palette_at_boot();
     let expected = [
         ("Arthur", BorderArt::ArthurPoles, (11u32, 379u32)),
-        ("Shogun", BorderArt::ShogunSinglePiece, (0, 336)),
+        // **336 until SQ-1076, and that number was the defect.** Shogun's Amiga
+        // border is a full-screen picture whose left columns are painted for all
+        // 200 of its rows — 400 native at this press's (2, 2) art scale. It
+        // measured 336 here because `@split_window(336)` reset windows 0 and 1 to
+        // the full screen width, out of the inset box the game had just given
+        // them, and the `erase_window(lower)` on the next instruction then took
+        // a 640x64 strip out of window 7 — the frame art's bottom four text rows,
+        // permanently. `machine-screenshots/amiga-shogun-main.png` is that frame
+        // on the machine, ornament running past the menu text to the bottom.
+        ("Shogun", BorderArt::ShogunSinglePiece, (0, 400)),
         ("Zork Zero", BorderArt::ZorkZeroPillars, (0, 400)),
         // The two SQ-0898 entries. Release 54's poles are the same rows whatever
         // turn they are read on; release 74's sit four native rows lower and end
