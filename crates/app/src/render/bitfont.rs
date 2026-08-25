@@ -6,9 +6,15 @@
 //!
 //! [`crate::render::vga16`] — Uni-VGA, natively **8×16** — is tried first, and
 //! [`glyph_bits`]'s 8×8 chain below is the fallback for what it doesn't carry.
-//! The cell is 8×16 at every production call site (`v6_layout`'s
-//! `FONT_W`/`FONT_H`), so the 16-row face samples **1:1** while an 8×8 master has
-//! to double each row into it. That doubling was the state of things from SQ-0450
+//! The cell is **the machine's** (SQ-0917): 7×15 on a Macintosh, 8×16 elsewhere,
+//! and a release's own proportional face states its own line height on top of that
+//! (SQ-1009). At 8×16 the 16-row face samples **1:1** while an 8×8 master has to
+//! double each row into it. This paragraph used to say 8×16 was the cell "at every
+//! production call site", which was true until the Macintosh declared its own and
+//! is contradicted 200 lines below by [`blit_glyph_styled`]'s own account of
+//! SQ-0917. `v6_layout`'s `FONT_W`/`FONT_H` are still bare 8/16 and documented
+//! there as a test convenience — they are not the cell. Left standing, a sentence
+//! like that is how `py + 16` gets written next, which is SQ-1020 exactly. That doubling was the state of things from SQ-0450
 //! until SQ-0932, and this module's opening line used to call a taller font
 //! "future work".
 //!
@@ -186,7 +192,8 @@ const STYLE_ITALIC: u8 = 4;
 /// terminals always faked it — and it is done here, in FONT space, BEFORE the
 /// glyph is scaled into its `cw × ch` cell, for two reasons:
 ///
-/// * **Scale.** A v6 cell is 8×16 device px (`v6_layout`'s `FONT_W`/`FONT_H`), and
+/// * **Scale.** A v6 cell is the machine's — 8×16 on most, 7×15 on a Macintosh
+///   (SQ-0917) — and
 ///   [`blit_glyph`] maps font column `c` to device column `dx` with `col = dx*8/cw`
 ///   — at `cw == 8` that is 1:1, so one font pixel IS one device pixel horizontally
 ///   and a one-column shift is exactly the classic one-device-pixel double-strike.
@@ -332,9 +339,13 @@ pub(crate) fn must_tile(c: char) -> bool {
 /// So a tiling glyph maps its ENDPOINTS instead: `dx * 7 / (cw - 1)` sends
 /// destination 0 to source 0 and destination `cw - 1` to source 7, dropping an
 /// INTERIOR column. At `cw == 8` that is the identity too, so no machine but the
-/// Macintosh moves, and at `cw > 8` it spreads the master over the wider cell the
-/// same way. An all-ink arm stays contiguous either way; a stem mid-cell stays one
-/// pixel wide.
+/// Macintosh moves. At `cw > 8` the endpoint map is NOT taken — the gate below is
+/// `(2..8)` — and the plain `dx * 8 / cw` runs instead; the outcome coincides,
+/// because `(cw - 1) * 8 / cw` floors to 7 for every `cw > 8`, so the rightmost
+/// column still survives and the tiling guarantee holds. This sentence used to say
+/// the wide case "spreads the master the same way", describing a branch the body
+/// does not take (SQ-1065). An all-ink arm stays contiguous either way; a stem
+/// mid-cell stays one pixel wide.
 fn source_col(dx: u32, cw: u32, tiling: bool) -> u32 {
     let col = if tiling && (2..8).contains(&cw) {
         dx.saturating_mul(7) / (cw - 1)

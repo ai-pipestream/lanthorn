@@ -73,8 +73,18 @@ pub enum Side {
 /// exit actually points. The previous north/south collapse sent an NE connector's
 /// leg up the room's CENTRE column, so the line left the top-right corner and
 /// immediately doubled back west — a contradiction the corner arrow hid and a
-/// diagonal stub makes plainly visible. This also settles a standing
-/// inconsistency: `oneway_entry_side` already routes NE arrivals to Right.
+/// diagonal stub makes plainly visible. It is also CONSISTENT with
+/// `oneway_entry_side`, which routes an NE arrival to **Left**
+/// (`route::oneway_entry_side` returns `side_for(opposite(dir))` for a diagonal:
+/// NE→Left, NW→Right, SE→Right, SW→Left). A connector leaves the origin's right
+/// and arrives on the destination's left, which is the same geometry from both
+/// ends.
+///
+/// This sentence used to cite that function as routing NE to *Right*, and read as
+/// settling an inconsistency (SQ-1065). It was true when written and stopped being
+/// true seven hours later the same morning, when `oneway_entry_side` was replaced
+/// and the comment was not — so a later reader could have "restored consistency"
+/// against an inverted citation.
 ///
 /// Non-planar (Up, Down, In, Out, Unknown) → `None` (rendered as stubs).
 pub fn side_for(dir: Direction) -> Option<Side> {

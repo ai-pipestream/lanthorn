@@ -186,8 +186,13 @@ pub fn home_candidates(graph: &MapGraph, region: &Region) -> Vec<Home> {
 /// Everywhere `region` could legally go, best first: a fresh layer when that is not merely a
 /// rename, then each [`home_candidates`] layer.
 ///
-/// This mirrors [`crate::layer::move_region`]'s own refusals rather than inventing a second rule,
-/// so nothing in this list can be turned down by the move it describes.
+/// This reproduces three of [`crate::layer::move_region`]'s four refusals rather than calling it,
+/// so nothing in this list can be turned down by the move it describes — **for this caller**
+/// (SQ-1065). The sentence used to claim it mirrors them all; it omits `EmptiesMain`
+/// (`crate::layer::layer.rs`'s check that a move must not empty the main layer), which is
+/// currently unreachable only because all three of this function's triggers structurally exclude
+/// a whole-layer region. `destinations` is `pub` with one caller, and the promise breaks the
+/// moment it gains a second — so add the fourth refusal, or call `move_region`, before doing that.
 pub fn destinations(graph: &MapGraph, region: &Region) -> Vec<MoveTarget> {
     let mut out = Vec::new();
     if !is_whole_layer(graph, region) {

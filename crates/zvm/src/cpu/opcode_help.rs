@@ -328,3 +328,47 @@ pub fn opcode_help(name: &str) -> Option<OpcodeHelp> {
 pub fn describe_mnemonic(name: &str) -> Option<&'static str> {
     opcode_help(name).map(|h| h.summary)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::opcode_help;
+    use crate::cpu::decode::OperandCount;
+    use crate::cpu::disasm::mnemonic;
+
+    /// **Every mnemonic the disassembler can name has a help entry** (SQ-1065).
+    ///
+    /// This table parallels `disasm::mnemonic`'s ~120 keys and had **no drift
+    /// guard at all** — this file carried zero tests, so a mnemonic added there
+    /// would silently reach the hover tooltip as "no description available". Its
+    /// sibling `gvm::disasm::opcode_help` has exactly such a guard
+    /// (`opcode_help_covers_every_implemented_opcode`) and its doc says it
+    /// "mirrors" this one's depth, which is a promise nothing here could keep.
+    ///
+    /// The two are in sync today; this is what keeps them so. `op:2op` and friends
+    /// are `mnemonic`'s own placeholders for an opcode number no version defines,
+    /// and are not names.
+    #[test]
+    fn every_mnemonic_the_disassembler_names_has_help() {
+        let counts =
+            [OperandCount::Zero, OperandCount::One, OperandCount::Two, OperandCount::Var, OperandCount::Ext];
+        let mut missing: Vec<String> = Vec::new();
+        for count in &counts {
+            for opcode in 0u16..=0xFF {
+                for version in 1u8..=8 {
+                    let name = mnemonic(count, opcode as u8, version);
+                    if name.starts_with("op:") || opcode_help(name).is_some() {
+                        continue;
+                    }
+                    if !missing.iter().any(|m| m == name) {
+                        missing.push(name.to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "opcode_help has no entry for {} mnemonic(s) the disassembler can produce: {missing:?}",
+            missing.len(),
+        );
+    }
+}

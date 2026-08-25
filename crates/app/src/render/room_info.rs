@@ -93,15 +93,19 @@ fn dir_label(dir: Direction) -> &'static str {
 /// A room's display name as every surface that names it agrees to spell it: the matrix's NUMBERED
 /// row label ("Maze 4") when its layer numbers it, the bare room name otherwise (SQ-0685).
 ///
-/// The dock header and the exit card both call this, so they cannot disagree.
+/// **The dock header calls this and the exit card calls [`dest_name`], and this
+/// now calls that** (SQ-1065). The sentence here used to say both surfaces called
+/// this one, which was never true — `display_name` has a single caller
+/// (`room_dock`) and the card has always named rooms through `dest_name`, a second
+/// independent spelling of the same three-step rule. They agreed for every input,
+/// which is the only reason nothing was ever misnamed.
+///
+/// The two differ only by `dest_name`'s `graph.layer_of(id) == layer` gate, and
+/// here that gate is trivially true because `layer` IS `graph.layer_of(room_id)`.
+/// So this is that function asked about a room on its own layer.
 pub fn display_name(graph: &MapGraph, room_id: RoomId) -> String {
     let layer = graph.layer_of(room_id);
-    let labels = mapper::matrix::labels(graph, layer);
-    let row = labels.row_of(room_id);
-    if !row.is_empty() {
-        return row.to_string();
-    }
-    graph.room(room_id).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{room_id}"))
+    dest_name(graph, &mapper::matrix::labels(graph, layer), layer, room_id)
 }
 
 // ── The exit card's column layout (SQ-0694) ──────────────────────────────────

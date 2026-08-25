@@ -8115,8 +8115,6 @@ mod tests {
 
     // ── Task 2 (SQ-0283): restore_quetzal (live-state preserving) ─────────────
 
-    /// The key §1.8.5 property: `restore_quetzal` reverts VM memory/stack/heap
-    /// to the save point and resumes with `-1` in `@save`'s S1, but leaves the
     /// The rule behind hiding a foreign embedded save must match the rule
     /// `@restore` refuses one by, or we would either hide a save the game could
     /// have used or offer one it cannot (SQ-0595).
@@ -8217,10 +8215,15 @@ mod tests {
         );
     }
 
-    /// live Glk model (windows/streams/VFS) and `iosys_mode`/`iosys_rock`
-    /// completely untouched — including further mutations made to them AFTER
-    /// the save. This is what distinguishes it from `restore_state`, which
-    /// replaces that state from `GReg`/`Glk `.
+    /// The key §1.8.5 property: `restore_quetzal` reverts VM memory/stack/heap to
+    /// the save point and resumes with `-1` in `@save`'s S1, but leaves the live
+    /// Glk model (windows/streams/VFS) and `iosys_mode`/`iosys_rock` completely
+    /// untouched — including further mutations made to them AFTER the save. This
+    /// is what distinguishes it from `restore_state`, which replaces that state
+    /// from `GReg`/`Glk `.
+    ///
+    /// (SQ-1065: this sentence was split in half by a test inserted between its
+    /// two paragraphs, so each half read as a claim about the wrong case.)
     #[test]
     fn restore_quetzal_reverts_vm_state_but_preserves_live_glk_and_iosys() {
         use asm::Op::{C8, Mem32, Zero};

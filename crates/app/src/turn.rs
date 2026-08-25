@@ -577,8 +577,14 @@ pub(crate) fn finish_resumed_turn(
 
 /// Apply a pending resume: restore the VM save, set transcript, re-observe location.
 ///
-/// Mirrors the Action::RestoreGame path exactly (restore_quetzal, set transcript,
-/// apply_turn to re-observe current room, set_viewed_layer(None), select_room, recenter).
+/// The same sequence the live restore performs — `engine_helpers`' restore path:
+/// restore_quetzal, set transcript, `apply_turn` to re-observe the current room,
+/// `set_viewed_layer(None)`, `select_room`, recenter.
+///
+/// This used to cite `Action::RestoreGame` (SQ-1065). That arm's own first line
+/// says it is "dead post-unification: keys now route through `SlashOutcome::Load`",
+/// and it has itself already drifted from the helper — so the citation pointed at
+/// code no key reaches.
 pub(crate) fn apply_launch_resume(
     save: &app::engine::EngineSave,
     lines: Vec<String>,

@@ -4039,8 +4039,6 @@ mod tests {
         crossings
     }
 
-    /// Collect every arrowhead cell with its owning connector index. Mirrors the renderer's
-    /// logic in `render_lane_connectors`: every connector gets a departure arrow at its
     #[test]
     fn two_connectors_perpendicular_crossing_breaks_the_horizontal() {
         // A vertical connector (1 above 2) and a horizontal connector (3 left of 4) routed so
