@@ -31,6 +31,8 @@ struct Opts {
     hybrid_first: bool,
     /// `--hybrid-only` — skip the raster half entirely.
     hybrid_only: bool,
+    /// `--paint` — the hybrid pane as characters, and its cell GROUNDS beside it.
+    paint: bool,
 }
 
 fn main() {
@@ -46,6 +48,7 @@ fn main() {
             "--entry" => entry = args.next(),
             "--route" => route = args.next().unwrap_or_default(),
             "--hybrid-only" => opts.hybrid_only = true,
+            "--paint" => opts.paint = true,
             "--windows" => opts.windows = true,
             "--trace" => opts.trace = true,
             "--hybrid-first" => opts.hybrid_first = true,
@@ -225,9 +228,10 @@ fn report(
     if opts.windows {
         for (n, w) in v6w.windows.iter().enumerate() {
             if w.x_size == 0 && w.texts.is_empty() { continue; }
-            println!("       w{n} box={}x{}@({},{}) attrs={:04b} grid={}x{} lm={} rm={}",
+            println!("       w{n} box={}x{}@({},{}) attrs={:04b} grid={}x{} lm={} rm={} fg={:?} bg={:?} runs={}",
                 w.x_size, w.y_size, w.x_coord, w.y_coord, w.attributes & 0b1111,
-                w.grid.cols, w.grid.rows, w.left_margin, w.right_margin);
+                w.grid.cols, w.grid.rows, w.left_margin, w.right_margin,
+                w.fg, w.bg, w.texts.len());
         }
     }
     for &n in &opts.runs {
@@ -267,6 +271,35 @@ fn report(
             canvas.width(),
             canvas.height()
         );
+        if opts.paint {
+            // The composite, downsampled to one character per 8x16 native cell,
+            // keyed by colour — a solid rectangle shows up as a block of one key.
+            let (cw, ch) = (8u32, 16u32);
+            let mut key: Vec<[u8; 4]> = Vec::new();
+            println!("     raster canvas {}x{} as {}x{} cells:", canvas.width(), canvas.height(), canvas.width() / cw, canvas.height() / ch);
+            for row in 0..canvas.height() / ch {
+                let mut line = String::new();
+                for col in 0..canvas.width() / cw {
+                    // The cell's most common pixel, so a glyph does not hide its ground.
+                    let mut counts: std::collections::HashMap<[u8; 4], u32> = Default::default();
+                    for y in row * ch..(row + 1) * ch {
+                        for x in col * cw..(col + 1) * cw {
+                            *counts.entry(canvas.get_pixel(x, y).0).or_default() += 1;
+                        }
+                    }
+                    let px = counts.into_iter().max_by_key(|(_, n)| *n).map(|(p, _)| p).unwrap_or([0; 4]);
+                    let i = key.iter().position(|k| *k == px).unwrap_or_else(|| {
+                        key.push(px);
+                        key.len() - 1
+                    });
+                    line.push(char::from_u32('a' as u32 + i as u32).unwrap_or('?'));
+                }
+                println!("     {row:>3} {line}");
+            }
+            for (i, k) in key.iter().enumerate() {
+                println!("     key {} = rgba{:?}", char::from_u32('a' as u32 + i as u32).unwrap_or('?'), k);
+            }
+        }
         if let Some((tx, ty, tw, th)) = prose_box {
             let _ = (tx, ty);
             let cols = (tw / u32::from(st.v6_text.cell().w)).max(1) as u16;
@@ -294,4 +327,44 @@ fn report(
         .collect();
     let live = rows.iter().filter(|r| r.trim_matches(|c: char| c == ' ' || c == '\u{10EEEE}').len() > 2).count();
     println!("     hybrid: path={path:?} rows-with-text={live}/{}", rows.len());
+    if opts.windows {
+        for c in st.v6_cell_map.borrow().iter() {
+            if c.label.starts_with("strip:") || c.label.starts_with("menu:") || c.label.starts_with("viewport") {
+                let (x, y, w, h) = c.cells;
+                println!("       ring {} {}x{}@({},{})", c.label, w, h, x, y);
+            }
+        }
+    }
+    if opts.paint {
+        // Each cell as its GROUND: '.' untouched, '#' a placeholder (an image
+        // cell), a letter for a glyph, and the ground's own colour keyed below.
+        let mut key: Vec<ratatui::style::Color> = Vec::new();
+        for y in 0..area.height {
+            let mut line = String::new();
+            for x in 0..area.width {
+                let c = buf.cell((x, y)).expect("in area");
+                let ch = c.symbol().chars().next().unwrap_or(' ');
+                let ground = if c.modifier.contains(ratatui::style::Modifier::REVERSED) { c.fg } else { c.bg };
+                if ch == '\u{10EEEE}' {
+                    line.push('#');
+                } else if ground == ratatui::style::Color::Reset {
+                    line.push(if ch == ' ' { '.' } else { ch });
+                } else {
+                    let i = key.iter().position(|k| *k == ground).unwrap_or_else(|| {
+                        key.push(ground);
+                        key.len() - 1
+                    });
+                    line.push(if ch == ' ' {
+                        char::from_u32('0' as u32 + i as u32).unwrap_or('?')
+                    } else {
+                        ch
+                    });
+                }
+            }
+            println!("     {y:>3} {line}");
+        }
+        for (i, k) in key.iter().enumerate() {
+            println!("     ground {i} = {k:?}");
+        }
+    }
 }
