@@ -2641,6 +2641,13 @@ impl Machine {
             //   +4/-4: stream 4 (commands) on/off
             0x13 => {
                 let stream = ops.first().copied().unwrap_or(0) as i16;
+                // Traced because stream 1 — the SCREEN — can be deselected, and a
+                // v6 game that prints with it off is laying text out without drawing
+                // it (SQ-1077). Nothing else in the trace can tell that apart from a
+                // print that should have appeared.
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@output_stream({stream})"));
+                }
                 match stream {
                     1  => { self.streams.stream1 = true; }
                     -1 => { self.streams.stream1 = false; }
@@ -4596,35 +4603,71 @@ impl Machine {
                         let (cell_row, cell_col) = (r, c);
                         let consumed = here.is_some_and(|b| b.consumed);
                         if !consumed {
-                            if r > w.grid.rows
-                                && u32::from(r.saturating_sub(1)) * u32::from(fh)
-                                    < u32::from(bound)
-                            {
-                                w.grid.grow_rows(r);
+                            // **The SCREEN can be deselected, and then this text is
+                            // laid out but never drawn** (ZMSD §7.1.2.1, SQ-1077).
+                            // `output_stream -1` turns stream 1 off; the streaming
+                            // branch below has always honoured it and the PAINT
+                            // branch never did, so v6 text printed with the screen
+                            // off reached the window anyway.
+                            //
+                            // Shogun's InvisiClues clue banner is the report, on both
+                            // presses. Having drawn the header the game issues
+                            // `output_stream(-1)`, prints the topic title to walk the
+                            // cursor to its width, and issues `output_stream(1)`:
+                            //
+                            //     @output_stream(-1)
+                            //     print "What must I do to survive?"   ← at pen (318,17)
+                            //     @output_stream(1)
+                            //
+                            // Window 1 sits at native x=70, so that landed at absolute
+                            // 388 — on top of `Return for a hint.`, which the game had
+                            // already drawn at 418. The Amiga press then WRAPPED the
+                            // overflow, stranding `survive?` at the far left of the row
+                            // below; the Macintosh's window is wide enough to take the
+                            // whole title, so it merely ate `Re` and left
+                            // `turn for a hint.`. `machine-screenshots/amiga-shogun-hint.png`
+                            // shows what belongs there: one line reading
+                            // `M for hint menu.    Return for a hint.`
+                            //
+                            // The CURSOR still moves, which is the whole point of the
+                            // idiom and is the rule the streaming branch already states
+                            // for its own diversion: "Only the DESTINATION changes here.
+                            // Everything the game can observe — the window cursor
+                            // (props 4/5) … — happens either way." Freezing it would
+                            // hand the game a width of zero for a string it printed.
+                            if self.streams.stream1 {
+                                if r > w.grid.rows
+                                    && u32::from(r.saturating_sub(1)) * u32::from(fh)
+                                        < u32::from(bound)
+                                {
+                                    w.grid.grow_rows(r);
+                                }
+                                // …and wider, for a proportional pen whose line holds
+                                // more characters than `x_size / cell.w` (SQ-1072).
+                                // Inert on a fixed pen, whose column limit above stops
+                                // the line at exactly `cols_now`.
+                                if c > w.grid.cols && c <= crate::screen::GRID_CELL_CAP {
+                                    w.grid.grow_cols(c);
+                                }
+                                w.grid.put(r, c, out_ch, style, fg, bg);
                             }
-                            // …and wider, for a proportional pen whose line holds
-                            // more characters than `x_size / cell.w` (SQ-1072).
-                            // Inert on a fixed pen, whose column limit above stops
-                            // the line at exactly `cols_now`.
-                            if c > w.grid.cols && c <= crate::screen::GRID_CELL_CAP {
-                                w.grid.grow_cols(c);
-                            }
-                            w.grid.put(r, c, out_ch, style, fg, bg);
                             c = c.saturating_add(1);
                         }
                         if !consumed {
-                            run.get_or_insert_with(|| crate::screen::V6Text {
-                                y: w.y_coord.max(1).saturating_add(w.y_cursor.max(1)).saturating_sub(1),
-                                x: w.x_coord.max(1).saturating_add(w.x_cursor.max(1)).saturating_sub(1),
-                                text: String::new(),
-                                style,
-                                fg,
-                                bg,
-                                grow: win_row.saturating_add(cell_row.saturating_sub(1)),
-                                gcol: win_col.saturating_add(cell_col.saturating_sub(1)),
-                            })
-                            .text
-                            .push(out_ch);
+                            if self.streams.stream1 {
+                                run.get_or_insert_with(|| crate::screen::V6Text {
+                                    y: w.y_coord.max(1).saturating_add(w.y_cursor.max(1)).saturating_sub(1),
+                                    x: w.x_coord.max(1).saturating_add(w.x_cursor.max(1)).saturating_sub(1),
+                                    text: String::new(),
+                                    style,
+                                    fg,
+                                    bg,
+                                    grow: win_row.saturating_add(cell_row.saturating_sub(1)),
+                                    gcol: win_col.saturating_add(cell_col.saturating_sub(1)),
+                                })
+                                .text
+                                .push(out_ch);
+                            }
                             w.x_cursor = w.x_cursor.saturating_add(adv);
                         }
                     }
@@ -10998,6 +11041,77 @@ pub(crate) mod tests {
         assert_eq!(
             joined, "UVWXYZ0123456789abcd",
             "erase stops at the right margin (320 - 160 px), leaving the margin strip"
+        );
+    }
+
+    /// **A deselected SCREEN paints nothing, but the cursor still moves**
+    /// (ZMSD §7.1.2.1, SQ-1077).
+    ///
+    /// `output_stream -1` turns stream 1 off. The streaming prose branch has always
+    /// honoured it; the v6 PAINT branch did not, so text a game printed with the
+    /// screen off reached the window anyway.
+    ///
+    /// Shogun's InvisiClues clue banner is the report, on the Amiga and Macintosh
+    /// presses alike. Having drawn `M for hint menu.` and `Return for a hint.`, the
+    /// game issues `output_stream(-1)`, prints the topic title to walk the cursor to
+    /// its width, and issues `output_stream(1)` — and the title landed on top of
+    /// `Return for a hint.`, wrapping its overflow onto the row below on the Amiga
+    /// (window 500px) and eating two characters on the Macintosh (window 640px).
+    ///
+    /// The cursor advance is the point of the idiom, so it is asserted too: freezing
+    /// it hands the game a width of zero for a string it just printed.
+    #[test]
+    fn v6_a_deselected_screen_paints_nothing_but_still_advances_the_cursor() {
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 1, 1, 1, 32, 320);
+        m.exec_var(0x0F, &[1, 1, 1], None, None); // cursor to (1,1)
+        m.print_text("SEEN");
+        let pen_after_seen = m.screen.v6.as_ref().unwrap().windows[1].x_cursor;
+
+        m.exec_var(0x13, &[0xFFFF], None, None); // output_stream -1 — screen OFF
+        m.print_text("HIDDEN");
+        let pen_after_hidden = m.screen.v6.as_ref().unwrap().windows[1].x_cursor;
+        m.exec_var(0x13, &[1], None, None); // output_stream 1 — screen ON
+
+        let joined: String =
+            m.screen.v6.as_ref().unwrap().windows[1].texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            joined, "SEEN",
+            "text printed while stream 1 is deselected must not reach the window — it \
+             overwrote the line the game had already drawn (SQ-1077)"
+        );
+        assert!(
+            pen_after_hidden > pen_after_seen,
+            "…but the cursor still advances ({pen_after_seen} -> {pen_after_hidden}): a game \
+             deselects the screen precisely to measure a string by how far the pen moves"
+        );
+
+        // …and the screen comes back: the next print is drawn again.
+        m.print_text("BACK");
+        let joined: String =
+            m.screen.v6.as_ref().unwrap().windows[1].texts.iter().map(|t| t.text.as_str()).collect();
+        assert!(
+            joined.contains("BACK"),
+            "reselecting stream 1 restores drawing, got {joined:?}"
+        );
+    }
+
+    /// The same rule reaching the GRID the paint branch keeps alongside its runs
+    /// (SQ-1009's cell bookkeeping): a hidden print writes no cells either, or the
+    /// grid and the runs disagree about what is on screen.
+    #[test]
+    fn v6_a_deselected_screen_writes_no_grid_cells() {
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 1, 1, 1, 32, 320);
+        m.exec_var(0x0F, &[1, 1, 1], None, None);
+        m.exec_var(0x13, &[0xFFFF], None, None); // screen OFF
+        m.print_text("HIDDEN");
+        m.exec_var(0x13, &[1], None, None); // screen ON
+        let w = &m.screen.v6.as_ref().unwrap().windows[1];
+        let row: String = (1..=6).map(|c| w.grid.cell(1, c).ch).collect();
+        assert_eq!(
+            row, "      ",
+            "the grid must be as untouched as the runs — got {row:?} (SQ-1077)"
         );
     }
 
