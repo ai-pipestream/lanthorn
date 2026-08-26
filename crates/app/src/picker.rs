@@ -1506,6 +1506,60 @@ fn bibliographic_key(title: &str) -> String {
     lower
 }
 
+/// The container name the TYPE column prints in parentheses for a row, or
+/// `None` when the row shows no parenthetical at all.
+///
+/// **One source of truth for two readers**: `picker_ui::interp_label` renders
+/// this into the column ("Z6 (ADF)", "Z5 (blorb)"), and `sort_stories`' Type
+/// key orders by it. They were two independent rules until SQ-1057, and the
+/// sort's rule was simply to ignore the container — so `Z6`, `Z6 (ADF)` and
+/// `Z6 (HFS)` interleaved under the filename tiebreak and a reader sorting by
+/// TYPE to group their original media by machine got nothing of the sort.
+/// A second copy of the `match` below would drift the same way, in the other
+/// direction: a key that named a container the label never prints would order
+/// rows by something the reader cannot see.
+///
+/// The rule is per engine, because the label's is:
+/// - **Z-code** shows the disk image it was mounted out of when there is one
+///   (that is the mount's own answer, not the filename's), else "blorb".
+/// - **Glulx** shows no container ever, blorbed or not — Glulx games are
+///   effectively always blorbed, so the suffix would say nothing (SQ-0369).
+/// - **Scott** shows "blorb" for the graphic `.blb` versions only.
+///
+/// `blorb` is `RowBadges::blorb` — see [`row_is_blorb`], which costs a
+/// directory read.
+pub fn type_container(meta: &StoryMeta, blorb: bool) -> Option<&'static str> {
+    match meta.engine {
+        Engine::ZCode => match meta.disk_image {
+            Some(image) => Some(image.label()),
+            None => blorb.then_some("blorb"),
+        },
+        Engine::Glulx => None,
+        Engine::Scott => blorb.then_some("blorb"),
+    }
+}
+
+/// Is this row blorb-wrapped — itself a blorb, or sitting beside a resource
+/// blorb? The fact behind `RowBadges::blorb` and behind the TYPE column's
+/// "(blorb)". **It touches the filesystem** (`sibling_blorb_exists`), so a
+/// caller that needs it for many rows must measure each row once; see
+/// `sort_stories`.
+fn row_is_blorb(entry: &StoryEntry) -> bool {
+    #[cfg(test)]
+    TYPE_BLORB_PROBES.with(|c| c.set(c.get() + 1));
+    entry.meta.self_blorb.is_some() || sibling_blorb_exists(&entry.path)
+}
+
+// Counts `row_is_blorb` calls on the CURRENT THREAD, so a test can pin that
+// the Type sort measures each row once rather than once per comparison.
+// Thread-local rather than a global counter on purpose: every test runs on its
+// own thread, and under `cargo test` (one process, many threads) a shared
+// counter would be a race between any two tests that scan or sort.
+#[cfg(test)]
+thread_local! {
+    static TYPE_BLORB_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Order `stories` in place by `sort`. Blanks (no author / no year, a
 /// non-numeric year, or no IFDB rating) always sort last, in both ascending and descending
 /// order — only the non-blank comparison reverses with `desc`. Filename is
@@ -1568,11 +1622,26 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
         }
     }
 
-    /// Groups rows by engine (Z-code, then Glulx, then Scott), and within an
-    /// engine by version. Each dotted version component is zero-padded to a
-    /// fixed width so a plain string compare orders numerically (Z3 < Z5 < Z8,
-    /// Glulx 3.1.2 < 3.1.11). Every story has an engine, so the key is never
-    /// blank.
+    /// Groups rows by engine (Z-code, then Glulx, then Scott), then within an
+    /// engine by version, then by the CONTAINER the TYPE column prints for the
+    /// row. Each dotted version component is zero-padded to a fixed width so a
+    /// plain string compare orders numerically (Z3 < Z5 < Z8, Glulx 3.1.2 <
+    /// 3.1.11). Every story has an engine, so the key is never blank.
+    ///
+    /// Engine and version dominate the container, because that is the order the
+    /// label reads in: a `Z3 (HFS)` is a Z3 first and a Macintosh disk second.
+    /// Within one engine and version, a row with NO parenthetical sorts first
+    /// (nothing before something — its label is a prefix of every other label
+    /// in the group), then containers alphabetically and
+    /// **case-insensitively**: "blorb" is a format name and "ADF"/"HFS"/"DOS"
+    /// are acronyms, so a raw byte compare would file every acronym ahead of
+    /// "blorb" by that accident of casing rather than by anything a reader
+    /// means. See [`type_container`] for what a row shows, which is the same
+    /// call the column itself makes (SQ-1057).
+    ///
+    /// **Costs a filesystem read** via [`row_is_blorb`], which is why
+    /// `sort_stories` measures it once per row instead of inside the
+    /// comparator.
     fn type_key(e: &StoryEntry) -> String {
         let rank = match e.meta.engine {
             Engine::ZCode => 0,
@@ -1588,10 +1657,28 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
             .map(|part| format!("{part:0>4}"))
             .collect::<Vec<_>>()
             .join(".");
-        format!("{rank} {version}")
+        let container = type_container(&e.meta, row_is_blorb(e))
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        format!("{rank} {version} {container}")
     }
 
-    stories.sort_by(|a, b| {
+    // The Type key is the one key here whose value costs a FILESYSTEM read —
+    // the container a row shows can be a sibling blorb, and only a directory
+    // lookup answers that. Every row's key is measured ONCE, before any
+    // comparison; inside the comparator it would be O(n log n) directory reads.
+    // The other four keys are pure and are still taken from the entry.
+    let type_keys: Vec<String> = if sort.key == SortKey::Type {
+        stories.iter().map(type_key).collect()
+    } else {
+        Vec::new()
+    };
+
+    // Sorting a permutation rather than the rows, so the comparator can reach
+    // each row's pre-measured key by its ORIGINAL index.
+    let mut order: Vec<usize> = (0..stories.len()).collect();
+    order.sort_by(|&i, &j| {
+        let (a, b) = (&stories[i], &stories[j]);
         let ord = match sort.key {
             SortKey::Title => {
                 let (a_blank, a_val) = title_key(a);
@@ -1614,11 +1701,15 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
                 cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
             }
             SortKey::Type => {
-                cmp_blank_last(false, &type_key(a), false, &type_key(b), sort.desc)
+                cmp_blank_last(false, &type_keys[i], false, &type_keys[j], sort.desc)
             }
         };
         ord.then_with(|| a.filename.cmp(&b.filename))
     });
+    let reordered: Vec<StoryEntry> = order.iter().map(|&i| stories[i].clone()).collect();
+    for (slot, entry) in stories.iter_mut().zip(reordered) {
+        *slot = entry;
+    }
 }
 
 /// Reorder `stories` by `sort`, keeping the selection on the same story — by
@@ -1690,7 +1781,7 @@ pub fn compute_row_badges(
         }
     };
     RowBadges {
-        blorb: entry.meta.self_blorb.is_some() || sibling_blorb_exists(&entry.path),
+        blorb: row_is_blorb(entry),
         save: game_dir_has_save(&game_dir),
         hint,
     }
@@ -1947,6 +2038,147 @@ mod tests {
 
         sort_stories(&mut stories, Sort { key: SortKey::Type, desc: true });
         assert_eq!(titles_of(&stories), vec!["scott", "glulx", "z8", "z3"]);
+    }
+
+    /// A row whose only container is a self-blorb, without touching the disk.
+    fn blorbed(mut e: StoryEntry) -> StoryEntry {
+        e.meta.self_blorb = Some(Vec::new());
+        e
+    }
+
+    /// SQ-1057: the TYPE column names the container a story came out of, and
+    /// the TYPE sort must order by the value the column actually shows — a
+    /// `Z6`, a `Z6 (ADF)` and a `Z6 (HFS)` may not interleave under the
+    /// filename tiebreak.
+    #[test]
+    fn sort_stories_by_type_groups_by_container_within_a_version() {
+        // Filenames run counter to the intended order, so a key that ignored
+        // the container would fall back to them and interleave the three.
+        let z6 = |title: &str, filename: &str, image: Option<crate::hints::DiskImage>| {
+            let mut e = story(title, filename, None, None);
+            e.meta.version = Some("6".to_string());
+            e.meta.disk_image = image;
+            e
+        };
+        let mut stories = vec![
+            z6("hfs", "a.image", Some(crate::hints::DiskImage::Hfs)),
+            z6("bare", "z.z6", None),
+            blorbed(z6("blorb", "m.zblorb", None)),
+            z6("adf", "n.adf", Some(crate::hints::DiskImage::Adf)),
+        ];
+
+        // Bare first (no parenthetical at all), then the containers
+        // alphabetically and case-insensitively: ADF, blorb, HFS. A raw byte
+        // compare would file "blorb" after every acronym.
+        sort_stories(&mut stories, Sort { key: SortKey::Type, desc: false });
+        assert_eq!(titles_of(&stories), vec!["bare", "adf", "blorb", "hfs"]);
+
+        sort_stories(&mut stories, Sort { key: SortKey::Type, desc: true });
+        assert_eq!(titles_of(&stories), vec!["hfs", "blorb", "adf", "bare"]);
+    }
+
+    /// Engine and version still dominate the container: a `Z3 (HFS)` is a Z3
+    /// first and a Macintosh disk second, and no container promotes a row out
+    /// of its version group.
+    #[test]
+    fn sort_stories_by_type_ranks_engine_and_version_above_the_container() {
+        let typed = |title: &str, engine: Engine, version: &str,
+                     image: Option<crate::hints::DiskImage>| {
+            let mut e = story(title, &format!("{title}.dat"), None, None);
+            e.meta.engine = engine;
+            e.meta.version = Some(version.to_string());
+            e.meta.disk_image = image;
+            e
+        };
+        let mut stories = vec![
+            typed("z6-bare", Engine::ZCode, "6", None),
+            typed("glulx", Engine::Glulx, "3.1.2", None),
+            typed("z3-hfs", Engine::ZCode, "3", Some(crate::hints::DiskImage::Hfs)),
+            typed("z6-adf", Engine::ZCode, "6", Some(crate::hints::DiskImage::Adf)),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Type, desc: false });
+        assert_eq!(titles_of(&stories), vec!["z3-hfs", "z6-bare", "z6-adf", "glulx"]);
+    }
+
+    /// Glulx shows no container in the TYPE column even when blorbed (SQ-0369),
+    /// so the sort may not order Glulx rows by one either — they fall through to
+    /// the filename tiebreak, exactly as two identical labels should.
+    #[test]
+    fn sort_stories_by_type_does_not_order_glulx_by_an_invisible_container() {
+        let glulx = |title: &str, filename: &str| {
+            let mut e = story(title, filename, None, None);
+            e.meta.engine = Engine::Glulx;
+            e.meta.version = Some("3.1.2".to_string());
+            e
+        };
+        let mut stories = vec![
+            blorbed(glulx("blorbed-z", "z.gblorb")),
+            glulx("bare-a", "a.ulx"),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Type, desc: false });
+        assert_eq!(titles_of(&stories), vec!["bare-a", "blorbed-z"]);
+
+        // Ascending vs descending swaps only the filename tiebreak, because the
+        // keys themselves are equal.
+        sort_stories(&mut stories, Sort { key: SortKey::Type, desc: true });
+        assert_eq!(titles_of(&stories), vec!["bare-a", "blorbed-z"]);
+    }
+
+    /// The Type key costs a directory read (`sibling_blorb_exists`), so it is
+    /// measured ONCE PER ROW before ordering — not inside the comparator, where
+    /// it would be O(n log n) directory reads on a list of a few thousand.
+    #[test]
+    fn sort_stories_by_type_probes_the_filesystem_once_per_row() {
+        let mut stories: Vec<StoryEntry> = (0..16)
+            .map(|i| {
+                let mut e = story(&format!("s{i}"), &format!("s{i}.z5"), None, None);
+                e.meta.version = Some("5".to_string());
+                e
+            })
+            .collect();
+        TYPE_BLORB_PROBES.with(|c| c.set(0));
+        sort_stories(&mut stories, Sort { key: SortKey::Type, desc: false });
+        assert_eq!(TYPE_BLORB_PROBES.with(|c| c.get()), stories.len());
+
+        // And a sort on another column pays nothing at all.
+        TYPE_BLORB_PROBES.with(|c| c.set(0));
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        assert_eq!(TYPE_BLORB_PROBES.with(|c| c.get()), 0);
+    }
+
+    /// The column and the sort read the same rule: whatever
+    /// `type_container` answers is exactly the parenthetical the TYPE column
+    /// prints, for every engine and every medium. This is the guard against the
+    /// two ends drifting apart again — `interp_label` lives in `picker_ui.rs`
+    /// and the key lives here.
+    #[test]
+    fn type_container_is_the_parenthetical_the_type_column_prints() {
+        let mut meta = story("s", "s.z5", None, None).meta;
+
+        meta.engine = Engine::ZCode;
+        assert_eq!(type_container(&meta, false), None);
+        assert_eq!(type_container(&meta, true), Some("blorb"));
+        for image in [
+            crate::hints::DiskImage::Adf,
+            crate::hints::DiskImage::Hfs,
+            crate::hints::DiskImage::Fat12Dos,
+            crate::hints::DiskImage::ProDos,
+        ] {
+            meta.disk_image = Some(image);
+            // The disk image wins over a blorb sibling, and is the mount's own
+            // label rather than a name invented here.
+            assert_eq!(type_container(&meta, false), Some(image.label()));
+            assert_eq!(type_container(&meta, true), Some(image.label()));
+        }
+        meta.disk_image = None;
+
+        // Glulx never shows one; Scott shows "blorb" only.
+        meta.engine = Engine::Glulx;
+        assert_eq!(type_container(&meta, false), None);
+        assert_eq!(type_container(&meta, true), None);
+        meta.engine = Engine::Scott;
+        assert_eq!(type_container(&meta, false), None);
+        assert_eq!(type_container(&meta, true), Some("blorb"));
     }
 
     #[test]
