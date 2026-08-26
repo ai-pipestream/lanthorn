@@ -29,6 +29,7 @@ pub mod pager;
 pub mod pin;
 pub mod score;
 pub mod storage;
+pub mod story_pick;
 pub mod term;
 pub mod titles;
 

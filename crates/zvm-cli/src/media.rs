@@ -198,44 +198,32 @@ pub fn story_candidates(path: &Path, raw: Vec<u8>) -> Result<Vec<Candidate>, Str
     Ok(found)
 }
 
+/// These candidates as the shared chooser sees them (SQ-1078).
+///
+/// The rule `--story` matches by lives in `cli_host::story_pick`, because
+/// lanthorn offers the same flag and the two must not drift; this is the only
+/// thing that is `zvm-cli`'s — which names a row shows.
+fn rows(cands: &[Candidate]) -> Vec<cli_host::story_pick::Row> {
+    cands
+        .iter()
+        .map(|c| cli_host::story_pick::Row {
+            name: c.name.clone(),
+            title: c.title().map(str::to_string),
+            label: c.label(),
+        })
+        .collect()
+}
+
 /// The numbered list a player picks from.
 pub fn menu(cands: &[Candidate]) -> String {
-    let mut s = String::new();
-    for (i, c) in cands.iter().enumerate() {
-        s.push_str(&format!("  {}) {}\n", i + 1, c.label()));
-    }
-    s
+    cli_host::story_pick::menu(&rows(cands))
 }
 
 /// Resolve what `--story` asked for: a 1-based number, or a name to match
 /// (case-insensitive, and a substring is enough as long as it picks out one
 /// story).
 pub fn find(cands: &[Candidate], want: &str) -> Result<usize, String> {
-    let want = want.trim();
-    if let Ok(n) = want.parse::<usize>() {
-        if (1..=cands.len()).contains(&n) {
-            return Ok(n - 1);
-        }
-        let last = cands.len();
-        return Err(format!("no story {n} on this disk — pick 1 to {last}:\n{}", menu(cands)));
-    }
-    let lower = want.to_ascii_lowercase();
-    // Both names a row shows: the stored one, and the canonical title when the
-    // table gave it one (SQ-0884). Matching only the stored name would make the
-    // menu a liar — it prints `Zork I: The Great Underground Empire` and
-    // `--story "zork i"` would find nothing.
-    let hits: Vec<usize> = (0..cands.len())
-        .filter(|&i| {
-            let c = &cands[i];
-            c.name.to_ascii_lowercase().contains(&lower)
-                || c.title().is_some_and(|t| t.to_ascii_lowercase().contains(&lower))
-        })
-        .collect();
-    match hits.as_slice() {
-        [i] => Ok(*i),
-        [] => Err(format!("no story on this disk is named '{want}':\n{}", menu(cands))),
-        _ => Err(format!("'{want}' matches more than one story on this disk:\n{}", menu(cands))),
-    }
+    cli_host::story_pick::find(&rows(cands), want, "this disk")
 }
 
 /// Pick a story off a mounted image.
