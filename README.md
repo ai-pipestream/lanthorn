@@ -46,13 +46,15 @@ roof; one engine-agnostic mapper that charts them all.
 
 ![Zork Zero with hybrid rendering mode](docs/zork-zero.png)
 
+![Arthur's Amiga floppy drawn in its own proportional typeface, at the ten-pixel line the machine used](docs/native-font.png)
+
 ![Frobozz Magic VideoPoker: a v6 game's painted card table, banner and clickable menu, drawn inside its own illustrated frame](docs/frobozz-poker.png)
 
 ![Scopa dealt on a green baize table — a v6 game whose entire screen, cards and buttons included, is artwork](docs/scopa.png)
 
 ![A Glulx game using a multi-window Glk layout with story-set colours](docs/multi-window-layout.png)
 
-![The matrix map view: Colossal Cave's all-alike maze as a direction table — one row per room, every passage's true behaviour in its cell](docs/maze-grid.png)
+![The matrix map view: the map as a direction table — one row per room, every passage's true destination in its cell](docs/maze-grid.png)
 
 ![The built-in Z-machine debug inspector: live disassembly, call stack, and opcode hover help](docs/debug-inspector.png)
 

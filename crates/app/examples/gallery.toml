@@ -395,9 +395,30 @@ expect = ["Forest Path", "Up a Tree", "West of House"]
 
 # ── The release's own typeface ───────────────────────────────────────────────
 #
-# `raster` is the only shot field that changes a render MODE, and this is the
-# only shot that needs it: hybrid draws text as terminal cells, so a frame meant
-# to show the face the disk shipped would show the reader's own font instead.
+# `raster` is the only shot field that changes a render MODE: hybrid draws text as
+# terminal cells, so a frame meant to show a FACE would show the reader's own font
+# instead.
+#
+# **The rule for every raster shot: a WHOLE-NUMBER magnification, landing as near
+# 1280x800 as that press allows.** Free scaling puts an art pixel on a fractional
+# number of device pixels, and a resampled glyph edge meeting a font glyph on a
+# shared boundary is the exact seam these frames exist to show off.
+#
+# It takes both fields, and it is worth saying why, because `--v6-pixel-lock on`
+# (SQ-1079) looks sufficient and is not. The lock snaps to the coarsest RUNG at or
+# below what the pane affords, and a rung is not always an integer: the ladder
+# step is `1 / gcd(g_art, g_cell)`, which is a HALF on the usual 8x16 cell, so a
+# generous pane locks to 2.5 as happily as to 2.0. The lock guarantees a rung; the
+# `size` chooses which one. So `size` is picked to put the free scale inside
+# `[k, k + step)` for the whole `k` whose `native * k` sits closest to 1280x800 —
+# 2x for a 640x400 press, and whatever that arithmetic gives for a press of
+# another size. The pane is therefore approximate on purpose and the result is
+# not.
+#
+# `magnification` in `gallery.json` is the check, and it is a check rather than a
+# comment: it records what was actually captured, so a size that drifts off its
+# rung shows up as a fraction there instead of as a slightly soft picture nobody
+# looks at twice.
 
 [[shots]]
 id = "arthur-amiga-proportional"
@@ -412,11 +433,132 @@ each glyph's own advance, so the status bar reads `Churchyard` at the spacing an
 Amiga gave it, and the prose wraps where the pixels run out instead of where a \
 column count says."""
 keys = "wait:4000,text:n,wait:2500,text:n,wait:3000,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:2000,text:look,cr,wait:7000"
-size = "194x63"
-backend = "halfblocks"
+size = "82x28"
+backend = "kitty"
 raster = true
+args = ["--v6-pixel-lock", "on"]
 # In RASTER the whole screen is one image, so there are no cells for a text guard
 # to search — the same reason `scopa` and `fmvpoker` lean on `expect_art_cells`.
 # What the cells still carry is the pane title, which is what catches a medium
-# that opened a browser or a neighbouring story instead of this one.
-expect = ["Arthur - The Quest for Excalibur.adf", "▀"]
+# that opened a browser or a neighbouring story instead of this one; the art-cell
+# floor proves the composite itself landed.
+expect = ["Arthur - The Quest for Excalibur.adf"]
+expect_art_cells = 900
+
+# ── The face nobody had to supply ────────────────────────────────────────────
+#
+# The shot above needs a release floppy. This one needs the opposite: a bare
+# story file and a machine named by hand, so that NOTHING answers the face
+# cascade and the embedded fallback is what draws. `raster` for the same reason
+# as above — in hybrid the glyphs on screen would be the reader's own font, and
+# the face is the entire subject here.
+
+[[shots]]
+id = "macintosh-embedded-face"
+title = "Adventure"
+press = "bare story file, told it is a Macintosh"
+media = "stories/advent.z6"
+caption = """
+A Macintosh cell with no Macintosh disk behind it. The 7x15 cell is the machine's \
+own, but the face Infocom drew it with lives on media nobody is obliged to have — \
+so lanthorn falls back to X11 misc-fixed 7x14, which is public domain and, unlike \
+the built-in VGA face, is genuinely SEVEN pixels wide. That last part is the whole \
+point: the VGA face is drawn for an eight-pixel advance and inks 76 of its 94 \
+printable glyphs out to column 6, so a 7-wide cell drops the one column that was \
+holding the letters apart."""
+# The bare `cr` answers "Would you like instructions?"; the two after it clear the
+# [more] pager the credits raise, because a pager eats whatever key comes next and
+# a still of a pager is not a still of a typeface.
+keys = "wait:2500,cr,wait:1200,cr,wait:800,cr,wait:800,text:look,cr,wait:2500"
+# 82 columns is what pins the magnification: `(82-2)/40` is exactly 2, and the
+# rows only have to keep up (>= 28). The extra rows past that buy pane height for
+# free — 34 still reads `min(2.0, 2.48)` — which is what gets the intro out of the
+# pager without moving off the rung.
+size = "82x34"
+backend = "kitty"
+raster = true
+args = ["--interpreter", "3", "--v6-pixel-lock", "on"]
+# Raster puts the whole screen in one image, so the pane title is the only text
+# left for a guard to find; `expect_art_cells` is what proves the composite
+# landed, exactly as `arthur-amiga-proportional` above does it.
+expect = ["advent"]
+expect_art_cells = 400
+
+# ── lanthorn itself ──────────────────────────────────────────────────────────
+#
+# The frames above are about games. These are about the program: the browser, the
+# inspector, the matrix view, and the two engines whose screens are not the
+# Z-machine's. They were the stills in README.md that no shot produced, so they
+# were the ones nobody could regenerate without a camera (SQ-1080).
+#
+# The browser and the cover grid are NOT here yet, and the reason is structural
+# rather than an oversight: `media` is resolved as a FILE — `Provenance::read`
+# mounts it through `load_mounted_story`, which reads bytes — so pointing a shot
+# at a library directory fails provenance and skips on every run for ever. A
+# permanently skipping shot reads as coverage and is worse than an absent one, so
+# those two wait on the harness learning a library launch (SQ-1080).
+
+[[shots]]
+id = "debug-inspector"
+title = "The debug inspector"
+press = "Zork I, with the disassembler open"
+media = "stories/zork1-r88-s840726.z3"
+caption = """
+`/debug` turns the map pane into a live disassembler: the program counter tracked \
+as the story runs, opcode help on hover, and operands you can click to jump to. \
+It retargets per engine — Z-machine registers here, Glulx routine discovery and \
+Scott Adams' action table elsewhere."""
+keys = "wait:2000,text:n,cr,wait:900,text:/debug,cr,wait:2500"
+size = "150x44"
+show_map = true
+expect = ["West of House"]
+
+[[shots]]
+id = "maze-grid"
+title = "The matrix map view"
+press = "Zork I, above ground"
+media = "stories/zork1-r88-s840726.z3"
+caption = """
+The same map as a direction table instead of a picture: one row per room, every \
+passage's true destination in its cell. It is the view a maze wants — a drawn map \
+of rooms that are deliberately indistinguishable tells you very little, while a \
+table of what each exit actually did tells you everything — and any layer can be \
+switched to it."""
+# NOT Adventure, which was the first choice and produced an EMPTY table: its v8
+# port prints no room-name header, so the mapper detects nothing and the matrix
+# has no rows. The view is only worth a frame with rooms in it.
+keys = "wait:2000,text:n,cr,wait:700,text:n,cr,wait:700,text:up,cr,wait:700,text:take egg,cr,wait:700,text:down,cr,wait:900,text:/view-map matrix,cr,wait:2500"
+size = "150x44"
+show_map = true
+expect = ["matrix view", "Forest Path"]
+
+[[shots]]
+id = "multi-window-layout"
+title = "Counterfeit Monkey"
+press = "Glulx (.gblorb)"
+media = "stories/CounterfeitMonkey-11.gblorb"
+caption = """
+A Glulx game laying out its own Glk windows — a status line, the story, and the \
+game's own side panel — with the colours and styles the story asks for honored at \
+24-bit RGB. Glk exists only inside lanthorn's Glulx adapter; the windows you see \
+are the game's, not the app's."""
+# It opens by asking "Can you hear me?" and will take nothing else until it is
+# answered, so `yes` is the first key rather than a blank line.
+keys = "wait:8000,text:yes,cr,wait:3000,cr,wait:3000"
+size = "150x44"
+expect = ["Back Alley"]
+
+[[shots]]
+id = "scott-adams-graphics"
+title = "Golden Baton"
+press = "Scott Adams with Blorb artwork (.blb)"
+media = "stories/golden_baton.blb"
+caption = """
+A Scott Adams adventure with the PNG artwork its Blorb carries, mapped as you go. \
+The third engine draws through the same pane, the same map and the same theme as \
+the other two — the only thing that changes is what is behind them."""
+keys = "wait:2500,cr,wait:1500,text:look,cr,wait:2500"
+size = "150x44"
+show_map = true
+expect = ["Golden Baton"]
+expect_art_cells = 200
