@@ -46,6 +46,8 @@ roof; one engine-agnostic mapper that charts them all.
 
 ![Zork Zero with hybrid rendering mode](docs/zork-zero.png)
 
+![Zork Zero off its Macintosh floppy: the black-and-white press, its dithered stone columns and compass rose drawn on the Macintosh's own 7x15 cell](docs/zork-zero-mac.png)
+
 ![Arthur's Amiga floppy drawn in its own proportional typeface, at the ten-pixel line the machine used](docs/native-font.png)
 
 ![Frobozz Magic VideoPoker: a v6 game's painted card table, banner and clickable menu, drawn inside its own illustrated frame](docs/frobozz-poker.png)

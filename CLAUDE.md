@@ -52,6 +52,24 @@ of `app` near the memory ceiling.
   module path still carries the old filename.
 - **Before you PUSH**, run the full gate below. Before the push that makes commits
   public, not before every commit.
+- **A change that compiles nothing needs no gate.** README prose, a doc under
+  `docs/`, a committed PNG, a `gallery.toml` key spec — none of it is Rust, and
+  the only question worth asking is whether the one suite that READS it still
+  passes (`cargo nextest run -p app gallery_manifest` is 23 cases in 0.13s warm).
+  The full gate exists for the two things that have ever justified it — a semantic
+  merge conflict between parallel lanes, and the shared-process palette races —
+  and a line of README prose cannot reach either. Running it anyway costs minutes
+  per iteration and buys nothing, which is easy to do a dozen times in a
+  documentation pass without noticing.
+- **VERIFY BEFORE YOU COMMIT, not after** — `crates/buildinfo/build.rs` shells out
+  to git and declares `cargo:rerun-if-changed=<git-dir>/HEAD`, so **every commit
+  invalidates `buildinfo`**, and `app` depends on it: the next build relinks all
+  fourteen of `app`'s test group binaries whatever you changed. Going from a dirty
+  tree to a clean one does it too, because the `-dirty` suffix is part of the same
+  string. That is the price of a version that carries its own short hash (which is
+  what makes a gallery frame and a bug report self-identifying, so it is worth
+  paying) — but pay it once, by running what you need BEFORE the commit rather
+  than triggering a relink with the commit and then testing.
 - **GitHub Actions runs `cargo test` on every push** and is the real backstop — and
   the only thing that can see a shared-process race, which per-test-process nextest
   structurally cannot (see the palette section below).

@@ -542,11 +542,14 @@ A Glulx game laying out its own Glk windows — a status line, the story, and th
 game's own side panel — with the colours and styles the story asks for honored at \
 24-bit RGB. Glk exists only inside lanthorn's Glulx adapter; the windows you see \
 are the game's, not the app's."""
-# It opens by asking "Can you hear me?" and will take nothing else until it is
-# answered, so `yes` is the first key rather than a blank line.
-keys = "wait:8000,text:yes,cr,wait:3000,cr,wait:3000"
+# Three questions stand between the launch and the game's own graphics: "Can you
+# hear me?" (yes), a follow-up (no), and "Do you remember our name?" (anything —
+# lanthorn). Only past those does it draw the screen this shot is here for, so the
+# answers are the key spec and a blank line will not do.
+keys = "wait:8000,text:yes,cr,wait:2500,text:no,cr,wait:2500,text:lanthorn,cr,wait:2500,cr,wait:4000"
 size = "150x44"
 expect = ["Back Alley"]
+expect_art_cells = 100
 
 [[shots]]
 id = "scott-adams-graphics"
