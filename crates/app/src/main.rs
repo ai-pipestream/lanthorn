@@ -1545,17 +1545,43 @@ fn main() {
             .as_ref()
             .and_then(|p| app::picker::StorySource::of(p, &ctx.data_base)),
     };
+    // `--story <n|name>` makes the browser's choice on the command line
+    // (SQ-1078). Resolved ONCE, here, against the very list the browser would
+    // have shown, so that a headless instrument can reach any game on a
+    // compilation disc instead of only whichever one the mount prefers. A miss
+    // prints the list and exits 2 — the same code `resolve_launch` uses for "no
+    // story given", and never a fallback to booting an arbitrary game.
+    let direct = ctx.cli.story_pick.as_deref().map(|want| {
+        let single = ctx.single_file.clone().unwrap_or_default();
+        match app::story_pick::pick(source.as_ref(), &single, &ctx.data_base, want) {
+            Ok(chosen) => chosen,
+            Err(msg) => {
+                eprintln!("lanthorn: {msg}");
+                std::process::exit(2);
+            }
+        }
+    });
+
     // A set browser is a library in every way that matters here: quitting it
     // exits, finishing a game returns to it, and `/quit-to-library` is live.
-    let launched_from_library = source.is_some();
+    // **Except when `--story` named the game**: that launch bypassed the browser
+    // deliberately, so it behaves like the single-file launch it reads as —
+    // `/quit-to-library` stays gated off and the loop ends when the game does,
+    // rather than dropping the player into a list they asked not to see.
+    let launched_from_library = source.is_some() && direct.is_none();
 
     // ── Picker → play loop ────────────────────────────────────────────────────
     loop {
         // Obtain the next story to play, plus any boot-time overrides chosen on
         // the way in (SQ-0789/0791): the browser's launch-options dialog for a
-        // library launch, `--pictures` for a single file. Both are empty for an
-        // ordinary launch.
-        let (story_path, disk_entry, overrides) = if let Some(source) = &source {
+        // library launch, `--pictures` for a single file or a `--story` pick.
+        // Both are empty for an ordinary launch.
+        let (story_path, disk_entry, overrides) = if let Some((path, entry)) = &direct {
+            // Named outright: no browser, and the pair that opens it — the
+            // container's path plus WHICH story on it, which is the only thing
+            // that reaches the right game on a compilation disc.
+            (path.clone(), entry.clone(), cli_overrides(&ctx))
+        } else if let Some(source) = &source {
             // Library (or multi-disk set) launch: run the picker on the normal
             // screen (the previous game left its alt-screen). Quitting the
             // picker (None) exits.
@@ -1571,25 +1597,12 @@ fn main() {
                 .single_file
                 .clone()
                 .expect("resolve_launch sets single_file for a non-library launch");
-            // A shell-completed `--pictures stories/zork0.mg1` is relative to the
-            // WORKING DIRECTORY, while `pictures = "…"` in a game's config is
-            // relative to the STORY — the sidecar lives elsewhere, so that is the
-            // only sane rule there. Absolutise a CLI path that resolves from here
-            // so both readings work and neither surprises anyone; a name that
-            // does not exist from the cwd falls through to the story-relative
-            // form, which is what `--pictures zork0.mg1` means.
-            let overrides = app::launch_options::LaunchOverrides {
-                pictures: ctx.cli.pictures.as_ref().map(|p| {
-                    std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()).display().to_string()
-                }),
-                interpreter_number: None,
-            };
             // A story file named on the command line opens itself; a disk image
             // that is not a volume of a multi-disk set opens what it always did,
             // the format's own tiebreak. Reaching the other games on a *single*
             // compilation disk is the browser's job (SQ-0859); a set named by
             // one of its volumes never reaches here at all (SQ-0844).
-            (path, None, overrides)
+            (path, None, cli_overrides(&ctx))
         };
 
         // Per-story build (enters the game alt-screen fresh), then run the loop.
@@ -1602,6 +1615,29 @@ fn main() {
             RunOutcome::ToLibrary if launched_from_library => continue,
             RunOutcome::ToLibrary => break,
         }
+    }
+}
+
+/// The boot-time overrides a *command-line* launch carries — what the browser's
+/// launch-options dialog supplies for a picked story (SQ-0789/0791).
+///
+/// `--pictures` has a referent exactly when a story was named on the command
+/// line, which is why clap requires one; both launches that name a story reach
+/// this, the bare single file and the `--story` pick off a volume.
+///
+/// A shell-completed `--pictures stories/zork0.mg1` is relative to the WORKING
+/// DIRECTORY, while `pictures = "…"` in a game's config is relative to the STORY
+/// — the sidecar lives elsewhere, so that is the only sane rule there.
+/// Absolutise a CLI path that resolves from here so both readings work and
+/// neither surprises anyone; a name that does not exist from the cwd falls
+/// through to the story-relative form, which is what `--pictures zork0.mg1`
+/// means.
+fn cli_overrides(ctx: &startup::LaunchCtx) -> app::launch_options::LaunchOverrides {
+    app::launch_options::LaunchOverrides {
+        pictures: ctx.cli.pictures.as_ref().map(|p| {
+            std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()).display().to_string()
+        }),
+        interpreter_number: None,
     }
 }
 

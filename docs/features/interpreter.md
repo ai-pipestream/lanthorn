@@ -639,6 +639,35 @@ does better by putting the games in it. Both front-ends reach every story on
 every image, and — because the save key is the story's own release and serial —
 `--story 4` and the browser row land in the same directory.
 
+**And lanthorn takes `--story` too, for when nobody is watching** (SQ-1078). A
+browser is the right answer for a player and the wrong one for everything else:
+until this flag, the only way to reach a game on a compilation disc was to launch
+it and move a cursor, so no capture, no harness and no bug report could name one.
+`stories/InfocomMasterpieces.img` opens *Zork Zero* by the volume's own tiebreak,
+and the Macintosh *Arthur* press sitting beside it on the same platter could not
+be measured at all — SQ-1063 worked around it with a StuffIt archive unpacked
+into a directory, which is not a medium, so the interpreter profile resolved
+wrong and every number described a screen no player sees.
+
+```sh
+lanthorn stories/InfocomMasterpieces.img --story arthur
+lanthorn stories/InfocomMasterpieces.img --story 7
+```
+
+Same flag, same spelling, same matching rule — literally the same code
+(`cli_host::story_pick`), because a `--story arthur` that found a game at the
+prompt and nothing in the TUI would be its own defect. A number is a position in
+the list the browser would have shown; a name is matched case-insensitively
+against both the stored name and the title, a fragment is enough, and something
+that fits two games is refused *with the list* rather than guessed at. Nothing
+that fails to match ever falls back to booting an arbitrary game.
+
+Naming a story goes straight into it: no browser on the way in, and none on the
+way out either — the launch reads as the single-file launch it is, so it exits
+when the game does rather than depositing you in a list you asked not to see. And
+because the flag names a story ON something, it requires a path, exactly as
+`--pictures` does.
+
 **And both front-ends read the whole set** (SQ-0844, SQ-0961). These collections
 were pressed as sets — seven Apple II volumes, nine Atari ST floppies,
 `floppy1.ima` through `floppy5.ima` — and a set is one shelf of games rather than

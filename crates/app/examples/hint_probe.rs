@@ -9,7 +9,7 @@
 //! see any of these defects.
 //!
 //! Usage:
-//!   cargo run -p app --example hint_probe -- --story <path> [--entry NAME]
+//!   cargo run -p app --example hint_probe -- --story <path> [--entry N|NAME]
 //!       [--pane 132x60] [--route 'L:;L:hint;C:y;C:13;C:13']
 
 use app::engine::{Engine, WinNode};
@@ -70,6 +70,18 @@ fn main() {
     }
     let story = story.expect("--story <path>");
     let p = std::path::Path::new(&story);
+    // `--entry` is a 1-based position or enough of a name to pick out one story
+    // — the rule `lanthorn --story` and `zvm-cli --story` both match by
+    // (SQ-1078). It used to be the stored name LITERALLY, which you could only
+    // learn by mounting the disc yourself.
+    let entry = match entry.as_deref().map(|w| app::story_pick::entry_on(p, w)) {
+        Some(Ok(e)) => e,
+        Some(Err(msg)) => {
+            eprintln!("hint_probe: {msg}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
     let entry = entry.as_deref();
 
     // ── boot as startup.rs boots ─────────────────────────────────────────────

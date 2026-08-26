@@ -23,7 +23,15 @@
 //! cargo run -q -p app --example flank_shape -- --story stories/zork0-r393-s890714.z6 \
 //!     --archive stories/zork0.cg1
 //! cargo run -q -p app --example flank_shape -- --all
+//! cargo run -q -p app --example flank_shape -- --story stories/InfocomMasterpieces.img \
+//!     --entry arthur --keys n
 //! ```
+//!
+//! `--entry <n|name>` says WHICH story, on a volume holding several — a 1-based
+//! position in the browser's list or enough of a name, matched exactly as
+//! `lanthorn --story` matches it (SQ-1078). Without it a compilation disc
+//! measures whatever the mount prefers, which on `InfocomMasterpieces.img` is
+//! Zork Zero whichever flank you meant to look at.
 //!
 //! `--archive` boots against a named picture archive — the tier-3 door the player
 //! uses to pick a rendition — because renditions of one title do not agree on the
@@ -64,6 +72,7 @@ fn main() {
     let taps: usize = get("--taps").and_then(|v| v.parse().ok()).unwrap_or(6);
     let archive = get("--archive");
     let keys = get("--keys");
+    let entry = get("--entry");
 
     let targets: Vec<(String, String)> = if a.iter().any(|v| v == "--all") {
         CORPUS.iter().map(|(s, k)| (s.to_string(), keys.clone().unwrap_or_else(|| k.to_string()))).collect()
@@ -76,7 +85,7 @@ fn main() {
 
     for (path, k) in targets {
         println!("═══ {path}");
-        match shape(&path, &k, archive.as_deref(), taps, cols, rows) {
+        match shape(&path, entry.as_deref(), &k, archive.as_deref(), taps, cols, rows) {
             Ok(()) => {}
             Err(e) => println!("  SKIP: {e}\n"),
         }
@@ -103,9 +112,22 @@ fn profile(img: &image::RgbaImage, x0: u32, x1: u32, rows: std::ops::Range<u32>)
     runs.iter().map(|(s, n)| format!("{s}x{n}")).collect::<Vec<_>>().join(" ")
 }
 
-fn shape(path: &str, keys: &str, archive: Option<&str>, taps: usize, cols: u32, rows: u32) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn shape(path: &str, entry: Option<&str>, keys: &str, archive: Option<&str>, taps: usize, cols: u32, rows: u32) -> Result<(), String> {
     let p = std::path::Path::new(path);
-    let (loaded, medium) = app::hints::load_mounted_story(p).map_err(|e| format!("{e:?}"))?;
+    // `--entry` names WHICH story, on a volume that holds several: a 1-based
+    // position or enough of a name, by the rule `lanthorn --story` matches
+    // (SQ-1078). Without it a compilation disc measures whatever the mount
+    // prefers, which on `InfocomMasterpieces.img` is Zork Zero whichever flank
+    // you meant to look at.
+    let entry = match entry.map(|w| app::story_pick::entry_on(p, w)) {
+        Some(Ok(e)) => e,
+        Some(Err(msg)) => return Err(msg),
+        None => None,
+    };
+    let entry = entry.as_deref();
+    let (loaded, medium) =
+        app::hints::load_mounted_story_from(p, entry).map_err(|e| format!("{e:?}"))?;
     let bytes = loaded.bytes().to_vec();
     if bytes.first() != Some(&6) {
         return Err("not a v6 story".into());
@@ -120,7 +142,11 @@ fn shape(path: &str, keys: &str, archive: Option<&str>, taps: usize, cols: u32, 
             (app::graphics::PictSource::from_native(pics), prof)
         }
         None => (
-            app::graphics::PictSource::resolve(p, None),
+            // The ENTRY rides along: a compilation keeps each game's plates in
+            // its own folder, and pairing the artwork with the volume instead of
+            // with the story drew Zork Zero's plates for every game on the disc
+            // (SQ-0876, the artwork half of `native_disk_font`'s case).
+            app::graphics::PictSource::resolve(p, entry),
             app::interpreter::InterpreterProfile::resolve(p, None, None, medium),
         ),
     };

@@ -342,6 +342,30 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", requires = "story", verbatim_doc_comment)]
     pub pictures: Option<PathBuf>,
 
+    /// Which story to open, on a volume or a library that holds several.
+    ///
+    /// A 1-based position in the list the browser would have shown, or enough of
+    /// a name to pick out one story — matched case-insensitively against both
+    /// the name the medium stores it under and the title the browser prints. A
+    /// name that fits two stories is refused with the list rather than guessed
+    /// at, and one that fits none never falls back to booting something else.
+    ///
+    ///   lanthorn stories/InfocomMasterpieces.img --story arthur
+    ///   lanthorn stories/InfocomMasterpieces.img --story 7
+    ///
+    /// This is the browser's choice, made on the command line: without it a
+    /// compilation disc can only be opened by launching it and picking, so
+    /// nothing headless — a capture, a harness, a bug report — can reach any
+    /// game on one but the first (SQ-1078). `zvm-cli --story` spells it and
+    /// matches it the same way.
+    ///
+    /// Requires a story on the command line, like --pictures: the flag names a
+    /// story ON something, so it has no referent when lanthorn opens the default
+    /// library. Naming one story goes straight into it and exits when the game
+    /// does — no browser on the way in, none on the way out.
+    #[arg(long = "story", value_name = "N|NAME", requires = "story", verbatim_doc_comment)]
+    pub story_pick: Option<String>,
+
     /// How the Version 6 graphical pane is drawn, for this launch only.
     ///
     ///   hybrid  chrome as a scaled pixel ring around a terminal story viewport,
@@ -2352,6 +2376,7 @@ mod tests {
             interpreter_number,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -2437,6 +2462,7 @@ mod tests {
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -2465,6 +2491,7 @@ mod tests {
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -2493,6 +2520,7 @@ mod tests {
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3086,6 +3114,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3112,6 +3141,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3152,6 +3182,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3238,6 +3269,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3266,6 +3298,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3295,6 +3328,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3359,6 +3393,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3416,6 +3451,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3461,6 +3497,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3651,6 +3688,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3707,6 +3745,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3761,6 +3800,7 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            story_pick: None,
             v6_render: None,
             v6_pixel_lock: None,
             machines: false,
@@ -3825,6 +3865,7 @@ use_defaults = false
             ("--image-protocol", "kitty"),
             ("--trace", "screen"),
             ("--pictures", "g.mg1"),
+            ("--story", "arthur"),
         ] {
             let cli = Cli::try_parse_from(["lanthorn", flag, value, "g.z5"])
                 .unwrap_or_else(|e| panic!("{flag} {value} should parse: {e}"));
@@ -3850,6 +3891,36 @@ use_defaults = false
         assert!(help.contains("--interpreter <N>"), "help offers --interpreter: {help}");
         assert!(!help.contains("--interpreter-number"), "and never the old name: {help}");
         assert!(help.contains("--no-game-colours"), "help offers --no-game-colours: {help}");
+    }
+
+    /// SQ-1078: `--story` names a game ON a volume, and the two spellings must
+    /// not be confused — the POSITIONAL says which container to open, the FLAG
+    /// says which story on it.
+    ///
+    /// They share a word on the command line and nothing else: the flag's field
+    /// is `story_pick`, because clap ids must be unique, while the long name
+    /// stays `--story` to match `zvm-cli`, which has spelled it that way since
+    /// SQ-0834. And it requires a path, like `--pictures`: naming a story on
+    /// nothing has no referent, and clap saying so beats a chooser that would
+    /// have to answer "on what?".
+    #[test]
+    fn the_story_flag_names_a_story_on_the_path_and_needs_one() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["lanthorn", "disc.img", "--story", "arthur"]).unwrap();
+        assert_eq!(cli.story.as_deref(), Some(std::path::Path::new("disc.img")), "the container");
+        assert_eq!(cli.story_pick.as_deref(), Some("arthur"), "and which story on it");
+        // A number is just as good a way to say it, and stays a string here —
+        // `cli_host::story_pick::find` is the one place that decides what it
+        // means, for both front-ends.
+        let cli = Cli::try_parse_from(["lanthorn", "disc.img", "--story", "7"]).unwrap();
+        assert_eq!(cli.story_pick.as_deref(), Some("7"));
+
+        assert!(
+            Cli::try_parse_from(["lanthorn", "--story", "arthur"]).is_err(),
+            "a story on nothing is a usage error, exactly as --pictures on nothing is"
+        );
+        let help = <Cli as clap::CommandFactory>::command().render_long_help().to_string();
+        assert!(help.contains("--story <N|NAME>"), "help offers the flag: {help}");
     }
 
     /// SQ-0960: `lanthorn --machines` answers without a story, and answers with
