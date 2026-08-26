@@ -109,6 +109,69 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
 
 ---
 
+## Launching it
+
+Every one of these is a single line in a terminal. `lanthorn --help` has the full
+list; these are the ones people actually reach for.
+
+**Open a library and pick from it**
+
+```bash
+lanthorn                                # your default_story_dir, once you've set one
+lanthorn ~/if-games/                    # any directory — the story picker opens on it
+```
+
+The picker is the front door: cover art, titles, badges, sorting and search, plus
+**`/`** to pull a new story down from IFDB without leaving it.
+
+**Go straight into one game**
+
+```bash
+lanthorn stories/zork1.z3               # a bare story file
+lanthorn Advent.zblorb                  # a Blorb — its art and sound come with it
+lanthorn adventureland.dat              # a Scott Adams game
+lanthorn curses.zip                     # a zip; lanthorn looks inside
+```
+
+**Play it off the disk it shipped on**
+
+```bash
+lanthorn "Zork Zero.adf"                            # an Amiga floppy, presented as an Amiga
+lanthorn "Zork Zero Disk.image"                     # a Macintosh floppy
+lanthorn "LostTreasures1.iso" --story 3             # a compilation disc, by position…
+lanthorn "InfocomMasterpieces.img" --story arthur   # …or by name
+```
+
+`--story` is the browser's choice made on the command line — without it a
+compilation can only be opened by launching it and picking, so nothing headless
+can reach any game on one but the first. Every format lanthorn mounts, and the
+machine each presents as, is in [Play the original disks](#play-the-original-disks).
+
+**Ask for a particular look**
+
+```bash
+lanthorn stories/journey.z6 --v6-render raster       # full-frame pixels instead of hybrid
+lanthorn stories/journey.z6 --v6-pixel-lock on       # whole device pixels per art pixel; no soft edges
+lanthorn stories/zork0.z6 --pictures zork0.mg1       # draw the MCGA rendition of the art
+lanthorn stories/zork1.z3 --interpreter 4 --system-colours   # dress a bare story as an Amiga
+lanthorn --machines                                  # what each interpreter number actually does
+```
+
+Naming an art archive picks the machine with it, so `--pictures zork0.mg1` also
+reports an IBM PC unless `--interpreter` says otherwise. On a bare story file
+nothing has named a machine, which is why the Amiga line asks for its colours
+explicitly — off an Amiga floppy that happens on its own.
+
+**Turn things off**
+
+```bash
+lanthorn story.z5 --no-sound                # quiet; the border still flashes as the cue
+lanthorn story.z5 --no-images               # text only
+lanthorn story.z5 --image-protocol kitty    # force a protocol instead of auto-detecting
+```
+
+---
+
 ## Highlights
 
 - **Three engines, one player** — a clean-room **Z-machine** (v3–v8, incl.
