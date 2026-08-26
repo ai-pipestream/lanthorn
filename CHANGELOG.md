@@ -209,6 +209,106 @@ unpack them. And a live font-size change now re-measures the cell in place inste
 of needing a restart to notice. `/dump-terminal` reports what the compression
 actually bought, measured off the wire rather than assumed.
 
+### InvisiClues screens read the way the machines printed them
+
+The hint systems built into *Shogun*, *Zork Zero* and *Arthur* are the densest
+Version 6 screens Infocom shipped — a menu window inside a story window inside a
+frame, painted rather than streamed — and every one of them had something wrong
+with it. They are now the frames the machines drew.
+
+**Two machines ignore the attribute that says whether text wraps.** ZMSD
+§8.8.3.1.2.2's table has a column per interpreter, and the Macintosh and Amiga rows
+read `---` for the window attributes: those interpreters follow the `buffer_mode`
+opcode instead, which defaults on, so both WORD WRAP whatever the attribute says.
+lanthorn read the attribute, so a clue on the Amiga ran off the right of the screen
+and the Macintosh broke lines a word early. The clip that bounds a non-wrapping
+window was wrong in the same place — §8.8.3.1.1 clips at the window's own right
+margin and we clipped at the SCREEN's, which is a bound no row of that table has.
+
+**A hint menu is not a transcript.** *Shogun*'s InvisiClues screen publishes no
+buffer at all — a full-screen graphics frame and three grids — so the story window
+resolved to the 500×330 topic list, and the entire scrollback was re-wrapped into
+it: seventy-eight rows of it under the topics, including the player's own
+`/dump-windows` output. A grid in that slot now contributes its rectangle and
+nothing else.
+
+**Leaving a hint menu no longer blanks the screen.** On the Macintosh press the
+score bar and both ornaments stayed and the story area went empty, recoverable only
+by `restart`. The game erases its own story window on the way out, and that erase
+was being counted as artwork by the probe that decides where prose can go — so the
+window was measured as obstructing itself and came back 180×0. A window's own
+ground is its page; only artwork moves the prose.
+
+**And the topic list sits where the game put it.** It was being centred, because a
+Version 6 window whose story slot holds a grid was handed the renderer written for
+v3–v5 status bars: that one sizes a region by counting COLUMNS, centres it, and
+floods it with the theme's own background. On a 115×34 pane that put *Shogun*'s
+topics thirteen columns right of the window's edge and left a 62×9 black rectangle
+over the rows the game had not written since the clue screen.
+`machine-screenshots/amiga-shogun-hint.png` puts those topics at native x=71, flush
+with the window, and so do we.
+
+**A title printed with the screen switched off stays off.** `output_stream -1`
+deselects the screen; *Shogun* uses it to walk its cursor across a string and
+measure it. The Version 6 paint path never consulted the flag, so the topic title
+was drawn a second time on top of `Return for a hint.`, wrapping its overflow onto
+the line below. The cursor still moves — that is the whole point of the idiom — but
+nothing reaches the window.
+
+### The frame's side art is one drawing, extended one way
+
+A v6 frame is 400 pixels tall and your pane usually is not, so the side columns are
+repeated to fill it. There were three routines to do that, one per game, chosen by
+guessing which game a column belonged to from its silhouette — and the guess was
+wrong often enough to be the defect. *Shogun*'s hint frame is a plain 60-wide
+lattice of question marks under eight rows where the panel above rounds into it, and
+those eight rows were enough to make it measure as a pillar, whereupon it was handed
+*Zork Zero*'s masonry: four hundred rows of ornament mirrored upside down and the
+frame's own top panel reprinted halfway down the column.
+
+There is now one rule, and it never asks which game drew anything. **A flank is a
+banner, a middle and a footer**, any of which may be absent — *Shogun* is middle
+only, *Arthur* is banner and middle, *Zork Zero* has all three — and extending one
+is always the same operation: keep the banner, re-anchor the footer to the new
+bottom, tile the middle between them. The per-game constants are not lost so much as
+measured: *Zork Zero*'s castle border sections as banner 0..82 and a 26-row foot,
+and 82 plus Bocfel's four-row inset is the 86 the old recipe hardcoded.
+
+Three consequences worth naming. A **lattice is never mirrored** and a shaft always
+is — a flip hides a seam where a drawing meets its own copy, and only turns a motif
+upside down where it already meets exactly; *Zork Zero*'s CGA pillar is lit, and
+translating it steps the shading 17.54 where the shaft itself never steps more than
+5.27. The **band always ends on the art's own last row**, so a column with a foot
+ends on its foot and one without still ends where the drawing ends. And **both flanks
+of a frame are read together**: Macintosh *Arthur*'s poles differ by a single pixel —
+the thin tail below the ornaments is five columns on the left and four on the right —
+which was enough that one side found the repeat and the other did not, and mirrored
+its banner down the column instead.
+
+*Shogun*'s Amiga border also stopped four text rows short of the bottom and tiled
+from there, because `@split_window` was resetting both windows to the full screen
+width; §8.8.4.1 says the two windows are "tiled together to fill the screen", which
+is about the vertical split it just made and not a licence to move their left edges.
+
+### A Version 6 game's saves name the disk it was played off
+
+*Arthur* release 54 / serial 890606 is on the Amiga floppy and on the Macintosh
+*Masterpieces* volume — the same build, pressed twice — so both resolved to one save
+directory and an auto-save made on one was silently resumed by the other. For a
+v1–v5 game that sharing is deliberate and stays: a save is VM memory, it says nothing
+about the machine, and *Zork I* keeps one set of saves across all three of its disks.
+
+Version 6 is where the machine stops being incidental. A host Save State swaps memory
+under a game that never learns it happened, and it carries the screen in the game's
+own native pixels along with its palette — so the Amiga's 640×400 snapshot restored
+into the Macintosh's 480×300 press comes back laid out for a screen you never saw. So
+a v6 directory now names its medium, in the same word the story list shows in its TYPE
+column: `arthur-r54-s890606-adf` beside `arthur-r54-s890606-hfs`.
+
+**Existing Version 6 save directories are not migrated** — rename them if you want
+them back (`arthur-r54-s890606.save` → `arthur-r54-s890606-adf.save`). Only *Arthur*,
+*Journey* and *Zork Zero* directories are affected; everything else keeps its name.
+
 ### Fixed
 
 - **The map's in/out portal badges are glyphs your font actually has.** They were
@@ -339,6 +439,36 @@ actually bought, measured off the wire rather than assumed.
   `zvm-cli` was reading the whole disc image's format rather than the individual
   story's, so every PC build on a hybrid disc reported as the Macintosh, or as no
   machine at all.
+- **A proportional pen measures what it draws, everywhere it measures.** Five places
+  asked how wide a run was using the DECLARED cell — `chars × cell.w` — while the
+  thing that drew it stepped the face's own advances. On every fixed-pitch machine
+  those are the same number, so all five were invisible until the Macintosh and the
+  Amiga got their real faces: the raster wrap measured roman where the draw measured
+  bold and lost a character off *Arthur*'s ribbon; the screen every later stage
+  divides by was sized by a measure nothing draws with; the retired-prose box, the
+  wrap's column pen, and the "would a highlight block erase the artwork here?" probe
+  all did the same in their own way. That last one had drifted furthest — it was
+  asking about an eighty-eight character line what is only a sensible question about
+  one character cell.
+- **A restart re-asks the launch's questions instead of answering them itself.**
+  `reset.rs` rebuilt the interpreter number and the screen size from two of the four
+  links `startup.rs` resolves, three lines below a comment promising "the same four
+  links, in the same order" — so `@restart` on a Macintosh game rebooted it onto a
+  different grid than its launch, and a press whose medium named its interpreter got
+  a different one back.
+- **A `.toast` disc appears in the story list.** `stories/Shogun.toast` is a bare HFS
+  volume and mounted correctly the day it arrived; the directory scan skipped it on
+  its extension before its bytes were ever looked at, so it was simply missing from
+  the browser.
+- **The `(blorb)` tag stops lying in both directions.** Two functions promised the
+  "same match order and rule" for finding a resource file beside a story, and their
+  extension lists differed in both steps, in opposite directions — so neither was a
+  superset of the other and a story could be tagged as having resources it would not
+  load, or load resources it was not tagged for.
+- **`/dump-windows` names the face each window is drawn with** — where it came from,
+  its size, how it was fitted and what its pen does — because "which face won" was
+  the one question the dump could not answer, and it is the first question every
+  proportional-text defect turns on.
 
 ### Pre-colour stories look like the machine that sold them
 
