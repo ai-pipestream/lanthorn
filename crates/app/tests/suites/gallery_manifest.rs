@@ -404,14 +404,15 @@ fn at_least_one_game_appears_on_several_media() {
     );
 }
 
-/// The label is what survives the picture being dragged out of the page, so its
-/// first line says what the picture is before it says anything else.
+/// The label is what survives the picture being dragged out of the page, so it
+/// has to WRAP rather than clip: the seed and the release live at the end of the
+/// provenance line, and a clip drops exactly them.
 #[test]
-fn the_label_leads_with_the_disclaimer_and_wraps_rather_than_clips() {
+fn the_label_wraps_rather_than_clips() {
     use super::pty_stream::gallery;
     let frame = image::RgbaImage::from_pixel(320, 40, image::Rgba([0, 0, 0, 255]));
     let long = "x".repeat(400);
-    let out = gallery::label(&frame, &["RENDER, NOT A SCREENSHOT - honest about layout".into(), long]);
+    let out = gallery::label(&frame, &["a short first line".into(), long]);
     assert_eq!(out.width(), frame.width(), "the label must not widen the frame");
     assert!(
         out.height() > frame.height() + 32,

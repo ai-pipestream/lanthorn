@@ -1002,15 +1002,14 @@ pub fn label(frame: &RgbaImage, lines: &[String]) -> RgbaImage {
     for (x, y, p) in frame.enumerate_pixels() {
         out.put_pixel(x, y, *p);
     }
-    // A hairline between the render and the harness's remark about it, so the
-    // two are never read as one surface.
+    // A hairline between the frame and the provenance under it, so the two are
+    // never read as one surface. It was red while the first label line was a
+    // warning; with the warning gone, red would be a signal about nothing.
     for x in 0..w {
-        out.put_pixel(x, frame.height(), Rgba([200, 40, 40, 255]));
+        out.put_pixel(x, frame.height(), Rgba([70, 72, 78, 255]));
     }
-    for (n, (source, text)) in rows.iter().enumerate() {
-        // The first source line is the disclaimer and is drawn in the divider's
-        // own red; the rest is provenance in a quieter grey.
-        let fg = if *source == 0 { Rgba([236, 130, 130, 255]) } else { Rgba([150, 152, 158, 255]) };
+    for (n, (_source, text)) in rows.iter().enumerate() {
+        let fg = Rgba([150, 152, 158, 255]);
         let y = frame.height() + PAD + LABEL_LINE * n as u32;
         for (j, ch) in text.chars().enumerate() {
             app::render::bitfont::blit_glyph(&mut out, ch, PAD + j as u32 * 8, y, 8, LABEL_LINE, fg, None, None);
@@ -1054,10 +1053,16 @@ fn wrap(text: &str, cols: usize) -> Vec<String> {
     out
 }
 
-/// The two lines every gallery frame carries.
+/// The provenance line every gallery frame carries.
+///
+/// It used to be led by a red "RENDER, NOT A SCREENSHOT" disclaimer, from back
+/// when the harness drew the type with its own bitmap master and a frame really
+/// did not look like a terminal. It draws with a real terminal face now, so the
+/// warning said less than the line below it already does — `face` names the
+/// typeface, its size and who rasterised it, which is the honest version of the
+/// same fact and is where it stays.
 pub fn label_lines(t: &Taken) -> Vec<String> {
     vec![
-        "RENDER, NOT A SCREENSHOT - honest about layout, art placement and colour; the type is the harness's".to_string(),
         format!(
             "{} | {} | {} | {}x{} cells at {}x{}px | {} | {} keypress(es) | seed {} | {}{} | lanthorn {}",
             t.id,

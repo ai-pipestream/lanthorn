@@ -14,10 +14,11 @@
 //! is the recipe; the pictures are the result, and this repository's standing
 //! rule is to persist the first and not the second.
 //!
-//! **What comes out is a RENDER, not a screenshot,** and every frame says so in
-//! its own pixels. The frames are honest about layout, art placement and colour
-//! because they are resolved out of the escape bytes lanthorn actually wrote;
-//! the type in them is drawn by this program. A hero shot wants a real terminal.
+//! **The frames are resolved, not photographed**: the layout, the art placement
+//! and the colour come out of the escape bytes lanthorn actually wrote, and the
+//! type is rasterised here from a real terminal face. Which face, at what size,
+//! is named under every frame — the honest version of the "RENDER, NOT A
+//! SCREENSHOT" disclaimer these carried until SQ-1080, and more useful than it.
 //!
 //! See `tests/pty_stream/gallery.rs` for why the font lives here and not in the
 //! geometry oracle.
@@ -325,8 +326,8 @@ fn main() -> std::process::ExitCode {
     println!("proof sheet : {}", sheet.display());
     println!("recipe      : {}", recipe.display());
     println!(
-        "\nThese are RENDERS, not screenshots: honest about layout, art placement and colour, and\n\
-         about nothing else. Every frame says so in its own footer. A hero shot wants a real terminal."
+        "\nResolved from the bytes lanthorn wrote, with the type rasterised from a real terminal\n\
+         face — which face, at what size, is named under every frame."
     );
     if failed.is_empty() {
         std::process::ExitCode::SUCCESS
