@@ -224,32 +224,28 @@ fn compute_columns(text_w: u16, want_author_w: u16) -> ListColumns {
 /// image is never also a blorb, so the two suffixes cannot collide. (The
 /// container names keep their own casing: "blorb" is a format name, "ADF" and
 /// "HFS" acronyms.)
+///
+/// The parenthetical itself is [`app::picker::type_container`] — one rule,
+/// shared with the TYPE column's sort, which orders rows by the container it
+/// names (SQ-1057). Only the base letters are decided here.
 fn interp_label(meta: &app::picker::StoryMeta, blorb: bool) -> String {
-    match meta.engine {
-        app::picker::Engine::ZCode => {
-            let base = match meta.version.as_deref() {
-                Some(v) if !v.is_empty() => format!("Z{v}"),
-                _ => "Z".to_string(),
-            };
-            if let Some(image) = meta.disk_image {
-                format!("{base} ({})", image.label())
-            } else if blorb {
-                format!("{base} (blorb)")
-            } else {
-                base
-            }
-        }
+    let base = match meta.engine {
+        app::picker::Engine::ZCode => match meta.version.as_deref() {
+            Some(v) if !v.is_empty() => format!("Z{v}"),
+            _ => "Z".to_string(),
+        },
         app::picker::Engine::Glulx => match meta.version.as_deref() {
             Some(v) if !v.is_empty() => format!("G{v}"),
             _ => "Glulx".to_string(),
         },
-        app::picker::Engine::Scott => {
-            if blorb {
-                "Scott (blorb)".to_string()
-            } else {
-                "Scott".to_string()
-            }
-        }
+        app::picker::Engine::Scott => "Scott".to_string(),
+    };
+    // Which container this row shows — and whether it shows one at all — is
+    // `app::picker::type_container`, the same call the TYPE *sort* makes, so
+    // the column and its ordering cannot disagree (SQ-1057).
+    match app::picker::type_container(meta, blorb) {
+        Some(container) => format!("{base} ({container})"),
+        None => base,
     }
 }
 

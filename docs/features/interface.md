@@ -652,7 +652,14 @@ The list sorts by **title**, **author**, **year**, **rating**, or **type** —
 click a column header, press `s` to cycle the column, or `d` to flip the
 direction. Sorting by rating parks every unrated story at the bottom in both
 directions, and breaks ties between equal averages by how many people voted, so
-a 4.6 from two hundred players outranks a 4.6 from three. `i` or
+a 4.6 from two hundred players outranks a 4.6 from three. Sorting by type orders
+rows by the whole label the TYPE column shows, container included: engine first,
+then version, then the parenthetical — so your Amiga floppies land together
+under `Z6 (ADF)`, apart from the Macintosh `Z6 (HFS)` ones and from the loose
+`Z6` files, instead of interleaving with them. Within one engine and version a
+bare story file comes first, then the containers alphabetically, and the case a
+container's name happens to be written in (`blorb` is a format, `ADF` an
+acronym) doesn't decide the order. `i` or
 `Tab` slides in a themeable **info panel** for the highlighted story:
 format/version/release/serial, IFID, author/year/genre, a blurb, feature flags,
 bundled resources, detected artwork, the typefaces the story's own medium
