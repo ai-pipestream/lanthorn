@@ -37,7 +37,12 @@ serde_json = "1"
 toml = "0.8"
 toml_edit = "0.22"
 regex = "1"
-clap = { version = "4", features = ["derive"] }
+# `wrap_help` reflows long help to the real terminal width. Without it clap does
+# not wrap AT ALL — it joins a doc comment into one paragraph and prints it — so
+# every long option ran off the edge and only the ones carrying
+# `verbatim_doc_comment` looked right, because those keep the source's own line
+# breaks rather than being wrapped.
+clap = { version = "4", features = ["derive", "wrap_help"] }
 notify = "6"
 unicode-width = "0.1"
 unicode-segmentation = "1"

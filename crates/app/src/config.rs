@@ -283,21 +283,16 @@ pub struct Cli {
     ///
     /// Games branch on it: Beyond Zork picks character graphics over colour on
     /// IBM PC, and several v6 story files were built for one specific machine.
-    /// The values are ZMSD §11.1.3's table:
-    ///
-    ///   1  DECSystem-20      7  Commodore 128
-    ///   2  Apple IIe         8  Commodore 64
-    ///   3  Macintosh         9  Apple IIc
-    ///   4  Amiga            10  Apple IIgs
-    ///   5  Atari ST         11  Tandy Color
-    ///   6  IBM PC
+    /// The numbers are ZMSD §11.1.3's table, which `--machines` prints in full
+    /// — along with the page and ink each one reports, the palette its colours
+    /// resolve through, and the screen its own interpreter drew.
     ///
     /// Overrides `interpreter_number` in config.toml. With neither set, lanthorn
     /// auto-selects per Frotz's rule: 6 (IBM PC) for v6, else 1 (DECSystem-20).
     //
     // The flag is spelled `--interpreter`, matching `zvm-cli`'s `-I`/`--interpreter`
     // (SQ-0855); the FIELD keeps the config key's name because that is what it sets.
-    #[arg(long = "interpreter", value_name = "N", verbatim_doc_comment)]
+    #[arg(long = "interpreter", value_name = "N")]
     pub interpreter_number: Option<u8>,
 
     /// Interpreter VERSION to advertise in the story header (0x1F).
@@ -308,50 +303,51 @@ pub struct Cli {
     ///
     /// This is an EXPERIMENT knob, not a setting — there is no config key and
     /// nothing is written back. lanthorn's default is `A` (65), which has no
-    /// provenance, and the original Amiga wrote 8: on release 295 of Shogun the
-    /// credits read "Amiga Interpreter version 6.65" here against the real
-    /// machine's "6.8". Whether any story BRANCHES on the byte rather than
-    /// merely printing it is unknown, and this is how to find out (SQ-0885).
-    #[arg(long = "interpreter-version", value_name = "V", verbatim_doc_comment,
+    /// provenance, and the original Amiga wrote 8: on release 295 of Shogun
+    /// the credits read "Amiga Interpreter version 6.65" here against the
+    /// real machine's "6.8". Whether any story BRANCHES on the byte rather
+    /// than merely printing it is unknown, and this is how to find out
+    /// (SQ-0885).
+    #[arg(long = "interpreter-version", value_name = "V",
           value_parser = parse_interpreter_version)]
     pub interpreter_version: Option<u8>,
 
     /// Native Infocom picture archive to draw this story's art from.
     ///
-    /// The path is taken as given if absolute, else resolved beside the STORY —
-    /// which is where these archives sit. Naming one is an instruction, not a
-    /// hint: it beats a Blorb next to the story and the `Pic.data` an Amiga
+    /// The path is taken as given if absolute, else resolved beside the STORY
+    /// — which is where these archives sit. Naming one is an instruction, not
+    /// a hint: it beats a Blorb next to the story and the `Pic.data` an Amiga
     /// `.adf` carries, and it OUTRANKS the `pictures` key in the game's own
-    /// config.toml. A file that is absent or will not decode says so and falls
-    /// back to the Blorb; it never fails quietly.
+    /// config.toml. A file that is absent or will not decode says so and
+    /// falls back to the Blorb; it never fails quietly.
     ///
-    /// The archive also picks the machine, unless --interpreter says
-    /// otherwise: a DOS .MG1/.EG1/.CG1 asks for the IBM PC, an Amiga Pic.data
-    /// for the Amiga.
+    /// The archive also picks the machine, unless --interpreter says otherwise:
+    /// a DOS .MG1/.EG1/.CG1 asks for the IBM PC, an Amiga Pic.data for the
+    /// Amiga. So `--pictures zork0.mg1` beside `stories/zork0.z6` draws the MCGA
+    /// rendition and reports an IBM PC.
     ///
-    ///   lanthorn stories/zork0.z6 --pictures zork0.mg1
+    /// Requires a story on the command line: the flag names art FOR a story,
+    /// so it has no referent when lanthorn opens a library. Pick a rendition
+    /// from the browser with Shift-Enter instead.
     ///
-    /// Requires a story on the command line: the flag names art FOR a story, so
-    /// it has no referent when lanthorn opens a library. Pick a rendition from
-    /// the browser with Shift-Enter instead.
-    ///
-    /// NOTE: Arthur's and Journey's EGA art shipped on two disks (.EG1 + .EG2);
-    /// naming the first loads both. EGA's dithered colours do not yet fuse at
-    /// 1:1, so fine detail reads as speckle; MCGA (.MG1), CGA (.CG1) and the
-    /// Amiga Pic.data have nothing to fuse and are exact today.
-    #[arg(long, value_name = "PATH", requires = "story", verbatim_doc_comment)]
+    /// NOTE: Arthur's and Journey's EGA art shipped on two disks (.EG1 +
+    /// .EG2); naming the first loads both. EGA's dithered colours do not yet
+    /// fuse at 1:1, so fine detail reads as speckle; MCGA (.MG1), CGA (.CG1)
+    /// and the Amiga Pic.data have nothing to fuse and are exact today.
+    #[arg(long, value_name = "PATH", requires = "story")]
     pub pictures: Option<PathBuf>,
 
     /// Which story to open, on a volume or a library that holds several.
     ///
-    /// A 1-based position in the list the browser would have shown, or enough of
-    /// a name to pick out one story — matched case-insensitively against both
-    /// the name the medium stores it under and the title the browser prints. A
-    /// name that fits two stories is refused with the list rather than guessed
-    /// at, and one that fits none never falls back to booting something else.
+    /// A 1-based position in the list the browser would have shown, or enough
+    /// of a name to pick out one story — matched case-insensitively against
+    /// both the name the medium stores it under and the title the browser
+    /// prints. A name that fits two stories is refused with the list rather
+    /// than guessed at, and one that fits none never falls back to booting
+    /// something else.
     ///
-    ///   lanthorn stories/InfocomMasterpieces.img --story arthur
-    ///   lanthorn stories/InfocomMasterpieces.img --story 7
+    /// So `--story arthur` and `--story 7` both reach one game on
+    /// `InfocomMasterpieces.img`.
     ///
     /// This is the browser's choice, made on the command line: without it a
     /// compilation disc can only be opened by launching it and picking, so
@@ -359,25 +355,23 @@ pub struct Cli {
     /// game on one but the first (SQ-1078). `zvm-cli --story` spells it and
     /// matches it the same way.
     ///
-    /// Requires a story on the command line, like --pictures: the flag names a
-    /// story ON something, so it has no referent when lanthorn opens the default
-    /// library. Naming one story goes straight into it and exits when the game
-    /// does — no browser on the way in, none on the way out.
-    #[arg(long = "story", value_name = "N|NAME", requires = "story", verbatim_doc_comment)]
+    /// Requires a story on the command line, like --pictures: the flag names
+    /// a story ON something, so it has no referent when lanthorn opens the
+    /// default library. Naming one story goes straight into it and exits when
+    /// the game does — no browser on the way in, none on the way out.
+    #[arg(long = "story", value_name = "N|NAME", requires = "story")]
     pub story_pick: Option<String>,
 
-    /// How the Version 6 graphical pane is drawn, for this launch only.
+    /// How the Version 6 graphical pane is drawn, for this launch only. The two
+    /// modes are listed below, out of the same doc comments the settings screen
+    /// reads, so there is no second description here to fall out of step.
     ///
-    ///   hybrid  chrome as a scaled pixel ring around a terminal story viewport,
-    ///           with the text drawn as crisp glyphs (the default)
-    ///   raster  the whole pane resolved into one pixel image
-    ///
-    /// The same choice `/set-v6-render` makes mid-game and the settings screen
-    /// persists, said before the game boots — so the first frame is already the
-    /// one you meant, which is what a headless capture and a bug report both
-    /// need (SQ-1079). Overrides `v6_render` in config.toml and is never written
-    /// back.
-    #[arg(long = "v6-render", value_enum, value_name = "MODE", verbatim_doc_comment)]
+    /// The same choice `/set-v6-render` makes mid-game and the settings
+    /// screen persists, said before the game boots — so the first frame is
+    /// already the one you meant, which is what a headless capture and a bug
+    /// report both need (SQ-1079). Overrides `v6_render` in config.toml and
+    /// is never written back.
+    #[arg(long = "v6-render", value_enum, value_name = "MODE")]
     pub v6_render: Option<V6RenderMode>,
 
     /// Snap the v6 magnification to the ladder the ARTWORK implies, so one art

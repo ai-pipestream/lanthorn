@@ -116,6 +116,11 @@ Absolute URLs or no link.
 - A Windows startup prompt no longer waits on input it cannot hear.
 - `/dump-windows` names the face each window is drawn with; the debug
   inspector's memory dump reads the story's own words.
+- `--help` wraps to your terminal. It never wrapped at all before — long option
+  text ran off the edge, and the few options that looked right were hand-wrapped
+  in the source and so stopped short of a wide terminal. Every option now reflows
+  to the real width. `--interpreter` no longer repeats the machine table that
+  `--machines` prints in full.
 
 ---
 
