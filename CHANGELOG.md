@@ -6,13 +6,13 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.2.0`) versions every crate and every
+version in `Cargo.toml` (currently `0.3.0`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
 ---
 
-## Unreleased
+## v0.3.0 — 2026-08-26
 
 ### Original media brings its machine's colours
 
