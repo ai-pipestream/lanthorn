@@ -220,7 +220,7 @@ lanthorn "LostTreasures1.iso" --story 3       # a compilation CD
 | Medium | Extensions | Presents as |
 |---|---|---|
 | AmigaDOS floppy | `.adf` | Amiga (4) |
-| Macintosh HFS floppy, incl. DiskCopy 4.2 | `.image` `.dc42` | Macintosh (3) |
+| Macintosh HFS floppy, incl. DiskCopy 4.2 | `.image` `.dc42` `.toast` | Macintosh (3) |
 | Apple II ProDOS volume | `.2mg` `.po` `.dsk` | Apple IIgs (10) |
 | Apple II raw self-booting press | `.dsk` | Apple IIgs (10) |
 | Atari ST floppy | `.st` | Atari ST (5) |
