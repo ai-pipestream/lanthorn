@@ -193,6 +193,409 @@ fn repeats_an_ornament(canvas: &RgbaImage, x0: u32, x1: u32, art: (u32, u32), hi
     heights.len() >= 2 && heights.windows(2).all(|w| w[0] == w[1])
 }
 
+/// **What a flank is MADE OF** — the three sections every v6 side border is built
+/// from, however the title draws it (SQ-1063).
+///
+/// A flank is a BANNER, a MIDDLE and a FOOTER, and any of them may be absent:
+///
+/// | shape | seen on |
+/// |---|---|
+/// | nothing | some of Arthur's function-key screens |
+/// | banner only | some of Arthur's screens |
+/// | middle only | Shogun |
+/// | banner + middle | Arthur; the hint screens |
+/// | banner + middle + footer | Zork Zero |
+///
+/// Only the MIDDLE repeats, and that is the whole of the model: extending a flank
+/// down a taller pane keeps the banner where it is, re-anchors the footer to the new
+/// bottom, and tiles the middle to fill whatever is between. Which title drew it
+/// never enters into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlankSections {
+    /// Rows `[art_top, middle_top)` — drawn once, at the top.
+    pub middle_top: u32,
+    /// Rows `[middle_top, middle_end)`, repeating every `period` rows.
+    pub middle_end: u32,
+    /// The middle's vertical period.
+    pub period: u32,
+    /// Whether that period was MEASURED from repeating pixels, or is merely the
+    /// section's own height standing in for one.
+    ///
+    /// It decides whether the repeat is mirrored, and the two cases are opposite.
+    /// A measured period means a LATTICE — the copy meets its own motifs exactly, so
+    /// there is no seam to hide and a flip only turns them upside down. An unmeasured
+    /// one means a shaft or a single drawing, where the copy does NOT meet itself:
+    /// Zork Zero's CGA pillar is LIT, so translating it steps the shading at every
+    /// join (measured: 17.54 against the 9.39 the shaft itself ever steps), and only
+    /// reversing it makes the join continuous. That is what the old recipes' `flip`
+    /// was for.
+    pub periodic: bool,
+    /// Whether the middle is a shaft with a BAND in it (SQ-0841).
+    ///
+    /// The Macintosh column's shaft carries a repeating band, and repeating a plain
+    /// length of it leaves bare shaft below the feet — so it is laid out by
+    /// [`extend_banded_pillars`], which ends the run on a whole copy of the art
+    /// rather than on whatever the stride had left over.
+    pub banded: bool,
+}
+
+/// Find the [`FlankSections`] of `dst` between `art_top` and `art_bottom`, or `None`
+/// when nothing in the column repeats — a flank with no middle has nothing to tile.
+///
+/// The middle is found in the PIXELS rather than in the silhouette: the longest
+/// stretch of rows for which every row equals the row `period` above it. Statistics
+/// over painted widths cannot find it — that is what read Shogun's eight-row rounded
+/// corner as a capital — and periodicity is what "repeats" actually means.
+///
+/// Among periods that tie, the smallest wins: a stretch periodic at `p` is also
+/// periodic at `2p`, and the smaller unit tiles with fewer seams.
+pub fn flank_sections(dst: &RgbaImage, art_top: u32, art_bottom: u32) -> Option<FlankSections> {
+    let hi_row = art_bottom.min(dst.height());
+    if hi_row <= art_top {
+        return None;
+    }
+    let row_eq = |a: u32, b: u32| -> bool {
+        (0..dst.width()).all(|x| dst.get_pixel(x, a) == dst.get_pixel(x, b))
+    };
+    let span = hi_row - art_top;
+    let mut best: Option<FlankSections> = None;
+    for period in (V6_TEXT_ROW / 4)..=(span / 2).min(V6_TEXT_ROW * 8) {
+        // The maximal run of rows agreeing with the row `period` above them.
+        let (mut run_start, mut cur) = (None::<u32>, art_top);
+        while cur + period < hi_row {
+            if row_eq(cur + period, cur) {
+                run_start.get_or_insert(cur);
+                let mut end = cur + period;
+                while end + 1 < hi_row && row_eq(end + 1, end + 1 - period) {
+                    end += 1;
+                }
+                let start = run_start.take().unwrap_or(cur);
+                let sect = FlankSections { middle_top: start, middle_end: end + 1, period, periodic: true, banded: false };
+                if best.is_none_or(|b| {
+                    (sect.middle_end - sect.middle_top) > (b.middle_end - b.middle_top)
+                }) {
+                    best = Some(sect);
+                }
+                cur = end + 1;
+            } else {
+                cur += 1;
+            }
+        }
+    }
+    let periodic = best.filter(|b| b.middle_end - b.middle_top >= 2 * b.period);
+
+    // **A middle is found two ways, because there are two kinds of middle.**
+    //
+    // A LATTICE repeats in the pixels — Shogun's question marks, Zork Zero's own
+    // plate 8 — and only periodicity finds it. A SHAFT is a plain span of one width
+    // between a capital and a base; it repeats trivially, so periodicity finds a
+    // meaningless four-row unit inside it, but its EXTENT is what matters and that is
+    // read from the silhouette. `pillar_shaft` and `banded_shaft` have measured
+    // exactly that since SQ-0792/SQ-0841, over sixty-eight flanks, and they are what
+    // says where a shaft stops and its FOOT begins.
+    //
+    // Periodicity is asked first and the shaft second: a lattice's period is real
+    // information and a shaft's is not, so the sharper answer wins where both exist.
+    let plain = pillar_shaft(dst, hi_row).map(|s| (s, false));
+    let shaft = plain
+        .or_else(|| banded_shaft(dst, hi_row).map(|s| (s, true)))
+        .map(|((top, bottom), banded)| FlankSections {
+            middle_top: top,
+            middle_end: bottom,
+            // The whole shaft is the unit: it has no period of its own, and a lit
+            // column has to be repeated entire so the mirror can reverse its shading.
+            period: (bottom - top).max(1),
+            periodic: false,
+            banded,
+        });
+    let mut sec = match (periodic, shaft) {
+        // **The SHAFT wins wherever the art declares one.** A shaft is architecture
+        // the drawing states — a capital above it and a base below — where a period
+        // is inferred from rows that happen to agree, and a uniform capital agrees
+        // with itself. Preferring the inferred reading let the middle start ABOVE the
+        // shaft, so the ring under Zork Zero's capital tiled down the column: SQ-0799
+        // exactly, which `no_tile_boundary_repeats_the_ring_under_the_capital` pins.
+        //
+        // Periodicity is what finds a LATTICE, and a lattice has no shaft to declare:
+        // Shogun's runs to the bottom at one width, so `pillar_shaft` sees no base
+        // under it and correctly answers `None`.
+        (_, Some(sh)) => sh,
+        (Some(p), None) => p,
+        // **MIDDLE ONLY**: no repeat and no shaft — the flank is one drawing. Shogun's
+        // game border is the case, and the model still describes it: no banner, no
+        // footer, tile the drawing.
+        (None, None) => FlankSections { middle_top: art_top, middle_end: hi_row, period: span, periodic: false, banded: false },
+    };
+
+    // **The FOOTER is found by its flare, not by the period** (SQ-1063). A repeat
+    // that runs to the last row leaves no footer, and for a flank that HAS one that
+    // is wrong twice over: the foot is tiled away, and the band then ends on a
+    // fragment of shaft instead of on the art's own last row — SQ-0841's "bare shaft
+    // below the foot" exactly.
+    //
+    // Zork Zero's is the shape that names it: its foot FLARES, 77 columns wide
+    // against a 71-wide shaft, so the trailing rows whose painted span differs from
+    // the column's usual one ARE the foot. Shogun's lattice runs to the bottom at one
+    // width and correctly reports no footer at all.
+    let footer_top = footer_top(dst, art_top, hi_row);
+    if footer_top > sec.middle_top {
+        sec.middle_end = sec.middle_end.min(footer_top);
+    }
+    (sec.middle_end > sec.middle_top).then_some(sec)
+}
+
+/// The first row of this flank's FOOTER — the trailing rows whose painted span is not
+/// the column's usual one — or `art_bottom` when it has none (SQ-1063).
+///
+/// The "usual" span is the modal one: whatever the most rows of this column are, which
+/// for a border is its shaft or its lattice. A foot flares out of that and a cap does
+/// not exist at the bottom, so a trailing run that departs from the mode is the foot.
+fn footer_top(dst: &RgbaImage, art_top: u32, art_bottom: u32) -> u32 {
+    let span_at = |y: u32| -> u32 {
+        let (mut f, mut l) = (None, 0);
+        for x in 0..dst.width() {
+            if dst.get_pixel(x, y)[3] >= 128 {
+                f.get_or_insert(x);
+                l = x;
+            }
+        }
+        f.map_or(0, |q| l - q + 1)
+    };
+    let spans: Vec<u32> = (art_top..art_bottom).map(span_at).collect();
+    if spans.is_empty() {
+        return art_bottom;
+    }
+    let mut tally: Vec<(u32, u32)> = Vec::new();
+    for &v in &spans {
+        match tally.iter_mut().find(|(s, _)| *s == v) {
+            Some((_, c)) => *c += 1,
+            None => tally.push((v, 1)),
+        }
+    }
+    let modal = tally.iter().max_by_key(|(_, c)| *c).map(|(s, _)| *s).unwrap_or(0);
+    let mut t = art_bottom;
+    while t > art_top && spans[(t - 1 - art_top) as usize] != modal {
+        t -= 1;
+    }
+    t
+}
+
+/// The one reading of a drawing that BOTH its flanks can be laid out from (SQ-1063).
+///
+/// A frame's two flanks are two crops of one drawing, and SQ-0845 already says they
+/// must be treated as one thing. They do not measure alike: Macintosh Arthur's poles
+/// differ by a single pixel — the thin tail below the ornaments is five columns wide
+/// on the left and four on the right — and that is enough that periodicity finds a
+/// four-row repeat on one side and nothing on the other. The side that finds nothing
+/// falls to the whole-drawing reading and mirrors the BANNER down the column, which
+/// is the reported *"the right side copies portions of the banner when tiling, left
+/// side is correct"*.
+///
+/// Combined conservatively, and symmetrically so both sides compute the same answer
+/// from the same pair:
+///
+/// * the **banner** is the later of the two — no side tiles what the other calls
+///   banner;
+/// * the **footer** is the earlier — no side tiles over what the other calls foot;
+/// * a measured **period** from either side is believed. Failing to find a repeat is
+///   absence of evidence, not evidence the drawing does not repeat, and the smaller
+///   period is taken when both found one.
+pub fn agree_sections(a: FlankSections, b: FlankSections) -> FlankSections {
+    let periodic = a.periodic || b.periodic;
+    let period = match (a.periodic, b.periodic) {
+        (true, true) => a.period.min(b.period),
+        (true, false) => a.period,
+        (false, true) => b.period,
+        (false, false) => a.period.max(b.period),
+    };
+    let middle_top = a.middle_top.max(b.middle_top);
+    let middle_end = a.middle_end.min(b.middle_end);
+    FlankSections {
+        middle_top,
+        middle_end: middle_end.max(middle_top + 1),
+        // A period that no longer fits the agreed middle is not one.
+        period: period.min(middle_end.saturating_sub(middle_top)).max(1),
+        periodic,
+        banded: a.banded || b.banded,
+    }
+}
+
+/// Extend a flank down `desired` rows from its three sections (SQ-1063): the banner
+/// stays where it is, the footer is re-anchored to the new bottom, and the middle is
+/// tiled to fill whatever is between.
+///
+/// One operation for every v6 border there is. It replaced three per-title recipes —
+/// Arthur's poles, Zork Zero's pillars and Shogun's single piece — each of which
+/// carried its own Bocfel-derived constants and had to be chosen by guessing the
+/// title from the column's silhouette. That guess is what SQ-1063 reports: eight rows
+/// where Shogun's top panel rounds into its flank made a plain lattice measure as a
+/// capital over a shaft, so it was handed Zork Zero's masonry, which mirrored four
+/// hundred rows of ornament and reprinted the panel down the column.
+///
+/// The constants are not lost, they are MEASURED: Zork Zero's flank sections as
+/// banner 0..218, middle 218..374 and footer 374..400, and that 26-row footer is
+/// exactly the `foot_height = 13` (doubled) the old recipe hardcoded.
+///
+/// The middle is tiled from the last whole period of the art, so it continues the
+/// phase already on screen and the seam falls where the ornament's own repeats do.
+/// Nothing is flipped: a directional motif read upside down is worse than a seam.
+pub fn extend_by_sections(
+    dst: &mut RgbaImage,
+    src: &RgbaImage,
+    art_top: u32,
+    art_bottom: u32,
+    desired_height: u32,
+) {
+    if desired_height <= art_bottom || art_bottom <= art_top {
+        return;
+    }
+    // **Sectioned and cut from `src`, stamped into `dst`** (SQ-0698). `dst` is the
+    // chrome canvas — the artwork MINUS whatever the renderer draws as terminal cells
+    // — and `src` is the graphics canvas, which still carries it all. Shogun's
+    // two-row status line is 32 native pixels the top of its border sits behind, so
+    // those rows are cleared in `dst`; a unit cut from there repeats the HOLE, and
+    // the reported "gap between the tiled shogun side-art pieces" is where two copies
+    // of it meet.
+    let Some(sec) = flank_sections(src, art_top, art_bottom) else { return };
+    extend_with_sections(dst, src, sec, art_top, art_bottom, desired_height);
+}
+
+/// [`extend_by_sections`] with the sections already decided — the form the renderer
+/// uses, because the two flanks of a frame must be sectioned TOGETHER (SQ-1063).
+pub fn extend_with_sections(
+    dst: &mut RgbaImage,
+    src: &RgbaImage,
+    sec: FlankSections,
+    art_top: u32,
+    art_bottom: u32,
+    desired_height: u32,
+) {
+    if desired_height <= art_bottom || art_bottom <= art_top {
+        return;
+    }
+
+    // **The band always ENDS on the art's own last row** (SQ-0841, SQ-1063).
+    //
+    // Everything is laid from the bottom up for that one reason. A flank with a
+    // FOOTER must end on its foot — Zork Zero's plates, where a downward fill left
+    // the "bare shaft below the foot" SQ-0841 reports — and a flank WITHOUT one must
+    // still end where the drawing ends, because the frame's bottom edge is drawn
+    // there. Zork Zero's plate 8 is the case that proves the second half: an
+    // InvisiClues lattice with no foot at all, whose downward fill stopped on
+    // whichever lattice row the last copy happened to reach.
+    //
+    // So: stamp the footer at the new bottom (it may be empty), then fill the middle
+    // UPWARD from it. The unit is taken ending at the middle's own last row, so a
+    // footer-less flank's last row is the art's last row by construction.
+    let footer_h = art_bottom.saturating_sub(sec.middle_end);
+    let footer = snapshot(src, sec.middle_end, footer_h);
+    let fill_to = desired_height.saturating_sub(footer_h);
+
+    // **Repeat as much of the middle as is a whole number of periods**, not one
+    // period of it. Both tile correctly, but a minimal unit throws the section's
+    // texture away: Zork Zero's shaft reads as a 16-row period inside a 292-row
+    // middle, so repeating the period alone stamps the same sixteen rows eighteen
+    // times where the art itself varies down its length.
+    let middle_h = sec.middle_end - sec.middle_top;
+    let unit_h = (middle_h / sec.period.max(1)).max(1) * sec.period.max(1);
+    let unit = snapshot(src, sec.middle_end.saturating_sub(unit_h), unit_h);
+    let uh = unit.height().max(1);
+
+    // **A non-periodic repeat is MIRRORED; a periodic one is not** — see
+    // [`FlankSections::periodic`] for why the two cases are opposite.
+    let mirror = !sec.periodic;
+
+    // **With a FOOTER, the middle is filled DOWNWARD and the copy adjacent to the art
+    // is the mirrored one** (SQ-1063). The footer is what ends the band, so the
+    // middle's parity is free — and continuity at the join is what it should be spent
+    // on: a flipped copy OPENS on the row the art CLOSED with, so the shading runs on
+    // unbroken. Stamped upright there instead, the join jumps from the shaft's last
+    // row back to the middle of the unit —
+    // `v6_side_border_tiling::no_tile_join_steps_harder_than_the_pillar_shaft_itself`
+    // measured that as a 10.54 step against the 5.27 the shaft itself ever steps.
+    //
+    // Without a footer the ending has to come from the middle, so that case keeps the
+    // bottom-anchored upward fill below; a footer-less flank is a lattice, which does
+    // not mirror and has no join to smooth.
+    if footer_h > 0 {
+        /// How far the repeat unit stays clear of the capital above it and the base
+        /// below — Bocfel's two raw rows at each end, doubled into unit space.
+        const INSET: u32 = 4;
+        // A flank with a footer is laid out by [`extend_pillars`], which is the
+        // tested primitive for exactly this shape: tile from where the foot WAS, then
+        // put the foot back at the new bottom. What has changed is where its three
+        // numbers come from — they are the section boundaries measured off the art,
+        // where they used to be Zork Zero's own constants applied to whatever flank
+        // arrived. Measured, `zork0.mg1`'s castle border gives a top cut of 82 and a
+        // 26-row foot; the constants said 86 and 26, and 86 is 82 plus this inset.
+        //
+        // The unit is inset at both ends for the reason the constant records: a
+        // shaft's first and last rows are transitions into the capital and the base,
+        // and repeating them steps the shading at every join.
+        // **A shaft with a BAND in it is not a plain one** (SQ-0841). The Macintosh
+        // column's band has to end the run on a whole copy of the art, or bare shaft
+        // is left below its feet — measured as a last band standing 183 rows above
+        // the foot where the picture itself stands 123.
+        if sec.banded {
+            extend_banded_pillars(dst, sec.middle_top + INSET, art_bottom, desired_height);
+            return;
+        }
+        let middle = sec.middle_end - sec.middle_top;
+        let unit_h = middle.saturating_sub(2 * INSET);
+        if unit_h > 0 {
+            extend_pillars(
+                dst,
+                sec.middle_top + INSET,
+                footer_h,
+                art_bottom,
+                unit_h,
+                0,
+                mirror,
+                desired_height,
+            );
+        }
+        return;
+    }
+
+    // Fill upward from the footer's new top, down to where the MIDDLE ends — not to
+    // where the ART ends (SQ-1063).
+    //
+    // The footer's original rows are still sitting in `dst` at the position the game
+    // drew them, and the extension moves the footer to the new bottom. Filling only
+    // below `art_bottom` leaves those rows where they were, so the footer appears
+    // TWICE: once part-way down, where the art put it, and once at the bottom. Every
+    // Zork Zero rendition showed it — "one copy of the footer before the tiling
+    // starts". The middle is tiled over them instead.
+    //
+    // Identical for a flank with no footer, where `middle_end == art_bottom`.
+    //
+    // The copy nearest the bottom is UPRIGHT whatever `mirror` says, so the last row
+    // is the art's last row either way.
+    let mut y = fill_to;
+    let mut flipped = false;
+    while y > sec.middle_end {
+        let top = y.saturating_sub(uh);
+        if top < sec.middle_end {
+            // The remaining gap is narrower than a whole copy: stamp that copy's
+            // TAIL into it rather than writing over the middle above it.
+            let tail_h = y - sec.middle_end;
+            let src_y = if flipped { 0 } else { uh - tail_h };
+            let tail = snapshot(&unit, src_y, tail_h);
+            stamp(dst, &tail, sec.middle_end, flipped);
+            break;
+        }
+        stamp(dst, &unit, top, flipped);
+        if mirror {
+            flipped = !flipped;
+        }
+        y = top;
+    }
+
+    if footer_h > 0 {
+        stamp(dst, &footer, fill_to, false);
+    }
+}
+
 /// Classify a flank from the shape of its own native columns.
 ///
 /// `art` is `(first, last_exclusive)` opaque native row within columns
@@ -457,106 +860,7 @@ pub fn extend_pillars(
 
 // ── Per-title handlers ───────────────────────────────────────────────────────
 
-/// **Arthur** — `draw_arthur_side_images()` in `draw_border.cpp`.
-///
-/// Bocfel cuts a **2-line** horizontal strip at 90% of the pole art's own height
-/// and repeats it plainly (`extend_pillars(place_to_cut, foot_height,
-/// total_height, /*pillar=*/2, /*overlap=*/0, /*flip=*/false, …)`), then stamps
-/// the original bottom 10% back on as the foot. The poles are a plain vertical
-/// texture, so neither overlap nor flip is wanted: the `kBWHint*` seam
-/// machinery an earlier reading attributed to Arthur belongs to the Mac B/W
-/// *hint* border, and Zork Zero's masonry.
-///
-/// Doubled into unit space the strip is **4 rows**, and `top_cut` is rounded
-/// down to an even row so the doubled texture keeps its phase.
-///
-/// Bocfel additionally shortens the foot on Amiga (`foot_height -= top_margin;
-/// total_height -= top_margin`). That does NOT transfer: `arthur_pic_top_margin`
-/// is a Glk window-layout quantity Bocfel introduces because it re-places
-/// Arthur's frame itself, quantised to its own cell height. lanthorn never
-/// re-places the art — the game draws it and we read the canvas back — so there
-/// is no top margin to subtract. Measured on `Arthur - The Quest for
-/// Excalibur.adf` (release 54, serial 890606): the poles run native rows
-/// 11..379 in flank columns 10..15 (left) and 624..629 (right).
-fn arthur(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
-    /// Bocfel: `place_to_cut = (int)(hw_screenheight * 0.9)`.
-    const CUT_NUM: u32 = 9;
-    const CUT_DEN: u32 = 10;
-    /// Bocfel's `pillar_height` argument is 2 raw lines; unit space doubles it.
-    const UNIT_ROWS: u32 = 4;
-    let top_cut = (art_bottom * CUT_NUM / CUT_DEN) & !1;
-    let foot_height = art_bottom - top_cut;
-    extend_pillars(dst, top_cut, foot_height, art_bottom, UNIT_ROWS, 0, false, desired_height);
-}
 
-/// **Shogun** — `shogun_extend_amiga_mac_border()` + `common_extend_border()`.
-///
-/// Shogun's Amiga and Mac B/W border is a **single image with no separate
-/// pillars**, so Bocfel extends it by stamping a second copy of *whichever
-/// border is in use* below the first: flipped for `P_BORDER` (3) at
-/// `border_height - 2`, plain for `P_BORDER2` (4) at `border_height - 22`
-/// (Mac B/W: `border_height` and `border_height - 35`). `P_BORDER` and
-/// `P_BORDER2` are two alternative border STYLES for different scenes, not two
-/// halves of one border. The flip is not decoration — it is what makes the join
-/// read as continuous on a border whose top and bottom differ.
-///
-/// We cannot see which of the two styles the game chose (the canvas is pixels,
-/// not picture numbers), and we do not need to: the flipped `P_BORDER` join is
-/// the one that reads continuously for either, and a 2-row overlap is small
-/// enough to be invisible if the style was the other one. Bocfel then runs
-/// `common_extend_border()`, which repeats everything drawn so far downward
-/// until the pane is filled — that is the third step here.
-///
-/// **Both repeats are cut from `art`, never from `dst`.** This is the ORDER
-/// Bocfel works in and it is load-bearing. Its covering rectangle over the
-/// status bar — *"the raw border graphics have a decorative top bar that doesn't
-/// fit the header text, so the original interpreters cover it with a solid color
-/// rectangle"* — is step 4 of `draw_border_common`, drawn AFTER the extension,
-/// so the copies it stamps are of the unmasked picture. lanthorn's chrome canvas
-/// is the same art with that band already gone: Shogun's status line is two
-/// 16px rows the renderer draws as crisp terminal cells (SQ-0500), so the top
-/// **32 native rows** of the flank are transparent there while the
-/// graphics-only canvas still carries them. Cutting the repeat from the chrome
-/// canvas therefore copies a 32-row hole twice — once at the flipped copy's
-/// FOOT (its source rows 32..0) and once at the tiled block's HEAD — and the two
-/// meet at the join, which is the 64-native-row (94px at a 120x90 terminal) black
-/// band between the panels the user reported. Reading `border_height` off the
-/// art while reading the PIXELS off the chrome canvas was the mismatch; the
-/// gap's size is twice the cleared status band, not the art's unpainted tail,
-/// and it sits centred on the join at `2·border_height − overlap` rather than
-/// at the art's own bottom. SQ-0698.
-///
-/// `dst`'s own first copy keeps the chrome canvas's clearing, because that band
-/// is where the status CELLS go; the flank crop starts below it in every pane we
-/// have measured, so it is only ever the rows the extension adds that need the
-/// art.
-///
-/// Measured on `James Clavell's Shogun.adf` (release 295, serial 890321): the
-/// border art is native rows 0..336 across flank columns 0..46 and 594..640, so
-/// `border_height` = 336 = the 168-row raw image doubled.
-fn shogun(dst: &mut RgbaImage, art: &RgbaImage, border_height: u32, desired_height: u32) {
-    /// Bocfel's Amiga offset for `P_BORDER` is 2 raw lines; unit space doubles it.
-    const OVERLAP: u32 = 4;
-    if border_height == 0 || desired_height <= border_height {
-        return;
-    }
-    let whole = snapshot(art, 0, border_height);
-    let second_top = border_height - OVERLAP;
-    stamp(dst, &whole, second_top, true);
-    let lowest = second_top + border_height;
-    if desired_height <= lowest {
-        return;
-    }
-    // `common_extend_border(desired_height, lowest_drawn_pixel, start_copy_from)`
-    // — repeat everything from `pillar_top` (0, for Shogun) down to the lowest
-    // drawn line, truncating the last copy at the bottom. Composed here from the
-    // art rather than snapshotted out of `dst`, for the reason above; the two
-    // stamps reproduce rows `[0, lowest)` exactly as the steps above laid them.
-    let mut block = RgbaImage::new(dst.width(), lowest);
-    stamp(&mut block, &whole, 0, false);
-    stamp(&mut block, &whole, second_top, true);
-    tile_down(dst, &block, lowest, desired_height, 0, false, false);
-}
 
 /// The plain **shaft** of a pillar — `(top, bottom_exclusive)` — as the art
 /// itself declares it, or `None` when this flank shows no pillar shape.
@@ -782,152 +1086,6 @@ pub fn extend_banded_pillars(dst: &mut RgbaImage, top_cut: u32, art_bottom: u32,
     erase_below(dst, desired_height);
 }
 
-/// **Zork Zero** — `extend_pillars(43, 13, 200, 142, 0, false, false)`, the
-/// CASTLE border on the VGA / Amiga / Blorb artwork (`zorkzero.cpp`), with
-/// every one of those four numbers **measured off the art** instead.
-///
-/// Bocfel can hard-code them because it only ever draws one rendition per run,
-/// chosen by display mode; lanthorn lets the player switch archives, and Zork
-/// Zero's renditions do not agree on where the pillars begin. The banner above
-/// them is 34 raw rows on MCGA, **37 on EGA and 39 on CGA**, while the pillars
-/// are 166 rows in all three — so a cut pinned to 86 in unit space lands 6 rows
-/// high under EGA and 10 under CGA, inside the ring beneath the capital, and
-/// every tile boundary then repeats that ring as a horizontal seam. SQ-0799.
-///
-/// What is measured is [`pillar_shaft`], and the four constants fall out of it:
-///
-/// | Bocfel (raw)            | derived from the shaft `[top, bottom)`      |
-/// |-------------------------|---------------------------------------------|
-/// | `place_to_cut` = 43     | `top + INSET`                               |
-/// | `foot_height` = 13      | `art_bottom - bottom`                       |
-/// | `total_height` = 200    | `art_bottom` (the caller already measured)  |
-/// | `pillar_height` = 142   | `bottom - top - 2·INSET`                    |
-///
-/// **`INSET` is the one number that cannot be derived**, and it is 2 raw rows —
-/// Bocfel keeps its repeat unit that far clear of the capital above and the base
-/// below, which is the whole of the difference between its constants and the
-/// shaft this measures. On the MCGA/Amiga/Blorb art the shaft is unit rows
-/// `[82, 374)` of a 400-row flank, and the table above returns **86 / 26 / 400 /
-/// 284** — Bocfel's four constants exactly, which is what makes this a
-/// derivation of them rather than a replacement for them.
-///
-/// When the flank shows no pillar shape at all, `pillar_shaft` says so and those
-/// constants are used as written. Every *castle* flank measured declares a shaft
-/// and no other Zork Zero flank does, so that arm is exactly its other two scene
-/// borders (below) — see [`pillar_shaft`] for the measurement that separates
-/// them, and for why letting a scene border derive its own recipe was worse than
-/// this fallback rather than better (SQ-0792).
-///
-/// ## Alternate tiles are MIRRORED, and that is SQ-0808
-///
-/// `flip` is on, which makes every internal join an exact duplicated row: tile
-/// *n* ends on strip row 0 and tile *n+1* — drawn the other way up — begins on
-/// strip row 0. A translation repeat instead butts the strip's LAST row against
-/// its FIRST, and that only disappears when the shaft is uniform down its length.
-///
-/// Two of Zork Zero's three renditions are uniform and one is not. Mean row
-/// luminance down the castle shaft, measured on `zork0-r393-s890714.z6` at a
-/// gameplay frame: `zork0.mg1` and `zork0.eg1` hold **54** and **51** from top to
-/// bottom, while `zork0.cg1` runs **97 → 82** — its pillar is a *lit* column,
-/// shaded darker toward its base, and repeating it reset the shading at every
-/// join. Against the art's own steepest internal step of 16.8 (a 16-row
-/// low-pass), the extension's join measured **29.3** at band row 654, the second
-/// tile boundary. That is the seam the user reported, and it is neither the EGA
-/// dither of SQ-0797 nor the mis-cut repeat unit of SQ-0799 — the cut is in the
-/// plain shaft on all three renditions and CGA still seams, because the shaft
-/// itself is not translation-invariant.
-///
-/// Bocfel reached the same conclusion per platform and hard-codes it:
-/// `extend_pillars(52, 25, 205, 133, 11, /*flip=*/true, false)` for CGA against
-/// `(43, 13, 200, 142, 0, false, false)` for VGA/Amiga/Blorb, and it forces the
-/// first EGA tile flipped too (`if (is_spatterlight_zork0 && graphics_type ==
-/// kGraphicsTypeEGA) initial_parity = true;`). Mirroring unconditionally is the
-/// same answer without the dispatch: on a uniform shaft a mirror is
-/// indistinguishable from a translation, so the two flat renditions are
-/// unaffected, and it needs none of Bocfel's per-platform overlap (11 raw rows on
-/// CGA, 9 on EGA) because a duplicated row has nothing left to hide.
-///
-/// ## Known limitation, deliberate
-///
-/// Zork Zero has three scene borders and Bocfel gives each its own routine:
-/// castle (above), `extend_underground_pillars(73, 54, 200, 74, 38, 37)` and
-/// `extend_jungle_pillars(67, 210, 143, 59)`. Which one is on screen is a
-/// Z-machine global Bocfel reads and we cannot — `WinNode::Graphics` carries a
-/// flattened `RgbaImage`, and picture numbers do not survive the engine boundary.
-/// SQ-0792 settled how much of that dispatch the pixels can replace:
-///
-/// * **Castle against not-castle: derivable, and now derived.** The castle is the
-///   only one of the three that holds one span for most of the flank, so
-///   [`pillar_shaft`]'s majority test tells them apart on every rendition, and the
-///   other two take the constants above — uniformly on BOTH flanks, which is the
-///   part that had regressed.
-/// * **The jungle's own overlap: moot.** `extend_jungle_pillars` is a plain
-///   59-row-overlap repeat with no foot, and the overlap exists to hide the seam
-///   that SQ-0808's mirror removes outright. Its `total_height` of 210 raw rows
-///   is TALLER than the 200-row screen, so the rows it reads below 200 are
-///   clipped from the canvas before we receive it; Bocfel sees them only because
-///   its pixmap is unclipped until `flush_bitmap`.
-/// * **The underground's stone alternation: genuinely blocked.** Bocfel does not
-///   flip that tile, it SWAPS the flanks — on alternate tiles it draws the right
-///   pillar's 37-px-wide stones at `x = 0` and the left pillar's at
-///   `x = width − 37`, so the two columns trade courses and the masonry stays
-///   consistent between them. That is a statement about the pair, applied only to
-///   the underground; a mirror inside one flank cannot express it, and applying
-///   it to the castle would flip a lit column's shading. Nothing in the pixels
-///   says "this is the underground".
-///
-/// ## Autocorrelation was tried, and the castle is why it cannot replace this
-///
-/// SQ-0813 asked whether the repeat unit could come from the art alone —
-/// autocorrelate a flank down y, take the strongest period as the tile height —
-/// which would retire the dispatch above and subsume the constant-span case,
-/// since a constant shaft autocorrelates at every lag. Measured over every
-/// rendition and all three scene borders it reproduces the castle's derivation on
-/// none of them, and the reason is structural: **a pillar shaft has no period.**
-/// `zork0.mg1`'s is uniform — its rows are pixel-identical, mean mismatch 0.30 of
-/// 255 at every lag from 4 to 20 alike — so the search is maximally confident and
-/// maximally uninformative and returns the smallest lag it is offered, 4 against
-/// the 284 [`pillar_shaft`] gives. `zork0.cg1`'s is a graded lit column (97 → 82,
-/// above) and a gradient is not periodic either, so its best lag scores *worse*
-/// than the average lag. Driven through this handler the per-pixel form returns 4
-/// on MCGA, Amiga and the Blorb and nothing at all on EGA and CGA.
-///
-/// The two scenes it was meant to rescue score no better: the underground's course
-/// is found at 74 rows at a confidence of 0.75–0.97 where 1.0 is a coin toss, and
-/// on `zork0.cg1` the two flanks disagree (76 left, 74 right) — the asymmetry
-/// SQ-0792 removed. Accepts and rejects interleave with no gap between them, where
-/// SQ-0792's cut had 36%..70%. The statistic measures self-similarity and a plain
-/// shaft is more self-similar than patterned masonry, so it is anti-correlated
-/// with what it was asked to detect. It also yields only the unit, never the
-/// `top_cut` and `foot` that [`extend_pillars`] needs and the shape measurement
-/// supplies. `v6_side_border_tiling.rs` pins the corpus numbers so a future
-/// statistic that does separate them says so.
-fn zork_zero(dst: &mut RgbaImage, art_bottom: u32, desired_height: u32) {
-    /// How far Bocfel's repeat unit stays clear of the capital above it and the
-    /// base below it: 2 raw rows at each end, doubled into unit space.
-    const INSET: u32 = 4;
-    /// `extend_pillars(top_cut=43, …)` doubled.
-    const TOP_CUT: u32 = 86;
-    /// `foot_height=13` doubled.
-    const FOOT: u32 = 26;
-    /// `pillar_height=142` doubled.
-    const UNIT: u32 = 284;
-    let (top_cut, foot, unit) = match pillar_shaft(dst, art_bottom) {
-        Some((top, bottom)) => (top + INSET, art_bottom - bottom, (bottom - top).saturating_sub(2 * INSET)),
-        // A shaft with a BAND in it is not a plain one, and repeating a plain
-        // length of it is what left bare shaft below the Macintosh column's
-        // feet. SQ-0841 — see [`extend_banded_pillars`].
-        None => match banded_shaft(dst, art_bottom) {
-            Some((top, _)) => return extend_banded_pillars(dst, top + INSET, art_bottom, desired_height),
-            None => (TOP_CUT, FOOT, UNIT),
-        },
-    };
-    if unit == 0 || foot == 0 || art_bottom <= top_cut + foot {
-        return;
-    }
-    let unit = unit.min(art_bottom - foot - top_cut);
-    extend_pillars(dst, top_cut, foot, art_bottom, unit, 0, true, desired_height);
-}
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -998,18 +1156,50 @@ pub fn flank_source(
             strip.put_pixel(x, y, *canvas.get_pixel(x0 + x, y));
         }
     }
-    match kind {
-        BorderArt::ArthurPoles => arthur(&mut strip, art.1, desired),
-        BorderArt::ShogunSinglePiece => {
-            let mut art_strip = RgbaImage::new(w, art.1);
-            for y in 0..art.1.min(gfx.height()) {
-                for x in 0..w.min(gfx.width().saturating_sub(x0)) {
-                    art_strip.put_pixel(x, y, *gfx.get_pixel(x0 + x, y));
-                }
+    // **One extension for every border** (SQ-1063). `kind` above is retained for the
+    // window dump and for the corpus sweep to speak in, but it no longer chooses a
+    // recipe: banner, middle and footer are measured from the column itself, and the
+    // three per-title routines that used to be selected here are gone.
+    let _ = kind;
+    let cut = |from: u32| -> RgbaImage {
+        let mut im = RgbaImage::new(w, art.1.max(1));
+        for y in 0..art.1.min(gfx.height()) {
+            for x in 0..w.min(gfx.width().saturating_sub(from)) {
+                im.put_pixel(x, y, *gfx.get_pixel(from + x, y));
             }
-            shogun(&mut strip, &art_strip, art.1, desired);
         }
-        BorderArt::ZorkZeroPillars => zork_zero(&mut strip, art.1, desired),
+        im
+    };
+    let art_strip = cut(x0);
+    // NOT `?`: a flank the model cannot section is left unextended, but the band is
+    // still shipped. Returning `None` here would drop the extension AND the art with
+    // it, and the band's last row would carry no ink at all.
+    let mine = flank_sections(&art_strip, art.0, art.1);
+    // **Both flanks of the frame are sectioned, and they agree** (SQ-1063, SQ-0845).
+    // The opposite crop is this one mirrored across the screen; sectioning it too and
+    // combining the two readings is what stops one side tiling material the other
+    // calls banner. `agree_sections` is symmetric, so each side reaches the same
+    // answer from the same pair without either knowing which side it is.
+    let twin_x0 = gfx.width().saturating_sub(x1);
+    let sec = mine.map(|mine| {
+        if twin_x0 == x0 || twin_x0 + w > gfx.width() {
+            return mine;
+        }
+        let twin = cut(twin_x0);
+        // **Only two crops of the SAME extent are two crops of one drawing.** The
+        // agreement combines absolute row numbers, so it is only meaningful when both
+        // sides span the same rows; a plate whose flanks reach different heights is
+        // not the symmetric case this is for, and each side keeps its own reading.
+        if art_extent(&twin, 0, w) != art {
+            return mine;
+        }
+        match flank_sections(&twin, art.0, art.1) {
+            Some(theirs) => agree_sections(mine, theirs),
+            None => mine,
+        }
+    });
+    if let Some(sec) = sec {
+        extend_with_sections(&mut strip, &art_strip, sec, art.0, art.1, desired);
     }
     Some(snapshot(&strip, crop_top, rows))
 }

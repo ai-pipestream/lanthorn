@@ -180,6 +180,32 @@ fn shape(path: &str, keys: &str, archive: Option<&str>, taps: usize, cols: u32, 
         let inset = art.0 + h.saturating_sub(art.1);
         println!("    {side} art rows {art:?}  inset {inset}  -> {kind:?}");
         println!("      art      {}", profile(&gfx, x0, x1, art.0..art.1));
+        {
+            // SQ-1063: the three-section reading — banner / middle / footer.
+            let strip = {
+                let w = x1.min(gfx.width()).saturating_sub(x0);
+                let mut im = image::RgbaImage::new(w.max(1), h);
+                for y in 0..h.min(gfx.height()) {
+                    for x in 0..w {
+                        im.put_pixel(x, y, *gfx.get_pixel(x0 + x, y));
+                    }
+                }
+                im
+            };
+            match v6_border::flank_sections(&strip, art.0, art.1) {
+                Some(sec) => {
+                    let mh = sec.middle_end - sec.middle_top;
+                    let unit = (mh / sec.period).max(1) * sec.period;
+                    println!(
+                        "      sections banner {}..{} ({} rows) · middle {}..{} (period {}, repeats {} rows) · footer {}..{} ({} rows)",
+                        art.0, sec.middle_top, sec.middle_top - art.0,
+                        sec.middle_top, sec.middle_end, sec.period, unit,
+                        sec.middle_end, art.1, art.1 - sec.middle_end
+                    )
+                }
+                None => println!("      sections NO MIDDLE — nothing in this column repeats"),
+            }
+        }
         match v6_border::flank_source(&gfx, &gfx, x0, x1, art, h, 0, rows) {
             Some(img) => {
                 let ext = profile(&img, 0, img.width(), 0..img.height());
