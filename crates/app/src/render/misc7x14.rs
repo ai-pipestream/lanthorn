@@ -1,5 +1,5 @@
-//! The X11 misc-fixed **7×14** face — a candidate v6 raster fallback for a
-//! Macintosh cell with no disk font available (SQ-1016).
+//! The X11 misc-fixed **7×14** face — the v6 raster fallback for a Macintosh
+//! cell with no disk font available (SQ-1016).
 //!
 //! **Generated — do not hand-edit.** Every glyph here is transcribed from
 //! `crates/app/assets/7x14-subset.bdf`, which carries the provenance and the
@@ -17,9 +17,10 @@
 //! can stand in, and an embedded copy is the only way the face machinery is
 //! reachable at all without a commercial fixture.
 //!
-//! This module is asset-and-table only: **nothing calls [`glyph`] yet.**
-//! Deciding when a fallback face is used belongs to the font-resolution code,
-//! not here — see SQ-1016.
+//! This module is asset-and-table only; WHEN it draws is
+//! [`crate::render::bitfont::blit_glyph_styled`]'s decision and documented there.
+//! In one line: a cell exactly 7 wide and at least 14 tall, after the release's
+//! own face has declined — so a Macintosh cell with no volume behind it.
 //!
 //! ## Not a substitute for everything 7-wide
 //!

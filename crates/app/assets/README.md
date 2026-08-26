@@ -89,14 +89,22 @@ bearing arithmetic. Then regenerate `vga16.rs` from the subset;
 `vga16::tests::the_table_matches_the_bdf_it_was_generated_from` parses this file
 and fails if the two ever disagree.
 
-## `7x14-subset.bdf` — a candidate v6 raster fallback face (SQ-1016)
+## `7x14-subset.bdf` — the v6 raster fallback for a 7-wide cell (SQ-1016)
 
 The **X11 misc-fixed** `7x14` font by Markus Kuhn: a public-domain 7×14
 fixed-pitch console face from the X.Org `misc-fixed` distribution.
-`crates/app/src/render/misc7x14.rs` is generated from this file. **This asset
-and its generated table are not wired into anything yet** — nothing calls
-`misc7x14::glyph` outside its own test. Deciding when it is used as a fallback
-face is separate work (SQ-1016/SQ-1017).
+`crates/app/src/render/misc7x14.rs` is generated from this file.
+
+**When it draws:** `render::bitfont::blit_glyph_styled` reaches for it when the
+cell is exactly **7 wide and at least 14 tall**, and the release's own face has
+already declined — so in practice a Macintosh 7×15 cell (SQ-0917) with no volume
+behind it. `FONT` 524 off the game's own floppy still wins (SQ-1011); `vga16`
+answers every other cell, unchanged. `cw == 7` exactly, because this face has no
+horizontal resampler — its rows are 7 bits and column `c` is drawn at `dx == c`.
+`ch >= 14` because that is where all fourteen source rows survive: at 15,
+`dy * 14 / 15` uses every one and doubles row 0, which is blank in 174 of the 194
+glyphs, while at 13 source row 13 is never reached and 28 glyphs ink it (the tails
+of `g j p q y`, the comma, the semicolon, `Ç`'s cedilla).
 
 ### Why this font
 
