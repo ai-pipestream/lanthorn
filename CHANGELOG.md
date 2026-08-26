@@ -10,553 +10,133 @@ version in `Cargo.toml` (currently `0.3.0`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
+**A section here becomes the GitHub release body**, so keep it to what a reader
+downloading a build wants: what each feature is, briefly. The reasoning, the
+measurements and the history belong in the commit that made the change and in
+the quest that tracked it. And use no RELATIVE links — `[x](docs/features/…)`
+resolves against the release page rather than the repository and 404s there.
+Absolute URLs or no link.
+
 ---
 
 ## v0.3.0 — 2026-08-26
 
+A release about rendering: the faces the original interpreters drew with, the
+colours the original machines showed, and a good deal less work per frame.
+
+### Version 6 text in the machine's own typeface
+
+Version 6 prose is now set in the face the original interpreter used, read off
+the media rather than bundled.
+
+- **Arthur's Amiga floppy** carries a real proportional typeface, drawn at the
+  game's own per-glyph advances and on the 20-row line the machine gave it.
+  Raster mode only — hybrid draws text as terminal cells, one glyph per cell.
+- **The Macintosh** gets its own 7×15 cell and the `FONT` 524 resource off the
+  game's disk, matched per game on a multi-game compilation.
+- **Geneva and topaz 8** come from boot media you supply: drop a Mac OS System
+  file or an Amiga Kickstart dump into `~/.lanthorn/`. Nothing is shipped,
+  copied or licensed, and with none there the built-in face answers as before.
+- **A 7-wide cell with no disk font** falls back to a public-domain 7-wide face
+  instead of an 8-wide one whose letters touch.
+
 ### Original media brings its machine's colours
 
-Boot *Shogun* off its Amiga floppy and the screen is the Amiga's grey; boot
-*Zork Zero* off its DOS floppy and it is blue under white **before the game has
-run a single instruction**. That second one is new — interpreter 6 used to state
-no colours at all for the IBM PC, on the reasoning that "an IBM PC in a terminal
-is the player's terminal".
+Boot a story off its release disk and the screen is that machine's before the
+game runs an instruction — the Amiga's grey, the DOS floppy's blue under white.
+Opening a bare story file names no machine, so your terminal still governs;
+`--system-colours` opts in when you have named one by hand.
 
-That was right about the launch and wrong about the machine, and the two are
-separated now. Three DOS captures — *Shogun*'s menu, *Arthur* mid-game, *Zork
-Zero*'s Banquet Hall — plus *Zork Zero*'s boot screen, against a trace of every
-`set_colour` each game issues: *Arthur* (941 screen ops) and *Journey* name no
-colour and are blue; *Shogun* names one, on a 548×32 status strip, and is blue
-everywhere else; *Zork Zero* names one on a window the size of the screen and is
-white. Four games, one rule.
+**Pre-colour stories too.** A v1–v4 story has no colour concept, so everything
+you see is the interpreter's presentation. Nine machines' page, ink, status line
+and cursor are now drawn as that machine drew them, measured off captures of the
+release disks.
 
-**A machine's colours need the medium that names it.** Opening a bare story file
-names no machine — `IbmPc` is just what nothing falls through to — so your
-terminal governs and no modern Inform game turns blue. Naming a number by hand
-advertises it in the header and stops there; add **`--system-colours`** (or
-`system_colours = true`) when you mean the whole machine. A DOS medium naming the
-IBM PC is not inert, either: *Beyond Zork* swaps its Font 3 arrows for CP437
-character graphics the moment it believes it is on an IBM PC — which, off a DOS
-medium, it genuinely now is.
+### Faster redraws, and a scrollback that stops costing
 
-**The shade itself was wrong**, and it took two of Infocom's own colour tables to
-find why: the v1–v5 interpreter sends colour 9 to EGA attribute 7 (`#AAAAAA`), the
-Version 6 one sends the same colour to attribute 15 (`#FFFFFF`) — one entry
-differs between them and it is white. `Shogun` r322 ("IBM Interpreter version
-6.68") measures `#FDFFFF`; *Hitchhiker's* r47, a v3 story, measures `#A0A0A0`.
-Both are the same header colour, resolved through the interpreter generation the
-running story actually is, chosen once before the story loads so every consumer —
-the VM, the theme, the v6 pixel path — agrees on one shade rather than showing two
-blues at a window seam.
+Kitty uploads keep the same image id across redraws, so a changed picture costs
+the picture instead of the whole frame — up to two orders of magnitude fewer
+bytes — and go out deflated where the terminal says it can inflate them. The
+transcript wrap is incremental rather than rebuilt every frame, so a
+twenty-thousand-turn session draws, and answers a keystroke, at the cost of its
+first.
 
-**And the machine's screen now holds from boot, on every version through 6, not
-just where a story happens to mention a colour.** *Shogun* never names its own
-page — its whole opening and its InvisiClues menu ran on your terminal's theme
-until the moment it *left* a hint screen and restored the header colour it had
-been carrying unread the whole time, which is why the bug looked like the page
-turning blue on the way *out* of a menu. The machine's screen is now laid down as
-a base coat before the story runs, with the game's own colours painted over it
-exactly as before when it names one. The v6 text caret is part of the same fix:
-it used to hold a stored constant three parts in 255 off the resolved shade, and
-now derives from it, so it can no longer disagree with the page it sits on.
+### Version 6 rendering
+
+- **InvisiClues screens** in *Shogun*, *Zork Zero* and *Arthur* now read the way
+  the machines printed them.
+- **Side art is one drawing, extended one way** — banner, middle and footer —
+  instead of a per-game recipe, so flanks tile and mirror correctly across
+  presses.
+- **The magnification lock is a per-game switch** (`/set-v6-pixel-lock`),
+  remembered per story rather than globally.
+
+### Command line
+
+- `--story <n|name>` opens one game off a compilation disc, matching a number or
+  any fragment of a name — the same rule `zvm-cli` has always used.
+- `--v6-render hybrid|raster` and `--v6-pixel-lock on|off` say before the game
+  boots what the slash commands say during it. Neither is written back to config.
+- `lanthorn --machines` prints the ZMSD §11.1.3 machine table.
 
 ### scott-cli can save and restore
 
-It was the only one of the three players where a session could not be preserved
-at all. The reason it stayed invisible is that its own header ran two statements
-together: a Scott Adams adventure has **no save format of its own**, which is
-true, and *therefore the host cannot save*, which does not follow. `scott::Vm`
-has carried `snapshot`/`restore` all along and the TUI has used them all along.
-
-`/save [name]` and `/restore [name]` (alias `/load`), on the `/status` precedent
-— host commands, never passed to the game, exactly as classic ScottFree made
-SAVE GAME and LOAD GAME its interpreter's rather than the adventure's. Leave the
-name off and it lists what you have and asks. Numbers pick at the restore prompt
-and not at the save prompt, an existing name is never overwritten without a `y`,
-and `--data-dir` works as it does in the other two — all the same shared code.
-
-The saves carry **`.sav`, not `.qzl`**: a Quetzal file is the Z-machine's own
-standard format and a Scott snapshot is item locations, flags, counters and the
-lamp. Naming it `.qzl` would be a claim about the bytes that is false. A save
-from a different adventure is refused rather than half-applied.
-
-### The v6 magnification lock is now a per-game switch
-
-Version 6 artwork rarely lands on a whole number of terminal cells, so its
-free-scaling fit is almost always fractional — one column of a repeating pattern
-three device pixels wide, the next four, at the same nominal zoom. `set-v6-pixel-lock
-[on|off|auto]` snaps the fit down to the nearest scale where one source art pixel
-covers a whole number of device pixels instead, trading margin for crispness.
-
-It is per-game, on purpose, and stored in the story's own sidecar `config.toml`
-beside `honor_game_colours`. The ladder's step comes from the artwork's own
-declared density: a doubled 320×200 Amiga or Blorb rendition has half-steps to
-land on and gives up almost nothing, while the Macintosh's whole-number monochrome
-plate can cost half the picture at the next rung down — so how much margin is
-worth how much crispness is a question about the disk you mounted, not one
-lanthorn can answer globally. `auto` inherits the global default; a bare toggle
-flips it, since deciding is exactly what flipping back and forth is for.
-
-Three correctness fixes ride with it. The raster-only render arm — games with no
-primary text buffer, like *scopa* and *fmvpoker* — was not honouring the lock at
-all, and a Blorb with no declared resolution was wrongly treated as pre-doubled
-rather than 1:1. The lock is **inert under half-blocks**, which has no device
-pixels to lock onto — `/dump-terminal` now says so outright instead of claiming
-the ladder is in effect. And the magnification ceiling that exists to bound
-PNG-style upload size on kitty, sixel and iTerm2 was wrongly capping half-blocks
-too, which encodes no image at all — that cap is gone for it, and the terminal
-grids it unblocked could run past 65,535 cells, which a `u16` size calculation
-could silently wrap on; both are now `usize`.
-
-### The Macintosh gets its own font and cell
-
-Booting a Version 6 story off its Macintosh floppy or disk image — *Arthur*,
-*Zork Zero*, *Journey*, *Shogun* — now lays text out on that machine's own **7×15**
-character cell instead of the 8×16 every other machine draws on, and raster text
-is set in the disk's own bitmap face rather than the built-in VGA font. The face
-comes straight from the game's resource fork — `FONT` resource 524, the one
-Infocom's own interpreter drew from — not a bundled substitute, and it is blitted
-1:1: the resource itself is fixed-pitch, so there is no resampling to get wrong.
-A Masterpieces-style compilation disc, which carries several games and several
-fonts in one folder tree, now matches each game to its own face rather than to
-whatever the platter happened to carry first.
-
-The story browser's info panel (`i`, or `/toggle-info-panel`) lists the typefaces
-a release carries and marks the one actually in use, so "why does this look
-different from that other Macintosh disk" has an answer without opening a
-debugger. And the magnification
-lock above only ever guaranteed a whole device pixel for the *art*; on an 8×16
-cell that was true by coincidence (their greatest common divisor is 8), and on the
-Macintosh's 7×15 cell it was not — a half-integer rung gave glyphs 10.5 device
-pixels, so strokes alternated one and two pixels wide while the artwork beside
-them stayed crisp. The ladder now satisfies both constraints at once.
-
-### Arthur's Amiga floppy draws its own proportional face
-
-The Amiga drew Arthur's text with the typeface on its own floppy, advancing
-the pen per glyph; lanthorn drew every Version 6 character at a fixed pitch,
-which is the reason an earlier attempt at this face read worse than the
-substitute it would have replaced (SQ-0916) — the face was fine, the cell was
-wrong for it. A face is now drawn proportionally when the disk actually
-carries one, at the machine's own measured advances (verified to the pixel
-against three prose runs off the release floppy), and the story is told the
-row count the real machine gave it — **20 lines, not 25**, Arthur's own
-`char.data` measured twice independently. Nothing else in the tree carries a
-proportional face — *Journey*, *Beyond Zork* and *Shogun*'s Amiga releases
-ship a fixed 8×8 graphics set instead of a typeface — so every other
-configuration keeps the path it always had.
-
-**This is the raster renderer only**, and hybrid is the default, so it is
-`/set-v6-render raster` (or `v6_render = "raster"`) that shows it. That is not
-an oversight: hybrid draws text as your terminal's own characters, one glyph
-per terminal cell, which is exactly what keeps it crisp and exactly why a
-per-glyph pen has nowhere to put a half-cell advance.
-
-**The engine side of the pen is still catching up, and it shows in two
-places.** zvm's grid windows still measure column position against the old
-fixed cell width while the pen draws the face's real, wider advances, so a
-couple of fields the *game* positions by column land short of where the
-proportional text actually reaches: the status bar's right-hand date field
-overruns the end of its own bar, and Arthur's F5 crystal-ball description
-wraps later than the real machine did. Tracked as SQ-1009.
-
-### The Amiga's own typeface, out of a Kickstart ROM
-
-Drop a Kickstart dump — any `*.rom` — into `~/.lanthorn/` and *Shogun* and
-*Zork Zero* on their Amiga floppies are set in **topaz 8**, the face Infocom's
-Amiga interpreter actually painted prose with, instead of the built-in VGA
-substitute.
-
-It needs a ROM because topaz 8 is *only* in ROM. A Workbench 1.2/1.3 floppy's
-`FONTS:` drawer carries `topaz/11` and six proportional display faces — ruby,
-opal, sapphire, diamond, garnet, emerald — and no Infocom interpreter drew with
-any of them, which is why the boot-media cascade had a rung for the Amiga that
-declined every time. Nothing is shipped, nothing is copied and nothing is
-licensed: the ROM stays yours, exactly the arrangement `stories/` runs on, and
-with none there the built-in face answers as it always did.
-
-Zoom into `machine-screenshots/amiga-shogun-game.png` over `Erasmus` in "This is
-the bridge of the Erasmus" and the face is measurable: ten distinct scanlines
-across a twenty-row line, so every face row is drawn twice, and sixty pixels of
-underline across seven characters, so the pen steps eight. An 8×8 face at (1, 2)
-— exactly the 8×16 cell the machine declares, and exactly the Amiga's 640×200
-hires mode. *Arthur* keeps its own `char.data`, which is authored in the game's
-320-wide picture space and doubles with the artwork: **two faces on one machine
-wanting two different scales**, so which space a face is drawn in now follows
-where the face came from rather than which machine is drawing it.
-
-Nothing is pinned to a Kickstart revision. The image is identified by its length
-(256 KiB maps at `$FC0000`, 512 KiB at `$F80000` — every Kickstart ends at
-`$1000000`) and by the `JMP` it opens with, then swept for `TextFont`-shaped
-records that name themselves `<something>.font`; on Kickstart 1.2 that finds
-`topaz/8` and `topaz/9` and nothing else. It is the same parser and the same name
-rule that already read a font out of a `FONTS:` drawer, so "topaz, at the size
-whose line matches my cell" picks the right one without a rule written twice. A
-ROM off the internet is untrusted input and treated as such: truncated, flipped,
-encrypted or pointing into hyperspace, it is refused quietly rather than
-crashing a launch.
-
-### Kitty terminals redraw faster
-
-A v6 graphics window, the chrome ring and the raster composite each keep the same
-image id across redraws now, so a changed picture costs the picture instead of the
-whole frame — measured up to two orders of magnitude fewer bytes on a redraw that
-only moved one placard. Uploads are sent **deflated** where the terminal has
-actually said it can inflate them, which fixed a real bug in passing: lanthorn had
-been claiming compression unconditionally before the probe that checks for it
-existed, silently blanking every graphics window on a terminal that could not
-unpack them. And a live font-size change now re-measures the cell in place instead
-of needing a restart to notice. `/dump-terminal` reports what the compression
-actually bought, measured off the wire rather than assumed.
-
-### InvisiClues screens read the way the machines printed them
-
-The hint systems built into *Shogun*, *Zork Zero* and *Arthur* are the densest
-Version 6 screens Infocom shipped — a menu window inside a story window inside a
-frame, painted rather than streamed — and every one of them had something wrong
-with it. They are now the frames the machines drew.
-
-**Two machines ignore the attribute that says whether text wraps.** ZMSD
-§8.8.3.1.2.2's table has a column per interpreter, and the Macintosh and Amiga rows
-read `---` for the window attributes: those interpreters follow the `buffer_mode`
-opcode instead, which defaults on, so both WORD WRAP whatever the attribute says.
-lanthorn read the attribute, so a clue on the Amiga ran off the right of the screen
-and the Macintosh broke lines a word early. The clip that bounds a non-wrapping
-window was wrong in the same place — §8.8.3.1.1 clips at the window's own right
-margin and we clipped at the SCREEN's, which is a bound no row of that table has.
-
-**A hint menu is not a transcript.** *Shogun*'s InvisiClues screen publishes no
-buffer at all — a full-screen graphics frame and three grids — so the story window
-resolved to the 500×330 topic list, and the entire scrollback was re-wrapped into
-it: seventy-eight rows of it under the topics, including the player's own
-`/dump-windows` output. A grid in that slot now contributes its rectangle and
-nothing else.
-
-**Leaving a hint menu no longer blanks the screen.** On the Macintosh press the
-score bar and both ornaments stayed and the story area went empty, recoverable only
-by `restart`. The game erases its own story window on the way out, and that erase
-was being counted as artwork by the probe that decides where prose can go — so the
-window was measured as obstructing itself and came back 180×0. A window's own
-ground is its page; only artwork moves the prose.
-
-**And the topic list sits where the game put it.** It was being centred, because a
-Version 6 window whose story slot holds a grid was handed the renderer written for
-v3–v5 status bars: that one sizes a region by counting COLUMNS, centres it, and
-floods it with the theme's own background. On a 115×34 pane that put *Shogun*'s
-topics thirteen columns right of the window's edge and left a 62×9 black rectangle
-over the rows the game had not written since the clue screen.
-`machine-screenshots/amiga-shogun-hint.png` puts those topics at native x=71, flush
-with the window, and so do we.
-
-**A title printed with the screen switched off stays off.** `output_stream -1`
-deselects the screen; *Shogun* uses it to walk its cursor across a string and
-measure it. The Version 6 paint path never consulted the flag, so the topic title
-was drawn a second time on top of `Return for a hint.`, wrapping its overflow onto
-the line below. The cursor still moves — that is the whole point of the idiom — but
-nothing reaches the window.
-
-### The frame's side art is one drawing, extended one way
-
-A v6 frame is 400 pixels tall and your pane usually is not, so the side columns are
-repeated to fill it. There were three routines to do that, one per game, chosen by
-guessing which game a column belonged to from its silhouette — and the guess was
-wrong often enough to be the defect. *Shogun*'s hint frame is a plain 60-wide
-lattice of question marks under eight rows where the panel above rounds into it, and
-those eight rows were enough to make it measure as a pillar, whereupon it was handed
-*Zork Zero*'s masonry: four hundred rows of ornament mirrored upside down and the
-frame's own top panel reprinted halfway down the column.
-
-There is now one rule, and it never asks which game drew anything. **A flank is a
-banner, a middle and a footer**, any of which may be absent — *Shogun* is middle
-only, *Arthur* is banner and middle, *Zork Zero* has all three — and extending one
-is always the same operation: keep the banner, re-anchor the footer to the new
-bottom, tile the middle between them. The per-game constants are not lost so much as
-measured: *Zork Zero*'s castle border sections as banner 0..82 and a 26-row foot,
-and 82 plus Bocfel's four-row inset is the 86 the old recipe hardcoded.
-
-Three consequences worth naming. A **lattice is never mirrored** and a shaft always
-is — a flip hides a seam where a drawing meets its own copy, and only turns a motif
-upside down where it already meets exactly; *Zork Zero*'s CGA pillar is lit, and
-translating it steps the shading 17.54 where the shaft itself never steps more than
-5.27. The **band always ends on the art's own last row**, so a column with a foot
-ends on its foot and one without still ends where the drawing ends. And **both flanks
-of a frame are read together**: Macintosh *Arthur*'s poles differ by a single pixel —
-the thin tail below the ornaments is five columns on the left and four on the right —
-which was enough that one side found the repeat and the other did not, and mirrored
-its banner down the column instead.
-
-*Shogun*'s Amiga border also stopped four text rows short of the bottom and tiled
-from there, because `@split_window` was resetting both windows to the full screen
-width; §8.8.4.1 says the two windows are "tiled together to fill the screen", which
-is about the vertical split it just made and not a licence to move their left edges.
+`/save` and `/restore` on the host, as classic ScottFree did it. A Scott
+adventure has no save format of its own, which was never a reason the host could
+not save one; files carry `.sav`, not `.qzl`.
 
 ### A Version 6 game's saves name the disk it was played off
 
-*Arthur* release 54 / serial 890606 is on the Amiga floppy and on the Macintosh
-*Masterpieces* volume — the same build, pressed twice — so both resolved to one save
-directory and an auto-save made on one was silently resumed by the other. For a
-v1–v5 game that sharing is deliberate and stays: a save is VM memory, it says nothing
-about the machine, and *Zork I* keeps one set of saves across all three of its disks.
-
-Version 6 is where the machine stops being incidental. A host Save State swaps memory
-under a game that never learns it happened, and it carries the screen in the game's
-own native pixels along with its palette — so the Amiga's 640×400 snapshot restored
-into the Macintosh's 480×300 press comes back laid out for a screen you never saw. So
-a v6 directory now names its medium, in the same word the story list shows in its TYPE
-column: `arthur-r54-s890606-adf` beside `arthur-r54-s890606-hfs`.
-
-**Existing Version 6 save directories are not migrated** — rename them if you want
-them back (`arthur-r54-s890606.save` → `arthur-r54-s890606-adf.save`). Only *Arthur*,
-*Journey* and *Zork Zero* directories are affected; everything else keeps its name.
-
-### Naming a game on a compilation disc, and the v6 render mode, from the shell
-
-*Masterpieces* carries thirty-three games on one volume, and until now there was
-exactly one door into it: launch the image, read the story list, move the cursor.
-Fine for a player and useless for everything else — no capture, no harness and no
-bug report could reach any game on it except whichever one the disc's own
-filesystem happened to hand back first, which is *Zork Zero*. The Macintosh
-*Arthur* press was, quite literally, unmeasurable.
-
-**`lanthorn stories/InfocomMasterpieces.img --story arthur`** opens that press.
-It takes a number from the list or any fragment of a name — the title the browser
-shows or the name the volume stores it under — and refuses with the list rather
-than guessing when the fragment fits two games. That is the flag `zvm-cli` has
-had all along, and it is now literally the same rule in both: a flag spelled the
-same in two front-ends that *matched* differently would be its own defect. The
-headless instruments take `--entry` on the same terms, so `--entry arthur` works
-wherever you would previously have had to type
-`InfocomMasterpieces/ARTHUR FOLDER/STORY.DATA` — a string whose only source was
-mounting the disc and looking.
-
-And because raster stopped being a fallback this cycle and became a destination,
-the two settings that decide how a Version 6 pane is drawn are sayable before the
-game boots rather than only after it has drawn a frame the other way:
-**`--v6-render hybrid|raster`** and **`--v6-pixel-lock on|off`**. Both spell their
-values exactly as their `/set-…` commands do. Neither is written back to your
-config — a single capture in raster must not become the mode every story opens in
-— and `--v6-pixel-lock` outranks even the game's own sidecar, because a flag is an
-instruction for the launch you typed it on and a file beside the story is not.
+*Arthur* is the same build on the Amiga floppy and the Macintosh volume, and a
+v6 save carries the screen in native pixels — so the two now key separately
+(`arthur-r54-s890606-adf` beside `…-hfs`). v1–v5 games keep sharing saves across
+media, as they should. **Existing v6 save directories are not migrated**; rename
+them if you want them back.
 
 ### Fixed
 
-- **The map's in/out portal badges are glyphs your font actually has.** They were
-  `⊙` and `⊗` from Miscellaneous Mathematical Operators, a block monospace faces
-  routinely skip — Fira Code carries neither, so the badge came out as tofu or in
-  whatever fallback face your terminal reached for, at the wrong weight and width.
-  They are now `◉` and `◎` from Geometric Shapes, the block the map already leans
-  on for `● ▲ ▼ ◀ ▶`: the same reading (a circle with something in it, filled for
-  the way in, hollow for the way out) drawn by every font that could draw the old
-  pair, and by several that could not. `portal.in` / `portal.out` in `style.toml`
-  put the old pair back in one line. The `nerdfont` preset's up/down icons are
-  fixed too — they named two codepoints that Nerd Fonts calls
-  `md-card_bulleted_off`, so patched faces drew a crisp icon of the wrong thing.
-- **The room dock's follow/pin markers are themeable, and drawable.** They were
-  `⌖` and `⊙`, hard-coded two panes away from the map — and the second is the very
-  glyph the badges above just lost for being missing from Fira Code, so removing it
-  from one place had left it drawn in the other. They are now `◇` and `◆`, hollow
-  while the dock follows you and filled once you pin it, and `dock.following` /
-  `dock.pinned` in `style.toml` change either.
-- **`/export-map` draws the map with your glyphs, not the shipped ones.** The dump
-  reached for hard-coded portal constants and a default symbol set, so a player
-  who had chosen `portal_icons = "nerdfont"` got a dump that disagreed with the
-  screen it was meant to be a picture of.
-- **Quitting a CLI no longer lets your shell draw over the game's last page.**
-  Under `--pin bottom` the final screen never reached scrollback: the teardown
-  parked the cursor on the bottom row and then reset the scroll region, and
-  `CSI r` homes the cursor on reset just as it does on set — so the park was
-  undone a moment after it happened and the shell's prompt landed on row 1,
-  writing over the story character by character (`$ ls` on top of the last line
-  you read). Those rows could then never scroll off, so they entered history as
-  the shell's output rather than as the story's.
-- **Quitting a CLI no longer leaks a stray mouse report into your shell.**
-  Teardown disabled raw mode before disabling mouse capture, so a report already
-  in flight (`35;154;45M`) landed on the terminal after echo came back on and was
-  typed into your prompt. Raw mode now goes last, the reverse of how setup turns
-  it on.
-- **A Windows startup prompt no longer waits on input it cannot hear.** A prior
-  launch could leave the console in a mode with line input and echo switched off;
-  the terminal is now put back into line mode before the "restore a saved
-  position?" prompt reads a line.
-- **A Version 6 story picture is sized by the text it sits beside, not by the
-  frame around it.** *Zork Zero*'s drop-cap came out roughly twice the height of
-  the paragraph it opens, worse the larger the pane, because hybrid mode scaled an
-  inline picture by the same factor as the artwork ring beside it — the wrong half
-  of the frame, since a drop-cap sits in the text flow and has to agree with the
-  text's own cell, not the art's. And a resize or a live font-size change could
-  leave the *old* strip cached under a key that only tracked cell count, not cell
-  size — so at some terminal sizes a cap or room icon came back as a misaligned
-  horizontal smear after the change, and never after a restart at the same size.
-- **Arthur's "If only you had a crystal ball...." message now actually appears.**
-  It arrives through `print_form`, the Version 6 opcode for formatted text boxes —
-  a stub that printed nothing at all. The box also came out empty or overdrawn
-  depending on your pane's height: at anything taller than 25 rows the scrolling
-  story window was given every leftover row of screen space, including the one
-  row Arthur's message box was actually using.
-- **Hint screens and transcript notes no longer show your theme through the
-  machine's own page.** Arthur's InvisiClues topic list and Zork Zero's own
-  bracketed annotations both read their colour from the *host theme* instead of
-  the machine's page a few cells over, so a grey Amiga screen showed a stripe of
-  your terminal's background wherever lanthorn's own text landed on it.
-- **Journey's frame is centred again with the magnification lock on.** Two chrome
-  fills were bounded by the pane's edge rather than the game's own screen, so with
-  the lock quantizing the fit down, 333 cells of letterbox painted the game's
-  panel colour on the left against 54 on the right — the art was centred the
-  whole time; the ground around it was not.
-- **CGA *Zork Zero* no longer bleeds its own artwork into white.** The plate is a
-  genuine two-colour display and the guard meant to leave its ground alone was
-  asking whether the *launch* named a machine rather than whether that machine's
-  screen actually is two colours — so a bare launch off the 360K DOS disk had its
-  plate's black linework painted out by the page the story requested.
-- **The Version 6 text caret matches what a Version 6 interpreter actually
-  draws.** It used to draw the fixed caret its machine's *Version 3* interpreter
-  used instead — a solid orange block on the Amiga, a DOS underscore — rather
-  than the on-screen colour pair reversed, which is what Infocom's own v6
-  interpreters do.
-- **Clicking an InvisiClues hint topic selects the topic under the pointer.**
-  Three separate coordinate bugs on the menu *Zork Zero* and *Shogun* share: the
-  topic list is a promoted grid centred in the pane, and clicks were mapped
-  against the *pane's* width rather than the game's own narrower screen; a packed
-  region's row math rounded to a cell's midpoint instead of a native pixel, so a
-  click could land one row high; and a click just outside a packed region (in the
-  ring's flank) resolved through an unrelated part of the screen. All three now
-  ask the same layout the draw itself used.
-- **A floppy with no story of its own now checks its release's other disks
-  before giving up**, the way a paged multi-disk press already did — so a
-  single-game DOS release mounts correctly rather than reporting nothing.
-- **A disc holding several unrelated games now offers the chooser.** Point
-  lanthorn at a compilation image — the Lost Treasures Masterpieces disc, thirty-
-  three games and no multi-disk set among them — and it used to launch whichever
-  game the disk format's own on-disk order happened to list first, with no way to
-  reach the others.
-- **Launching by a bare file path now mounts the same release the story picker
-  would.** A handful of disk presses keyed their saves and titles differently
-  depending on which door you came in through, so the same game could carry two
-  separate save identities.
-- **Half-blocks artwork no longer shows a ghost banner or black holes.** A
-  rasterised text label could survive its own row-skip and get painted twice, one
-  row above where its glyphs actually land; and transparent pixels in the frame
-  art — the letterboxing around a picture — came out solid black instead of the
-  page the story declared, because the half-block encoder has no alpha channel to
-  hand them to.
-- **Text printed on top of artwork under half-blocks is real glyphs, not a
-  smear.** Half-blocks samples two pixels per cell, so a rasterised 8×16 letter
-  arrives as 8×2 — unreadable. *Zork Zero*'s banner text ("Banquet Hall",
-  "Moves:", "Score:") now draws as terminal glyphs over its own sampled ground
-  instead.
-- **Arthur's side poles no longer run through, or get cut by, his own status
-  ribbon.** The status strip and the flank art beside it disagreed about how far
-  the ribbon actually reached, so the two either overlapped at the poles or left a
-  seam where the flank tiled at two different magnifications either side of it.
-- **Shogun's status bar no longer leaves stale ground in the right flank, or
-  paints itself twice.** Its erase command covers the whole 640-pixel screen, and
-  the surface it painted onto had been sized to the story window alone — 548
-  pixels — so the last 46 columns of the bar's own erase never landed. A second,
-  unrelated bug then drew the *same* bar again inside the flank art beside it.
-- **Zork Zero and Shogun's InvisiClues menu draws inside its own frame again**,
-  on every medium except the one it happened to work on already. The screen is a
-  full-screen graphics ring with the topic list printed into its clear middle;
-  four of five media measured discarded that ring entirely and drew the menu as
-  bare text on your theme instead.
-- **Raster-mode text is a proper face, not a blurred, doubled 8×8 font.** Every
-  raster character used to come from an 8×8 master nearest-row-doubled into a
-  16-pixel-tall cell, so no glyph ever had a descender. It now draws from a native
-  8×16 face; the game's own Font 3 — box-drawing and cursor arrows, a graphics
-  character set rather than a typeface — keeps its original 8×8 masters rather
-  than being drawn from the new text face.
-- **A hybrid Macintosh/DOS CD-ROM reports the right machine per game.**
-  `zvm-cli` was reading the whole disc image's format rather than the individual
-  story's, so every PC build on a hybrid disc reported as the Macintosh, or as no
-  machine at all.
-- **A proportional pen measures what it draws, everywhere it measures.** Five places
-  asked how wide a run was using the DECLARED cell — `chars × cell.w` — while the
-  thing that drew it stepped the face's own advances. On every fixed-pitch machine
-  those are the same number, so all five were invisible until the Macintosh and the
-  Amiga got their real faces: the raster wrap measured roman where the draw measured
-  bold and lost a character off *Arthur*'s ribbon; the screen every later stage
-  divides by was sized by a measure nothing draws with; the retired-prose box, the
-  wrap's column pen, and the "would a highlight block erase the artwork here?" probe
-  all did the same in their own way. That last one had drifted furthest — it was
-  asking about an eighty-eight character line what is only a sensible question about
-  one character cell.
-- **A restart re-asks the launch's questions instead of answering them itself.**
-  `reset.rs` rebuilt the interpreter number and the screen size from two of the four
-  links `startup.rs` resolves, three lines below a comment promising "the same four
-  links, in the same order" — so `@restart` on a Macintosh game rebooted it onto a
-  different grid than its launch, and a press whose medium named its interpreter got
-  a different one back.
-- **A `.toast` disc appears in the story list.** `stories/Shogun.toast` is a bare HFS
-  volume and mounted correctly the day it arrived; the directory scan skipped it on
-  its extension before its bytes were ever looked at, so it was simply missing from
-  the browser.
-- **The `(blorb)` tag stops lying in both directions.** Two functions promised the
-  "same match order and rule" for finding a resource file beside a story, and their
-  extension lists differed in both steps, in opposite directions — so neither was a
-  superset of the other and a story could be tagged as having resources it would not
-  load, or load resources it was not tagged for.
-- **`/dump-windows` names the face each window is drawn with** — where it came from,
-  its size, how it was fitted and what its pen does — because "which face won" was
-  the one question the dump could not answer, and it is the first question every
-  proportional-text defect turns on.
-- **Sorting the story list by TYPE now sorts by the whole thing the TYPE column
-  says.** The column names the container a story came out of — `Z6 (ADF)` for an
-  Amiga floppy, `Z6 (HFS)` for a Macintosh volume, `Z5 (blorb)` — and the sort
-  ignored every parenthetical, so those three interleaved under the filename
-  tiebreak and sorting by type to group your original media by machine did nothing
-  of the sort. Engine and version still lead (a `Z3 (HFS)` is a Z3 first); within
-  one version a loose file comes first, then the containers alphabetically, and
-  the casing a container's name happens to carry (`blorb` is a format name, `ADF`
-  an acronym) no longer decides the order. The column and its ordering now read
-  one rule, so they cannot drift apart again.
+**Version 6 layout and art**
 
-### Pre-colour stories look like the machine that sold them
+- Pictures are sized by the text beside them, not by the whole screen.
+- Journey's frame is centred again with the magnification lock on.
+- Arthur's side poles no longer cut through his status bar, and his "crystal
+  ball" message appears.
+- Shogun's status band is inset between the side ornaments and no longer leaves
+  stale ground in the flank.
+- Zork Zero and Shogun's InvisiClues menu draws inside its own frame.
+- Raster text is a proper face, not a blurred, doubled 8×8 font.
+- The v6 text caret matches what a real Version 6 interpreter drew.
+- A proportional pen now measures what it draws, in all five places that measure.
+- A restart re-asks the launch's questions instead of answering them itself.
 
-Colour arrives with Version 5, so a v1–v4 story has no colour concept at all —
-which means everything you see for one is the interpreter's presentation rather
-than something the story asked for. Open *Zork I* off a Commodore disk or
-*Spellbreaker* off an Amiga floppy and lanthorn now dresses the story pane the
-way that machine's own interpreter dressed its screen: its page and ink, its
-status line, and the shape of its cursor.
+**Colour and half-blocks**
 
-**Nine machines across seven rows**, and none of the decisions follows from the
-others. The Amiga's status line is not a band at all — the reversal sits behind
-each run of text with the blue page showing between them — the Macintosh does not
-distinguish its status line by ground and rules it instead, and the Amiga's own
-cursor colour is in neither channel of its body pair. The Atari ST joins the
-table this cycle, measured off *Zork I*'s own release (white page, black ink, a
-block caret), which leaves no machine in `zvm::interpreter::MACHINES` without one.
+- CGA *Zork Zero* no longer bleeds its artwork into white.
+- Half-blocks artwork no longer shows a ghost banner or black holes, and text on
+  top of artwork is real glyphs.
+- Hint screens and transcript notes no longer show your theme through the page.
 
-The values are **observed** from emulator captures of the release disks, not read
-out of Infocom's source as every other value in the machine table is, and
-`zvm-cli --machines` now says so beside them. The one exception is the IBM PC's
-row, which has no stored constant at all: its screen is its own EGA palette
-resolving the same `$2C`/`$2D` pair a v5+ story reads, so a v1–v4 story's page and
-a later story's own `@set_colour(6)` can never disagree at a window edge.
+**Media and the story browser**
 
-- On by default (`period_look`, in the F2 settings screen). Anything you have
-  styled yourself wins, per selector; nothing outside the story pane is touched;
-  `honor_game_colours = false` takes it with it, and never the other way round.
-- `zvm-cli --period-look` — **off** by default there, because that is your
-  terminal rather than a pane lanthorn owns. It paints through OSC 10/11 and
-  draws the machine's real cursor shape with DECSCUSR.
-- `--interpreter 8` finally gets you a **Commodore 64** instead of an IBM PC
-  wearing its number.
+- A floppy with no story of its own checks its release's other disks.
+- A disc holding several unrelated games offers the chooser; a bare file path
+  mounts the same release the picker would.
+- A hybrid Macintosh/DOS CD-ROM reports the right machine per game.
+- A `.toast` disc appears in the story list.
+- The `(blorb)` tag stops lying in both directions.
+- Sorting by TYPE now orders by the container the column prints, so your Amiga
+  floppies group together instead of interleaving.
 
-### Also
+**Interface**
 
-- **`lanthorn --machines`** prints the same §11.1.3 machine table `zvm-cli
-  --machines` already did, so the front-end that actually plays Version 6
-  stories can answer what it's doing to one.
-- **The debug inspector's memory dump reads the story's own words.** Rows now
-  decode dictionary entries and object names beside the raw hex instead of one
-  ZSCII character per byte, jumping to an object's property table — where its
-  name actually lives — rather than to its attribute/parent entry. Its sideways
-  pan has a scrollbar, `Shift`+wheel pans whichever window is under the pointer
-  rather than only the focused one, and every inspector key now does one thing
-  in every tab that lists it, with the hint bar showing only the keys that apply
-  to the tab you're on.
-
-See [The period look](docs/features/interpreter.md#the-period-look).
+- Map portal badges, room-dock markers and `/export-map` use glyphs your font
+  actually has, and your own theme.
+- Clicking an InvisiClues topic selects the one under the pointer.
+- Quitting a CLI no longer lets your shell draw over the last page, or leaks a
+  stray mouse report into it.
+- A Windows startup prompt no longer waits on input it cannot hear.
+- `/dump-windows` names the face each window is drawn with; the debug
+  inspector's memory dump reads the story's own words.
 
 ---
 
