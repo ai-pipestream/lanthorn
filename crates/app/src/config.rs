@@ -342,6 +342,34 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", requires = "story", verbatim_doc_comment)]
     pub pictures: Option<PathBuf>,
 
+    /// How the Version 6 graphical pane is drawn, for this launch only.
+    ///
+    ///   hybrid  chrome as a scaled pixel ring around a terminal story viewport,
+    ///           with the text drawn as crisp glyphs (the default)
+    ///   raster  the whole pane resolved into one pixel image
+    ///
+    /// The same choice `/set-v6-render` makes mid-game and the settings screen
+    /// persists, said before the game boots — so the first frame is already the
+    /// one you meant, which is what a headless capture and a bug report both
+    /// need (SQ-1079). Overrides `v6_render` in config.toml and is never written
+    /// back.
+    #[arg(long = "v6-render", value_enum, value_name = "MODE", verbatim_doc_comment)]
+    pub v6_render: Option<V6RenderMode>,
+
+    /// Snap the v6 magnification to the ladder the ARTWORK implies, so one art
+    /// pixel is a whole number of device pixels, for this launch only.
+    ///
+    /// `/set-v6-pixel-lock`'s `on` and `off` — `auto` and the bare toggle are
+    /// about a session already running and have nothing to mean here. Outranks
+    /// both `v6_pixel_lock` in config.toml and this game's own sidecar, for the
+    /// reason `--interpreter` does: a flag is an instruction for the launch you
+    /// typed it on, and a file beside the story is not.
+    ///
+    /// Inert on the half-blocks backend, which has no device pixels to land on;
+    /// `/dump-terminal` says so when it is.
+    #[arg(long = "v6-pixel-lock", value_enum, value_name = "ON|OFF")]
+    pub v6_pixel_lock: Option<OnOff>,
+
     /// Print the ZMSD §11.1.3 machine table and exit.
     ///
     /// What every interpreter number carries — the page and ink it reports in
@@ -366,6 +394,23 @@ pub struct Cli {
     /// (blue lines) persists across runs. (SQ-0449)
     #[arg(long)]
     pub debug: bool,
+}
+
+/// A boolean setting said the way its slash command says it, so a flag and the
+/// `/set-…` that changes it mid-game read alike (SQ-1079). `Option<OnOff>` and
+/// not a bare `bool`, because "not mentioned" has to stay distinct from "off" —
+/// a flag's absence must never turn a persisted `true` back off.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum OnOff {
+    On,
+    Off,
+}
+
+impl From<OnOff> for bool {
+    fn from(v: OnOff) -> bool {
+        matches!(v, OnOff::On)
+    }
 }
 
 /// Terminal image protocol for cover art. `Auto` detects the best available
@@ -725,8 +770,9 @@ impl GlkPixelScale {
 /// TOML: `v6_render = "hybrid"` (default) or `"raster"`. Any other string —
 /// including `"frameless"`, the mode SQ-0895 removed — silently reads as
 /// `Hybrid`; see [`deserialize_v6_render`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
+#[clap(rename_all = "lowercase")]
 pub enum V6RenderMode {
     /// Chrome (frame + status) as a scaled pixel ring around a terminal story
     /// viewport with crisp text (default).
@@ -734,6 +780,18 @@ pub enum V6RenderMode {
     Hybrid,
     /// The whole pane rasterized into one pixel image (feature-limited).
     Raster,
+}
+
+/// The `v6_render` token for a mode — what the file holds, and so what a one-run
+/// pin has to hold too. One spelling for both ends, because [`write_config_at`]
+/// compares the pinned value against the value it is about to write, and a
+/// second copy of this `match` that ever disagreed would silently un-pin the key
+/// (SQ-1079).
+fn v6_render_key(mode: V6RenderMode) -> &'static str {
+    match mode {
+        V6RenderMode::Hybrid => "hybrid",
+        V6RenderMode::Raster => "raster",
+    }
 }
 
 /// Read `v6_render`, falling back to the default on any unrecognised string.
@@ -823,6 +881,7 @@ pub mod keys {
     pub const ENABLE_SOUND: &str = "enable_sound";
     pub const INTERPRETER_NUMBER: &str = "interpreter_number";
     pub const V6_PIXEL_LOCK: &str = "v6_pixel_lock";
+    pub const V6_RENDER: &str = "v6_render";
     pub const SYSTEM_FONT_DISK: &str = "system_font_disk";
 }
 
@@ -1675,6 +1734,19 @@ pub fn resolve(cli: &Cli) -> Config {
         cfg.one_run.pin(keys::HONOR_GAME_COLOURS, false);
     }
 
+    // SQ-1079: the two v6 render settings, said before the game boots. Both are
+    // persisted keys, so both are pinned as they land — `--v6-render raster` for
+    // one capture must not make raster the mode every story opens in after the
+    // next settings save.
+    if let Some(mode) = cli.v6_render {
+        cfg.v6_render = mode;
+        cfg.one_run.pin(keys::V6_RENDER, v6_render_key(mode));
+    }
+    if let Some(lock) = cli.v6_pixel_lock {
+        cfg.v6_pixel_lock = lock.into();
+        cfg.one_run.pin(keys::V6_PIXEL_LOCK, bool::from(lock));
+    }
+
     // SQ-0928: the opt-in for a machine's own colours off original media. A flag
     // for the launch you typed it on, like the two above, so it is not written
     // back — but it needs no one-run pin, because unlike `honor_game_colours`
@@ -1877,11 +1949,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         AuxStorage::Global => "global",
     };
     doc.put("aux_storage", aux_str.into(), cfg.aux_storage == def.aux_storage);
-    let v6_str = match cfg.v6_render {
-        V6RenderMode::Hybrid => "hybrid",
-        V6RenderMode::Raster => "raster",
-    };
-    doc.put("v6_render", v6_str.into(), cfg.v6_render == def.v6_render);
+    doc.put("v6_render", v6_render_key(cfg.v6_render).into(), cfg.v6_render == def.v6_render);
     doc.put("fuse_art_dither", cfg.fuse_art_dither.into(), cfg.fuse_art_dither == def.fuse_art_dither);
     let scale_val: toml_edit::Value = match cfg.glk_pixel_scale {
         GlkPixelScale::Native => "native".into(),
@@ -2284,6 +2352,8 @@ mod tests {
             interpreter_number,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -2367,6 +2437,8 @@ mod tests {
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -2393,6 +2465,8 @@ mod tests {
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -2419,6 +2493,8 @@ mod tests {
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3010,6 +3086,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3034,6 +3112,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3043,6 +3123,96 @@ use_defaults = false
         // Flag present: sound forced off for this run.
         let muted = Cli { no_sound: true, ..base };
         assert!(!resolve(&muted).enable_sound);
+    }
+
+    /// SQ-1079: `--v6-render` and `--v6-pixel-lock` beat the file for the launch
+    /// they were typed on, and — because both land on keys `write_config_at`
+    /// persists — a settings save afterwards must leave the file exactly as it
+    /// was. One capture in raster must not make raster the mode every story
+    /// opens in.
+    #[test]
+    fn the_v6_render_flags_beat_the_file_and_are_not_written_back() {
+        let dir = std::env::temp_dir().join(format!("bm-v6cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        // Both keys PRESENT, and each the opposite of what the flags will ask
+        // for — the case `put` rewrites regardless of whether it is the default.
+        std::fs::write(&cfg_path, "v6_render = \"hybrid\"\nv6_pixel_lock = true\n").unwrap();
+        let base = Cli {
+            story: Some(PathBuf::from("foo.z6")),
+            user_dir: None,
+            data_dir: None,
+            config: Some(cfg_path.clone()),
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            no_game_colours: false,
+            system_colours: false,
+            interpreter_number: None,
+            interpreter_version: None,
+            pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
+            machines: false,
+            trace: None,
+            debug: false,
+        };
+        // Absent flags: the file governs, as it always did.
+        let plain = resolve(&base);
+        assert_eq!(plain.v6_render, V6RenderMode::Hybrid);
+        assert!(plain.v6_pixel_lock);
+
+        let mut cfg = resolve(&Cli {
+            v6_render: Some(V6RenderMode::Raster),
+            v6_pixel_lock: Some(OnOff::Off),
+            ..base
+        });
+        assert_eq!(cfg.v6_render, V6RenderMode::Raster, "the flag governs the run");
+        assert!(!cfg.v6_pixel_lock, "the flag governs the run");
+
+        write_config_at(&cfg_path, &cfg).unwrap();
+        let back: Config = toml::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        assert_eq!(back.v6_render, V6RenderMode::Hybrid, "the FILE still says hybrid");
+        assert!(back.v6_pixel_lock, "the FILE still says true");
+
+        // …and a deliberate edit of either row (which releases the pin) persists
+        // like any other setting.
+        cfg.one_run.release(keys::V6_RENDER);
+        cfg.one_run.release(keys::V6_PIXEL_LOCK);
+        write_config_at(&cfg_path, &cfg).unwrap();
+        let back: Config = toml::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        assert_eq!(back.v6_render, V6RenderMode::Raster);
+        assert!(!back.v6_pixel_lock);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pin only holds while the value is still the flag's, so the token the
+    /// pin carries has to be the one `write_config_at` writes. Two copies of
+    /// that `match` is how they would drift, which is why there is one
+    /// ([`v6_render_key`]) — asserted here rather than left to inspection.
+    #[test]
+    fn the_pinned_v6_render_token_is_the_one_the_file_holds() {
+        for mode in [V6RenderMode::Hybrid, V6RenderMode::Raster] {
+            let mut cfg = Config::default();
+            cfg.v6_render = mode;
+            cfg.one_run.pin(keys::V6_RENDER, v6_render_key(mode));
+            let dir = std::env::temp_dir()
+                .join(format!("bm-v6token-{}-{}", std::process::id(), v6_render_key(mode)));
+            std::fs::create_dir_all(&dir).unwrap();
+            let cfg_path = dir.join("config.toml");
+            // Present and set to the OTHER mode, so an ineffective pin is visible
+            // as a rewrite rather than as an absence.
+            let other = if mode == V6RenderMode::Raster { "hybrid" } else { "raster" };
+            std::fs::write(&cfg_path, format!("v6_render = \"{other}\"\n")).unwrap();
+            write_config_at(&cfg_path, &cfg).unwrap();
+            let back = std::fs::read_to_string(&cfg_path).unwrap();
+            assert!(
+                back.contains(&format!("v6_render = \"{other}\"")),
+                "the pin on {mode:?} did not hold: {back}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
@@ -3068,6 +3238,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3094,6 +3266,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3121,6 +3295,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3183,6 +3359,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3238,6 +3416,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3281,6 +3461,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3469,6 +3651,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3523,6 +3707,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,
@@ -3575,6 +3761,8 @@ use_defaults = false
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
+            v6_render: None,
+            v6_pixel_lock: None,
             machines: false,
             trace: None,
             debug: false,

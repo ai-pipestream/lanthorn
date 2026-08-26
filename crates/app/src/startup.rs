@@ -548,8 +548,13 @@ pub(crate) fn boot_story(
     // game's choice can never be written back into the user's global config.toml by
     // a later settings-screen save (`OneRunOverrides`). Editing the row itself
     // releases the pin, which is what a deliberate global edit looks like.
+    // …and `--v6-pixel-lock` outranks the sidecar, exactly as `--no-game-colours`
+    // outranks the two per-game layers above: a flag is an instruction for the
+    // launch you typed it on, a file beside the story is not (SQ-1079).
     let v6_pixel_lock_base = cfg.v6_pixel_lock;
-    if let Some(v) = app::styles::read_per_game_v6_pixel_lock(&game_dir) {
+    if let Some(v) =
+        app::styles::read_per_game_v6_pixel_lock(&game_dir).filter(|_| cli.v6_pixel_lock.is_none())
+    {
         cfg.v6_pixel_lock = v;
         cfg.one_run.pin(app::config::keys::V6_PIXEL_LOCK, v);
     }

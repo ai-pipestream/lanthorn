@@ -1096,13 +1096,17 @@ game's `config.toml` sidecar and nowhere else:
 | `/set-v6-pixel-lock` | flip whatever is in force, and remember it for this game |
 | `/set-v6-pixel-lock on` / `off` | say it outright |
 | `/set-v6-pixel-lock auto` | forget this game's answer and inherit your global `v6_pixel_lock` |
+| `lanthorn story.z6 --v6-pixel-lock on` / `off` | before the game boots, for this launch only |
 
 It takes effect on the next frame — there is no reload, and no restart. The bare
 form is a toggle precisely so it can be bound to a key and used to flip back and
 forth while you decide. Your global `config.toml` is never touched by any of this,
 including when you have the settings screen open at the time: a per-game value is
 held apart from the file exactly as `--no-game-colours` is, and only an edit to the
-settings screen's own **v6 pixel lock** row changes the global default.
+settings screen's own **v6 pixel lock** row changes the global default. The flag
+is the strongest of the three: it outranks the file *and* this game's sidecar,
+because a flag is an instruction for the launch you typed it on and a file
+beside the story is not.
 
 ### A picture is not stretched by the grid it sits on
 
@@ -1128,7 +1132,10 @@ Set `v6_render` in the config (or cycle it from the settings screen) to pick
 how a v6 story's pane is drawn on an image-capable terminal (Kitty, iTerm2, or
 Sixel). Want to compare looks mid-game? `/set-v6-render` hops to the next mode
 on the spot (or jumps straight to one: `/set-v6-render raster`) — a
-session-only switch that never touches your saved config:
+session-only switch that never touches your saved config. `--v6-render hybrid` /
+`--v6-render raster` says the same thing one moment earlier, before the game
+boots — so the *first* frame is already the one you meant, which is what a
+screenshot, a bug report and a headless capture all want:
 
 - **`hybrid`** (the default) — the decorative chrome (banner, borders, the
   compass) renders as a single scaled pixel image forming a **ring** around an
