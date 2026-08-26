@@ -2,10 +2,13 @@
 //! composite (Phase 1c). Glyphs are scaled to fill a `cw × ch` device-pixel
 //! cell so text stays legible at terminal cell sizes (~9×19).
 //!
-//! ## Two faces, and which one draws
+//! ## Three faces, and which one draws
 //!
-//! [`crate::render::vga16`] — Uni-VGA, natively **8×16** — is tried first, and
-//! [`glyph_bits`]'s 8×8 chain below is the fallback for what it doesn't carry.
+//! [`crate::render::misc7x14`] — X11 misc-fixed, natively **7×14** — draws a cell
+//! that is 7 wide, which is the Macintosh's and no other machine's (SQ-1016).
+//! [`crate::render::vga16`] — Uni-VGA, natively **8×16** — draws every other cell,
+//! and [`glyph_bits`]'s 8×8 chain below is the fallback for what neither carries
+//! (they carry the same 194 text codepoints, and no font 3 at all).
 //! The cell is **the machine's** (SQ-0917): 7×15 on a Macintosh, 8×16 elsewhere,
 //! and a release's own proportional face states its own line height on top of that
 //! (SQ-1009). At 8×16 the 16-row face samples **1:1** while an 8×8 master has to
@@ -34,10 +37,11 @@
 //!
 //! ## Provenance
 //!
-//! The 8×16 face is Uni-VGA, under the X licence — see
-//! `crates/app/assets/README.md` for its origin, its exact terms and how the
-//! subset beside it was cut. It was drawn from scratch rather than traced off
-//! silicon; no dumped ROM font is used anywhere in lanthorn.
+//! The 8×16 face is Uni-VGA, under the X licence, and the 7×14 one is Markus
+//! Kuhn's public-domain X11 misc-fixed — see `crates/app/assets/README.md` for
+//! their origins, their exact terms and how the subsets beside them were cut. Both
+//! were drawn from scratch rather than traced off silicon; no dumped ROM font is
+//! used anywhere in lanthorn.
 //!
 //! The 8×8 chain is the `font8x8` crate (`BASIC_FONTS`, `LATIN_FONTS`,
 //! `BOX_FONTS`, `BLOCK_FONTS`) — a CC0/public-domain font ported from
@@ -129,6 +133,13 @@ pub(crate) fn glyph_bits(glyph: char) -> Option<[u8; 8]> {
 
 /// Whether either master in this module carries `glyph` — the 8×16 face or the
 /// 8×8 one [`blit_glyph`] falls back to.
+///
+/// **The 7×14 face is deliberately not a third term** (SQ-1016). It carries the
+/// same 194 codepoints as [`crate::render::vga16`] — the two subsets were cut to
+/// the same ranges, and `the_narrow_face_can_never_widen_this_answer` pins that
+/// they are equal — so asking it could not change any answer, only suggest to a
+/// reader that it might. Should a future regeneration widen it, that case fails
+/// and this is the decision to revisit.
 ///
 /// [`blit_glyph`] paints a blank cell for anything it does not have, which is the
 /// right thing to DRAW and a terrible thing to be unable to ASK about: a caller
@@ -263,6 +274,50 @@ fn synthesize_face16(bits: [u8; 16], style: u8) -> [u8; 16] {
     let mut out = bits;
     if style & STYLE_ITALIC != 0 {
         for row in out.iter_mut().take(8) {
+            *row >>= 1;
+        }
+    }
+    if style & STYLE_BOLD != 0 {
+        for row in out.iter_mut() {
+            *row |= *row >> 1;
+        }
+    }
+    out
+}
+
+/// [`synthesize_face16`] for the 14-row, 7-wide face (SQ-1016). Same two
+/// transforms, same MSB-leftmost direction — read that first; this documents only
+/// what differs, which is what happens at the right-hand edge.
+///
+/// **There is no spare column here.** The 8×8 masters fill columns 0–6 and lean
+/// into column 7; Uni-VGA keeps column 7 as its gap. This face IS 7 wide, and bit 0
+/// of each row is BDF's byte padding rather than a column — so a shift that pushes
+/// ink past column 6 puts it in a bit [`blit_glyph_styled`] never samples. Measured
+/// over the whole subset:
+///
+/// * **Bold cannot lose a stroke**, because `row | row >> 1` is additive: every
+///   roman pixel survives and the smear off column 6 lands in the padding bit,
+///   which is a clip the cell never sees rather than a bleed into the next cell.
+///   What it does cost is a one-pixel COUNTER: 21 letters (`b d g h k m n p q r u
+///   v w y G K M N Q W Y`) have a 1 px gap that the double-strike closes. That is
+///   not a property of this face — the same measurement over Uni-VGA at its own
+///   8×16 cell closes 30, `m` among them — it is what a one-pixel double-strike
+///   does to any bitmap face with one-pixel counters, and the alternatives are
+///   worse: declining to embolden makes bold indistinguishable from roman, and
+///   falling back to `vga16` for emphasised runs reinstates the touching letters
+///   this arm exists to fix, blob and all.
+/// * **Italic loses ink on exactly four glyphs** — `T`, `Ð`, `×` and `æ`, the only
+///   ones in the subset that ink column 6 at all — and what they lose is one pixel
+///   of a horizontal bar whose right end still reaches column 6. No letter loses
+///   its rightmost stroke, because the shear moves ink RIGHT and only column-6 ink
+///   can fall off the edge.
+///
+/// Sheared at row 7, the midpoint of the 14-row box, exactly as
+/// [`synthesize_face16`] shears at the midpoint of its 16.
+fn synthesize_face7(bits: [u8; 14], style: u8) -> [u8; 14] {
+    let mut out = bits;
+    if style & STYLE_ITALIC != 0 {
+        for row in out.iter_mut().take(7) {
             *row >>= 1;
         }
     }
@@ -483,10 +538,42 @@ pub fn blit_glyph_styled(
         .map(|g| g.rows.as_slice())
         .filter(|rows| rows.len() as u32 == ch);
 
-    let tall = (native_rows.is_none() && ch >= 12)
+    // **A 7-WIDE CELL GETS A 7-WIDE FACE** (SQ-1016). `vga16` is drawn for an
+    // 8-pixel advance and the Macintosh cell is 7 (SQ-0917), so the column it drops
+    // is the one holding its whole inter-character gap: measured over all 52x52
+    // ordered pairs of ASCII letters at 7x15, **1649 pairs touch** their neighbour
+    // out of 2704, against **19** from the face below. `FONT` 524 off the release's
+    // own floppy is the real answer and wins above (SQ-1011) — but a Macintosh cell
+    // is reachable with no volume behind it (`--interpreter 3` on a bare `.z6`, and
+    // CI, where every disk font lives on gitignored media), so the path that most
+    // needs a 7-wide face is the one that cannot have the disk's.
+    //
+    // **`cw == 7` exactly, because this face has no horizontal resampler.** Its
+    // rows are 7 bits with bit 0 as BDF's byte padding, so column `c` is drawn at
+    // `dx == c` and nowhere else — one face pixel, one device pixel. At `cw == 8`
+    // nothing here is consulted and no machine but the Macintosh can move.
+    //
+    // **`ch >= 14`, because that is where every row of a 14-row face survives.**
+    // At `ch == 15`, `dy * 14 / 15` over 0..=14 gives 0,0,1,2,…,13: every source row
+    // used, row 0 twice, so the glyph body below it is 1:1. That doubled row is
+    // blank in 174 of the 194 glyphs; the 20 that ink it are accented capitals
+    // (`À`–`Ý`), where it draws the top row of the ACCENT twice and shifts nothing.
+    // At `ch == 13` source row 13 is never reached, and 28 glyphs ink it — the tails
+    // of `g j p q y`, the comma and the semicolon, `Ç`'s cedilla — which is the
+    // clipped-descender symptom of SQ-0917 arriving from the other direction. So
+    // below 14 this declines and `vga16` answers exactly as it did before.
+    //
+    // Font 3 cannot come from here: the subset carries no box drawing, no block
+    // elements and no cursor arrows (`misc7x14::font_three_is_not_in_this_face`),
+    // so a tiling glyph gets `None` and falls through to the masters and to
+    // `source_col`'s endpoint map (SQ-1027), untouched.
+    let narrow = (native_rows.is_none() && cw == 7 && ch >= 14)
+        .then(|| crate::render::misc7x14::glyph(glyph).map(|b| synthesize_face7(b, style)))
+        .flatten();
+    let tall = (native_rows.is_none() && narrow.is_none() && ch >= 12)
         .then(|| crate::render::vga16::glyph(glyph).map(|b| synthesize_face16(b, style)))
         .flatten();
-    let short = if tall.is_some() || native_rows.is_some() {
+    let short = if tall.is_some() || narrow.is_some() || native_rows.is_some() {
         None
     } else {
         glyph_bits(glyph).map(|b| synthesize_face(b, style))
@@ -503,6 +590,7 @@ pub fn blit_glyph_styled(
             break;
         }
         let tall_row = (dy * 16 / ch) as usize; // nearest source row, 16-row face
+        let narrow_row = (dy * 14 / ch) as usize; // nearest source row, 14-row face
         let row = (dy * 8 / ch) as usize; // nearest source row (non-smoothed path)
         for dx in 0..cw {
             let ox = px + dx;
@@ -513,6 +601,12 @@ pub fn blit_glyph_styled(
                 // 1:1 on both axes — the face IS the cell, which is the whole
                 // point of preferring it. MSB = leftmost, as `vga16` packs too.
                 rows[dy as usize] & (0x80 >> dx) != 0
+            } else if let Some(g) = &narrow {
+                // 1:1 horizontally — `dx` IS the source column, since the cell and
+                // the face are both 7 wide (SQ-1016). MSB = leftmost, as `vga16`
+                // packs too, and `dx < cw == 7` never reads bit 0, which is BDF's
+                // byte padding rather than a column.
+                g[narrow_row] & (0x80 >> dx) != 0
             } else if let Some(g) = &tall {
                 let col = source_col(dx, cw, tiling);
                 // vga16 packs each row MSB = leftmost column — the OPPOSITE of
@@ -710,6 +804,12 @@ mod tests {
     /// the same band, so they end together however the cell is scaled.
     ///
     /// Falsified by restoring `ch >= 16`, which fails here at 7x15.
+    ///
+    /// The 7x15 row measures [`crate::render::misc7x14`] since SQ-1016, and that
+    /// face puts `y` two rows below `x` where Uni-VGA puts it three. Two is still
+    /// the number that separates a real descender from the 8x8 master stretched,
+    /// which clears the baseline by ONE duplicated scanline — so the threshold
+    /// stands and the case still asks the question it was written to ask.
     #[test]
     fn a_descender_still_descends_at_the_macintoshs_fifteen_row_cell() {
         let fg = Rgba([255, 0, 0, 255]);
@@ -1261,6 +1361,320 @@ mod tests {
             vec![0, 1, 2, 3, 4, 5, 7],
             "a tiling glyph maps its endpoints and drops an interior column instead",
         );
+    }
+
+    /// The rendered 7×15 Macintosh cell (SQ-0917) read back as fifteen row
+    /// bitmaps, MSB-leftmost over its seven columns — the shape a 7-wide face's
+    /// own rows can be compared against.
+    fn rendered_rows_7x15(glyph: char, style: u8, tf: Option<&crate::native_font::TextFace>) -> [u8; 15] {
+        let fg = Rgba([255, 0, 0, 255]);
+        let mut canvas = RgbaImage::from_pixel(7, 15, Rgba([0, 0, 0, 0]));
+        blit_glyph_styled(&mut canvas, glyph, 0, 0, 7, 15, fg, None, style, tf);
+        let mut rows = [0u8; 15];
+        for (y, row) in rows.iter_mut().enumerate() {
+            for x in 0..7u32 {
+                if *canvas.get_pixel(x, y as u32) == fg {
+                    *row |= 0x80 >> x;
+                }
+            }
+        }
+        rows
+    }
+
+    /// **The Macintosh cell draws the 7-wide face, row for row** (SQ-1016).
+    ///
+    /// Pins the SOURCE and the row map together: `dy * 14 / 15` sends device row 0
+    /// and row 1 both to source row 0 and every row after that 1:1, so the whole
+    /// glyph body is the face's own bitmap with its top row drawn twice. Source row
+    /// 0 is blank in 174 of the 194 glyphs; `À` is one of the twenty that ink it,
+    /// which is why it is here — its accent's top row is the doubled one.
+    #[test]
+    fn a_seven_wide_cell_draws_the_seven_wide_face() {
+        for ch in ['A', 'm', 'g', 'y', 'T', '\u{00C0}', '\u{0153}', '\u{FFFD}'] {
+            let face = crate::render::misc7x14::glyph(ch).expect("all of these are in the subset");
+            let rows = rendered_rows_7x15(ch, 0, None);
+            for (dy, &got) in rows.iter().enumerate() {
+                let want = face[dy.saturating_sub(1)];
+                assert_eq!(got, want, "{ch:?} device row {dy} is not source row {}", dy.saturating_sub(1));
+            }
+        }
+    }
+
+    /// **Letters stop touching in a 7-wide cell** — the defect this face was
+    /// embedded to fix, measured on pixels (SQ-1016).
+    ///
+    /// `vga16` is drawn for an 8-pixel advance: 76 of its 94 printable glyphs ink
+    /// out to column 6, so column 7 is their entire inter-character gap, and a
+    /// 7-wide cell drops it. Census over all 52 × 52 ordered pairs of ASCII letters
+    /// blitted into adjacent 7×15 cells, counting pairs with ink in both the left
+    /// cell's last column and the right cell's first on the same row:
+    ///
+    /// | face | touching pairs | touching rows |
+    /// |---|---|---|
+    /// | `vga16` sampled into 7 wide (the old behaviour) | 1649 / 2704 | 4810 |
+    /// | `misc7x14` at 7 wide (now) | 19 / 2704 | 19 |
+    ///
+    /// The 19 that remain are `T` before a letter whose first column reaches the
+    /// crossbar's row — `T` is the ONLY glyph in the subset that inks column 6.
+    ///
+    /// Falsified by removing the `narrow` arm from `blit_glyph_styled`: this comes
+    /// back at 1649 and `mimic` comes back with no gaps at all.
+    #[test]
+    fn letters_gain_their_inter_character_gap_in_a_seven_wide_cell() {
+        let fg = Rgba([255, 0, 0, 255]);
+        let pair = |a: char, b: char| -> usize {
+            let mut c = RgbaImage::from_pixel(14, 15, Rgba([0, 0, 0, 0]));
+            blit_glyph_styled(&mut c, a, 0, 0, 7, 15, fg, None, 0, None);
+            blit_glyph_styled(&mut c, b, 7, 0, 7, 15, fg, None, 0, None);
+            (0..15).filter(|&y| *c.get_pixel(6, y) == fg && *c.get_pixel(7, y) == fg).count()
+        };
+        let letters: Vec<char> = ('a'..='z').chain('A'..='Z').collect();
+        let touching: Vec<(char, char)> = letters
+            .iter()
+            .flat_map(|&a| letters.iter().map(move |&b| (a, b)))
+            .filter(|&(a, b)| pair(a, b) > 0)
+            .collect();
+        assert!(
+            touching.len() <= 20,
+            "{} of 2704 letter pairs touch their neighbour — the 8-wide face sampled into a \
+             7-wide cell gives 1649, this face gives 19: {:?}",
+            touching.len(),
+            &touching[..touching.len().min(8)],
+        );
+        assert!(
+            touching.iter().all(|&(a, _)| a == 'T'),
+            "only `T` inks column 6 of this face, so only `T` can touch: {touching:?}",
+        );
+        // And the specimen: every adjacent pair in `mimic` is separated by a blank
+        // column, which is the whole of what a reader sees.
+        let word = "mimic";
+        let mut c = RgbaImage::from_pixel(7 * word.len() as u32, 15, Rgba([0, 0, 0, 0]));
+        for (i, ch) in word.chars().enumerate() {
+            blit_glyph_styled(&mut c, ch, i as u32 * 7, 0, 7, 15, fg, None, 0, None);
+        }
+        for i in 1..word.len() as u32 {
+            let seam = i * 7;
+            assert!(
+                (0..15).all(|y| *c.get_pixel(seam - 1, y) != fg || *c.get_pixel(seam, y) != fg),
+                "`mimic` letters {i} and {} run into each other at column {seam}",
+                i + 1,
+            );
+        }
+    }
+
+    /// **Font 3 still comes from the masters in a 7-wide cell, and still tiles**
+    /// (SQ-1016, guarding SQ-1027).
+    ///
+    /// A character-graphics set has to meet the cell beside it, which no text face
+    /// satisfies — so the 7-wide subset carries none of it (`misc7x14::tests::
+    /// font_three_is_not_in_this_face`) and every such glyph falls through to
+    /// `source_col`'s endpoint map exactly as before.
+    #[test]
+    fn a_tiling_glyph_still_comes_from_the_masters_in_a_seven_wide_cell() {
+        let fg = Rgba([255, 0, 0, 255]);
+        let rows = |ch: char| -> Vec<u8> {
+            assert!(crate::render::misc7x14::glyph(ch).is_none(), "{ch:?} must not be in a text face");
+            let mut c = RgbaImage::from_pixel(7, 15, Rgba([0, 0, 0, 0]));
+            blit_glyph_styled(&mut c, ch, 0, 0, 7, 15, fg, None, 0, None);
+            (0..15)
+                .map(|y| (0..7).fold(0u8, |a, x| a | if *c.get_pixel(x, y) == fg { 1 << x } else { 0 }))
+                .collect()
+        };
+        // `▕` is nothing BUT its master's rightmost column, so it is the glyph that
+        // vanishes if the endpoint map ever stops running here.
+        let bar = rows('\u{2595}');
+        assert!(bar.iter().any(|&r| r != 0), "`▕` must survive a 7-wide cell");
+        assert!(bar.iter().all(|&r| r == 0 || r == 1 << 6), "`▕` is the rightmost column only: {bar:?}");
+        // A dashed rule leaves column 6 blank, so only the endpoint map reaches the edge.
+        for ch in ['\u{2504}', '\u{2505}'] {
+            assert!(cell_rows(ch, 7).iter().any(|&r| r & (1 << 6) != 0), "{ch:?} must reach the cell edge");
+        }
+        // A corner's arm stays unbroken and `│` stays a hairline.
+        for ch in ['\u{2514}', '\u{250C}', '\u{2500}', '\u{2588}'] {
+            for (y, &r) in rows(ch).iter().enumerate() {
+                if r == 0 {
+                    continue;
+                }
+                let span = (r.trailing_zeros()..=7 - r.leading_zeros()).fold(0u8, |a, b| a | 1 << b);
+                assert_eq!(r, span, "{ch:?} row {y} has a hole: {r:#09b}");
+            }
+        }
+        let stem = rows('\u{2502}').into_iter().find(|&r| r != 0).expect("the rule has ink");
+        assert_eq!(stem.count_ones(), 1, "`│` must stay a one-pixel hairline: {stem:#010b}");
+    }
+
+    /// **No 8-wide machine moves** — the 7-wide face is admitted at `cw == 7` and
+    /// nowhere else, because it has no horizontal resampler (SQ-1016).
+    ///
+    /// Every machine but the Macintosh declares an 8-wide cell (SQ-0917), so this
+    /// is the case that says the arm cannot reach them. Checked at three heights,
+    /// including the two that pass its own `ch >= 14` floor.
+    #[test]
+    fn an_eight_wide_cell_never_reaches_the_seven_wide_face() {
+        let fg = Rgba([255, 0, 0, 255]);
+        for ch in [12u32, 14, 15, 16] {
+            for glyph in ['A', 'm', 'y'] {
+                let face = crate::render::vga16::glyph(glyph).expect("in the 8x16 subset");
+                let mut c = RgbaImage::from_pixel(8, ch, Rgba([0, 0, 0, 0]));
+                blit_glyph_styled(&mut c, glyph, 0, 0, 8, ch, fg, None, 0, None);
+                for dy in 0..ch {
+                    let got = (0..8u32)
+                        .fold(0u8, |a, x| a | if *c.get_pixel(x, dy) == fg { 0x80 >> x } else { 0 });
+                    assert_eq!(
+                        got,
+                        face[(dy * 16 / ch) as usize],
+                        "{glyph:?} at 8x{ch} row {dy} is not the 8x16 face's",
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A cell too short for the 7-wide face keeps `vga16`** (SQ-1016).
+    ///
+    /// The floor is `ch >= 14` — where every row of a 14-row face survives. At
+    /// `ch == 13`, `dy * 14 / 13` never reaches source row 13, and 28 glyphs ink it:
+    /// the tails of `g j p q y`, the comma, the semicolon, `Ç`'s cedilla. So below
+    /// the floor this declines rather than clipping them.
+    #[test]
+    fn a_cell_too_short_for_the_seven_wide_face_keeps_the_eight_wide_one() {
+        let fg = Rgba([255, 0, 0, 255]);
+        let mut c = RgbaImage::from_pixel(7, 13, Rgba([0, 0, 0, 0]));
+        blit_glyph_styled(&mut c, 'A', 0, 0, 7, 13, fg, None, 0, None);
+        let face = crate::render::vga16::glyph('A').expect("in the 8x16 subset");
+        for dy in 0..13u32 {
+            let got = (0..7u32).fold(0u8, |a, x| a | if *c.get_pixel(x, dy) == fg { 0x80 >> x } else { 0 });
+            // `vga16` sampled into 7 columns, which is `source_col`'s text map.
+            let want = (0..7u32).fold(0u8, |a, dx| {
+                a | if face[(dy * 16 / 13) as usize] & (0x80 >> source_col(dx, 7, false)) != 0 {
+                    0x80 >> dx
+                } else {
+                    0
+                }
+            });
+            assert_eq!(got, want, "row {dy} of a 7x13 `A` is not the 8x16 face's");
+        }
+    }
+
+    /// **The release's own face still wins.** `FONT` 524 off a Macintosh floppy is
+    /// the real answer at this cell (SQ-1011) and the embedded face is what stands
+    /// in when there is no volume; a stand-in that outranked the disk would be a
+    /// regression wearing a fix's clothes.
+    #[test]
+    fn the_releases_own_face_outranks_the_embedded_one() {
+        // A synthetic 7x15 fixed face whose row `y` of code `c` is `(c + y) as u8`,
+        // MSB-leftmost — nothing like any real glyph, so its presence is unmistakable.
+        let glyphs: Vec<blorb::bitmap_font::Glyph> = (0x20u8..=0x7E)
+            .map(|c| blorb::bitmap_font::Glyph {
+                width: 7,
+                rows: (0..15u8).map(|y| c.wrapping_add(y)).collect(),
+            })
+            .collect();
+        let font = blorb::bitmap_font::BitmapFont {
+            width: 7,
+            height: 15,
+            baseline: 12,
+            bold_smear: 0,
+            proportional: false,
+            lo: 0x20,
+            glyphs,
+        };
+        let profile = crate::interpreter::InterpreterProfile::Macintosh;
+        let faces = crate::native_font::FaceSet::release(font, profile, None);
+        assert!(faces.body().is_some(), "non-vacuity: the synthetic face was admitted");
+        let tf = crate::native_font::TextFace::new(profile, faces, None);
+        assert_eq!((tf.cell().w, tf.cell().h), (7, 15), "non-vacuity: this IS the Macintosh cell");
+
+        // Masked to the cell's seven columns: the face is 7 wide, so bit 0 of each
+        // row is past its right edge and the blit never reads it.
+        let want: Vec<u8> = (0..15u8).map(|y| b'A'.wrapping_add(y) & 0xFE).collect();
+        assert_eq!(rendered_rows_7x15('A', 0, Some(&tf)).to_vec(), want, "the disk face draws, 1:1");
+        assert_ne!(
+            rendered_rows_7x15('A', 0, Some(&tf)),
+            rendered_rows_7x15('A', 0, None),
+            "and it is not the embedded face",
+        );
+    }
+
+    /// **Bold on the 7-wide face keeps every roman pixel and stays in its cell.**
+    ///
+    /// The two guarantees `synthesize_face`/`synthesize_face16` give, checked on the
+    /// face that has NO spare column: bit 0 of each row is BDF padding rather than a
+    /// column, so the smear off column 6 lands somewhere the blit never samples —
+    /// a clip, not a bleed (SQ-1016).
+    #[test]
+    fn narrow_bold_is_a_superset_and_stays_inside_the_cell() {
+        for ch in ['m', 'A', 'W', 'g', 'T'] {
+            let roman = rendered_rows_7x15(ch, 0, None);
+            let bold = rendered_rows_7x15(ch, STYLE_BOLD, None);
+            for (k, (&r, &b)) in roman.iter().zip(bold.iter()).enumerate() {
+                assert_eq!(b & r, r, "{ch:?} row {k}: bold dropped ink the roman face had");
+            }
+            assert!(bold != roman, "{ch:?}: bold must differ from roman");
+        }
+        // Nothing lands outside the cell, at any style.
+        let fg = Rgba([255, 0, 0, 255]);
+        for style in [0u8, STYLE_BOLD, STYLE_ITALIC, STYLE_BOLD | STYLE_ITALIC] {
+            for ch in ['m', 'T', 'W', 'y'] {
+                let mut c = RgbaImage::from_pixel(21, 45, Rgba([0, 0, 0, 0]));
+                blit_glyph_styled(&mut c, ch, 7, 15, 7, 15, fg, Some(Rgba([9, 9, 9, 255])), style, None);
+                for (x, y, p) in c.enumerate_pixels() {
+                    if !((7..14).contains(&x) && (15..30).contains(&y)) {
+                        assert_eq!(*p, Rgba([0, 0, 0, 0]), "{ch:?} style {style} painted ({x},{y}) outside its cell");
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Italic leans the top forward and no letter loses its rightmost stroke**
+    /// (SQ-1016).
+    ///
+    /// The shear moves ink RIGHT, so only ink in column 6 can fall off — and `T`,
+    /// `Ð`, `×` and `æ` are the only glyphs in the whole subset that ink column 6.
+    /// What `T` loses is one pixel of its crossbar, whose right end still reaches
+    /// the cell edge; every letter, `y` among them, keeps all of its ink.
+    #[test]
+    fn narrow_italic_leans_forward_and_keeps_the_right_edge() {
+        let roman = rendered_rows_7x15('l', 0, None);
+        let italic = rendered_rows_7x15('l', STYLE_ITALIC, None);
+        let top = (0..8).find(|&k| roman[k] != 0).expect("`l` has ink in its top half");
+        assert_eq!(italic[top], roman[top] >> 1, "the top of `l` must move right, not left");
+        let bottom = (8..15).find(|&k| roman[k] != 0).expect("`l` has ink in its bottom half");
+        assert_eq!(italic[bottom], roman[bottom], "the bottom of `l` stays put");
+
+        // No LETTER loses ink to the edge — `y` is the one the tail makes interesting.
+        for ch in ('a'..='z').chain('A'..='Z') {
+            let (r, i) = (rendered_rows_7x15(ch, 0, None), rendered_rows_7x15(ch, STYLE_ITALIC, None));
+            let ink = |rows: [u8; 15]| rows.iter().map(|r| r.count_ones()).sum::<u32>();
+            if ch == 'T' {
+                continue;
+            }
+            assert_eq!(ink(i), ink(r), "{ch:?}: the shear dropped a stroke off the right edge");
+        }
+        // `T` is the one that pays, and it pays exactly one pixel per crossbar row
+        // while still reaching column 6.
+        let (r, i) = (rendered_rows_7x15('T', 0, None), rendered_rows_7x15('T', STYLE_ITALIC, None));
+        let bar = r.iter().position(|&x| x != 0).expect("`T` has a crossbar");
+        assert_eq!(i[bar].count_ones() + 1, r[bar].count_ones(), "`T`'s crossbar loses exactly one pixel");
+        assert!(i[bar] & 0x02 != 0, "and still reaches column 6: {:#010b}", i[bar]);
+    }
+
+    /// The 7-wide face carries the same 194 codepoints as the 8-wide one, which is
+    /// what makes leaving it out of [`has_glyph`] a no-op rather than an omission
+    /// (SQ-1016). A regeneration that widened it would change that, and this is
+    /// where it would say so.
+    #[test]
+    fn the_narrow_face_can_never_widen_this_answer() {
+        for c in 0u32..=0xFFFF {
+            let Some(ch) = char::from_u32(c) else { continue };
+            if crate::render::misc7x14::glyph(ch).is_some() {
+                assert!(
+                    has_glyph(ch),
+                    "U+{c:04X} is in the 7-wide face and in neither master — `has_glyph` now under-reports",
+                );
+            }
+        }
     }
 
     /// A `TextFace` with no face behind it, on `profile` — the cell path with that

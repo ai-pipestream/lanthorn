@@ -3188,6 +3188,19 @@ The order is one sentence, and it lives in one function:
 2. **the machine's system face**, off a boot medium you supplied;
 3. **the built-in**, which is what CI and an empty `~/.lanthorn/` get.
 
+And the built-in is **two faces, picked by the cell**. Uni-VGA is drawn for an
+8-pixel advance — 76 of its 94 printable glyphs ink out to column 6, so column 7
+*is* their inter-character gap — and a Macintosh cell is 7 wide, which drops it.
+Measured over all 52×52 ordered pairs of ASCII letters blitted into adjacent 7×15
+cells, 1649 pairs came out touching their neighbour. So a 7-wide cell with no disk
+face behind it — a bare `.z6` under `--interpreter 3`, and every CI run, since disk
+fonts live on media that cannot be committed — is drawn with **X11 misc-fixed 7×14**
+instead, public domain and 7 pixels wide by construction: 19 pairs touch, every one
+of them a `T`, the only glyph in that face which inks its last column. Every other
+machine declares an 8-wide cell and nothing about it moves; font 3 still comes off
+the 8×8 masters, because a character-graphics set has to tile edge to edge and no
+text face does.
+
 On the Macintosh those first two rungs answer at once and land in *different*
 jobs, which is the whole point: Geneva 12 off your System disk becomes the body
 face, and the game's own Monaco keeps the fixed-pitch role it was drawn for. A
