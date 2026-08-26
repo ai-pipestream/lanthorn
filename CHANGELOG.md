@@ -309,6 +309,35 @@ column: `arthur-r54-s890606-adf` beside `arthur-r54-s890606-hfs`.
 them back (`arthur-r54-s890606.save` → `arthur-r54-s890606-adf.save`). Only *Arthur*,
 *Journey* and *Zork Zero* directories are affected; everything else keeps its name.
 
+### Naming a game on a compilation disc, and the v6 render mode, from the shell
+
+*Masterpieces* carries thirty-three games on one volume, and until now there was
+exactly one door into it: launch the image, read the story list, move the cursor.
+Fine for a player and useless for everything else — no capture, no harness and no
+bug report could reach any game on it except whichever one the disc's own
+filesystem happened to hand back first, which is *Zork Zero*. The Macintosh
+*Arthur* press was, quite literally, unmeasurable.
+
+**`lanthorn stories/InfocomMasterpieces.img --story arthur`** opens that press.
+It takes a number from the list or any fragment of a name — the title the browser
+shows or the name the volume stores it under — and refuses with the list rather
+than guessing when the fragment fits two games. That is the flag `zvm-cli` has
+had all along, and it is now literally the same rule in both: a flag spelled the
+same in two front-ends that *matched* differently would be its own defect. The
+headless instruments take `--entry` on the same terms, so `--entry arthur` works
+wherever you would previously have had to type
+`InfocomMasterpieces/ARTHUR FOLDER/STORY.DATA` — a string whose only source was
+mounting the disc and looking.
+
+And because raster stopped being a fallback this cycle and became a destination,
+the two settings that decide how a Version 6 pane is drawn are sayable before the
+game boots rather than only after it has drawn a frame the other way:
+**`--v6-render hybrid|raster`** and **`--v6-pixel-lock on|off`**. Both spell their
+values exactly as their `/set-…` commands do. Neither is written back to your
+config — a single capture in raster must not become the mode every story opens in
+— and `--v6-pixel-lock` outranks even the game's own sidecar, because a flag is an
+instruction for the launch you typed it on and a file beside the story is not.
+
 ### Fixed
 
 - **The map's in/out portal badges are glyphs your font actually has.** They were
@@ -469,6 +498,16 @@ them back (`arthur-r54-s890606.save` → `arthur-r54-s890606-adf.save`). Only *A
   its size, how it was fitted and what its pen does — because "which face won" was
   the one question the dump could not answer, and it is the first question every
   proportional-text defect turns on.
+- **Sorting the story list by TYPE now sorts by the whole thing the TYPE column
+  says.** The column names the container a story came out of — `Z6 (ADF)` for an
+  Amiga floppy, `Z6 (HFS)` for a Macintosh volume, `Z5 (blorb)` — and the sort
+  ignored every parenthetical, so those three interleaved under the filename
+  tiebreak and sorting by type to group your original media by machine did nothing
+  of the sort. Engine and version still lead (a `Z3 (HFS)` is a Z3 first); within
+  one version a loose file comes first, then the containers alphabetically, and
+  the casing a container's name happens to carry (`blorb` is a format name, `ADF`
+  an acronym) no longer decides the order. The column and its ordering now read
+  one rule, so they cannot drift apart again.
 
 ### Pre-colour stories look like the machine that sold them
 
