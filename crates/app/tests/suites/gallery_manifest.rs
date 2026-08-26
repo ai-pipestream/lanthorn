@@ -200,7 +200,8 @@ fn the_manifest_sizes_are_the_ones_that_magnify_a_640x400_press_by_a_whole_numbe
     assert_eq!(mag("117x40", "kitty"), 2.875, "the size this manifest used to use, and the reason it no longer does");
     assert_eq!(mag("160x50", "kitty"), 3.76, "one row and two columns off 4x is still a resampled frame");
     // The Macintosh's monochrome plates are the one press here that is not
-    // 640x400, and `zork0-mac-mono` is the one shot that is not 82x28. Both
+    // 640x400, and the two shots off that disk are the ones that are not 82
+    // columns wide. Both
     // halves matter: the size is chosen for the SCREEN, not copied off the row
     // above it (SQ-1001).
     assert_eq!(on("62x22", "kitty", (480, 300)), 2.0, "the monochrome Macintosh's 480x300 screen");

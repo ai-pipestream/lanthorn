@@ -48,6 +48,8 @@ roof; one engine-agnostic mapper that charts them all.
 
 ![Zork Zero off its Macintosh floppy: the black-and-white press, its dithered stone columns and compass rose drawn on the Macintosh's own 7x15 cell](docs/zork-zero-mac.png)
 
+![The same Macintosh press in a terminal far taller than the screen the game was drawn for: hybrid mode extends the border out of its own artwork, so the banded pillars pick up more rings at the artist's own spacing instead of stretching or stranding in a letterbox](docs/tall-terminal-border.png)
+
 ![Arthur's Amiga floppy drawn in its own proportional typeface, at the ten-pixel line the machine used](docs/native-font.png)
 
 ![Frobozz Magic VideoPoker: a v6 game's painted card table, banner and clickable menu, drawn inside its own illustrated frame](docs/frobozz-poker.png)
@@ -122,7 +124,10 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   contents and connections. → [mapping](docs/features/mapping.md)
 - **Graphical Z-machine v6** — *Zork Zero*'s full illustrated frame (banner,
   columns, per-room compass, illuminated drop-caps) rendered faithfully at an
-  authentic 640×400, with a `hybrid` / `raster` render choice.
+  authentic 640×400, with a `hybrid` / `raster` render choice. A terminal taller
+  than the screen the game was drawn for is filled by *extending* the border out
+  of its own artwork rather than stretching it — a banded column picks up more
+  bands, at the spacing the artist drew them.
   → [v6 graphics](docs/features/v6-graphics.md)
 - **Even the games that predate colour** — a v1–v4 story has no colour concept at
   all, so everything you see for one is the *interpreter's* presentation rather

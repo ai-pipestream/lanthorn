@@ -56,9 +56,10 @@
 #
 # This is per-shot arithmetic and cannot become one constant: presses differ in
 # native size (Arthur's Apple II press is 560x384, the Macintosh's monochrome
-# plates are 480x300 — which is why `zork0-mac-mono` is 92x32 and nothing else
-# is), so a size that is integral for one is fractional for the next. The native
-# screen is DERIVED at capture time from the mounted medium, never declared here.
+# plates are 480x300 — which is why the two shots off that disk are 92 columns
+# wide and nothing else is), so a size that is integral for one is fractional for
+# the next. The native screen is DERIVED at capture time from the mounted medium,
+# never declared here.
 #
 # ── AND WHY THE KITTY GRIDS HALVED (SQ-1001) ─────────────────────────────────
 #
@@ -359,6 +360,49 @@ these three is a different composition rather than the same one enlarged."""
 keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
 size = "162x53"
 expect = ["The Party", "Individual Commands"]
+
+# ── A pane the game's screen cannot fill ────────────────────────────
+#
+# The three sizes above grow both axes together, which is the case where nothing
+# interesting happens: the magnification is `min(w, h)`, and a bigger terminal is
+# the same composition at a bigger `s`. Grow only the HEIGHT and the story pane
+# has rows the game's own screen has no pixels for. lanthorn does not letterbox
+# the border into the middle of them — the flanks are composed to the pane out of
+# the artwork's own repeat unit, so a frame is still a frame at any height.
+#
+# The monochrome Macintosh plates are the one press in this file that can PROVE
+# that, which is why this row is Zork Zero and not Journey. Every other rendition
+# here draws a featureless shaft, and a featureless shaft can be cut anywhere and
+# repeated forever without a reader being able to find the joins — a stretch, a
+# shift and an honest tile all look identical on it. `Pic.data` draws a BANDED
+# pillar instead: capital, shaft, a ring at mid-height, shaft, flared base. So
+# count the rings. `zork0-mac-mono` above is the same art in a 32-row pane and
+# carries ONE; this is 58 rows and carries THREE, spaced exactly as the artist
+# drew them, with the base still landing on the pane's last row. A taller pane
+# gets more rings rather than longer gaps, and that is the whole claim.
+
+[[shots]]
+id = "zork0-mac-tall"
+title = "Zork Zero"
+press = "Macintosh release floppy (.image, HFS), monochrome plates, in a tall terminal"
+media = "stories/Zork Zero Disk.image"
+args = ["--pictures", "Pic.data"]
+caption = """
+A terminal taller than the shape Zork Zero was drawn for. The game lays out on a \
+480x300 screen; this pane is nearly twice that tall, and hybrid mode fills the \
+difference by extending the border out of its own artwork rather than by \
+stretching it or stranding it in a letterbox. The pillars are the tell: the \
+Macintosh's monochrome plates band theirs with a ring, and a taller pane gets \
+more rings at the same spacing, capital to first ring and last ring to base both \
+exactly as drawn. Nothing in the frame is resampled — it is still a whole 3x."""
+keys = "wait:3000,cr,wait:1200,text:look,cr,wait:1800,text:ne,cr,wait:2000,text:look,cr,wait:2000"
+size = "92x58"
+expect = ["Scullery", "pots and pans"]
+# 1731 art cells measured. The guard is set where a frame that FAILED to extend
+# cannot reach it: unextended flanks stop after 300 native rows of a 55-row pane
+# and lose most of their cells, so this number is the extension itself, not the
+# artwork.
+expect_art_cells = 1200
 
 # ── The fallback everyone can see ────────────────────────────────────────────
 
