@@ -120,6 +120,31 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   columns, per-room compass, illuminated drop-caps) rendered faithfully at an
   authentic 640×400, with a `hybrid` / `raster` render choice.
   → [v6 graphics](docs/features/v6-graphics.md)
+- **Even the games that predate colour** — a v1–v4 story has no colour concept at
+  all, so everything you see for one is the *interpreter's* presentation rather
+  than anything the story asked for. Open *Zork I* off a Commodore disk or
+  *Spellbreaker* off an Amiga floppy and lanthorn dresses the pane the way that
+  machine's own interpreter dressed its screen: its page and ink, its status line
+  — the Amiga's is not a band at all, the reversal sitting behind each run of text
+  with the page showing between them — and the shape of its cursor. Nine machines,
+  every value measured off emulator captures of the release disks rather than
+  guessed. → [interpreter](docs/features/interpreter.md)
+- **The machine's own typeface, off the machine's own media** — Version 6 text is
+  set in the face the original interpreter drew with, read from the media rather
+  than bundled: *Arthur*'s proportional face off its Amiga floppy, stepped at the
+  game's own per-glyph advances; Monaco out of a Macintosh resource fork; and,
+  from boot media you supply, **Geneva** off a Mac OS System file and **topaz 8**
+  out of a Kickstart ROM — the only place topaz 8 has ever existed. Nothing is
+  shipped, copied or licensed, and with no such media present the built-in face
+  answers as it always did. → [v6 graphics](docs/features/v6-graphics.md)
+- **Faster redraws, and a scrollback that stops costing** — a graphics window, the
+  chrome ring and the raster composite each keep their image id across redraws, so
+  a changed picture costs the picture instead of the whole frame: up to two orders
+  of magnitude fewer bytes on a Kitty redraw that only moved one placard, sent
+  deflated where the terminal has actually said it can inflate them. And the
+  transcript wrap is incremental rather than rebuilt every frame, so a
+  twenty-thousand-turn session draws — and answers a keystroke — at the cost of
+  its first. → [v6 graphics](docs/features/v6-graphics.md)
 - **Play straight off the original release disks** — Amiga, Macintosh, Apple II,
   Atari ST, PC, Commodore and the *Lost Treasures* CDs, with the artwork and the
   sound each disk carries and the machine it came from. See
@@ -139,7 +164,9 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   export. → [interface](docs/features/interface.md)
 - **Three lightweight CLI players** — `zvm-cli`, `gvm-cli` and `scott-cli` play
   any story in a bare terminal, with your scrollback intact and a screen-reader
-  mode that emits zero escape sequences. See
+  mode that emits zero escape sequences. All three save and restore now, Scott
+  Adams included — it has no save format of its own, which is a fact about the
+  adventure and never was one about the host. See
   [**The command-line players**](#the-command-line-players) below.
   → [interpreter](docs/features/interpreter.md)
 - **Story picker & IFDB** — browse a library as a badged **list** or `g`
@@ -247,12 +274,21 @@ it. `/set-v6-render raster` switches live, or `v6_render = "raster"` in
 `config.toml` makes it the default.
 
 *Journey*, *Beyond Zork* and *Shogun*'s Amiga releases carry a fixed 8×8
-character set instead of a typeface and draw exactly as before. **The
-Macintosh does not get this yet, and it's worth saying plainly why:**
-Infocom's Mac games ship only Monaco (`FONT` 524), a monospaced stand-in — the
-real body face, Geneva, lives in the Macintosh System file that shipped with
-every Mac and no game, so there is nothing on a game disk for lanthorn to draw
-it from. Macintosh Version 6 text still sets in Monaco's fixed 7×15 cell.
+character set instead of a typeface, and set in **topaz 8** — the face Infocom's
+Amiga interpreter actually painted prose with — as soon as a Kickstart dump is
+sitting in `~/.lanthorn/`. It has to come from a ROM because topaz 8 exists
+nowhere else; a Workbench floppy's `FONTS:` drawer carries `topaz/11` and six
+display faces no Infocom interpreter ever drew with.
+
+**The Macintosh gets both halves, and which one you see depends on what you have
+lying around.** Infocom's Mac games ship Monaco (`FONT` 524), a monospaced
+stand-in, and lanthorn draws it off the resource fork on that machine's own 7×15
+cell. But the face the real interpreter *painted* was Geneva, and Geneva lives in
+the Macintosh System file that shipped with every Mac and no game — so drop a Mac
+OS System disk into `~/.lanthorn/` and prose sets in **Geneva 12**, stepped at its
+own proportional advances, with Monaco kept for the fixed-pitch runs the game asks
+for by name. Nothing is shipped, copied or licensed: the media stays yours,
+exactly the arrangement `stories/` already runs on.
 
 → [interpreter](docs/features/interpreter.md) · [v6 graphics](docs/features/v6-graphics.md)
 
