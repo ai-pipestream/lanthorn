@@ -287,7 +287,9 @@ pty_capture — drive lanthorn under a pty and decode the escapes it emits
   --png-diff BEFORE   put an earlier --png beside this run's, so a render change
                       can be reviewed as a before/after pair
   --timeout SECS      hard ceiling on the run (default 45)
-  --arg VALUE         extra argument passed through to lanthorn
+  --arg VALUE         extra argument passed through to lanthorn — which is how a
+                      story on a volume holding several is named, since lanthorn
+                      itself takes the choice: --arg --story --arg arthur
 
 Exit status 3 means the run did not negotiate kitty graphics — the capture then
 measures the wrong backend and must not be trusted.";

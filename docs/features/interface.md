@@ -580,6 +580,16 @@ still opens straight into it — a single-title floppy, and the DiskCopy *Lost
 Treasures* volume whose whole content is *Zork Zero*, want the game and not a
 one-row list.
 
+**And you can make the choice from the shell.** `lanthorn InfocomMasterpieces.img
+--story arthur` goes straight into Arthur — a number picks a position in the list
+the browser would have shown, a name is matched against both the title and the
+name the disc stores it under, and a fragment that fits two games is refused with
+the list rather than guessed at. It is the flag `zvm-cli` has always had, matched
+by the same rule, and it exists mostly for the things that cannot move a cursor:
+a capture, a test harness, a bug report that needs to name the exact press it was
+taken from. Naming a story skips the browser both ways — you land in the game and
+the session ends when it does.
+
 **And a game the set carries twice is listed once.** These collections overlap:
 `Infocom Compilation 5` stores its games as flat files and `Compilation 8` in
 per-game directories, and both carry the very same Trinity — release 11, serial

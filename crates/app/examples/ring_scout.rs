@@ -39,7 +39,15 @@
 //! cargo run -q -p app --example ring_scout -- --story "stories/James Clavell's Shogun.adf" --taps 1 --runs
 //! cargo run -q -p app --example ring_scout -- --story stories/arthur-r74-s890714.z6 \
 //!     --keys n --taps 12 --bands --size 70x19
+//! cargo run -q -p app --example ring_scout -- --story stories/InfocomMasterpieces.img \
+//!     --entry arthur --keys n
 //! ```
+//!
+//! `--entry <n|name>` says WHICH story, on a volume holding several: a 1-based
+//! position in the browser's list or enough of a name, matched exactly as
+//! `lanthorn --story` matches it (SQ-1078). It took the stored name literally
+//! until then, so reaching a game on a compilation disc meant mounting the disc
+//! yourself to learn what it was called.
 //!
 //! `--keys` is the byte answered to a CHARACTER read while tapping through the
 //! intro; `--all` takes each title's own from the corpus table unless this
@@ -233,6 +241,16 @@ fn scout(
     // second answer is the medium THIS story came off, which on a hybrid disc is not
     // the image's own format (SQ-0876) — so it is what the profile resolves from.
     let p = std::path::Path::new(path);
+    // `--entry` is a 1-based position or enough of a name to pick out one story —
+    // the rule `lanthorn --story` and `zvm-cli --story` both match by (SQ-1078).
+    // It used to be the stored name LITERALLY, so measuring anything on a
+    // compilation disc meant mounting the disc yourself first to learn it.
+    let entry = match entry.map(|w| app::story_pick::entry_on(p, w)) {
+        Some(Ok(e)) => e,
+        Some(Err(msg)) => return Err(msg),
+        None => None,
+    };
+    let entry = entry.as_deref();
     let (bytes, disk_image) = match app::hints::load_mounted_story_from(p, entry) {
         Ok((loaded, medium)) => (loaded.bytes().to_vec(), medium),
         Err(e) => return Err(format!("{path}: {e:?}")),
