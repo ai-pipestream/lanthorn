@@ -103,9 +103,11 @@ press the leader key (default **`Ctrl+P`**) for a pop-up reference of every
 command.
 
 Supported formats: **Z-machine v3–v8** (incl. graphical v6), **Glulx**, and
-**Scott Adams** (ScottFree `.dat`) — auto-detected from the file, loaded raw,
-from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
-(v1/v2 are not supported.)
+**Scott Adams** (ScottFree `.dat`) — auto-detected from the file, loaded raw or
+from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`). (v1/v2 are not
+supported.) A plain `.zip` works too, for a bare `.z3`/`.z5`/`.z8` anywhere
+inside it — handy for something you just downloaded — but only for those: it
+carries no artwork, sound or hints, and holds one game rather than a library.
 
 ---
 
@@ -130,7 +132,6 @@ The picker is the front door: cover art, titles, badges, sorting and search, plu
 lanthorn stories/zork1.z3               # a bare story file
 lanthorn Advent.zblorb                  # a Blorb — its art and sound come with it
 lanthorn adventureland.dat              # a Scott Adams game
-lanthorn curses.zip                     # a zip; lanthorn looks inside
 ```
 
 **Play it off the disk it shipped on**
@@ -165,10 +166,14 @@ explicitly — off an Amiga floppy that happens on its own.
 **Turn things off**
 
 ```bash
-lanthorn story.z5 --no-sound                # quiet; the border still flashes as the cue
-lanthorn story.z5 --no-images               # text only
-lanthorn story.z5 --image-protocol kitty    # force a protocol instead of auto-detecting
+lanthorn stories/sherlock.z5 --no-sound          # quiet; the border still flashes as the cue
+lanthorn stories/zork0.z6 --no-images            # skip the artwork; the prose still plays
+lanthorn stories/zork0.z6 --image-protocol kitty # force a protocol instead of auto-detecting
 ```
+
+The two image lines name a Version 6 story because that is where the choice
+bites: a v5 game has no artwork of its own, and the only picture it could cost
+you is the cover in the story picker.
 
 ---
 
