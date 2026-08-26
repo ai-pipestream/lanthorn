@@ -99,8 +99,8 @@ fn rows_the_cli_offers(path: &Path) -> Vec<cli_host::disk_set::Reachable> {
 fn builds_the_cli_offers(path: &Path) -> BTreeSet<(u16, String)> {
     rows_the_cli_offers(path)
         .iter()
-        .filter_map(|r| cli_host::DiskBuild::of(&r.bytes))
-        .map(|b| (b.release, b.serial))
+        .filter_map(|r| cli_host::DiskBuild::header_of(&r.bytes))
+        .map(|(_, release, serial)| (release, serial))
         .collect()
 }
 

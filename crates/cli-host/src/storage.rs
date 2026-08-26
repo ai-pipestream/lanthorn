@@ -37,6 +37,16 @@ use std::path::{Path, PathBuf};
 /// Z-machine header carries. This, not a filename, is what names its saves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskBuild {
+    /// Header `$00` — the Z-machine version.
+    ///
+    /// Carried because it decides whether the MEDIUM belongs in the key: a v1-v5
+    /// save is VM memory and says nothing about the machine, where a Version 6
+    /// archive carries the screen in NATIVE PIXELS plus its palette. See
+    /// [`disk_story_key`].
+    pub version: u8,
+    /// Which kind of disk this build came off — the same fact the story list
+    /// shows in its TYPE parenthetical (`Z6 (ADF)`, `Z6 (HFS)`).
+    pub medium: blorb::medium::DiskImage,
     /// Header `$02`, big-endian.
     pub release: u16,
     /// Header `$12..$18`, six ASCII bytes (`840726`), with bit 7 masked off —
@@ -60,7 +70,20 @@ impl DiskBuild {
     /// a `None` here would send it to the basename fallback and back in with
     /// its disk-mates, which is the defect this whole module exists to fix.
     /// Every other serial in the corpus has bit 7 clear, so nothing else moves.
-    pub fn of(bytes: &[u8]) -> Option<DiskBuild> {
+    /// `medium` is required rather than optional on purpose: it is half of what
+    /// names a Version 6 game's directory, and a caller that could omit it would
+    /// silently produce a key that looks right and points at another machine's
+    /// saves.
+    pub fn of(bytes: &[u8], medium: blorb::medium::DiskImage) -> Option<DiskBuild> {
+        let (version, release, serial) = DiskBuild::header_of(bytes)?;
+        Some(DiskBuild { version, medium, release, serial })
+    }
+
+    /// The `(version, release, serial)` a story's header carries, for a caller
+    /// that wants the story's IDENTITY without a medium to attach it to — the
+    /// cross-volume fold in [`crate::disk_set`] is the one, and it folds on
+    /// release and serial alone.
+    pub fn header_of(bytes: &[u8]) -> Option<(u8, u16, String)> {
         if bytes.len() < 0x18 || !(3..=8).contains(&bytes[0]) {
             return None;
         }
@@ -68,7 +91,7 @@ impl DiskBuild {
         if !serial.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
             return None;
         }
-        Some(DiskBuild { release: u16::from_be_bytes([bytes[0x02], bytes[0x03]]), serial })
+        Some((bytes[0], u16::from_be_bytes([bytes[0x02], bytes[0x03]]), serial))
     }
 }
 
@@ -157,7 +180,31 @@ pub fn disk_story_key(build: &DiskBuild) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    format!("{}-r{}-s{serial}", slug_for(build.release, &build.serial), build.release)
+    let base = format!("{}-r{}-s{serial}", slug_for(build.release, &build.serial), build.release);
+    match build.version {
+        // **A Version 6 game's saves are per-MEDIUM, because they are per-machine**
+        // (SQ-1068). One build can be pressed onto several disks — *Arthur* release
+        // 54 / serial 890606 is on both the Amiga floppy and the Macintosh
+        // Masterpieces volume, byte for byte — and for v1-v5 that is one game with
+        // one set of saves, which is what lets a key survive renaming an image or a
+        // game moving between disks in a set (SQ-0850, and its guard still holds).
+        //
+        // Version 6 is where the two stop being interchangeable. A host Save State
+        // swaps memory under a game that never learns it happened, and it carries
+        // the v6 screen in NATIVE PIXELS plus the palette — so the Amiga's snapshot
+        // restored into the Macintosh press puts a 640x400 screen into a 480x300
+        // machine, with the wrong palette and a cell and face the story was never
+        // told about. It looks plausible and is laid out for a screen the player
+        // never sees, which is the SQ-0901 shape.
+        // `reconcile_restored_screen_size` reconciles a restore into a different
+        // PANE; there is nothing that reconciles one into a different MACHINE.
+        //
+        // The suffix is the medium's own label, the same token the story list shows
+        // in its TYPE parenthetical, so a player reading `arthur-r54-s890606-hfs`
+        // sees the row they launched.
+        6 => format!("{base}-{}", build.medium.label().to_ascii_lowercase()),
+        _ => base,
+    }
 }
 
 /// The per-game directory token, by whichever of the two rules applies (see the
@@ -204,7 +251,7 @@ fn mounted_build(story_path: &Path, disk_entry: Option<&str>) -> Option<DiskBuil
     let raw = std::fs::read(story_path).ok()?;
     // `detect` first: mounting consumes the bytes, and the overwhelming majority
     // of calls are about an ordinary story file.
-    blorb::medium::DiskImage::detect(&raw)?;
+    let kind = blorb::medium::DiskImage::detect(&raw)?;
     // Across the SET, exactly as the launch path mounts (SQ-0952). This used to
     // be `MountedDisk::mount` — the platter alone — so a volume whose story comes
     // from the RELEASE rather than from itself found nothing, returned `None`,
@@ -230,7 +277,7 @@ fn mounted_build(story_path: &Path, disk_entry: Option<&str>) -> Option<DiskBuil
             .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want))?,
         None => disk.story()?,
     };
-    DiskBuild::of(&chosen.bytes)
+    DiskBuild::of(&chosen.bytes, kind)
 }
 
 /// The directory holding this story's saves and sidecars.
@@ -599,8 +646,60 @@ mod tests {
         b
     }
 
+    /// A v5 build off an Amiga floppy — the medium-agnostic case, so the keys the
+    /// cases below assert are the bare `<slug>-r<release>-s<serial>` form.
     fn build(release: u16, serial: &str) -> DiskBuild {
-        DiskBuild { release, serial: serial.to_string() }
+        build_v(5, release, serial, blorb::medium::DiskImage::Adf)
+    }
+
+    fn build_v(
+        version: u8,
+        release: u16,
+        serial: &str,
+        medium: blorb::medium::DiskImage,
+    ) -> DiskBuild {
+        DiskBuild { version, medium, release, serial: serial.to_string() }
+    }
+
+    /// **A Version 6 game's key names its MEDIUM; a v1-v5 game's does not**
+    /// (SQ-1068).
+    ///
+    /// *Arthur* release 54 / serial 890606 is one build pressed onto two disks —
+    /// the Amiga floppy and the Macintosh *Masterpieces* volume — so before this
+    /// they shared a drawer, and an auto-save made on one was silently resumed by
+    /// the other. For v1-v5 that sharing is the intended behaviour and
+    /// [`one_build_across_three_media_resolves_to_one_directory`] still pins it:
+    /// a save is VM memory and says nothing about the machine.
+    ///
+    /// Version 6 is where the machine stops being incidental. The archive carries
+    /// the screen in NATIVE PIXELS plus its palette, so the Amiga's 640x400
+    /// snapshot restored into the Macintosh's 480x300 press is laid out for a
+    /// screen the player never sees.
+    #[test]
+    fn a_version_six_key_names_its_medium_and_a_v5_key_does_not() {
+        use blorb::medium::DiskImage;
+        // The reported collision: one build, two media, two machines.
+        assert_eq!(
+            disk_story_key(&build_v(6, 54, "890606", DiskImage::Adf)),
+            "arthur-r54-s890606-adf",
+        );
+        assert_eq!(
+            disk_story_key(&build_v(6, 54, "890606", DiskImage::Hfs)),
+            "arthur-r54-s890606-hfs",
+        );
+        // …and the same build at v5 keeps one drawer whatever it is pressed on,
+        // which is the property SQ-0850 established and this must not disturb.
+        for medium in [DiskImage::Adf, DiskImage::Hfs, DiskImage::Fat12Dos] {
+            assert_eq!(
+                disk_story_key(&build_v(5, 88, "840726", medium)),
+                "zork-i-r88-s840726",
+                "a v5 build is medium-agnostic, on {medium:?}",
+            );
+        }
+        // The suffix is the medium's own label — the token the story list shows
+        // in its TYPE parenthetical — so the directory names the row it came from.
+        assert_eq!(DiskImage::Adf.label().to_ascii_lowercase(), "adf");
+        assert_eq!(DiskImage::Hfs.label().to_ascii_lowercase(), "hfs");
     }
 
     /// **Guard 1, the promise.** A loose story file keys on its basename and
@@ -709,13 +808,13 @@ mod tests {
     /// Z-code.)
     #[test]
     fn bytes_that_are_not_z_code_have_no_build() {
-        assert_eq!(DiskBuild::of(b"Glul\0\0\0\0"), None, "Glulx magic, not a Z header");
-        assert_eq!(DiskBuild::of(&[]), None);
-        assert_eq!(DiskBuild::of(&header(2, 88, "840726")), None, "v2 is out of range");
-        assert_eq!(DiskBuild::of(&header(9, 88, "840726")), None, "v9 is out of range");
+        assert_eq!(DiskBuild::of(b"Glul\0\0\0\0", blorb::medium::DiskImage::Adf), None, "Glulx magic, not a Z header");
+        assert_eq!(DiskBuild::of(&[], blorb::medium::DiskImage::Adf), None);
+        assert_eq!(DiskBuild::of(&header(2, 88, "840726"), blorb::medium::DiskImage::Adf), None, "v2 is out of range");
+        assert_eq!(DiskBuild::of(&header(9, 88, "840726"), blorb::medium::DiskImage::Adf), None, "v9 is out of range");
         assert_eq!(
-            DiskBuild::of(&header(3, 88, "840726")),
-            Some(build(88, "840726")),
+            DiskBuild::of(&header(3, 88, "840726"), blorb::medium::DiskImage::Adf),
+            Some(build_v(3, 88, "840726", blorb::medium::DiskImage::Adf)),
             "and a real v3 header reads",
         );
     }
@@ -729,14 +828,17 @@ mod tests {
     fn a_high_ascii_serial_still_keys_on_its_build() {
         let mut bytes = header(3, 0, "......");
         bytes[0x12..0x18].copy_from_slice(&[0xc2, 0xec, 0xef, 0xf7, 0xee, 0xa1]);
-        assert_eq!(DiskBuild::of(&bytes), Some(build(0, "Blown!")));
+        assert_eq!(
+            DiskBuild::of(&bytes, blorb::medium::DiskImage::Adf),
+            Some(build_v(3, 0, "Blown!", blorb::medium::DiskImage::Adf)),
+        );
         // No title in the table answers to release 0, so it slugs as `story`,
         // and `!` is not a directory character.
         assert_eq!(disk_story_key(&build(0, "Blown!")), "story-r0-sBlown_");
         // Binary is still binary with the bit masked: a saved game does not key.
         let mut save = header(3, 0, "......");
         save[0x12..0x18].copy_from_slice(&[0x00; 6]);
-        assert_eq!(DiskBuild::of(&save), None, "an all-zero serial is not text");
+        assert_eq!(DiskBuild::of(&save, blorb::medium::DiskImage::Adf), None, "an all-zero serial is not text");
     }
 
     /// `--story` can pick any game off a compilation, so `zvm-cli` works out the

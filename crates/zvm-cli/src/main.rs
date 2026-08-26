@@ -1442,7 +1442,7 @@ fn main() {
     // six games on an ST compilation and the image's filename says nothing about
     // which. The rule is `cli_host`'s, shared with the TUI, so opening the same
     // game in either front-end reaches the same directory.
-    let disk_build = medium.and_then(|_| cli_host::DiskBuild::of(&story_bytes));
+    let disk_build = medium.and_then(|kind| cli_host::DiskBuild::of(&story_bytes, kind));
     let game_dir = cli_host::game_dir_with_key(
         &story_path,
         args.data_dir.as_deref(),

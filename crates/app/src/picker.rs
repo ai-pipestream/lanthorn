@@ -104,8 +104,12 @@ impl StoryMeta {
     /// read the header, so a row can be keyed without touching the disk again
     /// (SQ-0850). Feed to [`crate::storage::story_key_for`].
     pub fn disk_build(&self) -> Option<crate::storage::DiskBuild> {
-        self.disk_image?;
         Some(crate::storage::DiskBuild {
+            // The MEDIUM and the VERSION are half of what names a Version 6
+            // game's directory (SQ-1068) — one build pressed onto two disks is
+            // one game for v1-v5 and two machines for v6.
+            medium: self.disk_image?,
+            version: self.version.as_deref().and_then(|v| v.parse().ok())?,
             release: self.release?,
             serial: self.serial.as_ref()?.clone(),
         })
@@ -1368,7 +1372,7 @@ fn entry_from_loaded(
     // Fetched IFDB sidecar: absent (never fetched, unreadable, malformed,
     // wrong IFID) is simply no metadata, never a scan error. The mount is
     // already done, so the disk-image save key (SQ-0850) costs nothing here.
-    let disk_build = disk_image.and_then(|_| crate::storage::DiskBuild::of(&bytes));
+    let disk_build = disk_image.and_then(|kind| crate::storage::DiskBuild::of(&bytes, kind));
     let game_dir = crate::storage::game_dir(
         data_base,
         &crate::storage::story_key_for(path, disk_build.as_ref()),

@@ -274,7 +274,7 @@ pub(crate) fn boot_story(
     // carries the `pictures` key, and that key decides the machine below; the
     // directory itself is created (and read from) further down, where it always
     // was.
-    let disk_build = disk_image.and_then(|_| DiskBuild::of(&story_bytes));
+    let disk_build = disk_image.and_then(|kind| DiskBuild::of(&story_bytes, kind));
     let game_dir = story_game_dir(&data_base, &story_key_for(&story_path, disk_build.as_ref()));
     // SQ-0734 tier 3: has the user named a picture archive for this story? Read
     // and PARSED here, ahead of everything, because the flavour it turns out to

@@ -577,8 +577,8 @@ pub fn stories_across_the_release(path: &Path, disk: &blorb::medium::MountedDisk
 /// The release and serial a story's header carries, or `None` when it has no
 /// Z-machine header to read — the identity the cross-volume fold is keyed on.
 fn build_of(bytes: &[u8]) -> Option<(u16, String)> {
-    let b = crate::storage::DiskBuild::of(bytes)?;
-    Some((b.release, b.serial))
+    let (_, release, serial) = crate::storage::DiskBuild::header_of(bytes)?;
+    Some((release, serial))
 }
 
 #[cfg(test)]

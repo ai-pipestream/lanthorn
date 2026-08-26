@@ -78,11 +78,11 @@ fn any_media_present() -> bool {
 /// would open. Empty when the file is absent or is not a disk image.
 fn stories_on(image: &Path) -> Vec<(String, Option<DiskBuild>)> {
     let Ok(raw) = std::fs::read(image) else { return Vec::new() };
-    if blorb::medium::DiskImage::detect(&raw).is_none() {
+    let Some(kind) = blorb::medium::DiskImage::detect(&raw) else {
         return Vec::new();
-    }
+    };
     let Ok(disk) = blorb::medium::MountedDisk::mount(raw) else { return Vec::new() };
-    disk.stories().into_iter().map(|s| (s.name, DiskBuild::of(&s.bytes))).collect()
+    disk.stories().into_iter().map(|s| (s.name, DiskBuild::of(&s.bytes, kind))).collect()
 }
 
 // ── Guard 2: a mounted story always has a build ──────────────────────────────
@@ -118,10 +118,20 @@ fn every_story_on_every_image_keys_on_a_build() {
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
                 .collect();
-            assert!(
-                key.ends_with(&format!("-r{}-s{serial}", build.release)),
-                "{image}: {name} -> {key}",
-            );
+            let build_part = format!("-r{}-s{serial}", build.release);
+            // **A Version 6 key carries its MEDIUM after the build** (SQ-1068).
+            // One build can be pressed onto two disks — Arthur r54/890606 is on
+            // the Amiga floppy and on the Macintosh Masterpieces volume — and for
+            // v6 those are two machines, whose archives are not interchangeable:
+            // the screen is stored in native pixels and the palette with it.
+            // v1-v5 keys are unchanged and medium-agnostic, which is what guard 4
+            // below still pins.
+            if build.version == 6 {
+                let want = format!("{build_part}-{}", build.medium.label().to_ascii_lowercase());
+                assert!(key.ends_with(&want), "{image}: {name} -> {key} (wanted …{want})");
+            } else {
+                assert!(key.ends_with(&build_part), "{image}: {name} -> {key}");
+            }
         }
     }
     assert!(ran > 0 || !any_media_present(), "no story mounted off any image in IMAGES");
@@ -308,9 +318,7 @@ fn a_volume_that_carries_no_story_keys_on_the_one_its_release_holds() {
     for entry in rd.flatten() {
         let path = entry.path();
         let Ok(raw) = std::fs::read(&path) else { continue };
-        if blorb::medium::DiskImage::detect(&raw).is_none() {
-            continue;
-        }
+        let Some(kind) = blorb::medium::DiskImage::detect(&raw) else { continue };
         // What the LAUNCH path would load: the set, not the platter.
         let Ok(set) = app::disk_set::mount_at(&path, raw.clone()) else { continue };
         let Some(story) = set.story() else { continue };
@@ -330,7 +338,7 @@ fn a_volume_that_carries_no_story_keys_on_the_one_its_release_holds() {
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
         assert_eq!(
             story_key_at(&path),
-            story_key_for(&path, DiskBuild::of(&story.bytes).as_ref()),
+            story_key_for(&path, DiskBuild::of(&story.bytes, kind).as_ref()),
             "{name}: the path-only door and the launch path must name one directory\
              (this volume's story {} on the platter itself)",
             if platter_has_none { "is NOT" } else { "is" },
@@ -357,16 +365,14 @@ fn both_front_ends_name_one_directory() {
     for image in IMAGES {
         let path = stories_dir().join(image);
         let Ok(raw) = std::fs::read(&path) else { continue };
-        if blorb::medium::DiskImage::detect(&raw).is_none() {
-            continue;
-        }
+        let Some(kind) = blorb::medium::DiskImage::detect(&raw) else { continue };
         let Ok(disk) = blorb::medium::MountedDisk::mount(raw) else { continue };
         let Some(story) = disk.story() else { continue };
         ran += 1;
         let cli = cli_host::storage::game_dir_with_key(
             &path,
             Some("/data"),
-            &cli_host::storage::story_key_for(&path, DiskBuild::of(&story.bytes).as_ref()),
+            &cli_host::storage::story_key_for(&path, DiskBuild::of(&story.bytes, kind).as_ref()),
         );
         let tui = app::storage::game_dir(Path::new("/data"), &story_key_at(&path));
         assert_eq!(tui, cli, "{image}: the TUI and zvm-cli must agree");
