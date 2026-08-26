@@ -21,99 +21,79 @@ Absolute URLs or no link.
 
 ## v0.3.0 — 2026-08-26
 
-A release about rendering: the faces the original interpreters drew with, the
-colours the original machines showed, and a good deal less work per frame.
+### Performance
 
-### Version 6 text in the machine's own typeface
+- Kitty uploads keep one image id across redraws, so a changed picture costs the
+  picture and not the whole frame — up to two orders of magnitude fewer bytes.
+- Uploads go out deflated where the terminal has said it can inflate them.
+- The transcript wrap is incremental instead of rebuilt every frame: a
+  twenty-thousand-turn session draws, and answers a keystroke, at the cost of its
+  first (a keystroke was 25 ms).
+- A live font-size change re-measures the cell in place; no restart.
 
-Version 6 prose is now set in the face the original interpreter used, read off
-the media rather than bundled.
+### Version 6 typefaces
 
-- **Arthur's Amiga floppy** carries a real proportional typeface, drawn at the
-  game's own per-glyph advances and on the 20-row line the machine gave it.
-  Raster mode only — hybrid draws text as terminal cells, one glyph per cell.
-- **The Macintosh** gets its own 7×15 cell and the `FONT` 524 resource off the
-  game's disk, matched per game on a multi-game compilation.
-- **Geneva and topaz 8** come from boot media you supply: drop a Mac OS System
-  file or an Amiga Kickstart dump into `~/.lanthorn/`. Nothing is shipped,
-  copied or licensed, and with none there the built-in face answers as before.
-- **A 7-wide cell with no disk font** falls back to a public-domain 7-wide face
-  instead of an 8-wide one whose letters touch.
+- *Arthur*'s Amiga floppy is drawn in its own proportional face, at the game's
+  per-glyph advances, on the 20-row line the machine used. Raster mode only.
+- The Macintosh gets its own 7×15 cell and `FONT` 524 off the game's disk,
+  matched per game on a multi-game compilation.
+- Geneva from a Mac OS System file, topaz 8 from an Amiga Kickstart dump — drop
+  either into `~/.lanthorn/`. Nothing is shipped, copied or licensed.
+- A 7-wide cell with no disk font falls back to a public-domain 7-wide face
+  rather than an 8-wide one whose letters touch.
 
-### Original media brings its machine's colours
+### Original media
 
-Boot a story off its release disk and the screen is that machine's before the
-game runs an instruction — the Amiga's grey, the DOS floppy's blue under white.
-Opening a bare story file names no machine, so your terminal still governs;
-`--system-colours` opts in when you have named one by hand.
-
-**Pre-colour stories too.** A v1–v4 story has no colour concept, so everything
-you see is the interpreter's presentation. Nine machines' page, ink, status line
-and cursor are now drawn as that machine drew them, measured off captures of the
-release disks.
-
-### Faster redraws, and a scrollback that stops costing
-
-Kitty uploads keep the same image id across redraws, so a changed picture costs
-the picture instead of the whole frame — up to two orders of magnitude fewer
-bytes — and go out deflated where the terminal says it can inflate them. The
-transcript wrap is incremental rather than rebuilt every frame, so a
-twenty-thousand-turn session draws, and answers a keystroke, at the cost of its
-first.
+- A release disk sets its machine's colours before the game runs an instruction.
+- v1–v4 stories are dressed as the machine that sold them: nine machines' page,
+  ink, status line and cursor, measured off captures of the release disks.
+- `--system-colours` opts in when you have named a machine by hand.
 
 ### Version 6 rendering
 
-- **InvisiClues screens** in *Shogun*, *Zork Zero* and *Arthur* now read the way
-  the machines printed them.
-- **Side art is one drawing, extended one way** — banner, middle and footer —
-  instead of a per-game recipe, so flanks tile and mirror correctly across
-  presses.
-- **The magnification lock is a per-game switch** (`/set-v6-pixel-lock`),
-  remembered per story rather than globally.
+- InvisiClues screens in *Shogun*, *Zork Zero* and *Arthur* read the way the
+  machines printed them.
+- Side art is one drawing — banner, middle, footer — extended one way, instead of
+  a per-game recipe.
+- The magnification lock is a per-game switch (`/set-v6-pixel-lock`).
 
 ### Command line
 
-- `--story <n|name>` opens one game off a compilation disc, matching a number or
-  any fragment of a name — the same rule `zvm-cli` has always used.
-- `--v6-render hybrid|raster` and `--v6-pixel-lock on|off` say before the game
-  boots what the slash commands say during it. Neither is written back to config.
-- `lanthorn --machines` prints the ZMSD §11.1.3 machine table.
+- `--story <n|name>` opens one game off a compilation disc.
+- `--v6-render hybrid|raster` and `--v6-pixel-lock on|off`.
+- `--machines` prints the ZMSD §11.1.3 machine table.
 
-### scott-cli can save and restore
+### Saves
 
-`/save` and `/restore` on the host, as classic ScottFree did it. A Scott
-adventure has no save format of its own, which was never a reason the host could
-not save one; files carry `.sav`, not `.qzl`.
+- Version 6 saves key by medium — `arthur-r54-s890606-adf` beside `…-hfs`.
+  v1–v5 games keep sharing saves across media.
+- **Existing v6 save directories are not migrated**; rename them to keep them.
 
-### A Version 6 game's saves name the disk it was played off
+### scott-cli
 
-*Arthur* is the same build on the Amiga floppy and the Macintosh volume, and a
-v6 save carries the screen in native pixels — so the two now key separately
-(`arthur-r54-s890606-adf` beside `…-hfs`). v1–v5 games keep sharing saves across
-media, as they should. **Existing v6 save directories are not migrated**; rename
-them if you want them back.
+- `/save` and `/restore`, host-side, as classic ScottFree did it. Files carry
+  `.sav`, not `.qzl`.
 
 ### Fixed
 
 **Version 6 layout and art**
 
 - Pictures are sized by the text beside them, not by the whole screen.
-- Journey's frame is centred again with the magnification lock on.
-- Arthur's side poles no longer cut through his status bar, and his "crystal
-  ball" message appears.
-- Shogun's status band is inset between the side ornaments and no longer leaves
-  stale ground in the flank.
-- Zork Zero and Shogun's InvisiClues menu draws inside its own frame.
+- *Journey*'s frame is centred again with the magnification lock on.
+- *Arthur*'s side poles no longer cut through his status bar; his "crystal ball"
+  message appears.
+- *Shogun*'s status band is inset between the side ornaments.
+- *Zork Zero* and *Shogun*'s InvisiClues menu draws inside its own frame.
 - Raster text is a proper face, not a blurred, doubled 8×8 font.
-- The v6 text caret matches what a real Version 6 interpreter drew.
-- A proportional pen now measures what it draws, in all five places that measure.
+- The v6 caret matches what a real Version 6 interpreter drew.
+- A proportional pen measures what it draws, in all five places that measure.
 - A restart re-asks the launch's questions instead of answering them itself.
 
 **Colour and half-blocks**
 
 - CGA *Zork Zero* no longer bleeds its artwork into white.
-- Half-blocks artwork no longer shows a ghost banner or black holes, and text on
-  top of artwork is real glyphs.
+- Half-blocks artwork no longer shows a ghost banner or black holes; text over
+  artwork is real glyphs.
 - Hint screens and transcript notes no longer show your theme through the page.
 
 **Media and the story browser**
@@ -124,13 +104,12 @@ them if you want them back.
 - A hybrid Macintosh/DOS CD-ROM reports the right machine per game.
 - A `.toast` disc appears in the story list.
 - The `(blorb)` tag stops lying in both directions.
-- Sorting by TYPE now orders by the container the column prints, so your Amiga
-  floppies group together instead of interleaving.
+- Sorting by TYPE orders by the container the column prints.
 
 **Interface**
 
 - Map portal badges, room-dock markers and `/export-map` use glyphs your font
-  actually has, and your own theme.
+  has, and your own theme.
 - Clicking an InvisiClues topic selects the one under the pointer.
 - Quitting a CLI no longer lets your shell draw over the last page, or leaks a
   stray mouse report into it.
