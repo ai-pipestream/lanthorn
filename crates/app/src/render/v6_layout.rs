@@ -473,6 +473,86 @@ pub fn classify_windows(items: &[PositionedWindow], cell: V6Cell) -> V6Layout<'_
     V6Layout { story, story_gfx, chrome }
 }
 
+/// One chrome graphics window the v6 CELL path places beside the story, and the
+/// pane columns it places it in.
+pub struct SideColumn<'a> {
+    /// The window itself — the renderer draws `win.node`, the dialog walk only
+    /// needs to know which columns it covers.
+    pub win: &'a PositionedWindow,
+    /// Left of the story box (`true`) or right of it (`false`) — which edge the
+    /// story has to be inset from.
+    pub left: bool,
+    /// First pane column, absolute (already offset from the pane's `x`).
+    pub x: u16,
+    /// Width in pane columns. Never zero, never more than half the pane.
+    pub w: u16,
+}
+
+/// The chrome graphics windows the v6 CELL path actually places, and where.
+///
+/// **THE single statement of that rule** (SQ-1092). It had two, and they measured
+/// the half-pane guard on different bases: the renderer in PANE-PROPORTIONAL
+/// columns (`area.width * px / native_w`), `screen::collect_graphics_rects` in the
+/// game's own NATIVE cells (`PositionedWindow::w`, 80 across a 640-px screen). At
+/// an 82-column pane against an ~80-cell screen those agree to the column, which
+/// is exactly why nothing caught it; at 160 columns the drawn column is twice as
+/// wide as the stamp and they can reach opposite verdicts on the same window. A
+/// modal is then centred over pixels the terminal draws on top of it — SQ-0203, in
+/// the one place the exclusion was still meant to apply.
+///
+/// The rule itself, unchanged from the cell path that owned it: a chrome GRAPHICS
+/// window entirely BESIDE the story (Journey's half-screen picture column) is
+/// story content, not frame art — this path drops the surrounding chrome, but
+/// dropping this lost the illustration the raster and hybrid paths both show.
+/// Frame art that spans or overlaps the story (Arthur's header panel, every game's
+/// full-screen backdrop) is NOT beside it and stays dropped: that is what drawing
+/// no game image means.
+///
+/// `layout` supplies the story window and the chrome, so window 0's own picture
+/// (`story_gfx`) is filed by [`classify_windows`] and cannot be classified twice;
+/// `native_w` is [`native_extent`]'s width for the same items. Empty when the frame
+/// has no story window at all — that frame goes to the painted-screen branch, which
+/// places no image.
+pub fn cell_path_side_columns<'a>(
+    layout: &V6Layout<'a>,
+    area: ratatui::layout::Rect,
+    native_w: u16,
+) -> Vec<SideColumn<'a>> {
+    let Some(story) = layout.story else { return Vec::new() };
+    let col_of = |px: u16| (area.width as u32 * px as u32 / native_w.max(1) as u32) as u16;
+    let story_l = story.x_px;
+    let story_r = story.x_px.saturating_add(story.w_px);
+    layout
+        .chrome
+        .iter()
+        .filter(|pw| matches!(&pw.node, WinNode::Graphics(_)))
+        .filter(|pw| {
+            pw.y_px < story.y_px.saturating_add(story.h_px)
+                && pw.y_px.saturating_add(pw.h_px) > story.y_px
+        })
+        .filter_map(|pw| {
+            let right_edge = pw.x_px.saturating_add(pw.w_px);
+            let left = if right_edge <= story_l {
+                true
+            } else if pw.x_px >= story_r {
+                false
+            } else {
+                return None;
+            };
+            let x = col_of(pw.x_px);
+            let w = col_of(right_edge).saturating_sub(x);
+            // A side column never takes more than half the pane — the story stays
+            // the larger half whatever the game declares.
+            (w > 0 && w.saturating_mul(2) <= area.width).then_some(SideColumn {
+                win: pw,
+                left,
+                x: area.x.saturating_add(x),
+                w,
+            })
+        })
+        .collect()
+}
+
 /// The story window's own background colour (set by the game via
 /// `set_colour`), resolved to an opaque RGBA for filling the story rect
 /// before floats/text. `None` when the game set no colour — the caller then
