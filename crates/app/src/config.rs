@@ -1131,12 +1131,18 @@ pub struct Config {
     /// display or with a large font (SQ-0593). Default: Auto.
     #[serde(default)]
     pub glk_pixel_scale: GlkPixelScale,
-    /// When true (default), forward arrow keypresses to a v6 story as ZSCII
-    /// cursor codes (129-132). Some v6 games bind arrows to movement; set false
-    /// (or `--no-v6-arrows`) to withhold them so arrows drive app-side
-    /// scrollback/map panning instead. Only affects v6 — v1-5/Glulx stories
-    /// always get arrows regardless of this setting.
-    #[serde(default = "default_true")]
+    /// When true, forward arrow keypresses to a v6 story as ZSCII cursor codes
+    /// (129-132), so a game that binds arrows to movement can read them.
+    /// Default false (SQ-1087) — arrows are lanthorn's own scrollback and map
+    /// panning everywhere else, and a v6 story is the one place that stopped
+    /// being true, which reads as the app going deaf rather than as a setting.
+    /// Withholding only ever costs a shortcut for a command the player can
+    /// still type; forwarding costs a key that works in every other story.
+    ///
+    /// Only affects v6 — v1-5/Glulx stories always get arrows regardless — and
+    /// only at a line (`>`) prompt: v6 menus and "press any key" screens get
+    /// arrows whatever this says, or they are unnavigable (SQ-0483).
+    #[serde(default)]
     pub v6_arrow_keys: bool,
     /// Snap the v6 hybrid letterbox magnification to the ladder the ARTWORK
     /// implies, so one art pixel is always a whole number of device pixels
@@ -1552,7 +1558,7 @@ impl Default for Config {
             v6_render: V6RenderMode::Hybrid,
             fuse_art_dither: true,
             glk_pixel_scale: GlkPixelScale::Native,
-            v6_arrow_keys: true,
+            v6_arrow_keys: false,
             v6_pixel_lock: false,
             system_font_disk: String::new(),
             keymap: KeymapConfig::default(),
@@ -3242,13 +3248,20 @@ use_defaults = false
 
     #[test]
     fn v6_arrow_keys_persists_from_config_file() {
-        // Config-only setting (the --no-v6-arrows CLI flag was retired): a
-        // persisted `v6_arrow_keys = false` must survive resolve; absent, the
-        // default keeps arrows forwarded.
+        // SQ-1087: the shipped default WITHHOLDS arrows from a v6 story, so
+        // they keep driving scrollback and map panning the way they do in every
+        // other story. This is a config-only setting (the --no-v6-arrows CLI
+        // flag was retired), so an opted-in `v6_arrow_keys = true` must survive
+        // resolve, and an absent key must resolve to the withholding default —
+        // by both routes into a Config, `Default` and serde.
+        assert!(!Config::default().v6_arrow_keys, "the shipped default withholds");
+        let absent_key: Config = toml::from_str("").unwrap();
+        assert!(!absent_key.v6_arrow_keys, "an absent key is the default, not true");
+
         let dir = std::env::temp_dir().join(format!("bm-v6arrows-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg_path = dir.join("config.toml");
-        std::fs::write(&cfg_path, "v6_arrow_keys = false\n").unwrap();
+        std::fs::write(&cfg_path, "v6_arrow_keys = true\n").unwrap();
         let base = Cli {
             story: Some(PathBuf::from("foo.z5")),
             user_dir: None,
@@ -3270,9 +3283,9 @@ use_defaults = false
             trace: None,
             debug: false,
         };
-        assert!(!resolve(&base).v6_arrow_keys, "persisted false must hold");
+        assert!(resolve(&base).v6_arrow_keys, "persisted true must hold");
         let absent = Cli { config: Some(dir.join("missing.toml")), ..base };
-        assert!(resolve(&absent).v6_arrow_keys, "default keeps arrows forwarded");
+        assert!(!resolve(&absent).v6_arrow_keys, "default withholds arrows from v6");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

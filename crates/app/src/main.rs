@@ -4325,13 +4325,14 @@ mod tests {
 
     #[test]
     fn forward_arrow_to_v6_gates_only_v6_when_disabled() {
-        // v6_arrow_keys = true (default): every version forwards arrows.
+        // v6_arrow_keys = true: every version forwards arrows.
         assert!(super::forward_arrow_to_v6(true, 6));
         assert!(super::forward_arrow_to_v6(true, 5));
         assert!(super::forward_arrow_to_v6(true, 0));
 
-        // v6_arrow_keys = false: only version 6 is withheld; v1-5 and the
-        // Glulx/no-session placeholder (version 0) still forward arrows.
+        // v6_arrow_keys = false (the default, SQ-1087): only version 6 is
+        // withheld; v1-5 and the Glulx/no-session placeholder (version 0) still
+        // forward arrows.
         assert!(!super::forward_arrow_to_v6(false, 6));
         assert!(super::forward_arrow_to_v6(false, 5));
         assert!(super::forward_arrow_to_v6(false, 3));

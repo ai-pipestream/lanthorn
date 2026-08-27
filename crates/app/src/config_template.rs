@@ -304,10 +304,12 @@ const INTERPRETER: &[Row] = &[
     ),
     d(
         "v6_arrow_keys",
-        "true",
+        "false",
         &[
-            "Forward arrow keys to a v6 story as ZSCII 129-132. Set false to keep them",
-            "for scrollback and map panning instead. v1-5 and Glulx always get them.",
+            "Forward arrow keys to a v6 story as ZSCII 129-132, for a game that binds",
+            "them to movement. Off by default, so arrows keep driving scrollback and",
+            "map panning the way they do in every other story. v1-5 and Glulx always",
+            "get them, and so do v6 menus and \"press any key\" screens either way.",
         ],
     ),
     d(
