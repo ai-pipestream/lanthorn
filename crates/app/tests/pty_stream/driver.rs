@@ -171,6 +171,16 @@ pub struct Spec {
     /// only a label and [`Spec::hide_map`] is not acted on, because there is no
     /// per-game sidecar to write for a program that has no per-game anything.
     pub argv: Option<Vec<String>>,
+    /// Run the child from this directory instead of inheriting ours.
+    ///
+    /// For a launch where the PATH IS PART OF THE PICTURE (SQ-1080): the story
+    /// picker prints the directory it scanned exactly as it was given, so a
+    /// gallery frame of a library staged under the system temp dir wears
+    /// `/var/folders/n8/p3vsw3jn6_77wv_m2zphnxww0000gn/T/…` across its header and
+    /// clips the key hints off the end. Handing the child that directory's PARENT
+    /// and naming the directory itself is the same launch a person makes by
+    /// typing `lanthorn stories`, and it is the one the header describes.
+    pub cwd: Option<PathBuf>,
 }
 
 impl Spec {
@@ -193,6 +203,7 @@ impl Spec {
             defer_by: Duration::ZERO,
             answer_kitty: true,
             argv: None,
+            cwd: None,
         }
     }
 }
@@ -402,6 +413,9 @@ fn spawn(spec: &Spec, pty: &Pty) -> std::io::Result<Child> {
                 .arg("--no-sound")
                 .args(&spec.extra_args);
         }
+    }
+    if let Some(dir) = &spec.cwd {
+        cmd.current_dir(dir);
     }
     cmd.stdin(Stdio::from(pty.slave.try_clone()?))
         .stdout(Stdio::from(pty.slave.try_clone()?))

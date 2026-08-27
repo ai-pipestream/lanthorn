@@ -90,8 +90,25 @@ pub struct Shot {
     /// One or two sentences under the frame. The page is a gallery with
     /// captions, so this may be longer than the surrounding body text.
     pub caption: String,
-    /// Path to the medium, relative to the repository root.
+    /// Path to the medium, relative to the repository root. A DIRECTORY when
+    /// [`Shot::library`] is set, a file otherwise.
     pub media: String,
+    /// `media` is a story LIBRARY — a directory — and the frame is the picker
+    /// rather than a game (SQ-1080).
+    ///
+    /// Declared rather than sniffed off the disk, so a manifest validates the
+    /// same on a machine that has the directory and on one that does not:
+    /// whether a shot is a library launch is a fact about the shot, not about
+    /// this checkout.
+    ///
+    /// Everything a story shot derives from its bytes is meaningless here
+    /// because NO STORY HAS BEEN CHOSEN — there is no release, no serial, no
+    /// medium, no native screen and no rendition to name. [`Shot::validate`]
+    /// refuses each of those fields on a library shot rather than let one be
+    /// silently ignored, and [`Provenance`] carries a separate arm that says
+    /// what a directory launch actually knows about itself.
+    #[serde(default)]
+    pub library: bool,
     /// The key spec, in [`Key::parse`]'s spelling: `cr,wait:900,text:look,cr`.
     pub keys: String,
     /// Terminal size in cells, `COLSxROWS`.
@@ -152,6 +169,9 @@ fn default_seed() -> u32 {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub shots: Vec<Shot>,
+    /// The story libraries a `library = true` shot can open (SQ-1080).
+    #[serde(default)]
+    pub libraries: Vec<Library>,
 }
 
 impl Manifest {
@@ -164,14 +184,57 @@ impl Manifest {
         if m.shots.is_empty() {
             return Err("gallery manifest: no [[shots]] — an empty gallery is a mistake, not a choice".into());
         }
+        let mut libs: BTreeSet<&str> = BTreeSet::new();
+        for l in &m.libraries {
+            l.validate()?;
+            if !libs.insert(l.id.as_str()) {
+                return Err(format!("gallery manifest: duplicate library id `{}`", l.id));
+            }
+        }
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         for s in &m.shots {
             s.validate()?;
             if !seen.insert(s.id.as_str()) {
                 return Err(format!("gallery manifest: duplicate shot id `{}` — ids are filenames", s.id));
             }
+            // A library shot names a library the way every other shot names a
+            // file, and an unresolvable name is caught HERE rather than as a
+            // missing directory three minutes into a run.
+            m.subject(s)?;
         }
         Ok(m)
+    }
+
+    /// What one shot opens: a medium on disk, or one of the libraries above.
+    ///
+    /// Resolved once, as a value, because the two answers are not
+    /// interchangeable and every consumer needs the same one — the provenance
+    /// under the frame, the path the binary is launched with, and the config the
+    /// run is given all follow from it. A function that took a path and a bool
+    /// instead would let a caller supply half of it and get a plausible frame
+    /// (see CLAUDE.md's refactoring policy, which this file has been bitten by
+    /// twice).
+    pub fn subject<'a>(&'a self, shot: &Shot) -> Result<Subject<'a>, String> {
+        if !shot.library {
+            return Ok(Subject::Medium(shot.media_path()));
+        }
+        self.libraries
+            .iter()
+            .find(|l| l.id == shot.media)
+            .map(Subject::Library)
+            .ok_or_else(|| {
+                format!(
+                    "gallery manifest: `{}` is a library shot whose `media = {:?}` names no \
+                     [[libraries]] entry (declared: {})",
+                    shot.id,
+                    shot.media,
+                    if self.libraries.is_empty() {
+                        "none".to_string()
+                    } else {
+                        self.libraries.iter().map(|l| l.id.as_str()).collect::<Vec<_>>().join(", ")
+                    }
+                )
+            })
     }
 
     /// The committed manifest's path: `crates/app/examples/gallery.toml`.
@@ -185,6 +248,104 @@ impl Manifest {
             .map_err(|e| format!("gallery manifest: reading {}: {e}", path.display()))?;
         Manifest::parse(&text)
     }
+}
+
+/// A story library a shot can point the picker at (SQ-1080).
+///
+/// **Named members, not a directory off this machine.** Pointing a shot straight
+/// at `stories/` was the first thing tried and it is the wrong fixture twice
+/// over: the frame would show whatever that folder happens to hold on the day —
+/// 287 entries here, a different number and a different first screenful on the
+/// next machine — and the picker sorts by title, so the screenful the shot lands
+/// on is decided by the alphabet rather than by the manifest. A frame is a
+/// fixture; this is how a library one gets named.
+///
+/// The harness stages the members as symlinks into a throwaway directory per
+/// capture, so nothing is copied and nothing under `from` is touched.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Library {
+    /// How a shot names this library: its `media`.
+    pub id: String,
+    /// The directory the members are drawn from, relative to the repo root.
+    pub from: String,
+    /// Filenames within `from`. A member that is not there is a reported
+    /// failure, exactly as a missing medium is.
+    pub members: Vec<String>,
+}
+
+impl Library {
+    fn validate(&self) -> Result<(), String> {
+        if self.id.is_empty()
+            || !self.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(format!(
+                "gallery manifest: library id `{}` must be lowercase ASCII, digits and dashes",
+                self.id
+            ));
+        }
+        if self.from.trim().is_empty() {
+            return Err(format!("gallery manifest: library `{}` has an empty `from`", self.id));
+        }
+        if self.members.is_empty() {
+            return Err(format!(
+                "gallery manifest: library `{}` has no members — an empty picker is not a picture of a catalogue",
+                self.id
+            ));
+        }
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for m in &self.members {
+            if m.trim().is_empty() || m.contains('/') {
+                return Err(format!(
+                    "gallery manifest: library `{}` member {m:?} must be a bare filename inside `{}`",
+                    self.id, self.from
+                ));
+            }
+            if !seen.insert(m.as_str()) {
+                return Err(format!("gallery manifest: library `{}` names {m:?} twice", self.id));
+            }
+        }
+        Ok(())
+    }
+
+    /// Build the directory the picker opens: one symlink per member, under
+    /// `work`.
+    ///
+    /// Rebuilt from scratch every capture. A member left behind by an earlier
+    /// run of an earlier manifest is a row in the catalogue that the committed
+    /// file does not name, and a frame nobody can reproduce.
+    pub fn stage(&self, work: &Path) -> Result<PathBuf, String> {
+        let from = repo_root().join(&self.from);
+        // `<work>/lib/<id>`, not `<work>/library-<id>`, because the directory's
+        // own NAME ends up on screen: the picker's header says what it scanned.
+        // The nesting is what keeps that name free of a disambiguating prefix
+        // while still not colliding with the per-shot user dirs beside it.
+        let dir = work.join("lib").join(&self.id);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("library `{}`: {}: {e}", self.id, dir.display()))?;
+        for m in &self.members {
+            let src = from.join(m);
+            if !src.is_file() {
+                return Err(format!(
+                    "library `{}`: no member at {} (the media directories are gitignored)",
+                    self.id,
+                    src.display()
+                ));
+            }
+            std::os::unix::fs::symlink(&src, dir.join(m))
+                .map_err(|e| format!("library `{}`: linking {m:?}: {e}", self.id))?;
+        }
+        Ok(dir)
+    }
+}
+
+/// What a shot opens — see [`Manifest::subject`].
+#[derive(Clone, Debug)]
+pub enum Subject<'a> {
+    /// One file on disk, mounted the way the app mounts it.
+    Medium(PathBuf),
+    /// A library of stories, staged at capture time. No story is chosen.
+    Library(&'a Library),
 }
 
 /// The repository root, from this crate's manifest directory.
@@ -218,6 +379,30 @@ impl Shot {
                 "gallery manifest: `{who}` is a half-block shot with `expect_art_cells` — half-blocks \
                  emit no placements at all, so that count is always zero. Put `\u{2580}` in `expect` instead"
             ));
+        }
+        // A LIBRARY SHOT HAS NO STORY, so every field that describes one is a
+        // field that would be quietly ignored (SQ-1080). `raster` is a v6 render
+        // mode and the picker is not a v6 screen; `--pictures` names a rendition
+        // of artwork inside a story nobody has opened; `show_map` writes a
+        // per-game sidecar keyed on the story path, and here that path is a
+        // directory. Refusing them is the difference between a manifest that
+        // means what it says and one whose author believes a line that does
+        // nothing.
+        if self.library {
+            for (field, set) in [("raster", self.raster), ("show_map", self.show_map)] {
+                if set {
+                    return Err(format!(
+                        "gallery manifest: `{who}` is a library shot with `{field}` — no story has \
+                         been chosen yet, so there is nothing for it to apply to"
+                    ));
+                }
+            }
+            if self.pictures().is_some() {
+                return Err(format!(
+                    "gallery manifest: `{who}` is a library shot passing `--pictures` — that names a \
+                     rendition of artwork inside a story the picker has not opened"
+                ));
+            }
         }
         if self.expect.is_empty() && self.expect_art_cells == 0 {
             return Err(format!(
@@ -396,15 +581,46 @@ impl Shot {
 
 // ── Provenance ────────────────────────────────────────────────────────────────
 
-/// What the medium turned out to carry, read at capture time.
+/// What the launch turned out to be pointed at, read at capture time.
 ///
-/// Measured, never declared: `load_mounted_story` mounts the file the way the
-/// app does and the release and serial come out of the header of the bytes it
-/// returned. A disk image is a different BUILD of the game, not the same story
-/// on other media, so a caption that names a release it did not load is worse
-/// than one that names none.
+/// TWO ARMS, BECAUSE A DIRECTORY IS NOT A FILE (SQ-1080). A story shot's
+/// provenance is measured and never declared: `load_mounted_story` mounts the
+/// file the way the app does and the release and serial come out of the header
+/// of the bytes it returned. A disk image is a different BUILD of the game, not
+/// the same story on other media, so a caption that names a release it did not
+/// load is worse than one that names none.
+///
+/// A LIBRARY launch has none of those facts and cannot be made to have them.
+/// Nothing has been mounted: the picker is a list of candidates, and which of
+/// them a player would have opened is the one thing the frame does not say. The
+/// honest provenance for that shot is the DIRECTORY, and this type says so with
+/// its own arm rather than by filling a story's fields with plausible zeroes —
+/// which would put `v0 r0/s000000` under a frame, or worse, the header of
+/// whichever file the directory happened to sort first.
+///
+/// The count is deliberately not here either. The picker prints its own
+/// (`105 found in stories`), that number is the scan's after containers are
+/// expanded and duplicate builds folded, and a second count computed a different
+/// way beside it would be exactly the "second copy of the truth" this file's
+/// header warns about. `expect` reads it off the frame instead.
 #[derive(Clone, Debug)]
-pub struct Provenance {
+pub enum Provenance {
+    /// One story, mounted.
+    Story(StoryProvenance),
+    /// A directory of stories, none of them opened: the picker IS the frame.
+    Library {
+        /// The library's manifest id.
+        id: String,
+        /// Where its members came from, relative to the repo root.
+        from: String,
+        /// How many of them were staged.
+        members: usize,
+    },
+}
+
+/// Everything the mounted bytes of ONE story say about themselves.
+#[derive(Clone, Debug)]
+pub struct StoryProvenance {
     pub version: u8,
     pub release: u16,
     pub serial: String,
@@ -422,6 +638,27 @@ pub struct Provenance {
 }
 
 impl Provenance {
+    /// The provenance of whatever this shot points at — a mounted story, or the
+    /// library a library shot opens the picker on.
+    pub fn of(subject: &Subject<'_>, pictures: Option<&str>) -> Result<Provenance, String> {
+        match subject {
+            Subject::Medium(path) => Provenance::read(path, pictures).map(Provenance::Story),
+            Subject::Library(l) => Ok(Provenance::Library {
+                id: l.id.clone(),
+                from: l.from.clone(),
+                members: l.members.len(),
+            }),
+        }
+    }
+
+    /// The v6 native screen, for a story that has one.
+    pub fn native(&self) -> Option<(u32, u32)> {
+        match self {
+            Provenance::Story(s) => s.native,
+            Provenance::Library { .. } => None,
+        }
+    }
+
     /// `pictures` is the shot's `--pictures` name, from [`Shot::pictures`], and
     /// has to be passed for the same reason lanthorn itself resolves the
     /// override before it builds the engine: the named archive settles both the
@@ -430,7 +667,7 @@ impl Provenance {
     /// Zork Zero's Macintosh disk is the case that shows it — `CPic.data` is
     /// 320x200 doubled to 640x400, its monochrome `Pic.data` is 480x300 at 1:1,
     /// and the two want different pane sizes to magnify by a whole number.
-    pub fn read(path: &Path, pictures: Option<&str>) -> Result<Provenance, String> {
+    pub fn read(path: &Path, pictures: Option<&str>) -> Result<StoryProvenance, String> {
         let (loaded, image) = app::hints::load_mounted_story(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let bytes = loaded.bytes();
@@ -456,7 +693,7 @@ impl Provenance {
         ) {
             return Err(over.warning().unwrap_or_else(|| "the named archive did not load".into()));
         }
-        Ok(Provenance {
+        Ok(StoryProvenance {
             version: bytes[0],
             release: u16::from_be_bytes([bytes[2], bytes[3]]),
             serial: String::from_utf8_lossy(&bytes[0x12..0x18]).into_owned(),
@@ -465,6 +702,19 @@ impl Provenance {
         })
     }
 
+    /// `v6 r83/s890706 off a story file`, or — for a library launch — the
+    /// directory and the fact that nothing in it has been opened.
+    pub fn describe(&self) -> String {
+        match self {
+            Provenance::Story(s) => s.describe(),
+            Provenance::Library { id, from, members } => {
+                format!("the `{id}` library — {members} stories staged from {from}/, none opened")
+            }
+        }
+    }
+}
+
+impl StoryProvenance {
     /// `v6 r83/s890706 off a story file`.
     pub fn describe(&self) -> String {
         format!("v{} r{}/s{} off {}", self.version, self.release, self.serial, self.medium)
@@ -590,11 +840,28 @@ impl Taken {
 
 /// Boot lanthorn for one shot and hand back the capture, having first refused
 /// every way the capture could be of the wrong thing.
-pub fn capture(shot: &Shot, bin: &Path, work: &Path, timeout: std::time::Duration) -> Result<Capture, String> {
-    let media = shot.media_path();
-    if !media.exists() {
-        return Err(format!("`{}`: no medium at {} (the media directories are gitignored)", shot.id, media.display()));
-    }
+pub fn capture(
+    shot: &Shot,
+    subject: &Subject<'_>,
+    bin: &Path,
+    work: &Path,
+    timeout: std::time::Duration,
+) -> Result<Capture, String> {
+    // The path lanthorn is launched with: the medium itself, or the directory
+    // this shot's library was just staged into.
+    let media = match subject {
+        Subject::Medium(path) => {
+            if !path.exists() {
+                return Err(format!(
+                    "`{}`: no medium at {} (the media directories are gitignored)",
+                    shot.id,
+                    path.display()
+                ));
+            }
+            path.clone()
+        }
+        Subject::Library(l) => l.stage(work).map_err(|e| format!("`{}`: {e}", shot.id))?,
+    };
     let (cols, rows) = shot.size_cells()?;
     let (cell_w, cell_h) = shot.cell_px();
 
@@ -605,18 +872,53 @@ pub fn capture(shot: &Shot, bin: &Path, work: &Path, timeout: std::time::Duratio
     // sidecar is a bare-lines file the driver already owns for `show_map`, and
     // two writers of one file is how a shot silently loses its seed.
     let render = if shot.raster { "v6_render = \"raster\"\n" } else { "" };
+    // A LIBRARY LAUNCH ASKS A QUESTION BEFORE THE TERMINAL EXISTS (SQ-1080).
+    // `resolve_launch` offers to remember a directory passed on the command line
+    // as `default_story_dir`, and `prompt_yes_no` reads a LINE from stdin in
+    // cooked mode — before the colour query, before raw mode, before anything is
+    // drawn. Nothing a key spec can send answers it usefully: the driver's keys
+    // start after the app has settled, and a `cr` typed into that prompt would
+    // then be a `cr` the picker never receives.
+    //
+    // So it is not answered; it is not ASKED. The prompt fires only when the
+    // config has no `default_story_dir`, and this run's config is ours to write
+    // — the same trick `pty_query_replies::library` uses, and for the same
+    // reason. A fresh user dir per shot means the answer cannot leak between
+    // shots or into anyone's real `~/.lanthorn`.
+    let default_dir = if shot.library {
+        // `to_string_lossy` and TOML's literal string: the path is this
+        // repository's own and carries no quote to escape.
+        format!("default_story_dir = '{}'\n", media.display())
+    } else {
+        String::new()
+    };
     std::fs::write(
         user_dir.join("config.toml"),
-        format!("random_seed = {}\n{render}", shot.seed),
+        format!("random_seed = {}\n{render}{default_dir}", shot.seed),
     )
     .map_err(|e| format!("`{}`: writing the pinned seed: {e}", shot.id))?;
 
     let mut spec = Spec::new(bin, &media, &user_dir);
+    // THE PICKER PRINTS THE PATH IT WAS GIVEN, so for a library shot the path is
+    // part of the picture. Launch from the staged directory's parent and name the
+    // directory — `lanthorn frontispieces` — which is the launch a person makes
+    // and the one the header can hold. Named absolutely it is 60 characters of
+    // system temp directory that clip the key hints off the end of the header.
+    if let (Subject::Library(_), Some(parent), Some(name)) =
+        (subject, media.parent(), media.file_name())
+    {
+        spec.cwd = Some(parent.to_path_buf());
+        spec.story = PathBuf::from(name);
+    }
     spec.cols = cols;
     spec.rows = rows;
     spec.cell_w = cell_w;
     spec.cell_h = cell_h;
-    spec.hide_map = !shot.show_map;
+    // The per-game sidecar `hide_map` writes is keyed on the STORY path, and a
+    // library shot's path is a directory — so there is no game to write one for.
+    // (`validate` has already refused `show_map` on a library shot, so this is
+    // the whole of the difference.)
+    spec.hide_map = !shot.show_map && !shot.library;
     spec.keys = shot.keys()?;
     spec.timeout = timeout;
     spec.extra_args = shot.lanthorn_args();
@@ -1168,10 +1470,30 @@ pub fn recipe_json(taken: &[Taken], manifest: &Path) -> String {
         let _ = writeln!(s, "    {{");
         let _ = writeln!(s, "      \"id\": {},", json_str(&t.id));
         let _ = writeln!(s, "      \"png\": {},", json_str(&t.png.display().to_string()));
-        let _ = writeln!(s, "      \"version\": {},", t.provenance.version);
-        let _ = writeln!(s, "      \"release\": {},", t.provenance.release);
-        let _ = writeln!(s, "      \"serial\": {},", json_str(&t.provenance.serial));
-        let _ = writeln!(s, "      \"medium\": {},", json_str(&t.provenance.medium));
+        // A library shot has no story to describe, and says so in JSON the same
+        // way it says so under the frame: nulls, not zeroes. `0` is a release
+        // number a story could plausibly carry; `null` is not.
+        match &t.provenance {
+            Provenance::Story(p) => {
+                let _ = writeln!(s, "      \"version\": {},", p.version);
+                let _ = writeln!(s, "      \"release\": {},", p.release);
+                let _ = writeln!(s, "      \"serial\": {},", json_str(&p.serial));
+                let _ = writeln!(s, "      \"medium\": {},", json_str(&p.medium));
+                let _ = writeln!(s, "      \"library\": null,");
+            }
+            Provenance::Library { id, from, members } => {
+                let _ = writeln!(s, "      \"version\": null,");
+                let _ = writeln!(s, "      \"release\": null,");
+                let _ = writeln!(s, "      \"serial\": null,");
+                let _ = writeln!(s, "      \"medium\": null,");
+                let _ = writeln!(
+                    s,
+                    "      \"library\": {{\"id\": {}, \"from\": {}, \"members\": {members}}},",
+                    json_str(id),
+                    json_str(from)
+                );
+            }
+        }
         let _ = writeln!(s, "      \"cols\": {}, \"rows\": {},", t.cols, t.rows);
         let _ = writeln!(s, "      \"cell_px\": [{}, {}],", t.cell_w, t.cell_h);
         let _ = writeln!(s, "      \"backend\": {},", json_str(t.backend.as_str()));
