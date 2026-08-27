@@ -1650,6 +1650,27 @@ pub struct ConfirmOverwriteSave {
     pub pending: PendingOverwrite,
 }
 
+/// The "keep this download in your library?" prompt (SQ-1086).
+///
+/// Raised once, right after a story fetched from a URL has booted, because that
+/// is the moment the player knows whether they want it: a fetch that is not kept
+/// plays from the temp directory it landed in and is forgotten, while keeping it
+/// writes it into the library the picker reads, so the next launch finds it
+/// without a second fetch (and the IFDB metadata/cover sweep can attach to it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchKeepPrompt {
+    /// What came off the network, and the local file the session was booted from.
+    pub fetched: crate::story_url::FetchedStory,
+    /// The library directory the copy would land in — `default_story_dir`, the
+    /// same directory the story picker lists. The prompt is never raised without
+    /// one, because there would be nowhere to keep it.
+    pub library_dir: std::path::PathBuf,
+    /// True when the library already holds a file of that name. This is what
+    /// turns the prompt's two buttons into three: replacing and keeping both are
+    /// different answers and neither may happen silently.
+    pub collision: bool,
+}
+
 // ── Text-entry dialog ─────────────────────────────────────────────────────────
 
 /// A single-field text-entry modal (title, one caret field, OK/Cancel) — the
@@ -2076,6 +2097,9 @@ pub struct OverlayState {
     /// it; cancel leaves it untouched. See [`PendingOverwrite`] for what a
     /// confirm resumes. (SQ-0648)
     pub confirm_overwrite_save: Option<ConfirmOverwriteSave>,
+    /// The "keep this download in your library?" prompt (SQ-1086), or `None`
+    /// when this launch did not come off a URL (or has already been answered).
+    pub fetch_keep: Option<FetchKeepPrompt>,
     /// When true, the "turn history is not being recorded — switch it on?"
     /// prompt is open (SQ-1091). Raised by `open-history` when there is nothing
     /// to replay AND the capture that would have filled it is off, which used to
@@ -3500,6 +3524,7 @@ impl AppState {
             || self.overlays.text_entry.is_some()
             || self.overlays.confirm_delete_save.is_some()
             || self.overlays.confirm_overwrite_save.is_some()
+            || self.overlays.fetch_keep.is_some()
             || self.overlays.reset_dialog
             || self.overlays.game_over
             || self.overlays.save_name_dialog.is_some()
@@ -3662,6 +3687,7 @@ impl AppState {
         if self.overlays.text_entry.is_some() { v.push("text_entry"); }
         if self.overlays.confirm_delete_save.is_some() { v.push("confirm_delete_save"); }
         if self.overlays.confirm_overwrite_save.is_some() { v.push("confirm_overwrite_save"); }
+        if self.overlays.fetch_keep.is_some() { v.push("fetch_keep"); }
         if self.overlays.reset_dialog { v.push("reset_dialog"); }
         if self.overlays.game_over { v.push("game_over"); }
         if self.overlays.save_name_dialog.is_some() { v.push("save_name_dialog"); }

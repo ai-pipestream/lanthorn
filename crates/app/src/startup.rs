@@ -71,6 +71,12 @@ pub(crate) struct LaunchCtx {
     pub library_dir: Option<std::path::PathBuf>,
     /// The single story file when launched with a file argument, else `None`.
     pub single_file: Option<std::path::PathBuf>,
+    /// Set when the launch argument was a URL rather than a path (SQ-1086): the
+    /// address, and the local file it was fetched to. `single_file` is that same
+    /// local file, so everything downstream of `resolve_launch` sees an ordinary
+    /// story path; this is here only so `boot_story` can raise the keep-it prompt
+    /// for the right story.
+    pub fetched: Option<app::story_url::FetchedStory>,
 }
 
 /// Resolve the one-time launch context: parse args + config, seed the style
@@ -127,6 +133,27 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         }
     };
 
+    // ── SQ-1086: a URL wherever a path is accepted ───────────────────────────
+    //
+    // Fetched HERE, before anything downstream has to know the difference. Past
+    // this line `story_path` is an ordinary local file, so every filetype the
+    // loader already opens — `.z3`–`.z8`, Blorb, Glulx, Scott Adams, release disk
+    // images, ZIPs — comes along for free and cannot drift from what opening the
+    // same file by name would do. There is no second loader.
+    //
+    // A failure exits with the same code as "no story given", and says what it
+    // fetched as well as that it could not open it: a 404 page, a login redirect
+    // and a PDF are three different mistakes and only the message tells them
+    // apart.
+    //
+    // Asked of the ARGUMENT only, never of the resolved path: a bare `lanthorn`
+    // falls back to `default_story_dir`, and re-fetching a config value on every
+    // launch is not a thing this should be able to do.
+    let (story_path, fetched) = match cli.story.as_deref().and_then(fetch_launch_url) {
+        Some(f) => (f.path.clone(), Some(f)),
+        None => (story_path, None),
+    };
+
     // First time a directory is passed on the command line with no default set,
     // offer to remember it as the default story directory (persisted to config).
     if cfg.default_story_dir.is_none()
@@ -159,7 +186,43 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         (None, Some(story_path))
     };
 
-    LaunchCtx { cli, cfg, data_base, library_dir, single_file }
+    LaunchCtx { cli, cfg, data_base, library_dir, single_file, fetched }
+}
+
+/// Fetch `arg` when it is a URL, returning the local file the rest of the boot
+/// should use; `None` when it is an ordinary path (SQ-1086).
+///
+/// Exits 2 — the same code `resolve_launch` uses for "no story given" — when the
+/// address is one lanthorn will not fetch, or when the fetch fails. Both messages
+/// name what happened rather than leaving a "no such file" about a path nobody
+/// typed.
+fn fetch_launch_url(arg: &std::path::Path) -> Option<app::story_url::FetchedStory> {
+    let text = arg.to_str()?;
+    if !app::story_url::is_story_url(text) {
+        // A `file://` or `ftp://` argument is URL-shaped and not fetchable; say
+        // so instead of letting it fall through to a confusing open failure.
+        if let Some(why) = app::story_url::declined_scheme(text) {
+            eprintln!("lanthorn: {why}");
+            std::process::exit(2);
+        }
+        return None;
+    }
+    let url = text.trim().to_string();
+    let dir = app::story_url::download_dir();
+    // Said before the fetch, not after: on a slow mirror this is the only sign
+    // that lanthorn is doing anything at all, and it is still the ordinary
+    // terminal here — the alternate screen is entered much further down.
+    eprintln!("lanthorn: fetching {url} …");
+    match app::story_url::fetch_to_dir(&app::story_url::HttpSource::new(), &url, &dir) {
+        Ok(f) => {
+            eprintln!("lanthorn: saved to {}", f.path.display());
+            Some(f)
+        }
+        Err(e) => {
+            eprintln!("lanthorn: could not open {url}: {e}");
+            std::process::exit(2);
+        }
+    }
 }
 
 /// The real story-pane `(rows, cols)` a v1–8 Z-machine session should be BOOTED
@@ -1362,6 +1425,27 @@ pub(crate) fn boot_story(
     state.command_history = startup_command_history;
     if let Some(turns) = startup_turns {
         state.turns = turns;
+    }
+
+    // SQ-1086: this story came off a URL, so offer to keep it. Raised BEFORE the
+    // resume prompt below so that prompt's `dialog_focus = 0` wins while it is
+    // up — it sits above this one in the ladder and has to be answered first.
+    // Only offered when there is a library to keep it IN: `default_story_dir` is
+    // the directory the picker reads, and inventing another location would put
+    // the file somewhere nothing lists.
+    if ctx.fetched.as_ref().is_some_and(|f| f.path == story_path) {
+        let fetched = ctx.fetched.clone().expect("checked just above");
+        match state.config.default_story_dir.clone() {
+            Some(library_dir) => {
+                let collision = app::story_url::library_collision(&fetched.path, &library_dir);
+                state.overlays.fetch_keep =
+                    Some(app::state::FetchKeepPrompt { fetched, library_dir, collision });
+                state.overlays.dialog_focus = 0;
+            }
+            None => state.push_notice(
+                "[Downloaded to a temporary folder. Set `default_story_dir` in your config to keep fetched stories.]",
+            ),
+        }
     }
 
     // If a save was found but auto_load is off and prompt_load_on_launch is on,

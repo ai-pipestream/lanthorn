@@ -23,6 +23,10 @@ use app::render::confirm_overwrite_dialog::{
     confirm_overwrite_key_focused, draw_confirm_overwrite_dialog, ConfirmOverwriteAction, ConfirmOverwriteDialogRects,
 };
 use app::render::dialog::DialogRects;
+use app::render::fetch_keep_dialog::{
+    button_count as fetch_keep_button_count, draw_fetch_keep_dialog, fetch_keep_key_focused,
+    FetchKeepAction,
+};
 use app::render::filebrowser::draw_file_browser;
 use app::render::game_over_dialog::{
     draw_game_over_dialog, game_over_dialog_key_focused, GameOverAction, GameOverDialogRects,
@@ -57,6 +61,7 @@ pub(crate) struct OverlayRects {
     pub dialog: Option<DialogRects>,
     pub aux_dialog: Option<AuxDialogRects>,
     pub history_prompt: Option<app::render::history_prompt::HistoryPromptRects>,
+    pub fetch_keep: Option<app::render::fetch_keep_dialog::FetchKeepRects>,
     pub reset_dialog: Option<ResetDialogRects>,
     pub game_over: Option<GameOverDialogRects>,
     pub save_name_dialog: Option<SaveNameDialogRects>,
@@ -91,6 +96,7 @@ pub(crate) fn draw_all(
 ) -> OverlayRects {
     let mut out = OverlayRects {
         history_prompt: None,
+        fetch_keep: None,
         dialog: dialog_seed,
         aux_dialog: None,
         reset_dialog: None,
@@ -198,6 +204,10 @@ pub(crate) fn draw_all(
 pub(crate) enum OverlayAct {
     /// Switch `record_turn_history` on and persist it (SQ-1091).
     EnableTurnHistory,
+    /// The keep-this-download prompt was answered (SQ-1086): `Some(mode)` copies
+    /// the fetched story into the library, `None` plays it where it landed and
+    /// forgets it. Applying it needs the run loop's paths, so it surfaces here.
+    FetchKeep(Option<app::story_url::KeepMode>),
     AuxArchive,
     AuxGlobal,
     ResetConfirm,
@@ -234,6 +244,7 @@ pub(crate) enum OverlayOutcome {
 #[allow(dead_code)] // introspection hook exercised only by the ladder-order test
 pub(crate) enum OverlayKind {
     HistoryPrompt,
+    FetchKeep,
     Aux,
     Reset,
     GameOver,
@@ -280,6 +291,10 @@ pub(crate) const COMMON_DIALOGS: &[&dyn Overlay] = &[
     &ConfirmDeleteOverlay,
     &QuitOverlay,
     &LaunchOverlay,
+    // Below everything the player opened: the keep-this-download prompt is
+    // raised by the app at boot, and a resume-or-new-game question about the very
+    // session it belongs to has to be settled first (SQ-1086).
+    &FetchKeepOverlay,
     // The region prompt sits at the bottom: it is the only modal in this ladder the app raises on
     // its own initiative, so anything the player asked for outranks it (SQ-0439).
     &RegionPromptOverlay,
@@ -352,6 +367,60 @@ impl Overlay for HistoryPromptOverlay {
         }
         if hp.cancel.is_some_and(|r| r.contains(pt)) || hp.close.is_some_and(|r| r.contains(pt)) {
             state.overlays.history_prompt = false;
+        }
+        OverlayOutcome::Consumed
+    }
+}
+
+// ── "Keep this download in your library?" prompt (SQ-1086) ─────────────────
+//
+// Two buttons, or three when the library already holds a file of that name — see
+// `render::fetch_keep_dialog` for why the collision case is not allowed to be
+// silent. `button_count` is asked rather than hard-coded so the focus ring and
+// the drawn row cannot disagree about how many stops it has.
+struct FetchKeepOverlay;
+impl Overlay for FetchKeepOverlay {
+    fn kind(&self) -> OverlayKind { OverlayKind::FetchKeep }
+    fn is_open(&self, ov: &OverlayState) -> bool { ov.fetch_keep.is_some() }
+    fn draw(&self, state: &AppState, area: Rect, buf: &mut Buffer, out: &mut OverlayRects) {
+        out.fetch_keep = draw_fetch_keep_dialog(state, area, buf);
+    }
+    fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
+        let n = fetch_keep_button_count(state);
+        let collision = state.overlays.fetch_keep.as_ref().is_some_and(|p| p.collision);
+        match key.code {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, n, 1);
+                OverlayOutcome::Consumed
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, n, -1);
+                OverlayOutcome::Consumed
+            }
+            code => match fetch_keep_key_focused(code, state.overlays.dialog_focus, collision) {
+                FetchKeepAction::Keep(mode) => {
+                    OverlayOutcome::Act(OverlayAct::FetchKeep(Some(mode)))
+                }
+                FetchKeepAction::Decline => {
+                    OverlayOutcome::Act(OverlayAct::FetchKeep(None))
+                }
+                FetchKeepAction::None => OverlayOutcome::Consumed,
+            },
+        }
+    }
+    fn mouse(&self, state: &mut AppState, m: &MouseEvent, panes: &PaneRects) -> OverlayOutcome {
+        let Some(pt) = left_down(m) else { return OverlayOutcome::Consumed };
+        let Some(fk) = &panes.fetch_keep else { return OverlayOutcome::Consumed };
+        let collision = state.overlays.fetch_keep.as_ref().is_some_and(|p| p.collision);
+        if fk.keep.is_some_and(|r| r.contains(pt)) {
+            let mode = if collision { app::story_url::KeepMode::Replace } else { app::story_url::KeepMode::KeepBoth };
+            return OverlayOutcome::Act(OverlayAct::FetchKeep(Some(mode)));
+        }
+        if fk.keep_both.is_some_and(|r| r.contains(pt)) {
+            return OverlayOutcome::Act(OverlayAct::FetchKeep(Some(app::story_url::KeepMode::KeepBoth)));
+        }
+        if fk.decline.is_some_and(|r| r.contains(pt)) || fk.close.is_some_and(|r| r.contains(pt)) {
+            return OverlayOutcome::Act(OverlayAct::FetchKeep(None));
         }
         OverlayOutcome::Consumed
     }
@@ -910,6 +979,99 @@ mod tests {
         assert_eq!(s.overlays.dialog_focus, 0, "two buttons, so it wraps");
     }
 
+    /// A pending keep-prompt for the tests below.
+    fn a_fetch_keep(collision: bool) -> app::state::FetchKeepPrompt {
+        app::state::FetchKeepPrompt {
+            fetched: app::story_url::FetchedStory {
+                url: "https://example.org/curses.z5".into(),
+                path: std::path::PathBuf::from("/tmp/lanthorn-fetch/curses.z5"),
+            },
+            library_dir: std::path::PathBuf::from("/home/p/stories"),
+            collision,
+        }
+    }
+
+    /// SQ-1086. The keep prompt must ask for a copy only on an affirmative, must
+    /// leave the prompt in place for the run loop's arm to consume (it carries
+    /// the destination), and must never make "replace" the answer Enter lands on
+    /// from an inherited focus of 0.
+    #[test]
+    fn the_fetch_keep_prompt_maps_focus_to_the_right_answer() {
+        use app::story_url::KeepMode;
+        let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+
+        // No collision: 0 keeps, 1 declines, Esc declines.
+        let mut s = AppState::default();
+        s.overlays.fetch_keep = Some(a_fetch_keep(false));
+        s.overlays.dialog_focus = 0;
+        let out = FetchKeepOverlay.key(&mut s, &key(KeyCode::Enter));
+        assert!(matches!(out, OverlayOutcome::Act(OverlayAct::FetchKeep(Some(KeepMode::KeepBoth)))));
+        assert!(s.overlays.fetch_keep.is_some(), "the run loop's arm takes it, not the overlay");
+
+        s.overlays.dialog_focus = 1;
+        let out = FetchKeepOverlay.key(&mut s, &key(KeyCode::Enter));
+        assert!(matches!(out, OverlayOutcome::Act(OverlayAct::FetchKeep(None))));
+
+        s.overlays.dialog_focus = 0;
+        let out = FetchKeepOverlay.key(&mut s, &key(KeyCode::Esc));
+        assert!(matches!(out, OverlayOutcome::Act(OverlayAct::FetchKeep(None))));
+
+        // Collision: focus 0 is the harmless keep, 1 replaces, 2 declines.
+        let mut s = AppState::default();
+        s.overlays.fetch_keep = Some(a_fetch_keep(true));
+        s.overlays.dialog_focus = 0;
+        let out = FetchKeepOverlay.key(&mut s, &key(KeyCode::Enter));
+        assert!(
+            matches!(out, OverlayOutcome::Act(OverlayAct::FetchKeep(Some(KeepMode::KeepBoth)))),
+            "an inherited focus of 0 must never mean `replace`"
+        );
+        s.overlays.dialog_focus = 1;
+        let out = FetchKeepOverlay.key(&mut s, &key(KeyCode::Enter));
+        assert!(matches!(out, OverlayOutcome::Act(OverlayAct::FetchKeep(Some(KeepMode::Replace)))));
+        s.overlays.dialog_focus = 2;
+        let out = FetchKeepOverlay.key(&mut s, &key(KeyCode::Enter));
+        assert!(matches!(out, OverlayOutcome::Act(OverlayAct::FetchKeep(None))));
+    }
+
+    /// The focus ring has as many stops as the button row has buttons — three
+    /// when the name collides, two otherwise.
+    #[test]
+    fn the_fetch_keep_focus_ring_matches_its_button_row() {
+        let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut s = AppState::default();
+        s.overlays.fetch_keep = Some(a_fetch_keep(false));
+        s.overlays.dialog_focus = 0;
+        FetchKeepOverlay.key(&mut s, &key(KeyCode::Tab));
+        assert_eq!(s.overlays.dialog_focus, 1);
+        FetchKeepOverlay.key(&mut s, &key(KeyCode::Tab));
+        assert_eq!(s.overlays.dialog_focus, 0, "two buttons, so it wraps");
+
+        s.overlays.fetch_keep = Some(a_fetch_keep(true));
+        FetchKeepOverlay.key(&mut s, &key(KeyCode::Tab));
+        FetchKeepOverlay.key(&mut s, &key(KeyCode::Tab));
+        assert_eq!(s.overlays.dialog_focus, 2, "three buttons when the name collides");
+        FetchKeepOverlay.key(&mut s, &key(KeyCode::Tab));
+        assert_eq!(s.overlays.dialog_focus, 0);
+        // Shift-Tab reverses it, per the standing convention.
+        FetchKeepOverlay.key(&mut s, &key(KeyCode::BackTab));
+        assert_eq!(s.overlays.dialog_focus, 2);
+    }
+
+    /// The keep prompt is raised by the app at boot, so it yields to the
+    /// resume-or-new-game question about the very session it belongs to — but it
+    /// still outranks the region prompt at the very bottom.
+    #[test]
+    fn the_fetch_keep_prompt_yields_to_the_launch_dialog() {
+        let mut o = OverlayState::default();
+        o.fetch_keep = Some(a_fetch_keep(false));
+        assert_eq!(topmost_common_dialog(&o).unwrap().kind(), OverlayKind::FetchKeep);
+        o.launch_dialog = true;
+        assert_eq!(topmost_common_dialog(&o).unwrap().kind(), OverlayKind::Launch);
+        o.launch_dialog = false;
+        o.region_prompt = Some(a_region_prompt());
+        assert_eq!(topmost_common_dialog(&o).unwrap().kind(), OverlayKind::FetchKeep);
+    }
+
     #[test]
     fn topmost_common_dialog_preserves_ladder_order() {
         // No overlay open → None.
@@ -933,6 +1095,7 @@ mod tests {
             (|o| o.confirm_delete_save = Some(std::path::PathBuf::from("s.sav")), OverlayKind::ConfirmDelete),
             (|o| o.quit_dialog = true, OverlayKind::Quit),
             (|o| o.launch_dialog = true, OverlayKind::Launch),
+            (|o| o.fetch_keep = Some(a_fetch_keep(false)), OverlayKind::FetchKeep),
         ];
         for (open, want) in cases {
             let mut o = OverlayState::default();
