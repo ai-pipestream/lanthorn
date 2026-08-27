@@ -812,10 +812,20 @@ const FORMATS: &[Format] = &[
     },
     Format {
         image: DiskImage::CommodoreG64,
-        // The ENCODING, because that is the only thing this row does not share
-        // with the one above it. "CBM" names the machine and would be equally
-        // true here, which is exactly why it would tell a picker nothing.
-        label: "GCR",
+        // **"CBM", the same label as the `.d64` row.** The picker's TYPE column
+        // names the MEDIUM, not the container it was dumped into, and every
+        // other family here already reads that way: "HFS" covers `.image`,
+        // `.dc42` and `.toast`; "ProDOS" covers `.2mg`, `.po` and `.dsk`. A
+        // Commodore pair that reported "CBM" beside "GCR" was the only place a
+        // library showed one 1541 floppy as two kinds of thing, which reads as a
+        // distinction the player has to account for and cannot act on (SQ-1095
+        // labelled it by encoding; the user reported the confusion).
+        //
+        // The encoding is not lost — `DiskImage::CommodoreG64` is still its own
+        // variant, so anything that needs to tell a bitstream dump from a sector
+        // dump still can. It is the one-word TYPE shown in a list that has no
+        // room for the difference and no use for it.
+        label: "CBM",
         // **7, the Commodore 128 — the same answer as the `.d64` row, and
         // deliberately not a fresh one.** §11.1.3's question is which machine
         // the interpreter runs on; a bitstream dump and a sector dump of the
@@ -2069,10 +2079,10 @@ mod tests {
                 DiskImage::CommodoreD64 => ("CBM", Some(COMMODORE_128_INTERPRETER_NUMBER)),
                 // …and the bitstream dump of the same floppy answers the same
                 // number, because §11.1.3 asks which MACHINE the interpreter
-                // runs on and a container cannot change that. Its label names
-                // the encoding, which is the only thing the two rows do not
-                // share (SQ-1095).
-                DiskImage::CommodoreG64 => ("GCR", Some(COMMODORE_128_INTERPRETER_NUMBER)),
+                // runs on and a container cannot change that. It carries the
+                // same LABEL for the same reason: the type a library shows is
+                // the medium, and both of these are a 1541 floppy.
+                DiskImage::CommodoreG64 => ("CBM", Some(COMMODORE_128_INTERPRETER_NUMBER)),
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
