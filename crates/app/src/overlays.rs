@@ -988,6 +988,7 @@ mod tests {
             },
             library_dir: std::path::PathBuf::from("/home/p/stories"),
             collision,
+            disk_images: Vec::new(),
         }
     }
 

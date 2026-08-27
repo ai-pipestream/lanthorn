@@ -105,6 +105,11 @@ pub enum FetchError {
     Unopenable(String),
     /// Nothing safe and nameable could be derived for the local file.
     NoFilename,
+    /// An archive entry named a path that would land outside the destination
+    /// directory (SQ-1096). Refused outright rather than trimmed: a zip that
+    /// tries to escape is not one lanthorn unpacks, and taking only its final
+    /// component would silently reward the attempt.
+    UnsafeEntry(String),
     /// A local filesystem error writing the download.
     Io(String),
 }
@@ -118,6 +123,10 @@ impl std::fmt::Display for FetchError {
             }
             FetchError::Unopenable(what) => write!(f, "{what}"),
             FetchError::NoFilename => write!(f, "no usable filename could be derived from the URL"),
+            FetchError::UnsafeEntry(name) => write!(
+                f,
+                "the archive entry '{name}' names a path outside your library, so nothing was unpacked"
+            ),
             FetchError::Io(e) => write!(f, "{e}"),
         }
     }
@@ -408,7 +417,192 @@ impl FetchedStory {
     }
 }
 
-/// Fetch `url` into `dir` and return the file the loader should be handed.
+/// What a fetch turned out to be (SQ-1096).
+///
+/// Two answers rather than one, because a download that lanthorn can *play* and
+/// a download that lanthorn can only *unpack* take different routes through the
+/// boot: the first is handed to the loader and booted, the second has to be
+/// offered to the player before anything else can happen at all. Making that an
+/// enum rather than a flag on [`FetchedStory`] is deliberate — a caller that
+/// ignored a flag would hand a zip of floppies to the engine as if it were a
+/// story, and the failure would be a long way from the cause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fetched {
+    /// A file the ordinary loader opens. Everything before SQ-1096 is this.
+    Story(FetchedStory),
+    /// A ZIP holding no story the loader can run, but one or more supported
+    /// release disk images.
+    DiskImages(FetchedArchive),
+}
+
+// ── A downloaded zip of disk images (SQ-1096) ────────────────────────────────
+//
+// A zip stays what SQ-1085 made it: a volume holding raw stories and their
+// resources, classified by CONTENT. It does not learn to mount media, and
+// `hints::extract_story` still knows exactly four kinds of story.
+//
+// What changes is the FETCH, which is a different question. Archive sites ship
+// C64, Amiga and Apple II floppies inside zips as a matter of course, so a
+// download that holds five `.dsk` files is the normal packaging of a multi-disk
+// release rather than an oddity — and the fetch is deciding what to UNPACK, not
+// what a file IS. Extension is the right signal for that question and carries
+// none of SQ-1085's tension (a `.d64` is raw sectors with no magic at all, so
+// there is no content answer to be had).
+//
+// **Only disk images come out.** Not a readme, not a cover scan, not a loose
+// `.z5` sitting beside them, not an installer. Three reasons, and they are why
+// the whitelist is the feature rather than a detail of it: the library directory
+// is scanned on every launch, so a stray file there is a row nobody asked for;
+// an arbitrary archive from an arbitrary URL is untrusted input, and "extract
+// everything" is how a dotfile or an executable lands in a directory lanthorn
+// reads; and the offer on screen says "keep this game in your library", not
+// "unpack this archive".
+
+/// One disk image inside a downloaded archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveImage {
+    /// The name the archive stores it under — possibly with directories, e.g.
+    /// `Journey/disks/journey_s1.dsk`.
+    pub entry: String,
+    /// What it lands in the library as: the final component only
+    /// ([`safe_basename`]).
+    ///
+    /// **Flattened, never recreated.** A multi-disk release whose images landed
+    /// in a subdirectory would not be found as siblings by
+    /// `cli_host::disk_set::mount_at`, which scans the directory the named image
+    /// sits in — so flattening is not tidiness, it is what makes a five-floppy
+    /// set mount as one release. It also means no directory is ever created,
+    /// which is one fewer way for an entry name to reach outside the library.
+    pub name: String,
+}
+
+/// A ZIP that came off the network holding disk images and no runnable story.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedArchive {
+    /// The address it was fetched from — the prompt shows it, for the same
+    /// reason [`FetchedStory`] carries one.
+    pub url: String,
+    /// The archive itself, in the download directory.
+    pub path: PathBuf,
+    /// The supported disk images inside it, in archive order. Never empty: an
+    /// archive with none of these is not a [`Fetched::DiskImages`] at all.
+    pub images: Vec<ArchiveImage>,
+}
+
+impl FetchedArchive {
+    /// The archive's own basename, for the prompt.
+    pub fn filename(&self) -> String {
+        self.path.file_name().and_then(|n| n.to_str()).unwrap_or("download.zip").to_string()
+    }
+
+    /// The names the images would carry in the library, in archive order.
+    pub fn names(&self) -> Vec<String> {
+        self.images.iter().map(|i| i.name.clone()).collect()
+    }
+}
+
+/// Does `name` end in an extension `blorb::medium` claims as a release disk
+/// image?
+///
+/// Asked of the stored ENTRY NAME, which is the whole point: `blorb::medium`
+/// enumerates every spelling lanthorn mounts, so this cannot drift from what
+/// opening the same file loose would do. Case-insensitive, because archives are
+/// written on every platform there is (`TRINITY1.D64` is how it ships).
+pub fn is_disk_image_name(name: &str) -> bool {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    match base.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => {
+            blorb::medium::image_extensions().any(|e| e.eq_ignore_ascii_case(ext))
+        }
+        _ => false,
+    }
+}
+
+/// Would writing `entry` reach outside the directory it is unpacked into?
+///
+/// An absolute name, a drive-qualified one, or any `..` component under either
+/// separator. Only ever asked of an entry lanthorn is about to WRITE — the rest
+/// of the archive is never touched, so its names cannot matter.
+fn escapes_destination(entry: &str) -> bool {
+    entry.starts_with('/')
+        || entry.starts_with('\\')
+        || entry.as_bytes().get(1) == Some(&b':')
+        || entry.split(['/', '\\']).any(|c| c == "..")
+}
+
+/// The supported disk images inside the ZIP at `path`, in archive order.
+///
+/// Empty when it holds none. [`FetchError::UnsafeEntry`] when one of them names
+/// a path that would escape the destination — the whole archive is refused, not
+/// the one entry, because an archive that tries it has told us what it is.
+pub fn zip_disk_images(path: &Path) -> Result<Vec<ArchiveImage>, FetchError> {
+    let names = crate::hints::zip_entry_names(path).map_err(|e| FetchError::Io(e.to_string()))?;
+    let mut out = Vec::new();
+    for entry in names {
+        if !is_disk_image_name(&entry) {
+            continue;
+        }
+        if escapes_destination(&entry) {
+            return Err(FetchError::UnsafeEntry(entry));
+        }
+        match safe_basename(&entry) {
+            Some(name) if is_disk_image_name(&name) => out.push(ArchiveImage { entry, name }),
+            _ => return Err(FetchError::UnsafeEntry(entry)),
+        }
+    }
+    Ok(out)
+}
+
+/// Unpack every disk image in `archive` into `library_dir`, and answer where
+/// each landed, sorted by name.
+///
+/// `mode` answers a collision with a file the library ALREADY held, exactly as
+/// it does for a single kept story. A collision between two entries of the SAME
+/// archive (`side_a/disk1.d64` and `side_b/disk1.d64` both flatten to
+/// `disk1.d64`) is never a replace: the second lands beside the first under
+/// `unique_dest`'s `-2` name, because whatever the player answered about their
+/// own library, they cannot have meant "overwrite the file I am unpacking with
+/// the next one out of the same zip".
+pub fn unpack_disk_images(
+    archive: &FetchedArchive,
+    library_dir: &Path,
+    mode: KeepMode,
+) -> Result<Vec<PathBuf>, FetchError> {
+    std::fs::create_dir_all(library_dir).map_err(|e| FetchError::Io(e.to_string()))?;
+    let mut written: Vec<PathBuf> = Vec::new();
+    for image in &archive.images {
+        // Re-asked at the write, not trusted from the scan: the value that
+        // decides where bytes land must be checked where the bytes land.
+        if escapes_destination(&image.entry) || safe_basename(&image.name).as_deref() != Some(image.name.as_str()) {
+            return Err(FetchError::UnsafeEntry(image.entry.clone()));
+        }
+        let plain = library_dir.join(&image.name);
+        let dest = match mode {
+            KeepMode::Replace if !written.contains(&plain) => plain,
+            _ => unique_dest(library_dir, &image.name),
+        };
+        // Belt and braces over `safe_basename`, the same guard `keep_in_library`
+        // applies: the destination must be a direct child of the library.
+        if dest.parent() != Some(library_dir) {
+            return Err(FetchError::UnsafeEntry(image.entry.clone()));
+        }
+        let want = image.entry.clone();
+        let bytes = crate::hints::read_zip_entry(&archive.path, |n| n == want)
+            .map_err(|e| FetchError::Io(e.to_string()))?
+            .ok_or_else(|| FetchError::UnsafeEntry(image.entry.clone()))?;
+        std::fs::write(&dest, &bytes).map_err(|e| FetchError::Io(e.to_string()))?;
+        written.push(dest);
+    }
+    written.sort();
+    Ok(written)
+}
+
+/// Do any of `archive`'s images already have a namesake in `library_dir`?
+pub fn archive_collision(archive: &FetchedArchive, library_dir: &Path) -> bool {
+    archive.images.iter().any(|i| library_dir.join(&i.name).exists())
+}
+
+/// Fetch `url` into `dir` and return what arrived.
 ///
 /// The whole of the "is this a story?" question is answered twice, on purpose:
 /// once over the bytes before anything is written ([`content_extension`]), so a
@@ -416,7 +610,14 @@ impl FetchedStory {
 /// loader, so a zip with no story entry or a disk image with no boot file fails
 /// with the loader's own words rather than ours. A file that fails the second
 /// check is removed.
-pub fn fetch_to_dir(src: &dyn UrlSource, url: &str, dir: &Path) -> Result<FetchedStory, FetchError> {
+///
+/// **The loader is asked FIRST, and that is what settles a zip holding both a
+/// story and disk images** (SQ-1096): the story wins, because it is the thing
+/// lanthorn can actually run, and the decision is the loader's own rather than
+/// whichever entry the archive happened to store first. Only when the loader has
+/// nothing at all is the archive asked whether it is a set of floppies, and only
+/// then is the download kept for the prompt to offer.
+pub fn fetch_to_dir(src: &dyn UrlSource, url: &str, dir: &Path) -> Result<Fetched, FetchError> {
     let payload = src.get(url)?;
     let name = match local_filename(payload.disposition.as_deref(), url, &payload.bytes) {
         Some(n) => n,
@@ -426,13 +627,32 @@ pub fn fetch_to_dir(src: &dyn UrlSource, url: &str, dir: &Path) -> Result<Fetche
     let dest = unique_dest(dir, &name);
     std::fs::write(&dest, &payload.bytes).map_err(|e| FetchError::Io(e.to_string()))?;
     if let Err(e) = crate::hints::load_mounted_story(&dest) {
+        if crate::hints::is_zip(&dest) {
+            match zip_disk_images(&dest) {
+                Ok(images) if !images.is_empty() => {
+                    return Ok(Fetched::DiskImages(FetchedArchive {
+                        url: url.to_string(),
+                        path: dest,
+                        images,
+                    }));
+                }
+                // A hostile entry name is the archive's answer about itself, and
+                // it outranks the loader's "no story here": say THAT, and leave
+                // nothing on disk.
+                Err(unsafe_entry @ FetchError::UnsafeEntry(_)) => {
+                    let _ = std::fs::remove_file(&dest);
+                    return Err(unsafe_entry);
+                }
+                _ => {}
+            }
+        }
         let _ = std::fs::remove_file(&dest);
         return Err(FetchError::Unopenable(format!(
             "{} — {e}",
             describe_payload(&payload.bytes)
         )));
     }
-    Ok(FetchedStory { url: url.to_string(), path: dest })
+    Ok(Fetched::Story(FetchedStory { url: url.to_string(), path: dest }))
 }
 
 /// Where a fetch lands when nobody has yet said to keep it. Stable rather than
@@ -529,9 +749,25 @@ impl UrlDownloader {
         let tx = self.tx.clone();
         thread::spawn(move || {
             let src = HttpSource::new();
-            let outcome = fetch_to_dir(&src, &url, &dir)
-                .map(|f| f.path)
-                .map_err(|e| e.to_string());
+            let outcome = match fetch_to_dir(&src, &url, &dir) {
+                Ok(Fetched::Story(f)) => Ok(f.path),
+                // SQ-1096: the picker's URL box downloads STRAIGHT INTO the
+                // library and has no prompt in front of it, so it is not the
+                // surface that unpacks an archive — it says what the archive
+                // holds and leaves nothing behind. Launching lanthorn with the
+                // URL is the route that offers to unpack it.
+                Ok(Fetched::DiskImages(a)) => {
+                    let n = a.images.len();
+                    let _ = std::fs::remove_file(&a.path);
+                    Err(format!(
+                        "this download holds {n} disk image{} and no story; lanthorn does not run \
+                         disk images from inside a zip — launch `lanthorn <url>` to unpack them \
+                         into your library",
+                        if n == 1 { "" } else { "s" },
+                    ))
+                }
+                Err(e) => Err(e.to_string()),
+            };
             let _ = tx.send(UrlDlResult { url, outcome });
         });
     }
@@ -583,6 +819,14 @@ mod tests {
     impl UrlSource for Dead {
         fn get(&self, _url: &str) -> Result<Payload, FetchError> {
             Err(FetchError::Transport("404 Not Found".into()))
+        }
+    }
+
+    /// Unwrap a fetch that must be a runnable story (SQ-1096).
+    fn only_story(got: Fetched) -> FetchedStory {
+        match got {
+            Fetched::Story(s) => s,
+            Fetched::DiskImages(a) => panic!("expected a story, got {} disk images", a.images.len()),
         }
     }
 
@@ -707,11 +951,54 @@ mod tests {
         assert_eq!(local_filename(None, "https://x.org/curses.z5", b"<html>404</html>"), None);
     }
 
+    // ── SQ-1096: recognising an archive of floppies ──────────────────────────
+
+    /// Every way an entry name can try to leave the directory it is unpacked
+    /// into. Refused OUTRIGHT — the archive, not just the entry — because
+    /// trimming to the final component silently rewards the attempt.
+    #[test]
+    fn every_shape_of_traversal_is_refused() {
+        for hostile in [
+            "../evil.d64",
+            "../../../etc/evil.d64",
+            "a/../../evil.d64",
+            "..\\evil.d64",
+            "/etc/evil.d64",
+            "\\windows\\evil.d64",
+            "C:\\windows\\evil.d64",
+        ] {
+            assert!(escapes_destination(hostile), "{hostile} must be refused");
+        }
+        for ok in ["disk1.d64", "Journey/disks/journey_s1.dsk", "a/b/c/side.adf", "..hidden.d64"] {
+            assert!(!escapes_destination(ok), "{ok} is an ordinary name");
+        }
+    }
+
+    /// A `..` inside a name is a component test, not a substring test — a file
+    /// genuinely called `Zork.. Solid Gold.d64` is not an attack.
+    #[test]
+    fn a_dotdot_inside_a_component_is_not_traversal() {
+        assert!(!escapes_destination("Zork.. Solid Gold.d64"));
+        assert!(escapes_destination("Zork/../../gold.d64"));
+    }
+
+    /// The whitelist, spelled out: only what `blorb::medium` claims.
+    #[test]
+    fn only_medium_spellings_are_disk_images() {
+        assert!(is_disk_image_name("TRINITY1.D64"));
+        assert!(is_disk_image_name("Journey/disks/journey_s1.dsk"));
+        assert!(!is_disk_image_name("readme.txt"));
+        assert!(!is_disk_image_name("curses.z5"));
+        assert!(!is_disk_image_name("bundle.zip"));
+        assert!(!is_disk_image_name("d64"), "an extension is not a filename");
+        assert!(!is_disk_image_name(".d64"), "…and a bare dotfile has no stem");
+    }
+
     #[test]
     fn fetch_writes_a_story_and_hands_back_a_path_the_loader_opens() {
         let dir = tmp("ok");
         let src = Canned { payload: zcode_v5(), disposition: None };
-        let got = fetch_to_dir(&src, "https://x.org/curses.z5", &dir).expect("fetch");
+        let got = only_story(fetch_to_dir(&src, "https://x.org/curses.z5", &dir).expect("fetch"));
         assert_eq!(got.path, dir.join("curses.z5"));
         assert_eq!(got.url, "https://x.org/curses.z5");
         assert_eq!(std::fs::read(&got.path).unwrap(), zcode_v5());
@@ -724,8 +1011,8 @@ mod tests {
     fn a_second_fetch_of_the_same_name_never_clobbers_the_first() {
         let dir = tmp("dup");
         let src = Canned { payload: zcode_v5(), disposition: None };
-        let a = fetch_to_dir(&src, "https://x.org/curses.z5", &dir).unwrap();
-        let b = fetch_to_dir(&src, "https://x.org/curses.z5", &dir).unwrap();
+        let a = only_story(fetch_to_dir(&src, "https://x.org/curses.z5", &dir).unwrap());
+        let b = only_story(fetch_to_dir(&src, "https://x.org/curses.z5", &dir).unwrap());
         assert_eq!(a.path, dir.join("curses.z5"));
         assert_eq!(b.path, dir.join("curses-2.z5"));
         let _ = std::fs::remove_dir_all(&dir);

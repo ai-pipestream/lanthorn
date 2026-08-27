@@ -16,7 +16,8 @@
 use std::path::{Path, PathBuf};
 
 use app::story_url::{
-    fetch_to_dir, keep_in_library, FetchError, KeepMode, Payload, UrlSource,
+    fetch_to_dir, keep_in_library, ArchiveImage, Fetched, FetchedArchive, FetchError, KeepMode,
+    Payload, UrlSource,
 };
 
 // ── Harness ──────────────────────────────────────────────────────────────────
@@ -34,6 +35,26 @@ impl UrlSource for Canned {
 
 fn canned(bytes: Vec<u8>) -> Canned {
     Canned { bytes, disposition: None }
+}
+
+/// Unwrap a fetch that must be a runnable story (SQ-1096). Every case that goes
+/// on to say `.path` is also asserting THIS — that the download was something
+/// the loader opens, not an archive lanthorn can only unpack.
+fn story(got: Fetched) -> app::story_url::FetchedStory {
+    match got {
+        Fetched::Story(s) => s,
+        Fetched::DiskImages(a) => {
+            panic!("expected a story; got an archive of {} disk images", a.images.len())
+        }
+    }
+}
+
+/// …and the mirror image: a fetch that must be an archive of floppies.
+fn archive(got: Fetched) -> FetchedArchive {
+    match got {
+        Fetched::DiskImages(a) => a,
+        Fetched::Story(s) => panic!("expected an archive of disk images; got {}", s.filename()),
+    }
 }
 
 /// A fresh scratch directory, named for the case so parallel cases cannot meet.
@@ -95,6 +116,7 @@ fn a_fetched_z_code_image_opens_through_the_ordinary_loader() {
     let dir = scratch("zcode");
     let got = fetch_to_dir(&canned(zcode_v5()), "https://example.org/if/curses.z5", &dir)
         .expect("a coherent v5 image is fetchable");
+    let got = story(got);
     assert_eq!(got.path, dir.join("curses.z5"));
     assert!(
         matches!(app::hints::load_mounted_story(&got.path), Ok((app::hints::LoadedStory::ZCode(_), None))),
@@ -110,6 +132,7 @@ fn a_fetched_glulx_image_opens_through_the_ordinary_loader() {
     glulx.extend_from_slice(&[0u8; 60]);
     let got = fetch_to_dir(&canned(glulx), "https://example.org/if/kerkerkruip.ulx", &dir)
         .expect("a Glulx image is fetchable");
+    let got = story(got);
     assert!(matches!(
         app::hints::load_mounted_story(&got.path),
         Ok((app::hints::LoadedStory::Glulx(_), None))
@@ -125,6 +148,7 @@ fn a_fetched_zip_is_unwrapped_by_the_loader_not_by_the_fetch() {
     let dir = scratch("zip");
     let got = fetch_to_dir(&canned(zip_of_a_story()), "https://example.org/if/curses.zip", &dir)
         .expect("a zip holding a story is fetchable");
+    let got = story(got);
     assert_eq!(got.path.extension().unwrap(), "zip", "the archive keeps its own name");
     assert!(matches!(
         app::hints::load_mounted_story(&got.path),
@@ -141,6 +165,7 @@ fn an_extensionless_download_url_still_lands_openable() {
     let dir = scratch("noext");
     let got = fetch_to_dir(&canned(zcode_v5()), "https://example.org/download.php?id=7", &dir)
         .expect("fetchable");
+    let got = story(got);
     assert_eq!(got.path, dir.join("download.php.z5"));
     assert!(app::hints::load_mounted_story(&got.path).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
@@ -180,6 +205,7 @@ fn keeping_a_fetched_story_puts_it_where_the_picker_will_find_it() {
 
     let got = fetch_to_dir(&canned(zcode_v5()), "https://example.org/if/curses.z5", &temp)
         .expect("fetchable");
+    let got = story(got);
     let kept = keep_in_library(&got.path, &library, KeepMode::KeepBoth).expect("kept");
     assert_eq!(kept, library.join("curses.z5"));
     assert!(got.path.exists(), "the running game's own file survives the copy");
@@ -203,6 +229,7 @@ fn declining_leaves_the_library_exactly_as_it_was() {
 
     let got = fetch_to_dir(&canned(zcode_v5()), "https://example.org/if/curses.z5", &temp)
         .expect("fetchable");
+    let got = story(got);
     // No `keep_in_library` call is what "declined" means.
     assert!(app::picker::scan_stories(&library, &data_base).is_empty());
     assert!(got.path.exists(), "and it still plays from where it landed");
@@ -299,6 +326,7 @@ fn real_media_of_every_format_present_survives_a_round_trip_through_the_fetch() 
         let url = format!("https://example.org/if/{name}");
         let got = fetch_to_dir(&canned(bytes), &url, &dir)
             .unwrap_or_else(|e| panic!("{ext}: {} did not survive a fetch: {e}", path.display()));
+        let got = story(got);
         assert!(
             app::hints::load_mounted_story(&got.path).is_ok(),
             "{ext}: fetched {} does not open, though the original does",
@@ -382,6 +410,7 @@ fn a_kept_zip_is_visible_to_the_picker() {
 
     let got = fetch_to_dir(&canned(zip_of_a_story()), "https://example.org/if/curses.zip", &temp)
         .expect("a zip holding a story is fetchable");
+    let got = story(got);
     let kept = keep_in_library(&got.path, &library, KeepMode::KeepBoth).expect("kept");
     assert_eq!(kept.extension().unwrap(), "zip");
 
@@ -476,5 +505,407 @@ fn a_loose_hint_file_still_outranks_an_archived_one() {
 
     for d in [library, data_base] {
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+// ── SQ-1096: a downloaded zip of release disk images ─────────────────────────
+//
+// The measured symptom: `TRINITY1.D64` and `Arthur - The Quest for
+// Excalibur.adf` both boot loose and were both refused inside a zip, with
+//
+//     no story file inside the zip …/trin.zip (1 entry read; none is a Blorb,
+//     a Z-machine story, a Glulx image or a Scott Adams database)
+//
+// which is accurate and useless: the zip classifier knows four kinds of story
+// and no media at all. The loader is unchanged — a zip is still a volume of raw
+// stories classified by CONTENT. What changed is the FETCH, which now recognises
+// an archive of floppies by extension and offers to unpack it.
+//
+// The synthetic cases below carry junk inside disk-image NAMES on purpose: the
+// whole claim is that the fetch classifies by extension here, so a case that
+// leaned on real sectors would be testing the mount instead. The two commercial
+// specimens get their own case and skip vacuously.
+
+/// A real ZIP with the given (stored name, bytes) entries, stored uncompressed.
+fn zip_of(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        for (name, bytes) in entries {
+            zip.start_file(
+                *name,
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .expect("zip entry");
+            zip.write_all(bytes).expect("zip write");
+        }
+        zip.finish().expect("zip finish");
+    }
+    buf.into_inner()
+}
+
+/// Bytes that are emphatically not a story of any of the four kinds — so that
+/// the only thing that can classify an entry carrying them is its NAME.
+fn not_a_story(tag: u8) -> Vec<u8> {
+    let mut v = vec![0xE5u8; 4096];
+    v[0] = tag;
+    v
+}
+
+/// The measured symptom, and the fix for it: a zip whose only entry is a disk
+/// image is no longer "no story file inside the zip" — it is an archive the
+/// fetch recognises and hands on to be unpacked.
+#[test]
+fn a_zip_of_one_disk_image_is_recognised_rather_than_refused() {
+    let dir = scratch("sq1096-one");
+    let payload = zip_of(&[("TRINITY1.D64", not_a_story(1))]);
+    let got = archive(
+        fetch_to_dir(&canned(payload), "https://example.org/if/trin.zip", &dir)
+            .expect("an archive of floppies is fetchable"),
+    );
+    assert_eq!(got.names(), vec!["TRINITY1.D64".to_string()], "the image is found by extension");
+    assert!(got.path.exists(), "the archive is kept until the prompt is answered");
+    assert_eq!(got.path.extension().unwrap(), "zip");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A multi-disk release is the NORMAL shape of a zipped disk image, not the
+/// exception — and all of it comes out, flattened, because `disk_set::mount_at`
+/// finds an image's siblings in the directory it sits in. Images left in
+/// `Journey/disks/` would be a five-floppy release that mounts as one floppy.
+#[test]
+fn a_multi_disk_release_unpacks_whole_and_flattened() {
+    let dir = scratch("sq1096-many-dl");
+    let library = scratch("sq1096-many-lib");
+    let entries: Vec<(&str, Vec<u8>)> = vec![
+        ("Journey/disks/journey_s3.dsk", not_a_story(3)),
+        ("Journey/disks/journey_s1.dsk", not_a_story(1)),
+        ("Journey/disks/journey_s2.dsk", not_a_story(2)),
+        ("Journey/disks/journey_s4.dsk", not_a_story(4)),
+        ("Journey/disks/journey_s5.dsk", not_a_story(5)),
+    ];
+    let got = archive(
+        fetch_to_dir(&canned(zip_of(&entries)), "https://example.org/if/journey.zip", &dir)
+            .expect("fetchable"),
+    );
+    assert_eq!(got.images.len(), 5, "every volume of the release is found");
+
+    let written = app::story_url::unpack_disk_images(&got, &library, KeepMode::KeepBoth)
+        .expect("unpacked");
+    assert_eq!(written.len(), 5);
+    let mut names: Vec<String> =
+        written.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["journey_s1.dsk", "journey_s2.dsk", "journey_s3.dsk", "journey_s4.dsk", "journey_s5.dsk"],
+        "flattened to basenames, so the five are siblings"
+    );
+    for p in &written {
+        assert_eq!(p.parent(), Some(library.as_path()), "every image is a direct child");
+    }
+    assert!(!library.join("Journey").exists(), "no directory from the archive is recreated");
+    // The one that would be launched is the first BY NAME, which for a release
+    // named in reading order is disk 1 — and the rest are found beside it.
+    assert_eq!(written[0].file_name().unwrap(), "journey_s1.dsk");
+    // Contents, not just names: entry order is not name order above, so this
+    // would catch a mapping that unpacked the right count under wrong names.
+    assert_eq!(std::fs::read(&written[0]).unwrap()[0], 1);
+    assert_eq!(std::fs::read(&written[4]).unwrap()[0], 5);
+
+    for d in [dir, library] {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// **The whitelist is the feature.** An arbitrary archive from an arbitrary URL
+/// is untrusted input, the library directory is scanned on every launch, and the
+/// offer on screen says "keep this game", not "unpack this archive". So exactly
+/// the supported disk images come out and nothing else does — no readme, no
+/// cover scan, no manual, no nested directory, and not even a file whose name
+/// says `.z5`.
+#[test]
+fn only_supported_disk_images_are_extracted_and_nothing_else_is() {
+    let dir = scratch("sq1096-junk-dl");
+    let library = scratch("sq1096-junk-lib");
+    let entries: Vec<(&str, Vec<u8>)> = vec![
+        ("readme.txt", b"Scanned by somebody, 1994.\n".to_vec()),
+        ("disk1.d64", not_a_story(1)),
+        ("art/cover.png", not_a_story(0x89)),
+        ("disk2.d64", not_a_story(2)),
+        ("docs/manual.pdf", not_a_story(0x25)),
+        ("bonus.z5", not_a_story(5)),
+        ("INSTALL.EXE", not_a_story(0x4D)),
+        ("notes.nfo", b"...".to_vec()),
+    ];
+    let got = archive(
+        fetch_to_dir(&canned(zip_of(&entries)), "https://example.org/if/bundle.zip", &dir)
+            .expect("fetchable"),
+    );
+    assert_eq!(
+        got.names(),
+        vec!["disk1.d64".to_string(), "disk2.d64".to_string()],
+        "the count the player is told is the count that will be written"
+    );
+
+    let written = app::story_url::unpack_disk_images(&got, &library, KeepMode::KeepBoth)
+        .expect("unpacked");
+    assert_eq!(written.len(), 2);
+    let mut got_names: Vec<String> = std::fs::read_dir(&library)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    got_names.sort();
+    assert_eq!(
+        got_names,
+        vec!["disk1.d64", "disk2.d64"],
+        "the library holds the two images and NOTHING else out of that archive"
+    );
+
+    for d in [dir, library] {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// A zip holding both a story the loader can run and some disk images is the
+/// STORY's — decided by asking the loader first, so it is never entry order that
+/// settles it.
+#[test]
+fn a_story_inside_the_zip_wins_over_the_disk_images_beside_it() {
+    let dir = scratch("sq1096-both");
+    let entries: Vec<(&str, Vec<u8>)> = vec![
+        ("disks/side_a.d64", not_a_story(1)),
+        ("curses.z5", zcode_v5()),
+        ("disks/side_b.d64", not_a_story(2)),
+    ];
+    let got = story(
+        fetch_to_dir(&canned(zip_of(&entries)), "https://example.org/if/curses.zip", &dir)
+            .expect("fetchable"),
+    );
+    assert!(
+        matches!(
+            app::hints::load_mounted_story(&got.path),
+            Ok((app::hints::LoadedStory::ZCode(_), None))
+        ),
+        "the loader's own answer, not the archive's entry order"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Nothing may be written outside the library. A name that climbs out is refused
+/// OUTRIGHT — the whole archive, not the one entry — rather than trimmed to its
+/// final component, because an archive that tries it has said what it is.
+#[test]
+fn an_entry_that_climbs_out_of_the_library_is_refused_outright() {
+    let dir = scratch("sq1096-climb");
+    let entries: Vec<(&str, Vec<u8>)> =
+        vec![("good.d64", not_a_story(1)), ("../../../evil.d64", not_a_story(2))];
+    let err = fetch_to_dir(&canned(zip_of(&entries)), "https://example.org/if/x.zip", &dir)
+        .expect_err("a traversal name is refused");
+    assert!(matches!(err, FetchError::UnsafeEntry(_)), "refused as unsafe, not as unopenable: {err}");
+    assert!(err.to_string().contains("evil.d64"), "the offending entry is named: {err}");
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "and the download itself is not left lying about"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Declining writes nothing. Recognition is a read of the archive and no more —
+/// the library is untouched until `unpack_disk_images` is called, which is what
+/// answering "yes" does.
+#[test]
+fn recognising_an_archive_writes_nothing_into_the_library() {
+    let dir = scratch("sq1096-decline-dl");
+    let library = scratch("sq1096-decline-lib");
+    let payload = zip_of(&[("disk1.d64", not_a_story(1)), ("disk2.d64", not_a_story(2))]);
+    let got = archive(
+        fetch_to_dir(&canned(payload), "https://example.org/if/x.zip", &dir).expect("fetchable"),
+    );
+    assert_eq!(got.images.len(), 2);
+    assert_eq!(std::fs::read_dir(&library).unwrap().count(), 0, "nothing kept without an answer");
+    assert!(!app::story_url::archive_collision(&got, &library), "and nothing to collide with");
+
+    for d in [dir, library] {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// The collision the prompt's third button exists for, on a set: a name the
+/// library already holds is either replaced or kept beside, never silently
+/// clobbered and never silently renamed.
+#[test]
+fn a_name_the_library_already_holds_is_replaced_or_kept_beside() {
+    let dir = scratch("sq1096-coll-dl");
+    let library = scratch("sq1096-coll-lib");
+    std::fs::write(library.join("disk1.d64"), b"the file the player already had").unwrap();
+
+    let payload = zip_of(&[("disk1.d64", not_a_story(1)), ("disk2.d64", not_a_story(2))]);
+    let got = archive(
+        fetch_to_dir(&canned(payload), "https://example.org/if/x.zip", &dir).expect("fetchable"),
+    );
+    assert!(app::story_url::archive_collision(&got, &library), "the prompt is told to say so");
+
+    let kept = app::story_url::unpack_disk_images(&got, &library, KeepMode::KeepBoth)
+        .expect("unpacked");
+    assert!(kept.contains(&library.join("disk1-2.d64")), "kept beside: {kept:?}");
+    assert_eq!(
+        std::fs::read(library.join("disk1.d64")).unwrap(),
+        b"the file the player already had",
+        "keeping both leaves the player's own file alone"
+    );
+
+    let replaced = app::story_url::unpack_disk_images(&got, &library, KeepMode::Replace)
+        .expect("unpacked");
+    assert!(replaced.contains(&library.join("disk1.d64")));
+    assert_eq!(std::fs::read(library.join("disk1.d64")).unwrap()[0], 1, "now the archive's copy");
+
+    for d in [dir, library] {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// Two entries that flatten onto one name are NOT a replace, whatever the player
+/// answered about their own library: nothing in "replace the file I already had"
+/// means "overwrite the disk you just unpacked with the next one out of the same
+/// zip".
+#[test]
+fn two_entries_that_flatten_onto_one_name_land_side_by_side() {
+    let dir = scratch("sq1096-flat-dl");
+    let library = scratch("sq1096-flat-lib");
+    let payload =
+        zip_of(&[("side_a/disk1.d64", not_a_story(1)), ("side_b/disk1.d64", not_a_story(2))]);
+    let got = archive(
+        fetch_to_dir(&canned(payload), "https://example.org/if/x.zip", &dir).expect("fetchable"),
+    );
+    let written = app::story_url::unpack_disk_images(&got, &library, KeepMode::Replace)
+        .expect("unpacked");
+    assert_eq!(written.len(), 2, "both survive: {written:?}");
+    assert_eq!(std::fs::read(library.join("disk1.d64")).unwrap()[0], 1);
+    assert_eq!(std::fs::read(library.join("disk1-2.d64")).unwrap()[0], 2);
+
+    for d in [dir, library] {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// The two specimens that reproduced the bug, zipped and put back through the
+/// whole chain: URL → zip → unpack → library → mount → story. Skips vacuously
+/// without `stories/` (gitignored; CI has none).
+///
+/// **Trinity is a RELEASE, not a platter, and this case is where that stops
+/// being a slogan.** `TRINITY1.D64` on its own answers *"no story file on the
+/// disk image (0 files on TRINITY; is this the boot disk?)"* — measured here —
+/// and mounts only with `TRINITY2.D64` beside it, because `disk_set::mount_at`
+/// scans the directory the named image sits in. So "unpack all of them" is not a
+/// convenience: unpack one volume of this release and the game does not run.
+/// It is also why the images are flattened, since a set in a subdirectory is not
+/// a set of siblings.
+#[test]
+fn the_commercial_specimens_survive_the_whole_chain() {
+    let Some(stories) = stories_dir() else {
+        eprintln!("skip: no stories/ directory");
+        return;
+    };
+    // (label, the whole release, the volume the launch should reach for)
+    let specimens: [(&str, &[&str], &str); 2] = [
+        ("Trinity (C64)", &["TRINITY1.D64", "TRINITY2.D64"], "TRINITY1.D64"),
+        (
+            "Arthur (Amiga)",
+            &["Arthur - The Quest for Excalibur.adf"],
+            "Arthur - The Quest for Excalibur.adf",
+        ),
+    ];
+    let mut ran = 0usize;
+    for (label, volumes, boot) in specimens {
+        let mut entries: Vec<(&str, Vec<u8>)> = Vec::new();
+        for v in volumes {
+            let Ok(bytes) = std::fs::read(stories.join(v)) else { break };
+            entries.push((v, bytes));
+        }
+        if entries.len() != volumes.len() {
+            eprintln!("skip {label}: not every volume is present");
+            continue;
+        }
+        let dir = scratch(&format!("sq1096-real{ran}-dl"));
+        let library = scratch(&format!("sq1096-real{ran}-lib"));
+        let got = archive(
+            fetch_to_dir(&canned(zip_of(&entries)), "https://example.org/if/press.zip", &dir)
+                .unwrap_or_else(|e| panic!("{label}: zipped and refused: {e}")),
+        );
+        assert_eq!(got.names().len(), volumes.len(), "{label}: every volume is recognised");
+        let written = app::story_url::unpack_disk_images(&got, &library, KeepMode::KeepBoth)
+            .expect("unpacked");
+        assert_eq!(written.len(), volumes.len());
+        assert_eq!(
+            written[0],
+            library.join(boot),
+            "{label}: the volume the launch reaches for is the first BY NAME"
+        );
+        assert!(
+            app::hints::load_mounted_story(&written[0]).is_ok(),
+            "{label}: unpacked out of the zip, the release mounts as it does loose"
+        );
+        eprintln!("  {label}: {} volume(s) zipped, unpacked, mounted", volumes.len());
+        ran += 1;
+        for d in [dir, library] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+    if ran == 0 {
+        eprintln!("skip: no specimen present");
+    }
+}
+
+/// The half of the Trinity measurement the case above rests on, stated on its
+/// own so a future reader does not have to take it on trust: one volume of a
+/// two-disk release does not mount alone. Skips vacuously.
+#[test]
+fn one_volume_of_a_release_does_not_mount_without_its_sibling() {
+    let Some(stories) = stories_dir() else {
+        eprintln!("skip: no stories/ directory");
+        return;
+    };
+    let (Ok(one), Ok(two)) = (
+        std::fs::read(stories.join("TRINITY1.D64")),
+        std::fs::read(stories.join("TRINITY2.D64")),
+    ) else {
+        eprintln!("skip: Trinity's two D64s are not both present");
+        return;
+    };
+    let library = scratch("sq1096-siblings");
+    let solo = library.join("TRINITY1.D64");
+    std::fs::write(&solo, &one).unwrap();
+    let err = app::hints::load_mounted_story(&solo)
+        .expect_err("side 1 alone carries no story — this is the premise of the case above");
+    assert!(err.to_string().contains("is this the boot disk?"), "{err}");
+    std::fs::write(library.join("TRINITY2.D64"), &two).unwrap();
+    assert!(
+        app::hints::load_mounted_story(&solo).is_ok(),
+        "…and mounts the moment its sibling is beside it"
+    );
+    let _ = std::fs::remove_dir_all(&library);
+}
+
+/// The names are `blorb::medium`'s, not a list written here — so a format the
+/// mount learns to read is one the fetch unpacks, with no second table to update.
+#[test]
+fn the_recognised_spellings_are_the_mediums_own() {
+    for ext in ["d64", "adf", "dsk", "po", "img", "2mg", "iso", "st"] {
+        assert!(
+            blorb::medium::image_extensions().any(|e| e == ext),
+            "{ext} is expected to be a supported image"
+        );
+        assert!(app::story_url::is_disk_image_name(&format!("release.{ext}")));
+        assert!(
+            app::story_url::is_disk_image_name(&format!("RELEASE.{}", ext.to_uppercase())),
+            "archives are written on every platform there is"
+        );
+    }
+    for name in ["readme.txt", "cover.png", "manual.pdf", "curses.z5", "game.zip", "noext", ".d64"] {
+        assert!(!app::story_url::is_disk_image_name(name), "{name} must not be extracted");
     }
 }

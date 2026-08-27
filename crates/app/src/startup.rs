@@ -149,8 +149,17 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     // Asked of the ARGUMENT only, never of the resolved path: a bare `lanthorn`
     // falls back to `default_story_dir`, and re-fetching a config value on every
     // launch is not a thing this should be able to do.
+    //
+    // SQ-1096 inverts that order for ONE case. A download that is a zip of
+    // release disk images holds nothing the loader can run, so it cannot be
+    // booted and then offered — the offer has to come first, and what the player
+    // answers decides whether there is anything to launch at all. See
+    // [`unpack_fetched_archive`].
     let (story_path, fetched) = match cli.story.as_deref().and_then(fetch_launch_url) {
-        Some(f) => (f.path.clone(), Some(f)),
+        Some(app::story_url::Fetched::Story(f)) => (f.path.clone(), Some(f)),
+        Some(app::story_url::Fetched::DiskImages(a)) => {
+            (unpack_fetched_archive(&a, &cfg), None)
+        }
         None => (story_path, None),
     };
 
@@ -196,7 +205,7 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
 /// address is one lanthorn will not fetch, or when the fetch fails. Both messages
 /// name what happened rather than leaving a "no such file" about a path nobody
 /// typed.
-fn fetch_launch_url(arg: &std::path::Path) -> Option<app::story_url::FetchedStory> {
+fn fetch_launch_url(arg: &std::path::Path) -> Option<app::story_url::Fetched> {
     let text = arg.to_str()?;
     if !app::story_url::is_story_url(text) {
         // A `file://` or `ftp://` argument is URL-shaped and not fetchable; say
@@ -215,7 +224,11 @@ fn fetch_launch_url(arg: &std::path::Path) -> Option<app::story_url::FetchedStor
     eprintln!("lanthorn: fetching {url} …");
     match app::story_url::fetch_to_dir(&app::story_url::HttpSource::new(), &url, &dir) {
         Ok(f) => {
-            eprintln!("lanthorn: saved to {}", f.path.display());
+            let path = match &f {
+                app::story_url::Fetched::Story(s) => &s.path,
+                app::story_url::Fetched::DiskImages(a) => &a.path,
+            };
+            eprintln!("lanthorn: saved to {}", path.display());
             Some(f)
         }
         Err(e) => {
@@ -223,6 +236,215 @@ fn fetch_launch_url(arg: &std::path::Path) -> Option<app::story_url::FetchedStor
             std::process::exit(2);
         }
     }
+}
+
+/// Ask whether a downloaded ZIP of release disk images should be unpacked into
+/// the library, and answer the path to launch (SQ-1096).
+///
+/// **This is the resequencing.** Every other fetch is booted and then offered;
+/// this one cannot be, because `hints::load_mounted_story` refuses a zip whose
+/// entries are floppies and the ordinary prompt lives far below that failure. So
+/// the offer is raised HERE — before `LaunchCtx` exists, before the picker,
+/// before any engine — and only a "yes" produces a story path at all.
+///
+/// Never returns on a decline: there is nothing to play, so the launch ends,
+/// with a message saying what lanthorn will not do and how to make it possible.
+fn unpack_fetched_archive(
+    archive: &app::story_url::FetchedArchive,
+    cfg: &Config,
+) -> std::path::PathBuf {
+    let n = archive.images.len();
+    // No library, no offer: `default_story_dir` is the directory the picker
+    // reads, and unpacking floppies anywhere else would put them where nothing
+    // lists them. Said rather than silently declined — the fix is one config key.
+    let Some(library_dir) = cfg.default_story_dir.clone() else {
+        let _ = std::fs::remove_file(&archive.path);
+        eprintln!(
+            "lanthorn: {} holds {n} disk image{} and no story, and lanthorn does not run disk \
+             images from inside a zip.",
+            archive.filename(),
+            if n == 1 { "" } else { "s" },
+        );
+        eprintln!(
+            "lanthorn: set `default_story_dir` in your config and lanthorn can unpack them into \
+             your library for you."
+        );
+        std::process::exit(2);
+    };
+
+    let collision = app::story_url::archive_collision(archive, &library_dir);
+    let prompt = app::state::FetchKeepPrompt {
+        fetched: app::story_url::FetchedStory {
+            url: archive.url.clone(),
+            path: archive.path.clone(),
+        },
+        library_dir: library_dir.clone(),
+        collision,
+        disk_images: archive.names(),
+    };
+    let mode = match ask_fetch_keep(prompt, cfg) {
+        app::render::fetch_keep_dialog::FetchKeepAction::Keep(mode) => mode,
+        _ => {
+            // DECLINED — and unlike SQ-1086's decline, nothing was booted from
+            // this file. That is the whole of the reason the temp copy is kept
+            // there (it IS the running game, and its basename is the save key),
+            // so with no session and no save key the reason does not carry: the
+            // download is removed rather than left as an orphan in the temp dir.
+            let _ = std::fs::remove_file(&archive.path);
+            eprintln!(
+                "lanthorn: not unpacked. lanthorn does not run disk images from inside a zip — \
+                 keeping them in your library is how to play them."
+            );
+            std::process::exit(0);
+        }
+    };
+
+    let written = match app::story_url::unpack_disk_images(archive, &library_dir, mode) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("lanthorn: could not unpack {}: {e}", archive.filename());
+            std::process::exit(2);
+        }
+    };
+    // The archive has served its purpose; the library holds the images now.
+    let _ = std::fs::remove_file(&archive.path);
+    for p in &written {
+        eprintln!("lanthorn: unpacked {}", p.display());
+    }
+    // Launch the first image BY NAME, not by archive order: a release's volumes
+    // are named in reading order far more reliably than they are stored, and
+    // `cli_host::disk_set::mount_at` finds the rest as siblings in the directory
+    // this just wrote them to — which is why they were flattened. A five-floppy
+    // release is one shelf, not five launches.
+    written
+        .first()
+        .cloned()
+        .expect("an archive with no images is never a Fetched::DiskImages")
+}
+
+/// Run the fetch-keep prompt on its own, before any game exists (SQ-1096).
+///
+/// The dialog, its focus ring, its buttons and its keyboard ladder are all
+/// `render::fetch_keep_dialog`'s — this is only the small terminal loop that
+/// stands in for the game's, since there is no game yet. Tab/Shift-Tab move
+/// focus, Enter activates, Esc cancels; Space is left alone (widget-reserved),
+/// exactly as the shared chrome does everywhere else.
+///
+/// A terminal that cannot be made interactive DECLINES. Writing several files
+/// into somebody's library is not a thing to do on a guess.
+fn ask_fetch_keep(
+    prompt: app::state::FetchKeepPrompt,
+    cfg: &Config,
+) -> app::render::fetch_keep_dialog::FetchKeepAction {
+    use app::render::fetch_keep_dialog::{
+        button_count, draw_fetch_keep_dialog, fetch_keep_key_focused, FetchKeepAction,
+    };
+    use crossterm::event::{
+        DisableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind,
+    };
+    use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
+
+    // Themed the way the game and the browser are, so the prompt does not arrive
+    // in a palette the player has never seen.
+    let (base, _w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
+    let (colors, _syms, _w2) = app::style::resolve(&base, &cfg.user_dir);
+
+    let mut state = AppState::default();
+    state.colors = colors;
+    state.overlays.fetch_keep = Some(prompt);
+    state.overlays.dialog_focus = 0;
+
+    if enable_raw_mode().is_err() {
+        return FetchKeepAction::Decline;
+    }
+    if execute!(stdout(), EnterAlternateScreen).is_err() {
+        let _ = disable_raw_mode();
+        return FetchKeepAction::Decline;
+    }
+    // Mouse capture follows the same opt-in the browser uses (`mouse = true`), so
+    // a player who clicks dialogs everywhere else can click this one too, and a
+    // player who has it off is not suddenly handed motion reporting.
+    if cfg.mouse {
+        let _ = execute!(stdout(), EnableMouseCapture);
+    }
+    let mut terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            return FetchKeepAction::Decline;
+        }
+    };
+
+    let collision = state.overlays.fetch_keep.as_ref().is_some_and(|p| p.collision);
+    let answer = loop {
+        let mut rects = None;
+        if terminal
+            .draw(|f| {
+                rects = draw_fetch_keep_dialog(&state, f.area(), f.buffer_mut());
+            })
+            .is_err()
+        {
+            break FetchKeepAction::Decline;
+        }
+        let ev = match crossterm::event::read() {
+            Ok(ev) => ev,
+            Err(_) => break FetchKeepAction::Decline,
+        };
+        // Clicks map to exactly the buttons the game loop's own handler maps them
+        // to (`overlays.rs`, `FetchKeepOverlay::mouse`) — the close box and the
+        // decline button both mean no.
+        if let Event::Mouse(m) = &ev {
+            if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+                continue;
+            }
+            let Some(r) = &rects else { continue };
+            let pt = (m.column, m.row);
+            if r.keep.is_some_and(|b| b.contains(pt.into())) {
+                break FetchKeepAction::Keep(if collision {
+                    app::story_url::KeepMode::Replace
+                } else {
+                    app::story_url::KeepMode::KeepBoth
+                });
+            }
+            if r.keep_both.is_some_and(|b| b.contains(pt.into())) {
+                break FetchKeepAction::Keep(app::story_url::KeepMode::KeepBoth);
+            }
+            if r.decline.is_some_and(|b| b.contains(pt.into()))
+                || r.close.is_some_and(|b| b.contains(pt.into()))
+            {
+                break FetchKeepAction::Decline;
+            }
+            continue;
+        }
+        let Event::Key(key) = ev else { continue };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        // Ctrl-C is not an answer; it is a refusal, and a refusal writes nothing.
+        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c'))
+        {
+            break FetchKeepAction::Decline;
+        }
+        let n = button_count(&state);
+        match key.code {
+            KeyCode::Tab | KeyCode::Right => {
+                state.overlays.dialog_focus = (state.overlays.dialog_focus + 1) % n;
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                state.overlays.dialog_focus = (state.overlays.dialog_focus + n - 1) % n;
+            }
+            code => match fetch_keep_key_focused(code, state.overlays.dialog_focus, collision) {
+                FetchKeepAction::None => {}
+                act => break act,
+            },
+        }
+    };
+
+    let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+    answer
 }
 
 /// The real story-pane `(rows, cols)` a v1–8 Z-machine session should be BOOTED
@@ -1447,8 +1669,15 @@ pub(crate) fn boot_story(
         match state.config.default_story_dir.clone() {
             Some(library_dir) => {
                 let collision = app::story_url::library_collision(&fetched.path, &library_dir);
-                state.overlays.fetch_keep =
-                    Some(app::state::FetchKeepPrompt { fetched, library_dir, collision });
+                state.overlays.fetch_keep = Some(app::state::FetchKeepPrompt {
+                    fetched,
+                    library_dir,
+                    collision,
+                    // A story, not an archive: an archive never gets this far —
+                    // it is answered before `boot_story` is called at all
+                    // (SQ-1096, `unpack_fetched_archive`).
+                    disk_images: Vec::new(),
+                });
                 state.overlays.dialog_focus = 0;
             }
             None => state.push_notice(
