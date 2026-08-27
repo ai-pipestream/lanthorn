@@ -115,15 +115,19 @@
 //! for the one clause that had to stop assuming otherwise.
 
 use crate::infocom_pics::InfocomPics;
+use std::borrow::Cow;
 
 /// Bytes in a 1541 sector — and therefore the only alignment a story can start
 /// on, since the loader reads whole sectors.
-const SECTOR: usize = 256;
+///
+/// `pub(crate)` for [`crate::g64`], which decodes a GCR bitstream into sectors
+/// of this size and must not keep its own copy of the number.
+pub(crate) const SECTOR: usize = 256;
 
 /// Tracks on a standard 1541 disk. The 40-track extensions exist; nothing in the
 /// corpus is one, and a row that claimed a geometry no medium here has would be
 /// the guess this crate declines everywhere else.
-const TRACKS: usize = 35;
+pub(crate) const TRACKS: usize = 35;
 
 /// A 35-track 1541 image: 683 sectors of 256 bytes.
 pub const D64_LEN: usize = 174_848;
@@ -159,12 +163,26 @@ enum Plan {
     /// Sectors `0..16` of each track, skipping the loader and directory tracks
     /// 17 and 18 whole. *Hitchhiker's*, 1984.
     Sixteen,
+    /// Seventeen sectors of each track, skipping the loader track 17 whole and
+    /// starting at sector 2 on the directory track — so the BAM and the one
+    /// directory sector behind it are stepped over and the seventeen taken from
+    /// there. *Plundered Hearts*, 1987 (SQ-1095).
+    ///
+    /// Measured, not guessed, and the measurement is worth keeping because it is
+    /// the third layout in three presses. Every 256-byte block of
+    /// `stories/plunderedhearts-r26-s870730.z3` occurs exactly once on
+    /// `plundered_hearts[infocom_1987](r26)(!).g64`, and mapping each to the
+    /// sector it came off gives an unbroken run: `T5/S0`..`T16/S16`, then
+    /// `T18/S2`..`T18/S18`, then `T19/S0` onward at seventeen a track to
+    /// `T35/S9`. Track 17 is absent from that run, and track 18's first two
+    /// sectors are the filesystem's.
+    Seventeen,
 }
 
 /// The plans a mount tries, in order. Order is not precedence — a plan is kept
 /// only when the story it produces verifies — but `Dense` first means the disk
 /// that spends every sector is answered without building the other candidate.
-const PLANS: [Plan; 2] = [Plan::Dense, Plan::Sixteen];
+const PLANS: [Plan; 3] = [Plan::Dense, Plan::Sixteen, Plan::Seventeen];
 
 /// A mounted Commodore 1541 disk.
 #[derive(Debug)]
@@ -307,7 +325,13 @@ impl D64 {
 
 /// Sectors on `track`, over the 1541's four speed zones. Tracks are 1-based, as
 /// Commodore DOS numbers them; `0` for anything off the disk.
-fn sectors_per_track(track: usize) -> usize {
+///
+/// `pub(crate)` for [`crate::g64`]: a GCR track states which sector each block
+/// is, and this says which of those a 35-track image has room for. **The one
+/// statement of this geometry in the crate** — a decoder with its own table
+/// would be the hand-maintained cross-file invariant the refactoring policy
+/// names.
+pub(crate) fn sectors_per_track(track: usize) -> usize {
     match track {
         1..=17 => 21,
         18..=24 => 19,
@@ -324,7 +348,10 @@ fn total_sectors() -> usize {
 
 /// The image-order index of `(track, sector)`. A `.d64` stores each track's
 /// sectors in ascending order, so this is a plain running total.
-fn linear(track: usize, sector: usize) -> usize {
+///
+/// `pub(crate)` for [`crate::g64`], which assembles an image and needs to put
+/// each decoded sector where this module will look for it.
+pub(crate) fn linear(track: usize, sector: usize) -> usize {
     (1..track).map(sectors_per_track).sum::<usize>() + sector
 }
 
@@ -510,6 +537,18 @@ fn payload(raw: &[u8], plan: Plan, from: usize) -> Vec<u8> {
                 })
                 .collect()
         }
+        Plan::Seventeen => {
+            let (first_track, first_sector) = track_sector(from);
+            (first_track..=TRACKS)
+                .filter(|&t| t != 17)
+                .flat_map(|t| {
+                    let base = if t == DIRECTORY_TRACK { 2 } else { 0 };
+                    let start =
+                        if t == first_track { first_sector.max(base) } else { base };
+                    (start..base + 17).map(move |s| linear(t, s))
+                })
+                .collect()
+        }
     };
     for index in indices {
         let block = sector_at(raw, index);
@@ -555,8 +594,20 @@ fn story_on(images: &[&[u8]]) -> Option<((usize, usize), Vec<u8>)> {
 /// checksum, so a pair of disks that do not belong together is refused rather
 /// than handed over as plausible-looking Z-code.
 pub(crate) fn story_across(segments: &[Vec<u8>]) -> Option<(String, Vec<u8>)> {
-    let sides: Vec<&[u8]> =
-        segments.iter().map(Vec::as_slice).filter(|b| b.len() == D64_LEN).collect();
+    // A side arrives in whichever container it was dumped in, and the two are
+    // the same disk: a `.d64` is already a sector image, a `.g64` is the raw
+    // bitstream and becomes one here (SQ-1095). Everything below this line reads
+    // sectors, so neither container is named again — and a `.d64` is borrowed
+    // rather than copied, because this runs on images and 175 KB a side is a
+    // price the ordinary case should not pay.
+    let images: Vec<Cow<[u8]>> = segments
+        .iter()
+        .filter_map(|raw| match raw.len() {
+            D64_LEN => Some(Cow::Borrowed(raw.as_slice())),
+            _ => crate::g64::sector_image(raw).map(Cow::Owned),
+        })
+        .collect();
+    let sides: Vec<&[u8]> = images.iter().map(Cow::as_ref).collect();
     if sides.len() < 2 {
         return None;
     }
@@ -708,6 +759,40 @@ pub(crate) mod tests {
     /// A formatted but empty disk is a 1541 image and is not an Infocom release
     /// — the sniff needs a story or a disk full of data outside its filesystem,
     /// and a blank one is neither.
+    /// The 1987 press's layout, synthetically — so the third [`Plan`] is
+    /// covered by something CI can run (SQ-1095).
+    ///
+    /// The real specimen it was measured off is a `.g64` in gitignored
+    /// `stories/`, and a plan whose only witness skips vacuously is a plan that
+    /// quietly stops working. This lays a story out the way *Plundered Hearts*
+    /// does — seventeen sectors a track from track 5, track 17 skipped, track 18
+    /// starting after the BAM and the directory sector — and asks the ordinary
+    /// mount for it back. The two plans ahead of it in [`PLANS`] both reach for
+    /// a different set of sectors and neither sums to the story's own checksum,
+    /// so this passes only because the third one exists.
+    #[test]
+    fn a_disk_laid_out_seventeen_sectors_a_track_round_trips_without_a_fixture() {
+        let story = fake_story(17 * SECTOR * 3);
+        let mut image = blank_disk();
+        let mut indices = Vec::new();
+        for track in 5..=TRACKS {
+            if track == 17 {
+                continue;
+            }
+            let base = if track == DIRECTORY_TRACK { 2 } else { 0 };
+            indices.extend((base..base + 17).map(|sector| linear(track, sector)));
+        }
+        for (chunk, &index) in story.chunks(SECTOR).zip(&indices) {
+            let at = index * SECTOR;
+            image[at..at + SECTOR].fill(0);
+            image[at..at + chunk.len()].copy_from_slice(chunk);
+        }
+        assert!(D64::looks_like_d64(&image));
+        let disk = D64::mount(image).expect("it mounts");
+        assert_eq!(disk.entry_name().as_deref(), Some("T5/S0"));
+        assert_eq!(disk.story().expect("a story").1, story, "byte-exact off the disk");
+    }
+
     #[test]
     fn an_empty_formatted_disk_is_not_an_infocom_release() {
         let blank = blank_disk();
