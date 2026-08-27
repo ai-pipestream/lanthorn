@@ -1102,7 +1102,7 @@ It takes effect on the next frame — there is no reload, and no restart. The ba
 form is a toggle precisely so it can be bound to a key and used to flip back and
 forth while you decide. Your global `config.toml` is never touched by any of this,
 including when you have the settings screen open at the time: a per-game value is
-held apart from the file exactly as `--no-game-colours` is, and only an edit to the
+held apart from the file exactly as `--game-colours off` is, and only an edit to the
 settings screen's own **v6 pixel lock** row changes the global default. The flag
 is the strongest of the three: it outranks the file *and* this game's sidecar,
 because a flag is an instruction for the launch you typed it on and a file
@@ -2595,14 +2595,20 @@ floppy is the source that is right.
 ## Arrow keys: movement or map panning, your call
 
 Several v6 titles bind the arrow keys straight to movement — press ↑ and your
-character walks north. That's authentic, but it collides with lanthorn's own
-use of arrows for scrollback recall and map panning, which some players would
-rather keep. Set `v6_arrow_keys = false` in the config (or flip it right in
-the settings screen) and arrows are withheld from v6 stories — but only at the
-`>` prompt, where the movement-vs-panning clash actually happens. There, instead
-of being delivered as a ZSCII cursor code, the keypress falls through to whatever
-lanthorn would do with it if no game input were pending — command-history recall
-or map panning, depending on focus.
+character walks north. That's authentic, but it collides with lanthorn's own use
+of arrows for scrollback recall and map panning, and a v6 game was the one place
+in lanthorn where ↑ stopped scrolling the transcript. That reads less like a
+setting doing its job than like the app going deaf, so arrows are **withheld by
+default** — but only at the `>` prompt, where the movement-vs-panning clash
+actually happens. There, instead of being delivered as a ZSCII cursor code, the
+keypress falls through to whatever lanthorn would do with it if no game input
+were pending — command-history recall or map panning, depending on focus.
+
+Want a game's own arrow bindings? Set `v6_arrow_keys = true` in the config, or
+flip it right in the settings screen. The trade isn't symmetric, which is why the
+default falls where it does: withholding costs you a shortcut for a movement
+command you can still type, while forwarding costs a key that works everywhere
+else.
 
 Menus are the deliberate exception. Whenever a v6 story is waiting on a single
 keypress rather than a line — Shogun's startup menu, hint menus, a "press any
@@ -3106,7 +3112,7 @@ two round at different rates.
 
 An empty capability list gets the same treatment, because it is three different
 facts: the terminal was asked and refused, `--image-protocol halfblocks` built a
-picker that asks nothing, or `--no-images` built no picker at all. And the
+picker that asks nothing, or `--images off` built no picker at all. And the
 question the command was written for:
 
 ```

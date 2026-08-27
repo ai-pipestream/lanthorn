@@ -411,8 +411,8 @@ re-seed the new template, or hand-write the new shape from
   and it refuses to save settings over a file it couldn't read, so the text you
   need in order to find the mistake is never overwritten. Fix the file (or move
   it aside and let lanthorn seed a fresh one) and saving resumes.
-- **A choice for one run stays a choice for one run.** `--no-sound`, `--user-dir`,
-  `--no-game-colours` and `--interpreter` are instructions for the launch you typed
+- **A choice for one run stays a choice for one run.** `--sound off`, `--user-dir`,
+  `--game-colours off` and `--interpreter` are instructions for the launch you typed
   them on,
   and so are the things lanthorn works out for itself: an interpreter number this
   game's own sidecar pins, a `garglk.ini` sitting beside the story, a `/game-colours`
@@ -420,7 +420,7 @@ re-seed the new template, or hand-write the new shape from
   `honor_game_colours` off for that one rendition. None of them can reach
   `config.toml`. That matters because saving settings is not always something you
   set out to do — the story picker's "remember this directory?" prompt writes the
-  file too, and before this a single `--no-sound` session was enough to leave every
+  file too, and before this a single `--sound off` session was enough to leave every
   later launch silent with nothing on screen to say why. The rule is one line: while
   a value is still the one that launch handed it, the file keeps whatever *it* said.
   Change the setting on the settings screen and it becomes yours from then on —
@@ -498,11 +498,13 @@ re-seed the new template, or hand-write the new shape from
   else: two-colour CGA line art is never fused either way (blurring line art only
   makes grey), and 320-wide MCGA and Amiga art has no dither at this frequency to
   fuse. See [Graphical v6](v6-graphics.md#the-colours-come-with-the-card).
-- **v6 arrow keys** — `v6_arrow_keys` (default `true`) controls whether arrow
-  keypresses are forwarded to a v6 story as movement input; set it `false` (in
-  config.toml or the settings screen) to withhold them so arrows drive lanthorn's own
-  scrollback recall / map panning instead. Only v6 stories are affected — v1-5
-  and Glulx games always get arrows. See [Graphical v6](v6-graphics.md#arrow-keys-movement-or-map-panning-your-call).
+- **v6 arrow keys** — `v6_arrow_keys` (default `false`) controls whether arrow
+  keypresses reach a v6 story as movement input. Off by default, so arrows go on
+  driving lanthorn's own scrollback recall and map panning the way they do in
+  every other story; set it `true` (in config.toml or the settings screen) to hand
+  them to a game that binds arrows to movement. Only v6 stories are affected —
+  v1-5 and Glulx games always get arrows, and so do v6 menus and "press any key"
+  screens either way. See [Graphical v6](v6-graphics.md#arrow-keys-movement-or-map-panning-your-call).
 - **Locking v6 art to whole pixels** — `v6_pixel_lock` (default `false`) snaps the
   v6 letterbox magnification to a rung of a ladder on which one *art* pixel is
   always a whole number of device pixels, instead of scaling by whatever fraction

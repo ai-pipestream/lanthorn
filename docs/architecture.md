@@ -192,6 +192,18 @@ model — v6 is a fourth leaf kind, not a parallel pipeline. See [Graphical
 v6](features/v6-graphics.md) for what that composite looks like from the
 player's side.
 
+**A modal forces the cell path**, and that changes which graphics a dialog has
+to keep clear of. `dialog_bounds` subtracts every graphics window so a dialog
+never lands under an image placement — but the cell path draws no frame art, so
+on a v6 composite the only thing still placed is a chrome window entirely
+*beside* the story (Journey's picture column). Subtracting the rest put the
+dialog in the strip below the frame's own stamp, clipped to eight rows with its
+buttons off the pane. `v6_layout::cell_path_side_columns` is now the single
+statement of which windows those are, called by the cell path and by
+`dialog_bounds` both: they had measured it on two different bases — pane-
+proportional cells against the game's native cells — and agreed only near an
+80-column pane, which is every pane anybody had tested.
+
 ## One transcript wrap, for both ways of drawing it
 
 Both render paths wrap the whole scrollback and then show forty rows of it, and

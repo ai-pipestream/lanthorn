@@ -35,7 +35,20 @@ Point lanthorn at whatever the game arrived in and it digs the story out itself.
 - **Blorb containers** — `.zblorb`/`.gblorb`/`.blorb`/`.blb` yield their executable
   chunk, and the same file's `Pict`/`Snd `/`Data` resources become the game's art
   and audio. A resources-only Blorb sitting *beside* the story counts too.
-- **ZIP archives** — the first `.z3`/`.z5`/`.z8` entry is unwrapped in memory.
+- **ZIP archives** — a zip is opened like a volume, not like a wrapper around one
+  file. Entries are classified by their **content**, not by their names, so a zip
+  carries anything lanthorn runs — v3–v8 including graphical v6, Glulx, Scott
+  Adams, Blorb containers — and a resources Blorb packed in the same zip supplies
+  that game's pictures and sounds, as does a hints file. (It used to name three
+  extensions and hand back no resources at all, which meant the one format whose
+  whole point is that it ships artwork was the one a zip could not carry.) Still
+  honest about its limit: a zip holding *two* games plays the first one. And a zip
+  is a convenience for what somebody downloaded — the `.lanthorn` archive is the
+  container, and the two stay apart.
+- **A URL** — anywhere a path is accepted. lanthorn fetches it, hands the file to
+  the same loader, so every format above works without a second code path, and
+  then offers to keep it in your library so the next launch finds it without
+  fetching again.
 - **Amiga `.adf` disk images** — the original release floppy, played as it shipped.
 - **Macintosh disk images** — a DiskCopy 4.2 `.image` (or a bare HFS volume), the
   Mac release floppy, likewise played as it shipped.
@@ -767,7 +780,7 @@ Amiga floppy or anywhere else.
   interrupt routine fires every N tenths of a second (countdowns and clocks — the
   bomb in Border Zone) and can cut the read short. Controlled by
   `honor_timed_input` (default on), the `/toggle-timed-input` command, and the
-  settings row; `zvm-cli` takes `--no-timed-input`. The VM stays zero-dependency —
+  settings row; `zvm-cli` takes `--timed-input off`. The VM stays zero-dependency —
   the wall clock lives in the hosts, not the interpreter.
 - **A different game every time you sit down** — every engine here runs the same
   xorshift generator, and a VM core built in isolation seeds it from a fixed
@@ -1205,7 +1218,7 @@ Amiga floppy or anywhere else.
   (SQ-0928). A machine's `$2C`/`$2D` pair describes a *machine*, and running a
   story off its release disk makes that description true of the launch — so off
   media it applies with no flag at all. Typing a number does not: add
-  **`--system-colours`** (or `system_colours = true`) when you have named one and
+  **`--colour machine`** (or `system_colours = true`) when you have named one and
   mean the whole machine. The reason is the IBM PC, which states blue under white
   and is also what every story with no medium falls through to; without the
   distinction, opening any modern Inform game would paint it blue.
@@ -1394,7 +1407,7 @@ Amiga floppy or anywhere else.
   dramatically faster. Well-known Inform veneer functions the game registers via
   `accelfunc` are recognized and run natively instead of grinding through full VM
   dispatch, so a heavyweight like Counterfeit Monkey stops making you wait through
-  its startup. On by default; disable with `--no-accel` (`gvm-cli` and the app).
+  its startup. On by default; disable with `--accel off` (`gvm-cli` and the app).
 - **Floating-point math** — the complete float opcode set is implemented, in both
   single **and** double precision: conversions, arithmetic, `sqrt`/`exp`/`log`/
   `pow`, trigonometry, and the fuzzy comparisons `jfeq`…`jisinf`. Games that
@@ -1421,7 +1434,7 @@ Amiga floppy or anywhere else.
   toggle it with `/toggle-sound` or the `F2` settings row, adjust it with
   `/volume <0-100>`, and use `/play-sound <resource-id>` to fire a Blorb `Snd `
   resource on demand for verifying the audio path. Both the `app` and `zvm-cli`
-  take `--no-sound` to start muted for a single run (leaving `enable_sound`
+  take `--sound off` to start muted for a single run (leaving `enable_sound`
   untouched); `zvm-cli` also takes `--volume <0-100>`.
 - **Straight off the original floppy** — the two Infocom games that ever used sound,
   *The Lurking Horror* and *Sherlock*, shipped their effects as raw Infocom sample
@@ -1472,7 +1485,7 @@ upper-window grid. **Glulx/Glk** games get the same treatment —
 
 It all sits under one switch, `honor_game_colours` (default **on**): flip it in the
 F2 settings screen to let your theme own every colour instead, per game with
-`/set-game-colours on|off|auto`, or for a single launch with **`--no-game-colours`** —
+`/set-game-colours on|off|auto`, or for a single launch with **`--game-colours off`** —
 one spelling across all three players, since `zvm-cli` and `gvm-cli` render the same
 colours as ANSI SGR and have always accepted it (they also honour `NO_COLOR` set to
 a non-empty value).
@@ -1634,7 +1647,7 @@ the terminal's *own* defaults so that every `ESC[0m` a styled run ends with
 returns to the machine's pair instead of dropping it; the cursor goes through
 DECSCUSR, which states the real shape rather than an approximation. What the CLI
 cannot say is the cursor's *colour*: DECSCUSR carries a shape and nothing else.
-`--no-game-colours` and `NO_COLOR` suppress the whole thing, as they should.
+`--game-colours off` and `NO_COLOR` suppress the whole thing, as they should.
 
 ## Plain text, for screen readers
 
@@ -1824,8 +1837,8 @@ someone who sets it has not asked to lose their status line.
 A turn that prints more than a screenful used to scroll its own beginning away in
 `gvm-cli` and `scott-cli`; only `zvm-cli` paused. All three now stop at the
 bottom of a page with a reverse-video `[MORE]` bar and wait for a key, the way
-the original interpreters did and the way the TUI already did. `--no-more`
-(alias `--no-page`) turns it off.
+the original interpreters did and the way the TUI already did. `--pager off`
+turns it off.
 
 Paging requires **both** ends to be a terminal — pausing for a key that a pipe
 will never send is a hang, which is why the headless harnesses never see it — and

@@ -758,6 +758,16 @@ for the one in use — the `↳` marking a wrapped continuation row carries
 `story_info_continuation`, and the launch-options dialog's warnings carry
 `dialog.launch_caveat`.
 
+- **Paste a URL.** `Shift-U` (or `/open-url`) opens a prompt for a web address
+  and downloads it straight into the library, landing the cursor on the new row.
+  It takes anything lanthorn can open, not just bare story files — a Blorb, a
+  release disk image, a zip — because the fetch just writes a file and hands it
+  to the ordinary loader. A URL works at launch too (`lanthorn https://…`), where
+  lanthorn asks whether to keep it in your library afterwards rather than leaving
+  it in a temp directory. What arrives is checked twice: once before anything is
+  written, so a 404 page or a login redirect never reaches disk, and again by the
+  loader, which says what actually came back — "the server sent a web page (6632
+  bytes)" — rather than failing obscurely.
 - **Search & download from IFDB.** Press `/` to open the **IFDB search** modal.
   It opens straight onto a **"Popular on IFDB"** browse list — highly-rated
   games with enough ratings to mean something, in IFDB's own confidence-ranked
@@ -785,9 +795,11 @@ for the one in use — the `↳` marking a wrapped continuation row carries
   skipped — press `o` on a game with no direct story file to open its IFDB
   page in your browser instead. `Esc` backs out a level: from a typed
   search's results it returns to the "Popular on IFDB" list, and from that
-  list it closes the modal. Downloads are capped at 16 MiB, filenames are
-  sanitised, and an existing file is never overwritten (a `-2`, `-3`, … suffix
-  is added). A "Results from IFDB" line credits the source, and every request
+  list it closes the modal. Downloads are capped at 32 MiB — enough for the
+  largest Glulx games in circulation, which carry their artwork and sound inside
+  the blorb and run well past the "few MiB" a story file used to be — filenames
+  are sanitised, and an existing file is never overwritten (a `-2`, `-3`, …
+  suffix is added). A "Results from IFDB" line credits the source, and every request
   carries lanthorn's User-Agent, honouring IFDB's low-volume, user-driven API
   terms (search, browse, and downloads happen only when you ask — the browse
   list is one extra request per modal open, not a poll). The modal reuses the
@@ -847,7 +859,7 @@ for the one in use — the `↳` marking a wrapped continuation row carries
 - **In-game graphics (Glulx).** Games that open Glk graphics windows render
   their filled shapes and images right in the terminal, using the best graphics
   protocol (Kitty / iTerm2 / Sixel) with a half-block fallback. Disable all
-  image rendering (in-game graphics *and* cover art) with `--no-images`.
+  image rendering (in-game graphics *and* cover art) with `--images off`.
 - **Inline images in text.** Glk inline images placed in a text-buffer window
   (the main transcript or another buffer window) render as full-width blocks
   right in the flow of text — same protocol ladder, same fallback — and scroll

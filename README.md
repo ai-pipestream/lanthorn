@@ -119,7 +119,7 @@ A few things worth doing in your first ten minutes. Everything else can wait.
 | **/** on an empty line | A fuzzy palette over every command. The fastest way to find out what there is. |
 | **Ctrl+S** or **Ctrl+R** | Saves and restores the map, the screen and your scrollback — not just the game's own state. |
 | **/open-settings** | The settings worth changing, each with a line saying what it does. |
-| **Ctrl+P** | The quick command pallet. |
+| **Ctrl+P** | The quick command palette. |
 
 And the thing that needs no keys at all: **explore, and watch the map draw
 itself.**
