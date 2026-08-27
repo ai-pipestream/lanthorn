@@ -281,6 +281,7 @@ pub mod colors;
 pub mod complete;
 pub mod config;
 pub mod config_template;
+pub mod corpus;
 pub mod cover;
 pub mod debug_panel;
 /// Which files are volumes of one multi-disk release (SQ-0844).

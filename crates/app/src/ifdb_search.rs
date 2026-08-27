@@ -150,44 +150,19 @@ use crate::ifiction::IFiction;
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SEARCH_XML: u64 = 4 * 1024 * 1024; // 4 MiB — a ~100-game reply is well under this.
 
-/// The largest game in this repository's own `stories/`, in bytes — a
-/// MEASUREMENT, so the cap below can be checked against something rather than
-/// against an impression of how big games are (SQ-1086).
-///
-/// The impression was wrong. This constant used to be 16 MiB under a comment
-/// reading "story files are small; a real Z-code/Glulx/blorb rarely exceeds a
-/// few MiB", and five games in this repo's own corpus give that the lie:
-///
-/// | game | bytes |
-/// |---|---|
-/// | `Kerkerkruip.gblorb` | 22,109,534 |
-/// | `Kerkerkruip.b10.gblorb` | 14,261,770 |
-/// | `Never Gives Up Her Dead.gblorb` | 11,680,602 |
-/// | `CounterfeitMonkey-11.gblorb` | 11,308,550 |
-/// | `cragne.gblorb` | 8,869,096 |
-///
-/// So the ceiling refused *Kerkerkruip* outright — a well-known Glulx game — and
-/// a URL fetch is exactly where somebody points at a large modern one. Modern
-/// Glulx games carry their artwork and sound inside the blorb; "a few MiB"
-/// described the Infocom era and was never re-measured.
-pub const LARGEST_GAME_IN_CORPUS: u64 = 22_109_534; // stories/Kerkerkruip.gblorb
-
 /// Cap on one downloaded story file.
 ///
-/// 32 MiB: comfortably past the largest game anyone here ships, still far short
-/// of anything a mislabelled link could usefully deliver. The assertion below is
-/// what keeps the two honest — raise the corpus figure and the build fails until
-/// this is raised with it.
+/// 32 MiB: comfortably past the largest game anyone ships, still far short of
+/// anything a mislabelled link could usefully deliver. It was 16 MiB under a
+/// sentence about story files being small, which refused *Kerkerkruip* outright
+/// — see [`crate::corpus`] for what that sentence was worth and why the figures
+/// live there rather than here.
 ///
-/// **There is a second constant of this shape.** `hints::MAX_ZIP_ENTRY` caps one
-/// inflated ZIP entry and was wrong for the same reason (SQ-1085); it is now
-/// 32 MiB against the same corpus measurement. Two constants meaning "the largest
-/// game anybody ships" in two files will drift, and they want one home — the two
-/// quests landed in parallel and consolidating them is a job for main, not for
-/// either branch.
+/// The assertion below is what keeps the two honest: raise the corpus floor and
+/// the build fails until this is raised with it.
 pub const MAX_DOWNLOAD: u64 = 32 * 1024 * 1024;
 const _: () = assert!(
-    MAX_DOWNLOAD > LARGEST_GAME_IN_CORPUS,
+    MAX_DOWNLOAD > crate::corpus::LARGEST_GAME,
     "the download cap must admit the largest game we know of, or the feature refuses real games"
 );
 

@@ -883,19 +883,17 @@ const MAX_ZIP_SCAN: u64 = 128 * 1024 * 1024;
 /// compile time, because a number that has to cover a real file is a fact about
 /// the build and not a thing to discover when a player opens a zip (SQ-1085).
 ///
-/// `Kerkerkruip.gblorb` is the largest runnable file in this repo's `stories/`
-/// and `InfocomMasterpieces.img` the largest disc. Both are gitignored, so they
-/// are NAMED here rather than measured: a check that reads them would pass
-/// vacuously in CI, which is exactly how a 4 MiB cap survived a change that made
-/// it wrong.
-const LARGEST_GAME_IN_CORPUS: u64 = 22_109_534; // stories/Kerkerkruip.gblorb
-const LARGEST_DISC_IN_CORPUS: u64 = 12_582_912; // stories/InfocomMasterpieces.img
+/// The figures live in [`crate::corpus`], which is also where the reasoning is:
+/// this cap and `ifdb_search::MAX_DOWNLOAD` were BOTH too small, written
+/// independently under two different confident sentences about how big games
+/// are. The caps stay separate because they bound different things; the floor
+/// they are checked against is one fact and now has one home.
 const _: () = assert!(
-    MAX_ZIP_ENTRY > LARGEST_GAME_IN_CORPUS,
+    MAX_ZIP_ENTRY > crate::corpus::LARGEST_GAME,
     "one zip entry must be able to hold the largest game anybody ships",
 );
 const _: () = assert!(
-    MAX_ZIP_ENTRY > LARGEST_DISC_IN_CORPUS,
+    MAX_ZIP_ENTRY > crate::corpus::LARGEST_DISC,
     "…and a compilation disc, which the classifier already recognises",
 );
 const _: () = assert!(

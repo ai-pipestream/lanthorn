@@ -323,7 +323,7 @@ fn real_media_of_every_format_present_survives_a_round_trip_through_the_fetch() 
 /// the corpus off the disk and checks the constant against it.
 ///
 /// The cap-versus-constant half needs no test at all: `ifdb_search` carries a
-/// `const _: () = assert!(MAX_DOWNLOAD > LARGEST_GAME_IN_CORPUS)`, so lowering
+/// `const _: () = assert!(MAX_DOWNLOAD > corpus::LARGEST_GAME)`, so lowering
 /// the cap is a BUILD failure rather than a test failure. What only a test can
 /// check is the constant against the corpus it claims to describe — and that
 /// needs the gitignored `stories/`, so it skips vacuously.
@@ -354,15 +354,15 @@ fn the_download_cap_admits_every_game_in_the_corpus() {
     }
     assert!(
         app::ifdb_search::MAX_DOWNLOAD > largest.0,
-        "the cap ({}) refuses {} ({} bytes) — raise it, and raise LARGEST_GAME_IN_CORPUS with it",
+        "the cap ({}) refuses {} ({} bytes) — raise it, and raise corpus::LARGEST_GAME with it",
         app::ifdb_search::MAX_DOWNLOAD,
         largest.1,
         largest.0,
     );
     assert!(
-        app::ifdb_search::LARGEST_GAME_IN_CORPUS >= largest.0,
-        "LARGEST_GAME_IN_CORPUS ({}) is stale: {} is {} bytes",
-        app::ifdb_search::LARGEST_GAME_IN_CORPUS,
+        app::corpus::LARGEST_GAME >= largest.0,
+        "corpus::LARGEST_GAME ({}) is stale: {} is {} bytes",
+        app::corpus::LARGEST_GAME,
         largest.1,
         largest.0,
     );
