@@ -1201,6 +1201,13 @@ pub struct ScreenState {
     pub erase_lower_requested: bool,
     /// Upper window character grid (v4+).
     pub upper: UpperWindow,
+    /// Were the rows of `upper` BELOW `upper_window_rows` stranded there by a
+    /// shrinking `split_window` (an Inform quote box), rather than printed there
+    /// deliberately by the game (a menu)? Only the first kind is retired when the
+    /// player next acts — see `Machine::retire_stranded_upper_rows` (SQ-0696,
+    /// SQ-1088). Transient display state, like `current_fg`: a host Save State
+    /// restores it `false`, which keeps whatever is on screen on screen.
+    pub upper_rows_stranded_by_split: bool,
     /// Active font number (ZMSD §16): 1 = normal (default), 3 = character-graphics.
     /// This is transient display state — NOT serialised into Quetzal saves.
     pub current_font: u8,
@@ -1243,6 +1250,7 @@ impl Default for ScreenState {
             show_status_requested: false,
             erase_lower_requested: false,
             upper: UpperWindow::default(),
+            upper_rows_stranded_by_split: false,
             current_font: 1,
             current_fg: ZColour::Default,
             current_bg: ZColour::Default,
