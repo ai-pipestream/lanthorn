@@ -339,10 +339,7 @@ fn ask_fetch_keep(
     use app::render::fetch_keep_dialog::{
         button_count, draw_fetch_keep_dialog, fetch_keep_key_focused, FetchKeepAction,
     };
-    use crossterm::event::{
-        DisableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind,
-    };
-    use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
+    use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 
     // Themed the way the game and the browser are, so the prompt does not arrive
     // in a palette the player has never seen.
@@ -358,7 +355,7 @@ fn ask_fetch_keep(
         return FetchKeepAction::Decline;
     }
     if execute!(stdout(), EnterAlternateScreen).is_err() {
-        let _ = disable_raw_mode();
+        crate::restore_terminal();
         return FetchKeepAction::Decline;
     }
     // Mouse capture follows the same opt-in the browser uses (`mouse = true`), so
@@ -370,8 +367,7 @@ fn ask_fetch_keep(
     let mut terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
         Ok(t) => t,
         Err(_) => {
-            let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
-            let _ = disable_raw_mode();
+            crate::restore_terminal();
             return FetchKeepAction::Decline;
         }
     };
@@ -442,8 +438,12 @@ fn ask_fetch_keep(
         }
     };
 
-    let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
-    let _ = disable_raw_mode();
+    // THE canonical teardown, not a copy of its steps (SQ-0998). Repeating the
+    // sequence here missed `drain_pending_input`, so a mouse report that arrived
+    // between the last `read()` and the disable was still on the fd when raw mode
+    // ended — and went to the shell. `restore_terminal` is idempotent and every
+    // step of it is a no-op for state this prompt never set.
+    crate::restore_terminal();
     answer
 }
 
