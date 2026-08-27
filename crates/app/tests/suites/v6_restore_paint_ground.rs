@@ -168,7 +168,7 @@ fn round_trip(session: &mut GameSession) -> app::archive::ArchiveContents {
         Some(&session.machine.screen),
         &session.machine.aux_data,
         meta(),
-        &[], &[], &[], &[], &[], &[], &[],
+        &app::archive::SessionRecord::empty(),
         &pics,
         Some(&dto),
         ground_png.as_deref(),

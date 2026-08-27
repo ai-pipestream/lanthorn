@@ -179,7 +179,7 @@ fn a_restore_mid_bet_still_echoes_typed_digits(honor: bool, resize: bool) {
             ifid: None, name: None, turns: 0, saved_at: String::new(),
             location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
         },
-        &[], &[], &[], &[], &[], &[], &[],
+        &app::archive::SessionRecord::empty(),
         &session.pictures_png(),
         None,
         None,

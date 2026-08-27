@@ -1,4 +1,6 @@
-# lanthorn
+<p align="center">
+  <img src="docs/lanthorn-banner.png" alt="lanthorn" width="720">
+</p>
 
 [![Test](https://github.com/sharkusk/lanthorn/actions/workflows/test.yml/badge.svg)](https://github.com/sharkusk/lanthorn/actions/workflows/test.yml)
 [![Made with Side-Quest](https://img.shields.io/badge/Made%20with-Side--Quest-f97316)](https://github.com/sharkusk/side-quest)

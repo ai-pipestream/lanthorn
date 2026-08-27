@@ -625,7 +625,8 @@ mod tests {
         ] {
             crate::persist_files::save_named(
                 &dir, "SCOTT-TEST-0531", name, trigger, &mapper::mapper::Mapper::default(),
-                save, None, &[], None, None, s.aux_data(), 1, None, None, &[], &[], &[], &[], &[],
+                save, None, &[], None, None, s.aux_data(), 1, None, None,
+                &crate::archive::SessionRecord::empty(),
             )
             .expect("save_named writes the Scott archive");
             let path = dir.join(format!("{name}.lanthorn"));
