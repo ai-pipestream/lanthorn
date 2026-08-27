@@ -109,6 +109,7 @@ A few things worth doing in your first ten minutes. Everything else can wait.
 
 | | |
 |---|---|
+| **r** | Fetches titles, blurbs, ratings and cover art from IFDB for everything missing them. Do this first — until you do, there is not much for the grid to show. |
 | **g** | Flips the list view into a grid of covers. |
 | **/** | Searches IFDB by title or author and downloads straight into your library. |
 | **i** or **Tab** | Shows the info panel for the highlighted story. |

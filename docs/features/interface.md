@@ -516,7 +516,7 @@ it is on two 1541 floppies because it has to be — a Version 4 story counts its
 length in fours, so 262,064 bytes will not go on a 174,848-byte disk however
 neatly you pack it. `TRINITY1.D64` carries the header and a third of the game;
 `TRINITY2.D64` carries the rest and nothing that says what it is, not even that
-it is Infocom. Name either and the browser shows one row, one game. The
+it is Infocom. Name either and the picker shows one row, one game. The
 *Hitchhiker's* Commodore disk beside them is one game on one disk and is not
 mistaken for the start of a set, even though its filename carries a `1984`.
 
@@ -563,7 +563,7 @@ for one reason only — `.dsk` was not a spelling any format claimed — and bec
 sets the same day, with nothing in the grouping rule changed.
 
 **Name any one volume and you get the whole release.** `lanthorn disk1.img` opens
-the browser on all eleven games across `disk1`–`disk4`, not the single story that
+the picker on all eleven games across `disk1`–`disk4`, not the single story that
 one image happens to hold. `lanthorn "Lost Treasures … (Disk 1 of 7).2mg"` opens
 all thirty — and that one used to be an error, because the Apple II press puts a
 launcher on disk 1 and no story at all. Once you're in, it behaves like any
@@ -572,22 +572,22 @@ library: pick a game, play it, `/quit-to-library` comes back to the same shelf.
 **And one disk is not one game.** A compilation pressed onto a single disc is a
 shelf too, and naming one used to start whatever story the disc's own tiebreak
 preferred — `lanthorn InfocomMasterpieces.img` opened one of thirty-three, with
-no way to reach the rest. The browser had every part it needed for this already;
+no way to reach the rest. The picker had every part it needed for this already;
 what it was missing is that "does this disk belong to a set?" and "is there a
 choice to make here?" are different questions. Now a disk holding two or more
-games gets the browser whether or not it has siblings. A disk holding **one**
+games gets the picker whether or not it has siblings. A disk holding **one**
 still opens straight into it — a single-title floppy, and the DiskCopy *Lost
 Treasures* volume whose whole content is *Zork Zero*, want the game and not a
 one-row list.
 
 **And you can make the choice from the shell.** `lanthorn InfocomMasterpieces.img
 --story arthur` goes straight into Arthur — a number picks a position in the list
-the browser would have shown, a name is matched against both the title and the
+the picker would have shown, a name is matched against both the title and the
 name the disc stores it under, and a fragment that fits two games is refused with
 the list rather than guessed at. It is the flag `zvm-cli` has always had, matched
 by the same rule, and it exists mostly for the things that cannot move a cursor:
 a capture, a test harness, a bug report that needs to name the exact press it was
-taken from. Naming a story skips the browser both ways — you land in the game and
+taken from. Naming a story skips the picker both ways — you land in the game and
 the session ends when it does.
 
 **And a game the set carries twice is listed once.** These collections overlap:
@@ -611,7 +611,7 @@ for the same reason: it doesn't need a menu, but its disks do belong to each
 other, so its artwork is shared across them. That is what the DOS presses of
 *Zork Zero* need — the 360K one puts the story alone on disk 2 with CGA on disk 1
 and EGA on disk 3, so booting the story disk drew nothing at all until lanthorn
-learned to read the whole release. A set with two or more games gets the browser
+learned to read the whole release. A set with two or more games gets the picker
 instead and keeps each disk's art on that disk; see
 [Choosing which artwork a game draws](v6-graphics.md#choosing-which-artwork-a-game-draws).
 
@@ -622,7 +622,7 @@ was the one that could not work — `lanthorn "…(360K) (Disk 1).ima"` failed w
 "no story file on this disk image" while disk 2 played perfectly. A volume with
 no story of its own now looks to its release's other volumes before giving up,
 and takes the game off whichever one has it. Strictly one game, though: a shelf
-of thirty is a browser's job, so *Lost Treasures* disk 1 still opens the menu
+of thirty is a picker's job, so *Lost Treasures* disk 1 still opens the menu
 rather than picking a game for you.
 
 Recognition is cautious on purpose, since wrongly merging two collections is
@@ -736,7 +736,7 @@ the game plays without pictures rather than with another release's; see
 `Space` picks the one under the cursor or flips a checkbox, `Tab`/`Shift-Tab`
 move between the buttons, `Enter` plays and `Esc` backs out. Its choices always
 fit the dialog, so a wheel notch over it has nothing to scroll — and it is eaten
-there rather than sliding the story list around behind the dialog. Everything applies
+there rather than sliding the picker's list around behind the dialog. Everything applies
 to that launch alone unless you tick *Save as this game's default*, which writes
 your changes — and only your changes — to the game's own `config.toml`. See
 [choosing which artwork a game draws](v6-graphics.md#three-ways-to-say-it).
@@ -751,7 +751,7 @@ sortable headers, and info panel are all themeable through
 active sort column), `story_author`, `story_year`, `story_rating` (the IFDB
 average and vote count in the RATING column), `story_no_metadata` (the
 "(no metadata yet)" placeholder), `story_tile`/`story_tile:selected` (the
-cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
+cover-grid captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
 `:cover`) style selectors. The Artwork block has its own pair —
 `story_info_artwork` for the detected archives and `story_info_artwork:active`
 for the one in use — the `↳` marking a wrapped continuation row carries
@@ -795,7 +795,7 @@ for the one in use — the `↳` marking a wrapped continuation row carries
   `ifdb_result`/`ifdb_result:selected`/`ifdb_result_meta`/`ifdb_download_marker`/
   `ifdb_download_present`/`ifdb_attribution` style selectors (the two download
   selectors carry the row's `⭳`/`✓` glyph, so a theme can change it).
-  Both lists scroll the way the story list does — the cursor moves inside the
+  Both lists scroll the way the picker's list does — the cursor moves inside the
   visible window and only scrolls it once it reaches an edge — and `Home`/`End`
   and `PageUp`/`PageDown` work throughout.
 - **Metadata fetch (IFDB).** Press `f` to fetch author/year/genre/description/
@@ -835,7 +835,7 @@ for the one in use — the `↳` marking a wrapped continuation row carries
   nearest-neighbour scaled so old low-res art stays crisp instead of blurring;
   `0` resets to fit. Past-native zoom centre-crops rather than shrinking back
   down, so postage-stamp 320×200-era art can be blown up to fill the modal.
-- **Cover gallery.** Press `g` to trade the metadata list for a grid of cover
+- **Cover grid.** Press `g` to trade the metadata list for a grid of cover
   thumbnails — as many ~16-column tiles as the pane is wide, each captioned with
   its title and the selected cover highlighted. Arrow keys or `h`/`j`/`k`/`l`
   drive a 2D cursor, PgUp/PgDn jump a screen of rows, the wheel scrolls the grid

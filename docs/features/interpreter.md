@@ -270,7 +270,7 @@ a measurement — the same build, off media that have every segment, behaves.
 `.po` is usually a **bare** ProDOS volume with nothing wrapped round it, which this
 reader has always been able to open; until these images arrived nothing in the
 reference collection was one, so the extension was in no format's list and the
-disks were openable by name and invisible in the story list. Three of the four
+disks were openable by name and invisible in the story picker. Three of the four
 here are bare volumes and mount (`Arthur.po`, `Journey.po`, `ZorkZero.po`).
 
 The fourth, `Shogun.po`, wears the same extension over a **DiskCopy 4.2** image,
@@ -303,7 +303,7 @@ one of those files by itself and the honest answer is the *Journey* answer — a
 mounted ProDOS volume called `SHOGUN.1`, four files on it, and no game.
 
 So opening a disk had to stop meaning opening a file. Name any volume of the set
-and lanthorn finds the rest the way the browser already grouped them — by their
+and lanthorn finds the rest the way the picker already grouped them — by their
 filenames, in one directory, without opening anything — and asks the container
 the question spanning them. The same header checksum settles it, so a pile of
 floppies that are not one release is refused rather than spliced: *Shogun*
@@ -312,7 +312,7 @@ release 383, serial 890602, 299,392 bytes, checksum `$6F7F`. Both are builds no
 other medium in the collection carries — a fifth *Shogun* and a fourth *Zork
 Zero*.
 
-In the browser they are two games and not nine disks: every volume reports the
+In the picker they are two games and not nine disks: every volume reports the
 same reassembled build, and the fold that already existed for multi-disk
 collections keeps the first one and drops the rest.
 
@@ -406,7 +406,7 @@ which is true of a *Shogun* floppy and false of every compilation disk there is.
 Both sets verify against their own header checksums on the way out, *Shogun*
 release 311 serial 890510 and *Zork Zero* release 383 serial 890602, so a
 mismatched pile of floppies is refused rather than reassembled into plausible
-nonsense. And which files are one release was already known — the browser had
+nonsense. And which files are one release was already known — the picker had
 been grouping multi-disk sets by name for a quest already, reading its list of
 disk spellings off the same table, so it recognised the two presses the day the
 reader landed without a line changed.
@@ -601,7 +601,7 @@ and `PC/DATA/BEYONDZO.DAT`, and on an Amiga floppy every one of them is
 `Story.data`. None of those is a title. What *is* one is the release and serial
 in the header, so the menu looks the build up in the bundled title table
 (`crates/cli-host/src/known_titles.tsv`) — the same table and the same key the
-story browser names its rows with and the per-game save directory is built from,
+story picker names its rows with and the per-game save directory is built from,
 so a game reads the same in all three places. A build the table does not carry
 falls back to the name the disc stored, which is the honest failure: a missing
 row costs a filename, a wrong one mislabels a game.
@@ -631,16 +631,16 @@ terminal that isn't there, `zvm-cli` lists the candidates and tells you to pass
 story.
 
 **The TUI asks the same question a different way** (SQ-0859). It has a list
-already, so a compilation contributes one *row per game* to the story browser
+already, so a compilation contributes one *row per game* to the story picker
 rather than a menu: same mount, same enumeration, same names, and the row carries
 which story it stands for straight into the launch. A menu is what a front-end
-with nothing on screen needs; a browser that can already sort and search by title
+with nothing on screen needs; a picker that can already sort and search by title
 does better by putting the games in it. Both front-ends reach every story on
 every image, and — because the save key is the story's own release and serial —
-`--story 4` and the browser row land in the same directory.
+`--story 4` and the picker row land in the same directory.
 
 **And lanthorn takes `--story` too, for when nobody is watching** (SQ-1078). A
-browser is the right answer for a player and the wrong one for everything else:
+picker is the right answer for a player and the wrong one for everything else:
 until this flag, the only way to reach a game on a compilation disc was to launch
 it and move a cursor, so no capture, no harness and no bug report could name one.
 `stories/InfocomMasterpieces.img` opens *Zork Zero* by the volume's own tiebreak,
@@ -657,12 +657,12 @@ lanthorn stories/InfocomMasterpieces.img --story 7
 Same flag, same spelling, same matching rule — literally the same code
 (`cli_host::story_pick`), because a `--story arthur` that found a game at the
 prompt and nothing in the TUI would be its own defect. A number is a position in
-the list the browser would have shown; a name is matched case-insensitively
+the list the picker would have shown; a name is matched case-insensitively
 against both the stored name and the title, a fragment is enough, and something
 that fits two games is refused *with the list* rather than guessed at. Nothing
 that fails to match ever falls back to booting an arbitrary game.
 
-Naming a story goes straight into it: no browser on the way in, and none on the
+Naming a story goes straight into it: no picker on the way in, and none on the
 way out either — the launch reads as the single-file launch it is, so it exits
 when the game does rather than depositing you in a list you asked not to see. And
 because the flag names a story ON something, it requires a path, exactly as
@@ -673,7 +673,7 @@ were pressed as sets — seven Apple II volumes, nine Atari ST floppies,
 `floppy1.ima` through `floppy5.ima` — and a set is one shelf of games rather than
 a pile of disks. lanthorn works out which files belong together from their names
 alone: one directory, one disk-image extension, identical but for a run of digits
-counting 1, 2, 3…. Name any single volume and the browser opens on the entire
+counting 1, 2, 3…. Name any single volume and the picker opens on the entire
 release, which is what finally makes *Lost Treasures* volume 1 useful — it is the
 GS/OS launcher with no game on it, so `lanthorn "…(Disk 1 of 7).2mg"` used to be
 an error message and now lists all thirty games.
@@ -1227,7 +1227,7 @@ Amiga floppy or anywhere else.
 
   You can set it per game as well as globally. The
   [launch-options dialog](v6-graphics.md#three-ways-to-say-it) — **Shift-Enter**
-  on a story in the browser — shows the number your art choice implies *and where
+  on a story in the picker — shows the number your art choice implies *and where
   it came from*, lets you pin a different one for that launch, and will write
   `interpreter_number` into the game's own `config.toml` if you tick the box.
   Most specific first: the dialog's choice for this launch, then
