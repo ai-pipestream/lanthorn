@@ -108,7 +108,7 @@ A few things worth doing in your first ten minutes. Everything else can wait.
 | **r** | Fetches titles, blurbs, ratings and cover art from IFDB for everything missing them. Do this first — until you do, there is not much for the grid to show. |
 | **g** | Flips the list view into a grid of covers. |
 | **/** | Searches IFDB by title or author and downloads straight into your library. |
-| **i** or **Tab** | Shows the info panel for the highlighted story. |
+| **Tab** | Shows the info panel for the highlighted story. |
 | **o** | Launch options for this story — renderer, machine, artwork — without touching a config file. |
 
 **In the story**
@@ -117,7 +117,7 @@ A few things worth doing in your first ten minutes. Everything else can wait.
 |---|---|
 | **Tab** | Completes from the words *this story* actually knows — no more guessing whether it wants `lamp` or `lantern`. |
 | **/** on an empty line | A fuzzy palette over every command. The fastest way to find out what there is. |
-| **Ctrl+S** / **Ctrl+R** | Saves and restores the map, the screen and your scrollback — not just the game's own state. |
+| **Ctrl+S** or **Ctrl+R** | Saves and restores the map, the screen and your scrollback — not just the game's own state. |
 | **Ctrl+P** | The command menu, if you would rather look than type. |
 | **/open-settings** | The settings worth changing, each with a line saying what it does — no config file, no restart. `Ctrl+P` then **s** gets there too. |
 
@@ -200,15 +200,6 @@ all.
 
 ---
 
-## The command-line players
-
-`zvm-cli`, `gvm-cli` and `scott-cli` play any story in a bare terminal — no map,
-no panes, your scrollback intact. Useful over a slow link, for a screen reader
-(`--screen-reader` emits zero escape sequences), or for debugging one engine
-without the TUI around it. They ship in every release archive.
-
-→ [**the CLI players**](docs/features/interpreter.md)
-
 ## Terminal support
 
 Cover art, in-game graphics, and v6's illustrated frame render with real pixels
@@ -240,6 +231,17 @@ live under `~/.lanthorn/saves/<story-filename>.save/` by default; `--data-dir
 <path>` relocates just those. See
 [customization & configuration](docs/features/customization.md) and the
 [persistence model](docs/persistence.md).
+
+---
+
+## The command-line players
+
+`zvm-cli`, `gvm-cli` and `scott-cli` play any story in a bare terminal — no map,
+no panes, your scrollback intact. Useful over a slow link, for a screen reader
+(`--screen-reader` emits zero escape sequences), or for debugging one engine
+without the TUI around it. They ship in every release archive.
+
+→ [**the CLI players**](docs/features/interpreter.md)
 
 ---
 
