@@ -2929,10 +2929,6 @@ fn render_node(
                     None
                 };
                 if state.graphics_render.borrow().v6_wants_build(gen, area) {
-                    let (canvas, raster_metrics) = build_v6_raster_canvas(&layout, native, state);
-                    // Cache the fresh metrics for skipped frames, then hand the
-                    // built canvas to the off-thread resize+encode worker.
-                    state.v6_raster_metrics.set(raster_metrics);
                     // SQ-0936: the raster arm takes the SAME locked magnification the
                     // ring does, from the same `locked_scale` — so a title that lands
                     // here sees `v6_pixel_lock` at all, and so the two paths agree.
@@ -2949,10 +2945,44 @@ fn render_node(
                     // arm asks the same question the ring does, of the same picker.
                     let lock_applies = crate::render::graphics::v6_pixel_lock_applies(picker);
                     state.v6_scale_lock_inapplicable.set(state.config.v6_pixel_lock && !lock_applies);
-                    let lock = (state.config.v6_pixel_lock && lock_applies)
-                        .then(|| v6::FrameGeometry::new(native, state.v6_art_scale, state.v6_text.cell()).locked_scale(pane_dev))
-                        .flatten()
-                        .map(|sc| sc.s);
+                    // SQ-1032: the Extended mode asks for a taller canvas at a whole
+                    // magnification; every other mode asks for the game's own screen,
+                    // which is what `RasterFrame::native` is and what every line below
+                    // then does exactly as before.
+                    //
+                    // Gated on the SAME `lock_applies` — "does this backend have a
+                    // device pixel?" (SQ-0978). The extension's height is derived from
+                    // `pane_dev`, and on half-blocks the picker's font size is a
+                    // hardcoded 10x20 that the encoder then throws away, so a canvas
+                    // height measured in those pixels is a number nobody chose.
+                    // Half-blocks keeps today's raster composite.
+                    let want = if state.config.v6_render == crate::config::V6RenderMode::Extended
+                        && lock_applies
+                    {
+                        v6::RasterFrame::extended(
+                            native,
+                            pane_dev,
+                            state.v6_text.cell(),
+                            crate::render::graphics::v6_upscale_cap(picker),
+                        )
+                    } else {
+                        v6::RasterFrame::native(native)
+                    };
+                    let (canvas, raster_metrics, built) = build_v6_raster_frame(&layout, want, state);
+                    // Cache the fresh metrics for skipped frames, then hand the
+                    // built canvas to the off-thread resize+encode worker.
+                    state.v6_raster_metrics.set(raster_metrics);
+                    // An extended frame carries its own whole magnification — one
+                    // device pixel per native pixel, times a whole number — which is
+                    // strictly finer than any `v6_pixel_lock` rung, so it satisfies the
+                    // lock as well. A frame that DECLINED the extension carries none,
+                    // and falls back to exactly what `Raster` pins.
+                    let lock = built.lock.or_else(|| {
+                        (state.config.v6_pixel_lock && lock_applies)
+                            .then(|| v6::FrameGeometry::new(native, state.v6_art_scale, state.v6_text.cell()).locked_scale(pane_dev))
+                            .flatten()
+                            .map(|sc| sc.s)
+                    });
                     state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area, lock);
                 }
                 // SQ-0532 wave-5: the game's own page runs to the pane EDGE. The
@@ -3875,7 +3905,31 @@ pub fn build_v6_raster_canvas(
     native: (u16, u16),
     state: &AppState,
 ) -> (image::RgbaImage, Option<RasterMetrics>) {
+    let (canvas, metrics, _) =
+        build_v6_raster_frame(layout, crate::render::v6_layout::RasterFrame::native(native), state);
+    (canvas, metrics)
+}
+
+/// [`build_v6_raster_canvas`] at a stated frame — the general form, and the one the
+/// render calls (SQ-1032).
+///
+/// `want` is the frame the MODE asked for; the third element of the return is the
+/// frame actually BUILT, which is `want` downgraded to
+/// [`RasterFrame::native`](crate::render::v6_layout::RasterFrame::native) whenever
+/// this particular screen has nowhere to put the extra rows. The caller needs that
+/// answer because the magnification it pins the encode to travels with the height
+/// (see [`crate::render::v6_layout::RasterFrame`]), and a canvas that declined the
+/// extension must keep the letterbox it would have had in `Raster`.
+pub fn build_v6_raster_frame(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    want: crate::render::v6_layout::RasterFrame,
+    state: &AppState,
+) -> (image::RgbaImage, Option<RasterMetrics>, crate::render::v6_layout::RasterFrame) {
     use crate::render::v6_layout as v6;
+    // The game's own screen. Everything between here and the flank extension is
+    // stated in it and is unchanged by SQ-1032: the extension only ever adds rows
+    // BELOW, and the game laid its windows out on this.
+    let native = want.native;
     let (default_fg, default_bg) = v6_host_pair(state);
     // The story PAIR (SQ-0510, extended in SQ-0532 wave-5): a game-set
     // story-window colour (`set_colour`) wins per channel, else the paired
@@ -3990,8 +4044,6 @@ pub fn build_v6_raster_canvas(
         })
         .flatten()
         .collect();
-    extend_raster_flanks(&mut canvas, &obstruction, layout.story, &chrome_runs, native, state.v6_text.cell());
-    let mut raster_metrics: Option<RasterMetrics> = None;
     // SQ-0578: only stamp the story when its clear interior can hold at least
     // one full 8x16 text cell. A full-screen picture (Zork Zero's rebus) grows
     // window 0 over the whole screen and paints art across virtually all of it;
@@ -4001,8 +4053,62 @@ pub fn build_v6_raster_canvas(
     // hundreds of keypresses to drain. No cell fits → the picture owns the
     // screen: ship the art alone and report no scroll metrics, exactly like the
     // no-story-window case.
+    //
+    // SQ-1032 HOISTED this above the flank extension, where it used to sit just
+    // below, because the frame's HEIGHT is decided from it. It reads `obstruction`
+    // and nothing else, and nothing between the two positions touches that canvas,
+    // so `Raster` builds the identical composite either way.
+    let cell = state.v6_text.cell();
     let story_clear =
         v6::story_clear_native(layout.story, &obstruction).filter(|&(_, _, w, h)| w >= 8 && h >= 16);
+    // SQ-1032: does this frame extend, and by how many native rows?
+    //
+    // The MODE asked for it (`want`); this screen has to be able to SPEND it. Every
+    // test below is a screen where the extra rows would have no prose to hold, and a
+    // canvas grown past the artwork with nothing in it is a strip of bare page under
+    // the game's own frame. They are the same questions, in the same order, that the
+    // composite asks itself further down — asked here so the frame cannot grow down a
+    // path that then declines to draw into it.
+    let extension = 'ext: {
+        if want.extension() == 0 {
+            break 'ext 0;
+        }
+        let Some(story) = layout.story else { break 'ext 0 };
+        // A text-only command strip under the story window — Journey. Hybrid meets
+        // this case by BOTTOM-ANCHORING the strip and letting the story fill between
+        // (`BottomPlan::Menu`), and this mode cannot: the composite is one image
+        // built in the game's own coordinates, so moving the game's chrome inside it
+        // is a composition change rather than a layout one. The flank extension
+        // declines the identical frame for the identical reason (SQ-0819), so
+        // extending here would strand the menu mid-canvas over an unextended flank.
+        // Declining leaves Journey exactly as `Raster` draws it.
+        if menu_strip_below_story(story, &obstruction, &chrome_runs, native, cell) {
+            break 'ext 0;
+        }
+        // A story window enclosed by its own art is a CANVAS, not a page (SQ-0729):
+        // fmvpoker gets no transcript at all, so there is no prose to grow.
+        if story_window_is_a_canvas(layout, native) {
+            break 'ext 0;
+        }
+        // A `Grid` in the story slot contributes its rect and nothing else
+        // (SQ-1026) — again no transcript. scopa and Amiga Shogun's InvisiClues.
+        if !matches!(&story.node, WinNode::Buffer(_)) {
+            break 'ext 0;
+        }
+        // The picture owns the screen (SQ-0578), or an absolutely-placed plate is
+        // drawn INSTEAD of prose (SQ-0707). Arthur's intro plate is the second.
+        let Some(clear) = story_clear else { break 'ext 0 };
+        if v6::story_prose_box(clear, layout.story_gfx, cell).is_none() {
+            break 'ext 0;
+        }
+        want.extension()
+    };
+    let frame = if extension == 0 { v6::RasterFrame::native(native) } else { want };
+    if extension > 0 {
+        canvas = grow_canvas_rows(canvas, frame.canvas_h);
+    }
+    extend_raster_flanks(&mut canvas, &obstruction, layout.story, &chrome_runs, frame, cell);
+    let mut raster_metrics: Option<RasterMetrics> = None;
     if let Some((sx, sy, sw, sh)) = story_clear {
         // Paint the story page opaque (SQ-0510, reopened). Leaving it
         // transparent let whoever composites the image pick the colour
@@ -4037,7 +4143,7 @@ pub fn build_v6_raster_canvas(
         // screen. See `story_window_is_a_canvas`: fmvpoker alone.
         if story_window_is_a_canvas(layout, native) {
             v6::draw_story_canvas_runs(&mut canvas, layout.story, ink, page, honor, &state.colors, &state.v6_text);
-            return finish_v6_raster_canvas(canvas, page, raster_metrics);
+            return finish_v6_raster_canvas(canvas, page, raster_metrics, frame);
         }
         // **A `Grid` in the story slot contributes its RECT and nothing else**
         // (SQ-1026). With no primary `Buffer` on the frame, `classify_windows`
@@ -4058,15 +4164,15 @@ pub fn build_v6_raster_canvas(
         // No prose box and no scroll metrics, exactly as when a plate owns the
         // screen — there is no transcript on this frame.
         if !matches!(layout.story.map(|s| &s.node), Some(WinNode::Buffer(_))) {
-            return finish_v6_raster_canvas(canvas, page, raster_metrics);
+            return finish_v6_raster_canvas(canvas, page, raster_metrics, frame);
         }
         // Whether any prose belongs on THIS frame, and where (SQ-0707). An
         // absolutely-placed plate is drawn INSTEAD of prose, not under it: the
         // game erases, draws, and waits, so the narration is its own picture-less
         // screen. `None` = the plate owns the screen, and rasterizing scrollback
         // onto it would paint the PREVIOUS screen's text across the art.
-        let Some((tx, ty, tw, th)) = v6::story_prose_box((sx, sy, sw, sh), layout.story_gfx, state.v6_text.cell()) else {
-            return finish_v6_raster_canvas(canvas, page, raster_metrics);
+        let Some((tx, ty, tw, th)) = v6::story_prose_box((sx, sy, sw, sh), layout.story_gfx, cell) else {
+            return finish_v6_raster_canvas(canvas, page, raster_metrics, frame);
         };
         // Window-0 inline pictures (drop-caps, room icons) arrive as
         // transcript-anchored floats (`transcript_images` sidecar):
@@ -4075,8 +4181,21 @@ pub fn build_v6_raster_canvas(
         // Non-square 8×16 v6 cell (SQ-0479): columns divide the
         // clear width by the cell's width, rows the height by its height.
         let (sx, sy) = (tx, ty);
-        let cols = (tw / u32::from(state.v6_text.cell().w)).max(1) as u16;
-        let rows = (th / u32::from(state.v6_text.cell().h)).max(1) as u16;
+        // SQ-1032: the extension belongs to the PROSE BOX and to nothing else. It is
+        // whole text rows of the game's own face by construction
+        // (`RasterFrame::extended` sizes it in `cell.h`), so `rows` below gains
+        // exactly that many and keeps whatever sub-row remainder the unextended box
+        // already had — the region lands on the face's own grid rather than being
+        // letterboxed inside itself.
+        //
+        // `th + extension` rather than "grow to the canvas bottom", which is the
+        // literal transcription of hybrid's `area.bottom() - y`: on every title that
+        // extends they are the same number (the story box reaches the game's screen
+        // bottom), and this one additionally cannot walk prose over a bottom band the
+        // game drew below its own story window.
+        let th = th + extension;
+        let cols = (tw / u32::from(cell.w)).max(1) as u16;
+        let rows = (th / u32::from(cell.h)).max(1) as u16;
         let (main, rm) = build_main_text(state, cols, rows);
         // …sparing the cells another window's own text already holds (SQ-0729).
         // The page fill above spares them; the GLYPHS did not, so the transcript
@@ -4153,7 +4272,7 @@ pub fn build_v6_raster_canvas(
     // identical on every protocol/terminal. Touches alpha==0 pixels
     // ONLY — art, status bands, glyphs and drop-caps are all opaque and
     // are left byte-for-byte alone. (SQ-0510)
-    finish_v6_raster_canvas(canvas, page, raster_metrics)
+    finish_v6_raster_canvas(canvas, page, raster_metrics, frame)
 }
 
 /// Seal a v6 raster composite: resolve every still-transparent pixel to the story
@@ -4163,9 +4282,28 @@ fn finish_v6_raster_canvas(
     mut canvas: image::RgbaImage,
     page: image::Rgba<u8>,
     raster_metrics: Option<RasterMetrics>,
-) -> (image::RgbaImage, Option<RasterMetrics>) {
+    frame: crate::render::v6_layout::RasterFrame,
+) -> (image::RgbaImage, Option<RasterMetrics>, crate::render::v6_layout::RasterFrame) {
     crate::render::v6_layout::flatten_onto_page(&mut canvas, page);
-    (canvas, raster_metrics)
+    (canvas, raster_metrics, frame)
+}
+
+/// SQ-1032: the same composite with more transparent native rows below it.
+///
+/// Transparent, not paged: the flank extension paints its own columns into them and
+/// `flatten_onto_page` resolves whatever is left to the story page, which is exactly
+/// how every other unpainted pixel on this canvas reaches the screen (SQ-0510).
+fn grow_canvas_rows(src: image::RgbaImage, height: u32) -> image::RgbaImage {
+    if height <= src.height() {
+        return src;
+    }
+    let mut out = image::RgbaImage::new(src.width(), height);
+    for y in 0..src.height() {
+        for x in 0..src.width() {
+            out.put_pixel(x, y, *src.get_pixel(x, y));
+        }
+    }
+    out
 }
 
 /// Flood every cell of `area` with an opaque game page colour (SQ-0532 wave-5).
@@ -4279,6 +4417,10 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
     // A live `/set-game-colours` toggle changes the composite's page/ink
     // resolution without touching the model — it must invalidate the canvas.
     state.config.honor_game_colours.hash(&mut h);
+    // SQ-1032: and the MODE, which now decides the canvas's own height. `/set-v6-render`
+    // between raster and extended moves no window, no run and no pixel of the model, so
+    // without this the cached composite outlives the mode it was built for.
+    state.config.v6_render.hash(&mut h);
     let tbg = state.colors.theme.get("transcript").style;
     style_fg_rgba(tbg, image::Rgba([220, 220, 220, 255])).0.hash(&mut h);
     style_bg_rgba(tbg, image::Rgba([0, 0, 0, 255])).0.hash(&mut h);
@@ -5437,14 +5579,23 @@ fn flank_tiled_source(
 /// player saw "Individual Commands" alone with the art column smeared across
 /// where "The Party" belongs. Release 83 (`journey-r83-s890706.z6`, story window
 /// bottom 304) has the identical shape, so this was never medium-specific.
+///
+/// **SQ-1032 gave it the FRAME rather than the native screen**, and the two are the
+/// same thing until the composite extends: the rows copied verbatim off `canvas` are
+/// still the game's own screen (`frame.native.1`), and only the number of rows the
+/// band is asked to FILL changes (`frame.canvas_h`). `flank_source` has always taken
+/// those as separate arguments — "extend only when the pane is taller than the art" is
+/// Bocfel's own guard and it reads a desired height, not a screen — so an extended
+/// frame tiles further down the same recipe rather than a new one.
 fn extend_raster_flanks(
     canvas: &mut image::RgbaImage,
     gfx: &image::RgbaImage,
     story: Option<&crate::engine::PositionedWindow>,
     chrome_runs: &[&crate::engine::PxText],
-    native: (u16, u16),
+    frame: crate::render::v6_layout::RasterFrame,
     cell: zvm::screen::V6Cell,
 ) {
+    let native = frame.native;
     let Some(story) = story else { return };
     if menu_strip_below_story(story, gfx, chrome_runs, native, cell) {
         return;
@@ -5456,9 +5607,16 @@ fn extend_raster_flanks(
             continue;
         }
         let art = crate::render::v6_border::art_extent(gfx, x0, x1);
-        let Some(src) =
-            crate::render::v6_border::flank_source(canvas, gfx, x0, x1, art, native_h, 0, native_h)
-        else {
+        let Some(src) = crate::render::v6_border::flank_source(
+            canvas,
+            gfx,
+            x0,
+            x1,
+            art,
+            native_h,
+            0,
+            frame.canvas_h,
+        ) else {
             continue;
         };
         for y in 0..src.height().min(canvas.height()) {

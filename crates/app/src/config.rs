@@ -842,10 +842,10 @@ impl GlkPixelScale {
 
 /// How the v6 graphical story pane is rendered.
 ///
-/// TOML: `v6_render = "hybrid"` (default) or `"raster"`. Any other string —
-/// including `"frameless"`, the mode SQ-0895 removed — silently reads as
+/// TOML: `v6_render = "hybrid"` (default), `"raster"` or `"extended"`. Any other
+/// string — including `"frameless"`, the mode SQ-0895 removed — silently reads as
 /// `Hybrid`; see [`deserialize_v6_render`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Default, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 #[clap(rename_all = "lowercase")]
 pub enum V6RenderMode {
@@ -855,6 +855,12 @@ pub enum V6RenderMode {
     Hybrid,
     /// The whole pane rasterized into one pixel image (feature-limited).
     Raster,
+    /// [`Self::Raster`], but the frame GROWS downward instead of letterboxing:
+    /// the magnification is pinned to a whole number of device pixels per native
+    /// pixel and the pane's surplus height buys whole text rows of prose in the
+    /// game's own bitmap face (SQ-1032). The game is told nothing — its own screen
+    /// is the top of a taller canvas, laid out exactly as it always was.
+    Extended,
 }
 
 /// The `v6_render` token for a mode — what the file holds, and so what a one-run
@@ -866,6 +872,7 @@ fn v6_render_key(mode: V6RenderMode) -> &'static str {
     match mode {
         V6RenderMode::Hybrid => "hybrid",
         V6RenderMode::Raster => "raster",
+        V6RenderMode::Extended => "extended",
     }
 }
 
@@ -883,6 +890,7 @@ where
     let s = String::deserialize(d)?;
     Ok(match s.as_str() {
         "raster" => V6RenderMode::Raster,
+        "extended" => V6RenderMode::Extended,
         _ => V6RenderMode::Hybrid,
     })
 }
@@ -2802,9 +2810,27 @@ use_defaults = false
         assert_eq!(c.v6_render, V6RenderMode::Hybrid, "the removed mode reads as the default");
         let c: Config = toml::from_str("v6_render = \"rastr\"").unwrap();
         assert_eq!(c.v6_render, V6RenderMode::Hybrid, "a typo reads as the default too");
-        // …and the fallback must not swallow the mode that DOES still exist.
+        // …and the fallback must not swallow the modes that DO still exist.
         let c: Config = toml::from_str("v6_render = \"raster\"").unwrap();
         assert_eq!(c.v6_render, V6RenderMode::Raster);
+        let c: Config = toml::from_str("v6_render = \"extended\"").unwrap();
+        assert_eq!(c.v6_render, V6RenderMode::Extended);
+    }
+
+    /// SQ-1032: the third mode has to survive the file the same way, and its token
+    /// is the one [`v6_render_key`] writes.
+    #[test]
+    fn v6_render_extended_round_trips_through_writer() {
+        let dir = std::env::temp_dir().join(format!("lanthorn-v6-ext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.v6_render = V6RenderMode::Extended;
+        write_config(&dir, &cfg).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(text.contains("v6_render = \"extended\""), "the file must hold the token: {text}");
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.v6_render, V6RenderMode::Extended, "extended must survive save→load");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Retargeted from `v6_render_frameless_round_trips_through_writer` (SQ-0895):
@@ -3318,7 +3344,7 @@ use_defaults = false
     /// ([`v6_render_key`]) — asserted here rather than left to inspection.
     #[test]
     fn the_pinned_v6_render_token_is_the_one_the_file_holds() {
-        for mode in [V6RenderMode::Hybrid, V6RenderMode::Raster] {
+        for mode in [V6RenderMode::Hybrid, V6RenderMode::Raster, V6RenderMode::Extended] {
             let mut cfg = Config::default();
             cfg.v6_render = mode;
             cfg.one_run.pin(keys::V6_RENDER, v6_render_key(mode));

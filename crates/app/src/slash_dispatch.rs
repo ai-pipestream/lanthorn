@@ -595,17 +595,21 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::SetV6Render(opt) => {
-            // Live, session-only switch for testing the two v6 looks; the
-            // config screen remains the persistence path. Bare toggles.
+            // Live, session-only switch for testing the v6 looks; the config
+            // screen remains the persistence path. Bare CYCLES — with three modes
+            // (SQ-1032) there is no "the other one" to toggle to, and the cycle is
+            // the order the settings screen's own row already walks.
             use app::config::V6RenderMode;
             let next = opt.unwrap_or(match state.config.v6_render {
                 V6RenderMode::Hybrid => V6RenderMode::Raster,
-                V6RenderMode::Raster => V6RenderMode::Hybrid,
+                V6RenderMode::Raster => V6RenderMode::Extended,
+                V6RenderMode::Extended => V6RenderMode::Hybrid,
             });
             state.config.v6_render = next;
             let label = match next {
                 V6RenderMode::Hybrid => "hybrid",
                 V6RenderMode::Raster => "raster",
+                V6RenderMode::Extended => "extended",
             };
             state.push_transcript_internal(
                 &format!("v6 render: {label} (session only)"),
@@ -793,7 +797,11 @@ fn terminal_snapshot(
                 let native = app::render::v6_layout::native_extent(&items, &state.v6_text);
                 let hybrid = state.config.v6_render == app::config::V6RenderMode::Hybrid;
                 Some(RenderFacts {
-                    mode: if hybrid { "hybrid" } else { "raster" },
+                    mode: match state.config.v6_render {
+                        app::config::V6RenderMode::Hybrid => "hybrid",
+                        app::config::V6RenderMode::Raster => "raster",
+                        app::config::V6RenderMode::Extended => "extended",
+                    },
                     takeover: state.v6_takeover_reason.get(),
                     // The hatch is a hybrid-mode test; in raster the cell holds
                     // whatever some earlier hybrid frame left, which is not a verdict

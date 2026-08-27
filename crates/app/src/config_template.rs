@@ -283,8 +283,13 @@ const INTERPRETER: &[Row] = &[
         "\"hybrid\"",
         &[
             "How v6 graphical games (Zork Zero, Arthur, Journey, Shogun) are drawn:",
-            "  \"hybrid\" — crisp terminal story inside a scaled pixel frame (default)",
-            "  \"raster\" — the whole pane as one pixel image",
+            "  \"hybrid\"   — crisp terminal story inside a scaled pixel frame (default)",
+            "  \"raster\"   — the whole pane as one pixel image, letterboxed",
+            "  \"extended\" — the same pixel image, but pinned to a whole magnification",
+            "               and grown DOWNWARD: the pane's surplus height becomes extra",
+            "               story rows in the game's own bitmap typeface instead of",
+            "               empty letterbox. The game is told nothing — its own screen",
+            "               keeps the layout it always had, at the top of a taller frame.",
         ],
     ),
     d(
