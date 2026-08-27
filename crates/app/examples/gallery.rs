@@ -172,7 +172,19 @@ fn main() -> std::process::ExitCode {
         // Provenance FIRST, and from the mount rather than the filename: a disk
         // image is a different build of the game, so a frame captioned with a
         // release it did not load is worse than one captioned with none.
-        let provenance = match gallery::Provenance::read(&shot.media_path(), shot.pictures()) {
+        // What this shot opens — a medium, or one of the manifest's libraries —
+        // settled once and handed to everything below, so the provenance under
+        // the frame and the path the binary is launched with cannot disagree.
+        let subject = match manifest.subject(shot) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("SKIP  {e}");
+                failed.push(format!("{}: {e}", shot.id));
+                drop_stale();
+                continue;
+            }
+        };
+        let provenance = match gallery::Provenance::of(&subject, shot.pictures()) {
             Ok(p) => p,
             Err(e) => {
                 println!("SKIP  {e}");
@@ -197,7 +209,7 @@ fn main() -> std::process::ExitCode {
         let mut attempts = 0usize;
         for attempt in 1..=retries.max(1) {
             attempts = attempt;
-            let c = match gallery::capture(shot, &bin, &work, Duration::from_secs(timeout)) {
+            let c = match gallery::capture(shot, &subject, &bin, &work, Duration::from_secs(timeout)) {
                 Ok(c) => c,
                 Err(e) => {
                     last = e;
@@ -250,7 +262,7 @@ fn main() -> std::process::ExitCode {
             face.draw(canvas, ch, px, py, cw, chh, fg)
         });
 
-        let native = provenance.native;
+        let native = provenance.native();
         let mut t = Taken {
             id: shot.id.clone(),
             png: png.clone(),

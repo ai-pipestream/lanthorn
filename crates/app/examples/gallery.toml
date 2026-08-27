@@ -535,12 +535,134 @@ expect_art_cells = 400
 # Z-machine's. They were the stills in README.md that no shot produced, so they
 # were the ones nobody could regenerate without a camera (SQ-1080).
 #
-# The browser and the cover grid are NOT here yet, and the reason is structural
-# rather than an oversight: `media` is resolved as a FILE — `Provenance::read`
-# mounts it through `load_mounted_story`, which reads bytes — so pointing a shot
-# at a library directory fails provenance and skips on every run for ever. A
-# permanently skipping shot reads as coverage and is worse than an absent one, so
-# those two wait on the harness learning a library launch (SQ-1080).
+# ── AND THE TWO THAT OPEN A DIRECTORY (SQ-1080) ──────────────────────────────
+#
+# `library = true` says the frame is the PICKER, and `media` then names a
+# `[[libraries]]` entry below rather than a file. It changes four things:
+#
+#   * the library is STAGED — one symlink per member, into a throwaway directory
+#     per capture — and lanthorn is launched on that, from its parent, so the
+#     directory NAME is what the header shows. (Named absolutely it is sixty
+#     characters of system temp path that clip the key hints off the end.)
+#   * provenance is the library, not a story. Nothing has been mounted, so there
+#     is no release, no serial, no medium and no native screen to read, and
+#     `Provenance::Library` says so instead of filling a story's fields with
+#     zeroes. The count under the header is the picker's own and is left to the
+#     frame to state.
+#   * `default_story_dir` is written into the run's config. A directory on the
+#     command line otherwise trips the first-use "set this as your default story
+#     directory?" question, which reads a LINE from stdin in cooked mode BEFORE
+#     the terminal is touched at all — before the colour query, before raw mode.
+#     No keypress in a key spec can answer it, because the driver's keys start
+#     after the app has settled. Falsified by removing the config write, at which
+#     point the capture fails with "NOT KITTY — lanthorn never asked the kitty
+#     capability query": the app was still blocked on `read_line`. So the prompt
+#     is not answered — it is not asked.
+#   * no per-game sidecar is written, because the path is not a game.
+#
+# `raster`, `show_map` and `--pictures` are all REFUSED on a library shot: each
+# describes a story that has not been opened, and a field silently ignored is
+# worse than one rejected.
+#
+# WHERE THE COVERS COME FROM, AND WHY THAT DECIDES THE FIXTURE. A cover is
+# either the story's own `Fspc` frontispiece, out of its own bytes, or a
+# `cover.png` an IFDB fetch wrote into the save directory. The gallery gives
+# every shot a FRESH user dir, so the second kind does not exist here and cannot:
+# a shot that fetched from IFDB would be a test that reaches the network, and one
+# that read this machine's fetch cache would be a frame nobody else can
+# regenerate. Every cover below is therefore the story's own.
+#
+# Which is why a library shot names its MEMBERS rather than pointing at
+# `stories/`. Pointing at `stories/` was tried first and is the wrong fixture
+# twice over: the frame shows whatever that folder holds on the day — 287 entries
+# on this machine, a different set on the next — and the picker sorts by title,
+# so the alphabet decides which screenful the shot lands on. Measured: the
+# top-of-alphabet screenful is `advent`, `advent`, `advent`, `Adventureland`,
+# four empty boxes and no metadata at all, because the frontispieces are spread
+# evenly through the alphabet and the Infocom rows have no author until somebody
+# fetches one. A named library is a fixture; a directory is a coincidence.
+#
+# Every member below carries BOTH an `Fspc` frontispiece and an `IFmd` metadata
+# chunk, so the covers, the authors and the years in these two frames all come
+# out of the stories' own bytes.
+
+[[libraries]]
+id = "frontispieces"
+from = "stories"
+members = [
+  "And_Then_You_Come_to_a_House.gblorb.blorb",
+  "Brain_Guzzlers_from_Beyond!.gblorb.blorb",
+  "Coloratura.gblorb.blorb",
+  "CounterfeitMonkey-11.gblorb",
+  "cragne.gblorb",
+  "Dr Ludwig and the Devil.gblorb",
+  "Dual.zblorb.blorb",
+  "Eat_Me.gblorb",
+  "FooFoo.gblorb.blorb",
+  "Game of Worlds Tournament.gblorb",
+  "Kerkerkruip.gblorb",
+  "LostPig.zblorb.blorb",
+  "MidnightSwordfight.gblorb",
+  "Never Gives Up Her Dead.gblorb",
+  "Sub_Rosa.gblorb.blorb",
+  "Superluminal_Vagrant_Twin.gblorb.blorb",
+  "TAKE.gblorb",
+  "THE BAT.gblorb.blorb",
+  "The_Magpie_Takes_the_Train.gblorb.blorb",
+  "The_Mary_Jane_of_Tomorrow.gblorb.blorb",
+  "The_Song_of_the_Mockingbird.gblorb.blorb",
+  "The_Wizard_Sniffer.gblorb.blorb",
+  "Violet.zblorb.blorb",
+  "Zozzled.gblorb.blorb",
+  "the-impossible-bottle.zblorb.blorb",
+]
+
+[[shots]]
+id = "story-list"
+title = "The story picker"
+press = "a story library, in list view"
+media = "frontispieces"
+library = true
+caption = """
+Point lanthorn at a directory instead of a story and it opens its catalogue: \
+every game the folder holds, resolved without running any of them — title, \
+author and year out of each story's own metadata, the engine and container as a \
+badge, and a save marker where there is one. Any column sorts. The panel beside \
+it is the selected story's, cover included."""
+# `i` opens the info panel (it starts closed), and the moves after it are what
+# put a story with its own frontispiece under the cursor — the panel only asks
+# for a cover once it is open and the selection has settled.
+keys = "wait:9000,i,wait:2500,down,wait:400,down,wait:400,down,wait:2500"
+size = "140x32"
+# Four claims, and each one fails differently: the picker opened at all; the
+# columns resolved (an empty AUTHOR column is what a catalogue with no metadata
+# looks like, and it looks fine); the info panel is open; and the cover in it
+# actually decoded, which is the only thing `expect_art_cells` can see.
+expect = ["choose a story", "TITLE", "AUTHOR", "Info"]
+expect_art_cells = 300
+
+[[shots]]
+id = "cover-gallery"
+title = "The story picker"
+press = "a story library, in cover view"
+media = "frontispieces"
+library = true
+caption = """
+The same catalogue as a wall of covers. `g` switches the list for a grid of \
+frontispieces — drawn as kitty graphics, at whatever size the tiles come out — \
+with the selected story's panel still beside it. The art is each story's own: a \
+blorb that carries an `Fspc` frontispiece has its cover in its bytes, and \
+nothing here asks the network for anything."""
+keys = "wait:9000,g,wait:3000,i,wait:2500,right,wait:600,right,wait:4000"
+size = "140x38"
+# The whole point of the frame is the artwork, so the art floor is the guard that
+# matters: a grid that resolved no cover at all still draws its placeholder boxes
+# and its titles, and reads as a perfectly good screenshot of nothing. 2000 is
+# chosen to be out of the INFO PANEL's reach — the panel's own cover is at most
+# ~40x17 cells, so a floor near it could be met with an empty grid beside a
+# populated panel. Measured here: ~3100 cells, twelve tiles plus the panel.
+expect = ["choose a story", "g: list"]
+expect_art_cells = 2000
 
 [[shots]]
 id = "debug-inspector"

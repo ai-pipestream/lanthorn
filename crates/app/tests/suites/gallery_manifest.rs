@@ -225,6 +225,10 @@ fn every_v6_shot_magnifies_by_a_whole_number() {
     let mut any_present = false;
     let mut checked = 0usize;
     for s in &m.shots {
+        // A library shot mounts nothing at all — see `Provenance::Library`.
+        if s.library {
+            continue;
+        }
         let path = s.media_path();
         if !path.exists() {
             continue;
@@ -359,6 +363,75 @@ fn an_unknown_field_is_refused() {
         "`turns` is DERIVED from `keys`; letting a manifest declare one would create a second copy \
          of the truth, which is the whole thing this manifest is shaped to avoid"
     );
+}
+
+// ── Library shots (SQ-1080) ───────────────────────────────────────────────────
+
+/// A library shot names a `[[libraries]]` entry the way every other shot names a
+/// file, and a name that resolves to nothing is refused at PARSE time.
+///
+/// It has to be caught here rather than at capture: the alternative is a shot
+/// that skips on every run for ever, which reads as coverage and is not any —
+/// exactly the reason these two shots were removed from the manifest the first
+/// time round instead of being left in.
+#[test]
+fn a_library_shot_must_name_a_declared_library() {
+    let body = format!("{GOOD}library = true\n");
+    let e = parse_one(&body).expect_err("`stories/a.z6` is not a declared library id");
+    assert!(e.contains("[[libraries]]"), "the error must say what is missing: {e}");
+
+    let ok = Manifest::parse(&format!(
+        "[[libraries]]\nid = \"lib\"\nfrom = \"stories\"\nmembers = [\"a.z6\"]\n\
+         [[shots]]{}media = \"lib\"\nlibrary = true\n",
+        GOOD.replace(r#"media = "stories/a.z6""#, "")
+    ));
+    assert!(ok.is_ok(), "a declared library resolves: {ok:?}");
+}
+
+/// Everything that describes a STORY is refused on a library shot, because no
+/// story has been opened and a field silently ignored is worse than one
+/// rejected.
+#[test]
+fn a_library_shot_may_not_describe_a_story() {
+    let lib = "[[libraries]]\nid = \"lib\"\nfrom = \"stories\"\nmembers = [\"a.z6\"]\n";
+    let base = format!("{}media = \"lib\"\nlibrary = true\n", GOOD.replace(r#"media = "stories/a.z6""#, ""));
+    assert!(Manifest::parse(&format!("{lib}[[shots]]{base}")).is_ok(), "the control must parse");
+    for extra in ["raster = true\n", "show_map = true\n", "args = [\"--pictures\", \"Pic.data\"]\n"] {
+        let e = Manifest::parse(&format!("{lib}[[shots]]{base}{extra}"))
+            .expect_err("a library shot has no story for `{extra}` to apply to");
+        assert!(e.contains("library shot"), "the error must say why: {e}");
+    }
+}
+
+/// A library with no members, or a member that is a path rather than a name.
+#[test]
+fn a_malformed_library_is_refused() {
+    let shot = format!("[[shots]]{}media = \"lib\"\nlibrary = true\n", GOOD.replace(r#"media = "stories/a.z6""#, ""));
+    for (members, why) in [
+        ("[]", "an empty picker is not a picture of a catalogue"),
+        ("[\"sub/a.z6\"]", "a member must be a bare filename"),
+        ("[\"a.z6\", \"a.z6\"]", "a member named twice"),
+    ] {
+        let text = format!("[[libraries]]\nid = \"lib\"\nfrom = \"stories\"\nmembers = {members}\n{shot}");
+        assert!(Manifest::parse(&text).is_err(), "{why}");
+    }
+}
+
+/// The committed manifest really does exercise the library path, and its members
+/// are named rather than swept out of a directory.
+#[test]
+fn the_committed_manifest_opens_a_library() {
+    let m = manifest();
+    assert!(m.shots.iter().any(|s| s.library), "no library shot — the picker is two of README's stills");
+    assert!(!m.libraries.is_empty(), "a library shot with no [[libraries]] should not have parsed");
+    for l in &m.libraries {
+        assert!(
+            l.members.len() >= 8,
+            "library `{}` has {} member(s); a cover grid wants enough of them to BE a grid",
+            l.id,
+            l.members.len()
+        );
+    }
 }
 
 /// Every shot pins a seed, whether or not its game deals randomly.
