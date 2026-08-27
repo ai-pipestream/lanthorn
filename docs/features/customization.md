@@ -552,7 +552,7 @@ re-seed the new template, or hand-write the new shape from
   the settings screen with `←` / `→`. A game's imported `garglk.ini` margin (below)
   overrides this default while that story is open.
 - **In-app config screen** — pop the leader panel (default `Ctrl+P`) and press
-  the `open-config` key for a settings modal covering the common options, with an
+  the `open-settings` key for a global-settings modal covering the common options, with an
   explicit Save (writes the config file, comments and layout preserved) and
   Cancel; changes apply live.
 - **Portable home** — everything lanthorn keeps (config, style, saves, sidecars)

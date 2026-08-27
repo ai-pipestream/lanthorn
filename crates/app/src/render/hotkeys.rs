@@ -193,10 +193,14 @@ mod tests {
         let mut buf = Buffer::empty(area);
         draw_hotkey_dialog(&state, area, &mut buf);
         let text = buf_text(&buf);
-        // The default layout has a "Layout" group
-        assert!(text.contains("Layout"), "expected 'Layout' group heading in dialog");
-        // The tidy-map command's label (registry description) appears in that group
-        assert!(text.contains("tidy"), "expected 'tidy' label in dialog");
+        // Session leads the panel, and the map groups name themselves as such.
+        assert!(text.contains("Session"), "expected the 'Session' group heading in dialog");
+        assert!(text.contains("global settings"), "expected Session's 'global settings' label in dialog");
+        assert!(
+            text.contains("Map \u{b7} Layers"),
+            "expected the 'Map \u{b7} Layers' heading: the renderer draws flat headings, so a \
+             sub-section can only be spelled in the title"
+        );
     }
 
     #[test]
@@ -208,10 +212,11 @@ mod tests {
         let rects = draw_hotkey_dialog(&state, area, &mut buf).expect("dialog should draw");
         let content = rects.content;
 
-        // The tidy-map row is authored with leader letter 't'; find its row by
-        // locating the row whose content-area text carries tidy-map's authored
-        // panel label, then check the row's key column is 't'.
-        let tidy_desc = "tidy the layout";
+        // The rename-room row is authored with leader letter 'r'; find its row by
+        // locating the row whose content-area text carries that authored panel
+        // label, then check the row's key column is 'r'. (This used tidy-map until
+        // the Layout group was removed from the panel.)
+        let tidy_desc = "rename room";
         let mut found_tidy_row = false;
         for y in content.y..content.bottom() {
             let mut line = String::new();
@@ -223,10 +228,10 @@ mod tests {
             if line.contains(tidy_desc) {
                 found_tidy_row = true;
                 let key_cell = buf.cell((content.x, y)).expect("key cell");
-                assert_eq!(key_cell.symbol(), "t", "expected authored letter 't' in the key column of the tidy row");
+                assert_eq!(key_cell.symbol(), "r", "expected authored letter 'r' in the key column of the rename row");
             }
         }
-        assert!(found_tidy_row, "expected a row containing tidy-map's panel label in the dialog content");
+        assert!(found_tidy_row, "expected a row containing rename-room's panel label in the dialog content");
 
         // The old global-keymap chord label must not appear anywhere.
         let text = buf_text(&buf);

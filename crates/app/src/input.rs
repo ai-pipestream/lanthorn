@@ -4559,8 +4559,10 @@ mod tests {
     fn leader_letter_fires_command() {
         let mut s = AppState::default();
         s.overlays.hotkey_dialog = true;
-        match key_to_command(&s, key(KeyCode::Char('t'))) {
-            KeyResolve::Command(c, _) => assert_eq!(c, "tidy-map"),
+        // 'r' → rename-room. This used 't' → tidy-map until the Layout group was
+        // removed from the panel; the mechanism under test is unchanged.
+        match key_to_command(&s, key(KeyCode::Char('r'))) {
+            KeyResolve::Command(c, _) => assert_eq!(c, "rename-room"),
             other => panic!("expected Command, got {other:?}"),
         }
     }
@@ -4734,17 +4736,18 @@ mod tests {
     }
 
     #[test]
-    fn tidy_and_rename_fire_only_through_the_leader_dialog() {
+    fn rename_fires_only_through_the_leader_dialog() {
         let mut s = AppState::default();
         // With the dialog closed these are ordinary typing (SQ-0599).
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::InputChar('t')));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::InputChar('r')));
-        // Return actions when dialog is open, via their authored leader letters
-        // ('t' for tidy-map/Retidy, 'r' for rename-room); Shift+R is no longer
-        // an authored leader letter.
+        // With it open, 'r' fires rename-room through its authored leader letter;
+        // Shift+R is no longer an authored letter. 't' used to be tidy-map here and
+        // is now unauthored, so it closes the dialog instead — see
+        // `retidy_has_no_default_key_and_t_is_free`.
         s.overlays.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::CloseHotkeyDialog));
     }
 
     #[test]
@@ -5670,7 +5673,10 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::EditNotes));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::MoveRegion(ref a) if a == "new"));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MoveRegion(ref a) if a == "parent"));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
+        // 't' was Retidy until the Layout group left the panel; unauthored letters
+        // close the dialog rather than firing, so it belongs with the group below.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::CloseHotkeyDialog));
         // Unauthored keys (shift-modified letters, brackets, dropped letters)
         // close the dialog instead of firing.
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::CloseHotkeyDialog));
@@ -5813,7 +5819,7 @@ mod tests {
         s.overlays.hotkey_dialog = true;
         // Ctrl-combos always close the dialog now (never fire). open-saves has no
         // leader letter; the SQ-0446 leader letter 's' opens the settings screen
-        // (open-config), reached via the saves dialog / Ctrl+R otherwise.
+        // (open-settings), reached via the saves dialog / Ctrl+R otherwise.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('s'))), Action::OpenConfig));
     }
@@ -6049,11 +6055,13 @@ mod tests {
 
     #[test]
     fn dialog_open_dialog_only_cmd_fires() {
-        // When dialog is open, the authored leader letter 't' in map focus fires Retidy.
+        // With the dialog open, an authored leader letter fires its command. This
+        // used 't' for Retidy until the Layout group left the panel; 'r' and 'i'
+        // are authored rows that remain.
         let mut s = AppState::default();
         s.focus = Focus::Map;
         s.overlays.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
         // toggle-inventory fires too (SQ-0446 gave 'i' to inventory).
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
     }
@@ -6110,10 +6118,15 @@ mod tests {
         );
     }
 
-    /// With the default layout (retidy NOT in direct): closed dialog → None,
-    /// open dialog → Retidy.
+    /// Retidy has no default key at all now, and `t` is a free letter.
+    ///
+    /// It was dialog-only on the authored letter `t` until the Layout group was
+    /// removed from the leader panel: the layout re-tidies itself continuously, so
+    /// a by-hand pass was not earning a heading of its own. `/tidy-map` still runs
+    /// it. This case exists to catch `t` being handed to something else without
+    /// anyone noticing it used to mean this.
     #[test]
-    fn default_layout_retidy_is_dialog_only() {
+    fn retidy_has_no_default_key_and_t_is_free() {
         let mut s = AppState::default();
         s.focus = Focus::Map;
         // Closed dialog: Ctrl+T returns None.
@@ -6121,16 +6134,16 @@ mod tests {
             matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::None),
             "retidy should NOT fire directly with default layout (dialog closed)"
         );
-        // Open dialog: Ctrl+T now closes the dialog (Ctrl-combos never fire);
-        // the authored leader letter 't' fires Retidy instead.
         s.overlays.hotkey_dialog = true;
+        // Ctrl-combos close the dialog rather than firing, as they always did.
         assert!(
             matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::CloseHotkeyDialog),
             "Ctrl-combos close the hotkey dialog rather than firing"
         );
+        // And a bare `t` now fires nothing: no group authors that letter.
         assert!(
-            matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy),
-            "retidy should fire from the hotkey dialog via leader letter 't'"
+            !matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy),
+            "'t' must not still fire Retidy — the Layout group that authored it is gone"
         );
     }
 
@@ -8489,11 +8502,13 @@ mod tests {
     fn open_command_band_is_in_the_view_leader_group() {
         use crate::keymap::HotkeyLayout;
         let layout = HotkeyLayout::default();
+        // The group is titled "Map · View" — the panel renders flat headings, so
+        // the three map sub-groups spell their parent rather than indenting.
         let (_, cmds) = layout
             .groups
             .iter()
-            .find(|(title, _)| title == "View")
-            .expect("View group should exist");
+            .find(|(title, _)| title == "Map \u{b7} View")
+            .expect("Map \u{b7} View group should exist");
         assert!(cmds.iter().any(|c| c.1 == "open-command-band"));
     }
 
@@ -10293,7 +10308,7 @@ mod tests {
 
     #[test]
     fn slash_suggestions_filter_by_prefix() {
-        let names = vec!["panh".to_string(),"panv".to_string(),"zoom".to_string(),"open-config".to_string()];
+        let names = vec!["panh".to_string(),"panv".to_string(),"zoom".to_string(),"open-settings".to_string()];
         let s = slash_suggestions("pa", &names, 6);
         assert!(s.contains(&"panh".to_string()) && s.contains(&"panv".to_string()));
         assert!(!s.contains(&"zoom".to_string()));
