@@ -16,6 +16,7 @@ pub mod disasm;
 pub mod error;
 pub mod exec;
 pub mod glk;
+pub mod grammar;
 pub mod header;
 pub mod memory;
 pub mod trace;
