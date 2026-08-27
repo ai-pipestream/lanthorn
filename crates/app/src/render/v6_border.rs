@@ -242,13 +242,53 @@ pub struct FlankSections {
 /// Find the [`FlankSections`] of `dst` between `art_top` and `art_bottom`, or `None`
 /// when nothing in the column repeats — a flank with no middle has nothing to tile.
 ///
-/// The middle is found in the PIXELS rather than in the silhouette: the longest
-/// stretch of rows for which every row equals the row `period` above it. Statistics
-/// over painted widths cannot find it — that is what read Shogun's eight-row rounded
+/// The middle is found in the PIXELS rather than in the silhouette: a stretch of
+/// rows for which every row equals the row `period` above it. Statistics over
+/// painted widths cannot find it — that is what read Shogun's eight-row rounded
 /// corner as a capital — and periodicity is what "repeats" actually means.
 ///
-/// Among periods that tie, the smallest wins: a stretch periodic at `p` is also
-/// periodic at `2p`, and the smaller unit tiles with fewer seams.
+/// **A middle has to REACH THE FOOTER, and length alone cannot say which stretch
+/// is one** (SQ-1094). The model is banner, then middle, then footer, in that
+/// order, and only the middle repeats — so the repeating stretch that abuts the
+/// foot is the middle and everything above it is banner, however much of the banner
+/// also repeats. A BANNER may repeat: Arthur's three ornaments are one drawing
+/// stamped three times, and on his CGA plate they agree at a period of 64 over 128
+/// rows where the plain pole beneath them agrees at 4 over 110. Ranked by length
+/// alone the ORNAMENTS win, which makes the pole under them banner, the pole's
+/// tapered tip the middle, and prints the clasp motif down the side of the screen.
+///
+/// So [`footer_top`] is measured FIRST and a candidate is only a middle when it
+/// comes within one period of it — one period, because the last copy before the
+/// foot need not be a whole one. Among the stretches that qualify the longest wins,
+/// and among equals the smallest period: a stretch periodic at `p` is also periodic
+/// at `2p`, and the smaller unit tiles with fewer seams.
+///
+/// **And a middle thinner than a TEXT ROW is texture, not structure** — the same
+/// floor [`repeats_an_ornament`] states for the same reason, and here it also has a
+/// mechanical edge: [`extend_with_sections`] insets its repeat unit by two raw rows
+/// at each end, so a middle of eight unit rows or fewer yields no unit at all and
+/// the extension silently draws NOTHING. Shogun's lacquer is where that bites.
+/// Every Shogun rendition is one drawing with no banner and no foot, and it agrees
+/// with itself for eight rows in two or three places, some of them at the very
+/// bottom where the reach test cannot exclude them: `James Clavell's Shogun.adf`
+/// plate 4's left flank found `390..398` at period 4 and composed a 497-row band
+/// whose last painted row was 399, which is `v6_archive_border_sweep`'s "the frame
+/// stops short of the pane's own edge".
+///
+/// **A candidate must also hold for two whole copies to be a repeat at all, and
+/// that test belongs HERE and not to the winner** — SQ-1094's other half. It used to
+/// be applied to `best` after the search, so an invalid candidate could win the
+/// search and then be discarded, taking every valid one with it and dropping the
+/// flank into the "one drawing" arm below. Measured on `stories/arthur.cg1` at the
+/// Churchyard frame: the left pole's winner was a 172-row stretch at period 112 —
+/// not two copies of anything — and the period-4 pole beneath it was never reported.
+/// [`extend_with_sections`] then repeated the WHOLE flank, mirrored, and a clipped
+/// upside-down copy of the banner's clasp appeared 174 device rows tall near the
+/// bottom of a 100x50 pane.
+///
+/// All three tests are stated over the flank's OWN columns, which is the width this
+/// function is defined at: a 17-column slice of a 46-column slab is not a flank, and
+/// it finds repeats the flank does not have.
 pub fn flank_sections(dst: &RgbaImage, art_top: u32, art_bottom: u32) -> Option<FlankSections> {
     let hi_row = art_bottom.min(dst.height());
     if hi_row <= art_top {
@@ -258,6 +298,10 @@ pub fn flank_sections(dst: &RgbaImage, art_top: u32, art_bottom: u32) -> Option<
         (0..dst.width()).all(|x| dst.get_pixel(x, a) == dst.get_pixel(x, b))
     };
     let span = hi_row - art_top;
+    // Where the FOOTER starts, measured before anything is chosen — a middle has to
+    // reach it (SQ-1094), so this is an input to the search and not, as it was, a
+    // trim applied to its winner.
+    let foot = footer_top(dst, art_top, hi_row);
     let mut best: Option<FlankSections> = None;
     for period in (V6_TEXT_ROW / 4)..=(span / 2).min(V6_TEXT_ROW * 8) {
         // The maximal run of rows agreeing with the row `period` above them.
@@ -271,9 +315,12 @@ pub fn flank_sections(dst: &RgbaImage, art_top: u32, art_bottom: u32) -> Option<
                 }
                 let start = run_start.take().unwrap_or(cur);
                 let sect = FlankSections { middle_top: start, middle_end: end + 1, period, periodic: true, banded: false };
-                if best.is_none_or(|b| {
-                    (sect.middle_end - sect.middle_top) > (b.middle_end - b.middle_top)
-                }) {
+                let len = sect.middle_end - sect.middle_top;
+                if len >= 2 * period
+                    && len >= V6_TEXT_ROW
+                    && sect.middle_end + period >= foot
+                    && best.is_none_or(|b| len > b.middle_end - b.middle_top)
+                {
                     best = Some(sect);
                 }
                 cur = end + 1;
@@ -282,7 +329,7 @@ pub fn flank_sections(dst: &RgbaImage, art_top: u32, art_bottom: u32) -> Option<
             }
         }
     }
-    let periodic = best.filter(|b| b.middle_end - b.middle_top >= 2 * b.period);
+    let periodic = best;
 
     // **A middle is found two ways, because there are two kinds of middle.**
     //
@@ -337,9 +384,8 @@ pub fn flank_sections(dst: &RgbaImage, art_top: u32, art_bottom: u32) -> Option<
     // against a 71-wide shaft, so the trailing rows whose painted span differs from
     // the column's usual one ARE the foot. Shogun's lattice runs to the bottom at one
     // width and correctly reports no footer at all.
-    let footer_top = footer_top(dst, art_top, hi_row);
-    if footer_top > sec.middle_top {
-        sec.middle_end = sec.middle_end.min(footer_top);
+    if foot > sec.middle_top {
+        sec.middle_end = sec.middle_end.min(foot);
     }
     (sec.middle_end > sec.middle_top).then_some(sec)
 }

@@ -100,14 +100,44 @@ const SPECIMENS: &[Specimen] = &[
     Specimen { title: "Arthur@5", file: "arthur-r74-s890714.z6", release: 74, serial: "890714", turns: 5 },
 ];
 
-/// v6 stories with no side border art of these shapes. None of them may grow a
-/// tiled band: this work is the three titles above and nothing else.
-const UNAFFECTED: &[&str] = &[
-    "advent.z6",
-    "journey-r83-s890706.z6",
-    "Journey - The Quest Begins.adf",
-    "fmvpoker.z6",
-    "mysterious01.z6",
+/// v6 stories with no side border art of these shapes, each with the RENDITION to
+/// boot it against (`None` for the medium's own art). None of them may grow a tiled
+/// band: this work is the three titles above and nothing else.
+///
+/// **Journey's three DOS plates are here because of SQ-1094**, which was reported
+/// as a recurring flank defect rather than an Arthur one, and Journey was named as
+/// the other title showing it. It does not reach this code at all, and this is
+/// where that is stated rather than assumed: measured at the gameplay frame, the
+/// left column of Journey's own frame is art rows 25..279 of a 400-row screen, an
+/// INSET of 146 — more than the quarter-screen `v6_border::recognize` allows a
+/// flank — so it answers `None` and nothing is extended, on the medium's art and on
+/// `journey.cg1`, `journey.eg1` and `journey.mg1` alike. Journey's rule is glyphs
+/// and a Menu-plan panel (SQ-0750, and case 11's divider extension); a border
+/// SECTIONING defect cannot reach it.
+/// A named picture archive and the build it is paired with — the release and
+/// serial ride along because [`boot_named`] checks them.
+#[derive(Clone, Copy)]
+struct Rendition {
+    archive: &'static str,
+    release: u16,
+    serial: &'static str,
+}
+
+/// One story to check, on the medium's own art or on a named rendition.
+struct Untouched {
+    file: &'static str,
+    rendition: Option<Rendition>,
+}
+
+const UNAFFECTED: &[Untouched] = &[
+    Untouched { file: "advent.z6", rendition: None },
+    Untouched { file: "journey-r83-s890706.z6", rendition: None },
+    Untouched { file: "journey-r83-s890706.z6", rendition: Some(Rendition { archive: "journey.cg1", release: 83, serial: "890706" }) },
+    Untouched { file: "journey-r83-s890706.z6", rendition: Some(Rendition { archive: "journey.eg1", release: 83, serial: "890706" }) },
+    Untouched { file: "journey-r83-s890706.z6", rendition: Some(Rendition { archive: "journey.mg1", release: 83, serial: "890706" }) },
+    Untouched { file: "Journey - The Quest Begins.adf", rendition: None },
+    Untouched { file: "fmvpoker.z6", rendition: None },
+    Untouched { file: "mysterious01.z6", rendition: None },
 ];
 
 /// Pane sizes swept. The last is the deliberately TALL one, where the stretch
@@ -776,18 +806,30 @@ fn no_side_flank_is_stretched_out_of_aspect() {
 /// The corpus guard the quest asked for: check for any OTHER title whose side
 /// art this reaches. A tiled band is the signature; no other v6 story may draw
 /// one.
+///
+/// The panes include `(120, 90)`, the tall one, which is where a border extension
+/// runs at all — so this is also SQ-1094's statement about JOURNEY: at a pane far
+/// taller than its frame, on its own artwork and on each of its three DOS plates,
+/// nothing in Journey's frame is tiled.
 #[test]
 fn no_other_v6_title_grows_a_tiled_band() {
     let _g = app::v6_palette_at_boot();
-    for file in UNAFFECTED {
-        let Some(mut s) = boot(file, None) else { continue };
+    for u in UNAFFECTED {
+        let file = u.file;
+        let Some(mut s) = (match u.rendition {
+            Some(r) => boot_named(file, r.archive, (r.release, r.serial)),
+            None => boot(file, None),
+        }) else {
+            continue;
+        };
+        let what = u.rendition.map_or_else(|| file.to_string(), |r| format!("{file} + {}", r.archive));
         drive(&mut s, 12);
         for &(w, h) in PANES {
             let (_, bands, _) = frame(&s, (w, h));
             let tiled: Vec<_> = bands.iter().filter(|b| b.tiled).collect();
             assert!(
                 tiled.is_empty(),
-                "{file} at {w}x{h}: this title's flanks are not one of the three border \
+                "{what} at {w}x{h}: this title's flanks are not one of the three border \
                  layouts and must be drawn exactly as before, but got {tiled:?}"
             );
         }
@@ -2005,13 +2047,29 @@ fn a_divider_extension_replicates_a_rule_and_never_a_picture() {
 /// a window this wide sees the art and nothing beside it. Shogun is absent by
 /// design: its border is a slab two dozen columns wide, a different recipe, and
 /// cases 1–10 above already measure its extension.
+///
+/// **`archive` is the RENDITION, and it is what SQ-1094 adds.** These rows used to
+/// name a medium and nothing else, so every one of them measured whatever artwork
+/// that medium happens to carry — and the defect SQ-1094 reports is
+/// rendition-specific: at one pane, one release and one frame, the Blorb beside the
+/// story extends Arthur's poles cleanly while `stories/arthur.cg1` prints a clipped,
+/// upside-down copy of the banner's clasp partway down them. A table with no
+/// archive column cannot see that at all, because the plates the player picks with
+/// `--pictures` were never composed here. `Some(name)` boots the tier-3 door
+/// ([`boot_named`]); `None` takes the medium's own art. Both are `startup.rs`.
 struct FlankShape {
     title: &'static str,
     file: &'static str,
+    /// The picture archive to boot against, or `None` for the medium's own art.
+    archive: Option<&'static str>,
     release: u16,
     serial: &'static str,
     turns: usize,
     cols: u32,
+    /// The flank's own opaque row extent, pinned. A frame is a fixture: a rendition
+    /// that draws a different picture in these columns fails here rather than
+    /// quietly having its extension measured on something else.
+    art: (u32, u32),
     bands: u32,
 }
 
@@ -2019,13 +2077,33 @@ const FLANK_SHAPES: &[FlankShape] = &[
     // Arthur's three ornaments, on every press he has. The ProDOS release is the
     // one SQ-0899 was reported on and the only one whose poles reach both screen
     // edges, because its screen is 560x384 where the others are 640x400.
-    FlankShape { title: "Arthur ProDOS", file: "Arthur.po", release: 63, serial: "890622", turns: 6, cols: 17, bands: 3 },
-    FlankShape { title: "Arthur ProDOS", file: "Arthur Quest 4 Excalibur.2mg", release: 63, serial: "890622", turns: 6, cols: 17, bands: 3 },
-    FlankShape { title: "Arthur Amiga", file: "Arthur - The Quest for Excalibur.adf", release: 54, serial: "890606", turns: 6, cols: 17, bands: 3 },
-    FlankShape { title: "Arthur DOS", file: "arthur-r74-s890714.z6", release: 74, serial: "890714", turns: 6, cols: 17, bands: 3 },
+    FlankShape { title: "Arthur ProDOS", file: "Arthur.po", archive: None, release: 63, serial: "890622", turns: 6, cols: 17, art: (0, 384), bands: 3 },
+    FlankShape { title: "Arthur ProDOS", file: "Arthur Quest 4 Excalibur.2mg", archive: None, release: 63, serial: "890622", turns: 6, cols: 17, art: (0, 384), bands: 3 },
+    FlankShape { title: "Arthur Amiga", file: "Arthur - The Quest for Excalibur.adf", archive: None, release: 54, serial: "890606", turns: 6, cols: 17, art: (11, 379), bands: 3 },
+    FlankShape { title: "Arthur DOS", file: "arthur-r74-s890714.z6", archive: None, release: 74, serial: "890714", turns: 6, cols: 17, art: (16, 384), bands: 3 },
+    // Arthur's five PLATES — the renditions `--pictures` selects (SQ-1094).
+    // `arthur.cg1` is the one the defect was reported on; the other four are what
+    // stop "it works on the one I fixed" passing for a fix. The CGA and EGA plates
+    // are a 640x200 picture space and the MCGA and Amiga ones 320x200, so the same
+    // poles are drawn at different widths and with different dither — the ornament
+    // count is the thing that does not move.
+    FlankShape { title: "Arthur CGA", file: "arthur-r74-s890714.z6", archive: Some("arthur.cg1"), release: 74, serial: "890714", turns: 6, cols: 17, art: (16, 384), bands: 3 },
+    FlankShape { title: "Arthur EGA", file: "arthur-r74-s890714.z6", archive: Some("arthur.eg1"), release: 74, serial: "890714", turns: 6, cols: 17, art: (16, 384), bands: 3 },
+    FlankShape { title: "Arthur EGA-2", file: "arthur-r74-s890714.z6", archive: Some("arthur.eg2"), release: 74, serial: "890714", turns: 6, cols: 17, art: (16, 384), bands: 3 },
+    FlankShape { title: "Arthur MCGA", file: "arthur-r74-s890714.z6", archive: Some("arthur.mg1"), release: 74, serial: "890714", turns: 6, cols: 17, art: (16, 384), bands: 3 },
+    FlankShape { title: "Arthur Amiga plate", file: "arthur-r74-s890714.z6", archive: Some("arthur.pic"), release: 74, serial: "890714", turns: 6, cols: 17, art: (11, 379), bands: 3 },
     // Zork Zero's one capital, the shape the pillar recipe is FOR.
-    FlankShape { title: "Zork Zero DOS", file: "zork0-r393-s890714.z6", release: 393, serial: "890714", turns: 6, cols: 17, bands: 1 },
-    FlankShape { title: "Zork Zero Amiga", file: "Zork Zero - The Revenge of Megaboz.adf", release: 366, serial: "890323", turns: 6, cols: 17, bands: 1 },
+    FlankShape { title: "Zork Zero DOS", file: "zork0-r393-s890714.z6", archive: None, release: 393, serial: "890714", turns: 6, cols: 17, art: (0, 400), bands: 1 },
+    FlankShape { title: "Zork Zero Amiga", file: "Zork Zero - The Revenge of Megaboz.adf", archive: None, release: 366, serial: "890323", turns: 6, cols: 17, art: (0, 400), bands: 1 },
+    // Zork Zero's own four PLATES are deliberately absent, and the reason is that
+    // this case's oracle cannot state them. `full_width_bands` has no height floor
+    // on purpose, and Zork Zero's CGA capital is dithered — its span oscillates back
+    // to full width for two to ten rows the whole way down, so `zork0.cg1` measures
+    // FIVE bands on its left flank and its two crops are not even symmetric (art
+    // rows 2..400 on the left, 4..400 on the right; SQ-0845's own asymmetry). Its
+    // renditions are swept instead by
+    // `every_zork_zero_rendition_tiles_only_its_pillar_shaft`, whose oracle is the
+    // shaft's modal span and is immune to dither.
 ];
 
 /// Count the maximal runs of rows whose painted span reaches `hi` — the flank's
@@ -2104,12 +2182,38 @@ fn full_width_bands(img: &image::RgbaImage, x0: u32, x1: u32, rows: std::ops::Ra
 /// The band counts are asserted outright as well as compared, so a change that
 /// quietly stopped finding the ornaments would fail here rather than pass by
 /// making both sides zero.
+///
+/// ## SQ-1094 — the same defect, one rendition down, and the pane that shows it
+///
+/// The table now names an ARCHIVE as well as a medium (see [`FlankShape`]), and the
+/// row that fails without the fix is `arthur.cg1`. Reported from a 100x50 pane at a
+/// 16x32 cell: the pane is 1568x1504 device px against a 1280x800 frame, so the
+/// extension runs, and a 174-row clipped copy of the banner's clasp appears at
+/// device rows 1330..1504 with plain rule above and below it. The **control is the
+/// pane that fits** — at 82x28 the same frame at the same 2.0x scale exactly fills
+/// the pane, the extension never runs, and the margin holds two runs and no third.
+/// Both halves are stated below: `flank_source` must DECLINE for a band the art
+/// already covers, and must add no band for one it does not.
+///
+/// Why that rendition and no other: `flank_sections` picks the middle out of the
+/// column's own pixels, and on the CGA plate the pole below the ornaments is
+/// interrupted twice by a two-row narrowing where the MCGA and EGA plates run one
+/// texture straight down. The pole's longest exact repeat is therefore 110 rows at
+/// period 4, against 128 rows at period 64 for the three ORNAMENTS above it — and
+/// the search ranked by length. The ornaments won, the pole became banner, and the
+/// flank fell through to the "one drawing" arm, which repeats the whole column
+/// mirrored. See `v6_border::flank_sections`.
 #[test]
 fn extending_a_flank_lengthens_its_shaft_and_adds_no_band() {
     let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for sp in FLANK_SHAPES {
-        let Some(mut s) = boot(sp.file, Some((sp.release, sp.serial))) else { continue };
+        let Some(mut s) = (match sp.archive {
+            Some(a) => boot_named(sp.file, a, (sp.release, sp.serial)),
+            None => boot(sp.file, Some((sp.release, sp.serial))),
+        }) else {
+            continue;
+        };
         drive(&mut s, sp.turns);
         let model = s.screen();
         let WinNode::Layered(items) = &model.root else { panic!("{}: v6 Layered root", sp.title) };
@@ -2120,6 +2224,13 @@ fn extending_a_flank_lengthens_its_shaft_and_adds_no_band() {
         for (edge, x0, x1) in [("left", 0, sp.cols), ("right", w - sp.cols, w)] {
             let art = app::render::v6_border::art_extent(&gfx, x0, x1);
             assert!(art.1 > art.0, "{} [{}] {edge}: this frame paints no flank", sp.title, sp.release);
+            assert_eq!(
+                art, sp.art,
+                "{} [release {}] {edge} flank: this frame's art runs {art:?}, not the {:?} the \
+                 table pins — the frame moved, so everything measured below belongs to a \
+                 different picture",
+                sp.title, sp.release, sp.art,
+            );
             let before = full_width_bands(&gfx, x0, x1, art.0..art.1);
             assert_eq!(
                 before, sp.bands,
@@ -2139,6 +2250,20 @@ fn extending_a_flank_lengthens_its_shaft_and_adds_no_band() {
                 after, before,
                 "{} [release {}] {edge} flank extended to {DESIRED} rows: {after} full-width                  band(s) where the artwork has {before}. Extending a flank lengthens its shaft;                  a band that appears only in the generated rows is the frame's ornament reprinted                  down the side",
                 sp.title, sp.release,
+            );
+            // **The CONTROL: a band the art already covers is not extended at all**
+            // (SQ-1094). This is the 82x28 pane in the reproduction — the frame fills
+            // it exactly and there is nothing to lengthen — and it is what says the
+            // comparison above is measuring an extension rather than a crop.
+            assert!(
+                app::render::v6_border::flank_source(
+                    &gfx, &gfx, x0, x1, art, native.1 as u32, 0, art.1,
+                )
+                .is_none(),
+                "{} [release {}] {edge} flank: a band the artwork already covers must not be \
+                 extended — a pane that fits the frame is the control for the case above",
+                sp.title,
+                sp.release,
             );
             ran += 1;
         }
