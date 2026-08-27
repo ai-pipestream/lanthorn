@@ -186,6 +186,13 @@ impl StoryEntry {
 /// `blorb::medium`'s format table, and [`has_story_ext`] takes the union.
 const STORY_EXTS: &[&str] = &[
     "z3", "z4", "z5", "z6", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb", "blb",
+    // A ZIP is opened by `hints::read_story_file` exactly as a disk image is —
+    // the container is unwrapped and the story inside comes out — so the scan
+    // that lists disk images had no principled reason to skip archives, and
+    // SQ-1086 gave it a pressing one: a story fetched from a `.zip` URL and KEPT
+    // landed in the library invisible to the only view that would show it, under
+    // a dialog that had just promised "it will be there next time".
+    "zip",
 ];
 
 /// Is this file worth opening during a directory scan?
@@ -197,9 +204,16 @@ const STORY_EXTS: &[&str] = &[
 ///
 /// **Only a pre-filter on what is worth opening**: every candidate is then
 /// mounted and rejected unless a story actually comes out of it, which is what
-/// makes admitting a generic extension like `.image` or `.img` safe. Nothing
-/// here concludes a *format* from a name; that stays `DiskImage::detect`'s
+/// makes admitting a generic extension like `.image`, `.img` or `.zip` safe.
+/// Nothing here concludes a *format* from a name; that stays `DiskImage::detect`'s
 /// answer over the bytes.
+///
+/// That rejection was CHECKED rather than assumed before `.zip` was admitted
+/// (SQ-1086): `resolve_entry` is `hints::load_mounted_story_from(..).ok()?`, so
+/// an archive holding no story is an `Err` and yields no row at all, and
+/// `entry_from_loaded` then requires whatever did come out to construct a VM
+/// before it becomes one. An archive of holiday photos in a story directory
+/// costs one open and appears nowhere.
 ///
 /// The disk half used to be a second list written out here, and it went stale
 /// exactly as a duplicated census does: it knew `.adf` and `.image` and never
@@ -1209,19 +1223,53 @@ fn holds_several_games(path: &Path) -> bool {
 /// sort). Sidecars matched to some present game are removed from `out`; a lone
 /// sidecar with no matching game stays listed. O(games × sidecars) — the list
 /// is small and built once.
+/// The name a row is JUDGED by when asking whether it is a hint file.
+///
+/// Its filename, except for a CONTAINER — a `.zip`, admitted to the scan by
+/// SQ-1086. `hints::hint_name_matches` requires a `.z3`/`.z5`/`.z8` extension,
+/// and its reason for requiring one is to reject a `hints.txt` DOCUMENT; an
+/// archive that unwrapped into a playable Z-machine image is not a document.
+/// Without this, `deadline-hints.zip` lists as a game of its own beside the very
+/// story it belongs to, while the identical loose `deadlineinv.z5` folds into
+/// that story's row — the same file, two answers, decided by its wrapper.
+fn hint_classification_name(filename: &str) -> String {
+    let p = Path::new(filename);
+    match p.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("zip") => {
+            format!("{}.z5", p.file_stem().and_then(|s| s.to_str()).unwrap_or(filename))
+        }
+        _ => filename.to_string(),
+    }
+}
+
 fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
+    // What each row is judged by — see `hint_classification_name`. Computed once
+    // so the split below and the matching further down cannot ask two different
+    // questions about the same row.
+    let names: Vec<String> = out.iter().map(|e| hint_classification_name(&e.filename)).collect();
     // Split into sidecar and game indices.
     let mut sidecar_idxs: Vec<usize> = Vec::new();
     let mut game_idxs: Vec<usize> = Vec::new();
-    for (i, e) in out.iter().enumerate() {
-        if hints::is_hint_sidecar(&e.filename) {
+    for (i, _e) in out.iter().enumerate() {
+        if hints::is_hint_sidecar(&names[i]) {
             sidecar_idxs.push(i);
         } else {
             game_idxs.push(i);
         }
     }
-    // Stable candidate order (by filename) so association is deterministic.
-    sidecar_idxs.sort_by(|&a, &b| out[a].filename.cmp(&out[b].filename));
+    // Stable candidate order so association is deterministic — and a LOOSE hint
+    // file ahead of an archived one, so admitting `.zip` to the scan (SQ-1086)
+    // cannot change which sidecar an existing library already resolves. An
+    // archive is chosen only when nothing loose answers, which is exactly the
+    // case that had no answer at all before.
+    sidecar_idxs.sort_by(|&a, &b| {
+        let arch = |i: usize| {
+            Path::new(&out[i].filename)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+        };
+        arch(a).cmp(&arch(b)).then_with(|| out[a].filename.cmp(&out[b].filename))
+    });
 
     let mut matched: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for &g in &game_idxs {
@@ -1237,9 +1285,9 @@ fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
             // Identity first (SQ-0767): a story mounted out of a disk image is
             // named for the box, so neither its stem nor its title can say
             // which clues file is its own.
-            hints::hint_matches_identity(&out[s].filename, &ifid)
-                || hints::hint_matches_story(&out[s].filename, &stem)
-                || hints::hint_matches_story(&out[s].filename, &title)
+            hints::hint_matches_identity(&names[s], &ifid)
+                || hints::hint_matches_story(&names[s], &stem)
+                || hints::hint_matches_story(&names[s], &title)
         });
         if let Some(s) = chosen {
             out[g].hint_sidecar = Some(out[s].path.clone());

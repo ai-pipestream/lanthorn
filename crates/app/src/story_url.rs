@@ -43,15 +43,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
-use crate::ifdb_search::{read_capped, unique_dest, MAX_DOWNLOAD};
+use crate::ifdb_search::{
+    read_capped, unique_dest, BODY_TIMEOUT, CONNECT_TIMEOUT, HEADERS_TIMEOUT, MAX_DOWNLOAD,
+};
 
 /// Redirect chain cap. Generous for the archives that host IF (the IF Archive
 /// bounces http→https→mirror), tight enough that a login-wall ping-pong ends.
 pub const MAX_REDIRECTS: u32 = 5;
-
-const TIMEOUT: Duration = Duration::from_secs(30);
 
 // ── Recognising a URL ────────────────────────────────────────────────────────
 
@@ -149,7 +148,16 @@ pub struct HttpSource {
 impl HttpSource {
     pub fn new() -> Self {
         let config = ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
+            // Per PHASE, never end-to-end. `timeout_global` is documented as
+            // "from DNS lookup to finishing reading the response body", so any
+            // value small enough to be a useful stall detector is also small
+            // enough to refuse a 22 MB Glulx game on an ordinary link — the same
+            // false premise as the old 16 MiB cap, wearing a clock. The budget
+            // and the size cap live together in `ifdb_search`; see the note
+            // above them for why they are one fact.
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(HEADERS_TIMEOUT))
+            .timeout_recv_body(Some(BODY_TIMEOUT))
             .user_agent(user_agent())
             .max_redirects(MAX_REDIRECTS)
             // A chain longer than the cap must FAIL, not quietly hand back the
@@ -335,12 +343,11 @@ pub fn local_filename(disposition: Option<&str>, url: &str, bytes: &[u8]) -> Opt
         .and_then(|n| safe_basename(&n))
         .or_else(|| basename_from_url(url).and_then(|n| safe_basename(&n)))
         .unwrap_or_else(|| "story".to_string());
-    // `.zip` is not in `picker::has_story_ext` (the library scan does not look
-    // inside archives) but IS opened by `hints::read_story_file`, so a zip keeps
-    // its own name rather than being relabelled as the story inside it.
-    if crate::picker::has_story_ext(Path::new(&stem))
-        || Path::new(&stem).extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))
-    {
+    // `picker::has_story_ext` includes `.zip` (SQ-1086), so an archive keeps its
+    // own name rather than being relabelled after the story inside it — the
+    // loader unwraps one, and a `curses.zip` renamed `curses.z5` would be a file
+    // whose name lies about what it holds.
+    if crate::picker::has_story_ext(Path::new(&stem)) {
         return Some(stem);
     }
     Some(format!("{stem}.{ext}"))

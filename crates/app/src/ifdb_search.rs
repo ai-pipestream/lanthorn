@@ -144,12 +144,76 @@ use std::time::Duration;
 use crate::ifdb::MetadataSource;
 use crate::ifiction::IFiction;
 
+/// Whole-call cap for the XML endpoints (search, hot, viewgame). These replies
+/// are kilobytes and a slow one is a broken one, so failing fast is right — but
+/// see [`BODY_TIMEOUT`] for why a *download* must not be held to it.
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SEARCH_XML: u64 = 4 * 1024 * 1024; // 4 MiB — a ~100-game reply is well under this.
-/// Story files are small; a real Z-code/Glulx/blorb rarely exceeds a few MiB.
-/// 16 MiB is a generous ceiling that still guards against a mislabelled link
-/// pointing at something huge.
-pub const MAX_DOWNLOAD: u64 = 16 * 1024 * 1024;
+
+/// The largest game in this repository's own `stories/`, in bytes — a
+/// MEASUREMENT, so the cap below can be checked against something rather than
+/// against an impression of how big games are (SQ-1086).
+///
+/// The impression was wrong. This constant used to be 16 MiB under a comment
+/// reading "story files are small; a real Z-code/Glulx/blorb rarely exceeds a
+/// few MiB", and five games in this repo's own corpus give that the lie:
+///
+/// | game | bytes |
+/// |---|---|
+/// | `Kerkerkruip.gblorb` | 22,109,534 |
+/// | `Kerkerkruip.b10.gblorb` | 14,261,770 |
+/// | `Never Gives Up Her Dead.gblorb` | 11,680,602 |
+/// | `CounterfeitMonkey-11.gblorb` | 11,308,550 |
+/// | `cragne.gblorb` | 8,869,096 |
+///
+/// So the ceiling refused *Kerkerkruip* outright — a well-known Glulx game — and
+/// a URL fetch is exactly where somebody points at a large modern one. Modern
+/// Glulx games carry their artwork and sound inside the blorb; "a few MiB"
+/// described the Infocom era and was never re-measured.
+pub const LARGEST_GAME_IN_CORPUS: u64 = 22_109_534; // stories/Kerkerkruip.gblorb
+
+/// Cap on one downloaded story file.
+///
+/// 32 MiB: comfortably past the largest game anyone here ships, still far short
+/// of anything a mislabelled link could usefully deliver. The assertion below is
+/// what keeps the two honest — raise the corpus figure and the build fails until
+/// this is raised with it.
+///
+/// **There is a second constant of this shape.** `hints::MAX_ZIP_ENTRY` caps one
+/// inflated ZIP entry and was wrong for the same reason (SQ-1085); it is now
+/// 32 MiB against the same corpus measurement. Two constants meaning "the largest
+/// game anybody ships" in two files will drift, and they want one home — the two
+/// quests landed in parallel and consolidating them is a job for main, not for
+/// either branch.
+pub const MAX_DOWNLOAD: u64 = 32 * 1024 * 1024;
+const _: () = assert!(
+    MAX_DOWNLOAD > LARGEST_GAME_IN_CORPUS,
+    "the download cap must admit the largest game we know of, or the feature refuses real games"
+);
+
+// ── Download timeouts ────────────────────────────────────────────────────────
+//
+// The size cap and the time budget are ONE fact, not two, which is why they sit
+// together: a cap that admits a 22 MB Glulx game paired with a timeout that
+// cannot finish one is a promise the code does not keep. That is precisely what
+// 16 MiB and a 15-second `timeout_global` were doing — and `timeout_global` in
+// ureq 3 is documented as "end-to-end, from DNS lookup to finishing reading the
+// response body", so it is a WHOLE-TRANSFER cap and not the per-read timeout it
+// might be mistaken for. 22 MB inside 15s needs 1.5 MB/s sustained.
+//
+// ureq 3 offers no idle timer at all — every knob it has caps a phase — so a
+// download is bounded per phase instead: fail fast on a host that will not
+// answer, then allow a real file the time a real link needs.
+
+/// Cap on DNS + socket + TLS. A host that will not answer must not hang.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Cap on time-to-headers. A server that accepts the connection and then says
+/// nothing fails here rather than inside the body budget.
+pub const HEADERS_TIMEOUT: Duration = Duration::from_secs(20);
+/// Cap on reading the body. Sized from the numbers above, not from taste:
+/// [`MAX_DOWNLOAD`] at roughly 110 KB/s — a genuinely poor link — is about five
+/// minutes, and a transfer slower than that has stalled rather than started.
+pub const BODY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// One game listing from an IFDB search.
 #[derive(Debug, Clone, PartialEq)]
@@ -329,8 +393,21 @@ impl SearchSource for IfdbSearchClient {
     }
 
     fn download(&self, url: &str, dest_dir: &Path) -> Result<PathBuf, SearchError> {
-        let mut resp =
-            self.agent.get(url).call().map_err(|e| SearchError::Transport(e.to_string()))?;
+        // Per-request, because this agent's own `timeout_global` is the XML
+        // endpoints' 15 seconds and a story file is not an XML reply. Cleared
+        // rather than raised: `timeout_global` covers all the others, so leaving
+        // it set would re-impose a whole-transfer cap over the phase budgets.
+        let mut resp = self
+            .agent
+            .get(url)
+            .config()
+            .timeout_global(None)
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_recv_response(Some(HEADERS_TIMEOUT))
+            .timeout_recv_body(Some(BODY_TIMEOUT))
+            .build()
+            .call()
+            .map_err(|e| SearchError::Transport(e.to_string()))?;
 
         // Fast reject on an honest Content-Length before reading a byte.
         if let Some(len) = resp
@@ -494,18 +571,41 @@ fn one_line(s: &str) -> Option<String> {
 /// A download link is offered iff it is uncompressed AND its URL basename has
 /// an extension the app can actually open (`crate::picker::has_story_ext`:
 /// `.z3`–`.z8`, `.ulx`, `.gblorb`, `.zblorb`, `.blorb`, `.blb`, `.dat`, …).
-/// Compressed archives (`.zip`, `.hqx`), executables, source, and documents
-/// are deliberately skipped — the picker can't open them directly, and we do
-/// NOT unzip. IFDB's `<isGame/>` flag is a hint but not the gate: the
-/// extension is authoritative (a `.zip` marked `isGame` is still unopenable).
+/// Compressed archives (`.zip`, `.hqx`), executables, source, and documents are
+/// deliberately skipped. The reason used to be that the picker could not open
+/// them; since SQ-1086 it can (`picker::has_story_ext` admits `.zip`, and
+/// `hints::read_story_file` unwraps one), so the reason is now the honest
+/// smaller one: an IFDB archive link is usually a BUNDLE — game, walkthrough,
+/// source, feelies — and choosing which entry the player meant is a different
+/// question from downloading one named file. This chooser offers named files.
+/// IFDB's `<isGame/>` flag is a hint but not the gate: the extension is
+/// authoritative.
 pub fn is_playable_download(url: &str, compressed: bool) -> bool {
     if compressed {
         return false;
     }
     match basename_from_url(url) {
-        Some(name) => crate::picker::has_story_ext(Path::new(&name)),
+        Some(name) => is_named_story_file(Path::new(&name)),
         None => false,
     }
+}
+
+/// A story extension THIS module accepts: `picker::has_story_ext` minus the
+/// archives it admits.
+///
+/// The two questions used to have the same answer and no longer do (SQ-1086).
+/// `has_story_ext` asks "is this worth opening during a directory scan?", and a
+/// `.zip` is, because the loader unwraps one. This module asks a narrower
+/// question — "is this one named story file a chooser can offer and a download
+/// can be validated against?" — and an archive is not: it is a bundle whose
+/// contents nobody has chosen between, and `looks_like_story_file` below has no
+/// extension to sniff it against. Deriving one from the other keeps them from
+/// drifting apart; spelling out the difference keeps them from being confused.
+fn is_named_story_file(name: &Path) -> bool {
+    if name.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+        return false;
+    }
+    crate::picker::has_story_ext(name)
 }
 
 /// Read at most `cap` bytes from `r`; error with [`SearchError::TooLarge`] if
@@ -601,7 +701,7 @@ pub fn sanitize_filename(raw: &str) -> Option<String> {
     if cleaned.is_empty() || cleaned == ".." {
         return None;
     }
-    crate::picker::has_story_ext(Path::new(&cleaned)).then_some(cleaned)
+    is_named_story_file(Path::new(&cleaned)).then_some(cleaned)
 }
 
 /// A non-colliding path in `dir` for `filename`: returns `dir/filename` if free,
