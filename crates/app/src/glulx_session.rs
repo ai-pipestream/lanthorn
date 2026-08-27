@@ -1794,7 +1794,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         crate::persist_files::save_named(
             &dir, "GLULX-TEST-0531", "slot", SaveTrigger::Ingame, &mapper::mapper::Mapper::default(),
-            &ingame, None, &[], None, None, sess.aux_data(), 3, None, None, &[], &[], &[], &[], &[],
+            &ingame, None, &[], None, None, sess.aux_data(), 3, None, None, &crate::archive::SessionRecord::empty(),
         )
         .expect("save_named writes the Glulx archive");
         let path = dir.join("slot.lanthorn");

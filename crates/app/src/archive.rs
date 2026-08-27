@@ -704,6 +704,62 @@ pub struct ArchiveContents {
     pub engine: String,
 }
 
+/// Everything the SESSION contributes to an archive, as one value.
+///
+/// **This exists because the alternative lost data in the field.** These seven
+/// slices used to be seven positional arguments in the middle of a sixteen-argument
+/// writer, five of them `&[…]` of different element types and two of them plain
+/// `&[String]`-ish neighbours. `persist_files::save_named` passed `&[], &[]` for
+/// the last two under a comment reading "named saves are separate slots; command
+/// history is per-game, not per-slot" — which is true of `command_history` and not
+/// of `history`. The comment appeared to cover both. So every named Save State
+/// wrote an archive with NO rewind/replay history at all: 22 turns played, no
+/// `history/` directory in the file, and a restore that came back with nothing to
+/// rewind through. Nothing failed; the number was simply absent (SQ-1090).
+///
+/// The cure the refactoring policy prescribes is a type, and [`of`](Self::of) is
+/// the half that matters — a caller that hands over the whole session cannot omit
+/// a field of it. A caller that must deviate says so by name, and struct-update
+/// syntax keeps the deviation to one line that a reader can see:
+///
+/// ```ignore
+/// SessionRecord { command_history: &[], ..SessionRecord::of(state) }
+/// ```
+pub struct SessionRecord<'a> {
+    pub transcript: &'a [String],
+    pub kinds: &'a [crate::state::TranscriptKind],
+    pub runs: &'a [Vec<crate::state::StyleRun>],
+    pub para: &'a [crate::state::ParaFmt],
+    pub images: &'a [Option<crate::inline_image::InlineImage>],
+    /// Per-turn rewind/replay records. Empty is a legitimate value — the capture
+    /// is opt-in (`record_turn_history`) — which is exactly why an omission here
+    /// could not be told apart from a player who had it switched off.
+    pub history: &'a [crate::history::TurnRecord],
+    pub command_history: &'a [String],
+}
+
+impl<'a> SessionRecord<'a> {
+    /// The whole session, straight off the live state. The spelling that cannot
+    /// forget a field.
+    pub fn of(state: &'a crate::state::AppState) -> Self {
+        SessionRecord {
+            transcript: &state.transcript,
+            kinds: &state.transcript_kinds,
+            runs: &state.transcript_runs,
+            para: &state.transcript_para,
+            images: &state.transcript_images,
+            history: &state.history,
+            command_history: &state.command_history,
+        }
+    }
+
+    /// A session with nothing in it — for the callers that archive a machine
+    /// rather than a play session (tests, and the bare-machine writer).
+    pub fn empty() -> Self {
+        SessionRecord { transcript: &[], kinds: &[], runs: &[], para: &[], images: &[], history: &[], command_history: &[] }
+    }
+}
+
 /// Write a `.lanthorn` archive containing the current map and VM save.
 ///
 /// `save` is the engine-tagged game state (from `Engine::save_state`); its
@@ -759,8 +815,16 @@ pub fn save_archive_meta(
     command_history: &[String],
 ) -> io::Result<()> {
     // No pictures, no display list and no painted ground: the non-v6 entry point.
-    save_archive_meta_pics(path, mapper, save, screen, aux, meta, transcript,
-        transcript_kinds, transcript_runs, transcript_para, &[], history, command_history, &[], None, None)
+    let session = SessionRecord {
+        transcript,
+        kinds: transcript_kinds,
+        runs: transcript_runs,
+        para: transcript_para,
+        images: &[],
+        history,
+        command_history,
+    };
+    save_archive_meta_pics(path, mapper, save, screen, aux, meta, &session, &[], None, None)
 }
 
 /// Write a `.lanthorn` archive including per-window v6 graphics-canvas PNG
@@ -803,17 +867,20 @@ pub fn save_archive_meta_pics(
     screen: Option<&zvm::screen::ScreenState>,
     aux: &BTreeMap<String, Vec<u8>>,
     meta: Meta,
-    transcript: &[String],
-    transcript_kinds: &[crate::state::TranscriptKind],
-    transcript_runs: &[Vec<crate::state::StyleRun>],
-    transcript_para: &[crate::state::ParaFmt],
-    transcript_images: &[Option<crate::inline_image::InlineImage>],
-    history: &[crate::history::TurnRecord],
-    command_history: &[String],
+    session: &SessionRecord<'_>,
     pictures: &[(u8, Vec<u8>)],
     display: Option<&DisplayListDto>,
     ground: Option<&[u8]>,
 ) -> io::Result<()> {
+    let SessionRecord {
+        transcript,
+        kinds: transcript_kinds,
+        runs: transcript_runs,
+        para: transcript_para,
+        images: transcript_images,
+        history,
+        command_history,
+    } = *session;
     // Build the whole ZIP in memory, then land it with ONE atomic write
     // (SQ-0644). `File::create(path)` truncated the player's archive before a
     // single byte of the replacement existed — and this is the auto-save path, so
@@ -1447,7 +1514,8 @@ mod tests {
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
-            &transcript, &kinds, &[], &[], &images, &[], &[], &[],
+            &SessionRecord { transcript: &transcript, kinds: &kinds, images: &images, ..SessionRecord::empty() },
+            &[],
             None,
             None,
         )
@@ -1479,7 +1547,8 @@ mod tests {
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
-            &transcript, &kinds, &[], &[], &[], &[], &[], &[],
+            &SessionRecord { transcript: &transcript, kinds: &kinds, ..SessionRecord::empty() },
+            &[],
             None,
             None,
         )
@@ -2421,7 +2490,7 @@ mod tests {
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
-            &[], &[], &[], &[], &[], &[], &[],
+            &SessionRecord::empty(),
             &[(7, png_a.clone()), (1, png_b.clone())],
             None,
             None,

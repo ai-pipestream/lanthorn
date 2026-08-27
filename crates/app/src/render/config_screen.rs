@@ -86,7 +86,7 @@ pub fn draw_config_screen(
     ];
 
     let spec = DialogSpec {
-        title: "Settings",
+        title: "Global Settings",
         placement: Placement::Centered { w: modal_w, h: modal_h },
         buttons,
         show_close: true,
@@ -426,7 +426,10 @@ mod tests {
             .collect();
 
         // Title should appear
-        assert!(content.contains("Settings"), "title 'Settings' should be present");
+        // "Global Config", not "Settings": every value on this screen is written to
+        // the GLOBAL ~/.lanthorn/config.toml, and calling it settings invited the
+        // reading that it applied to the story in front of you.
+        assert!(content.contains("Global Settings"), "title 'Global Settings' should be present");
         // Save and Cancel buttons
         assert!(content.contains("Save"), "[Save] button should be visible");
         assert!(content.contains("Cancel"), "[Cancel] button should be visible");

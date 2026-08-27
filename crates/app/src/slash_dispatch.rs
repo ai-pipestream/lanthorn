@@ -346,7 +346,7 @@ pub(crate) fn dispatch_slash_outcome(
                     score,
                     trigger: app::archive::SaveTrigger::HostState,
                 };
-                let result = save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref(), v6_ground.as_deref())
+                let result = save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &app::archive::SessionRecord::of(state), &v6_pics, v6_display.as_ref(), v6_ground.as_deref())
                     .map(|()| "saved".to_string())
                     .map_err(|e| format!("save failed: {}", e));
                 apply_slash_save_result(result, session, state);
@@ -881,8 +881,8 @@ pub(crate) fn write_named_save(
     save_named(
         game_dir, ifid, name, app::archive::SaveTrigger::HostState, mapper, &session.save_state(),
         zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(),
-        v6_ground.as_deref(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds,
-        &state.transcript_runs, &state.transcript_para, &state.transcript_images,
+        v6_ground.as_deref(), session.aux_data(), state.turns, location, score,
+        &app::archive::SessionRecord::of(state),
     )
         .map(|()| format!("saved as \"{}\"", name))
         .map_err(|e| format!("save failed: {}", e))

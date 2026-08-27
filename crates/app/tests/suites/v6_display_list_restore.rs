@@ -80,7 +80,7 @@ fn round_trip(session: &mut GameSession, tag: &str, with_display: bool) -> app::
         Some(&session.machine.screen),
         &session.machine.aux_data,
         meta(),
-        &[], &[], &[], &[], &[], &[], &[],
+        &app::archive::SessionRecord::empty(),
         &pics,
         display.as_ref(),
         None,

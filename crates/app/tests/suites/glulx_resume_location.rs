@@ -80,7 +80,7 @@ fn a_resumed_glulx_game_reports_the_room_it_was_saved_in() {
             score: None,
             trigger: app::archive::SaveTrigger::HostState,
         },
-        &[], &[], &[], &[], &[], &[], &[],
+        &app::archive::SessionRecord::empty(),
         &[],
         None,
         None,

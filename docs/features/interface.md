@@ -362,7 +362,7 @@ know which side you're on).
   even when it is the very last line in the pane.
 - **The command palette** (type `/`) keeps its own presentation: a bracketed
   candidate strip below the prompt, since command names match anywhere in the
-  word — `/config` finds `open-config` — and there is no single tail to ghost.
+  word — `/settings` finds `open-settings` — and there is no single tail to ghost.
   **Tab**/**Shift-Tab** cycle it, the bracket tracks the name on the command
   line, and the strip scrolls sideways to keep the active candidate in view.
   Give it a border with the `suggestion_line` style selector to float it as a

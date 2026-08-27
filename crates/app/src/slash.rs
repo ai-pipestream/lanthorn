@@ -429,8 +429,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         dispatch: |a| SlashOutcome::Export(a.first().map(|s| s.to_string())) },
 
     // ── Style ─────────────────────────────────────────────────────────────
-    CommandSpec { name: "open-config", category: Category::Style, context: Context::Global,
-        usage: "open-config", description: "open the settings screen",
+    CommandSpec { name: "open-settings", category: Category::Style, context: Context::Global,
+        usage: "open-settings", description: "open the global settings screen",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenConfig) },
     CommandSpec { name: "reload-style", category: Category::Style, context: Context::Global,
         usage: "reload-style", description: "reload style.toml from disk",
@@ -807,7 +807,7 @@ mod tests {
         assert!(matches!(parse("quit", '/'), SlashOutcome::Quit));
         assert!(matches!(parse("help", '/'), SlashOutcome::Help));
         // in registry:
-        assert!(matches!(parse("open-config", '/'), SlashOutcome::Action(_)));
+        assert!(matches!(parse("open-settings", '/'), SlashOutcome::Action(_)));
         // errors:
         assert!(matches!(parse("panh", '/'), SlashOutcome::Error(_)));   // no longer in registry
         assert!(matches!(parse("nope", '/'), SlashOutcome::Error(_)));   // unknown
@@ -822,7 +822,7 @@ mod tests {
     fn slash_names_returns_registry() {
         let n = slash_names();
         assert!(n.iter().any(|s| s == "pan-map")); // registry name
-        assert!(n.iter().any(|s| s == "open-config")); // registry name
+        assert!(n.iter().any(|s| s == "open-settings")); // registry name
         assert!(!n.iter().any(|s| s == "panh")); // old curated name, not in registry
     }
 
@@ -840,8 +840,8 @@ mod tests {
         // Every registry command's usage must appear in /help.
         let lines = help_text('/');
         assert!(
-            lines.iter().any(|l| l.contains("/open-config")),
-            "open-config should appear in /help"
+            lines.iter().any(|l| l.contains("/open-settings")),
+            "open-settings should appear in /help"
         );
         assert!(
             lines.iter().any(|l| l.contains("/save-state")),

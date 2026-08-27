@@ -583,17 +583,37 @@ type DefaultEntry = (char, &'static str, &'static str);
 /// One authored default group: title plus its entries.
 type DefaultGroup = (&'static str, &'static [DefaultEntry]);
 
+// ── The panel's ORDER is the panel's argument ────────────────────────────────
+//
+// Session first, because it is what a reader who has just opened this panel is
+// most often after — settings, or starting over — and it is the one group that
+// is not about the map. Everything after it IS about the map, which is why the
+// four map groups run together and say so in their titles: the renderer draws a
+// flat `## title` per group with no nesting (`render::hotkeys`), so a hierarchy
+// can only be spelled, not indented.
+//
+// `Layout` is GONE, and with it the panel's only rows for `tidy-map` and
+// `animate-tidy`. They were not earning a heading of their own — the layout
+// re-tidies itself continuously, so asking for a pass by hand is a thing almost
+// nobody does. Both remain commands: `/tidy-map` and `/animate-tidy` still work,
+// and `t`/`a` are now free letters if something wants them.
+//
+// `open-history` is gone from Session for a sharper reason. `record_turn_history`
+// is opt-in and defaults to false, and `Action::OpenHistory` is a deliberate
+// no-op when the history is empty (`input.rs`) — so for every player who has not
+// turned recording on, that row did nothing at all and said nothing about why.
+// A menu entry that cannot work should not be offered. `/open-history` still
+// opens it for anyone who has the setting on.
 const DEFAULT_GROUPS: &[DefaultGroup] = &[
-    ("Layout", &[('t', "tidy-map", "tidy the layout"), ('a', "animate-tidy", "animate a tidy pass")]),
-    ("Layers", &[('p', "move-region new", "region into a new layer"), ('m', "move-region parent", "region into the parent layer"), ('c', "cycle-layer next", "next map layer"), ('z', "mark-maze-layer", "flag layer as a maze")]),
-    ("Edit", &[('r', "rename-room", "rename room"), ('n', "edit-notes", "edit room notes"), ('d', "delete-connection", "delete connection"), ('e', "relabel-edge", "relabel edge")]),
-    ("View", &[('i', "toggle-inventory", "inventory strip"), ('l', "toggle-portal-labels", "portal labels"), ('v', "open-command-band", "command band"), ('u', "view-map", "drawn / matrix view"), ('k', "toggle-room-dock", "room dock")]),
+    ("Session", &[('s', "open-settings", "global settings"), ('g', "reset-game", "restart game")]),
     // SQ-0599: zoom and centring used to be plain +/- and c while the map held
     // the keyboard. With that focus mode gone they would otherwise be
     // mouse-only, so they live here — on the keys they always used, which keeps
     // the muscle memory intact now that a leader press precedes them.
     ("Map", &[('+', "zoom-map in", "zoom in"), ('-', "zoom-map out", "zoom out"), ('0', "center-map", "centre on selection")]),
-    ("Session", &[('s', "open-config", "settings"), ('h', "open-history", "rewind/replay history"), ('g', "reset-game", "restart game")]),
+    ("Map · Layers", &[('p', "move-region new", "region into a new layer"), ('m', "move-region parent", "region into the parent layer"), ('c', "cycle-layer next", "next map layer"), ('z', "mark-maze-layer", "flag layer as a maze")]),
+    ("Map · Edit", &[('r', "rename-room", "rename room"), ('n', "edit-notes", "edit room notes"), ('d', "delete-connection", "delete connection"), ('e', "relabel-edge", "relabel edge")]),
+    ("Map · View", &[('i', "toggle-inventory", "inventory strip"), ('l', "toggle-portal-labels", "portal labels"), ('v', "open-command-band", "command band"), ('u', "view-map", "drawn / matrix view"), ('k', "toggle-room-dock", "room dock")]),
 ];
 
 /// One leader-panel entry: `(leader letter, command-string, optional label)`.
@@ -935,10 +955,10 @@ mod tests {
         assert!(layout.is_direct_name("toggle-focus"), "toggle-focus should be direct");
         // Non-direct (dialog-only) commands
         assert!(!layout.is_direct_name("tidy-map"), "tidy-map should NOT be direct");
-        assert!(!layout.is_direct_name("open-config"), "open-config should NOT be direct");
+        assert!(!layout.is_direct_name("open-settings"), "open-settings should NOT be direct");
         // Groups
-        assert_eq!(layout.groups.len(), 6, "default layout should have 6 groups");
-        assert_eq!(layout.groups[0].0, "Layout", "first group title should be Layout");
+        assert_eq!(layout.groups.len(), 5, "Layout was removed; Session + Map + its three sub-groups remain");
+        assert_eq!(layout.groups[0].0, "Session", "Session leads the panel — it is the group that is not about the map");
     }
 
     #[test]
@@ -1041,16 +1061,29 @@ mod tests {
         assert_eq!(km.lookup(&f5, Context::Global), None);
     }
 
+    /// `open-history` is reachable, and is NOT offered in the leader panel.
+    ///
+    /// It was in Session until it was noticed that it does nothing for almost
+    /// everyone: `record_turn_history` defaults to false, and `OpenHistory` is a
+    /// silent no-op on an empty history. A row that cannot work and cannot say
+    /// why is worse than no row. The command itself is untouched — `/open-history`
+    /// still opens the modal once recording is on.
     #[test]
-    fn open_history_key_f4_unbound_but_in_group() {
-        // open-history is leader-only now (SQ-0202); F4 has no default binding.
+    fn open_history_is_a_command_but_not_a_panel_row() {
+        // Leader-only since SQ-0202; F4 has no default binding either.
         let km = KeyMap::default();
         let f4 = KeySpec { code: KeyCode::F(4), ctrl: false, shift: false, alt: false };
         assert_eq!(km.lookup(&f4, Context::Global), None);
-        // It still appears in the Session hotkey group (leader panel) — SQ-0446.
         let layout = HotkeyLayout::default();
-        let session = layout.groups.iter().find(|(t, _)| t == "Session").expect("Session group");
-        assert!(session.1.iter().any(|c| c.1 == "open-history"), "open-history in Session group");
+        assert!(
+            !layout.groups.iter().any(|(_, cmds)| cmds.iter().any(|c| c.1 == "open-history")),
+            "open-history must not be offered in the leader panel: it is a no-op unless \
+             record_turn_history is on, and the panel gives no way to say so"
+        );
+        assert!(
+            crate::slash::COMMANDS.iter().any(|c| c.name == "open-history"),
+            "the command itself must remain — this removed a panel row, not a feature"
+        );
     }
 
     #[test]
@@ -1075,7 +1108,7 @@ mod tests {
     #[test]
     fn toggle_inventory_in_view_group() {
         let layout = HotkeyLayout::default();
-        let view_group = layout.groups.iter().find(|(title, _)| title == "View");
+        let view_group = layout.groups.iter().find(|(title, _)| title == "Map \u{b7} View");
         assert!(view_group.is_some(), "View group should exist");
         let (_, cmds) = view_group.unwrap();
         assert!(cmds.iter().any(|c| c.1 == "toggle-inventory"), "toggle-inventory should be in View group");
@@ -1259,24 +1292,27 @@ mod tests {
         assert_eq!(letters.len(), unique.len(), "leader letters must be unique");
         assert_eq!(
             letters.len(),
-            21,
-            "expected 21 authored leader letters (SQ-0446 Proposal B, SQ-0599's Map group — \
-             +/- zoom and 0 centre — SQ-0666's view-map on the letter toggle-untried-exits \
-             gave back, mark-maze-layer, and SQ-0692's room dock on `k`)"
+            18,
+            "expected 18 authored leader letters. It was 21 until three rows left the panel: \
+             `t` and `a` with the Layout group (the layout re-tidies itself, so a by-hand pass \
+             was not earning a heading) and `h` with open-history (a no-op unless \
+             record_turn_history is on, and the panel cannot say so). All three are still \
+             commands; only the rows are gone, and the three letters are now free"
         );
     }
 
     #[test]
     fn leader_command_resolves_authored_letter() {
         let layout = HotkeyLayout::default();
-        assert_eq!(layout.leader_command('t'), Some("tidy-map"));
+        assert_eq!(layout.leader_command('t'), None, "`t` was tidy-map; the Layout group is gone");
+        assert_eq!(layout.leader_command('r'), Some("rename-room"));
         assert_eq!(layout.leader_command('c'), Some("cycle-layer next"));
         // SQ-0446 Proposal B mnemonics:
         assert_eq!(layout.leader_command('n'), Some("edit-notes"));
         assert_eq!(layout.leader_command('i'), Some("toggle-inventory"));
         assert_eq!(layout.leader_command('l'), Some("toggle-portal-labels"));
         assert_eq!(layout.leader_command('v'), Some("open-command-band"));
-        assert_eq!(layout.leader_command('s'), Some("open-config"));
+        assert_eq!(layout.leader_command('s'), Some("open-settings"));
         assert_eq!(layout.leader_command('g'), Some("reset-game"));
         // 'q' is deliberately unassigned (bare q closes the dialog):
         assert_eq!(layout.leader_command('q'), None);

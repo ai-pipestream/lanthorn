@@ -252,7 +252,7 @@ fn a_restore_brings_the_second_window_back() {
             ifid: None, name: None, turns: 0, saved_at: String::new(),
             location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
         },
-        &[], &[], &[], &[], &[], &[], &[],
+        &app::archive::SessionRecord::empty(),
         &session.pictures_png(),
         None,
         None,

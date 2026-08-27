@@ -233,7 +233,7 @@ fn the_ring_is_still_placed_after_a_restore_and_a_move() {
             ifid: None, name: None, turns: 0, saved_at: String::new(),
             location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
         },
-        &[], &[], &[], &[], &[], &[], &[],
+        &app::archive::SessionRecord::empty(),
         &session.pictures_png(),
         None,
         None,

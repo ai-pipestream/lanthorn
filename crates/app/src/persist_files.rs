@@ -126,11 +126,10 @@ pub fn save_named(
     turns: u32,
     location: Option<String>,
     score: Option<i32>,
-    transcript: &[String],
-    transcript_kinds: &[crate::state::TranscriptKind],
-    transcript_runs: &[Vec<crate::state::StyleRun>],
-    transcript_para: &[crate::state::ParaFmt],
-    transcript_images: &[Option<crate::inline_image::InlineImage>],
+    // The whole session, as one value. It used to be the five transcript slices
+    // and nothing else, which is how the rewind/replay history came to be dropped
+    // here — see `SessionRecord` and SQ-1090.
+    session: &crate::archive::SessionRecord<'_>,
 ) -> io::Result<()> {
     let path = named_save_path(game_dir, name)?;
 
@@ -145,8 +144,13 @@ pub fn save_named(
         score,
         trigger,
     };
-    // Named saves are separate slots; command history is per-game, not per-slot.
-    crate::archive::save_archive_meta_pics(&path, mapper, save, screen, aux, meta, transcript, transcript_kinds, transcript_runs, transcript_para, transcript_images, &[], &[], pics, display, ground)
+    // Command history is per-game, not per-slot, so a named save deliberately
+    // writes none — and says so by NAME. The rewind/replay history is not covered
+    // by that reasoning and must go in: this line used to read `&[], &[]`
+    // positionally, the comment above appeared to explain both, and every named
+    // Save State went to disk with no `history/` in it at all (SQ-1090).
+    let session = crate::archive::SessionRecord { command_history: &[], ..*session };
+    crate::archive::save_archive_meta_pics(&path, mapper, save, screen, aux, meta, &session, pics, display, ground)
 }
 
 /// The engine state to seal into an archive's `game.<ext>` entry for `trigger`
@@ -432,6 +436,49 @@ mod tests {
     use mapper::direction::Direction;
     use mapper::persist::to_json;
 
+    /// A named Save State carries the rewind/replay history (SQ-1090).
+    ///
+    /// It did not, and nothing failed: `save_named` passed `&[], &[]` positionally
+    /// for `history` and `command_history` under a comment that explained only the
+    /// second. Every named save went to disk with no `history/` entry at all, and
+    /// restoring one came back with nothing to rewind through — 22 turns played,
+    /// no history, no error. `SessionRecord` is why that spelling is gone; this is
+    /// the case that fails if it comes back.
+    #[test]
+    fn a_named_save_keeps_the_turn_history_and_drops_only_the_command_history() {
+        let Some(machine) = fake_machine() else { return };
+        let dir = std::env::temp_dir().join(format!("bm-named-hist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mapper = mapper::mapper::Mapper::default();
+
+        let mut history = Vec::new();
+        for t in 1..=3u32 {
+            crate::history::record_turn(&mut history, t, "north", vec![t as u8; 4], &mapper, false, "You are here.");
+        }
+        assert_eq!(history.len(), 3, "three turns recorded before saving");
+        let commands = vec!["north".to_string(), "look".to_string()];
+
+        super::save_named(
+            &dir, "TEST-IFID", "slot", crate::archive::SaveTrigger::HostState, &mapper,
+            &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 3, None, None,
+            &crate::archive::SessionRecord {
+                history: &history,
+                command_history: &commands,
+                ..crate::archive::SessionRecord::empty()
+            },
+        )
+        .expect("save_named");
+
+        let ac = crate::archive::load_archive(&dir.join("slot.lanthorn")).expect("load");
+        assert_eq!(ac.history.len(), 3, "the rewind/replay history must survive a named save");
+        assert_eq!(ac.history[0].save, vec![1, 1, 1, 1], "and byte-identically");
+        assert_eq!(ac.history[2].save, vec![3, 3, 3, 3]);
+        // The other blank IS deliberate: command history is per-game, not per-slot.
+        assert!(ac.command_history.is_empty(), "a named slot carries no command history");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn save_then_load_round_trips() {
         let mut dir = std::env::temp_dir();
@@ -566,7 +613,7 @@ mod tests {
         mapper.observe(1, "Foyer", None);
 
         let ifid = "ZCODE-1-TEST00-0001";
-        super::save_named(&dir, ifid, "before-troll", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 42, None, None, &[], &[], &[], &[], &[])
+        super::save_named(&dir, ifid, "before-troll", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 42, None, None, &crate::archive::SessionRecord::empty())
             .expect("save_named ok");
 
         // Path is `<slug>.lanthorn` inside the game dir (no ifid in the name).
@@ -597,7 +644,7 @@ mod tests {
         let dir = make_temp_dir("summary");
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0411";
-        super::save_named(&dir, ifid, "at-troll", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 7, Some("The Troll Room".into()), Some(10), &[], &[], &[], &[], &[])
+        super::save_named(&dir, ifid, "at-troll", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 7, Some("The Troll Room".into()), Some(10), &crate::archive::SessionRecord::empty())
             .expect("save_named ok");
 
         let saves = super::list_saves(&dir);
@@ -620,7 +667,7 @@ mod tests {
         let ifid = "ZCODE-1-TEST00-0009";
 
         // "Default" slugifies to "default" — reserved for the auto/singleton slot.
-        let err = super::save_named(&dir, ifid, "Default", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 1, None, None, &[], &[], &[], &[], &[])
+        let err = super::save_named(&dir, ifid, "Default", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 1, None, None, &crate::archive::SessionRecord::empty())
             .expect_err("reserved slug must be rejected");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(!dir.join("default.lanthorn").exists(), "must not clobber the default slot");
@@ -641,11 +688,11 @@ mod tests {
             .expect("default save ok");
 
         // Write two named saves.
-        super::save_named(&dir, ifid, "save-a", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 10, None, None, &[], &[], &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "save-a", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 10, None, None, &crate::archive::SessionRecord::empty()).unwrap();
         // Small sleep between named saves so timestamps differ, but since we
         // can't sleep in tests, we directly patch the timestamps via the archive
         // — instead, just verify ordering constraint is maintained.
-        super::save_named(&dir, ifid, "save-b", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 20, None, None, &[], &[], &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "save-b", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 20, None, None, &crate::archive::SessionRecord::empty()).unwrap();
 
         let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 3, "should find 3 saves (1 default + 2 named)");
@@ -734,7 +781,7 @@ mod tests {
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0004";
 
-        super::save_named(&dir, ifid, "to-delete", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 5, None, None, &[], &[], &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "to-delete", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], None, None, &machine.aux_data, 5, None, None, &crate::archive::SessionRecord::empty()).unwrap();
         let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 1);
         let path = saves[0].path.clone();

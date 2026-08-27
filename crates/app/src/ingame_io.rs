@@ -118,7 +118,7 @@ pub(crate) fn handle_save_as(
     // be recoloured.
     let (v6_pics, v6_display, v6_ground, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
     for d in &v6_diags { state.note_v6_save(d); }
-    let result = save_named(dir, ifid, &buf, trigger, mapper, &save, zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(), v6_ground.as_deref(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images);
+    let result = save_named(dir, ifid, &buf, trigger, mapper, &save, zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(), v6_ground.as_deref(), session.aux_data(), state.turns, location, score, &app::archive::SessionRecord::of(state));
     match result {
         Ok(()) => {
             state.push_notice(&format!("[Saved as: {}]", buf));
