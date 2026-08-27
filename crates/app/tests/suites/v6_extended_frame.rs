@@ -59,6 +59,12 @@ use ratatui::layout::Rect;
 /// whether this frame has anywhere to spend an extension.
 struct Specimen {
     file: &'static str,
+    /// The picture archive to mount, when the medium carries more than one — a
+    /// Macintosh disk holds `Pic.data` (480x300, art_scale (1,1)) beside
+    /// `CPic.data` (320x200 doubled), and they are two different renditions of the
+    /// same release, not two spellings of one. `None` takes whatever the medium
+    /// resolves on its own.
+    pictures: Option<&'static str>,
     keys: u8,
     taps: usize,
     release: u16,
@@ -73,9 +79,9 @@ struct Specimen {
 }
 
 const CORPUS: &[Specimen] = &[
-    Specimen { file: "zork0-r393-s890714.z6", keys: 13, taps: 6, release: 393, then: &[], extends: true },
-    Specimen { file: "arthur-r74-s890714.z6", keys: b'n', taps: 12, release: 74, then: &["look"], extends: true },
-    Specimen { file: "journey-r83-s890706.z6", keys: 13, taps: 40, release: 83, then: &[], extends: false },
+    Specimen { file: "zork0-r393-s890714.z6", pictures: None, keys: 13, taps: 6, release: 393, then: &[], extends: true },
+    Specimen { file: "arthur-r74-s890714.z6", pictures: None, keys: b'n', taps: 12, release: 74, then: &["look"], extends: true },
+    Specimen { file: "journey-r83-s890706.z6", pictures: None, keys: 13, taps: 40, release: 83, then: &[], extends: false },
 ];
 
 /// A pane with real surplus height at the 8x18 kitty cell: 800x900 device pixels
@@ -106,14 +112,14 @@ fn stories_dir() -> PathBuf {
 /// Skipping `native_std_window` is what booted two 560x384 presses at 640x400 and
 /// fabricated a frame a whole quest was fixed against (CLAUDE.md, SQ-0901/SQ-1021), so
 /// the profile, release, screen and cell this harness booted are all PRINTED.
-fn boot(s: &Specimen) -> Option<(GameSession, (u32, u32))> {
-    let (mut session, art_scale) = boot_raw(s.file, s.release)?;
-    tap_in(&mut session, s.keys, s.taps);
+fn boot(s: &Specimen) -> Option<Booted> {
+    let mut b = boot_raw(s.file, s.release, s.pictures)?;
+    tap_in(&mut b.session, s.keys, s.taps);
     for cmd in s.then {
-        let r = session.submit(cmd);
+        let r = b.session.submit(cmd);
         assert!(r.fault.is_none(), "{}: {cmd:?} faulted: {:?}", s.file, r.fault);
     }
-    Some((session, art_scale))
+    Some(b)
 }
 
 /// Answer whatever the game is waiting on, `taps` times, saying `n` to a `y or n`.
@@ -130,9 +136,30 @@ fn tap_in(session: &mut GameSession, keys: u8, taps: usize) {
     }
 }
 
+/// Everything one boot settled, travelling together.
+///
+/// The CELL is the fact this exists for. It is the MACHINE's — 7x15 on a Macintosh
+/// and 8x16 everywhere else (SQ-0917) — it reaches the render through
+/// `AppState::v6_text`, and a harness that leaves that at its 8x16 default measures
+/// a Macintosh screen on a grid no Macintosh has. That is the shape of SQ-1020 and
+/// SQ-1021, so the face is resolved here, beside the screen and the art scale, and
+/// handed to `state_for` as one value rather than remembered separately.
+struct Booted {
+    session: GameSession,
+    /// The ARCHIVE's density (SQ-0790) — unit pixels per art pixel.
+    art_scale: (u32, u32),
+    /// The machine's cell and the release's own typeface, as `startup.rs` builds it.
+    face: app::native_font::TextFace,
+    /// Whether the artwork left the game's colours licensed (SQ-0806/SQ-0846): a
+    /// two-colour archive declares the interpreter colourless.
+    honoured: bool,
+    screen_px: Option<(u16, u16)>,
+    profile: InterpreterProfile,
+}
+
 /// The mount and boot alone, with no input answered — so a caller can measure the
 /// SPLASH frame, which is what the game shows before anything is typed at it.
-fn boot_raw(file: &str, want_release: u16) -> Option<(GameSession, (u32, u32))> {
+fn boot_raw(file: &str, want_release: u16, pictures: Option<&str>) -> Option<Booted> {
     let path = stories_dir().join(file);
     let (bytes, medium) = match app::hints::load_mounted_story(&path) {
         Ok((loaded, medium)) => (loaded.bytes().to_vec(), medium),
@@ -141,9 +168,21 @@ fn boot_raw(file: &str, want_release: u16) -> Option<(GameSession, (u32, u32))> 
             return None;
         }
     };
-    let profile = InterpreterProfile::resolve(&path, None, None, medium);
+    // The picture archive first: on a Macintosh disk its FLAVOUR refines the
+    // profile and its own picture space is a screen-size link, so both have to be
+    // settled before the engine is built (`startup.rs`, and
+    // `v6_macintosh_profile::launch`).
+    let dir = std::env::temp_dir().join(format!("lanthorn-sq1032-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let over = match pictures {
+        Some(name) => app::graphics::PictureOverride::resolve_with_session(&path, &dir, Some(name)),
+        None => app::graphics::PictureOverride::Unset,
+    };
+    let named_art_std_window = over.std_window();
+    let profile = InterpreterProfile::resolve(&path, None, over.flavour(), medium);
     app::v6_set_palette(profile.palette());
-    let mut picts = PictSource::resolve(&path, None);
+    let mut picts = PictSource::resolve_with_override(&path, over, None);
+    let _ = std::fs::remove_dir_all(&dir);
     let dims = picts.all_pict_dims();
     let release = u16::from_be_bytes([bytes[2], bytes[3]]);
     assert_eq!(
@@ -151,37 +190,59 @@ fn boot_raw(file: &str, want_release: u16) -> Option<(GameSession, (u32, u32))> 
         "{file}: a disk image is a different BUILD, not the same story on other media — this case \
          is pinned to release {want_release}"
     );
+    // SQ-0806/SQ-0846: two-colour artwork declares the interpreter colourless — the
+    // Macintosh B/W press is exactly that, and skipping this filter boots it with
+    // colours no rendition of it ever had.
+    let honoured = !picts.declines_game_colours(profile.default_colours());
+    // The release's own typeface, resolved the way `startup.rs` resolves it.
+    // `disks: None` so the answer cannot depend on what the person running this
+    // keeps in `~/.lanthorn/`.
+    let faces = app::native_font::resolve(&app::native_font::FaceRequest {
+        story_path: &path,
+        entry: None,
+        profile,
+        source: app::interpreter::ProfileSource::Medium,
+        art_scale: picts.art_scale(),
+        disks: None,
+    });
     let boot = app::machine_boot::MachineBoot::resolve(
         profile,
         &picts,
-        None,
+        named_art_std_window,
         profile.interpreter_number(),
-        profile.default_colours(),
-        app::native_font::FaceSet::none(),
+        honoured.then(|| profile.default_colours()).flatten(),
+        faces.clone(),
     );
     let art_scale = boot.art_scale;
+    let face = app::native_font::TextFace::new(profile, faces, art_scale);
     eprintln!(
         "{file}: booted as {profile:?} off {medium:?} · release {release} · screen {:?} · \
-         art_scale {art_scale:?} · v6 cell {:?}",
+         art_scale {art_scale:?} · v6 cell {:?} · face scale {:?} · colours {}",
         boot.screen_px,
-        app::state::AppState::default().v6_text.cell(),
+        face.cell(),
+        face.scale(),
+        if honoured { "honoured" } else { "declined" },
     );
-    let mut session = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
-        .unwrap_or_else(|e| panic!("{file}: should boot without a ZError: {e:?}"));
+    let mut session =
+        GameSession::new_for_machine(bytes, honoured, false, false, dims, None, None, &boot)
+            .unwrap_or_else(|e| panic!("{file}: should boot without a ZError: {e:?}"));
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
     let _ = session.take_transcript();
-    Some((session, art_scale.unwrap_or((2, 2))))
+    Some(Booted {
+        session,
+        art_scale: art_scale.unwrap_or((2, 2)),
+        face,
+        honoured,
+        screen_px: boot.screen_px,
+        profile,
+    })
 }
 
 /// A v6 app state at a real kitty cell, in `mode`, with the art scale the mount
 /// resolved. Only the MODE differs between the two states any case here compares.
 #[allow(deprecated)]
-fn state_for(
-    mode: app::config::V6RenderMode,
-    transcript: &str,
-    art_scale: (u32, u32),
-) -> app::state::AppState {
+fn state_for(mode: app::config::V6RenderMode, transcript: &str, b: &Booted) -> app::state::AppState {
     let mut state = app::state::AppState::default();
     state.colors = app::colors::ColorScheme::terminal_default();
     let mut picker =
@@ -189,8 +250,12 @@ fn state_for(
     picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
     state.game_picker = Some(picker);
     state.config.v6_render = mode;
-    state.config.honor_game_colours = true;
-    state.v6_art_scale = art_scale;
+    state.config.honor_game_colours = b.honoured;
+    state.v6_art_scale = b.art_scale;
+    // The machine's own cell and the release's own face (SQ-0917, SQ-1009).
+    // Leaving this at `AppState::default()`'s 8x16 is how a Macintosh press gets
+    // measured on a grid no Macintosh has.
+    state.v6_text = b.face.clone();
     for line in transcript.lines() {
         state.push_transcript(line);
     }
@@ -211,12 +276,12 @@ type Pair = (
     (image::RgbaImage, Option<app::render::screen::RasterMetrics>, v6::RasterFrame),
 );
 
-fn pair(session: &mut GameSession, art_scale: (u32, u32), pane: (u16, u16)) -> Pair {
-    let transcript = session.take_transcript();
-    let model = session.screen();
+fn pair(b: &mut Booted, pane: (u16, u16)) -> Pair {
+    let transcript = b.session.take_transcript();
+    let model = b.session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
-    let plain = state_for(app::config::V6RenderMode::Raster, &transcript, art_scale);
-    let ext = state_for(app::config::V6RenderMode::Extended, &transcript, art_scale);
+    let plain = state_for(app::config::V6RenderMode::Raster, &transcript, b);
+    let ext = state_for(app::config::V6RenderMode::Extended, &transcript, b);
     let native = v6::native_extent(items, &plain.v6_text);
     let layout = v6::classify_windows(items, plain.v6_text.cell());
     let cell = plain.v6_text.cell();
@@ -289,9 +354,9 @@ fn the_extension_grows_downward_and_the_prose_box_takes_it() {
     let mut any_present = false;
     for spec in CORPUS.iter().filter(|s| s.extends) {
         any_present |= stories_dir().join(spec.file).exists();
-        let Some((mut session, art_scale)) = boot(spec) else { continue };
+        let Some(mut b) = boot(spec) else { continue };
         for pane in [TALL, WIDE] {
-        let ((plain, pm, pf), (extended, em, ef)) = pair(&mut session, art_scale, pane);
+        let ((plain, pm, pf), (extended, em, ef)) = pair(&mut b, pane);
         eprintln!(
             "{}: at {pane:?} raster {}x{} → extended {}x{} (lock {:?})",
             spec.file,
@@ -393,8 +458,8 @@ fn a_frame_that_declines_the_extension_is_byte_identical_to_raster() {
         // Journey declines at any pane; the others decline at a pane with no surplus.
         let panes: &[(u16, u16)] = if spec.extends { &[SNUG] } else { &[SNUG, TALL] };
         for &pane in panes {
-            let Some((mut session, art_scale)) = boot(spec) else { continue };
-            let ((plain, _, pf), (extended, _, ef)) = pair(&mut session, art_scale, pane);
+            let Some(mut b) = boot(spec) else { continue };
+            let ((plain, _, pf), (extended, _, ef)) = pair(&mut b, pane);
             assert_eq!(
                 ef.extension(),
                 0,
@@ -432,12 +497,12 @@ fn the_render_path_reports_the_larger_viewport() {
     let mut any_present = false;
     for spec in CORPUS.iter().filter(|s| s.extends) {
         any_present |= stories_dir().join(spec.file).exists();
-        let Some((mut session, art_scale)) = boot(spec) else { continue };
-        let transcript = session.take_transcript();
-        let model = session.screen();
+        let Some(mut b) = boot(spec) else { continue };
+        let transcript = b.session.take_transcript();
+        let model = b.session.screen();
         let area = Rect::new(0, 0, TALL.0, TALL.1);
         let rows = |mode| {
-            let state = state_for(mode, &transcript, art_scale);
+            let state = state_for(mode, &transcript, &b);
             let mut buf = Buffer::empty(area);
             app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf)
                 .viewport_rows
@@ -498,6 +563,7 @@ enum Reach {
 /// One v6 shape, and the verdict the extension must reach on it.
 struct Shape {
     file: &'static str,
+    pictures: Option<&'static str>,
     release: u16,
     reach: Reach,
     /// Does this frame extend? Pinned, so a frame that changes shape says so
@@ -511,40 +577,40 @@ const SHAPES: &[Shape] = &[
     // Splash cards. Every one is a full-screen plate or a picture takeover, so
     // there is no prose box to grow — the frame must decline and look exactly as
     // `raster` draws it.
-    Shape { file: "zork0-r393-s890714.z6", release: 393, reach: Reach::Zork0TitleSplash, extends: false,
+    Shape { file: "zork0-r393-s890714.z6", pictures: None, release: 393, reach: Reach::Zork0TitleSplash, extends: false,
             why: "the title splash: window 1 IS the screen and window 0 collapses, so there is no \
                   story window at all (SQ-0497)" },
-    Shape { file: "zork0-r393-s890714.z6", release: 393, reach: Reach::BootFrame, extends: true,
+    Shape { file: "zork0-r393-s890714.z6", pictures: None, release: 393, reach: Reach::BootFrame, extends: true,
             why: "not a splash: the PROLOGUE, an ordinary framed gameplay screen" },
-    Shape { file: "arthur-r74-s890714.z6", release: 74, reach: Reach::BootFrame, extends: false,
+    Shape { file: "arthur-r74-s890714.z6", pictures: None, release: 74, reach: Reach::BootFrame, extends: false,
             why: "the intro plate, absolutely placed in window 0 and drawn INSTEAD of prose \
                   (SQ-0707)" },
-    Shape { file: "shogun-r322-s890706.z6", release: 322, reach: Reach::BootFrame, extends: false,
+    Shape { file: "shogun-r322-s890706.z6", pictures: None, release: 322, reach: Reach::BootFrame, extends: false,
             why: "title card" },
     // Journey's boot frame is NOT its title card — it is the blank full-screen
     // window 0 the game publishes before it paints anything into it, so there is a
     // prose box and it extends. Nothing is on either screen; the extension makes the
     // empty page taller, which is what extending an empty text window means.
-    Shape { file: "journey-r83-s890706.z6", release: 83, reach: Reach::BootFrame, extends: true,
+    Shape { file: "journey-r83-s890706.z6", pictures: None, release: 83, reach: Reach::BootFrame, extends: true,
             why: "a blank full-screen window 0, before the title is painted into it" },
     // One tap on: the title PLATE, and a picture that owns the screen leaves no prose
     // box (SQ-0707) — the shape this quest most needed to decline, and it does.
-    Shape { file: "journey-r83-s890706.z6", release: 83, reach: Reach::Play { keys: 13, taps: 1 }, extends: false,
+    Shape { file: "journey-r83-s890706.z6", pictures: None, release: 83, reach: Reach::Play { keys: 13, taps: 1 }, extends: false,
             why: "the title plate owns the screen: no prose box (SQ-0707)" },
     // Three taps: the panels are open and the command menu is under the story.
-    Shape { file: "journey-r83-s890706.z6", release: 83, reach: Reach::Play { keys: 13, taps: 3 }, extends: false,
+    Shape { file: "journey-r83-s890706.z6", pictures: None, release: 83, reach: Reach::Play { keys: 13, taps: 3 }, extends: false,
             why: "the command menu sits below window 0 (SQ-0819) — hybrid bottom-anchors \
                   it and the composite cannot" },
     // Hint screens.
-    Shape { file: "zork0-r393-s890714.z6", release: 393, reach: Reach::HintMenu { taps: 8 }, extends: false,
+    Shape { file: "zork0-r393-s890714.z6", pictures: None, release: 393, reach: Reach::HintMenu { taps: 8 }, extends: false,
             why: "InvisiClues: the buffer withdraws and a Grid is the story surface (SQ-1026)" },
-    Shape { file: "shogun-r322-s890706.z6", release: 322, reach: Reach::HintMenu { taps: 8 }, extends: false,
+    Shape { file: "shogun-r322-s890706.z6", pictures: None, release: 322, reach: Reach::HintMenu { taps: 8 }, extends: false,
             why: "topic menu" },
-    Shape { file: "James Clavell's Shogun.adf", release: 295, reach: Reach::HintClues { taps: 14 }, extends: false,
+    Shape { file: "James Clavell's Shogun.adf", pictures: None, release: 295, reach: Reach::HintClues { taps: 14 }, extends: false,
             why: "clue page" },
-    Shape { file: "Arthur - The Quest for Excalibur.adf", release: 54, reach: Reach::ArthurHintPage, extends: false,
+    Shape { file: "Arthur - The Quest for Excalibur.adf", pictures: None, release: 54, reach: Reach::ArthurHintPage, extends: false,
             why: "the crystal ball's text-only menu" },
-    Shape { file: "Arthur - The Quest for Excalibur.adf", release: 54, reach: Reach::ArthurHintBox, extends: false,
+    Shape { file: "Arthur - The Quest for Excalibur.adf", pictures: None, release: 54, reach: Reach::ArthurHintBox, extends: false,
             why: "window 3 across native (28,384) 584x16 — the screen's LAST text row, BELOW \
                   window 0, which `menu_strip_below_story` cannot see (SQ-1008). Extending \
                   would strand the game's own answer box mid-scrollback." },
@@ -552,11 +618,10 @@ const SHAPES: &[Shape] = &[
 
 /// What `classify_windows` made of this frame's story slot — the fact every decline
 /// below turns on, printed so the table reads as a measurement.
-fn story_shape(session: &GameSession) -> String {
-    let model = session.screen();
+fn story_shape(b: &Booted) -> String {
+    let model = b.session.screen();
     let WinNode::Layered(items) = &model.root else { return "not layered".into() };
-    let tf = app::state::AppState::default().v6_text;
-    let layout = v6::classify_windows(items, tf.cell());
+    let layout = v6::classify_windows(items, b.face.cell());
     match layout.story {
         None => "none".into(),
         Some(pw) => format!(
@@ -572,11 +637,12 @@ fn story_shape(session: &GameSession) -> String {
     }
 }
 
-fn reach(sh: &Shape) -> Option<(GameSession, (u32, u32))> {
-    let (mut s, art_scale) = boot_raw(sh.file, sh.release)?;
+fn reach(sh: &Shape) -> Option<Booted> {
+    let mut b = boot_raw(sh.file, sh.release, sh.pictures)?;
+    let s = &mut b.session;
     match sh.reach {
         Reach::BootFrame => {}
-        Reach::Play { keys, taps } => tap_in(&mut s, keys, taps),
+        Reach::Play { keys, taps } => tap_in(s, keys, taps),
         Reach::Zork0TitleSplash => {
             let mut lines = ["get under table", "wait", "wait", "wait", "wait", "wait"].into_iter();
             let mut parked = false;
@@ -631,7 +697,7 @@ fn reach(sh: &Shape) -> Option<(GameSession, (u32, u32))> {
             }
         }
         Reach::ArthurHintPage => {
-            tap_in(&mut s, 13, 14);
+            tap_in(s, 13, 14);
             // Out through the gate, into the church after curfew: arrested, which
             // is the death prompt that offers HINT (`v6_arthur_hint_page`).
             for cmd in ["open gate", "e", "hint", "hint", ""] {
@@ -643,12 +709,12 @@ fn reach(sh: &Shape) -> Option<(GameSession, (u32, u32))> {
             }
         }
         Reach::ArthurHintBox => {
-            tap_in(&mut s, 13, 14);
+            tap_in(s, 13, 14);
             let r = s.submit("hint");
             assert!(r.fault.is_none(), "{}: `hint` faulted", sh.file);
         }
     }
-    Some((s, art_scale))
+    Some(b)
 }
 
 /// Every splash card and every hint screen reaches the verdict its row pins, and a
@@ -664,9 +730,9 @@ fn splash_cards_and_hint_screens_reach_the_verdict_their_row_pins() {
     let mut any_present = false;
     for sh in SHAPES {
         any_present |= stories_dir().join(sh.file).exists();
-        let Some((mut session, art_scale)) = reach(sh) else { continue };
-        let story = story_shape(&session);
-        let ((plain, pm, _), (extended, em, ef)) = pair(&mut session, art_scale, TALL);
+        let Some(mut b) = reach(sh) else { continue };
+        let story = story_shape(&b);
+        let ((plain, pm, _), (extended, em, ef)) = pair(&mut b, TALL);
         eprintln!(
             "  SHAPE {:<38} {:?} → {} (canvas {}x{}, story {story}, prose box {}) — {}",
             sh.file,
@@ -775,12 +841,12 @@ fn the_extended_frame_publishes_the_games_screen_beside_its_canvas() {
     let mut any_present = false;
     for spec in CORPUS.iter().filter(|s| s.extends) {
         any_present |= stories_dir().join(spec.file).exists();
-        let Some((mut session, art_scale)) = boot(spec) else { continue };
-        let transcript = session.take_transcript();
-        let model = session.screen();
+        let Some(mut b) = boot(spec) else { continue };
+        let transcript = b.session.take_transcript();
+        let model = b.session.screen();
         let area = Rect::new(0, 0, TALL.0, TALL.1);
         let map_for = |mode| {
-            let state = state_for(mode, &transcript, art_scale);
+            let state = state_for(mode, &transcript, &b);
             let mut buf = Buffer::empty(area);
             let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
             let map = state
@@ -880,4 +946,275 @@ fn the_extended_frame_publishes_the_games_screen_beside_its_canvas() {
     if any_present {
         assert!(seen > 0, "a present fixture must have been measured, not skipped");
     }
+}
+
+// ── 8. The MACINTOSH, where the two densities disagree ───────────────────────
+//
+// Every other press in this suite has an 8x16 cell and a (2, 2) art scale, and on
+// such a machine several wrong arithmetics give the right answer. The Macintosh is
+// the only machine in the corpus where the ART's density and the TEXT's cell
+// disagree — 7x15 text (SQ-0917) under artwork that is either 480x300 at (1, 1)
+// (`Pic.data`) or 320x200 doubled (`CPic.data`) — so it is the only machine that can
+// falsify this mode's arithmetic:
+//
+//   * SQ-1012 / SQ-1024 — a whole-ART rung is a HALF-NATIVE one wherever an art
+//     pixel is already two native pixels, and a 7-wide glyph at 1.5 native scale
+//     gets 10.5 device pixels. `RasterFrame::extended` pins whole DEVICE pixels per
+//     NATIVE pixel for exactly this reason; here it is measured rather than argued.
+//   * SQ-1039 — scaling a face by `art_scale` declared Geneva 12's fifteen rows as
+//     thirty, and ONLY on the colour press. The B/W press is (1, 1) and cannot
+//     falsify it, which is why BOTH renditions are driven below.
+//
+// Both are the same release on the same disk. A rendition is not a spelling.
+
+/// One Macintosh rendition: the medium, the archive, and the two densities it
+/// should resolve.
+struct MacPress {
+    file: &'static str,
+    pictures: Option<&'static str>,
+    release: u16,
+    taps: usize,
+    /// The picture space this archive declares, as `MachineBoot` resolves it.
+    art_scale: (u32, u32),
+}
+
+const MAC: &[MacPress] = &[
+    // Zork Zero, Macintosh release 296 / serial 881019 — the disk `v6_macintosh_profile`
+    // pins. Six taps in is its PROLOGUE, the framed gameplay screen that the 8x16
+    // press extends at.
+    MacPress { file: "Zork Zero Disk.image", pictures: Some("CPic.data"), release: 296, taps: 6, art_scale: (2, 2) },
+    MacPress { file: "Zork Zero Disk.image", pictures: Some("Pic.data"), release: 296, taps: 6, art_scale: (1, 1) },
+    // Shogun, Macintosh release 292 / serial 890314 — the other Macintosh medium.
+    MacPress { file: "Shogun.toast", pictures: None, release: 292, taps: 2, art_scale: (2, 2) },
+];
+
+/// The extension's arithmetic, on the machine whose cell is 7x15.
+///
+/// Four things, all of them the ones a `/16` or an `art_scale` would get wrong:
+/// the magnification is whole in DEVICE pixels per NATIVE pixel; the extension is a
+/// whole number of the MACHINE's text rows with no partial row; the face is drawn at
+/// its own space and not at `art_scale`; and the prose grows by exactly the rows the
+/// frame added.
+///
+/// A rendition whose frame DECLINES is reported and skipped rather than forced —
+/// declining is a legitimate answer (§5 above), and the case says which renditions
+/// actually exercised the arithmetic so a silent skip cannot read as a pass.
+#[test]
+fn the_macintosh_cell_is_what_the_extension_counts_in() {
+    let _g = app::v6_palette_at_boot();
+    let mut extended_any = 0usize;
+    let mut any_present = false;
+    for m in MAC {
+        any_present |= stories_dir().join(m.file).exists();
+        let Some(mut b) = boot_raw(m.file, m.release, m.pictures) else { continue };
+        tap_in(&mut b.session, 13, m.taps);
+
+        // The machine, before anything is measured on it (CLAUDE.md: print the
+        // profile, release, screen and cell the harness booted).
+        let cell = b.face.cell();
+        assert_eq!(
+            b.profile,
+            InterpreterProfile::Macintosh,
+            "{} [{:?}]: this case is about the Macintosh — the medium resolved {:?}",
+            m.file, m.pictures, b.profile
+        );
+        assert_eq!(
+            (cell.w, cell.h),
+            (7, 15),
+            "{} [{:?}]: the Version 6 cell is the MACHINE's (SQ-0917)",
+            m.file, m.pictures
+        );
+        assert_eq!(
+            b.art_scale, m.art_scale,
+            "{} [{:?}]: this rendition's picture space",
+            m.file, m.pictures
+        );
+
+        // SQ-1039, live: the face is scaled by its OWN space, never by the
+        // artwork's. The Macintosh answers `Native` both ways, so a (2, 2) art
+        // scale must leave the text scale at (1, 1) — and the COLOUR press is the
+        // only rendition that can catch it, because the B/W press is (1, 1) and a
+        // wrong multiply is invisible there.
+        assert_eq!(
+            b.face.scale(),
+            (1, 1),
+            "{} [{:?}]: the Macintosh draws text at one native pixel per face pixel \
+             whatever `CPic.data`'s density is — scaling the face by art_scale is SQ-1039",
+            m.file, m.pictures
+        );
+
+        for pane in [TALL, WIDE] {
+        let ((plain, pm, pf), (extended, em, ef)) = pair(&mut b, pane);
+        eprintln!(
+            "  MAC {:<22} [{:?}] {pane:?} cell {:?} art_scale {:?} face {:?} :: raster {}x{} -> {} \
+             {}x{} (lock {:?})",
+            m.file,
+            m.pictures,
+            (cell.w, cell.h),
+            b.art_scale,
+            b.face.scale(),
+            plain.width(),
+            plain.height(),
+            if ef.extension() > 0 { "extended" } else { "declined" },
+            extended.width(),
+            extended.height(),
+            ef.lock,
+        );
+        if let Ok(dir) = std::env::var("LANTHORN_SHOT_DIR") {
+            let tag = format!("{}-{:?}-{pane:?}", m.file.replace(' ', "_"), m.pictures);
+            extended.save(format!("{dir}/mac-ext-{tag}.png")).unwrap();
+            plain.save(format!("{dir}/mac-ras-{tag}.png")).unwrap();
+        }
+        assert_eq!(pf.extension(), 0, "{}: the raster frame never extends", m.file);
+        if ef.extension() == 0 {
+            eprintln!("      (declines — reported, not forced)");
+            assert!(
+                extended.as_raw() == plain.as_raw(),
+                "{} [{:?}]: a declined Macintosh frame is the raster composite to the byte",
+                m.file, m.pictures
+            );
+            continue;
+        }
+
+        // (1) A whole magnification, in DEVICE pixels per NATIVE pixel.
+        let s = ef.lock.expect("an extended frame pins one");
+        assert_eq!(s, s.floor(), "{} [{:?}]: {s} is not whole", m.file, m.pictures);
+        assert!(s >= 1.0, "{} [{:?}]: and never a minification", m.file, m.pictures);
+
+        // (2) The extension is whole 7x15 text rows, with no partial row: the canvas
+        // is the game's screen plus a whole multiple of the MACHINE's cell height.
+        assert_eq!(
+            ef.extension() % u32::from(cell.h),
+            0,
+            "{} [{:?}]: the extension must be whole rows of a {}-tall cell, not {}",
+            m.file, m.pictures, cell.h, ef.extension()
+        );
+        assert_eq!(extended.height(), plain.height() + ef.extension());
+        assert_eq!(extended.width(), plain.width(), "{}: never sideways", m.file);
+
+        // (3) …and the prose took exactly those rows, counted in the same cell.
+        let pv = pm.expect("the raster frame has a story box").viewport_rows;
+        let ev = em.expect("and so does the extended one").viewport_rows;
+        assert_eq!(
+            u32::from(ev - pv),
+            ef.extension() / u32::from(cell.h),
+            "{} [{:?}]: raster {pv} rows, extended {ev} — not the {} rows the frame added",
+            m.file,
+            m.pictures,
+            ef.extension() / u32::from(cell.h)
+        );
+        eprintln!("      prose {pv} -> {ev} rows of a {}px cell", cell.h);
+        extended_any += 1;
+        }
+    }
+    if any_present {
+        assert!(
+            extended_any > 0,
+            "no Macintosh rendition exercised the extension — the arithmetic is still undriven \
+             on the only machine whose densities disagree"
+        );
+    }
+}
+
+// ── 9. Restore ───────────────────────────────────────────────────────────────
+
+/// A game saved in `extended` and restored still extends — and still extends one
+/// MOVE later, into a pane of a different size.
+///
+/// `v6_render` is config rather than archive state, so this ought to be free. The
+/// project's convention is to distrust "ought to": *restore bugs surface one action
+/// AFTER the restore, when the game next repaints, changes palette, splits or
+/// resizes* — asserting the frame straight after a restore is when everything still
+/// looks correct. So this restores, MOVES, and only then asserts, the way
+/// `v6_restore_palette_replay` does.
+///
+/// The second half is the case a same-session round-trip structurally cannot see:
+/// the archive is backend- and terminal-neutral, and a restore into a DIFFERENT pane
+/// is a resize the game never saw. The extension is derived from the pane, so the
+/// restored frame must re-derive it — at `WIDE` that is a different magnification
+/// (2 rather than 1) and a different canvas height, off the same archive.
+#[test]
+fn a_game_saved_in_extended_still_extends_a_move_after_it_is_restored() {
+    let _g = app::v6_palette_at_boot();
+    let spec = &CORPUS[0];
+    assert_eq!(spec.file, "zork0-r393-s890714.z6", "this case is pinned to Zork Zero's prologue");
+    let Some(mut b) = boot(spec) else { return };
+    let _ = b.session.submit("look");
+    let _ = b.session.take_transcript();
+
+    let before = {
+        let (_, (canvas, m, f)) = pair(&mut b, TALL);
+        (canvas.dimensions(), m.expect("a story box before saving").viewport_rows, f)
+    };
+    assert!(before.2.extension() > 0, "the frame being saved is an extended one");
+
+    // Through the real archive, as Save State and auto-resume do.
+    let mapper = mapper::mapper::Mapper::default();
+    let es = app::engine::Engine::save_state(&b.session);
+    let path = std::env::temp_dir().join(format!("sq1032-restore-{}.lanthorn", std::process::id()));
+    app::archive::save_archive_meta_pics(
+        &path,
+        &mapper,
+        &es,
+        Some(&b.session.machine.screen),
+        &b.session.machine.aux_data,
+        app::archive::Meta {
+            format_version: app::archive::CURRENT_FORMAT_VERSION,
+            ifid: None,
+            name: None,
+            turns: 0,
+            saved_at: String::new(),
+            location: None,
+            score: None,
+            trigger: app::archive::SaveTrigger::HostState,
+        },
+        &app::archive::SessionRecord::empty(),
+        &b.session.pictures_png(),
+        None,
+        None,
+    )
+    .expect("save archive");
+    let ac = app::archive::load_archive(&path).expect("load archive");
+    let _ = std::fs::remove_file(&path);
+
+    let mut fresh = boot_raw(spec.file, spec.release, spec.pictures).expect("fresh boot");
+    app::engine::Engine::restore_state(&mut fresh.session, &ac.engine_save()).expect("restore");
+    app::session::restore_screen(&mut fresh.session, ac.screen.clone().expect("screen"));
+    fresh.session.load_pictures_png(&ac.pictures);
+
+    // PERTURB. Everything still looks correct on the frame immediately after a
+    // restore; the defect arrives when the game next repaints.
+    let r = fresh.session.submit("look");
+    assert!(r.fault.is_none(), "the move after the restore faulted: {:?}", r.fault);
+
+    // The pane it was saved at.
+    let (_, (canvas, m, f)) = pair(&mut fresh, TALL);
+    let rows = m.expect("a story box after the restore").viewport_rows;
+    eprintln!(
+        "restore @ {TALL:?}: saved {}x{} / {} rows → restored {}x{} / {rows} rows (lock {:?})",
+        before.0.0, before.0.1, before.1, canvas.width(), canvas.height(), f.lock
+    );
+    assert!(f.extension() > 0, "the restored frame must still extend");
+    assert_eq!(canvas.dimensions(), before.0, "…to the same canvas at the same pane");
+    assert_eq!(f, before.2, "…on the same frame");
+    assert_eq!(rows, before.1, "…with the same story viewport");
+
+    // …and into a pane it was NOT saved at, which is a resize the game never saw.
+    // `WIDE` affords a whole magnification of two, so the restored frame must
+    // re-derive both the scale and the height rather than replay the saved ones.
+    let (_, (wide, wm, wf)) = pair(&mut fresh, WIDE);
+    let wrows = wm.expect("a story box at the other pane").viewport_rows;
+    eprintln!(
+        "restore @ {WIDE:?}: {}x{} / {wrows} rows (lock {:?})",
+        wide.width(), wide.height(), wf.lock
+    );
+    assert!(wf.extension() > 0, "the restored frame extends at the other pane too");
+    assert_eq!(wf.lock, Some(2.0), "…at that pane's own whole magnification");
+    assert_ne!(wide.dimensions(), canvas.dimensions(), "…and a different canvas for it");
+    assert_eq!(
+        wf.extension() % u32::from(fresh.face.cell().h),
+        0,
+        "…still whole text rows"
+    );
+    assert!(wrows > 0, "…with prose in it");
 }
