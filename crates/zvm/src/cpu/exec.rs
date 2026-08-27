@@ -713,10 +713,36 @@ impl Machine {
     ///
     /// A timeout is not the player acting, so it retires nothing (the same
     /// distinction `v6_reload_line_counts` draws).
+    ///
+    /// **Only rows a SPLIT stranded are retired** (SQ-1088). Rows below the split
+    /// have two entirely different provenances, and "painted rows exceed the
+    /// split" cannot tell them apart on its own:
+    ///
+    /// * a **quote box** — the game split tall, painted, and shrank the split
+    ///   back under its own text. The rows are leftovers; the player's next key
+    ///   is what a real screen's scrolling would have been.
+    /// * a **menu** — the game opened a small split and simply printed below it,
+    ///   which real interpreters keep on screen because printing into the upper
+    ///   window "overlays whatever text is already there" (ZMSD §8.6.1.1.1) and
+    ///   nothing has scrolled over it. Anchorhead's HELP menu is exactly this:
+    ///   `@erase_window(-1)`, `@split_window(7)`, then thirteen rows of menu,
+    ///   with `[press BACKSPACE to return to game]` on row 13. Retiring on the
+    ///   arrow keys that drive the menu blanked its bottom three entries and the
+    ///   BACKSPACE line, while `set_cursor` went on landing on rows that were
+    ///   still selectable and no longer painted. (LostPig's HELP menu, already
+    ///   named in `split_window`'s own comment, is the same shape.)
+    ///
+    /// `upper_rows_stranded_by_split` records which of the two the grid is in:
+    /// set by a shrinking split, cleared by a keystroke and by any write below
+    /// the split (see `print_text`).
     fn retire_stranded_upper_rows(&mut self) {
         if self.screen.v6.is_some() {
             return; // v6 text is paint; erases and repaints govern it (§8.8.5.3)
         }
+        if !self.screen.upper_rows_stranded_by_split {
+            return; // live content below the split, not a quote box
+        }
+        self.screen.upper_rows_stranded_by_split = false;
         let split = self.screen.upper_window_rows;
         if self.screen.upper.rows > split {
             let cols = self.screen.upper.cols.max(1);
@@ -2130,6 +2156,17 @@ impl Machine {
                     // would otherwise allocate rows×cols cells (~400 MB at 80
                     // cols) before the terminal could ever show them.
                     let rows = rows.min(GRID_CELL_CAP);
+                    // SQ-1088: does THIS split STRAND the rows below it? Only a
+                    // shrink can — a boundary that moves UP past rows already
+                    // painted. A split that grows, or that opens a window over a
+                    // grid no taller than itself, strands nothing, so whatever a
+                    // game paints below it afterwards is live content and not a
+                    // quote box awaiting retirement. See
+                    // `retire_stranded_upper_rows`. Recomputed on every split, so
+                    // the answer always describes the split the grid stands on.
+                    let prev_split = self.screen.upper_window_rows;
+                    self.screen.upper_rows_stranded_by_split =
+                        self.mem.version() > 3 && rows < prev_split && self.screen.upper.rows > rows;
                     self.screen.upper_window_rows = rows;
                     let cols = self.mem.read_byte(0x21) as u16;
                     // ZMSD §15 split_window: "In Version 3 (only) the upper
@@ -4704,6 +4741,12 @@ impl Machine {
                 }
                 let out_ch = if font3 { font3_translate(ch) } else { ch };
                 let (r, c) = (self.screen.cursor_row, self.screen.cursor_col);
+                if r > self.screen.upper_window_rows {
+                    // SQ-1088: a write BELOW the split is the game putting live
+                    // content there, so it cancels any pending retirement of the
+                    // rows down there (`retire_stranded_upper_rows`).
+                    self.screen.upper_rows_stranded_by_split = false;
+                }
                 if r > self.screen.upper.rows && r <= screen_h {
                     self.screen.upper.grow_rows(r);
                 }
@@ -9477,6 +9520,77 @@ pub(crate) mod tests {
         m.supply_char(b' ');
         assert_eq!(m.screen.upper.rows, 1, "a real keypress retires the stranded rows");
         assert_eq!(m.screen.upper.cell(1, 1).ch, 'H', "the status row itself is untouched");
+    }
+
+    #[test]
+    fn rows_painted_below_the_split_survive_a_keypress() {
+        // SQ-1088. Anchorhead's HELP menu is `@erase_window(-1)`,
+        // `@split_window(7)`, then thirteen rows printed into window 1: six
+        // entries down to row 10, and `[press BACKSPACE to return to game]` on
+        // row 13. Every arrow key is a `read_char`, and retiring the rows below
+        // the split on each one blanked the bottom three entries and the
+        // BACKSPACE line — while `set_cursor` went on landing on rows that were
+        // still selectable and no longer painted.
+        //
+        // None of it is a quote box: no shrink ever moved the boundary up past
+        // this text, and ZMSD §8.6.1.1.1 — "Printing onto the upper window
+        // overlays whatever text is already there" — is why a real screen still
+        // shows it.
+        let mut m = screen_machine(5);
+        m.mem.write_byte(0x20, 24); // a 24-row screen, so the grid may reach row 13
+        m.exec_var(0x0A, &[7], None, None); // split_window 7 — the menu's own split
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 13;
+        m.screen.cursor_col = 1;
+        m.print_text("BACKSPACE");
+        assert_eq!(m.screen.upper.rows, 13, "a write below the split grows the grid to reach it");
+
+        m.pending_input = Some(PendingInput {
+            store_var: Some(0),
+            text_buf: 0,
+            parse_buf: 0,
+            interrupt_time: 0,
+            interrupt_routine: 0,
+            instr_pc: 0,
+        });
+        m.supply_char(130); // ZSCII cursor down (ZMSD §3.8) — one menu arrow key
+        assert_eq!(m.screen.upper.rows, 13, "an arrow key must not retire live menu rows");
+        assert_eq!(m.screen.upper.cell(13, 1).ch, 'B', "…and the row keeps its text");
+    }
+
+    #[test]
+    fn a_write_below_the_split_cancels_a_pending_quote_retirement() {
+        // The other half of SQ-1088's rule. A shrink arms the retirement, but if
+        // the game then prints below the new split it has put live content there
+        // and the rows are no longer leftovers — so the next keypress leaves them
+        // alone.
+        let mut m = screen_machine(5);
+        m.mem.write_byte(0x20, 24);
+        m.exec_var(0x0A, &[3], None, None); // split tall
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 3;
+        m.screen.cursor_col = 1;
+        m.print_text("QUOTE");
+        m.exec_var(0x0A, &[1], None, None); // shrink — arms the retirement
+        assert!(m.screen.upper_rows_stranded_by_split, "the shrink stranded row 3");
+
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 2;
+        m.screen.cursor_col = 1;
+        m.print_text("MENU");
+        assert!(!m.screen.upper_rows_stranded_by_split, "a write below the split disarms it");
+
+        m.pending_input = Some(PendingInput {
+            store_var: Some(0),
+            text_buf: 0,
+            parse_buf: 0,
+            interrupt_time: 0,
+            interrupt_routine: 0,
+            instr_pc: 0,
+        });
+        m.supply_char(b' ');
+        assert_eq!(m.screen.upper.rows, 3, "so the keypress retires nothing");
+        assert_eq!(m.screen.upper.cell(2, 1).ch, 'M', "the live row survives");
     }
 
     #[test]
