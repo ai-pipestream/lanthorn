@@ -22,14 +22,30 @@
 //! non-destructive one. Without a collision the prompt is the ordinary two-button
 //! yes/no.
 //!
+//! ## The second shape: a downloaded zip of disk images (SQ-1096)
+//!
+//! Archive sites ship C64, Amiga and Apple II floppies inside zips as a matter
+//! of course, and lanthorn's zip loader is a volume of raw stories — it does not
+//! mount media. So a download that holds five `.dsk` files and no story reaches
+//! the SAME prompt, before anything boots, worded for what it is: **Unpack into
+//! library** copies the images out (and only the images), **Cancel** ends the
+//! launch saying why.
+//!
+//! The order is the point. For a story the prompt comes AFTER the boot, because
+//! that is when the player knows whether they want it. For an archive the load
+//! fails before any prompt could be reached, so the offer has to come first —
+//! there is nothing to play until it is answered.
+//!
 //! ## Styling
 //!
-//! Existing selectors only — no new theme rows. The chrome is `DialogStyle`'s
-//! (`dialog.border` / `dialog.title` / `dialog.button` / `dialog.shadow`), the
-//! body is `dialog.background`, the URL and destination lines take the dim
-//! secondary-line style `dialog.hint_suggestion`, and the collision warning takes
-//! `dialog.launch_caveat` — `alert` without `dim`, which is exactly the register
-//! of a line that exists to stop the player being surprised by the outcome.
+//! Existing selectors only — no new theme rows, in both shapes. The chrome is
+//! `DialogStyle`'s (`dialog.border` / `dialog.title` / `dialog.button` /
+//! `dialog.shadow`), the body is `dialog.background`, the URL and destination
+//! lines take the dim secondary-line style `dialog.hint_suggestion`, and the
+//! collision warning — plus the archive shape's "lanthorn does not run these
+//! from inside a zip" line — takes `dialog.launch_caveat`: `alert` without
+//! `dim`, which is exactly the register of a line that exists to stop the player
+//! being surprised by the outcome.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -42,11 +58,17 @@ const MIN_W: u16 = 44;
 const MIN_H: u16 = 10;
 const DIALOG_W: u16 = 68;
 const DIALOG_H: u16 = 13;
+/// The archive shape says three things the story shape does not — what the zip
+/// holds, that lanthorn will not run it from in there, and what unpacking does —
+/// so it is three rows taller and wants three more rows before it gives up.
+const ARCHIVE_H: u16 = 16;
+const ARCHIVE_MIN_H: u16 = 13;
 
 pub struct FetchKeepRects {
     pub area: Rect,
     pub close: Option<Rect>,
-    /// "Keep in library", or "Replace" when the name collides.
+    /// "Keep in library" ("Unpack into library" for an archive), or "Replace"
+    /// when the name collides.
     pub keep: Option<Rect>,
     /// "Keep both" — present only when the name collides.
     pub keep_both: Option<Rect>,
@@ -68,17 +90,29 @@ pub fn button_count(state: &AppState) -> usize {
 /// is too small to hold it.
 pub fn draw_fetch_keep_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<FetchKeepRects> {
     let prompt = state.overlays.fetch_keep.as_ref()?;
+    // SQ-1096: an archive prompt is the same dialog with a different subject —
+    // several files that have not been written yet, rather than one that is
+    // already playing.
+    let archive = !prompt.disk_images.is_empty();
 
+    let (want_h, min_h) =
+        if archive { (ARCHIVE_H, ARCHIVE_MIN_H) } else { (DIALOG_H, MIN_H) };
     let modal_w = DIALOG_W.min(area.width.saturating_sub(4));
-    let modal_h = DIALOG_H.min(area.height.saturating_sub(2));
-    if modal_w < MIN_W || modal_h < MIN_H {
+    let modal_h = want_h.min(area.height.saturating_sub(2));
+    if modal_w < MIN_W || modal_h < min_h {
         return None;
     }
 
     let st = DialogStyle::from_colors(&state.colors);
+    // "Just play it" is the honest answer only when something IS playing.
+    // Declining an archive plays nothing — the launch simply ends — so the
+    // archive shape says so.
     let two = [
-        DialogButton { id: ButtonId::Ok, label: "Keep in library" },
-        DialogButton { id: ButtonId::Cancel, label: "Just play it" },
+        DialogButton {
+            id: ButtonId::Ok,
+            label: if archive { "Unpack into library" } else { "Keep in library" },
+        },
+        DialogButton { id: ButtonId::Cancel, label: if archive { "Cancel" } else { "Just play it" } },
     ];
     // "Keep both" comes FIRST, so focus index 0 is the harmless keep in BOTH
     // shapes. That is not cosmetic: `dialog_focus` is shared across the whole
@@ -89,7 +123,7 @@ pub fn draw_fetch_keep_dialog(state: &AppState, area: Rect, buf: &mut Buffer) ->
     let three = [
         DialogButton { id: ButtonId::KeepBoth, label: "Keep both" },
         DialogButton { id: ButtonId::Ok, label: "Replace" },
-        DialogButton { id: ButtonId::Cancel, label: "Just play it" },
+        DialogButton { id: ButtonId::Cancel, label: if archive { "Cancel" } else { "Just play it" } },
     ];
     let buttons: &[DialogButton] = if prompt.collision { &three } else { &two };
     // The underlined default is the harmless answer in both shapes: keep it when
@@ -98,7 +132,7 @@ pub fn draw_fetch_keep_dialog(state: &AppState, area: Rect, buf: &mut Buffer) ->
     debug_assert_eq!(buttons.len(), button_count(state), "focus ring and button row must agree");
 
     let spec = DialogSpec {
-        title: "Keep this story?",
+        title: if archive { "Unpack this download?" } else { "Keep this story?" },
         placement: Placement::Centered { w: modal_w, h: modal_h },
         buttons,
         show_close: true,
@@ -119,12 +153,43 @@ pub fn draw_fetch_keep_dialog(state: &AppState, area: Rect, buf: &mut Buffer) ->
         (prompt.fetched.filename(), body_style),
         (format!("from {}", prompt.fetched.url), detail_style),
         (String::new(), body_style),
-        ("Keeping it copies the file into your library:".to_string(), body_style),
-        (prompt.library_dir.display().to_string(), detail_style),
     ];
+    if archive {
+        // The count is what will be EXTRACTED, not the archive's entry count —
+        // a zip of five floppies and forty text files is five disk images here,
+        // because five files are what land in the library.
+        let n = prompt.disk_images.len();
+        lines.push((
+            format!(
+                "This archive holds {n} disk image{}, and lanthorn does not",
+                if n == 1 { "" } else { "s" }
+            ),
+            caveat_style,
+        ));
+        lines.push(("run disk images from inside a zip.".to_string(), caveat_style));
+        lines.push((String::new(), body_style));
+        lines.push((
+            format!(
+                "Unpacking copies {} into your library, and nothing else",
+                if n == 1 { "it" } else { "them" }
+            ),
+            body_style,
+        ));
+        lines.push(("out of the archive:".to_string(), body_style));
+    } else {
+        lines.push(("Keeping it copies the file into your library:".to_string(), body_style));
+    }
+    lines.push((prompt.library_dir.display().to_string(), detail_style));
     if prompt.collision {
         lines.push((String::new(), body_style));
-        lines.push(("A file of that name is already in your library.".to_string(), caveat_style));
+        lines.push((
+            if archive {
+                "Some of those names are already in your library.".to_string()
+            } else {
+                "A file of that name is already in your library.".to_string()
+            },
+            caveat_style,
+        ));
     }
 
     for (i, (line, style)) in lines.iter().enumerate() {
@@ -201,6 +266,20 @@ mod tests {
             },
             library_dir: std::path::PathBuf::from("/home/p/stories"),
             collision,
+            disk_images: Vec::new(),
+        }
+    }
+
+    /// The SQ-1096 shape: a downloaded zip of floppies, nothing booted.
+    fn archive_prompt(collision: bool, n: usize) -> FetchKeepPrompt {
+        FetchKeepPrompt {
+            fetched: FetchedStory {
+                url: "https://example.org/if/journey.zip".to_string(),
+                path: std::path::PathBuf::from("/tmp/lanthorn-fetch/journey.zip"),
+            },
+            library_dir: std::path::PathBuf::from("/home/p/stories"),
+            collision,
+            disk_images: (1..=n).map(|i| format!("journey_s{i}.dsk")).collect(),
         }
     }
 
@@ -278,6 +357,65 @@ mod tests {
         // Space is widget-reserved, so it must not activate anything here.
         assert_eq!(fetch_keep_key_focused(KeyCode::Char(' '), 0, false), FetchKeepAction::None);
         assert_eq!(fetch_keep_key_focused(KeyCode::Char('x'), 0, false), FetchKeepAction::None);
+    }
+
+    /// SQ-1096. The archive shape has to say three things the story shape never
+    /// does — what the download holds, that lanthorn will not run it from in
+    /// there, and that unpacking takes the images and NOTHING else — because a
+    /// player who answers "no" gets no game at all and must know why.
+    #[test]
+    fn the_archive_shape_says_what_it_holds_and_what_lanthorn_will_not_do() {
+        let mut state = AppState::default();
+        state.overlays.fetch_keep = Some(archive_prompt(false, 5));
+        let (rects, all) = render(&state);
+        let r = rects.expect("drawn");
+        assert!(r.keep.is_some() && r.decline.is_some());
+        assert!(r.keep_both.is_none(), "no third answer when nothing collides");
+        assert!(all.contains("Unpack this download?"), "titled for what it is: {all}");
+        assert!(all.contains("journey.zip"), "the archive is named");
+        assert!(all.contains("holds 5 disk images"), "the count is stated: {all}");
+        assert!(all.contains("does not"), "and that lanthorn will not run them from in there");
+        assert!(all.contains("nothing else"), "and that only the images come out: {all}");
+        assert!(all.contains("Unpack into library"), "the affirmative says what it does");
+        // "Just play it" is a lie here: declining plays nothing.
+        assert!(!all.contains("Just play it"), "nothing would be played: {all}");
+    }
+
+    /// One image is one image — an archive with a single floppy must not be told
+    /// it holds "1 disk images".
+    #[test]
+    fn a_single_image_is_worded_in_the_singular() {
+        let mut state = AppState::default();
+        state.overlays.fetch_keep = Some(archive_prompt(false, 1));
+        let (_r, all) = render(&state);
+        assert!(all.contains("holds 1 disk image,"), "singular: {all}");
+        assert!(all.contains("copies it into"), "and so is the verb: {all}");
+    }
+
+    /// A collision on a SET is still the three-answer shape, worded for several
+    /// files rather than one.
+    #[test]
+    fn an_archive_collision_offers_the_same_three_answers() {
+        let mut state = AppState::default();
+        state.overlays.fetch_keep = Some(archive_prompt(true, 3));
+        let (rects, all) = render(&state);
+        let r = rects.expect("drawn");
+        assert!(r.keep.is_some() && r.keep_both.is_some() && r.decline.is_some());
+        assert!(all.contains("Some of those names are already"), "plural collision: {all}");
+        assert!(all.contains("Replace") && all.contains("Keep both"));
+        assert_eq!(button_count(&state), 3);
+    }
+
+    /// The story shape must be untouched by all of the above — no "disk image"
+    /// wording may leak into the SQ-1086 prompt.
+    #[test]
+    fn the_story_shape_is_unchanged() {
+        let mut state = AppState::default();
+        state.overlays.fetch_keep = Some(prompt(false));
+        let (_r, all) = render(&state);
+        assert!(all.contains("Keep this story?") && all.contains("Keep in library"));
+        assert!(all.contains("Just play it"), "a story IS playing either way");
+        assert!(!all.contains("disk image"), "no archive wording in the story shape: {all}");
     }
 
     /// The prompt must vanish rather than paint over a pane too small to hold it.

@@ -844,16 +844,41 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
         let scan = first_zip_story(path)?;
         return match scan.story {
             Some((_name, bytes)) => Ok((bytes, None)),
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "no story file inside the zip {} ({} entr{} read; none is a Blorb, \
-                     a Z-machine story, a Glulx image or a Scott Adams database)",
-                    path.display(),
-                    scan.examined,
-                    if scan.examined == 1 { "y" } else { "ies" },
-                ),
-            )),
+            None => {
+                // SQ-1096: the loader still knows exactly four kinds of story
+                // and still classifies by content — but "none of them" is a
+                // useless thing to say about an archive of floppies, which is
+                // the ordinary packaging for C64, Amiga and Apple II releases.
+                // Counted by NAME, and only for the message: a `.d64` is raw
+                // sectors with no magic, so there is no content answer to give,
+                // and none is needed to tell the player what they are holding.
+                let images = zip_entry_names(path)
+                    .map(|names| {
+                        names.iter().filter(|n| crate::story_url::is_disk_image_name(n)).count()
+                    })
+                    .unwrap_or(0);
+                let media = if images == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        "; it holds {images} disk image{}, which lanthorn does not run from \
+                         inside a zip — unpack them into your story directory and open one \
+                         of those",
+                        if images == 1 { "" } else { "s" },
+                    )
+                };
+                Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "no story file inside the zip {} ({} entr{} read; none is a Blorb, \
+                         a Z-machine story, a Glulx image or a Scott Adams database{})",
+                        path.display(),
+                        scan.examined,
+                        if scan.examined == 1 { "y" } else { "ies" },
+                        media,
+                    ),
+                ))
+            }
         };
     }
     Ok((raw, None))
@@ -984,6 +1009,29 @@ struct ZipScan {
     /// archive holding nothing lanthorn runs reads differently from one whose
     /// entries were all too large to be a story.
     examined: usize,
+}
+
+/// The stored names of every non-directory entry in the ZIP at `path`, in
+/// archive order — read from the central directory, inflating nothing (SQ-1096).
+///
+/// A name is not a classification and this is not one: it exists so the FETCH
+/// can ask what a download would unpack to, and so the refusal below can say how
+/// many disk images it is refusing. `hints::extract_story` still decides what a
+/// story IS by content alone.
+pub fn zip_entry_names(path: &Path) -> io::Result<Vec<String>> {
+    let file = std::fs::File::open(path)?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let mut out = Vec::with_capacity(zip.len());
+    for i in 0..zip.len() {
+        let entry = zip
+            .by_index(i)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if !entry.is_dir() {
+            out.push(entry.name().to_string());
+        }
+    }
+    Ok(out)
 }
 
 /// Does the file at `path` begin with the ZIP local-file-header signature?

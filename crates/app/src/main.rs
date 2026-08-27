@@ -2162,6 +2162,14 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         // it out from under a running game is the one destructive
                         // thing this could do. A keep is a COPY.
                         if let Some(prompt) = state.overlays.fetch_keep.take() {
+                            // SQ-1096: the archive shape of this prompt is
+                            // answered before `boot_story`, so it can never
+                            // reach the game loop — where `keep_in_library`
+                            // would copy the ZIP itself into the library.
+                            debug_assert!(
+                                prompt.disk_images.is_empty(),
+                                "an archive prompt must be answered before the boot, not here"
+                            );
                             match mode {
                                 Some(mode) => match app::story_url::keep_in_library(
                                     &prompt.fetched.path, &prompt.library_dir, mode,

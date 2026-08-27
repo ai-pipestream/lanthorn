@@ -1669,6 +1669,18 @@ pub struct FetchKeepPrompt {
     /// turns the prompt's two buttons into three: replacing and keeping both are
     /// different answers and neither may happen silently.
     pub collision: bool,
+    /// SQ-1096: when the download is a ZIP of release **disk images** rather
+    /// than a story, the names they would land in the library under. Empty for
+    /// the ordinary SQ-1086 case, and that emptiness is what the dialog reads to
+    /// choose its wording.
+    ///
+    /// The two cases reach the screen from different places and must not be
+    /// confused: a story prompt is raised inside `boot_story`, after the game is
+    /// running, and answering it copies one file. An archive prompt is raised
+    /// BEFORE any boot — nothing is running, `fetched.path` is the zip rather
+    /// than a story, and answering it unpacks several files or ends the launch.
+    /// Only the first ever reaches the game loop's overlay ladder.
+    pub disk_images: Vec<String>,
 }
 
 // ── Text-entry dialog ─────────────────────────────────────────────────────────
