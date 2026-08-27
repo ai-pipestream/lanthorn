@@ -62,15 +62,20 @@ struct Specimen {
     keys: u8,
     taps: usize,
     release: u16,
+    /// Commands issued after the taps. Arthur needs one: he answers a blank line in
+    /// a boxed window 3 across the screen's LAST text row, and a frame with the
+    /// game's own chrome below its story window declines (SQ-1008). One real command
+    /// clears the box, which is also what a player does next.
+    then: &'static [&'static str],
     /// Does this frame EXTEND? False is the Journey case — a text-only command strip
     /// below the story window, which the composite cannot bottom-anchor.
     extends: bool,
 }
 
 const CORPUS: &[Specimen] = &[
-    Specimen { file: "zork0-r393-s890714.z6", keys: 13, taps: 6, release: 393, extends: true },
-    Specimen { file: "arthur-r74-s890714.z6", keys: b'n', taps: 12, release: 74, extends: true },
-    Specimen { file: "journey-r83-s890706.z6", keys: 13, taps: 40, release: 83, extends: false },
+    Specimen { file: "zork0-r393-s890714.z6", keys: 13, taps: 6, release: 393, then: &[], extends: true },
+    Specimen { file: "arthur-r74-s890714.z6", keys: b'n', taps: 12, release: 74, then: &["look"], extends: true },
+    Specimen { file: "journey-r83-s890706.z6", keys: 13, taps: 40, release: 83, then: &[], extends: false },
 ];
 
 /// A pane with real surplus height at the 8x18 kitty cell: 800x900 device pixels
@@ -102,7 +107,33 @@ fn stories_dir() -> PathBuf {
 /// fabricated a frame a whole quest was fixed against (CLAUDE.md, SQ-0901/SQ-1021), so
 /// the profile, release, screen and cell this harness booted are all PRINTED.
 fn boot(s: &Specimen) -> Option<(GameSession, (u32, u32))> {
-    let path = stories_dir().join(s.file);
+    let (mut session, art_scale) = boot_raw(s.file, s.release)?;
+    tap_in(&mut session, s.keys, s.taps);
+    for cmd in s.then {
+        let r = session.submit(cmd);
+        assert!(r.fault.is_none(), "{}: {cmd:?} faulted: {:?}", s.file, r.fault);
+    }
+    Some((session, art_scale))
+}
+
+/// Answer whatever the game is waiting on, `taps` times, saying `n` to a `y or n`.
+fn tap_in(session: &mut GameSession, keys: u8, taps: usize) {
+    for _ in 0..taps {
+        let t = match session.pending_input() {
+            InputKind::Line => session.submit("").transcript,
+            InputKind::Char => session.submit_char(keys).transcript,
+            InputKind::Event => session.submit("").transcript,
+        };
+        if t.to_lowercase().contains("y or n") {
+            let _ = session.submit_char(b'n');
+        }
+    }
+}
+
+/// The mount and boot alone, with no input answered — so a caller can measure the
+/// SPLASH frame, which is what the game shows before anything is typed at it.
+fn boot_raw(file: &str, want_release: u16) -> Option<(GameSession, (u32, u32))> {
+    let path = stories_dir().join(file);
     let (bytes, medium) = match app::hints::load_mounted_story(&path) {
         Ok((loaded, medium)) => (loaded.bytes().to_vec(), medium),
         Err(_) => {
@@ -116,10 +147,9 @@ fn boot(s: &Specimen) -> Option<(GameSession, (u32, u32))> {
     let dims = picts.all_pict_dims();
     let release = u16::from_be_bytes([bytes[2], bytes[3]]);
     assert_eq!(
-        release, s.release,
-        "{}: a disk image is a different BUILD, not the same story on other media — this case is \
-         pinned to release {}",
-        s.file, s.release
+        release, want_release,
+        "{file}: a disk image is a different BUILD, not the same story on other media — this case \
+         is pinned to release {want_release}"
     );
     let boot = app::machine_boot::MachineBoot::resolve(
         profile,
@@ -131,27 +161,16 @@ fn boot(s: &Specimen) -> Option<(GameSession, (u32, u32))> {
     );
     let art_scale = boot.art_scale;
     eprintln!(
-        "{}: booted as {profile:?} off {medium:?} · release {release} · screen {:?} · \
+        "{file}: booted as {profile:?} off {medium:?} · release {release} · screen {:?} · \
          art_scale {art_scale:?} · v6 cell {:?}",
-        s.file,
         boot.screen_px,
         app::state::AppState::default().v6_text.cell(),
     );
     let mut session = GameSession::new_for_machine(bytes, true, false, false, dims, None, None, &boot)
-        .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", s.file));
+        .unwrap_or_else(|e| panic!("{file}: should boot without a ZError: {e:?}"));
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
     let _ = session.take_transcript();
-    for _ in 0..s.taps {
-        let t = match session.pending_input() {
-            InputKind::Line => session.submit("").transcript,
-            InputKind::Char => session.submit_char(s.keys).transcript,
-            InputKind::Event => session.submit("").transcript,
-        };
-        if t.to_lowercase().contains("y or n") {
-            let _ = session.submit_char(b'n');
-        }
-    }
     Some((session, art_scale.unwrap_or((2, 2))))
 }
 
@@ -428,6 +447,434 @@ fn the_render_path_reports_the_larger_viewport() {
         eprintln!("{}: raster {plain} viewport rows → extended {ext}", spec.file);
         assert!(plain > 0, "{}: the raster path reports a story viewport at all", spec.file);
         assert!(ext > plain, "{}: extended must report more of one ({ext} vs {plain})", spec.file);
+        seen += 1;
+    }
+    if any_present {
+        assert!(seen > 0, "a present fixture must have been measured, not skipped");
+    }
+}
+
+// ── 6. The other v6 SHAPES: splash cards and hint screens ─────────────────────
+//
+// The corpus above is gameplay. A v6 title has two other shapes, and both were
+// asked for by name: the SPLASH card the game shows before anything is typed at
+// it, and the HINT screens — a menu of topics, a page of clues, and (Arthur) a
+// boxed window the game opens under its story. They are covered here because the
+// answer must be DELIBERATE: a splash that grew a prose region and tiled flanks
+// around a title card would look wrong, and a hint menu is driven by CLICKS, so a
+// frame that both extended and was clickable is where a wrong click map would be
+// felt (see `the_click_map_drops_a_click_in_the_rows_lanthorn_added`).
+
+/// How the harness reaches one frame.
+#[derive(Clone, Copy, Debug)]
+enum Reach {
+    /// Nothing answered: the first frame the game paints after boot. For Shogun and
+    /// Journey that IS the title card; for Zork Zero and Arthur it is not, which is
+    /// why the real splashes have rows of their own below.
+    BootFrame,
+    /// Zork Zero's *"The Revenge of Megaboz"* title splash, which is **not** the boot
+    /// frame: it arrives after the prologue cutscene, when `@split_window(400)` grows
+    /// window 1 to the whole screen and window 0 collapses (SQ-0497). Driven the way
+    /// `v6_zork0_splash::drive_to_splash` drives it, and parked on its keypress.
+    Zork0TitleSplash,
+    /// `taps` answers in, for a frame that is neither the boot frame nor a hint
+    /// screen — Journey's title BLOCK, which it prints as text into a full-screen
+    /// window 0 before it opens its panels (SQ-0755's frame).
+    Play { keys: u8, taps: usize },
+    /// Clear the intro, then `hint` + `y` — the topic MENU (`v6_zork0_hints`,
+    /// `v6_hint_menu_mouse`).
+    HintMenu { taps: usize },
+    /// …and four Returns further in: a page of CLUE text (`v6_hint_clue_wrap`).
+    HintClues { taps: usize },
+    /// Arthur's crystal ball, reached by getting arrested — a text-only menu with
+    /// no artwork behind it at all (`v6_arthur_hint_page`).
+    ArthurHintPage,
+    /// Arthur's boxed answer window, which he opens on the LAST text row of the
+    /// screen, BELOW window 0 (`v6_arthur_hint_box`, and the frame SQ-1008 was
+    /// about).
+    ArthurHintBox,
+}
+
+/// One v6 shape, and the verdict the extension must reach on it.
+struct Shape {
+    file: &'static str,
+    release: u16,
+    reach: Reach,
+    /// Does this frame extend? Pinned, so a frame that changes shape says so
+    /// rather than flipping the mode's behaviour silently.
+    extends: bool,
+    /// Why that is the right answer for this shape.
+    why: &'static str,
+}
+
+const SHAPES: &[Shape] = &[
+    // Splash cards. Every one is a full-screen plate or a picture takeover, so
+    // there is no prose box to grow — the frame must decline and look exactly as
+    // `raster` draws it.
+    Shape { file: "zork0-r393-s890714.z6", release: 393, reach: Reach::Zork0TitleSplash, extends: false,
+            why: "the title splash: window 1 IS the screen and window 0 collapses, so there is no \
+                  story window at all (SQ-0497)" },
+    Shape { file: "zork0-r393-s890714.z6", release: 393, reach: Reach::BootFrame, extends: true,
+            why: "not a splash: the PROLOGUE, an ordinary framed gameplay screen" },
+    Shape { file: "arthur-r74-s890714.z6", release: 74, reach: Reach::BootFrame, extends: false,
+            why: "the intro plate, absolutely placed in window 0 and drawn INSTEAD of prose \
+                  (SQ-0707)" },
+    Shape { file: "shogun-r322-s890706.z6", release: 322, reach: Reach::BootFrame, extends: false,
+            why: "title card" },
+    // Journey's boot frame is NOT its title card — it is the blank full-screen
+    // window 0 the game publishes before it paints anything into it, so there is a
+    // prose box and it extends. Nothing is on either screen; the extension makes the
+    // empty page taller, which is what extending an empty text window means.
+    Shape { file: "journey-r83-s890706.z6", release: 83, reach: Reach::BootFrame, extends: true,
+            why: "a blank full-screen window 0, before the title is painted into it" },
+    // One tap on: the title PLATE, and a picture that owns the screen leaves no prose
+    // box (SQ-0707) — the shape this quest most needed to decline, and it does.
+    Shape { file: "journey-r83-s890706.z6", release: 83, reach: Reach::Play { keys: 13, taps: 1 }, extends: false,
+            why: "the title plate owns the screen: no prose box (SQ-0707)" },
+    // Three taps: the panels are open and the command menu is under the story.
+    Shape { file: "journey-r83-s890706.z6", release: 83, reach: Reach::Play { keys: 13, taps: 3 }, extends: false,
+            why: "the command menu sits below window 0 (SQ-0819) — hybrid bottom-anchors \
+                  it and the composite cannot" },
+    // Hint screens.
+    Shape { file: "zork0-r393-s890714.z6", release: 393, reach: Reach::HintMenu { taps: 8 }, extends: false,
+            why: "InvisiClues: the buffer withdraws and a Grid is the story surface (SQ-1026)" },
+    Shape { file: "shogun-r322-s890706.z6", release: 322, reach: Reach::HintMenu { taps: 8 }, extends: false,
+            why: "topic menu" },
+    Shape { file: "James Clavell's Shogun.adf", release: 295, reach: Reach::HintClues { taps: 14 }, extends: false,
+            why: "clue page" },
+    Shape { file: "Arthur - The Quest for Excalibur.adf", release: 54, reach: Reach::ArthurHintPage, extends: false,
+            why: "the crystal ball's text-only menu" },
+    Shape { file: "Arthur - The Quest for Excalibur.adf", release: 54, reach: Reach::ArthurHintBox, extends: false,
+            why: "window 3 across native (28,384) 584x16 — the screen's LAST text row, BELOW \
+                  window 0, which `menu_strip_below_story` cannot see (SQ-1008). Extending \
+                  would strand the game's own answer box mid-scrollback." },
+];
+
+/// What `classify_windows` made of this frame's story slot — the fact every decline
+/// below turns on, printed so the table reads as a measurement.
+fn story_shape(session: &GameSession) -> String {
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { return "not layered".into() };
+    let tf = app::state::AppState::default().v6_text;
+    let layout = v6::classify_windows(items, tf.cell());
+    match layout.story {
+        None => "none".into(),
+        Some(pw) => format!(
+            "{} ({},{}) {}x{}",
+            match &pw.node {
+                WinNode::Buffer(b) if b.primary => "Buffer",
+                WinNode::Buffer(_) => "Buffer(secondary)",
+                WinNode::Grid(_) => "Grid",
+                _ => "other",
+            },
+            pw.x_px, pw.y_px, pw.w_px, pw.h_px
+        ),
+    }
+}
+
+fn reach(sh: &Shape) -> Option<(GameSession, (u32, u32))> {
+    let (mut s, art_scale) = boot_raw(sh.file, sh.release)?;
+    match sh.reach {
+        Reach::BootFrame => {}
+        Reach::Play { keys, taps } => tap_in(&mut s, keys, taps),
+        Reach::Zork0TitleSplash => {
+            let mut lines = ["get under table", "wait", "wait", "wait", "wait", "wait"].into_iter();
+            let mut parked = false;
+            for _ in 0..16 {
+                match s.pending_input() {
+                    InputKind::Line => {
+                        s.submit(lines.next().unwrap_or("wait"));
+                    }
+                    InputKind::Char => {
+                        s.submit_char(13);
+                    }
+                    InputKind::Event => {
+                        s.submit("");
+                    }
+                }
+                let win1 = match &s.screen().root {
+                    WinNode::Layered(items) => items
+                        .iter()
+                        .find_map(|pw| matches!(&pw.node, WinNode::Graphics(g) if g.win == 1).then_some(pw.h_px))
+                        .unwrap_or(0),
+                    _ => 0,
+                };
+                if win1 > 300 && s.pending_input() == InputKind::Char {
+                    parked = true;
+                    break;
+                }
+            }
+            assert!(parked, "{}: never reached the ZORK ZERO title splash", sh.file);
+        }
+        Reach::HintMenu { taps } | Reach::HintClues { taps } => {
+            // Zork Zero asks for a LINE first; Shogun holds its title on a CHAR
+            // read. Answer whatever is in the way rather than assuming either —
+            // the same loop `v6_hint_menu_mouse::hint_menu` uses.
+            for _ in 0..taps {
+                match s.pending_input() {
+                    InputKind::Line => break,
+                    InputKind::Char => {
+                        let _ = s.submit_char(13);
+                    }
+                    InputKind::Event => {
+                        let _ = s.submit("");
+                    }
+                }
+            }
+            s.submit("hint");
+            let entered = s.submit_char(b'y');
+            assert!(entered.fault.is_none(), "{}: entering the hint menu faulted", sh.file);
+            if matches!(sh.reach, Reach::HintClues { .. }) {
+                for _ in 0..4 {
+                    let _ = s.submit_char(13);
+                }
+            }
+        }
+        Reach::ArthurHintPage => {
+            tap_in(&mut s, 13, 14);
+            // Out through the gate, into the church after curfew: arrested, which
+            // is the death prompt that offers HINT (`v6_arthur_hint_page`).
+            for cmd in ["open gate", "e", "hint", "hint", ""] {
+                let r = s.submit(cmd);
+                assert!(r.fault.is_none(), "{}: {cmd:?} faulted", sh.file);
+            }
+            if s.pending_input() == InputKind::Char {
+                let _ = s.submit_char(13);
+            }
+        }
+        Reach::ArthurHintBox => {
+            tap_in(&mut s, 13, 14);
+            let r = s.submit("hint");
+            assert!(r.fault.is_none(), "{}: `hint` faulted", sh.file);
+        }
+    }
+    Some((s, art_scale))
+}
+
+/// Every splash card and every hint screen reaches the verdict its row pins, and a
+/// frame that declines is byte-identical to `raster`.
+///
+/// The table's `extends` column is a MEASUREMENT, not a caption: the case prints
+/// what each frame actually did, so a shape that drifts is visible in the output
+/// before it is a failure.
+#[test]
+fn splash_cards_and_hint_screens_reach_the_verdict_their_row_pins() {
+    let _g = app::v6_palette_at_boot();
+    let mut seen = 0usize;
+    let mut any_present = false;
+    for sh in SHAPES {
+        any_present |= stories_dir().join(sh.file).exists();
+        let Some((mut session, art_scale)) = reach(sh) else { continue };
+        let story = story_shape(&session);
+        let ((plain, pm, _), (extended, em, ef)) = pair(&mut session, art_scale, TALL);
+        eprintln!(
+            "  SHAPE {:<38} {:?} → {} (canvas {}x{}, story {story}, prose box {}) — {}",
+            sh.file,
+            sh.reach,
+            if ef.extension() > 0 { "EXTENDS" } else { "declines" },
+            extended.width(),
+            extended.height(),
+            if pm.is_some() { "yes" } else { "none" },
+            sh.why,
+        );
+        if let Ok(dir) = std::env::var("LANTHORN_SHOT_DIR") {
+            let tag = format!("{}-{:?}", sh.file.replace(' ', "_"), sh.reach);
+            extended.save(format!("{dir}/ext-{tag}.png")).unwrap();
+            plain.save(format!("{dir}/ras-{tag}.png")).unwrap();
+        }
+        assert_eq!(
+            ef.extension() > 0,
+            sh.extends,
+            "{} {:?}: expected {} — {}",
+            sh.file,
+            sh.reach,
+            if sh.extends { "to extend" } else { "to decline" },
+            sh.why
+        );
+        if sh.extends {
+            // An extending frame must have somewhere to put the rows, or the
+            // extension is bare page under a title card.
+            let ev = em.expect("an extending frame keeps a story box").viewport_rows;
+            let pv = pm.expect("…and so does the raster frame it grew from").viewport_rows;
+            assert!(ev > pv, "{}: {ev} rows against {pv}", sh.file);
+        } else {
+            assert!(
+                extended.as_raw() == plain.as_raw(),
+                "{} {:?}: a declined frame must be the raster composite to the byte",
+                sh.file,
+                sh.reach
+            );
+        }
+        seen += 1;
+    }
+    if any_present {
+        assert!(seen > 0, "a present fixture must have been measured, not skipped");
+    }
+}
+
+// ── 7. The click map ─────────────────────────────────────────────────────────
+//
+// An extended composite is TALLER than the game's screen, so the click map's
+// inverse — which is stated over the drawn canvas, because that is what was drawn
+// — can land on a native row the game never had. Those rows carry lanthorn's own
+// scrollback. A click there is dropped, not clamped onto the game's last row:
+// clamping is the worse failure, because it hands the game a plausible in-range
+// coordinate the player did not click.
+
+/// The rule, stated over the map alone: `canvas` inverts, `screen` bounds.
+///
+/// FALSIFY by restoring `map_click`'s old tail — `Some((gx.min(canvas.0), gy.min(
+/// canvas.1)))` with no `screen` at all — and the clicks below the game's screen
+/// come back as row 400 instead of `None`.
+#[test]
+fn the_click_map_drops_a_click_in_the_rows_lanthorn_added() {
+    use app::render::graphics::V6ClickMap;
+    // A 640x896 composite drawn 1:1 at an 8x16 cell, over a 640x400 game screen —
+    // the frame `zork0-r393-s890714.z6` builds at the TALL pane in this suite.
+    let m = V6ClickMap {
+        pane_x: 0,
+        pane_y: 0,
+        cell_w: 8,
+        cell_h: 16,
+        img_x: 0.0,
+        img_y: 0.0,
+        img_w: 640.0,
+        img_h: 896.0,
+        canvas: (640, 896),
+        screen: (640, 400),
+        packed_text: Vec::new(),
+    };
+    // Inside the game's own screen: the ordinary letterbox inverse, unchanged.
+    assert_eq!(m.map_click(0, 0), Some((5, 9)), "the top-left cell is the game's");
+    assert_eq!(m.map_click(40, 12), Some((325, 201)), "and so is the middle of its screen");
+    // The last row the game has (native 385..400) is cell row 24.
+    let last = m.map_click(0, 24).expect("the game's last text row still maps");
+    assert!(last.1 <= 400, "…and maps inside the game's screen, not past it: {last:?}");
+    // The first row lanthorn added is cell row 25 (native 401..416).
+    assert_eq!(m.map_click(0, 25), None, "the first added row is not the game's to hear");
+    assert_eq!(m.map_click(40, 40), None, "nor is anything below it");
+    assert_eq!(m.map_click(0, 55), None, "…down to the bottom of the composite");
+
+    // The same map with nothing added — every path but an extended raster frame —
+    // answers exactly as it always did, including at the bottom row.
+    let plain = V6ClickMap { canvas: (640, 400), screen: (640, 400), img_h: 400.0, ..m };
+    assert_eq!(plain.map_click(0, 0), Some((5, 9)));
+    assert!(plain.map_click(0, 24).is_some(), "an unextended frame keeps its last row");
+}
+
+/// …and the real frame publishes it: an extended composite's click map carries a
+/// canvas taller than the screen, and drops a click below the game.
+///
+/// The raster control at the same pane publishes `canvas == screen` and drops
+/// nothing, which is how this case shows the rejection belongs to the EXTENSION
+/// and not to the click map in general.
+#[test]
+fn the_extended_frame_publishes_the_games_screen_beside_its_canvas() {
+    let _g = app::v6_palette_at_boot();
+    let mut seen = 0usize;
+    let mut any_present = false;
+    for spec in CORPUS.iter().filter(|s| s.extends) {
+        any_present |= stories_dir().join(spec.file).exists();
+        let Some((mut session, art_scale)) = boot(spec) else { continue };
+        let transcript = session.take_transcript();
+        let model = session.screen();
+        let area = Rect::new(0, 0, TALL.0, TALL.1);
+        let map_for = |mode| {
+            let state = state_for(mode, &transcript, art_scale);
+            let mut buf = Buffer::empty(area);
+            let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+            let map = state
+                .graphics_render
+                .borrow()
+                .last_v6_map
+                .clone()
+                .unwrap_or_else(|| panic!("{}: the raster path records a click map", spec.file));
+            map
+        };
+        let plain = map_for(app::config::V6RenderMode::Raster);
+        let ext = map_for(app::config::V6RenderMode::Extended);
+        eprintln!(
+            "{}: raster map canvas {:?} screen {:?} · extended map canvas {:?} screen {:?}",
+            spec.file, plain.canvas, plain.screen, ext.canvas, ext.screen
+        );
+        assert_eq!(plain.canvas, plain.screen, "{}: raster draws the game's screen", spec.file);
+        assert_eq!(ext.screen, plain.screen, "{}: the game's screen never changes", spec.file);
+        assert!(
+            ext.canvas.1 > ext.screen.1,
+            "{}: this case needs a frame that actually extended ({:?} vs {:?})",
+            spec.file,
+            ext.canvas,
+            ext.screen
+        );
+
+        // Sweep the pane: every cell either maps inside the game's screen or is
+        // dropped. Nothing may come back as a game pixel the game does not have —
+        // which is what the old clamp produced.
+        let mut mapped = 0usize;
+        let mut dropped = 0usize;
+        for row in area.y..area.bottom() {
+            for col in area.x..area.right() {
+                match ext.map_click(col, row) {
+                    Some((gx, gy)) => {
+                        assert!(
+                            gx >= 1 && gx <= ext.screen.0 && gy >= 1 && gy <= ext.screen.1,
+                            "{}: cell ({col},{row}) mapped to ({gx},{gy}), outside the game's \
+                             {:?} screen",
+                            spec.file,
+                            ext.screen
+                        );
+                        mapped += 1;
+                    }
+                    None => dropped += 1,
+                }
+            }
+        }
+        eprintln!("  {} cells map to the game, {dropped} are dropped", mapped);
+        assert!(mapped > 0, "{}: some of the pane is still the game's", spec.file);
+        assert!(
+            dropped > 0,
+            "{}: the rows lanthorn added must be dropped — none were",
+            spec.file
+        );
+
+        // …and the dropped ones are the EXTENSION's, not merely the letterbox
+        // margins. The game's screen ends at the device row where `screen.1` of
+        // `canvas.1` has been drawn; every cell whose centre falls below that is
+        // lanthorn's, and must be `None` on BOTH axes' worth of columns.
+        //
+        // Stated separately from the sweep above because that sweep passes under
+        // the OLD clamp: clamping keeps every answer inside the screen too, and
+        // the horizontal margins are dropped either way. This is the half that
+        // fails when the rejection is replaced by `.min()`.
+        let screen_dev = ext.img_y + ext.img_h * f32::from(ext.screen.1) / f32::from(ext.canvas.1);
+        let first_added = area.y
+            + ((screen_dev / f32::from(ext.cell_h)).ceil() as u16)
+            + 1;
+        assert!(first_added < area.bottom(), "{}: the extension reaches the pane", spec.file);
+        for row in first_added..area.bottom() {
+            for col in area.x..area.right() {
+                assert_eq!(
+                    ext.map_click(col, row),
+                    None,
+                    "{}: cell ({col},{row}) is in the rows lanthorn added (the game's screen \
+                     ends at device row {screen_dev}) and must not reach the game",
+                    spec.file
+                );
+            }
+        }
+        // The raster control drops only its letterbox margins, and every cell it
+        // does map is inside the same screen.
+        for row in area.y..area.bottom() {
+            for col in area.x..area.right() {
+                if let Some((gx, gy)) = plain.map_click(col, row) {
+                    assert!(
+                        gx <= plain.screen.0 && gy <= plain.screen.1,
+                        "{}: the raster map is unchanged by any of this",
+                        spec.file
+                    );
+                }
+            }
+        }
         seen += 1;
     }
     if any_present {

@@ -255,14 +255,14 @@ fn the_raster_composite_shrinks_below_its_canvas_at_a_small_pane() {
                 .clone()
                 .unwrap_or_else(|| panic!("pane {cols}x{rows}: the raster path drew no composite"));
             assert_eq!(
-                (map.native_w, map.native_h),
-                (640, 400),
+                (map.canvas, map.screen),
+                ((640, 400), (640, 400)),
                 "{FIXTURE} r{RELEASE} honor={honor} pane {cols}x{rows}: the composite's native \
                  canvas is Journey's 320x200 screen at the uniform V6_ART_SCALE"
             );
-            if map.img_w < map.native_w as f32 {
+            if map.img_w < map.canvas.0 as f32 {
                 shrank += 1;
-            } else if map.img_w > map.native_w as f32 {
+            } else if map.img_w > map.canvas.0 as f32 {
                 grew += 1;
             }
         }

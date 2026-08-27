@@ -90,8 +90,8 @@ fn zork0_v6_compass_click_maps_writes_header_and_does_not_fault() {
         img_w: 320.0,
         img_h: 200.0,
         packed_text: Vec::new(),
-        native_w: 320,
-        native_h: 200,
+        canvas: (320, 200),
+        screen: (320, 200),
     };
     let (gx, gy) = click_map
         .map_click(21, 0)
@@ -168,8 +168,8 @@ fn zork0_compass_click_ends_the_line_read_with_the_clicked_direction() {
         img_w: 640.0,
         img_h: 400.0,
         packed_text: Vec::new(),
-        native_w: 640,
-        native_h: 400,
+        canvas: (640, 400),
+        screen: (640, 400),
     };
 
     // (terminal cell, the direction that slice of the rose means)
@@ -318,8 +318,8 @@ fn a_click_in_a_packed_region_selects_the_row_and_column_under_the_pointer() {
         img_y: 0.0,
         img_w: 640.0 * 1.725,
         img_h: 400.0 * 1.725,
-        native_w: 640,
-        native_h: 400,
+        canvas: (640, 400),
+        screen: (640, 400),
         // SQ-0951: the row origin is the box's own native PIXEL top (78), not its
         // row index (4) — Zork Zero's box does not begin on a multiple of the cell.
         packed_text: vec![PackedText {
@@ -374,7 +374,7 @@ fn a_row_only_packed_region_leaves_the_column_proportional() {
     let map = V6ClickMap {
         pane_x: 0, pane_y: 0, cell_w: 8, cell_h: 16,
         img_x: 0.0, img_y: 0.0, img_w: 640.0, img_h: 400.0,
-        native_w: 640, native_h: 400,
+        canvas: (640, 400), screen: (640, 400),
         packed_text: vec![PackedText { rows: (30, 4, 20 * 16), cols: None }],
     };
     let (gx, gy) = map.map_click(10, 31).expect("inside the strip");

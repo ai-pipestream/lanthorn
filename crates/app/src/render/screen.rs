@@ -2983,7 +2983,15 @@ fn render_node(
                             .flatten()
                             .map(|sc| sc.s)
                     });
-                    state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area, lock);
+                    // The encode is handed the FRAME, not the bare magnification
+                    // (SQ-1032): the canvas height, the scale, and the game's own
+                    // screen are one subject, and the click map on the far side needs
+                    // the third of them to tell a click on the game from a click in
+                    // the rows lanthorn added. `built` already carries the height and
+                    // the screen; only the lock is re-resolved here, because the pixel
+                    // lock is the caller's question and not the frame's.
+                    let encoded = v6::RasterFrame { lock, ..built };
+                    state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area, encoded);
                 }
                 // SQ-0532 wave-5: the game's own page runs to the pane EDGE. The
                 // composite is drawn letterboxed inside the pane, so the margins
@@ -4083,6 +4091,26 @@ pub fn build_v6_raster_frame(
         // extending here would strand the menu mid-canvas over an unextended flank.
         // Declining leaves Journey exactly as `Raster` draws it.
         if menu_strip_below_story(story, &obstruction, &chrome_runs, native, cell) {
+            break 'ext 0;
+        }
+        // …and ANY chrome the game put below its story window, which the test above
+        // does not see. `menu_strip_below_story` answers false as soon as the story
+        // reaches within one native text row of the screen bottom — and that is
+        // exactly when Arthur spends the row it forgives. Measured on
+        // `Arthur - The Quest for Excalibur.adf` (release 54 / serial 890606),
+        // fourteen taps in, answering `hint` in play: window 0 is (28, 208) 584x176
+        // so its bottom is 384, window 3 is laid across native (28, 384, 584, 16) —
+        // the LAST text row of a 640x400 screen — and prints *"If only you had a
+        // crystal ball...."* into it. `native.1 (400) <= 384 + 16` holds, so the menu
+        // test returns false before it looks, and the extension would grow the prose
+        // box from 384 down to 880 straight through the game's own box, leaving it
+        // stranded mid-scrollback instead of pinned to the frame's bottom edge.
+        //
+        // This is SQ-1008 exactly, and it is answered with SQ-1008's own instrument
+        // rather than a second opinion: hybrid deducts those rows and bottom-anchors
+        // them. The composite cannot bottom-anchor anything — the same reason Journey
+        // declines — so it declines here too, and the frame is `raster`'s to the byte.
+        if menu_band_rows(&menu_band_runs(&chrome_runs, story), cell) > 0 {
             break 'ext 0;
         }
         // A story window enclosed by its own art is a CANVAS, not a page (SQ-0729):
@@ -12063,7 +12091,7 @@ mod tests {
             WinNode::Layered(items) => items,
             _ => unreachable!("cell_path_v6_model is Layered"),
         }, &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
-        assert_eq!((map.native_w, map.native_h), (nw, nh));
+        assert_eq!((map.canvas, map.screen), ((nw, nh), (nw, nh)));
 
         // Top-left cell → the top-left game pixel (1-based origin, ZMSD §8.8.1).
         let (gx, gy) = map.map_click(area.x, area.y).expect("a click inside the pane maps");
