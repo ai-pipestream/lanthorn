@@ -65,7 +65,7 @@
 //! Zork Zero's full-screen map is `--turns 1 --cmd map`, and driving blank lines
 //! reaches an intro card and often nothing else (CLAUDE.md).
 //!
-//! `--no-game-colours` renders `--bands` with `honor_game_colours` off. The two modes
+//! `--game-colours off` renders `--bands` with `honor_game_colours` off. The two modes
 //! are separate baselines and always have been (CLAUDE.md), and the ring is not the
 //! same picture in both: honouring the game's colours floods every window's PAGE, and
 //! SQ-0883 lived entirely in the flooded one — the shipped default — while the other
@@ -125,7 +125,13 @@ fn main() {
                 i += 1;
             }
             "--no-tap" => no_tap = true,
-            "--no-game-colours" => honor_colours = false,
+            // SQ-1082: `--<noun> on|off`, the spelling every front-end uses. This
+            // is a debug instrument rather than a front-end, but a third spelling
+            // of one concept is exactly what that quest removed.
+            "--game-colours" => {
+                honor_colours = args.get(i + 1).map(String::as_str) != Some("off");
+                i += 1;
+            }
             "--runs" => runs = true,
             "--bands" => bands = true,
             "--taps" => {

@@ -192,7 +192,7 @@ struct Booted {
 /// screen nobody sees (SQ-0901/0883/0899), so the decision is printed.
 ///
 /// `user_honours` is the player's `honor_game_colours`, which is the only knob:
-/// `false` is `--no-game-colours`, and it is what makes `color` show its other face.
+/// `false` is `--game-colours off`, and it is what makes `color` show its other face.
 fn boot(file: &str, user_honours: bool) -> Option<Booted> {
     let path = stories_dir().join(file);
     let bytes = match app::hints::load_story(&path) {

@@ -132,7 +132,7 @@ fn a_host_save_and_restore_survive_a_move() {
     let dir = scratch("roundtrip");
     let transcript = play(
         "/save here\ndown\n/restore here\n",
-        &["--seed", "1", "--no-more", "--data-dir", dir.to_str().unwrap()],
+        &["--seed", "1", "--pager", "off", "--data-dir", dir.to_str().unwrap()],
     );
 
     assert!(transcript.contains("Saved to"), "the save reports where it went:\n{transcript}");
@@ -168,7 +168,7 @@ fn a_bare_restore_lists_the_saves_and_takes_a_number() {
     let dir = scratch("bynumber");
     let transcript = play(
         "/save alpha\ndown\n/restore\n1\n",
-        &["--seed", "1", "--no-more", "--data-dir", dir.to_str().unwrap()],
+        &["--seed", "1", "--pager", "off", "--data-dir", dir.to_str().unwrap()],
     );
     assert!(transcript.contains("saves: 1 alpha"), "the list is shown:\n{transcript}");
     assert!(transcript.contains("Restored from"), "and the number picked it:\n{transcript}");
@@ -182,7 +182,7 @@ fn saving_over_a_name_asks_and_a_no_keeps_the_original() {
     let dir = scratch("overwrite");
     let transcript = play(
         "/save keep\n/save keep\nn\n",
-        &["--seed", "1", "--no-more", "--data-dir", dir.to_str().unwrap()],
+        &["--seed", "1", "--pager", "off", "--data-dir", dir.to_str().unwrap()],
     );
     assert!(transcript.contains("already exists. Overwrite? (y/N)"), "asks:\n{transcript}");
     assert!(transcript.contains("Save cancelled."), "and a no is a no:\n{transcript}");
@@ -197,7 +197,7 @@ fn an_unslashed_save_still_reaches_the_game() {
     let dir = scratch("bareword");
     let transcript = play(
         "save\n",
-        &["--seed", "1", "--no-more", "--data-dir", dir.to_str().unwrap()],
+        &["--seed", "1", "--pager", "off", "--data-dir", dir.to_str().unwrap()],
     );
     assert!(!transcript.contains("Save as ?"), "the host must not claim it:\n{transcript}");
     assert!(!transcript.contains("Saved to"), "nor save:\n{transcript}");

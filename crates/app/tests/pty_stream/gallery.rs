@@ -412,7 +412,7 @@ impl Shot {
         }
         // The tool owns these, and a manifest that sets them either fights the
         // backend choice or writes the gallery into the player's real home.
-        for owned in ["--image-protocol", "--user-dir", "--no-sound"] {
+        for owned in ["--image-protocol", "--user-dir", "--sound"] {
             if self.args.iter().any(|a| a == owned) {
                 return Err(format!(
                     "gallery manifest: `{who}` passes `{owned}` — the gallery tool owns that argument \

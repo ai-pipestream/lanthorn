@@ -153,7 +153,7 @@ pub fn plain_from(argv: &[String], term: Option<&str>) -> bool {
 /// specifically that software "prevents the addition of ANSI color" — it says
 /// nothing about cursor addressing, and someone who sets `NO_COLOR` has not
 /// asked to lose their pinned status line. So it maps onto the CLIs' existing
-/// `--no-game-colours`, not onto plain mode. `TERM=dumb` is the variable that
+/// `--game-colours off`, not onto plain mode. `TERM=dumb` is the variable that
 /// means the whole vocabulary is unavailable.
 pub fn no_color() -> bool {
     no_color_from(std::env::var("NO_COLOR").ok().as_deref())

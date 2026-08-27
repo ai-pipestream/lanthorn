@@ -2589,9 +2589,15 @@ pub struct AppState {
     /// `honor_game_colours_base` exists to survive.
     pub v6_pixel_lock_base: bool,
 
-    /// True when `--no-game-colours` was typed on this launch (SQ-0855).
+    /// What `--game-colours` was typed as on this launch, if it was (SQ-0855).
     ///
-    /// The base above is already `false` in that case, but a base is only the
+    /// `None` is the third answer SQ-1082 gave every one of these switches: the
+    /// flag was not typed, so nothing on the command line has an opinion and the
+    /// per-story sources below speak. `Some(true)` is as much an instruction as
+    /// `Some(false)` — while this was a `bool` named `no_game_colours_cli` there
+    /// was no way to ask for the colours a sidecar had turned off.
+    ///
+    /// The base above is already `false` in the `Some(false)` case, but a base is only the
     /// FALLBACK — `reload_style` re-reads the two per-story sources from disk on
     /// every reload, so without this a `garglk.ini` beside the story or a sidecar
     /// `honor` key written on some earlier run would quietly turn the flag off
@@ -2601,14 +2607,14 @@ pub struct AppState {
     /// Cleared by `/set-game-colours`, which is the user overriding their own flag
     /// in session — the same "a deliberate edit ends the one-run hold" rule
     /// `--interpreter` follows (SQ-0646).
-    pub no_game_colours_cli: bool,
+    pub game_colours_cli: Option<bool>,
 
     /// True when the artwork this launch loaded is a two-colour rendition with no
     /// machine behind it to state a screen, so `startup.rs` declared the
     /// interpreter colourless (SQ-0806/SQ-0846, narrowed by SQ-0956 to exactly
     /// that launch — see [`crate::graphics::PictSource::declines_game_colours`]).
     ///
-    /// Recorded here for exactly the reason `no_game_colours_cli` above is: the
+    /// Recorded here for exactly the reason `game_colours_cli` above is: the
     /// force-off happens on `Config` before the engine is built, and the boot
     /// `reload_style` that runs a few lines later recomputes the key from the two
     /// per-story FILES and lands on the global base — which was captured *before*
@@ -2986,7 +2992,7 @@ impl Default for AppState {
             garglk_overlay: None,
             honor_game_colours_base: true,
             v6_pixel_lock_base: false,
-            no_game_colours_cli: false,
+            game_colours_cli: None,
             artwork_declines_colours: false,
             story_zversion: None,
             period_look: None,

@@ -146,8 +146,9 @@ pub enum ProfileSource {
     /// The player named it: `--interpreter N`, `interpreter_number`, or an
     /// archive whose flavour the medium could not refine. Advertises the byte in
     /// `$1E`, and licenses the colours only with the opt-in
-    /// (`Config::system_colours`), because a number typed at a bare story file is
-    /// a request about the STORY, not a statement about where it came from.
+    /// (`Config::system_colours`, from `--colour machine`), because a number typed
+    /// at a bare story file is a request about the STORY, not a statement about
+    /// where it came from.
     Asked,
     /// Nothing named a machine, so [`InterpreterProfile::IbmPc`] answered as the
     /// historical default. **Never** licenses machine colours: this is every
@@ -320,7 +321,7 @@ impl InterpreterProfile {
             // machine the player asked for. `for_interpreter_number` lands every
             // unmodelled number on `IbmPc` — which was inert while that variant
             // stated nothing, and is not now that it states blue under white:
-            // `--interpreter 1 --system-colours` would have painted a
+            // `--interpreter 1 --colour machine` would have painted a
             // DECSystem-20 in the IBM PC's colours. The number still reaches
             // `$1E`, because the story asked and §11.1.3 has an answer.
             let src = match Self::try_for_interpreter_number(n) {

@@ -190,7 +190,7 @@ sessions.
   embeds the full VFS per-slot, but Layer 3 is what preserves those files when the
   player never saves at all.
 
-Deleting the sidecar (or `--no-aux` in the CLIs) resets the game's stored data.
+Deleting the sidecar (or `--aux off` in the CLIs) resets the game's stored data.
 
 ## Storage layout (SQ-0284)
 

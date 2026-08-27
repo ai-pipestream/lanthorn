@@ -581,7 +581,7 @@ impl ScreenView {
     }
 
     /// The pinned region's current text, unconditionally — no dedupe, no TTY
-    /// gate, no `--no-status` gate.
+    /// gate, no `--story-only` gate.
     ///
     /// [`frame`](Self::frame) answers "what changed since last time", which is
     /// right for streaming and wrong for `/status`: the player asked *because*
@@ -878,7 +878,7 @@ mod view_tests {
 
     #[test]
     fn no_status_still_beats_show_status() {
-        // `--no-status` is the stronger, already-documented switch: it suppresses
+        // `--story-only` is the stronger, already-documented switch: it suppresses
         // the upper window outright, menu or not.
         let menu = menu_rows(0);
         let mut v = ScreenView::new(false, true, false, 24, 80);
@@ -979,7 +979,7 @@ mod view_tests {
     fn start_clears_screen_only_when_interactive() {
         assert_eq!(ScreenView::new(true, false, false, 24, 80).start(), "\x1b[2J\x1b[H");
         assert_eq!(ScreenView::new(false, false, false, 24, 80).start(), ""); // piped
-        assert_eq!(ScreenView::new(true, true, false, 24, 80).start(), ""); // --no-status
+        assert_eq!(ScreenView::new(true, true, false, 24, 80).start(), ""); // --story-only
     }
 
     #[test]

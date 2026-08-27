@@ -112,7 +112,7 @@ use cli_host::rgb24;
 
 /// Opening SGR for a style + resolved colour and attribute hints. Style
 /// attributes always apply; the game's fg/bg/reverse colour is added only when
-/// `honor` is true (the `--no-game-colours` gate), emitted as 24-bit truecolor
+/// `honor` is true (the `--game-colours` gate), emitted as 24-bit truecolor
 /// so no fidelity is lost. Returns `""` when nothing needs setting.
 fn sgr_open(style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, honor: bool) -> String {
     let mut s = sgr_set(style, attrs);
@@ -519,7 +519,7 @@ pub struct TerminalBackend {
     /// Rendered Weight/Oblique hints of the chars in `pending_word`; flushed
     /// like the style.
     pending_word_attrs: StyleAttrs,
-    /// Whether to render the game's stylehint colours (`--no-game-colours` off).
+    /// Whether to render the game's stylehint colours (`--game-colours off`).
     honor: bool,
     /// Every tracked TextGrid window with its resolved rect + cell buffer. Each
     /// is drawn at its own rect (grids no longer collapse to one status line).
@@ -686,7 +686,7 @@ impl TerminalBackend {
 
     /// Enable or disable rendering of the game's stylehint colours. When off,
     /// only style attributes (bold/italic/reverse) are emitted — the terminal's
-    /// own palette shows through, matching zvm-cli's `--no-game-colours`.
+    /// own palette shows through, matching zvm-cli's `--game-colours off`.
     pub fn set_honor_colours(&mut self, on: bool) {
         self.honor = on;
     }
@@ -1957,7 +1957,7 @@ mod tests {
             style_wrap("x", GlkStyle::Normal, fg_bg, StyleAttrs::default(), true, true),
             "\x1b[38;2;255;128;64m\x1b[48;2;17;34;51mx\x1b[0m"
         );
-        // --no-game-colours (honor=false) drops the colour entirely.
+        // --game-colours off (honor=false) drops the colour entirely.
         assert_eq!(style_wrap("x", GlkStyle::Normal, fg_bg, StyleAttrs::default(), false, true), "x");
         // reverse hint emits SGR 7 ahead of any colour.
         let rev = StyleColour { fg: None, bg: None, reverse: true };

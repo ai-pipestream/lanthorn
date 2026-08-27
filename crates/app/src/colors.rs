@@ -130,6 +130,51 @@ pub fn host_default_colour_pair(
     Some((nearest_standard_colour(bg), nearest_standard_colour(fg)))
 }
 
+/// The page and ink this launch reports to the story in header `$2C`/`$2D`,
+/// from the source it licenses (SQ-1082).
+///
+/// The three arms are what `--colour terminal|theme|machine` names, and they are
+/// not new: this is the `or_else` chain `startup.rs` and `reset.rs` each kept
+/// their own copy of, with a switch on which arm it may start at. `machine` is
+/// the default and is the whole chain, so a launch that says nothing resolves
+/// exactly as it did before.
+///
+/// `machine` is passed in rather than read off `cfg`, because the caller has
+/// already folded in the two-colour CARD's pair where the archive supplies one
+/// (SQ-0956) — a fact about the same machine's display, and the strongest arm of
+/// the same source.
+///
+/// **`honor_game_colours = false` answers no** — and that coupling is deliberate,
+/// not the coincidence of one branch it used to be. `--game-colours off` declares
+/// the interpreter colourless under ZMSD §8.3.2, and an interpreter with no
+/// colours has no default page and ink to report: the VM's own black-on-white
+/// seed is what §8.3.2 asks be left alone. So the two flags are different axes —
+/// one is whether the story's requests are obeyed, the other is what DEFAULT
+/// resolves to — and `--colour` is simply inert while the first says off. The
+/// theme still paints the pane either way; that is a fact about lanthorn's
+/// window, not a claim made to the story.
+pub fn host_default_colours(
+    cfg: &crate::config::Config,
+    machine: Option<(u8, u8)>,
+    themed: Style,
+    osc_fg: Option<(u8, u8, u8)>,
+    osc_bg: Option<(u8, u8, u8)>,
+) -> Option<(u8, u8)> {
+    use crate::config::ColourSource;
+    if !cfg.honor_game_colours {
+        return None;
+    }
+    match cfg.colour_source {
+        ColourSource::Machine => {
+            machine.or_else(|| host_default_colour_pair(themed, osc_fg, osc_bg))
+        }
+        ColourSource::Theme => host_default_colour_pair(themed, osc_fg, osc_bg),
+        // The theme is dropped by handing the pair resolver a style that names
+        // neither channel, which is the state it already falls through on.
+        ColourSource::Terminal => host_default_colour_pair(Style::default(), osc_fg, osc_bg),
+    }
+}
+
 /// Seed an unconfigured base scheme's `foreground`/`background` from the
 /// terminal's OSC 10/11-probed defaults (SQ-0510).
 ///

@@ -461,7 +461,7 @@ fn only_original_media_licenses_a_machines_own_colours() {
     assert_eq!(prof, InterpreterProfile::Amiga);
     assert_eq!(src, ProfileSource::Asked);
     assert!(!src.licenses_machine_colours(false), "a typed number is not original media");
-    assert!(src.licenses_machine_colours(true), "…until --system-colours says so");
+    assert!(src.licenses_machine_colours(true), "…until --colour machine says so");
 }
 
 /// The same, on a real release disk: the medium licenses it with no flag at all.
@@ -547,7 +547,7 @@ fn a_dos_medium_names_the_ibm_pc_even_though_its_number_is_a_rule() {
 ///
 /// `for_interpreter_number` lands every number this table does not model on
 /// `IbmPc`. That was inert while the variant stated nothing; it is not now that it
-/// states blue under white, and `--interpreter 1 --system-colours` would otherwise
+/// states blue under white, and `--interpreter 1 --colour machine` would otherwise
 /// paint a DECSystem-20 in the IBM PC's own colours. The number still reaches
 /// `$1E` — the story asked and §11.1.3 has an answer — and only the presentation
 /// is withheld.
@@ -563,7 +563,7 @@ fn an_unmodelled_number_never_borrows_the_ibm_pcs_colours() {
         assert_eq!(source, ProfileSource::Fallback, "-I {n} names no machine we model");
         assert!(
             !source.licenses_machine_colours(true),
-            "-I {n}: not even --system-colours may lend it the IBM PC's page",
+            "-I {n}: not even --colour machine may lend it the IBM PC's page",
         );
     }
     // 6 is the IBM PC itself, so asking for it IS asking for a machine.

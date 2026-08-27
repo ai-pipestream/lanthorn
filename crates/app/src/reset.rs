@@ -98,28 +98,30 @@ pub(crate) fn reset_game(
             if let Some(scale) = v6_art_scale {
                 state.v6_art_scale = scale;
             }
-            let host_default_colours = if state.config.honor_game_colours {
-                // SQ-0956: the CARD's pair when the archive this restart resolved
-                // is a two-colour one, exactly as `startup.rs` resolves it — a
-                // restart may have landed on a different rendition (the sidecar,
-                // or a `--pictures` choice), so this is asked again rather than
-                // carried.
+            // SQ-0956: the CARD's pair when the archive this restart resolved is a
+            // two-colour one, exactly as `startup.rs` resolves it — a restart may
+            // have landed on a different rendition (the sidecar, or a `--pictures`
+            // choice), so this is asked again rather than carried.
+            let card = if state.config.honor_game_colours {
                 let card = picts.two_colour_card_screen(&state.config);
                 if let Some((palette, _)) = card {
                     zvm::screen::set_palette(palette);
                 }
                 card.map(|(_, pair)| pair)
-                    .or_else(|| state.config.machine_default_colours())
-                    .or_else(|| {
-                        app::colors::host_default_colour_pair(
-                            state.colors.theme.get("transcript").style,
-                            state.term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
-                            state.term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
-                        )
-                    })
             } else {
                 None
             };
+            // SQ-1082: and the chain the card heads is `colors::host_default_colours`
+            // now, shared with `startup.rs` rather than copied here. This copy is
+            // exactly the hand-maintained invariant across files the refactoring
+            // policy names: `--colour` would have had to be added to both.
+            let host_default_colours = app::colors::host_default_colours(
+                &state.config,
+                card.or_else(|| state.config.machine_default_colours()),
+                state.colors.theme.get("transcript").style,
+                state.term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
+                state.term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
+            );
             // SQ-1022: every per-machine fact in one value, resolved the way
             // `startup.rs` resolves it rather than reproduced here. It HAD drifted
             // — this call passed `None` for the Version 6 cell, so restarting a

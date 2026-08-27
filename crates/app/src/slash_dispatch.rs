@@ -536,12 +536,12 @@ pub(crate) fn dispatch_slash_outcome(
             // and `auto` falls back to garglk/global.
             match app::styles::write_per_game_honor(game_dir, opt) {
                 Ok(()) => {
-                    // SQ-0855: an explicit choice here ends a `--no-game-colours`
+                    // SQ-0855: an explicit choice here ends a `--game-colours`
                     // launch's hold — the user is overriding their own flag, which
                     // is the same event as a settings-panel edit ending
                     // `--interpreter`'s (SQ-0646). Without this the command would
                     // report success and change nothing.
-                    state.no_game_colours_cli = false;
+                    state.game_colours_cli = None;
                     // SQ-0860: and the artwork's force-off, for the same reason and
                     // then some — the archive's half of `declines_game_colours` is
                     // expressly a GUESS about a machine, and a player who typed this
@@ -725,7 +725,7 @@ fn terminal_snapshot(
     };
     // An empty capability list is three different facts. Only
     // `build_cover_picker`'s `Auto`/named arms run `Picker::from_query_stdio`;
-    // `halfblocks()` asks nothing, and `--no-images` builds no picker at all.
+    // `halfblocks()` asks nothing, and `--images off` builds no picker at all.
     // Read off the CONFIG rather than off `picker.is_none()`, because a picker is
     // also absent when a forced protocol's query failed — which is a terminal that
     // was asked and could not answer, the opposite of never having been asked.

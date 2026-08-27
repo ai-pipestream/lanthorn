@@ -80,7 +80,7 @@ impl Pager {
     /// happens *before* the line that would scroll the top away, not after.
     pub fn line(&mut self) -> bool {
         // Saturating: nothing resets the count while a game prints without
-        // pausing — piped output, `--no-more`, a print loop — so it climbs
+        // pausing — piped output, `--pager off`, a print loop — so it climbs
         // without bound. It used to be `+=` on a u16 and panicked with "attempt
         // to add with overflow" at exactly 65_536 newlines; Zork Zero reached
         // that in under twenty seconds (SQ-0601). Nothing reads the count past
