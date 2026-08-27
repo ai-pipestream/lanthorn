@@ -484,7 +484,10 @@ pub fn agree_sections(a: FlankSections, b: FlankSections) -> FlankSections {
 ///
 /// The middle is tiled from the last whole period of the art, so it continues the
 /// phase already on screen and the seam falls where the ornament's own repeats do.
-/// Nothing is flipped: a directional motif read upside down is worse than a seam.
+/// Whether a copy is flipped is [`FlankSections::periodic`]'s call and nobody
+/// else's: a measured period meets itself and wants no flip, an unmeasured one does
+/// not and is continuous only reversed. Both arms have obeyed that since SQ-1097;
+/// the foot-less one used to say "nothing is flipped" and mean it.
 pub fn extend_by_sections(
     dst: &mut RgbaImage,
     src: &RgbaImage,
@@ -520,21 +523,15 @@ pub fn extend_with_sections(
         return;
     }
 
-    // **The band always ENDS on the art's own last row** (SQ-0841, SQ-1063).
+    // **A flank with a FOOTER always ends on its foot** (SQ-0841, SQ-1063): the foot
+    // goes at the new bottom and the middle fills whatever is above it, or the band
+    // ends on a fragment of shaft and the "bare shaft below the foot" SQ-0841 reports
+    // is what the player gets. That arm is [`extend_pillars`]'s, below.
     //
-    // Everything is laid from the bottom up for that one reason. A flank with a
-    // FOOTER must end on its foot — Zork Zero's plates, where a downward fill left
-    // the "bare shaft below the foot" SQ-0841 reports — and a flank WITHOUT one must
-    // still end where the drawing ends, because the frame's bottom edge is drawn
-    // there. Zork Zero's plate 8 is the case that proves the second half: an
-    // InvisiClues lattice with no foot at all, whose downward fill stopped on
-    // whichever lattice row the last copy happened to reach.
-    //
-    // So: stamp the footer at the new bottom (it may be empty), then fill the middle
-    // UPWARD from it. The unit is taken ending at the middle's own last row, so a
-    // footer-less flank's last row is the art's last row by construction.
+    // A flank WITHOUT one has no foot to land on, and the row it ends on is therefore
+    // whatever the fill leaves at the pane's edge — see the second half of the note
+    // below `mirror`.
     let footer_h = art_bottom.saturating_sub(sec.middle_end);
-    let footer = snapshot(src, sec.middle_end, footer_h);
     let fill_to = desired_height.saturating_sub(footer_h);
 
     // **Repeat as much of the middle as is a whole number of periods**, not one
@@ -560,9 +557,34 @@ pub fn extend_with_sections(
     // `v6_side_border_tiling::no_tile_join_steps_harder_than_the_pillar_shaft_itself`
     // measured that as a 10.54 step against the 5.27 the shaft itself ever steps.
     //
-    // Without a footer the ending has to come from the middle, so that case keeps the
-    // bottom-anchored upward fill below; a footer-less flank is a lattice, which does
-    // not mirror and has no join to smooth.
+    // **Without a footer the middle is filled downward too, and by exactly the same
+    // rule** (SQ-1097). It used to fill UPWARD from the pane's bottom, so that the
+    // band's last row was the art's last row by construction, on the argument that "a
+    // footer-less flank is a lattice, which does not mirror and has no join to
+    // smooth". Both halves of that are wrong. It has a join — the first row below the
+    // art is where the drawing has to pick itself up again — and anchoring the run at
+    // the pane's edge is what puts the fill's leftover FRAGMENT there, with the whole
+    // copies stacked beneath it.
+    //
+    // Shogun is the flank that shows it. Its lacquer is one drawing with no
+    // sub-period, so the unit is the whole 400 rows, and a 586-row pane leaves 186 —
+    // less than one copy. The upward fill therefore took its partial branch on the
+    // FIRST iteration and stamped the art's own rows 214..400 directly beneath the
+    // art, so art row 399 was followed by art row 214. Measured on
+    // `shogun-r322-s890706.z6` at the gameplay frame, 60 columns in, all three
+    // extending presses alike: an **18.18** step across that join against the 6.93 the
+    // drawing typically steps by itself. Filling downward with the mirrored copy
+    // adjacent to the art — the parity `mirror` already asks for — steps **0.00**,
+    // because a flipped copy opens on the row the art closed with. The vine reverses
+    // at the join and reads as a symmetric blossom rather than as a break.
+    //
+    // What is given up is the band ending on the art's own last row. Nothing is lost:
+    // [`footer_top`] reported no footer, which is a measurement that the drawing ends
+    // on nothing in particular, and it is right about every flank that reaches here —
+    // Shogun's vine, Zork Zero's jungle trunk, his underground masonry and his
+    // InvisiClues lattice all run off the bottom of the screen with nothing closing
+    // them. `v6_archive_border_sweep`'s "a flank ends on its FOOT" is stated over the
+    // flanks that have one for that reason.
     if footer_h > 0 {
         /// How far the repeat unit stays clear of the capital above it and the base
         /// below — Bocfel's two raw rows at each end, doubled into unit space.
@@ -603,42 +625,35 @@ pub fn extend_with_sections(
         return;
     }
 
-    // Fill upward from the footer's new top, down to where the MIDDLE ends — not to
-    // where the ART ends (SQ-1063).
-    //
-    // The footer's original rows are still sitting in `dst` at the position the game
-    // drew them, and the extension moves the footer to the new bottom. Filling only
-    // below `art_bottom` leaves those rows where they were, so the footer appears
-    // TWICE: once part-way down, where the art put it, and once at the bottom. Every
-    // Zork Zero rendition showed it — "one copy of the footer before the tiling
-    // starts". The middle is tiled over them instead.
-    //
-    // Identical for a flank with no footer, where `middle_end == art_bottom`.
-    //
-    // The copy nearest the bottom is UPRIGHT whatever `mirror` says, so the last row
-    // is the art's last row either way.
-    let mut y = fill_to;
-    let mut flipped = false;
-    while y > sec.middle_end {
-        let top = y.saturating_sub(uh);
-        if top < sec.middle_end {
-            // The remaining gap is narrower than a whole copy: stamp that copy's
-            // TAIL into it rather than writing over the middle above it.
-            let tail_h = y - sec.middle_end;
-            let src_y = if flipped { 0 } else { uh - tail_h };
-            let tail = snapshot(&unit, src_y, tail_h);
-            stamp(dst, &tail, sec.middle_end, flipped);
-            break;
-        }
-        stamp(dst, &unit, top, flipped);
-        if mirror {
-            flipped = !flipped;
-        }
-        y = top;
+    // Copies downward from where the middle ends, each one opening on the row the copy
+    // above it closed with — the parity `mirror` already states, run from the art down
+    // instead of from the pane's bottom up. A MEASURED period means the unit is a whole
+    // number of periods, so an upright copy lands in phase and no flip is wanted; an
+    // unmeasured one means a drawing that does not meet itself, and there the FLIPPED
+    // copy is the continuous one. That is [`FlankSections::periodic`]'s rule and the
+    // with-footer arm's, applied here for the first time.
+    let gap = fill_to.saturating_sub(sec.middle_end);
+    let whole = gap / uh;
+    let rest = gap - whole * uh;
+    let parity = |i: u32| mirror && i.is_multiple_of(2);
+    for i in 0..whole {
+        stamp(dst, &unit, sec.middle_end + i * uh, parity(i));
     }
-
-    if footer_h > 0 {
-        stamp(dst, &footer, fill_to, false);
+    if rest > 0 {
+        // The leftover is the top of the copy that would have come next, in that
+        // copy's own orientation — the unit's first `rest` rows for an upright copy,
+        // its last `rest` read upward for a flipped one. So the phase carries on
+        // through it and the band's one cut is the pane's own bottom edge, which is
+        // where the frame runs off a screen taller than any it was drawn for.
+        //
+        // Shogun never gets past this branch: 586 − 400 is 186 against a 400-row unit,
+        // so `whole` is nought and the fragment IS the extension. Which end it is cut
+        // from is therefore the whole of what the player sees, and under the upward
+        // fill it was the wrong one — the art's own rows 214..400, laid straight under
+        // art row 399.
+        let flipped = parity(whole);
+        let src_y = if flipped { uh - rest } else { 0 };
+        stamp(dst, &snapshot(&unit, src_y, rest), sec.middle_end + whole * uh, flipped);
     }
 }
 
