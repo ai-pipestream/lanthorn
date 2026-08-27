@@ -2374,4 +2374,71 @@ mod tests {
         assert!(src.current_plte.is_none(), "a size query must not establish the palette");
         assert_eq!(top_left(&src.image(2).unwrap()), [170, 0, 170, 255], "adaptive still on its placeholder");
     }
+
+    /// **`graphics::resource_blorb` is the only way in, and this is what keeps
+    /// it so** (SQ-1085).
+    ///
+    /// A bare `blorb::resolve_resource_blorb` knows the filesystem and nothing
+    /// else. Every tier `app` has added since — the build-mismatch refusal
+    /// (SQ-0866) and now the ZIP a player downloaded the game in — lives in the
+    /// wrapper, so a call that skips it silently resolves from an older set of
+    /// rules and produces a plausible answer rather than an error. That is
+    /// exactly the shape CLAUDE.md's refactoring policy names, and `reset.rs`
+    /// has already been on the wrong side of it once (SQ-1022).
+    ///
+    /// It cannot be made unreachable — `blorb` is a dependency and its function
+    /// is public — so it is made VISIBLE instead. Two exemptions, both narrow:
+    /// `graphics.rs` itself, which is the wrapper; and anything below a file's
+    /// own `#[cfg(test)]`, where a harness building its own `PictSource` from a
+    /// loose story file is stating its inputs rather than resolving a launch.
+    #[test]
+    fn resource_blorb_is_resolved_through_this_module_only() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src_root, &mut files);
+        files.sort();
+        assert!(files.len() > 10, "the walk found the source tree: {}", files.len());
+
+        let mut bad = Vec::new();
+        for file in files {
+            if file.file_name().and_then(|n| n.to_str()) == Some("graphics.rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let mut in_tests = false;
+            for (n, line) in text.lines().enumerate() {
+                if line.starts_with("#[cfg(test)]") {
+                    in_tests = true;
+                }
+                if in_tests {
+                    continue;
+                }
+                // Comments and doc links name it on purpose; this is about code.
+                let code = match line.find("//") {
+                    Some(i) => &line[..i],
+                    None => line,
+                };
+                if code.contains("blorb::resolve_resource_blorb(") {
+                    bad.push(format!("  {}:{}  {}", file.display(), n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "resolve the resource Blorb through `crate::graphics::resource_blorb`, which \
+             carries the zip tier and the build-mismatch refusal:\n{}",
+            bad.join("\n"),
+        );
+    }
 }

@@ -862,12 +862,46 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
 /// Total inflated bytes one scan of a ZIP will read before it gives up
 /// (SQ-1085).
 ///
-/// [`MAX_ZIP_ENTRY`] bounds ONE entry, which was enough while a zip was opened
-/// by name and at most one entry was ever inflated. A content scan reads
-/// everything small enough to be a story, so the archive as a whole needs a
-/// ceiling too — sixteen entries at the per-entry cap, which no game download
-/// comes close to and a zip bomb cannot exceed.
-const MAX_ZIP_SCAN: u64 = 16 * MAX_ZIP_ENTRY;
+/// **A different question from [`MAX_ZIP_ENTRY`], and deliberately not a
+/// multiple of it.** That one bounds a BUFFER — how much memory a single entry
+/// may occupy at once. This one bounds WORK — how long a launch may spend
+/// inflating before it concludes there is no game in here. Tying the two
+/// together is how the pair goes wrong: raising the buffer to cover
+/// *Kerkerkruip* would otherwise have raised the whole-archive budget to half a
+/// gigabyte, which is not a launch anybody wants to wait through.
+///
+/// 128 MiB is set from the work side. The scan STOPS at the first entry whose
+/// content is a story, so an ordinary download spends the size of its game and
+/// nothing more; the budget is only reached by an archive of large entries that
+/// are not stories, and at deflate's throughput that worst case is well under a
+/// second. It leaves room for the largest game known plus its resources plus a
+/// couple of large decoys ahead of them in archive order, and a zip bomb still
+/// cannot exceed it.
+const MAX_ZIP_SCAN: u64 = 128 * 1024 * 1024;
+
+/// The two limits above, pinned against what the corpus actually HOLDS — at
+/// compile time, because a number that has to cover a real file is a fact about
+/// the build and not a thing to discover when a player opens a zip (SQ-1085).
+///
+/// `Kerkerkruip.gblorb` is the largest runnable file in this repo's `stories/`
+/// and `InfocomMasterpieces.img` the largest disc. Both are gitignored, so they
+/// are NAMED here rather than measured: a check that reads them would pass
+/// vacuously in CI, which is exactly how a 4 MiB cap survived a change that made
+/// it wrong.
+const LARGEST_GAME_IN_CORPUS: u64 = 22_109_534; // stories/Kerkerkruip.gblorb
+const LARGEST_DISC_IN_CORPUS: u64 = 12_582_912; // stories/InfocomMasterpieces.img
+const _: () = assert!(
+    MAX_ZIP_ENTRY > LARGEST_GAME_IN_CORPUS,
+    "one zip entry must be able to hold the largest game anybody ships",
+);
+const _: () = assert!(
+    MAX_ZIP_ENTRY > LARGEST_DISC_IN_CORPUS,
+    "…and a compilation disc, which the classifier already recognises",
+);
+const _: () = assert!(
+    MAX_ZIP_SCAN > MAX_ZIP_ENTRY,
+    "the whole-archive budget must be able to read past one full-size entry",
+);
 
 /// Hand every entry of the ZIP at `path` that could plausibly BE a story or a
 /// resource file to `visit`, as (stored name, inflated bytes), stopping early
@@ -906,8 +940,10 @@ fn for_each_zip_entry(
         (&mut entry).take(MAX_ZIP_ENTRY + 1).read_to_end(&mut buf)?;
         budget = budget.saturating_sub(buf.len() as u64);
         if buf.len() as u64 > MAX_ZIP_ENTRY {
-            // The declared size lied. Nothing lanthorn runs is this big, so the
-            // entry is simply not a candidate; the scan carries on.
+            // The declared size lied — the entry inflates past a cap set to
+            // cover the largest game anybody ships (see [`MAX_ZIP_ENTRY`]), so
+            // it is not a candidate. The scan carries on rather than erroring,
+            // because one hostile entry must not hide a real game beside it.
             continue;
         }
         examined += 1;
@@ -1205,10 +1241,35 @@ fn unrunnable(bytes: &[u8]) -> String {
     )
 }
 
-/// Cap on one extracted ZIP entry (SQ-0660). Story files here are Z-code
-/// images, whose format tops out at 512 KiB; 4 MiB is generous headroom while
-/// still stopping a hostile zip from inflating a multi-GB entry into memory.
-const MAX_ZIP_ENTRY: u64 = 4 * 1024 * 1024;
+/// Cap on one extracted ZIP entry (SQ-0660, raised SQ-1085) — the largest
+/// buffer one entry may inflate into.
+///
+/// **It has to cover the largest thing lanthorn RUNS, and that is no longer a
+/// Z-code image.** The cap was 4 MiB against a zip branch that accepted `.z3`,
+/// `.z5` and `.z8` only, and a Z-machine story tops out at 512 KiB, so it was
+/// eight times the format's own ceiling. Opening a zip by CONTENT changed what
+/// the constant has to cover and the constant did not move with it — and neither
+/// Glulx nor Blorb has a ceiling to appeal to (a Blorb chunk length is a 32-bit
+/// word, Glulx's address space is 32-bit), so the number can only come from what
+/// people actually ship.
+///
+/// What this repo's own `stories/` holds, largest first:
+///
+/// | file | size |
+/// |---|---|
+/// | `Kerkerkruip.gblorb` | 21.1 MB |
+/// | `Kerkerkruip.b10.gblorb` | 13.6 MB |
+/// | `InfocomMasterpieces.img` (a disc, not a story) | 12.0 MB |
+/// | `Never Gives Up Her Dead.gblorb` | 11.1 MB |
+/// | `CounterfeitMonkey-11.gblorb` | 10.8 MB |
+/// | `cragne.gblorb` | 8.5 MB |
+///
+/// 32 MiB clears the largest of those by half again, and clears the compilation
+/// disc too — a zipped disk image is a plausible next case, since the zip branch
+/// hands its bytes to the same classifier that already recognises one. It is
+/// still a single bounded allocation, and a hostile zip claiming multiple GB is
+/// stopped exactly as it was.
+const MAX_ZIP_ENTRY: u64 = 32 * 1024 * 1024;
 
 /// Return the bytes of the first ZIP entry whose name satisfies `pred`.
 ///
@@ -1620,7 +1681,9 @@ mod tests {
     fn a_zip_yields_every_format_a_loose_file_does() {
         let base = scratch("zip-formats");
 
-        let cases: Vec<(&str, Vec<u8>, fn(&LoadedStory) -> bool)> = vec![
+        // (stored name, bytes, the engine it must come back as)
+        type Case = (&'static str, Vec<u8>, fn(&LoadedStory) -> bool);
+        let cases: Vec<Case> = vec![
             ("journey.z6", sample_zcode(6), |l| matches!(l, LoadedStory::ZCode(_))),
             ("trinity.z4", sample_zcode(4), |l| matches!(l, LoadedStory::ZCode(_))),
             ("shogun.z7", sample_zcode(7), |l| matches!(l, LoadedStory::ZCode(_))),
@@ -1773,6 +1836,52 @@ mod tests {
                 entry: "deadlineinv.z5".to_string()
             },
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The cap that rejects a zip has to cover what lanthorn RUNS.** SQ-1085
+    /// widened the classifier to accept Glulx and Blorb by content while
+    /// [`MAX_ZIP_ENTRY`] still stood at the 4 MiB a Z-code-only branch needed —
+    /// so every real Glulx game was skipped WITHOUT being inflated, and the
+    /// launch reported "no story file inside the zip", which reads as a
+    /// legitimately empty archive. Half the fix did not work, silently.
+    ///
+    /// A synthetic Glulx Blorb past the old cap, because the real ones
+    /// (`Kerkerkruip.gblorb`, `CounterfeitMonkey-11.gblorb`) live in gitignored
+    /// `stories/` and a case built on those goes vacuous in CI — which is how
+    /// this would have escaped a second time.
+    #[test]
+    fn a_glulx_game_past_the_old_four_mib_cap_still_opens_out_of_a_zip() {
+        const OLD_CAP: usize = 4 * 1024 * 1024;
+        let base = scratch("zip-bigglulx");
+
+        // Six MiB of payload: half again the cap that used to reject it, and
+        // small enough that the deflate costs nothing.
+        let payload = vec![0x47u8; 6 * 1024 * 1024];
+        let gblorb = make_blorb(b"GLUL", &payload);
+        assert!(gblorb.len() > OLD_CAP, "the fixture must cross the old cap");
+
+        let zip_path = base.join("kerkerkruip.zip");
+        {
+            use std::io::Write as _;
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("kerkerkruip.gblorb", opts).unwrap();
+            zw.write_all(&gblorb).unwrap();
+            zw.finish().unwrap();
+        }
+
+        match load_story(&zip_path) {
+            Ok(LoadedStory::Glulx(bytes)) => assert_eq!(
+                bytes.len(),
+                payload.len(),
+                "the whole executable comes back, not a truncated prefix",
+            ),
+            other => panic!("a zipped Glulx game past the old cap must open: {other:?}"),
+        }
+
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -3841,10 +3841,24 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 // start room remains after the re-seed.
 
 /// Resolve the Pict/graphics blorb for a story the same way at launch and
-/// restart: path-based (self-contained blorb, same-stem sidecar, or dir scan).
+/// restart — the Glulx and Scott arms of both, where the Z-machine arm builds a
+/// [`app::graphics::PictSource`] instead.
+///
+/// **Through `graphics::resource_blorb`, not `blorb::resolve_resource_blorb`**
+/// (SQ-1085), so the two arms resolve from the same tiers. The bare `blorb`
+/// call knows the filesystem: a self-blorb, a same-stem sidecar, a directory
+/// scan. It does not know about the ZIP a player downloaded the game in — so a
+/// zipped `.gblorb` ran with no pictures and no sounds at all, which is the
+/// worse half of the same defect, since Glulx is the engine whose games most
+/// often ARE one big resource-carrying Blorb.
+///
+/// Nothing else moves: the extra tier only fires when `story_path` is a zip,
+/// and the build-mismatch refusal `graphics::resource_blorb` adds is inert here
+/// — it needs a story mounted off a release disk image with an identifiable
+/// build, which no Glulx or Scott game is.
 fn resolve_pict_blorb(story_path: &std::path::Path, images: bool) -> Option<blorb::Blorb> {
     if images {
-        blorb::resolve_resource_blorb(story_path).map(|(b, _)| b)
+        app::graphics::resource_blorb(story_path).found.map(|(b, _)| b)
     } else {
         None
     }
@@ -4601,6 +4615,97 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&no_sidecar_dir);
+    }
+
+    /// The same resolution, when the download was never unpacked (SQ-1085).
+    ///
+    /// **Glulx is the engine this matters most to**, because a Glulx game very
+    /// often IS one big resource-carrying Blorb — and `resolve_pict_blorb` is
+    /// the only thing that hands the Glulx and Scott sessions their resources.
+    /// Going straight to `blorb::resolve_resource_blorb` meant a zipped game
+    /// booted and then drew nothing and played nothing, at launch AND after
+    /// `@restart`, since both arms come through here.
+    ///
+    /// Built from `gvm-cli`'s committed `glulxercise.ulx`, so it never goes
+    /// vacuous the way a `stories/` fixture would.
+    #[test]
+    fn resolve_pict_blorb_reaches_a_blorb_inside_the_storys_zip() {
+        use std::io::Write as _;
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../gvm-cli/tests/fixtures/glulxercise.ulx");
+        let ulx_bytes = std::fs::read(&fixture).expect("glulxercise.ulx is committed");
+
+        // A resources-only Blorb: one Pict, no executable — a `.blb` beside a
+        // bare `.ulx`, which is the layout the sibling case above covers loose.
+        fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(ty);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+        let png = {
+            let img = image::RgbImage::from_pixel(2, 2, image::Rgb([0, 128, 255]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .unwrap();
+            bytes
+        };
+        let sidecar = {
+            let ridx_data_len = 4 + 12;
+            let off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+            let mut ridx = Vec::new();
+            ridx.extend_from_slice(&1u32.to_be_bytes());
+            ridx.extend_from_slice(b"Pict");
+            ridx.extend_from_slice(&0u32.to_be_bytes());
+            ridx.extend_from_slice(&(off as u32).to_be_bytes());
+            let mut inner = Vec::new();
+            inner.extend_from_slice(b"IFRS");
+            inner.extend_from_slice(&chunk(b"RIdx", &ridx));
+            inner.extend_from_slice(&chunk(b"PNG ", &png));
+            let mut file = Vec::new();
+            file.extend_from_slice(b"FORM");
+            file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+            file.extend_from_slice(&inner);
+            file
+        };
+
+        let dir = std::env::temp_dir().join(format!("bm-pictblorb-zip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let zip_path = dir.join("glulxercise.zip");
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("glulxercise/glulxercise.ulx", opts).unwrap();
+            zw.write_all(&ulx_bytes).unwrap();
+            zw.start_file("glulxercise/glulxercise.blb", opts).unwrap();
+            zw.write_all(&sidecar).unwrap();
+            zw.finish().unwrap();
+        }
+
+        // The game itself opens out of the zip…
+        assert!(
+            matches!(app::hints::load_story(&zip_path), Ok(app::hints::LoadedStory::Glulx(_))),
+            "the zipped .ulx must load as Glulx",
+        );
+        // …and the session is handed the artwork that came with it.
+        let blorb = super::resolve_pict_blorb(&zip_path, true)
+            .expect("the Blorb inside the zip must reach the Glulx session");
+        assert_eq!(blorb.resources().len(), 1, "its one Pict is indexed");
+        assert!(
+            super::resolve_pict_blorb(&zip_path, false).is_none(),
+            "images disabled still resolves to None",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── TestBackend: map pane shows a single-line border by default ───────────
