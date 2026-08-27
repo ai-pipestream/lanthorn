@@ -538,6 +538,7 @@ struct PaneRects {
     pub dialog: Option<DialogRects>,
     /// Hit-rects for the aux-storage prompt (when open).
     pub aux_dialog: Option<app::render::aux_dialog::AuxDialogRects>,
+    pub history_prompt: Option<app::render::history_prompt::HistoryPromptRects>,
     /// Hit-rects for the reset dialog (when open).
     pub reset_dialog: Option<app::render::reset_dialog::ResetDialogRects>,
     /// Hit-rects for the region prompt (when open) — its option rows and its buttons (SQ-0439).
@@ -1130,7 +1131,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, region_prompt: overlay_rects.region_prompt, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_prompt_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, history_prompt: overlay_rects.history_prompt, reset_dialog: overlay_rects.reset_dialog, region_prompt: overlay_rects.region_prompt, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_prompt_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
 }
 
 // ── Command-band mouse routing ───────────────────────────────────────────────
@@ -2141,6 +2142,16 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             if let overlays::OverlayOutcome::Act(act) = outcome {
                 use overlays::OverlayAct;
                 match act {
+                    OverlayAct::EnableTurnHistory => {
+                        // Persist it, because a player who answers this prompt
+                        // means "from now on", not "for this launch": the whole
+                        // point is that the archive starts carrying turns.
+                        state.config.record_turn_history = true;
+                        let _ = app::config::write_config_file(&state.config);
+                        state.push_notice(
+                            "[Recording turn history. Rewind will have something to show after your next move.]",
+                        );
+                    }
                     OverlayAct::AuxArchive => {
                         let mode = app::config::AuxStorage::Archive;
                         state.overlays.aux_prompt = false;

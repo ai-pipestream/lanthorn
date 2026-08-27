@@ -7,26 +7,20 @@
 
 **Play interactive fiction in your terminal while lanthorn draws the map for you — live, as you explore.**
 
-lanthorn is a terminal interactive-fiction interpreter with a built-in
-*automapper*. Point it at a story — the Infocom canon and Z-machine classics
-like *Zork*, modern Inform 7 / Glulx games, graphical *Zork Zero*, or a classic
-Scott Adams text adventure — play it in a clean, mouse-driven TUI, and watch a
-room-and-connection map assemble itself from your movements. No graph paper, no
-manual annotation: every room you enter and every exit you take is placed,
-routed, and de-overlapped automatically, then continuously tidied into a
-readable layout. Three from-scratch, zero-dependency virtual machines under one
-roof; one engine-agnostic mapper that charts them all.
+### Supported story formats:
 
-> **Upgrading from babelmap?** The project was renamed in 0.2.0. Move your data
-> once — `mv ~/.babelmap ~/.lanthorn`, then rename `*.babelmap` archives inside it
-> to `*.lanthorn` — and everything loads as before; the formats themselves did not
-> change. See the [changelog](CHANGELOG.md) for the exact commands.
->
-> The formats that live on your disk between sessions — saves, the `.lanthorn`
-> archive, the sidecars — are **frozen and version-pinned**, so a future change
-> can't silently corrupt them (see the
-> [save-format policy](docs/release/save-format-policy.md)). The `config.toml` /
-> `style.toml` schemas stay tolerant and may still gain fields.
+* **Z-machine v3–v8** (incl. graphical v6)
+* **Glulx**
+* **Scott Adams**
+
+### Supported original Infocom disk formats:
+
+* Amiga
+* Mac
+* PC
+* ST
+* AppleII
+* C-64/128
 
 ---
 
@@ -34,12 +28,14 @@ roof; one engine-agnostic mapper that charts them all.
 
 **The map draws itself while you play.** A lap of the white house in each
 direction — nothing typed but the game's own commands, no annotation, no graph
-paper. Walking the ring both ways is the point: a room already placed must not
-move when you come back to it from the other side.
+paper.
 
 ![lanthorn walking Zork I while the automap assembles itself room by room](docs/automapping.gif)
 
-![lanthorn's cover-gallery view: a grid of story covers beside a metadata info panel](docs/cover-gallery.png)
+**Your library at a glance.** The story picker shows it as a list or as a grid of covers. Press `[TAB]` to
+bring up the story info panel.
+
+![The story picker's grid view: covers beside a metadata info panel](docs/cover-gallery.png)
 
 <details>
 <summary>More screenshots</summary>
@@ -89,203 +85,76 @@ release, four binaries in each: `lanthorn` itself plus the no-map CLI players
 (`zvm-cli` / `gvm-cli` / `scott-cli`). Extract it and run:
 
 ```bash
-# Play a story
-./lanthorn path/to/story.z5
-
-# Point it at a directory to open the story picker instead
-./lanthorn ~/if-games/
+lanthorn ~/if-games/        # a directory — opens the story picker. The usual way in.
+lanthorn zork1.z3           # or straight into one game
 ```
 
-Platform notes (Gatekeeper on macOS, SmartScreen on Windows, `libasound2` on
-Linux) are covered in each release's notes. Per-platform behaviour differences —
-what Windows cannot be asked, and what it cannot do on the way out — are in
-[docs/features/platforms.md](docs/features/platforms.md).
-
-Don't have a story yet? Launch the picker and press **`/`** to browse IFDB's
-popular list or search by title/author, then **download a playable story file
-straight into your library** — lanthorn grabs it in the background and drops you
-right on it.
-
-Set a `default_story_dir` (lanthorn offers to remember the first directory you
-open) and a bare **`lanthorn`** opens your library there. You type at the
-story's own inline `>` prompt, the way a classic terminal interpreter works;
-press the leader key (default **`Ctrl+P`**) for a pop-up reference of every
-command.
-
-Supported formats: **Z-machine v3–v8** (incl. graphical v6), **Glulx**, and
-**Scott Adams** (ScottFree `.dat`) — auto-detected from the file, loaded raw or
-from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`). (v1/v2 are not
-supported.) A plain `.zip` works too, for a bare `.z3`/`.z5`/`.z8` anywhere
-inside it — handy for something you just downloaded — but only for those: it
-carries no artwork, sound or hints, and holds one game rather than a library.
+lanthorn offers to remember the first directory you open, so a bare **`lanthorn`**
+goes there next time. It opens disk images too — see
+[**Play the original disks**](#play-the-original-disks). `lanthorn --help` has the
+flags; the ones people reach for are `--no-sound`, `--no-images` and
+`--image-protocol`.
 
 ---
 
-## Launching it
+## Try these first
 
-Every one of these is a single line in a terminal. `lanthorn --help` has the full
-list; these are the ones people actually reach for.
+A few things worth doing in your first ten minutes. Everything else can wait.
 
-**Open a library and pick from it**
+**In the story picker**
 
-```bash
-lanthorn                                # your default_story_dir, once you've set one
-lanthorn ~/if-games/                    # any directory — the story picker opens on it
-```
+| | |
+|---|---|
+| **r** | Fetches titles, blurbs, ratings and cover art from IFDB for everything missing them. Do this first — until you do, there is not much for the grid to show. |
+| **g** | Flips the list view into a grid of covers. |
+| **/** | Searches IFDB by title or author and downloads straight into your library. |
+| **Tab** | Shows the info panel for the highlighted story. |
+| **o** | Launch options for this story — renderer, machine, artwork. |
 
-The picker is the front door: cover art, titles, badges, sorting and search, plus
-**`/`** to pull a new story down from IFDB without leaving it.
+**In the story**
 
-**Go straight into one game**
+| | |
+|---|---|
+| **Tab** | Completes from the words *this story* actually knows — no more guessing whether it wants `lamp` or `lantern`. |
+| **/** on an empty line | A fuzzy palette over every command. The fastest way to find out what there is. |
+| **Ctrl+S** or **Ctrl+R** | Saves and restores the map, the screen and your scrollback — not just the game's own state. |
+| **/open-settings** | The settings worth changing, each with a line saying what it does. |
+| **Ctrl+P** | The quick command pallet. |
 
-```bash
-lanthorn stories/zork1.z3               # a bare story file
-lanthorn Advent.zblorb                  # a Blorb — its art and sound come with it
-lanthorn adventureland.dat              # a Scott Adams game
-```
-
-**Play it off the disk it shipped on**
-
-```bash
-lanthorn "Zork Zero.adf"                            # an Amiga floppy, presented as an Amiga
-lanthorn "Zork Zero Disk.image"                     # a Macintosh floppy
-lanthorn "LostTreasures1.iso" --story 3             # a compilation disc, by position…
-lanthorn "InfocomMasterpieces.img" --story arthur   # …or by name
-```
-
-`--story` is the browser's choice made on the command line — without it a
-compilation can only be opened by launching it and picking, so nothing headless
-can reach any game on one but the first. Every format lanthorn mounts, and the
-machine each presents as, is in [Play the original disks](#play-the-original-disks).
-
-**Ask for a particular look**
-
-```bash
-lanthorn stories/journey.z6 --v6-render raster       # full-frame pixels instead of hybrid
-lanthorn stories/journey.z6 --v6-pixel-lock on       # whole device pixels per art pixel; no soft edges
-lanthorn stories/zork0.z6 --pictures zork0.mg1       # draw the MCGA rendition of the art
-lanthorn stories/zork1.z3 --interpreter 4 --system-colours   # dress a bare story as an Amiga
-lanthorn --machines                                  # what each interpreter number actually does
-```
-
-Naming an art archive picks the machine with it, so `--pictures zork0.mg1` also
-reports an IBM PC unless `--interpreter` says otherwise. On a bare story file
-nothing has named a machine, which is why the Amiga line asks for its colours
-explicitly — off an Amiga floppy that happens on its own.
-
-**Turn things off**
-
-```bash
-lanthorn stories/sherlock.z5 --no-sound          # quiet; the border still flashes as the cue
-lanthorn stories/zork0.z6 --no-images            # skip the artwork; the prose still plays
-lanthorn stories/zork0.z6 --image-protocol kitty # force a protocol instead of auto-detecting
-```
-
-The two image lines name a Version 6 story because that is where the choice
-bites: a v5 game has no artwork of its own, and the only picture it could cost
-you is the cover in the story picker.
+And the thing that needs no keys at all: **explore, and watch the map draw
+itself.**
 
 ---
 
-## Highlights
+## What it does
 
-- **Three engines, one player** — a clean-room **Z-machine** (v3–v8, incl.
-  graphical v6), **Glulx** (Inform 7, with an accelerated veneer and full Glk
-  0.7.6), and **Scott Adams** (ScottFree), auto-detected from the file. Pure
-  Rust, no C bindings, zero runtime deps. → [interpreter](docs/features/interpreter.md)
-- **Live automapping** — rooms and connections placed, routed, and de-overlapped
-  as you explore, split across switchable multi-level **layers**, and
-  continuously re-tidied. Engine-agnostic: the same map grows for *Zork*,
-  *Counterfeit Monkey*, or *Adventureland*. Click any room — on the map or in
-  the **matrix** view — and lanthorn highlights the way there from where you
-  stand; a docked **room panel** follows you with the current room's exits,
-  contents and connections. → [mapping](docs/features/mapping.md)
-- **Graphical Z-machine v6** — *Zork Zero*'s full illustrated frame (banner,
-  columns, per-room compass, illuminated drop-caps) rendered faithfully at an
-  authentic 640×400, with a `hybrid` / `raster` render choice. A terminal taller
-  than the screen the game was drawn for is filled by *extending* the border out
-  of its own artwork rather than stretching it — a banded column picks up more
-  bands, at the spacing the artist drew them.
-  → [v6 graphics](docs/features/v6-graphics.md)
-- **Even the games that predate colour** — a v1–v4 story has no colour concept at
-  all, so everything you see for one is the *interpreter's* presentation rather
-  than anything the story asked for. Open *Zork I* off a Commodore disk or
-  *Spellbreaker* off an Amiga floppy and lanthorn dresses the pane the way that
-  machine's own interpreter dressed its screen: its page and ink, its status line
-  — the Amiga's is not a band at all, the reversal sitting behind each run of text
-  with the page showing between them — and the shape of its cursor. Nine machines,
-  every value measured off emulator captures of the release disks rather than
-  guessed. → [interpreter](docs/features/interpreter.md)
-- **The machine's own typeface, off the machine's own media** — Version 6 text is
-  set in the face the original interpreter drew with, read from the media rather
-  than bundled: *Arthur*'s proportional face off its Amiga floppy, stepped at the
-  game's own per-glyph advances; Monaco out of a Macintosh resource fork; and,
-  from boot media you supply, **Geneva** off a Mac OS System file and **topaz 8**
-  out of a Kickstart ROM — the only place topaz 8 has ever existed. Nothing is
-  shipped, copied or licensed, and with no such media present the built-in face
-  answers as it always did. → [v6 graphics](docs/features/v6-graphics.md)
-- **Faster redraws, and a scrollback that stops costing** — a graphics window, the
-  chrome ring and the raster composite each keep their image id across redraws, so
-  a changed picture costs the picture instead of the whole frame: up to two orders
-  of magnitude fewer bytes on a Kitty redraw that only moved one placard, sent
-  deflated where the terminal has actually said it can inflate them. And the
-  transcript wrap is incremental rather than rebuilt every frame, so a
-  twenty-thousand-turn session draws — and answers a keystroke — at the cost of
-  its first. → [v6 graphics](docs/features/v6-graphics.md)
-- **Play straight off the original release disks** — Amiga, Macintosh, Apple II,
-  Atari ST, PC, Commodore and the *Lost Treasures* CDs, with the artwork and the
-  sound each disk carries and the machine it came from. See
-  [**Play the original disks**](#play-the-original-disks) below.
-  → [interpreter](docs/features/interpreter.md)
-- **Pictures in your terminal** — cover art, in-game Glulx graphics windows, and
-  inline images render with your terminal's best protocol (Kitty / iTerm2 /
-  Sixel) and a universal half-block fallback. → [interface](docs/features/interface.md)
-- **Built-in debug inspector** — `/debug` turns the map pane into a live
-  disassembler with PC tracking, opcode hover help, and click-to-jump operands —
-  retargeted per engine (Z-machine registers, Glulx routine discovery, Scott
-  Adams' action table). → [interface](docs/features/interface.md)
-- **A full TUI** — mouse support, drag-to-resize panes, select-and-copy (over
-  SSH via OSC 52), a Journey-style click-to-compose **command band**, dictionary
-  autocomplete, a `/`-summoned fuzzy **command palette**, an inventory strip,
-  command history, notification toasts, and transcript search / filter /
-  export. → [interface](docs/features/interface.md)
-- **Three lightweight CLI players** — `zvm-cli`, `gvm-cli` and `scott-cli` play
-  any story in a bare terminal, with your scrollback intact and a screen-reader
-  mode that emits zero escape sequences. All three save and restore now, Scott
-  Adams included — it has no save format of its own, which is a fact about the
-  adventure and never was one about the host. See
-  [**The command-line players**](#the-command-line-players) below.
-  → [interpreter](docs/features/interpreter.md)
-- **Story picker & IFDB** — browse a library as a badged **list** or `g`
-  cover-gallery **grid**, with a live metadata info panel, on-demand IFDB fetch
-  cached per game, and `/` **IFDB search + download** into your library.
+- **Three engines, one player** — Z-machine v3–v8 (including graphical v6),
+  Glulx, and Scott Adams, auto-detected from the file. Clean-room, pure Rust, no
+  C bindings. → [interpreter](docs/features/interpreter.md)
+- **A map that draws itself** — rooms placed, routed and de-overlapped as you
+  explore, across switchable layers. Click a room and it shows you the way there.
+  → [mapping](docs/features/mapping.md)
+- **The original disks, as the original machines** — hand it an Amiga, Macintosh,
+  Apple II, Atari ST, PC or Commodore floppy and it plays the build on that disk,
+  with that machine's artwork, sound, palette and status line. Nine machines,
+  measured off emulator captures rather than guessed.
+  → [Play the original disks](#play-the-original-disks)
+- **Graphical v6, drawn properly** — *Zork Zero*'s illustrated frame at an
+  authentic 640×400, set in the typeface the original interpreter used, read off
+  the media rather than bundled. → [v6 graphics](docs/features/v6-graphics.md)
+- **Saves that remember the whole session** — map, screen and scrollback, not
+  just the game's own state, whether you press Ctrl+S or the story does its own
+  `SAVE`. Plus Quetzal import/export and per-turn rewind.
+  → [saves](docs/features/saves.md)
+- **A real terminal UI** — mouse, resizable panes, a story picker with IFDB
+  search, command palette, in-game InvisiClues, transcript search, a debug
+  disassembler, and a theme every part of which you can restyle.
   → [interface](docs/features/interface.md)
-- **In-game hints** — open a matching *InvisiClues* file and lanthorn boots it in
-  a second Z-machine over the story pane; ~50 Infocom titles can fetch one on
-  demand with `H`. → [interface](docs/features/interface.md)
-- **Sound & colour** — Z-machine bleeps + Blorb sampled audio and Glulx Glk sound
-  channels (AIFF/Ogg/MOD, per-channel volume), plus game-driven `set_colour` /
-  Glk style hints honored at 24-bit RGB. → [interpreter](docs/features/interpreter.md) · [remote audio](docs/remote-sound.md)
-- **Saves & rewind** — self-contained `.lanthorn` saves (map + VM + screen +
-  transcript) written by Ctrl+S *and* by the story's own `SAVE`, so an in-game
-  restore brings your scrollback back too; named slots, standard Quetzal
-  import/export, auto-save/load, and a per-turn **rewind/replay** history with the
-  map reconstructed at each moment.
-  → [saves](docs/features/saves.md) · [persistence model](docs/persistence.md)
-- **Deeply themeable** — a 7-role palette the whole UI derives from, first-class
-  styling for all 11 Glk styles, per-game looks, a templated status bar, and a
-  fully configurable keymap in an auto-seeded, live-reloadable `style.toml`.
-  → [customization](docs/features/customization.md)
-- **Crash-proof** — a faulting story halts with a call-frame stack trace (saved
-  to `~/.lanthorn/crash.log`) while the app stays interactive, instead of taking
-  the interpreter down. → [interpreter](docs/features/interpreter.md)
 
-For the full, exhaustive feature list see **[`docs/features/`](docs/features/)**;
-for the standards lanthorn implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
-Treaty of Babel) see **[`docs/standards.md`](docs/standards.md)**; for the crate
-layout and I/O design see **[`docs/architecture.md`](docs/architecture.md)**.
-
----
+There is a great deal more than this — proportional fonts off a Kickstart ROM,
+Glk sound channels, a click-to-compose command band, screen-reader output. The
+exhaustive version lives in [**`docs/features/`**](docs/features/); the standards
+implemented are in [**`docs/standards.md`**](docs/standards.md).
 
 ## Play the original disks
 
@@ -309,119 +178,25 @@ lanthorn "LostTreasures1.iso" --story 3       # a compilation CD
 | Atari ST floppy | `.st` | Atari ST (5) |
 | Commodore 1541 | `.d64` | Commodore 128 (7) |
 | PC floppy | `.ima` `.img` | — |
-| CD-ROM, incl. hybrid Mac/PC discs | `.iso` `.bin` | Macintosh (3) or —, per file |
+| CD-ROM, incl. hybrid Mac/PC discs | `.iso` `.bin` | Macintosh (3) or PC/DOS, per file |
 
-**A CD-ROM is not a machine**, which is why its row names two. The *Lost
-Treasures* discs carry the Macintosh and DOS builds in one filesystem, so a
-single answer would be wrong for half the disc: a file Apple's ISO 9660
-extension identifies as a Macintosh one is played as a Macintosh, and a file it
-does not leaves whatever rule is already in force. A dash is that — no number
-stated, the current default stands, which for a PC floppy is simply your
-terminal. `--interpreter <n>` overrides any of them.
-
-(The extension column is what a *scan* offers to open, not a claim about the
-bytes: several formats share a spelling, and what a volume actually **is** gets
-decided by reading it.)
-
-**A release pressed across several floppies is one game.** Name any single
-volume and the rest are found beside it — *Arthur*'s Apple press keeps its story
-in five segments and its 168 pictures across four disks. The story browser shows
-one row per game, not one per platter, so every story on a compilation is
-reachable and each keeps its own saves.
-
-**The artwork comes off the disk in the disk's own format** — Amiga, Apple II
-(8-byte records, RLE and XOR), the PC archives (LZW and all), and the Macintosh
-monochrome plate — rather than from a converted Blorb. EGA and CGA plates are
-drawn in the colours their card fixed. Where a release offers more than one
-rendition, a dialog, a flag and a key all reach the same choice.
+**The artwork comes off the disk in the disk's own format**, not from a converted
+Blorb — and where a release shipped more than one rendition (MCGA, EGA, CGA, the
+Macintosh's monochrome plates), you can pick.
 
 **And the sound.** *The Lurking Horror* and *Sherlock* shipped sampled effects on
 their release disks years before Blorb existed, in a format nothing else reads.
-lanthorn plays them — off the Amiga floppies and off the Macintosh `/MAC/SOUND`
-layout on the *Lost Treasures* CD — including the **pitch**. Each effect names a
-note, each sample states the note it was recorded at, and the gap between the two
-is the bend, so *Sherlock*'s heartbeat really does beat at three speeds from one
-recording. That model was read out of the 68000 interpreter Infocom shipped
-rather than inferred from the files.
+lanthorn plays them, pitch-bend and all — so *Sherlock*'s heartbeat really does
+beat at three speeds from one recording.
 
-**A disk outranks a `.blb` filed beside it**, for sound and graphics alike: the
-disk is the rendition Infocom pressed, and a Blorb is somebody's later
-re-rendering of it — sometimes at audibly different pitches. `/play-sound` says
-which source answered, and names a Blorb that is present but outranked rather
-than leaving you wondering.
 
-**And now the typeface, on the Amiga.** *Arthur*'s Amiga floppy carries a real
-proportional font rather than a fixed grid, and lanthorn now draws it at the
-game's own per-glyph advances instead of an even-width approximation — the same
-look the machine had, straight off the floppy with nothing to install. It needs
-the **raster** renderer, which paints the whole frame as an image: hybrid is the
-default and draws text as your terminal's own characters, one glyph per cell,
-which is what makes it crisp and is also why a proportional face cannot fit in
-it. `/set-v6-render raster` switches live, or `v6_render = "raster"` in
-`config.toml` makes it the default.
-
-*Journey*, *Beyond Zork* and *Shogun*'s Amiga releases carry a fixed 8×8
-character set instead of a typeface, and set in **topaz 8** — the face Infocom's
-Amiga interpreter actually painted prose with — as soon as a Kickstart dump is
-sitting in `~/.lanthorn/`. It has to come from a ROM because topaz 8 exists
-nowhere else; a Workbench floppy's `FONTS:` drawer carries `topaz/11` and six
-display faces no Infocom interpreter ever drew with.
-
-**The Macintosh gets both halves, and which one you see depends on what you have
-lying around.** Infocom's Mac games ship Monaco (`FONT` 524), a monospaced
-stand-in, and lanthorn draws it off the resource fork on that machine's own 7×15
-cell. But the face the real interpreter *painted* was Geneva, and Geneva lives in
-the Macintosh System file that shipped with every Mac and no game — so drop a Mac
-OS System disk into `~/.lanthorn/` and prose sets in **Geneva 12**, stepped at its
-own proportional advances, with Monaco kept for the fixed-pitch runs the game asks
-for by name. Nothing is shipped, copied or licensed: the media stays yours,
-exactly the arrangement `stories/` already runs on.
+**And the typeface.** *Arthur*'s Amiga floppy carries a real proportional font,
+drawn at the game's own per-glyph advances — try `/set-v6-render raster` to see
+it. Drop your own `Kick12.rom` or a Mac OS System file into `~/.lanthorn` and the
+system faces come too: topaz 8, and Geneva, which lives on no Infocom disk at
+all.
 
 → [interpreter](docs/features/interpreter.md) · [v6 graphics](docs/features/v6-graphics.md)
-
----
-
-## The command-line players
-
-`zvm-cli`, `gvm-cli` and `scott-cli` play any story in a bare terminal — no map,
-no panes, happy in a pipe or a script. They ship in every release archive
-alongside `lanthorn` itself.
-
-```bash
-zvm-cli zork1.z3                  # play
-zvm-cli "Sherlock.adf"            # release media works here too
-zvm-cli --machines                # what machine is what
-```
-
-- **`--pin bottom` gives you your terminal's scrollback back.** A terminal only
-  files a line into its history when the line scrolls off the **top of the
-  screen** — so pinning the status line up there, which is what every interpreter
-  has always done, means nothing the game prints is ever archived. Put the fixed
-  window *under* the story instead and the story text scrolls off the top
-  normally: `Shift-PageUp`, the wheel and `tmux` copy-mode all reach what the
-  game printed, with no scrollback buffer of our own in the way.
-
-  `--pin top` remains the **default** and keeps the classic layout — and, being
-  the classic layout, it archives nothing. `/pin` swaps them mid-game, so you can
-  play with the bar on top and drop it to the bottom when you want to scroll
-  back. Whichever you choose, quitting releases the pinned region and leaves your
-  shell prompt below the game rather than in the middle of it — on `quit`, on
-  Ctrl-D and on Ctrl-C alike.
-- **The save prompt lists your saves** and a number picks one, so you needn't
-  remember what you called it. Saving over one asks first.
-- **Release media, the same as the TUI.** A disk holding several stories asks
-  with a numbered menu labelled by version, release and serial — the only thing
-  that tells four files called `STORY.DAT` apart — and names them from a bundled
-  titles table where it can. With stdin piped it never prompts into the void.
-- **A screen-reader mode.** `--screen-reader` (automatic under `TERM=dumb`) emits
-  **zero escape sequences**, hands echo and line editing back to the terminal,
-  quiets the ever-changing status line while announcing **score changes** and
-  answering **`/status`** on demand, and drops the `[MORE]` pager. `NO_COLOR` is
-  honoured separately, as colour-only.
-- **`--machines`** prints the ZMSD §11.1.3 machine table zvm holds: every
-  setting per row, each decline argued, and each machine's period look beside it.
-
-→ [interpreter](docs/features/interpreter.md)
 
 ---
 
@@ -438,69 +213,12 @@ which, so you rarely set anything. Full pixel graphics reach **all three OSes**:
 | **Sixel** | Windows Terminal **1.22+**, foot, xterm (+ others) | Windows 11 · Linux · macOS |
 | *Unicode half-blocks* (automatic fallback) | any terminal, incl. SSH / tmux / plain | everywhere |
 
-Anything without a pixel protocol — a remote session, a bare console — degrades
-to the universal half-block renderer automatically, so a story always stays
-playable and the map always draws. Sixel has the heaviest **encode** cost of the
-three (the v6 `raster` mode leans on it hardest); lanthorn encodes off the UI
-thread so playing stays responsive, but on a very large pane Kitty or iTerm2 will
-feel snappier. Force a specific path with
-`--image-protocol <auto|halfblocks|kitty|sixel|iterm2>`, or turn image rendering
-off entirely with `--no-images`.
+Anything without a protocol degrades to half-blocks automatically, so a story is
+always playable and the map always draws. Force a path with `--image-protocol`,
+or turn images off with `--no-images`.
 
----
-
-## Missing or Corrupted Characters / Glyphs
-
-If your map is peppered with tofu boxes or question marks, your font is missing
-some of the line art lanthorn draws with. Any mono-space Nerd Font carries the
-lot: https://www.nerdfonts.com
-
-Here is exactly what the map asks of your font, so you can check a favourite
-before switching away from it:
-
-| Range | Block | Used for |
-|---|---|---|
-| `U+2500`–`U+257F` | Box Drawing | room outlines, connector paths, junctions |
-| `U+2580`–`U+259F` | Block Elements | panel fills, dividers, the half-block image renderer |
-| `U+2190`–`U+2193`, `U+2196`–`U+2199` | Arrows | connector arrowheads, including the diagonals `↖↗↘↙` |
-| `U+25B2`, `U+25B6`, `U+25BC`, `U+25C0`, `U+25CF` | Geometric Shapes | filled arrowheads, the note marker `●` |
-| `U+2297`, `U+2299` | Misc. Mathematical | in/out portal icons `⊗ ⊙` |
-| **`U+1FBA0`–`U+1FBA3`** | **Symbols for Legacy Computing** | **the diagonal corner stubs `🮠🮡🮢🮣`** |
-
-Everything above the last row has been in Unicode for decades and is safe
-essentially everywhere. **The half-diagonals are the one modern ask** — Symbols
-for Legacy Computing arrived in Unicode 13 (2020), and plenty of otherwise
-excellent fonts still don't cover it. If your diagonal *passages* come out blank
-while everything else draws fine, that block is your culprit.
-
-> **The fix, if your font is missing them.** Turn the stubs off and those
-> connectors route orthogonally with plain box-drawing characters instead. The
-> line is already in your `~/.lanthorn/style.toml`, commented out — uncomment it
-> and set it to `false`:
->
-> ```toml
-> [map]
-> diagonal_corners = false
-> ```
->
-> `reload-style` picks it up without restarting. Picking a font that covers the
-> block works too, and keeps the nicer diagonals.
-
-Style settings live in `~/.lanthorn/style.toml` (create it if absent — every
-setting has a default, so it only needs the lines you change), and `reload-style`
-applies edits without restarting. A per-game file at
-`~/.lanthorn/saves/<story-filename>.save/style.toml` layers over the global one.
-Styling belongs in `style.toml`, **not** `config.toml`; `[symbols]` in a config
-file is a legacy location lanthorn will tell you to move.
-
-Diagonal *arrowheads* are a different thing entirely — they live in the ancient
-Arrows block, so if those are missing, something else is wrong. Individual glyphs
-can also be swapped one at a time under `[symbols.overrides]`; see
-[customization & configuration](docs/features/customization.md).
-
-Nerd Font glyphs themselves (Private Use Area) are strictly opt-in — you only
-touch them if you choose a `nerdfont` preset for `arrow_set` or `portal_icons`.
-The default look needs no patched font at all.
+Boxes or blank squares where glyphs should be? That is a font gap, not a bug —
+see [**missing or corrupted glyphs**](docs/glyphs.md).
 
 ---
 
@@ -516,43 +234,27 @@ live under `~/.lanthorn/saves/<story-filename>.save/` by default; `--data-dir
 
 ---
 
-## Building from source & development
+## The command-line players
 
-Prefer to build it yourself? All you need is a Rust toolchain. On Linux, the
-default `playback` audio feature also wants ALSA headers: `libasound2-dev`
-(Debian/Ubuntu) or `alsa-lib-devel` (Fedora). Then
-`cargo build --release` produces `target/release/lanthorn`.
+`zvm-cli`, `gvm-cli` and `scott-cli` play any story in a bare terminal — no map,
+no panes, your scrollback intact. Useful over a slow link, for a screen reader
+(`--screen-reader` emits zero escape sequences), or for debugging one engine
+without the TUI around it. They ship in every release archive.
 
-```bash
-cargo build --workspace          # build everything
-cargo test --workspace           # fast suite (a few slow tests are skipped)
-cargo test --workspace -- --include-ignored  # everything, incl. slow full-game walkthroughs
-cargo run -p zvm-cli   -- story.z5    # DOS-style CLI player (no map)
-cargo run -p gvm-cli   -- story.ulx   # DOS-style Glulx CLI player (no map)
-cargo run -p scott-cli -- story.dat   # DOS-style Scott Adams CLI player (no map)
-```
-
-The workspace is four shipped binaries — the mapping TUI (`lanthorn`, in the
-`app` crate) plus three no-map CLI players — over a set of library crates: the
-three VMs (`zvm` / `gvm` / `scott`), the VM-agnostic `mapper`, and supporting
-`blorb` / `audio` crates. CI runs the full suite on Linux, macOS, and Windows,
-plus clippy, on every push and PR. A few slow full-game Glulx walkthroughs
-(Kerkerkruip, Counterfeit Monkey) are marked `#[ignore]`; pass `--include-ignored`
-to run them.
-
-The `audio` crate carries two default-on features: `playback` (real output via
-`rodio`) and `mod-music` (ProTracker `.mod` playback). Build with
-`--no-default-features` for a compile-time no-op backend (headless/CI); with
-`playback` on, a missing audio device degrades to silence rather than erroring.
-
-Cut a release by pushing a version tag (`git tag v0.1.0-beta.4 && git push origin
-v0.1.0-beta.4`) — the release workflow builds every platform and opens a draft
-GitHub Release; a hyphenated suffix marks it a pre-release. The release body is
-assembled from that tag's [`CHANGELOG.md`](CHANGELOG.md) section, so write the
-entry *before* tagging — a tag with no matching section still releases, just
-without the summary. Bump the workspace `version` in `Cargo.toml` to match.
+→ [**the CLI players**](docs/features/interpreter.md)
 
 ---
+
+## Building from source
+
+```sh
+cargo build --workspace --release
+```
+
+Rust stable, no system dependencies beyond ALSA on Linux (`libasound2-dev`) for
+sound. The crate layout, the engine/host seam and the render pipeline are in
+[**docs/architecture.md**](docs/architecture.md); testing conventions are in
+[**CLAUDE.md**](CLAUDE.md).
 
 ## License
 

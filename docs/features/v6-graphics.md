@@ -420,12 +420,12 @@ same place:
 and it composes with your shell, so you can flip between renditions in successive
 launches without touching any config. It **outranks** the config key: the more
 specific and more recent instruction wins. It also *requires* a story on the
-command line, and says so immediately rather than starting the browser and
+command line, and says so immediately rather than starting the picker and
 quietly discarding the flag — the flag names art for a story, so it has no
 meaning without one.
 
 **The launch-options dialog** is the richest door, because it can show you what
-you have before you choose. Select a story in the browser and press **Shift-Enter**
+you have before you choose. Select a story in the picker and press **Shift-Enter**
 — plain Enter launches as it always has, so you meet this only when you ask for
 it. (`o` does the same thing on terminals that can't tell Shift-Enter from Enter,
 and so does double-right-clicking a row.) It lists the archives detected **for
@@ -465,7 +465,7 @@ than by its name, which matters here more than anywhere: `CPic.data` and
 `Pic.data` are one codec under two names that tell you nothing, and only the
 file's own two-colour flag says which is which.
 
-The same list appears, read-only, in the browser's **info panel**, so you can see
+The same list appears, read-only, in the picker's **info panel**, so you can see
 what a game has without opening anything: each detected archive with its flavour
 and picture count, and an arrow against the one the game's `config.toml` actually
 names. Panel and dialog run the same detection, so they cannot tell you two
@@ -838,7 +838,7 @@ it was never a workaround — the pixels they build are the pixels they ship.
 
 That argument was never about v6, and the same pair was still standing at the four
 places a picture is *fitted into a cell box*: Glulx graphics windows, the cover panel
-in the story browser, the gallery's cover-view tiles, and the resource preview. All
+in the story picker, its cover-grid tiles, and the resource preview. All
 four now make one call, and on half-blocks it resamples once onto the sample grid too.
 The win here is smaller and honestly so — a jacket scan into a twenty-cell tile
 pre-scaled to 190×220 device pixels, not to 50 MB — but it is paid per *tile* and on
@@ -3239,7 +3239,7 @@ system_font_disk = "1.3"      # any case-insensitive piece of the filename
 It only breaks a tie. A file named there that doesn't carry the face being asked
 for falls through to the others, because a naming preference must never lose you
 a face; with no preference the pool is ordered by filename, which is stable and
-visible. The browser's info panel lists every face it found, grouped by the medium
+visible. The picker's info panel lists every face it found, grouped by the medium
 it came off, so you can see what a disk is worth before a game is even launched.
 
 ### The Amiga's face is in the ROM

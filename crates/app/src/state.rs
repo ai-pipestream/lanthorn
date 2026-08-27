@@ -2076,6 +2076,11 @@ pub struct OverlayState {
     /// it; cancel leaves it untouched. See [`PendingOverwrite`] for what a
     /// confirm resumes. (SQ-0648)
     pub confirm_overwrite_save: Option<ConfirmOverwriteSave>,
+    /// When true, the "turn history is not being recorded — switch it on?"
+    /// prompt is open (SQ-1091). Raised by `open-history` when there is nothing
+    /// to replay AND the capture that would have filled it is off, which used to
+    /// be a silent no-op.
+    pub history_prompt: bool,
     /// When true, the first-use aux-storage prompt is open.
     pub aux_prompt: bool,
     /// When true, the "Save state before quitting?" confirmation dialog is open.
@@ -3498,6 +3503,7 @@ impl AppState {
             || self.overlays.reset_dialog
             || self.overlays.game_over
             || self.overlays.save_name_dialog.is_some()
+            || self.overlays.history_prompt
             || self.overlays.aux_prompt
             || self.overlays.quit_dialog
             || self.overlays.launch_dialog
@@ -3659,6 +3665,7 @@ impl AppState {
         if self.overlays.reset_dialog { v.push("reset_dialog"); }
         if self.overlays.game_over { v.push("game_over"); }
         if self.overlays.save_name_dialog.is_some() { v.push("save_name_dialog"); }
+        if self.overlays.history_prompt { v.push("history_prompt"); }
         if self.overlays.aux_prompt { v.push("aux_prompt"); }
         if self.overlays.quit_dialog { v.push("quit_dialog"); }
         if self.overlays.launch_dialog { v.push("launch_dialog"); }

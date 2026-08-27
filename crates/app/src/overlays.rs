@@ -56,6 +56,7 @@ pub(crate) struct OverlayRects {
     /// by the higher-z-order dialogs in the ladder.
     pub dialog: Option<DialogRects>,
     pub aux_dialog: Option<AuxDialogRects>,
+    pub history_prompt: Option<app::render::history_prompt::HistoryPromptRects>,
     pub reset_dialog: Option<ResetDialogRects>,
     pub game_over: Option<GameOverDialogRects>,
     pub save_name_dialog: Option<SaveNameDialogRects>,
@@ -89,6 +90,7 @@ pub(crate) fn draw_all(
     palette_hits: &mut Vec<(usize, Rect)>,
 ) -> OverlayRects {
     let mut out = OverlayRects {
+        history_prompt: None,
         dialog: dialog_seed,
         aux_dialog: None,
         reset_dialog: None,
@@ -194,6 +196,8 @@ pub(crate) fn draw_all(
 /// state changes (focus, checkbox, text field) are applied inside the `Overlay`
 /// methods and never surface here.
 pub(crate) enum OverlayAct {
+    /// Switch `record_turn_history` on and persist it (SQ-1091).
+    EnableTurnHistory,
     AuxArchive,
     AuxGlobal,
     ResetConfirm,
@@ -229,6 +233,7 @@ pub(crate) enum OverlayOutcome {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[allow(dead_code)] // introspection hook exercised only by the ladder-order test
 pub(crate) enum OverlayKind {
+    HistoryPrompt,
     Aux,
     Reset,
     GameOver,
@@ -263,6 +268,9 @@ pub(crate) trait Overlay {
 /// whenever both are `Some` at once, or Cancel would have nothing to fall
 /// back into. This is otherwise the exact order of the old run-loop `if`-ladder.
 pub(crate) const COMMON_DIALOGS: &[&dyn Overlay] = &[
+    // Topmost: the player asked for it by running `open-history`, and it is the
+    // only thing on screen when it is up.
+    &HistoryPromptOverlay,
     &AuxOverlay,
     &ResetOverlay,
     &GameOverOverlay,
@@ -295,6 +303,58 @@ fn left_down(m: &MouseEvent) -> Option<Position> {
 fn is_ctrl_char(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(_))
         && key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
+// ── "Record turn history?" prompt (SQ-1091) ────────────────────────────────
+//
+// Two buttons and a close, so the whole of it is the shared ladder: `cycle_focus`
+// for the focus ring, `dialog_button_key_focused` for Enter/Esc/accelerators, and
+// `left_down` + the rects the renderer handed back for the mouse. Nothing here is
+// bespoke except which act each button maps to.
+struct HistoryPromptOverlay;
+impl Overlay for HistoryPromptOverlay {
+    fn kind(&self) -> OverlayKind { OverlayKind::HistoryPrompt }
+    fn is_open(&self, ov: &OverlayState) -> bool { ov.history_prompt }
+    fn draw(&self, state: &AppState, area: Rect, buf: &mut Buffer, out: &mut OverlayRects) {
+        out.history_prompt = app::render::history_prompt::draw_history_prompt(state, area, buf);
+    }
+    fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
+        match key.code {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, 1);
+                OverlayOutcome::Consumed
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, -1);
+                OverlayOutcome::Consumed
+            }
+            KeyCode::Esc => {
+                state.overlays.history_prompt = false;
+                OverlayOutcome::Consumed
+            }
+            KeyCode::Enter => {
+                state.overlays.history_prompt = false;
+                if state.overlays.dialog_focus == 0 {
+                    OverlayOutcome::Act(OverlayAct::EnableTurnHistory)
+                } else {
+                    OverlayOutcome::Consumed
+                }
+            }
+            _ => OverlayOutcome::Consumed,
+        }
+    }
+    fn mouse(&self, state: &mut AppState, m: &MouseEvent, panes: &PaneRects) -> OverlayOutcome {
+        let Some(pt) = left_down(m) else { return OverlayOutcome::Consumed };
+        let Some(hp) = &panes.history_prompt else { return OverlayOutcome::Consumed };
+        if hp.enable.is_some_and(|r| r.contains(pt)) {
+            state.overlays.history_prompt = false;
+            return OverlayOutcome::Act(OverlayAct::EnableTurnHistory);
+        }
+        if hp.cancel.is_some_and(|r| r.contains(pt)) || hp.close.is_some_and(|r| r.contains(pt)) {
+            state.overlays.history_prompt = false;
+        }
+        OverlayOutcome::Consumed
+    }
 }
 
 // ── Aux-storage prompt ─────────────────────────────────────────────────────
@@ -805,6 +865,51 @@ mod tests {
     /// save-name ▸ text-entry ▸ confirm-delete ▸ quit ▸ launch.
     /// `topmost_common_dialog` must return the highest-priority open overlay
     /// regardless of which lower ones are also open.
+    /// Enter on the affirmative button asks the run loop to switch recording on;
+    /// Esc and the second button just close (SQ-1091).
+    ///
+    /// The overlay cannot persist the setting itself — `write_config_file` needs
+    /// paths the run loop owns — so what is asserted here is the ACT it returns.
+    /// The arm that consumes it is three lines in `main.rs` and is type-checked by
+    /// the match being exhaustive.
+    #[test]
+    fn the_history_prompt_returns_an_enable_act_only_on_the_affirmative() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+
+        let mut s = AppState::default();
+        s.overlays.history_prompt = true;
+        s.overlays.dialog_focus = 0;
+        let out = HistoryPromptOverlay.key(&mut s, &key(KeyCode::Enter));
+        assert!(matches!(out, OverlayOutcome::Act(OverlayAct::EnableTurnHistory)));
+        assert!(!s.overlays.history_prompt, "and it closes behind itself");
+
+        // Focus on "Not now" → closes, asks for nothing.
+        let mut s = AppState::default();
+        s.overlays.history_prompt = true;
+        s.overlays.dialog_focus = 1;
+        let out = HistoryPromptOverlay.key(&mut s, &key(KeyCode::Enter));
+        assert!(matches!(out, OverlayOutcome::Consumed));
+        assert!(!s.overlays.history_prompt);
+
+        // Esc → closes, asks for nothing, whatever the focus.
+        let mut s = AppState::default();
+        s.overlays.history_prompt = true;
+        s.overlays.dialog_focus = 0;
+        let out = HistoryPromptOverlay.key(&mut s, &key(KeyCode::Esc));
+        assert!(matches!(out, OverlayOutcome::Consumed));
+        assert!(!s.overlays.history_prompt);
+
+        // Tab moves between exactly two buttons and wraps.
+        let mut s = AppState::default();
+        s.overlays.history_prompt = true;
+        s.overlays.dialog_focus = 0;
+        HistoryPromptOverlay.key(&mut s, &key(KeyCode::Tab));
+        assert_eq!(s.overlays.dialog_focus, 1);
+        HistoryPromptOverlay.key(&mut s, &key(KeyCode::Tab));
+        assert_eq!(s.overlays.dialog_focus, 0, "two buttons, so it wraps");
+    }
+
     #[test]
     fn topmost_common_dialog_preserves_ladder_order() {
         // No overlay open → None.
@@ -814,6 +919,7 @@ mod tests {
         // Each overlay alone resolves to itself, in ladder order.
         #[allow(clippy::type_complexity)]
         let cases: &[(fn(&mut OverlayState), OverlayKind)] = &[
+            (|o| o.history_prompt = true, OverlayKind::HistoryPrompt),
             (|o| o.aux_prompt = true, OverlayKind::Aux),
             (|o| o.reset_dialog = true, OverlayKind::Reset),
             (|o| o.game_over = true, OverlayKind::GameOver),

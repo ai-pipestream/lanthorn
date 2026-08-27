@@ -41,7 +41,7 @@ still reach in and override any single selector by name.
   with the story's filename appended in parentheses when it differs from the
   title (e.g. `Journey: The Quest Begins (journey-r83-s890706.z6)`) — a bare
   filename with no known title (or a file already named after it) shows with
-  no parenthetical. The title is the *same* one the story browser lists, drawn
+  no parenthetical. The title is the *same* one the story picker lists, drawn
   from the same metadata in the same order — a blorb's own iFiction record, then
   the fetched IFDB details cached beside your saves, then lanthorn's bundled
   title tables — so a game can't be *Anchorhead* in the library and `anchor` in
@@ -237,7 +237,7 @@ switches that make lanthorn feel like yours without opening the whole registry.
   `hotkey_key` style selector. Direct key bindings
   still live in `[keymap.global]`, `[keymap.map]` (reached only while the debug
   inspector holds the right-hand pane; it ships no defaults of its own),
-  `[keymap.anim]`, and `[keymap.browser]` (the story browser — see below) as
+  `[keymap.anim]`, and `[keymap.browser]` (the story picker — see below) as
   `"key" = "command args"` — the **key on the left**, the command it runs on the
   right, spelled the way the registry spells it (hyphenated: `save-state`,
   `zoom-map in`). Bind one command to two keys by writing two entries. Get the two
@@ -259,7 +259,7 @@ switches that make lanthorn feel like yours without opening the whole registry.
   "ctrl+g" = "dump-cells"
   "ctrl+t" = "dump-terminal"
   ```
-- **The story browser's keys are bindable too** — the screen you get when
+- **The story picker's keys are bindable too** — the screen you get when
   lanthorn is pointed at a directory used to be the one surface whose keys were
   not data: hardcoded match arms, and a footer hint typed out by hand beside
   them. They now go through the same registry as everything else, in their own
@@ -278,7 +278,7 @@ switches that make lanthorn feel like yours without opening the whole registry.
   `reverse-sort`, `quit-browser` and `cancel-browser`. They are a world of their
   own: a game command in `[keymap.browser]` is refused with a warning (there is
   no game yet for it to act on), and these do not appear in `/help` or the
-  command palette, because the browser has no command line to type them into.
+  command palette, because the picker has no command line to type them into.
   The footer hint bar is *generated* from these bindings, so rebind `g` and the
   footer says so without anyone editing a string.
 - **Command palette** — press `/` at an empty prompt (or `/` inside the leader
@@ -419,7 +419,7 @@ re-seed the new template, or hand-write the new shape from
   choice, or two-colour artwork that has no colours to give and so switches
   `honor_game_colours` off for that one rendition. None of them can reach
   `config.toml`. That matters because saving settings is not always something you
-  set out to do — the story browser's "remember this directory?" prompt writes the
+  set out to do — the story picker's "remember this directory?" prompt writes the
   file too, and before this a single `--no-sound` session was enough to leave every
   later launch silent with nothing on screen to say why. The rule is one line: while
   a value is still the one that launch handed it, the file keeps whatever *it* said.
@@ -542,7 +542,7 @@ re-seed the new template, or hand-write the new shape from
   the same face from different releases of the operating system, since a System 7
   Geneva is not the 1988 one; not worth setting otherwise, and on Workbench 1.2
   versus 1.3 it changes nothing at all, because those two ship identical font
-  drawers. The browser's info panel lists every face found, grouped by the medium
+  drawers. The picker's info panel lists every face found, grouped by the medium
   it came off. See
   [Graphical v6](v6-graphics.md#your-own-boot-disk-your-machines-own-typeface).
 - **Story text margins** — `text_margin_x` / `text_margin_y` (default 0) reserve
