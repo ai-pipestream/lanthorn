@@ -689,8 +689,8 @@ fn fmvpoker_menu_labels_are_clickable_where_drawn(honor: bool, mode: app::config
                 .unwrap_or(0)
                 + pane
         };
-        let cy = best(top, bot, map.img_y, map.img_h, map.native_h, map.cell_h, map.pane_y, area.height);
-        let cx = best(x0, x1 - 1, map.img_x, map.img_w, map.native_w, map.cell_w, map.pane_x, area.width);
+        let cy = best(top, bot, map.img_y, map.img_h, map.canvas.1, map.cell_h, map.pane_y, area.height);
+        let cx = best(x0, x1 - 1, map.img_x, map.img_w, map.canvas.0, map.cell_w, map.pane_x, area.width);
 
         let (gx, gy) = map.map_click(cx, cy).unwrap_or_else(|| {
             panic!("honor={honor} {mode:?}: the cell showing {label:?} ({cx},{cy}) is off the image")

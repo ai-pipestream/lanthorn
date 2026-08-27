@@ -10,6 +10,7 @@ use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 
 use crate::engine::GraphicsWindow;
+use crate::render::v6_layout::RasterFrame;
 
 /// Two RGBA samples are "the same colour" within a small tolerance (anti-alias slack).
 fn close(a: image::Rgba<u8>, b: image::Rgba<u8>) -> bool {
@@ -637,8 +638,19 @@ pub struct V6ClickMap {
     pub img_y: f32,
     pub img_w: f32,
     pub img_h: f32,
-    pub native_w: u16,
-    pub native_h: u16,
+    /// The game-pixel canvas the drawn image maps across. This is the game's own
+    /// screen on every path but one: an EXTENDED raster frame (SQ-1032) draws a
+    /// taller canvas, whose lower rows are lanthorn's, not the game's.
+    pub canvas: (u16, u16),
+    /// The game's own screen inside that canvas.
+    ///
+    /// **The inverse is stated over `canvas`, because that is what was drawn; the
+    /// ANSWER is bounded by `screen`, because that is what the game has** (SQ-1032).
+    /// A click below an extended frame's screen is in lanthorn's own scrollback and
+    /// is dropped — not clamped onto the game's last row, which would hand the game
+    /// a plausible coordinate the player did not click. Equal to `canvas` on every
+    /// other path, so that rejection is unreachable there by construction.
+    pub screen: (u16, u16),
     /// Every region of the pane that is drawn as PACKED CELLS rather than through
     /// the letterbox scale — see [`PackedText`]. Empty when the whole pane is the
     /// scaled image, which is the common case.
@@ -722,7 +734,7 @@ impl V6ClickMap {
     /// The click's device position is taken at the clicked cell's centre, giving
     /// a subcell estimate finer than the cell grid.
     pub fn map_click(&self, col: u16, row: u16) -> Option<(u16, u16)> {
-        if self.img_w <= 0.0 || self.img_h <= 0.0 || self.native_w == 0 || self.native_h == 0 {
+        if self.img_w <= 0.0 || self.img_h <= 0.0 || self.canvas.0 == 0 || self.canvas.1 == 0 {
             return None;
         }
         if col < self.pane_x || row < self.pane_y {
@@ -746,9 +758,24 @@ impl V6ClickMap {
             // the whole terminal cell selects the character the player sees on it —
             // the same rule the row mapping below uses vertically.
             Some((left, _, native_x0)) => {
-                u32::from(native_x0) + u32::from(col - left) * 8 + 4
+                // A packed region's overshoot is a ROUNDING TAIL of cell arithmetic
+                // over cells the renderer drew, not a click outside the frame, so it
+                // is clamped exactly as it always was. (Packed regions belong to the
+                // hybrid ring, which never extends — `redraw_v6` passes none — so
+                // this clamp and the bound below can never disagree.)
+                (u32::from(native_x0) + u32::from(col - left) * 8 + 4).min(u32::from(self.screen.0))
             }
-            None => (fx * self.native_w as f32).floor() as u32 + 1,
+            None => {
+                let gx = (fx * self.canvas.0 as f32).floor() as u32 + 1;
+                // Outside the game's own screen → not the game's click (SQ-1032).
+                // Inert until a frame extends sideways, which none does; stated
+                // anyway because `screen` and `canvas` are one subject and an
+                // asymmetric bound is how the next axis gets forgotten.
+                if gx > u32::from(self.screen.0) {
+                    return None;
+                }
+                gx
+            }
         };
         let gy = match row_packed {
             Some(p) => {
@@ -757,17 +784,25 @@ impl V6ClickMap {
                 // the whole terminal row therefore selects the line the player
                 // sees on it, whatever sub-cell phase the region begins on.
                 let (top, _, native_y0) = p.rows;
-                u32::from(native_y0) + u32::from(row - top) * 16 + 8
+                (u32::from(native_y0) + u32::from(row - top) * 16 + 8).min(u32::from(self.screen.1))
             }
             None => {
                 let fy = (dy - self.img_y) / self.img_h;
                 if !(0.0..1.0).contains(&fy) {
                     return None;
                 }
-                (fy * self.native_h as f32).floor() as u32 + 1
+                let gy = (fy * self.canvas.1 as f32).floor() as u32 + 1;
+                // The rejection this quest is actually about: a click in the rows an
+                // EXTENDED frame added below the game's screen. Those rows carry
+                // lanthorn's scrollback, drawn in the game's face; the game never had
+                // them and must not be told it was clicked on its last one.
+                if gy > u32::from(self.screen.1) {
+                    return None;
+                }
+                gy
             }
         };
-        Some(((gx.min(self.native_w as u32)) as u16, (gy.min(self.native_h as u32)) as u16))
+        Some((gx as u16, gy as u16))
     }
 }
 
@@ -995,8 +1030,11 @@ struct V6Ready {
     area_w: u16,
     area_h: u16,
     proto: Protocol,
-    native_w: u16,
-    native_h: u16,
+    /// The canvas encoded, and the game's own screen inside it — see
+    /// [`V6ClickMap::canvas`] / [`V6ClickMap::screen`]. They differ only for an
+    /// extended frame (SQ-1032).
+    canvas: (u16, u16),
+    screen: (u16, u16),
     /// Where the composite itself lies inside the cell rect the protocol reports,
     /// in device pixels: `(off_x, off_y, w, h)` (SQ-1081).
     ///
@@ -1685,9 +1723,10 @@ impl GraphicsRender {
         canvas: &image::RgbaImage,
         gen: u64,
         area: Rect,
-        lock: Option<f32>,
+        frame: RasterFrame,
         reuse: Option<u32>,
     ) -> Option<V6Ready> {
+        let lock = frame.lock;
         let fs = picker.font_size();
         let box_w = area.width as u32 * fs.width.max(1) as u32;
         let box_h = area.height as u32 * fs.height.max(1) as u32;
@@ -1724,8 +1763,8 @@ impl GraphicsRender {
             area_w: area.width,
             area_h: area.height,
             proto,
-            native_w: canvas.width() as u16,
-            native_h: canvas.height() as u16,
+            canvas: (canvas.width() as u16, canvas.height() as u16),
+            screen: frame.native,
             // The id this composite is already placed under, carried across the
             // re-encode: `redraw_v6` re-confirms it off the placement it writes.
             placed_id: reuse,
@@ -1765,7 +1804,11 @@ impl GraphicsRender {
         canvas: image::RgbaImage,
         gen: u64,
         area: Rect,
-        lock: Option<f32>,
+        // SQ-1032: the frame, not the bare lock. It carries the canvas height, the
+        // magnification that height was derived from, and the GAME's own screen —
+        // one subject, so a caller cannot supply the scale and omit the bound a
+        // click has to be judged against (CLAUDE.md's refactoring policy).
+        frame: RasterFrame,
     ) {
         if area.width == 0 || area.height == 0 || canvas.width() == 0 || canvas.height() == 0 {
             return;
@@ -1776,12 +1819,12 @@ impl GraphicsRender {
         // branch that has to encode synchronously.
         let reuse = self.v6.as_ref().and_then(|r| r.placed_id);
         if self.v6.is_none() {
-            self.v6 = Self::encode_v6(picker, &canvas, gen, area, lock, None);
+            self.v6 = Self::encode_v6(picker, &canvas, gen, area, frame, None);
             return;
         }
         let picker = picker.clone();
         self.v6_job =
-            Some(std::thread::spawn(move || Self::encode_v6(&picker, &canvas, gen, area, lock, reuse)));
+            Some(std::thread::spawn(move || Self::encode_v6(&picker, &canvas, gen, area, frame, reuse)));
     }
 
     /// Drop the last-ready v6 raster composite (and detach any in-flight encode,
@@ -1908,7 +1951,7 @@ impl GraphicsRender {
         let w = sz.width.min(area.width);
         let ht = sz.height.min(area.height);
         let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - ht) / 2, w, ht);
-        let (native_w, native_h) = (ready.native_w, ready.native_h);
+        let (canvas, screen) = (ready.canvas, ready.screen);
         let pic = ready.pic;
         // Queued deletes ride out on this placement, in the same batch (SQ-0637's
         // rule); deferred back to the queue if this backend has no row to carry them.
@@ -1950,8 +1993,8 @@ impl GraphicsRender {
             img_y: (dest.y - area.y) as f32 * ch as f32 + pic.1 as f32,
             img_w: pic.2 as f32,
             img_h: pic.3 as f32,
-            native_w,
-            native_h,
+            canvas,
+            screen,
             packed_text: Vec::new(),
         });
     }
@@ -1982,8 +2025,11 @@ impl GraphicsRender {
             img_y: scale.off_y as f32,
             img_w: native.0 as f32 * scale.s,
             img_h: native.1 as f32 * scale.s,
-            native_w: native.0,
-            native_h: native.1,
+            // The hybrid ring draws the game's screen and nothing below it — the
+            // SQ-1032 extension is the raster composite's alone — so the canvas IS
+            // the screen here and the bound in `map_click` is unreachable.
+            canvas: native,
+            screen: native,
             packed_text,
         });
     }
@@ -2015,8 +2061,10 @@ impl GraphicsRender {
             img_y: 0.0,
             img_w: pane.width as f32 * cw as f32,
             img_h: pane.height as f32 * ch as f32,
-            native_w: native.0,
-            native_h: native.1,
+            // The cell path draws no game image at all and never extends anything:
+            // the pane stands for the game's screen, so canvas and screen are one.
+            canvas: native,
+            screen: native,
             packed_text: Vec::new(),
         });
     }
@@ -3637,7 +3685,7 @@ mod resample_tests {
                     let (raw, _) =
                         super::v6_fit_source(&canvas, bw, bh, None, super::v6_upscale_cap(&picker));
                     let (rw, rh) = raw.dimensions();
-                    let ready = GraphicsRender::encode_v6(&picker, &canvas, 0, area, None, None)
+                    let ready = GraphicsRender::encode_v6(&picker, &canvas, 0, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)), None)
                         .expect("kitty always builds a protocol");
                     let sz = ready.proto.size();
                     let (box_w, box_h) =
@@ -4007,7 +4055,7 @@ mod resample_tests {
             let cells = super::v6_halfblocks_grid(canvas.dimensions(), box_w, box_h, fs, None);
             let (gw, gh) = sample_grid(cells);
 
-            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None, None).expect("encode");
+            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)), None).expect("encode");
             assert_eq!(ready.proto.size(), cells, "{cols}x{rows}: the protocol reports the grid");
 
             // One resample, straight from the canvas — then the crate, whose resample
@@ -4100,7 +4148,7 @@ mod resample_tests {
         let canvas = dithered_plate(640, 400);
         for (cols, rows) in [(458u16, 144u16), (200, 60), (60, 24)] {
             let area = Rect::new(0, 0, cols, rows);
-            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None, None).expect("encode");
+            let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)), None).expect("encode");
             let cells = ready.proto.size();
             let (gw, gh) = sample_grid(cells);
             let ideal = ideal(&canvas, gw, gh);
@@ -4120,7 +4168,7 @@ mod resample_tests {
         }
         // …and at the pane the defect was reported at, by a margin worth having.
         let area = Rect::new(0, 0, 458, 144);
-        let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None, None).expect("encode");
+        let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)), None).expect("encode");
         let cells = ready.proto.size();
         let ideal = ideal(&canvas, sample_grid(cells).0, sample_grid(cells).1);
         let once = rms(&screen_grid(&ready.proto, cells), &ideal);
@@ -4156,7 +4204,7 @@ mod resample_tests {
                 .new_protocol(image::DynamicImage::ImageRgba8(img), Size::new(area.width, area.height), fit)
                 .expect("encode")
                 .size();
-            let got = GraphicsRender::encode_v6(&picker, &canvas, 1, area, None, None).expect("encode");
+            let got = GraphicsRender::encode_v6(&picker, &canvas, 1, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)), None).expect("encode");
             assert_eq!(
                 got.proto.size(),
                 want,
@@ -4694,8 +4742,8 @@ mod tests {
             img_y: 0.0,
             img_w: 100.0,
             img_h: 100.0,
-            native_w: 100,
-            native_h: 100,
+            canvas: (100, 100),
+            screen: (100, 100),
             packed_text: Vec::new(),
         }
     }
@@ -4733,8 +4781,8 @@ mod tests {
             img_w: 80.0, // 40 native * 2
             img_h: 80.0,
             packed_text: Vec::new(),
-            native_w: 40,
-            native_h: 40,
+            canvas: (40, 40),
+            screen: (40, 40),
         };
         // A click left of the pane origin is rejected outright.
         assert_eq!(m.map_click(3, 2), None);
@@ -5090,7 +5138,7 @@ mod tests {
         // last-ready composite the encode is SYNCHRONOUS (SQ-0578: a transition
         // frame has no honest previous image to show), so it is ready this frame.
         assert!(gr.v6_wants_build(7, area), "cold start wants the first build");
-        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area, None);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)));
         assert!(gr.v6_job.is_none(), "a cold-start encode runs synchronously, no worker");
         assert!(gr.v6.is_some(), "the cold-start encode installed immediately");
         assert_eq!(gr.v6.as_ref().unwrap().gen, 7);
@@ -5100,7 +5148,7 @@ mod tests {
         // for a newer generation (newest wins: the in-flight one finishes, then
         // the next frame builds whatever the current generation is).
         assert!(gr.v6_wants_build(8, area), "a changed generation wants a fresh build");
-        gr.spawn_v6_encode(&picker, canvas.clone(), 8, area, None);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 8, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)));
         assert!(gr.v6_job.is_some(), "a warm re-encode runs on the worker");
         assert!(!gr.v6_wants_build(8, area), "an in-flight encode suppresses a rebuild");
         assert!(!gr.v6_wants_build(9, area), "an in-flight encode suppresses even a newer generation");
@@ -5113,7 +5161,7 @@ mod tests {
         gr.invalidate_v6();
         assert!(gr.v6.is_none() && gr.v6_job.is_none(), "invalidation drops composite and job");
         assert!(gr.v6_wants_build(8, area), "an invalidated cache wants a rebuild");
-        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area, None);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)));
         assert!(gr.v6_job.is_none() && gr.v6.is_some(), "post-invalidation encode is synchronous");
 
         // Same generation → no rebuild (the gate is the win: idle frames skip
@@ -5142,7 +5190,7 @@ mod tests {
         let area = Rect::new(0, 0, 200, 100);
         let canvas = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
         let kitty = kitty_picker(10, 20);
-        let ready = GraphicsRender::encode_v6(&kitty, &canvas, 1, area, None, None).expect("encode");
+        let ready = GraphicsRender::encode_v6(&kitty, &canvas, 1, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)), None).expect("encode");
         // The encoded protocol reports its device size; 2× of 32 = 64 px = at most
         // ceil(64/20)=4 cells tall / ceil(64/10)=7 wide. Assert it is far smaller than
         // the pane (the cap engaged), not the full 200×100.
@@ -5150,7 +5198,7 @@ mod tests {
         assert!(sz.width <= 14 && sz.height <= 8, "capped image is ~2× native, got {sz:?}");
         // …and the same canvas on half-blocks, which encodes nothing, reaches the pane.
         let hb = Picker::halfblocks();
-        let hb_ready = GraphicsRender::encode_v6(&hb, &canvas, 1, area, None, None).expect("encode");
+        let hb_ready = GraphicsRender::encode_v6(&hb, &canvas, 1, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)), None).expect("encode");
         let hb_sz = hb_ready.proto.size();
         assert!(
             hb_sz.width > sz.width && hb_sz.height > sz.height,
@@ -5251,7 +5299,7 @@ mod tests {
             let native = (area.width as u32 * CELL.0 as u32, area.height as u32 * CELL.1 as u32);
 
             let draw = |gr: &mut GraphicsRender, gen: u64, green: u8| {
-                gr.spawn_v6_encode(&picker, tinted(native.0, native.1, green), gen, area, None);
+                gr.spawn_v6_encode(&picker, tinted(native.0, native.1, green), gen, area, RasterFrame::native((native.0 as u16, native.1 as u16)));
                 drain_v6_job(gr);
                 let mut buf = Buffer::empty(area);
                 gr.redraw_v6(&picker, area, &mut buf);
@@ -5326,7 +5374,8 @@ mod tests {
             // raster→ring transition Journey makes two frames into its boot.
             let area = Rect::new(0, 0, 10, 4);
             let canvas = tinted(area.width as u32 * CELL.0 as u32, area.height as u32 * CELL.1 as u32, 40);
-            gr.spawn_v6_encode(&picker, canvas, 1, area, None);
+            let dims = (canvas.width() as u16, canvas.height() as u16);
+            gr.spawn_v6_encode(&picker, canvas, 1, area, RasterFrame::native(dims));
             drain_v6_job(&mut gr);
             let mut buf = Buffer::empty(area);
             gr.redraw_v6(&picker, area, &mut buf);
@@ -5914,7 +5963,7 @@ mod tests {
         let mut gr = GraphicsRender::default();
         let canvas = image::RgbaImage::from_pixel(32, 54, image::Rgba([9, 8, 7, 255]));
 
-        gr.spawn_v6_encode(&picker, canvas.clone(), 1, area, None);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 1, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)));
         gr.redraw_v6(&picker, area, &mut buf);
         let first = gr.v6.as_ref().and_then(|r| r.placed_id).expect("the composite knows its id");
 
@@ -5923,7 +5972,7 @@ mod tests {
         // 12 of this pane's placeholder cells (3,680 at 117x64), so moving it would
         // repaint the pane to change the picture. Nothing is freed, because the id
         // being replaced is the id the frame is about to place.
-        gr.spawn_v6_encode(&picker, canvas.clone(), 2, area, None);
+        gr.spawn_v6_encode(&picker, canvas.clone(), 2, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)));
         drain_v6_job(&mut gr);
         assert!(
             queued_delete_ids(&gr).is_empty() && gr.deletes_after_place.is_empty(),
@@ -6284,9 +6333,9 @@ mod tests {
                 image::Rgba([(x % 256) as u8, (y % 256) as u8, 90, 255])
             });
             let area = Rect::new(0, 0, 80, 25);
-            let a = GraphicsRender::encode_v6(&kitty(4, 7), &canvas, 1, area, None, None)
+            let a = GraphicsRender::encode_v6(&kitty(4, 7), &canvas, 1, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)), None)
                 .expect("a kitty encode of a real canvas");
-            let b = GraphicsRender::encode_v6(&kitty(4, 9), &canvas, 1, area, None, None)
+            let b = GraphicsRender::encode_v6(&kitty(4, 9), &canvas, 1, area, RasterFrame::native((canvas.width() as u16, canvas.height() as u16)), None)
                 .expect("a kitty encode of a real canvas");
             assert_ne!(
                 (a.proto.size().width, a.proto.size().height),
@@ -6303,7 +6352,8 @@ mod tests {
             let area = Rect::new(0, 0, 80, 25);
             let mut gr = GraphicsRender::default();
             assert!(gr.v6_wants_build(1, area), "nothing is built yet");
-            gr.spawn_v6_encode(&kitty(4, 7), canvas, 1, area, None);
+            let dims = (canvas.width() as u16, canvas.height() as u16);
+            gr.spawn_v6_encode(&kitty(4, 7), canvas, 1, area, RasterFrame::native(dims));
             assert!(!gr.v6_wants_build(1, area), "the first encode installs a composite");
 
             // The pane is still 80x25 cells; only the cells changed shape. Nothing
@@ -6345,7 +6395,7 @@ mod tests {
             let mut buf2 = Buffer::empty(area);
             gr.render(&sixel, &gw2, area, Style::default(), &mut buf2);
             // …and a raster composite.
-            gr.spawn_v6_encode(&kitty(8, 18), (*gw.canvas).clone(), 1, area, None);
+            gr.spawn_v6_encode(&kitty(8, 18), (*gw.canvas).clone(), 1, area, RasterFrame::native((gw.canvas.width() as u16, gw.canvas.height() as u16)));
 
             let (cache, _bands, kitty_wins, v6) = gr.cell_keyed_cache_sizes();
             assert_eq!(

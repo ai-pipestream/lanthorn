@@ -87,6 +87,20 @@ carrying `enable_sound = false` could only be overridden by editing the file.
 
 ### Version 6 rendering
 
+- **A third v6 render mode, `extended`.** `raster` draws the whole pane as one
+  pixel image and spends every spare pixel on magnification, which on a tall
+  terminal means a fractional scale and a thick letterbox. `extended` draws the
+  same picture but pins the magnification to a whole number and grows the frame
+  DOWNWARD instead: the game's own screen keeps its layout at the top, the side
+  border tiles on down out of its own artwork, and the height that opens up
+  carries more of the story — in the release's own bitmap typeface, at 1:1 or 2x
+  where it is sharpest. Zork Zero shows 50 rows of prose where `raster` showed
+  19 at the same 100x50 terminal, and pages at `[MORE]` correspondingly less
+  often. `v6_render = "extended"`, `--v6-render extended`, or
+  `/set-v6-render extended` (bare `/set-v6-render` now cycles all three). The
+  game is never told a taller screen, so no title lays itself out differently;
+  one whose own chrome sits below its story window — Journey's command menu —
+  keeps today's letterbox.
 - A **modal over a v6 game centres in the pane**. Dropping to text-only for a
   dialog is what frees the space, but the dialog was still being centred in the
   rect the pixel frame had left — so it landed low and right, and at some sizes

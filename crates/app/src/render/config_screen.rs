@@ -46,7 +46,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("hint_skip_screen_warning", ConfigRowKind::Bool, "Auto-skip the InvisiClues 'your screen is only N characters wide' banner when opening izm hints, landing straight on the topic menu."),
     ("text_margin_x",        ConfigRowKind::Num,  "Blank columns reserved on each side inside the story text pane. Imported from garglk tmarginx. Use ← / → to adjust."),
     ("text_margin_y",        ConfigRowKind::Num,  "Blank rows reserved above and below the story text. Imported from garglk tmarginy. Use ← / → to adjust."),
-    ("v6_render",            ConfigRowKind::Enum, "How v6 graphical games (Zork Zero) render: hybrid (crisp terminal story in a scaled pixel frame) or raster (whole pane as one pixel image)."),
+    ("v6_render",            ConfigRowKind::Enum, "How v6 graphical games (Zork Zero) render: hybrid (crisp terminal story in a scaled pixel frame), raster (whole pane as one pixel image) or extended (raster at a whole magnification, the frame grown downward for more story rows)."),
     ("v6_arrow_keys",        ConfigRowKind::Bool, "Forward arrow keypresses to v6 stories (some bind them to movement); off = arrows drive lanthorn's scrollback and map panning instead."),
     ("v6_pixel_lock",        ConfigRowKind::Bool, "Scale v6 artwork by whole device pixels per art pixel (0.5x/1x/1.5x on a 320-wide rendition, 1x/2x/3x on the Mac mono and EGA ones) instead of stretching it to fill the pane: crisper art and seamless borders, at the cost of a wider margin. No effect under half-blocks, which draws cells rather than device pixels and has no rung to snap to."),
 ];
@@ -248,6 +248,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         24 => match cfg.v6_render {
             crate::config::V6RenderMode::Hybrid => "hybrid".to_string(),
             crate::config::V6RenderMode::Raster => "raster".to_string(),
+            crate::config::V6RenderMode::Extended => "extended".to_string(),
         },
         25 => bool_str(cfg.v6_arrow_keys),
         26 => bool_str(cfg.v6_pixel_lock),
@@ -339,12 +340,15 @@ mod tests {
         assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.text_margin_x, 0, "text_margin_x clamps at 0");
 
         // The v6_render enum row (SQ-0186) cycles via ConfigCycle at its index,
-        // Hybrid -> Raster and back (SQ-0895 removed the third position).
+        // Hybrid -> Raster -> Extended and back (SQ-0895 removed the old third
+        // position, SQ-1032 added a different one).
         let vidx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "v6_render").unwrap();
         state.overlays.config_screen.as_mut().unwrap().scroll.selected = vidx;
         assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.v6_render, crate::config::V6RenderMode::Hybrid);
         apply_action(Action::ConfigCycle(1), &mut state, &mut m);
         assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.v6_render, crate::config::V6RenderMode::Raster, "v6_render must cycle to Raster");
+        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
+        assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.v6_render, crate::config::V6RenderMode::Extended, "v6_render must cycle to Extended");
         apply_action(Action::ConfigCycle(1), &mut state, &mut m);
         assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.v6_render, crate::config::V6RenderMode::Hybrid, "v6_render must cycle back to Hybrid");
     }

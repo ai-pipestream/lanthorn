@@ -450,14 +450,15 @@ pub static COMMANDS: &[CommandSpec] = &[
             _ => err("set-game-colours requires an argument: on | off | auto"),
         } },
     CommandSpec { name: "set-v6-render", category: Category::Style, context: Context::Global,
-        usage: "set-v6-render [hybrid|raster]", description: "switch the v6 render mode live — bare toggles the other mode; session-only (the settings screen persists)",
+        usage: "set-v6-render [hybrid|raster|extended]", description: "switch the v6 render mode live — bare cycles hybrid → raster → extended; session-only (the settings screen persists)",
         dispatch: |a| {
             use crate::config::V6RenderMode;
             match a.first().copied() {
                 None => SlashOutcome::SetV6Render(None),
                 Some("hybrid")    => SlashOutcome::SetV6Render(Some(V6RenderMode::Hybrid)),
                 Some("raster")    => SlashOutcome::SetV6Render(Some(V6RenderMode::Raster)),
-                Some(s) => err(format!("set-v6-render: unknown mode '{s}' (hybrid | raster, or bare to toggle)")),
+                Some("extended")  => SlashOutcome::SetV6Render(Some(V6RenderMode::Extended)),
+                Some(s) => err(format!("set-v6-render: unknown mode '{s}' (hybrid | raster | extended, or bare to cycle)")),
             }
         } },
     CommandSpec { name: "set-v6-pixel-lock", category: Category::Style, context: Context::Global,
@@ -1126,6 +1127,7 @@ mod tests {
         use crate::config::V6RenderMode;
         assert!(matches!(parse("set-v6-render hybrid", '/'), SlashOutcome::SetV6Render(Some(V6RenderMode::Hybrid))));
         assert!(matches!(parse("set-v6-render raster", '/'), SlashOutcome::SetV6Render(Some(V6RenderMode::Raster))));
+        assert!(matches!(parse("set-v6-render extended", '/'), SlashOutcome::SetV6Render(Some(V6RenderMode::Extended))));
         // SQ-0895 removed `frameless`; it must now be rejected like any other
         // unknown token rather than silently parsing to a mode.
         assert!(matches!(parse("set-v6-render frameless", '/'), SlashOutcome::Error(_)));

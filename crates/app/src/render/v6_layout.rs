@@ -2211,6 +2211,97 @@ impl FrameGeometry {
     }
 }
 
+/// SQ-1032: how tall the raster composite is BUILT, and the magnification it is
+/// pinned to.
+///
+/// Two facts that are one decision, so they travel together rather than
+/// positionally (the refactoring policy in CLAUDE.md, and the same shape as
+/// [`FrameGeometry`] beside it): a canvas height, and the whole-pixel scale that
+/// height was derived from. A caller handed only the height would letterbox the
+/// taller canvas at a fractional scale and undo the whole point.
+///
+/// [`V6RenderMode::Raster`] builds the game's own screen and lets the pane
+/// letterbox it. [`V6RenderMode::Extended`] grows the canvas DOWNWARD — the game's
+/// screen is the top of it, untouched — so the pane's surplus height becomes whole
+/// text rows of prose instead of empty margin. **Nothing is told a taller screen**:
+/// `native` is what the game laid its windows out on and stays exactly that.
+///
+/// [`V6RenderMode::Raster`]: crate::config::V6RenderMode::Raster
+/// [`V6RenderMode::Extended`]: crate::config::V6RenderMode::Extended
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RasterFrame {
+    /// The game's own screen in native pixels — never changed by the extension.
+    pub native: (u16, u16),
+    /// The canvas height built, in native pixels. `native.1` unless extended.
+    pub canvas_h: u32,
+    /// The magnification the composite is pinned to, in device pixels per NATIVE
+    /// pixel. `None` = the fitted letterbox every non-extended frame keeps.
+    pub lock: Option<f32>,
+}
+
+impl RasterFrame {
+    /// The game's screen and nothing more — today's letterboxed composite.
+    pub fn native(native: (u16, u16)) -> RasterFrame {
+        RasterFrame { native, canvas_h: u32::from(native.1), lock: None }
+    }
+
+    /// The extension this pane can afford: the largest WHOLE magnification that
+    /// fits the game's screen in `pane_dev` device pixels, and as many whole text
+    /// rows of surplus height as that scale leaves under it.
+    ///
+    /// **Whole device pixels per NATIVE pixel**, which is stricter than
+    /// `v6_pixel_lock`'s whole-device-per-ART rung wherever `art_scale` is 2 — and
+    /// stricter is what this mode needs, because its text is the thing being sized:
+    /// raster text is drawn on the machine's cell in native pixels, so a
+    /// half-native rung gives a 7-wide Macintosh glyph 10.5 device pixels and its
+    /// strokes alternate one and two (SQ-1012, SQ-1024). A whole native rung cannot
+    /// produce that on any cell.
+    ///
+    /// The surplus is measured in whole `cell.h` rows so the extension is a whole
+    /// number of text rows of the game's own face — the raster prose box already
+    /// floors its row count, so adding a multiple of the cell adds exactly that many
+    /// rows and leaves whatever sub-row remainder the unextended box already had.
+    ///
+    /// Degrades to [`Self::native`] — today's letterbox, exactly — when the pane
+    /// cannot hold the game's screen at 1:1. There is no extension to be had there,
+    /// and a magnification below 1 is not a whole one.
+    pub fn extended(
+        native: (u16, u16),
+        pane_dev: (u32, u32),
+        cell: zvm::screen::V6Cell,
+        cap: Option<f64>,
+    ) -> RasterFrame {
+        let plain = RasterFrame::native(native);
+        if native.0 == 0 || native.1 == 0 || cell.h == 0 {
+            return plain;
+        }
+        let fit = (f64::from(pane_dev.0) / f64::from(native.0))
+            .min(f64::from(pane_dev.1) / f64::from(native.1));
+        let s = cap.map_or(fit, |c| fit.min(c)).floor();
+        // NaN is impossible above (both divisors are guarded non-zero) but is stated
+        // rather than assumed, because "not at least 1" and "less than 1" differ on it
+        // and only one of them is safe to build a canvas from.
+        if !s.is_finite() || s < 1.0 {
+            return plain;
+        }
+        // The native rows the pane shows at `s`, and the whole text rows of them
+        // that lie below the game's own screen.
+        let rows_px = (f64::from(pane_dev.1) / s).floor() as u32;
+        let extra = rows_px.saturating_sub(u32::from(native.1)) / u32::from(cell.h);
+        RasterFrame {
+            native,
+            canvas_h: u32::from(native.1) + extra * u32::from(cell.h),
+            lock: Some(s as f32),
+        }
+    }
+
+    /// The native rows the extension added below the game's own screen; 0 when the
+    /// frame is the game's screen.
+    pub fn extension(self) -> u32 {
+        self.canvas_h.saturating_sub(u32::from(self.native.1))
+    }
+}
+
 fn locked_scale_inner(geom: FrameGeometry, pane_dev: (u32, u32)) -> Option<Scale> {
     let free = uniform_scale(geom.native, pane_dev).s;
     // **The ladder serves the ARTWORK and the TEXT, and they are not the same

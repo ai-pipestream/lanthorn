@@ -375,7 +375,7 @@ fn the_halfblocks_composite_is_one_resample_of_the_canvas() {
             // The shipped path. With no last-ready composite the encode is synchronous
             // (SQ-0578), so the frame is on the buffer when `redraw_v6` returns.
             let mut gr = app::render::graphics::GraphicsRender::default();
-            gr.spawn_v6_encode(&hb, canvas.clone(), 1, area, None);
+            gr.spawn_v6_encode(&hb, canvas.clone(), 1, area, app::render::v6_layout::RasterFrame::native((640, 400)));
             let mut got = Buffer::empty(area);
             gr.redraw_v6(&hb, area, &mut got);
 

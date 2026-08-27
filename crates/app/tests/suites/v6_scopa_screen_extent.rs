@@ -203,8 +203,8 @@ fn the_dealt_table_composites_at_screen_scale_and_paints_no_black_bands() {
                 .clone()
                 .expect("the raster path records a click map");
             assert_eq!(
-                (map.native_w, map.native_h),
-                (640, 400),
+                (map.canvas, map.screen),
+                ((640, 400), (640, 400)),
                 "honor={honor} pane={w}x{h}: the drawn image spans the game's screen"
             );
             // Aspect: 640/400 = 1.60. The inflated extent was 1579/1370 = 1.15,
