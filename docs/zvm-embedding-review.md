@@ -374,6 +374,33 @@ header says the requirement exists "so callers can downcast to concrete types
 (e.g., to read `BufferOutput::buf` in tests)" — a test convenience paid for by
 every embedder. Worth revisiting; the fix is not obvious and this is not urgent.
 
+**The grammar seam is now closed too (SQ-1040).** `zvm::grammar` reads the
+story's syntax tables the way `dictionary.rs` reads its words: `Grammar::load`
+returns a self-contained snapshot — no `&Memory` needed afterwards, so it caches
+beside a session or crosses a thread — answering whether a word is a verb, what
+sentence shapes that verb accepts, which prepositions it expects, and what parts
+of speech the dictionary marks any word with. Five table formats are covered
+(Infocom's fixed and variable ZIL forms, Infocom's Version 6 form, and Inform's
+GV1 and GV2), from the Inform Technical Manual §§8.5–8.6 and ztools'
+`showverb.c`. This is API an embedder wants and could not previously build: the
+dictionary is a flat list with no parts of speech, so before this a host could
+tell a player a word was unknown and nothing more.
+
+Two things about it are deliberate and worth keeping if it grows. It **refuses
+rather than guesses** — `GrammarError` distinguishes "this story has no grammar"
+(Journey) from five ways the bytes failed to describe a table — because a
+wrong-but-well-formed grammar is indistinguishable from a right one to every
+consumer downstream. And every public type in it is already
+`#[non_exhaustive]`, which is item 3 below applied to a module while that is
+still free.
+
+The known gap is modern Inform 7 output: two stories in the local corpus
+(`frankenfingers_260330.z5`, `ImpossibleStairs.z8`) begin static memory with
+something other than the verb-pointer table, and both are refused. `infodump`
+declines them too, so this is a limitation of the format assumption both tools
+share — the grammar table's address is not in the header — rather than of this
+reader.
+
 ## 8. What machine knowledge is still in the wrong crate
 
 SQ-1013 is done, and the answer to "what else is shaped like it" is: not much of
@@ -450,9 +477,9 @@ the API is usable**, and the setting should come off the moment one exists.
 
 ## 10. Stability: nothing is `#[non_exhaustive]`
 
-There is not one `#[non_exhaustive]` in `zvm`, `gvm` or `scott`. Every public
-enum is exhaustively matchable, so adding a variant to any of them is a breaking
-change for every embedder, forever.
+Outside `grammar` (SQ-1040) there is not one `#[non_exhaustive]` in `zvm`, `gvm`
+or `scott`. Every other public enum is exhaustively matchable, so adding a
+variant to any of them is a breaking change for every embedder, forever.
 
 Some of these enums have *demonstrably* grown. `Palette` (`screen.rs:1626`) went
 from two variants to five across SQ-0719 and SQ-0956, and will grow again the
