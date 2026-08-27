@@ -2999,10 +2999,21 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
         // ── Replay / rewind actions ───────────────────────────────────────────
 
         Action::OpenHistory => {
-            // Seed at the last turn; no-op when there is no history.
+            // Three outcomes, and the point of SQ-1091 is that two of them used to
+            // be one silent no-op: "there is nothing to replay" and "the thing
+            // that would have filled it is switched off" look identical from here,
+            // and only the second is something the player can act on.
             state.overlays.hotkey_dialog = false;
             if !state.history.is_empty() {
                 state.overlays.replay = Some(crate::state::ReplayState::new(state.history.len() - 1));
+            } else if !state.config.record_turn_history {
+                state.overlays.history_prompt = true;
+                state.overlays.dialog_focus = 0;
+            } else {
+                // Recording IS on and the history is still empty, which is only
+                // true before the first move. Saying so beats a dialog offering to
+                // switch on what is already on.
+                state.push_notice("[No turns recorded yet — rewind will have something after your next move.]");
             }
         }
 
@@ -6075,6 +6086,44 @@ mod tests {
         assert!(s.overlays.hotkey_dialog);
         apply_action(Action::CloseHotkeyDialog, &mut s, &mut m);
         assert!(!s.overlays.hotkey_dialog);
+    }
+
+    /// `open-history` has THREE outcomes, and two of them used to be one silence.
+    ///
+    /// `record_turn_history` is opt-in and defaults to false, so for most players
+    /// the command opened nothing and explained nothing — which is how it came to
+    /// be reported as broken. "Nothing to replay" and "the capture is switched
+    /// off" are different situations and only the second is actionable, so they
+    /// now get different answers (SQ-1091).
+    #[test]
+    fn open_history_offers_to_switch_recording_on_rather_than_doing_nothing() {
+        let mut m = Mapper::default();
+
+        // Recording off, nothing recorded → offer to turn it on.
+        let mut s = AppState::default();
+        s.config.record_turn_history = false;
+        apply_action(Action::OpenHistory, &mut s, &mut m);
+        assert!(s.overlays.history_prompt, "the prompt must open when recording is off");
+        assert!(s.overlays.replay.is_none(), "there is nothing to replay");
+        assert_eq!(s.overlays.dialog_focus, 0, "focus starts on the affirmative button");
+
+        // Recording ON but nothing yet → say so; do not offer what is already on.
+        let mut s = AppState::default();
+        s.config.record_turn_history = true;
+        let before = s.notifications.history().len();
+        apply_action(Action::OpenHistory, &mut s, &mut m);
+        assert!(!s.overlays.history_prompt, "no prompt when the setting is already on");
+        assert!(s.notifications.history().len() > before, "but the player is told why nothing opened");
+
+        // History present → open the replay, whatever the setting says.
+        let mut s = AppState::default();
+        s.config.record_turn_history = false;
+        for t in 1..=3u32 {
+            crate::history::record_turn(&mut s.history, t, "n", vec![t as u8], &m, false, "");
+        }
+        apply_action(Action::OpenHistory, &mut s, &mut m);
+        assert!(!s.overlays.history_prompt, "nothing to offer when there is history to show");
+        assert!(s.overlays.replay.is_some(), "the replay opens, seeded at the last turn");
     }
 
     #[test]
