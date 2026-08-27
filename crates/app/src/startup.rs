@@ -189,11 +189,22 @@ fn pre_boot_host_screen(
     cfg: &Config,
     cs: &app::colors::ColorScheme,
     garglk_overlay: &Option<app::garglk_ini::GarglkOverlay>,
+    layout: app::state::Layout,
 ) -> Option<(u16, u16)> {
     let mut boot_state = AppState::default();
     boot_state.colors = cs.clone();
     boot_state.config = cfg.clone();
     boot_state.garglk_overlay = garglk_overlay.clone();
+    // SQ-1084: the fifth fact, and the one whose absence was invisible. Everything
+    // above changes how the pane LOOKS; this changes how WIDE it is, and the width
+    // is what the story is told. `compute_pane_layout` splits the frame for a
+    // visible map unless the layout says otherwise, so a default-constructed state
+    // declared half the terminal to every story whose map the player had hidden —
+    // and a game centres on the number it is given, so its title screen came out
+    // centred in the left half of a full-width pane. A `Layout` rather than a
+    // `bool` because a bare boolean here is the positional fact this file has been
+    // bitten by three times (SQ-1022, SQ-1061).
+    boot_state.layout = layout;
     boot_state.pane_sizes = app::state::PaneSizes {
         split_ratio: cfg.split_ratio,
         band_height: cfg.command_band.height,
@@ -587,7 +598,14 @@ pub(crate) fn boot_story(
     // engine exists, so a v4/v5 story's boot-time status-bar layout already
     // targets it instead of the zvm 80×24 fallback. `None` (size query failed,
     // or a zero-area frame) leaves the constructor's existing fallback in place.
-    let host_screen = pre_boot_host_screen(&cfg, &cs, &garglk_overlay);
+    // The map's visibility is resolved above, and it MUST reach the width the
+    // story is told (SQ-1084) — see `pre_boot_host_screen`.
+    let boot_layout = if start_map_hidden {
+        app::state::Layout::TranscriptFull
+    } else {
+        app::state::Layout::Split
+    };
+    let host_screen = pre_boot_host_screen(&cfg, &cs, &garglk_overlay, boot_layout);
 
     // SQ-0811: the seed every engine's PRNG starts from, drawn ONCE here and
     // handed to whichever engine builds below, so the console line further down

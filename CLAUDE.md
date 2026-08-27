@@ -117,7 +117,21 @@ Three consequences of nextest's model worth knowing: it runs **each test in its 
 **Every writer now does, and there is no other way to write** (SQ-0987). Three locks on one route, and you only ever meet the first one that catches you: the shared lock is **private to `app`**, so a suite cannot take it raw — that is a compile error, not a convention; `app::v6_set_palette` is the only reachable setter and **panics** unless the calling thread holds a guard; and `palette_lock_discipline` fails any file under `tests/suites/` that reaches `zvm::screen::set_palette` directly, which is the one spelling the other two cannot see. So the two ways in are `let _g = app::v6_palette(p);` when the case can name its table at the lock site, and `let _g = app::v6_palette_at_boot();` when it cannot — thirty harnesses resolve an `InterpreterProfile` from a medium deep inside their own `boot()` and set `profile.palette()` there, several rows below where the lock is taken. `v6_palette_at_boot` is exactly `v6_palette(Standard)` with permission to name another table later: it still installs a known palette rather than leaving whatever was there, because "leave whatever was there" is how SQ-0958 happened. **Do not add a "lock now, set later" helper that skips that** — the pairing is the rule. The invariant this buys is that the palette outside the lock is always `Standard`, so the table a case inherits under `cargo test` is the one nextest's fresh process would have given it.
 
 **Clippy gate** (before any push, alongside the test gate):
-`cargo clippy --workspace --all-targets -- -D warnings` must be clean. It costs ~149s the first time after a test build (separate fingerprints, so it shares nothing) and ~0.3s when already warm — cheap to re-run, so re-run it rather than assuming.
+`cargo clippy --workspace --all-targets -- -D warnings` must be clean. It costs ~149s the first time after a test build (separate fingerprints, so it shares nothing) and ~0.3s when already warm — cheap to re-run once warm, so re-run it rather than assuming.
+
+**But do NOT reach for the workspace sweep in the inner loop — narrow it to what you touched.** CI runs exactly `cargo clippy --workspace --all-targets -- -D warnings` on every push (`.github/workflows/test.yml`, Linux only, because clippy's result does not vary meaningfully by OS), so the full sweep already has a backstop and running it locally per iteration buys very little for minutes a time.
+
+**Clippy cannot take a list of FILES, and never will.** It is a rustc driver, and Rust's compilation unit is the crate: to lint one module it must parse, macro-expand, name-resolve and type-check the whole crate, because what code in one file means depends on every other file in it. The only granularity on offer is the package (`-p`) and the target within it:
+
+| scope | what it covers | measured here |
+|---|---|---|
+| `--workspace --all-targets` | everything, incl. all fourteen of `app`'s test group binaries | ~150s+ |
+| `-p app --all-targets` | one package, still all its test binaries | most of that |
+| **`-p app --lib`** | one package, library target only | **62s** |
+
+So for a change confined to `crates/app/src/`, `cargo clippy -p app --lib` is the local gate and CI is the sweep. Match the `-p` to the crate you edited; add `--all-targets` only when you actually changed something under `tests/`.
+
+And note WHY even the narrow run costs a minute: at 62s wall it burned 2.75s of CPU at 33% utilisation. Almost none of that is lint work — it is rebuilding `app` under clippy's own fingerprints, which share nothing with the test build. Running the test gate and then clippy is two full builds of the same code, and no amount of scoping changes that; only doing it once, at the end, does.
 
 ## Hard rules
 
