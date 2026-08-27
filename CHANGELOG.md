@@ -19,6 +19,94 @@ Absolute URLs or no link.
 
 ---
 
+## Unreleased
+
+*This section is drained when a version is cut. README prose for the same work
+is staged in [`docs/readme-next.md`](docs/readme-next.md), because the README
+describes the RELEASED build and must not describe this one until it ships.*
+
+### Breaking — the command-line flags
+
+Every `--no-x` flag is replaced by a positive one that takes a value, across
+**all four front-ends** (`lanthorn`, `zvm-cli`, `gvm-cli`, `scott-cli`). There
+are no aliases for the old spellings; they are rejected.
+
+| was | is |
+|---|---|
+| `--no-sound` | `--sound on\|off` |
+| `--no-images` | `--images on\|off` |
+| `--no-accel` | `--accel on\|off` |
+| `--no-game-colours` | `--game-colours on\|off` |
+| `--no-aux` | `--aux on\|off` |
+| `--no-timed-input` | `--timed-input on\|off` |
+| `--no-more` / `--no-page` | `--pager on\|off` |
+| `--system-colours` | `--colour machine` |
+| `--no-status` | removed (use `--story-only`, which it was already an alias for) |
+
+The point is not the spelling. A negative-only flag is **one-way**: `--no-sound`
+could force sound off for a run, but nothing could force it *on*, so a config
+carrying `enable_sound = false` could only be overridden by editing the file.
+`--game-colours on` could not be asked for at all.
+
+- **New: `--colour terminal|theme|machine`** pins which of the three sources the
+  story's default page and ink resolve from — a precedence the code already had
+  and nothing could choose between. It is a different axis from
+  `--game-colours on|off`, which decides whether the interpreter honours what the
+  *story* asks for; both are kept.
+- `--help` now wraps to one width — 80 columns — in every front-end. Some entries
+  wrapped themselves at ~83 columns while a generated list ran to 117 and was
+  wrapped by the terminal, so one help screen showed two authorities.
+
+### Original media
+
+- **`.g64` GCR bitstream disks.** A `.g64` holds the raw bitstream a 1541's head
+  reads rather than decoded sectors; lanthorn decodes it and plays it. Verified
+  byte-identical against an independent dump of the same release.
+- A **zip is opened like a volume**: entries are classified by content, not by
+  name, so a zip carries anything lanthorn runs — v3–v8 including graphical v6,
+  Glulx, Scott Adams, Blorb containers — and a Blorb or hints file packed beside
+  the story is found. It previously named three extensions and discarded the
+  resource handle, so the one format whose point is that it ships artwork was the
+  one a zip could not carry.
+- A `.d64` and a `.g64` now report the same type in the story list. They are one
+  floppy dumped two ways, and showing them as two kinds of thing was a
+  distinction a player could not act on.
+
+### Library
+
+- **A URL works wherever a path does.** lanthorn fetches it and hands the file to
+  the ordinary loader, so every format works without a second code path, then
+  offers to keep it in your library.
+- **A downloaded zip of release disk images** is recognised and offered: keep it
+  and the whole release is unpacked into your library and launched; decline and
+  it says why rather than failing obscurely. Only disk images are extracted —
+  never a readme, cover or anything else in the archive.
+- The download cap is 32 MiB, not 16. Modern Glulx games carry their artwork and
+  sound inside the blorb and run well past the "few MiB" a story file used to be;
+  the old ceiling refused real games silently.
+
+### Version 6 rendering
+
+- A **modal over a v6 game centres in the pane**. Dropping to text-only for a
+  dialog is what frees the space, but the dialog was still being centred in the
+  rect the pixel frame had left — so it landed low and right, and at some sizes
+  its buttons ran off the pane entirely.
+- **A fractionally-scaled raster frame is no longer resampled by the terminal.**
+  The composite is padded to the whole cells it is placed over, so it blits 1:1
+  instead of being stretched into a box up to a cell taller than itself.
+
+### Fixed
+
+- Arthur's CGA flank no longer reprints a fragment of the top banner's ornament
+  partway down the side rule when the pane is taller than the artwork.
+- A menu a game prints *below* its own split — Anchorhead's help, LostPig's —
+  stays on screen. It was being retired as though it were an Inform quote box,
+  losing the bottom entries and the `BACKSPACE to return` line on every keypress.
+- `v6_arrow_keys` defaults to **false**: arrows keep driving lanthorn's
+  scrollback and map panning in a v6 game, as they do everywhere else. A game's
+  own arrow bindings are now opt-in. v6 menus and "press any key" screens are
+  unaffected either way.
+
 ## v0.3.0 — 2026-08-26
 
 ### Performance
