@@ -109,7 +109,7 @@ A few things worth doing in your first ten minutes. Everything else can wait.
 | **g** | Flips the list view into a grid of covers. |
 | **/** | Searches IFDB by title or author and downloads straight into your library. |
 | **Tab** | Shows the info panel for the highlighted story. |
-| **o** | Launch options for this story — renderer, machine, artwork — without touching a config file. |
+| **o** | Launch options for this story — renderer, machine, artwork. |
 
 **In the story**
 
@@ -118,10 +118,10 @@ A few things worth doing in your first ten minutes. Everything else can wait.
 | **Tab** | Completes from the words *this story* actually knows — no more guessing whether it wants `lamp` or `lantern`. |
 | **/** on an empty line | A fuzzy palette over every command. The fastest way to find out what there is. |
 | **Ctrl+S** or **Ctrl+R** | Saves and restores the map, the screen and your scrollback — not just the game's own state. |
-| **Ctrl+P** | The command menu, if you would rather look than type. |
-| **/open-settings** | The settings worth changing, each with a line saying what it does — no config file, no restart. `Ctrl+P` then **s** gets there too. |
+| **/open-settings** | The settings worth changing, each with a line saying what it does. |
+| **Ctrl+P** | The quick command pallet. |
 
-And the thing that needs no keys at all: **walk around, and watch the map draw
+And the thing that needs no keys at all: **explore, and watch the map draw
 itself.**
 
 ---
