@@ -29,13 +29,71 @@ title = "lanthorn — the automapper drawing Zork I as you walk"
 caption = """
 The map pane builds itself from nothing but the game's own output, one room at a \
 time, as the player moves. This is the project's differentiator and it only makes \
-sense in motion — a still of a finished map could have come from anywhere."""
+sense in motion — a still of a finished map could have come from anywhere.
+
+The walk is the ring around the white house, and it is walked BOTH WAYS on \
+purpose — north, east, south, west, and then south, east, north, west back over \
+the same four rooms. A room the mapper has already placed must not MOVE when it is \
+re-entered from the other side, and the passage between two rooms has to come out \
+as one edge whichever direction discovered it. Walking the ring once cannot show \
+either: every room is new, so any layout at all looks correct."""
 program = "lanthorn"
 media = "stories/zork1-r88-s840726.z3"
 size = "140x40"
 show_map = true
-keys = "wait:2500,text:n,cr,wait:1200,text:n,cr,wait:1200,text:up,cr,wait:1200,text:take egg,cr,wait:1200,text:down,cr,wait:1200,text:s,cr,wait:1200,text:s,cr,wait:1200,text:e,cr,wait:1500"
-expect = ["West of House", "Forest Path", "Up a Tree"]
+keys = "wait:2500,text:n,cr,wait:1100,text:e,cr,wait:1100,text:s,cr,wait:1100,text:w,cr,wait:1300,text:s,cr,wait:1100,text:e,cr,wait:1100,text:n,cr,wait:1100,text:w,cr,wait:1600"
+expect = ["West of House", "North of House", "Behind House", "South of House"]
+
+# ── Two games whose OPENING is the thing worth showing ───────────────────────
+#
+# Both run with `show_map = false`. The automapper has its own cast above, and a
+# map pane here would take half the width to draw nothing interesting while the
+# screen these are about is squeezed into the other half.
+
+[[casts]]
+id = "beyond-zork"
+title = "lanthorn — Beyond Zork building a character, off its own Amiga floppy"
+caption = """
+Beyond Zork opens by making you roll a character, and it draws the attributes as \
+bar graphs in a window it keeps for the whole game — the same window that later \
+holds the in-game map. This walks the Character Setup menu with the arrow keys, \
+takes the "create your own character" path, spends points across Endurance, \
+Strength and Dexterity, names the result, and steps into the game far enough for \
+one `look`.
+
+It is launched from the AMIGA RELEASE DISK, which is the point of picking that \
+medium over the bare story file: lanthorn mounts the floppy, plays the build on \
+it, and presents the Amiga — its interpreter number, its palette, the red status \
+strip you can see across the top. The bare `.z5` opens with "Is this a VT220?", \
+because nothing has told it what it is running on; the disk never asks."""
+program = "lanthorn"
+media = "stories/Beyond Zork - The Coconut of Quendor.adf"
+size = "82x32"
+show_map = false
+keys = "wait:3000,text:begin,cr,wait:2200,esc,wait:1400,cr,wait:1800,down,wait:450,down,wait:450,down,wait:450,down,wait:800,cr,wait:2000,right,wait:450,right,wait:450,down,wait:450,right,wait:450,right,wait:900,cr,wait:1200,text:yes,cr,wait:1200,cr,wait:1200,text:Lanthorn,cr,wait:1200,text:yes,cr,wait:1500,text:yes,cr,wait:1500,text:no,cr,wait:3000,text:look,cr,wait:2500"
+# Single words on purpose: the menu title and the prompts are drawn with cursor
+# positioning, so "Character Setup" is never contiguous in the stream even though
+# it is plainly on the screen. A guard has to match what was WRITTEN.
+expect = ["Endurance", "Dexterity", "Quendor"]
+
+[[casts]]
+id = "anchorhead"
+title = "lanthorn — Anchorhead's opening, and the boxes it sets its epigraphs in"
+caption = """
+Anchorhead opens on an H.P. Lovecraft epigraph set in a box of its own, then \
+gives you the prologue a screen at a time. The boxes are a window the story \
+splits for itself and writes into — not decoration lanthorn adds — and getting \
+them right means honouring a split the game asks for and then giving it back.
+
+It pages the opening, skips the rest of the prologue, and stops one `look` into \
+the game — far enough to show that the boxes are a passing part of a real \
+session rather than a title card, and not so far as to be a playthrough."""
+program = "lanthorn"
+media = "stories/anchor.z8"
+size = "82x32"
+show_map = false
+keys = "wait:4000,cr,wait:2500,space,wait:2200,space,wait:2200,esc,wait:1800,text:look,cr,wait:2500"
+expect = ["H.P. Lovecraft", "Anchorhead"]
 
 # ── The showpiece: fidelity, in about four seconds ───────────────────────────
 
@@ -113,19 +171,25 @@ size = "100x30"
 keys = "wait:2500,text:look,cr,wait:1200,text:go north,cr,wait:1200,text:look,cr,wait:1500"
 expect = ["I'm in a"]
 
-# ── The artwork, at half-block resolution ────────────────────────────────────
-
-[[casts]]
-id = "journey-halfblocks"
-title = "lanthorn — Journey's Version 6 artwork on a terminal with no graphics"
-caption = """
-The v6 pixel path still runs on a terminal that has no image protocol; it simply \
-resolves into `▀` cells with two colours each. Coarse — two vertical samples per \
-cell — but the picture is there, and it replays in any asciinema player. For what \
-it actually looks like under kitty, the page wants a screen recording."""
-program = "lanthorn"
-media = "stories/journey-r83-s890706.z6"
-size = "117x40"
-keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
-expect = ["The Party", "Individual Commands"]
-max_bytes = 4194304
+# ── NO VERSION 6 CAST, AND THAT IS THE DECISION ──────────────────────────────
+#
+# `journey-halfblocks` used to sit here: Journey's artwork resolved into `▀` cells
+# because the asciinema player drops kitty graphics. It has been removed, and the
+# reasoning is worth keeping so it is not re-added by someone solving the same
+# problem again.
+#
+# Half-blocks is the honest fallback for a reader who HAS no graphics protocol. It
+# is not a preview of what lanthorn's Version 6 rendering looks like, and putting
+# it on a page beside the phrase "graphical v6" undersells the thing it is meant
+# to be advertising — the entry's own caption admitted as much, ending "for what it
+# actually looks like under kitty, the page wants a screen recording."
+#
+# The renderer settles it too. These casts are rendered to GIF by `agg`, whose
+# palette is 256 colours; a half-block frame carries TWO 24-bit colours per cell
+# and is exactly the content that cannot survive the trip. Every cast that remains
+# is text or 16-colour, which GIF holds exactly.
+#
+# So Version 6 is shown with the gallery's stills (`gallery.toml`), which are
+# captured under kitty at a whole magnification and show the artwork as drawn.
+# Motion is for what only motion can show: a map assembling itself, a menu being
+# walked, an intro paging past.

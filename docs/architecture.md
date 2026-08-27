@@ -583,8 +583,34 @@ under `target/casts/`, a required guard per entry.
 cargo build --workspace
 cargo run -p app --example cast              # the whole manifest
 cargo run -p app --example cast -- --list
+cargo run -p app --example cast -- --only zork-map --gif
 asciinema play target/casts/machines.cast
 ```
+
+**`--gif` is what makes a cast publishable.** A `.cast` is JSON and needs a
+player, which a GitHub README cannot run — so the flag renders each recording as
+an animated GIF beside it with [`agg`](https://docs.asciinema.org/manual/agg/),
+asciinema's own renderer (`brew install agg`). `docs/automapping.gif`,
+`docs/beyond-zork.gif` and `docs/anchorhead.gif` are that output.
+
+**`agg` and not `svg-term`, and the reason is geometry rather than taste.** The
+SVG route was built first and discarded: `svg-term` lays columns out 1.002 units
+apart while a box-drawing glyph is one unit wide, so every cell boundary carries a
+hairline seam. It is invisible in prose and cumulative along a rule — enough to
+render lanthorn's own window borders as dashed lines — and no flag adjusts it,
+because it is baked into the emitted geometry. (It also runs `svgo` over its own
+output, which *deletes* the `font-family` declaration and drops the whole page
+onto the viewer's proportional default; `--no-optimize` fixes that half but not
+the seams.) `agg` rasterises with a real font at whole-pixel cell positions, so a
+`│` column is solid and a `─` run is continuous.
+
+What that costs is GIF's 256-colour palette, and it is why **no cast is a Version
+6 recording**. A half-block v6 frame carries two 24-bit colours per cell and is
+exactly the content the palette cannot hold; more to the point, half-blocks is the
+fallback for a reader without a graphics protocol rather than a preview of what v6
+looks like. Version 6 is shown with the gallery's kitty stills, and motion is kept
+for what only motion shows. Every entry in `casts.toml` is text or 16-colour,
+which GIF holds exactly.
 
 **These recordings deliberately do NOT answer the kitty capability query.** The
 asciinema player renders cells and SGR and drops kitty's APC graphics, so a

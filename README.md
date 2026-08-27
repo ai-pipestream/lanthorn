@@ -30,17 +30,25 @@ roof; one engine-agnostic mapper that charts them all.
 
 ## See it
 
-<!-- DEMO: drop a terminal-recording GIF/VHS cast of a play-through + live map here -->
-<!-- e.g. ![lanthorn in motion](docs/demo.gif) -->
+**The map draws itself while you play.** A lap of the white house in each
+direction — nothing typed but the game's own commands, no annotation, no graph
+paper. Walking the ring both ways is the point: a room already placed must not
+move when you come back to it from the other side.
+
+![lanthorn walking Zork I while the automap assembles itself room by room](docs/automapping.gif)
 
 ![lanthorn's cover-gallery view: a grid of story covers beside a metadata info panel](docs/cover-gallery.png)
-
-![lanthorn playing Zork I with a live automap of the Great Underground Empire](docs/automapping.png)
 
 <details>
 <summary>More screenshots</summary>
 
 <!-- SCREENSHOTS: additional stills / GIFs can be dropped in below -->
+
+![Beyond Zork booting from its Amiga release floppy and building a character: the attribute bars, the arrow-driven menus, and the first room](docs/beyond-zork.gif)
+
+![Anchorhead's opening: a Lovecraft epigraph in a box the story splits for itself, the prologue paging past, and the first turn](docs/anchorhead.gif)
+
+![lanthorn playing Zork I with a live automap of the Great Underground Empire](docs/automapping.png)
 
 ![In-game graphics rendered with the Kitty graphics protocol](docs/kitty-graphics.png)
 

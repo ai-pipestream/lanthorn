@@ -5,6 +5,7 @@
 //! cargo run -p app --example cast          # the whole manifest
 //! cargo run -p app --example cast -- --only machines,zork-map
 //! cargo run -p app --example cast -- --list
+//! cargo run -p app --example cast -- --only zork-map --gif
 //! ```
 //!
 //! Output lands under `target/casts/`: one `.cast` per recording plus an
@@ -35,6 +36,7 @@ fn main() -> std::process::ExitCode {
     let mut only: Vec<String> = Vec::new();
     let mut timeout = 90u64;
     let mut list = false;
+    let mut gif = false;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -59,6 +61,7 @@ fn main() -> std::process::ExitCode {
                 i += 1;
             }
             "--list" => list = true,
+            "--gif" => gif = true,
             "--timeout" => {
                 timeout = need(i).parse().unwrap_or(timeout);
                 i += 1;
@@ -238,7 +241,17 @@ fn main() -> std::process::ExitCode {
         match std::fs::write(&path, &body) {
             Ok(()) => {
                 let secs = cap.flushes.last().map(|f| f.at.as_secs_f64()).unwrap_or(0.0);
-                println!("{:>6} KiB  {:>5.1}s  {} event(s)  {}", body.len() / 1024, secs, cap.flushes.len(), path.display());
+                print!("{:>6} KiB  {:>5.1}s  {} event(s)  {}", body.len() / 1024, secs, cap.flushes.len(), path.display());
+                if gif {
+                    match to_gif(&path) {
+                        Ok(n) => print!("  + {} KiB gif", n / 1024),
+                        Err(e) => {
+                            print!("  GIF FAILED");
+                            failed.push(format!("{}: {e}", entry.id));
+                        }
+                    }
+                }
+                println!();
                 rows.push((entry.id.clone(), entry.title.clone(), entry.caption.clone(), body.len(), secs));
             }
             Err(e) => {
@@ -263,6 +276,45 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Render a recorded cast as an animated GIF beside it, and return its size.
+///
+/// A `.cast` is JSON and needs a player, which a GitHub README cannot run — so
+/// the one artefact a README can actually SHOW is this.
+///
+/// **`agg` and not `svg-term`, and the reason is geometry.** `svg-term` lays
+/// columns out 1.002 units apart while a box-drawing glyph is one unit wide, so
+/// every cell boundary gets a hairline seam: invisible in prose, cumulative along
+/// a rule, and enough to make lanthorn's own window borders render as dashes. No
+/// flag adjusts it — it is baked into the emitted geometry. `agg` is asciinema's
+/// own renderer and rasterises with a real font at whole-pixel cell positions, so
+/// a `│` column is solid and a `─` run is continuous.
+///
+/// What that costs is GIF's 256-colour palette, which is why every entry in
+/// `casts.toml` is a text or 16-colour session. A half-block v6 recording carries
+/// two 24-bit colours per cell and must not be rendered this way; v6 is shown
+/// with the gallery's stills instead.
+#[cfg(unix)]
+fn to_gif(cast: &std::path::Path) -> Result<u64, String> {
+    let gif = cast.with_extension("gif");
+    let out = std::process::Command::new("agg")
+        // A terminal frame changes on a keystroke, not on a vsync, so the default
+        // 30 is thirty times more frames than these recordings contain.
+        .args(["--fps-cap", "10", "--font-size", "18", "--last-frame-duration", "4"])
+        .arg(cast)
+        .arg(&gif)
+        .output()
+        .map_err(|e| format!("running `agg`: {e} — install it with `brew install agg`, and only --gif needs it"))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("`agg` failed: {}", why.trim().lines().last().unwrap_or("no output")));
+    }
+    let n = std::fs::metadata(&gif).map(|m| m.len()).map_err(|e| format!("{}: {e}", gif.display()))?;
+    if n == 0 {
+        return Err(format!("{} is empty — agg wrote nothing", gif.display()));
+    }
+    Ok(n)
+}
+
 #[cfg(unix)]
 const HELP: &str = "\
 cast — record asciinema casts from examples/casts.toml
@@ -271,6 +323,8 @@ cast — record asciinema casts from examples/casts.toml
   --out DIR         where the .cast files go (default: target/casts)
   --only IDS        comma list of recording ids
   --list            print the recordings that would be made, and stop
+  --gif             also write <id>.gif — an animated GIF a README can show
+                    inline (needs `agg`: brew install agg)
   --timeout SECS    per-recording ceiling (default 90)
 
 Every recording answers the terminal queries as a terminal with NO kitty
