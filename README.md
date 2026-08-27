@@ -7,26 +7,20 @@
 
 **Play interactive fiction in your terminal while lanthorn draws the map for you — live, as you explore.**
 
-lanthorn is a terminal interactive-fiction interpreter with a built-in
-*automapper*. Point it at a story — the Infocom canon and Z-machine classics
-like *Zork*, modern Inform 7 / Glulx games, graphical *Zork Zero*, or a classic
-Scott Adams text adventure — play it in a clean, mouse-driven TUI, and watch a
-room-and-connection map assemble itself from your movements. No graph paper, no
-manual annotation: every room you enter and every exit you take is placed,
-routed, and de-overlapped automatically, then continuously tidied into a
-readable layout. Three from-scratch, zero-dependency virtual machines under one
-roof; one engine-agnostic mapper that charts them all.
+### Supported story formats:
 
-> **Upgrading from babelmap?** The project was renamed in 0.2.0. Move your data
-> once — `mv ~/.babelmap ~/.lanthorn`, then rename `*.babelmap` archives inside it
-> to `*.lanthorn` — and everything loads as before; the formats themselves did not
-> change. See the [changelog](CHANGELOG.md) for the exact commands.
->
-> The formats that live on your disk between sessions — saves, the `.lanthorn`
-> archive, the sidecars — are **frozen and version-pinned**, so a future change
-> can't silently corrupt them (see the
-> [save-format policy](docs/release/save-format-policy.md)). The `config.toml` /
-> `style.toml` schemas stay tolerant and may still gain fields.
+* **Z-machine v3–v8** (incl. graphical v6)
+* **Glulx**
+* **Scott Adams**
+
+### Supported original Infocom disk formats:
+
+* Amiga
+* Mac
+* PC
+* ST
+* AppleII
+* C-64/128
 
 ---
 
@@ -34,10 +28,12 @@ roof; one engine-agnostic mapper that charts them all.
 
 **The map draws itself while you play.** A lap of the white house in each
 direction — nothing typed but the game's own commands, no annotation, no graph
-paper. Walking the ring both ways is the point: a room already placed must not
-move when you come back to it from the other side.
+paper.
 
 ![lanthorn walking Zork I while the automap assembles itself room by room](docs/automapping.gif)
+
+**Your IF library at a glance.** The story list can be configured as a list of grid of covers. Press `[TAB]` to
+bring up the story info panel.
 
 ![lanthorn's cover-gallery view: a grid of story covers beside a metadata info panel](docs/cover-gallery.png)
 
@@ -96,44 +92,20 @@ release, four binaries in each: `lanthorn` itself plus the no-map CLI players
 ./lanthorn ~/if-games/
 ```
 
-Platform notes (Gatekeeper on macOS, SmartScreen on Windows, `libasound2` on
-Linux) are covered in each release's notes. Per-platform behaviour differences —
-what Windows cannot be asked, and what it cannot do on the way out — are in
-[docs/features/platforms.md](docs/features/platforms.md).
-
-Don't have a story yet? Launch the picker and press **`/`** to browse IFDB's
-popular list or search by title/author, then **download a playable story file
-straight into your library** — lanthorn grabs it in the background and drops you
-right on it.
-
-Set a `default_story_dir` (lanthorn offers to remember the first directory you
-open) and a bare **`lanthorn`** opens your library there. You type at the
-story's own inline `>` prompt, the way a classic terminal interpreter works;
-press the leader key (default **`Ctrl+P`**) for a pop-up reference of every
-command.
-
-Supported formats: **Z-machine v3–v8** (incl. graphical v6), **Glulx**, and
-**Scott Adams** (ScottFree `.dat`) — auto-detected from the file, loaded raw or
-from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`). (v1/v2 are not
-supported.) A plain `.zip` works too, for a bare `.z3`/`.z5`/`.z8` anywhere
-inside it — handy for something you just downloaded — but only for those: it
-carries no artwork, sound or hints, and holds one game rather than a library.
-
 ---
 
 ## Launching it
 
-Every one of these is a single line in a terminal. `lanthorn --help` has the full
-list; these are the ones people actually reach for.
-
 **Open a library and pick from it**
 
 ```bash
-lanthorn                                # your default_story_dir, once you've set one
 lanthorn ~/if-games/                    # any directory — the story picker opens on it
 ```
 
-The picker is the front door: cover art, titles, badges, sorting and search, plus
+Lanthorn offers to remember the first directory you open as the `default_story_dir`.
+If you accept, a bare **`lanthorn`** uses that as your default directory.
+
+The picker let's you browse all your stories, download cover art and meta data, plus
 **`/`** to pull a new story down from IFDB without leaving it.
 
 **Go straight into one game**
@@ -153,26 +125,6 @@ lanthorn "LostTreasures1.iso" --story 3             # a compilation disc, by pos
 lanthorn "InfocomMasterpieces.img" --story arthur   # …or by name
 ```
 
-`--story` is the browser's choice made on the command line — without it a
-compilation can only be opened by launching it and picking, so nothing headless
-can reach any game on one but the first. Every format lanthorn mounts, and the
-machine each presents as, is in [Play the original disks](#play-the-original-disks).
-
-**Ask for a particular look**
-
-```bash
-lanthorn stories/journey.z6 --v6-render raster       # full-frame pixels instead of hybrid
-lanthorn stories/journey.z6 --v6-pixel-lock on       # whole device pixels per art pixel; no soft edges
-lanthorn stories/zork0.z6 --pictures zork0.mg1       # draw the MCGA rendition of the art
-lanthorn stories/zork1.z3 --interpreter 4 --system-colours   # dress a bare story as an Amiga
-lanthorn --machines                                  # what each interpreter number actually does
-```
-
-Naming an art archive picks the machine with it, so `--pictures zork0.mg1` also
-reports an IBM PC unless `--interpreter` says otherwise. On a bare story file
-nothing has named a machine, which is why the Amiga line asks for its colours
-explicitly — off an Amiga floppy that happens on its own.
-
 **Turn things off**
 
 ```bash
@@ -181,13 +133,9 @@ lanthorn stories/zork0.z6 --no-images            # skip the artwork; the prose s
 lanthorn stories/zork0.z6 --image-protocol kitty # force a protocol instead of auto-detecting
 ```
 
-The two image lines name a Version 6 story because that is where the choice
-bites: a v5 game has no artwork of its own, and the only picture it could cost
-you is the cover in the story picker.
-
 ---
 
-## Highlights
+## Feature Highlights
 
 - **Three engines, one player** — a clean-room **Z-machine** (v3–v8, incl.
   graphical v6), **Glulx** (Inform 7, with an accelerated veneer and full Glk
@@ -212,26 +160,14 @@ you is the cover in the story picker.
   than anything the story asked for. Open *Zork I* off a Commodore disk or
   *Spellbreaker* off an Amiga floppy and lanthorn dresses the pane the way that
   machine's own interpreter dressed its screen: its page and ink, its status line
-  — the Amiga's is not a band at all, the reversal sitting behind each run of text
-  with the page showing between them — and the shape of its cursor. Nine machines,
-  every value measured off emulator captures of the release disks rather than
-  guessed. → [interpreter](docs/features/interpreter.md)
+  and the shape of its cursor. Nine machines, every value measured off emulator
+  captures of the release disks rather than guessed. → [interpreter](docs/features/interpreter.md)
 - **The machine's own typeface, off the machine's own media** — Version 6 text is
   set in the face the original interpreter drew with, read from the media rather
   than bundled: *Arthur*'s proportional face off its Amiga floppy, stepped at the
   game's own per-glyph advances; Monaco out of a Macintosh resource fork; and,
   from boot media you supply, **Geneva** off a Mac OS System file and **topaz 8**
-  out of a Kickstart ROM — the only place topaz 8 has ever existed. Nothing is
-  shipped, copied or licensed, and with no such media present the built-in face
-  answers as it always did. → [v6 graphics](docs/features/v6-graphics.md)
-- **Faster redraws, and a scrollback that stops costing** — a graphics window, the
-  chrome ring and the raster composite each keep their image id across redraws, so
-  a changed picture costs the picture instead of the whole frame: up to two orders
-  of magnitude fewer bytes on a Kitty redraw that only moved one placard, sent
-  deflated where the terminal has actually said it can inflate them. And the
-  transcript wrap is incremental rather than rebuilt every frame, so a
-  twenty-thousand-turn session draws — and answers a keystroke — at the cost of
-  its first. → [v6 graphics](docs/features/v6-graphics.md)
+  out of a Kickstart ROM — the only place topaz 8 has ever existed. → [v6 graphics](docs/features/v6-graphics.md)
 - **Play straight off the original release disks** — Amiga, Macintosh, Apple II,
   Atari ST, PC, Commodore and the *Lost Treasures* CDs, with the artwork and the
   sound each disk carries and the machine it came from. See
@@ -251,9 +187,7 @@ you is the cover in the story picker.
   export. → [interface](docs/features/interface.md)
 - **Three lightweight CLI players** — `zvm-cli`, `gvm-cli` and `scott-cli` play
   any story in a bare terminal, with your scrollback intact and a screen-reader
-  mode that emits zero escape sequences. All three save and restore now, Scott
-  Adams included — it has no save format of its own, which is a fact about the
-  adventure and never was one about the host. See
+  mode that emits zero escape sequences. See
   [**The command-line players**](#the-command-line-players) below.
   → [interpreter](docs/features/interpreter.md)
 - **Story picker & IFDB** — browse a library as a badged **list** or `g`
@@ -276,9 +210,6 @@ you is the cover in the story picker.
   styling for all 11 Glk styles, per-game looks, a templated status bar, and a
   fully configurable keymap in an auto-seeded, live-reloadable `style.toml`.
   → [customization](docs/features/customization.md)
-- **Crash-proof** — a faulting story halts with a call-frame stack trace (saved
-  to `~/.lanthorn/crash.log`) while the app stays interactive, instead of taking
-  the interpreter down. → [interpreter](docs/features/interpreter.md)
 
 For the full, exhaustive feature list see **[`docs/features/`](docs/features/)**;
 for the standards lanthorn implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
@@ -309,25 +240,7 @@ lanthorn "LostTreasures1.iso" --story 3       # a compilation CD
 | Atari ST floppy | `.st` | Atari ST (5) |
 | Commodore 1541 | `.d64` | Commodore 128 (7) |
 | PC floppy | `.ima` `.img` | — |
-| CD-ROM, incl. hybrid Mac/PC discs | `.iso` `.bin` | Macintosh (3) or —, per file |
-
-**A CD-ROM is not a machine**, which is why its row names two. The *Lost
-Treasures* discs carry the Macintosh and DOS builds in one filesystem, so a
-single answer would be wrong for half the disc: a file Apple's ISO 9660
-extension identifies as a Macintosh one is played as a Macintosh, and a file it
-does not leaves whatever rule is already in force. A dash is that — no number
-stated, the current default stands, which for a PC floppy is simply your
-terminal. `--interpreter <n>` overrides any of them.
-
-(The extension column is what a *scan* offers to open, not a claim about the
-bytes: several formats share a spelling, and what a volume actually **is** gets
-decided by reading it.)
-
-**A release pressed across several floppies is one game.** Name any single
-volume and the rest are found beside it — *Arthur*'s Apple press keeps its story
-in five segments and its 168 pictures across four disks. The story browser shows
-one row per game, not one per platter, so every story on a compilation is
-reachable and each keeps its own saves.
+| CD-ROM, incl. hybrid Mac/PC discs | `.iso` `.bin` | Macintosh (3) or PC/DOS, per file |
 
 **The artwork comes off the disk in the disk's own format** — Amiga, Apple II
 (8-byte records, RLE and XOR), the PC archives (LZW and all), and the Macintosh
@@ -344,38 +257,20 @@ is the bend, so *Sherlock*'s heartbeat really does beat at three speeds from one
 recording. That model was read out of the 68000 interpreter Infocom shipped
 rather than inferred from the files.
 
-**A disk outranks a `.blb` filed beside it**, for sound and graphics alike: the
-disk is the rendition Infocom pressed, and a Blorb is somebody's later
-re-rendering of it — sometimes at audibly different pitches. `/play-sound` says
-which source answered, and names a Blorb that is present but outranked rather
-than leaving you wondering.
 
-**And now the typeface, on the Amiga.** *Arthur*'s Amiga floppy carries a real
-proportional font rather than a fixed grid, and lanthorn now draws it at the
-game's own per-glyph advances instead of an even-width approximation — the same
+
+*Arthur*'s Amiga floppy carries a real proportional font rather than a fixed grid,
+and lanthorn now draws it at the game's own per-glyph advances - the same
 look the machine had, straight off the floppy with nothing to install. It needs
 the **raster** renderer, which paints the whole frame as an image: hybrid is the
 default and draws text as your terminal's own characters, one glyph per cell,
 which is what makes it crisp and is also why a proportional face cannot fit in
-it. `/set-v6-render raster` switches live, or `v6_render = "raster"` in
-`config.toml` makes it the default.
+it. `/set-v6-render raster` switches live, or you can make it permanent by using
+the `/open-settings` command and setting it there.
 
-*Journey*, *Beyond Zork* and *Shogun*'s Amiga releases carry a fixed 8×8
-character set instead of a typeface, and set in **topaz 8** — the face Infocom's
-Amiga interpreter actually painted prose with — as soon as a Kickstart dump is
-sitting in `~/.lanthorn/`. It has to come from a ROM because topaz 8 exists
-nowhere else; a Workbench floppy's `FONTS:` drawer carries `topaz/11` and six
-display faces no Infocom interpreter ever drew with.
-
-**The Macintosh gets both halves, and which one you see depends on what you have
-lying around.** Infocom's Mac games ship Monaco (`FONT` 524), a monospaced
-stand-in, and lanthorn draws it off the resource fork on that machine's own 7×15
-cell. But the face the real interpreter *painted* was Geneva, and Geneva lives in
-the Macintosh System file that shipped with every Mac and no game — so drop a Mac
-OS System disk into `~/.lanthorn/` and prose sets in **Geneva 12**, stepped at its
-own proportional advances, with Monaco kept for the fixed-pitch runs the game asks
-for by name. Nothing is shipped, copied or licensed: the media stays yours,
-exactly the arrangement `stories/` already runs on.
+If you want all of the original bitmap fonts for both Amiga and Mac you will
+need to copy your `Kick12.rom` and `MacOS_6.0.8_System_Startup.img` files to the
+~/.lanthorn directory.
 
 → [interpreter](docs/features/interpreter.md) · [v6 graphics](docs/features/v6-graphics.md)
 
@@ -407,8 +302,6 @@ zvm-cli --machines                # what machine is what
   back. Whichever you choose, quitting releases the pinned region and leaves your
   shell prompt below the game rather than in the middle of it — on `quit`, on
   Ctrl-D and on Ctrl-C alike.
-- **The save prompt lists your saves** and a number picks one, so you needn't
-  remember what you called it. Saving over one asks first.
 - **Release media, the same as the TUI.** A disk holding several stories asks
   with a numbered menu labelled by version, release and serial — the only thing
   that tells four files called `STORY.DAT` apart — and names them from a bundled
@@ -418,8 +311,6 @@ zvm-cli --machines                # what machine is what
   quiets the ever-changing status line while announcing **score changes** and
   answering **`/status`** on demand, and drops the `[MORE]` pager. `NO_COLOR` is
   honoured separately, as colour-only.
-- **`--machines`** prints the ZMSD §11.1.3 machine table zvm holds: every
-  setting per row, each decline argued, and each machine's period look beside it.
 
 → [interpreter](docs/features/interpreter.md)
 
