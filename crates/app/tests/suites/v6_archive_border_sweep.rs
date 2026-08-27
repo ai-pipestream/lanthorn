@@ -85,12 +85,16 @@
 //!    art's own picture space or that space rounded up to a whole text cell.
 //!    **This is SQ-0841's root cause stated as a property**, and it is the one
 //!    assertion here that could have caught it before a person did.
-//! 5. **A pillar ends on its foot.** Conditional, and deliberately so:
+//! 5. **A flank that has a foot ends on it.** Conditional, and deliberately so:
 //!    `tile_down`'s own doc records that not every flank has one — *"Arthur needs
 //!    neither… Zork Zero's patterned masonry is the case they were written
-//!    for"*. Where the layout is one of the two arms that stamp a foot, the
-//!    composition's last row is the art's own last row, pixel for pixel. Shogun's
-//!    slab tiles to the bottom instead and is exempt.
+//!    for"*. Where the flank has a FOOTER — which is what selects the two arms
+//!    that stamp a foot — the composition's last row is the art's own last row,
+//!    pixel for pixel. A flank without one has nothing to land on, tiles to the
+//!    pane's edge instead, and is exempt. **The condition was `kind !=
+//!    ShogunSinglePiece` until SQ-1097**, which is a proxy for the arm and not
+//!    the arm: Zork Zero's jungle, underground and InvisiClues plates are
+//!    recognised as pillars and have no foot at all.
 //! 6. **A symmetric border comes out symmetric** (SQ-0845). One plate is one
 //!    drawing and its left and right crops are the same border, so they must be
 //!    the same layout. This is the property a crop width borrowed from another
@@ -248,6 +252,12 @@ fn sweep(a: &mut Archive) -> Tally {
         let Some(kind) = kind else { continue };
 
         let flank = crop(&f.canvas, f.x0, f.x1, native_h);
+        // Whether this flank ends on a FOOT, read the way the composer reads it
+        // (SQ-1097). `flank_source` sections both crops of the drawing and combines
+        // them, and `agree_sections` takes the EARLIER footer of the two — so a foot
+        // this side can see is a foot the composition uses, whatever the twin says.
+        let has_foot =
+            border::flank_sections(&flank, f.art.0, f.art.1).is_some_and(|s| f.art.1 > s.middle_end);
         let art_rows = spans(&flank);
         let art_spans: std::collections::HashSet<(u32, u32)> = art_rows.iter().copied().flatten().collect();
 
@@ -308,13 +318,32 @@ fn sweep(a: &mut Archive) -> Tally {
                 );
             }
 
-            // ── 5. A pillar ends on its foot ─────────────────────────────────
+            // ── 5. A flank that HAS a foot ends on it ────────────────────────
             //
             // Conditional on the layout, not on the art: Shogun's slab has no
             // separate base to stamp and tiles to the bottom instead, which is
             // what `tile_down`'s own doc records. Both pillar arms end on a
             // whole copy of the art's tail, so the band's last row is the art's.
-            if kind != BorderArt::ShogunSinglePiece {
+            //
+            // **The condition used to be `kind != ShogunSinglePiece`, and that
+            // was a proxy for the arm rather than the arm** (SQ-1097). The two
+            // arms that stamp a foot are the ones a FOOTER selects, and a flank
+            // can be recognised as pillars and still have none: Zork Zero's
+            // jungle, underground and InvisiClues plates are all a capital over
+            // a texture that simply runs off the bottom of the screen, and
+            // `footer_top` correctly reports no foot on any of them. They passed
+            // this only because the foot-less arm used to anchor its fill at the
+            // pane's bottom, which is the anchoring SQ-1097 removes — it put the
+            // fill's leftover FRAGMENT against the art and stacked the whole
+            // copies below it, and on Shogun, where the pane leaves room for no
+            // whole copy at all, the extension was the art's own rows 214..400
+            // stamped straight under art row 399.
+            //
+            // So the property is now stated over the flanks that actually have
+            // somewhere to land. What the foot-less arm gains instead — a join
+            // to the art that continues the drawing — is pinned by
+            // `v6_side_border_tiling::no_flank_join_steps_harder_than_the_art_itself`.
+            if has_foot {
                 let foot: Vec<[u8; 4]> = (0..out.width()).map(|x| out.get_pixel(x, d - 1).0).collect();
                 let want: Vec<[u8; 4]> =
                     (0..flank.width()).map(|x| flank.get_pixel(x, f.art.1 - 1).0).collect();

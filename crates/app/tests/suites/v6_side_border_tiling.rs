@@ -184,6 +184,20 @@ fn stories_dir() -> PathBuf {
 /// Boot exactly as `startup.rs` does — the profile comes from the MEDIUM, the
 /// artwork from whatever that medium supplies — after checking the build.
 fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
+    boot_machine(file, release).map(|(s, _)| s)
+}
+
+/// [`boot`], keeping the [`app::machine_boot::MachineBoot`] it resolved.
+///
+/// The v6 CELL rides on that value, and it is the machine's: 7x15 on a Macintosh
+/// press, 8x16 everywhere else (SQ-0917). A case that measures native geometry has
+/// to read it from here rather than assume `V6Cell::DEFAULT`, or it lays a
+/// Macintosh frame out on a grid the game was never told about — SQ-1020/SQ-1021
+/// exactly. One boot, so the two forms cannot disagree.
+fn boot_machine(
+    file: &str,
+    release: Option<(u16, &str)>,
+) -> Option<(GameSession, app::machine_boot::MachineBoot)> {
     let path = fixture_path(file);
     let (loaded, _) = app::hints::load_mounted_story(&path).ok().or_else(|| {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
@@ -224,7 +238,7 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<GameSession> {
     assert!(!s.quit, "{file}: quit during boot");
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();
-    Some(s)
+    Some((s, machine))
 }
 
 /// Boot a story against a NAMED picture archive — SQ-0734 tier 3, the door the
@@ -1059,6 +1073,150 @@ fn no_tile_join_steps_harder_than_the_pillar_shaft_itself() {
                  lit, so a repeat that merely translates it cannot be seamless",
                 sp.release,
                 natural,
+            );
+        }
+    }
+}
+// ── 7b. And the same of the FOOT-LESS arm (SQ-1097) ──────────────────────────
+
+/// SQ-1097, as the user reported it: Shogun's flank *"grows from the bottom and
+/// meets a single fixed copy of the art at the top"*, with a visible break where
+/// the two meet.
+///
+/// The sibling case above pins the join a flank with a FOOT makes. This pins the
+/// other arm, which had no case at all and was wrong in a way `flank_shape` states
+/// in one line:
+///
+/// ```text
+/// ShogunSinglePiece · banner 0..0 (0 rows) · middle 0..400 (period 400) · footer 400..400 (0 rows)
+/// ```
+///
+/// A 400-row middle at period 400 means no sub-period was found — the repeat unit
+/// is the whole drawing — and a 586-row band leaves 186 rows to fill, which is less
+/// than one copy of it. The foot-less fill used to run UPWARD from the pane's
+/// bottom, so it took its partial branch on the first iteration and stamped the
+/// art's own rows 214..400 straight under art row 399. Every rendition of Shogun
+/// that extends at all does this, because they all measure alike.
+///
+/// ## The oracle
+///
+/// The same low-pass step detector the sibling uses, at the one row that matters:
+/// the boundary between the art and the first row this code composed. The
+/// threshold is the drawing's own MEDIAN internal step rather than its maximum,
+/// because a slab of ornament has no plain shaft to be quiet — Shogun's vine steps
+/// as hard as 34.28 somewhere inside itself, so "no worse than the worst" is
+/// satisfied by anything. "No more of a step than the drawing makes at half its own
+/// row boundaries" is the property a join has to meet: it must be UNREMARKABLE, not
+/// merely not-the-worst.
+///
+/// Measured at K = 16, all three extending presses alike, both flanks:
+///
+/// | | join step | the drawing's median |
+/// |---|---|---|
+/// | before | **18.18** | 11.43 |
+/// | after | **0.00** | 11.43 |
+///
+/// Zero, because the copy adjacent to the art is now the MIRRORED one and a
+/// flipped copy opens on the row the art closed with — SQ-1063's own argument for
+/// the footed arm, which the foot-less arm was not using.
+///
+/// Falsifiable: cut the leftover fragment from the unit's other end (`let src_y =
+/// if flipped { 0 } else { uh - rest }`) and all three presses fail here at 18.18
+/// against 11.43, while Zork Zero's castle — the footed arm, which this case also
+/// drives — still passes at 0.00.
+///
+/// **The fitting pane is the control**: at a band no taller than the art there is
+/// nothing to extend, `flank_source` says so by answering `None`, and the case
+/// checks that before it measures anything. `stories/Shogun.po` (Apple IIgs,
+/// release 311 / serial 890510) is the other control and is absent on purpose — it
+/// is a 560x384 press whose art covers its screen, so it never reaches this code.
+#[test]
+fn no_flank_join_steps_harder_than_the_art_itself() {
+    /// The 586-row band `flank_shape` composes by default: a 129x60 pane at an
+    /// 8x18 cell over a 400-row screen. Deliberately LESS than twice the art, which
+    /// is the case the fill got wrong — at 800 a whole copy fits and it did not.
+    const BAND: u32 = 586;
+    /// The low-pass window, in unit rows — the sibling case's own constant.
+    const K: usize = 16;
+
+    /// One press, and the shape its flank must still have when it is measured.
+    struct Press {
+        name: &'static str,
+        file: &'static str,
+        release: u16,
+        serial: &'static str,
+        /// Turns of blank input from boot to the gameplay frame.
+        turns: usize,
+        art: (u32, u32),
+        want: BorderArt,
+    }
+    // All three Shogun presses that extend — the defect is not a medium — plus Zork
+    // Zero's castle, which is the FOOTED arm and must be untouched by this.
+    const PRESSES: &[Press] = &[
+        Press { name: "Shogun IBM PC", file: "shogun-r322-s890706.z6", release: 322, serial: "890706", turns: 12, art: (0, 400), want: BorderArt::ShogunSinglePiece },
+        Press { name: "Shogun Amiga", file: "James Clavell's Shogun.adf", release: 295, serial: "890321", turns: 12, art: (0, 400), want: BorderArt::ShogunSinglePiece },
+        Press { name: "Shogun Macintosh", file: "Shogun.toast", release: 292, serial: "890314", turns: 12, art: (0, 400), want: BorderArt::ShogunSinglePiece },
+        Press { name: "Zork Zero IBM PC", file: "zork0-r393-s890714.z6", release: 393, serial: "890714", turns: 12, art: (0, 400), want: BorderArt::ZorkZeroPillars },
+    ];
+
+    let _g = app::v6_palette_at_boot();
+    for p in PRESSES {
+        let Some((mut s, machine)) = boot_machine(p.file, Some((p.release, p.serial))) else {
+            continue;
+        };
+        drive(&mut s, p.turns);
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("{}: v6 Layered root", p.name) };
+        // The CELL is the machine's, and the Macintosh press is told on 7x15
+        // (SQ-0917). Reading it off the boot rather than assuming the default is
+        // what stops this measuring a screen the player never sees.
+        let native = app::render::v6_layout::native_extent(items, &machine.text_face());
+        let layout = app::render::v6_layout::classify_windows(items, machine.cell);
+        let gfx = app::render::v6_layout::build_graphics_canvas(&layout.chrome, native);
+        let story = layout.story.expect("a story window");
+        eprintln!(
+            "{}: profile {:?}, release {} serial {}, screen {:?}, cell {}x{}, native {}x{}, {} turns",
+            p.name, machine.profile, p.release, p.serial, machine.screen_px,
+            machine.cell.w, machine.cell.h, native.0, native.1, p.turns,
+        );
+        for (x0, x1, side) in [
+            (0u32, story.x_px as u32, "left"),
+            ((story.x_px + story.w_px) as u32, gfx.width(), "right"),
+        ] {
+            let art = app::render::v6_border::art_extent(&gfx, x0, x1);
+            // Non-vacuity: this is the frame the numbers above were measured on.
+            assert_eq!(art, p.art, "{} [release {}] {side}: the flank's native art rows", p.name, p.release);
+            assert_eq!(
+                app::render::v6_border::recognize(&gfx, x0, x1, art, native.1 as u32),
+                Some(p.want),
+                "{} [release {}] {side}: recognised layout", p.name, p.release,
+            );
+
+            // The FITTING pane: a band the art already fills is not extended at all.
+            assert!(
+                app::render::v6_border::flank_source(&gfx, &gfx, x0, x1, art, native.1 as u32, 0, art.1)
+                    .is_none(),
+                "{} [release {}] {side}: a band no taller than the art needs no extension",
+                p.name, p.release,
+            );
+
+            let out = app::render::v6_border::flank_source(&gfx, &gfx, x0, x1, art, native.1 as u32, 0, BAND)
+                .unwrap_or_else(|| panic!("{} {side}: a {BAND}-row band over {art:?} must be extended", p.name));
+            let prof: Vec<f64> = (0..out.height()).map(|y| row_luma(&out, y)).collect();
+            // What the drawing does to itself, at half its own row boundaries…
+            let mut internal: Vec<f64> =
+                (art.0 as usize + K..art.1 as usize - K).map(|y| luma_step(&prof, y, K)).collect();
+            internal.sort_by(f64::total_cmp);
+            let median = internal[internal.len() / 2];
+            // …against the one row this code put next to it.
+            let join = luma_step(&prof, art.1 as usize, K);
+            assert!(
+                join <= median,
+                "{} [release {}] {side}: the art→extension join at band row {} steps {join:.2}, \
+                 where the drawing itself steps {median:.2} at half its own row boundaries \
+                 (worst {:.2}). A join the eye can find is a phase jump: the fill laid a fragment \
+                 of the drawing against the drawing instead of continuing it (SQ-1097)",
+                p.name, p.release, art.1, internal.last().copied().unwrap_or_default(),
             );
         }
     }
