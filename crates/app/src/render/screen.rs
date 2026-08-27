@@ -3163,38 +3163,19 @@ fn render_node(
                     // this path drops the surrounding chrome, but dropping this lost
                     // the illustration the raster and hybrid paths both show. Give it
                     // its native-proportional column and inset the story beside it.
-                    // Frame art that spans or overlaps the story (Arthur's header
-                    // panel, every game's full-screen backdrop) is NOT beside it and
-                    // stays dropped — that is what drawing no game image means.
+                    //
+                    // WHICH windows those are, and at which pane columns, is
+                    // `v6_layout::cell_path_side_columns` and lives there because
+                    // `dialog_bounds` has to ask the same question and used to answer
+                    // it for itself, on a different measuring basis (SQ-1092).
                     let col_of = |px: u16| (area.width as u32 * px as u32 / native_w.max(1) as u32) as u16;
                     let story_l = story.x_px;
                     let story_r = story.x_px.saturating_add(story.w_px);
-                    let sides: Vec<(&&PositionedWindow, bool)> = layout
-                        .chrome
-                        .iter()
-                        .filter(|pw| matches!(&pw.node, WinNode::Graphics(_)))
-                        .filter(|pw| pw.y_px < story.y_px.saturating_add(story.h_px) && pw.y_px.saturating_add(pw.h_px) > story.y_px)
-                        .filter_map(|pw| {
-                            let right_edge = pw.x_px.saturating_add(pw.w_px);
-                            if right_edge <= story_l {
-                                Some((pw, true))
-                            } else if pw.x_px >= story_r {
-                                Some((pw, false))
-                            } else {
-                                None
-                            }
-                        })
-                        // A side column never takes more than half the pane — the
-                        // story stays the larger half whatever the game declares.
-                        .filter(|(pw, _)| {
-                            let w = col_of(pw.x_px.saturating_add(pw.w_px)).saturating_sub(col_of(pw.x_px));
-                            w > 0 && w * 2 <= area.width
-                        })
-                        .collect();
+                    let sides = crate::render::v6_layout::cell_path_side_columns(&layout, area, native_w);
                     let mut story_x = area.x;
                     let mut story_right = area.right();
-                    for (_, left) in &sides {
-                        if *left {
+                    for s in &sides {
+                        if s.left {
                             story_x = story_x.max(area.x + col_of(story_l));
                         } else {
                             story_right = story_right.min(area.x + col_of(story_r));
@@ -3202,11 +3183,10 @@ fn render_node(
                     }
                     let mid_y = area.y + story_row;
                     let mid_h = area.height.saturating_sub(story_row + bottom_used);
-                    for (pw, _) in &sides {
-                        let x = area.x + col_of(pw.x_px);
-                        let w = col_of(pw.x_px.saturating_add(pw.w_px)).saturating_sub(col_of(pw.x_px));
-                        let rect = Rect::new(x, mid_y, w.min(area.right().saturating_sub(x)), mid_h);
-                        render_node(&pw.node, status, char_mode, introspect, state, rect, buf, game_input, links, grid_colors);
+                    for s in &sides {
+                        let w = s.w.min(area.right().saturating_sub(s.x));
+                        let rect = Rect::new(s.x, mid_y, w, mid_h);
+                        render_node(&s.win.node, status, char_mode, introspect, state, rect, buf, game_input, links, grid_colors);
                     }
                     let story_area = Rect::new(story_x, mid_y, story_right.saturating_sub(story_x), mid_h);
                     {
@@ -3380,9 +3360,21 @@ fn layered_item_rect(area: Rect, item: &PositionedWindow) -> Rect {
 /// inside it); pass an empty rect when the story pane isn't shown.
 ///
 /// With no graphics windows this returns `frame` unchanged (today's behavior).
-pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect, colors: &ColorScheme) -> Rect {
+///
+/// A Version 6 composite contributes only its side COLUMNS — the one kind of
+/// graphics the cell path a modal forces still places. See
+/// [`collect_graphics_rects`]'s `Layered` arm (SQ-1092).
+///
+/// `state` rather than a `&ColorScheme`, because the walk needs two facts that
+/// always come from the same place: the theme (whether a pair reserves a separator
+/// gutter, SQ-0821) and the machine's `v6_text`, which is where BOTH the character
+/// cell `classify_windows` splits on and the unit screen `native_extent` measures
+/// come from. Two bare parameters that always travel together is the refactoring
+/// policy's tell; `AppState` is the value they travel in, and is what every other
+/// render entry point in this file already takes.
+pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect, state: &AppState) -> Rect {
     let mut graphics: Vec<Rect> = Vec::new();
-    collect_graphics_rects(&model.root, story_area, &mut graphics, colors);
+    collect_graphics_rects(&model.root, story_area, &mut graphics, state);
     let mut bounds = frame;
     for g in graphics {
         bounds = subtract_rect(bounds, g);
@@ -3393,10 +3385,12 @@ pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect, colors:
 /// Walk the tree assigning each leaf its terminal rect (exactly as `render_node`
 /// does), collecting every graphics leaf's rect.
 ///
-/// `colors` is needed for the same reason `render_node` needs it: whether a pair
-/// reserves a separator gutter is a THEME decision since SQ-0821, and a walk that
-/// guessed differently would hand `dialog_bounds` rects one row off what was drawn.
-fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>, colors: &ColorScheme) {
+/// `state` is needed for the same reason `render_node` needs it, and for one more:
+/// whether a pair reserves a separator gutter is a THEME decision since SQ-0821, and
+/// a walk that guessed differently would hand `dialog_bounds` rects one row off what
+/// was drawn; and a v6 composite's columns are measured against the machine's own
+/// text face (SQ-1092) — see the `Layered` arm.
+fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>, state: &AppState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -3405,18 +3399,57 @@ fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>, color
             // Reserve the same separator gutter render_node does, so the graphics
             // rects (and thus `dialog_bounds`) match exactly what's drawn — which
             // since SQ-0821 means asking the THEME, not the game's border flag.
-            let sep = border.then(|| separator_style(*vertical, colors)).flatten();
+            let sep = border.then(|| separator_style(*vertical, &state.colors)).flatten();
             let (a1, _sep, a2) =
                 split_area_bordered(area, *vertical, split.fixed, u16::from(sep.is_some()));
-            collect_graphics_rects(first, a1, out, colors);
-            collect_graphics_rects(second, a2, out, colors);
+            collect_graphics_rects(first, a1, out, state);
+            collect_graphics_rects(second, a2, out, state);
         }
         WinNode::Graphics(_) => out.push(area),
         WinNode::Grid(_) | WinNode::Buffer(_) | WinNode::Blank => {}
+        // A VERSION 6 COMPOSITE EXCLUDES ONLY WHAT THE CELL PATH STILL PLACES (SQ-1092).
+        //
+        // `Layered` is built in exactly one place — `session.rs`'s v6 screen model —
+        // so this arm is the graphical Z-machine and nothing else. And a v6 frame
+        // drawn WHILE A DIALOG IS UP is not the pixel frame: `render_node`'s `Layered`
+        // arm takes the ring or the raster composite only
+        // `if !state.any_modal_overlay_open()`, and every consumer of what
+        // `dialog_bounds` returns is one of the modals that gate names
+        // (`overlays::draw_all` centres all of them in this one rect). The frame to
+        // reason about here is therefore always the CELL path's, and that path draws
+        // no game image — with one exception, the side columns below.
+        //
+        // Taking every graphics leaf instead did the opposite of both halves. Zork
+        // Zero's border window SPANS the story, so the cell path draws nothing for it —
+        // and its native cell rect (0, 0, 80, 25) subtracted from an 82x34 frame with
+        // the story pane inset one cell left `(0, 26, 82, 8)`, the strip BELOW the
+        // stamp. Every dialog centred in that: low, right, and — since
+        // `dialog::centered_rect` clamps to its bounds — a fifteen-row leader panel cut
+        // to eight with its `Done` button gone.
+        //
+        // WHICH windows survive, and at which pane columns, is not restated here:
+        // `v6_layout::cell_path_side_columns` is the single statement of that rule and
+        // the cell path itself is its other caller. Restating it was the defect one
+        // layer down — this walk measured the half-pane guard in the GAME's native
+        // cells (`PositionedWindow::w`) while the renderer measured it in
+        // PANE-PROPORTIONAL ones, which agree only while a pane is about as wide as
+        // the ~80-cell v6 screen.
+        //
+        // The one thing that legitimately differs is the VERTICAL extent, and it
+        // differs in the safe direction. The renderer knows the band its column sits
+        // in (`mid_y`/`mid_h`, from the run analysis this walk has no part of); the
+        // exclusion takes the full pane height, a SUPERSET of what is drawn. Anything
+        // narrower would need this walk to redo that analysis, which is the mistake
+        // above wearing a different hat — and the guillotine in `subtract_rect` takes
+        // the complement of a full-height edge column either way, so a superset here
+        // costs the dialog nothing.
         WinNode::Layered(items) => {
-            for item in items {
-                let sub = layered_item_rect(area, item);
-                collect_graphics_rects(&item.node, sub, out, colors);
+            let tf = &state.v6_text;
+            let layout = crate::render::v6_layout::classify_windows(items, tf.cell());
+            let (native_w, _) = crate::render::v6_layout::native_extent(items, tf);
+            for col in crate::render::v6_layout::cell_path_side_columns(&layout, area, native_w) {
+                let w = col.w.min(area.right().saturating_sub(col.x));
+                out.push(Rect::new(col.x, area.y, w, area.height));
             }
         }
     }
@@ -10351,12 +10384,23 @@ mod tests {
         ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0, content_size: (0, 0) }
     }
 
+    /// The state `dialog_bounds` reads: the theme it resolves separators through,
+    /// and the machine's `v6_text` — which supplies both the cell
+    /// `classify_windows` splits on and the face `native_extent` measures with. The
+    /// default face is the 8x16 cell every non-Macintosh v6 press declares, which is
+    /// the grid the composites below are built on.
+    fn dialog_state() -> crate::state::AppState {
+        let mut state = crate::state::AppState::default();
+        state.colors = ColorScheme::terminal_default();
+        state
+    }
+
     #[test]
     fn dialog_bounds_returns_frame_when_no_graphics() {
         // A pure-text tree: no graphics → dialogs keep full-frame centering.
         let model = model_with(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }));
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, Rect::new(0, 0, 20, 12), frame, &ColorScheme::terminal_default()), frame);
+        assert_eq!(dialog_bounds(&model, Rect::new(0, 0, 20, 12), frame, &dialog_state()), frame);
     }
 
     #[test]
@@ -10375,7 +10419,7 @@ mod tests {
         });
         let story_area = Rect::new(0, 0, 20, 12);
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, story_area, frame, &ColorScheme::terminal_default()), Rect::new(10, 0, 30, 12));
+        assert_eq!(dialog_bounds(&model, story_area, frame, &dialog_state()), Rect::new(10, 0, 30, 12));
     }
 
     #[test]
@@ -10391,7 +10435,7 @@ mod tests {
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
         let area = Rect::new(0, 0, 20, 12);
-        assert_eq!(dialog_bounds(&model, area, area, &ColorScheme::terminal_default()), Rect::new(0, 3, 20, 9));
+        assert_eq!(dialog_bounds(&model, area, area, &dialog_state()), Rect::new(0, 3, 20, 9));
     }
 
     #[test]
@@ -10408,7 +10452,113 @@ mod tests {
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, Rect::default(), frame, &ColorScheme::terminal_default()), frame);
+        assert_eq!(dialog_bounds(&model, Rect::default(), frame, &dialog_state()), frame);
+    }
+
+    /// A v6 composite: `art` at the given native pixel box, plus a primary story
+    /// buffer at `story_px`. Cell rects are the native 8x16 quantization the
+    /// session builds them with.
+    fn v6_composite(art_px: (u16, u16, u16, u16), story_px: (u16, u16, u16, u16)) -> WinNode {
+        let pw = |px: (u16, u16, u16, u16), node| crate::engine::PositionedWindow {
+            x: px.0 / 8,
+            y: px.1 / 16,
+            w: px.2 / 8,
+            h: px.3 / 16,
+            x_px: px.0,
+            y_px: px.1,
+            w_px: px.2,
+            h_px: px.3,
+            left_margin: 0,
+            right_margin: 0,
+            node,
+        };
+        WinNode::Layered(vec![
+            pw(art_px, graphics_node()),
+            pw(story_px, WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+        ])
+    }
+
+    #[test]
+    fn dialog_bounds_ignores_a_v6_composites_spanning_art() {
+        // SQ-1092: a `Layered` root is the graphical Z-machine, and a modal forces that
+        // frame onto the CELL path (`!any_modal_overlay_open()`), which draws no frame
+        // art at all. Subtracting it anyway put every modal in whatever strip it left:
+        // Zork Zero's border window (0, 0, 640, 400) cut an 82x34 frame — story pane
+        // inset one cell — down to `(0, 26, 82, 8)`, so a fifteen-row leader panel was
+        // clamped to eight and lost its buttons.
+        let model = model_with(v6_composite((0, 0, 640, 400), (86, 78, 468, 320)));
+        let frame = Rect::new(0, 0, 82, 34);
+        let story_area = Rect::new(1, 1, 80, 31);
+        assert_eq!(
+            dialog_bounds(&model, story_area, frame, &dialog_state()),
+            frame,
+            "art that spans the story is not drawn on the cell path, so it excludes nothing"
+        );
+    }
+
+    /// The two callers of `v6_layout::cell_path_side_columns`, pinned against each
+    /// other at a pane width where the OLD code diverged (SQ-1092).
+    ///
+    /// A stand-in for Journey's Amiga floppy at 160 columns: the renderer places the
+    /// illustration at pane-proportional columns 3..65, while the walk that measured
+    /// in the game's own NATIVE cells excluded only 2..33 whatever the pane — so a
+    /// modal centred in what was left began at column 33 and the terminal drew the
+    /// rest of the canyon wall over it. At 82 columns the two bases coincide (both
+    /// 2..33), which is why every case written at the reported terminal size passes
+    /// either way.
+    ///
+    /// Asserted as a RELATION to what the renderer places, not as a pinned rect: the
+    /// point is that the two cannot drift apart again. The measured numbers are named
+    /// in the message so a change to the shared rule is still legible in a failure.
+    #[test]
+    fn a_v6_side_columns_exclusion_tracks_the_columns_the_cell_path_places() {
+        let items = match v6_composite((8, 16, 248, 272), (264, 16, 368, 272)) {
+            WinNode::Layered(items) => items,
+            other => panic!("expected a composite, got {other:?}"),
+        };
+        let state = dialog_state();
+        let layout = crate::render::v6_layout::classify_windows(&items, state.v6_text.cell());
+        let (native_w, _) = crate::render::v6_layout::native_extent(&items, &state.v6_text);
+        // This two-window stand-in's unit screen is its story box's right edge; the
+        // real frame has further windows and reaches 640. Either way the columns
+        // below are proportional to it, which is the property under test.
+        assert_eq!(native_w, 632, "the synthetic composite's unit screen");
+        let model = model_with(WinNode::Layered(items.clone()));
+
+        for (pane_w, want_cols) in [(82u16, (2u16, 33u16)), (160, (3, 65))] {
+            let frame = Rect::new(0, 0, pane_w, 34);
+            let story_area = Rect::new(1, 1, pane_w - 2, 31);
+            let cols = crate::render::v6_layout::cell_path_side_columns(&layout, story_area, native_w);
+            assert_eq!(cols.len(), 1, "one illustration column at {pane_w} columns");
+            let drawn = (cols[0].x, cols[0].x + cols[0].w);
+            assert_eq!(
+                drawn, want_cols,
+                "the cell path places Journey's illustration at these pane columns at {pane_w}"
+            );
+            let bounds = dialog_bounds(&model, story_area, frame, &state);
+            assert!(
+                bounds.x >= drawn.1,
+                "at {pane_w} columns the dialog area must start at or right of the DRAWN column \
+                 {drawn:?}, got {bounds:?} — the two measuring bases have drifted apart again"
+            );
+            assert_eq!(bounds.height, frame.height, "…and the dialog still gets the pane's full height");
+        }
+    }
+
+    #[test]
+    fn dialog_bounds_still_avoids_a_v6_side_column() {
+        // The other half of SQ-1092, and the reason that arm filters rather than
+        // returns: a chrome graphics window entirely BESIDE the story IS placed through
+        // the image protocol on the cell path ("story content, not frame art"), so a
+        // dialog must still keep clear of it. Journey's Amiga floppy (release 30) at
+        // its gameplay frame: illustration at native x 8..256, story box at 264.
+        let model = model_with(v6_composite((8, 16, 248, 272), (264, 16, 368, 272)));
+        let frame = Rect::new(0, 0, 82, 34);
+        let story_area = Rect::new(1, 1, 80, 31);
+        let bounds = dialog_bounds(&model, story_area, frame, &dialog_state());
+        assert_ne!(bounds, frame, "the illustration column is still excluded");
+        assert!(bounds.x >= 33, "the dialog area starts right of the column, got {bounds:?}");
+        assert_eq!(bounds.height, frame.height, "…and keeps the full height, so no modal is clipped");
     }
 
     #[test]
@@ -10844,12 +10994,22 @@ mod tests {
     }
 
     #[test]
-    fn collect_graphics_ids_walks_layered_like_collect_graphics_rects() {
+    fn collect_graphics_ids_walks_a_layered_composite() {
         // SQ-0637: a v6 composite is a `Layered` root. Missing that arm reported NO
         // live windows for such a frame, so `retain_live` cleared the whole protocol
         // cache every frame — a full re-encode, and under kitty a fresh id per frame
-        // with the previous ones never deleted. The id walk must cover exactly what
-        // the rect walk covers.
+        // with the previous ones never deleted. The id walk must reach every graphics
+        // leaf of a composite.
+        //
+        // This used to assert PARITY with `collect_graphics_rects`, and SQ-1092 ended
+        // that: the two walks answer different questions and now differ on exactly this
+        // tree. Which windows are LIVE decides what the protocol cache keeps, and a
+        // composite's are (the ring drew them last frame and will again the moment the
+        // modal closes). Which rects a DIALOG must avoid is asked only while a modal is
+        // up, and a modal is what takes the composite off the screen — see
+        // `collect_graphics_rects`'s `Layered` arm. Parity was a convenient proxy for
+        // "don't forget the arm", never the requirement; the requirement is asserted
+        // directly below.
         let pane = Rect::new(0, 0, 40, 20);
         let pw = |win: u32, x: u16, y: u16| PositionedWindow {
             x,
@@ -10876,9 +11036,12 @@ mod tests {
         collect_graphics_ids(&tree, &mut ids);
         assert_eq!(ids, std::collections::HashSet::from([3, 5]), "every layered graphics leaf is live");
 
+        // …and the rect walk deliberately sees NEITHER of them (SQ-1092): win 3 overlaps
+        // the story box, win 5 clears its rows entirely, and the cell path a modal
+        // forces places only a column that is beside the story AND alongside its rows.
         let mut rects = Vec::new();
-        collect_graphics_rects(&tree, pane, &mut rects, &ColorScheme::terminal_default());
-        assert_eq!(rects.len(), ids.len(), "the id walk and the rect walk see the same windows");
+        collect_graphics_rects(&tree, pane, &mut rects, &dialog_state());
+        assert!(rects.is_empty(), "neither window is a side column the cell path would place");
     }
 
     /// v6 layered composite (Phase 1b): a full-area solid graphics window

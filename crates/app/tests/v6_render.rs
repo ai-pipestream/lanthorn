@@ -27,6 +27,8 @@ mod v6_amiga_shipped_interpreter;
 mod v6_frame_border_medium;
 #[path = "suites/v6_game_colour_regression.rs"]
 mod v6_game_colour_regression;
+#[path = "suites/v6_modal_dialog_bounds.rs"]
+mod v6_modal_dialog_bounds;
 #[path = "suites/v6_menu_plan_zero_slack.rs"]
 mod v6_menu_plan_zero_slack;
 #[path = "suites/v6_pixel_lock_backend.rs"]
