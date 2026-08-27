@@ -1,4 +1,5 @@
 pub mod aux_dialog;
+pub mod fetch_keep_dialog;
 pub mod history_prompt;
 pub mod bitfont;
 pub mod config_screen;

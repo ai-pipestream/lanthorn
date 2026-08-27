@@ -590,6 +590,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "set-ifdb-url", category: Category::Library, context: Context::Browser,
         usage: "set-ifdb-url", description: "point the selected story at an IFDB page by hand",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SetIfdbUrl) },
+    CommandSpec { name: "open-url", category: Category::Library, context: Context::Browser,
+        usage: "open-url", description: "download a story from a URL into this library and open it",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::OpenUrl) },
     CommandSpec { name: "search-ifdb", category: Category::Library, context: Context::Browser,
         usage: "search-ifdb", description: "search IFDB by title or author and download a story into this directory",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::SearchIfdb) },
@@ -991,7 +994,9 @@ mod tests {
         // registry entirely.
         // SQ-0439 retired `peel-layer` and `merge-layer` for the one verb they
         // always were, `move-region` — two entries out, one in.
-        assert_eq!(COMMANDS.len(), 79, "registry must match the spec's Full command table");
+        // SQ-1086 added `open-url`: a URL is accepted wherever a story path is,
+        // and this is the browser's door to one.
+        assert_eq!(COMMANDS.len(), 80, "registry must match the spec's Full command table");
     }
 
     /// SQ-0796: `Category::ORDER` must list every category, or a whole group of

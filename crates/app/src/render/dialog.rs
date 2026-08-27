@@ -144,6 +144,10 @@ pub enum ButtonId {
     Never,
     /// The region prompt's confirm when it is a pick rather than a suggestion.
     MoveRegion,
+    /// The keep-this-download prompt's middle answer (SQ-1086): keep the fetched
+    /// story AND the file the library already holds under that name, rather than
+    /// replacing one with the other.
+    KeepBoth,
 }
 
 // ── DialogButton ──────────────────────────────────────────────────────────────

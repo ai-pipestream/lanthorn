@@ -827,6 +827,15 @@ pub(crate) fn run_story_picker(
     // submits a fetch-by-id, Esc cancels.
     let mut manual_ifdb: Option<app::text_field::TextField> = None;
 
+    // Open-a-URL (SQ-1086): `Some` while the user is typing an address. The
+    // download runs on its own short-lived thread and lands in `dir` — the
+    // library — because in the browser there is nothing to decide: this IS the
+    // directory the picker reads, so a story fetched here is kept by definition
+    // and there is no keep-it prompt to raise. (The command line, which has no
+    // library in hand, is where that question gets asked.)
+    let mut url_prompt: Option<app::text_field::TextField> = None;
+    let mut url_dl = app::story_url::UrlDownloader::new();
+
     // IFDB story search (SQ-0413): `/` opens a modal to search IFDB, browse
     // results, and download a chosen story file into `dir`. Network runs on its
     // own serial worker (one request at a time), drained per frame like the
@@ -984,6 +993,12 @@ pub(crate) fn run_story_picker(
             let story_header_active = cs.theme.get("story_header_active").style;
             if let Some(field) = &manual_ifdb {
                 let prompt = format!("IFDB URL or id (Enter to fetch, Esc to cancel): {}▏", field.as_str());
+                draw_progress_line(buf, list_area, &prompt, story_header_active);
+            } else if let Some(field) = &url_prompt {
+                let prompt = format!(
+                    "Story URL (Enter to download, Esc to cancel): {}\u{258f}",
+                    field.as_str()
+                );
                 draw_progress_line(buf, list_area, &prompt, story_header_active);
             } else if let Some(msg) = &progress_line {
                 draw_progress_line(buf, list_area, msg, story_header_active);
@@ -1204,6 +1219,53 @@ pub(crate) fn run_story_picker(
             }
         }
 
+        // Drain the open-a-URL downloads (SQ-1086). A finished one lands in
+        // `dir`, so the library has to be rescanned and the cursor put on the new
+        // story — the same landing the IFDB download below performs, through the
+        // same `ifdb_download_landing` seam, so the two gestures cannot end
+        // anywhere different.
+        let mut url_arrived = false;
+        for r in url_dl.drain() {
+            url_arrived = true;
+            match r.outcome {
+                Ok(new_path) => {
+                    let name =
+                        new_path.file_name().and_then(|n| n.to_str()).unwrap_or("story").to_string();
+                    let prev_row = stories
+                        .get(list.selected)
+                        .map(|e| (e.path.clone(), e.meta.disk_entry.clone()));
+                    // A set browser scans its volumes, not a directory, so a
+                    // fetched story would otherwise land on disk and vanish from
+                    // the list that ordered it — exactly SQ-0844's case.
+                    if let app::picker::StorySource::DiskSet { members, .. } = &mut source {
+                        if !members.contains(&new_path) {
+                            members.push(new_path.clone());
+                        }
+                    }
+                    stories = source.scan(data_base);
+                    app::picker::resort_preserving_selection(&mut stories, 0, sort);
+                    row_badges = stories
+                        .iter()
+                        .map(|e| app::picker::compute_row_badges(e, data_base, &hint_index))
+                        .collect();
+                    aux_cache = (0..stories.len()).map(|_| None).collect();
+                    list.len(stories.len());
+                    let (idx, line) = ifdb_download_landing(
+                        stories.iter().position(|e| e.path == new_path),
+                        prev_row
+                            .and_then(|(p, d)| stories.iter().position(|e| e.is(&p, d.as_deref()))),
+                        stories.len(),
+                        &name,
+                    );
+                    list.select(idx, viewport, anim);
+                    progress_line = Some(line);
+                }
+                // Say what was fetched and why it could not be opened — a 404
+                // page, a login redirect and a PDF are three different mistakes.
+                Err(msg) => progress_line = Some(format!("Could not open {}: {msg}", r.url)),
+            }
+        }
+
         // Drain IFDB search worker events (SQ-0413). A downloaded file lands in
         // `dir`, so rescan the directory, honour the active sort, and land the
         // cursor on the new story; other events (search results, download
@@ -1262,7 +1324,7 @@ pub(crate) fn run_story_picker(
         // draw is at the top of the loop, and once the result is cached
         // `cover_busy` goes false — without this the loop would block on `read()`
         // and the new cover wouldn't appear until the next input event.
-        if cover_arrived || fetch_arrived || hint_arrived || search_arrived {
+        if cover_arrived || fetch_arrived || hint_arrived || search_arrived || url_arrived {
             list.finalize_if_done();
             continue;
         }
@@ -1284,7 +1346,7 @@ pub(crate) fn run_story_picker(
         // the next keypress.
         let search_scrolling =
             search_modal.as_ref().is_some_and(|m| m.has_active_animation());
-        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy() || search_busy || search_scrolling)
+        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy() || url_dl.busy() || search_busy || search_scrolling)
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
@@ -1416,6 +1478,47 @@ pub(crate) fn run_story_picker(
                                         progress_line = Some("Not an IFDB URL or id".to_string());
                                     }
                                 }
+                            }
+                        }
+                        Backspace => field.backspace(),
+                        Delete => field.delete(),
+                        Left => field.left(),
+                        Right => field.right(),
+                        Home => field.home(),
+                        End => field.end(),
+                        Char(c) => field.insert(c),
+                        _ => {}
+                    }
+                } else if let Some(field) = url_prompt.as_mut() {
+                    // SQ-1086: the open-a-URL prompt. Same shape as the manual
+                    // IFDB field above — Enter submits, Esc cancels, everything
+                    // else edits — because a second editing idiom in one footer
+                    // row would be a second thing to learn for no reason.
+                    match k.code {
+                        Esc => {
+                            url_prompt = None;
+                            progress_line = None;
+                        }
+                        Enter => {
+                            let input = field.take();
+                            url_prompt = None;
+                            let typed = input.trim().to_string();
+                            if typed.is_empty() {
+                                progress_line = None;
+                            } else if !app::story_url::is_story_url(&typed) {
+                                // Say which of the two mistakes it is: a URL
+                                // scheme lanthorn will not fetch, or something
+                                // that is not an address at all.
+                                progress_line = Some(
+                                    app::story_url::declined_scheme(&typed).unwrap_or_else(|| {
+                                        "Not a URL — paste an http:// or https:// address".to_string()
+                                    }),
+                                );
+                            } else if url_dl.busy() {
+                                progress_line = Some("A download is already running".to_string());
+                            } else {
+                                progress_line = Some(format!("Downloading {typed}…"));
+                                url_dl.start(typed, dir.to_path_buf());
                             }
                         }
                         Backspace => field.backspace(),
@@ -1602,6 +1705,16 @@ pub(crate) fn run_story_picker(
                         // into this directory. Opens on a "Popular on IFDB" seed
                         // list (SQ-0473), fetched non-blocking through the same
                         // worker.
+                        // Open a story straight from a URL (SQ-1086). It lands
+                        // in `dir`, which IS the library, so the download is kept
+                        // by construction — the command line's keep-it prompt has
+                        // no counterpart here.
+                        Some(app::browser::BrowserAction::OpenUrl) => {
+                            if !url_dl.busy() {
+                                url_prompt = Some(app::text_field::TextField::new(""));
+                                progress_line = None;
+                            }
+                        }
                         Some(app::browser::BrowserAction::SearchIfdb) => {
                             let mut sm = app::ifdb_search_modal::SearchModal::new();
                             // So the chooser can mark files this directory

@@ -68,6 +68,8 @@ mod period_look_media;
 mod real_media_releases;
 #[path = "suites/story_identity_sweep.rs"]
 mod story_identity_sweep;
+#[path = "suites/story_url_fetch.rs"]
+mod story_url_fetch;
 #[path = "suites/release_asset_span.rs"]
 mod release_asset_span;
 #[path = "suites/restart_reboots_in_place.rs"]

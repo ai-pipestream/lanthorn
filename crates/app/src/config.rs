@@ -222,6 +222,11 @@ fn parse_interpreter_version(s: &str) -> Result<u8, String> {
 pub struct Cli {
     /// Path to a story file (.z3/.z5/.z8 etc.) or a directory to browse. When
     /// omitted, falls back to the `default_story_dir` config setting.
+    ///
+    /// An `http://` or `https://` URL works here too: lanthorn downloads it,
+    /// opens it exactly as it would the same file on disk — story files, Blorbs,
+    /// release disk images and ZIPs alike — and then offers to keep it in your
+    /// library.
     pub story: Option<PathBuf>,
 
     /// Override the lanthorn home directory (default: ~/.lanthorn)

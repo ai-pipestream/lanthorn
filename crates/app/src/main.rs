@@ -539,6 +539,7 @@ struct PaneRects {
     /// Hit-rects for the aux-storage prompt (when open).
     pub aux_dialog: Option<app::render::aux_dialog::AuxDialogRects>,
     pub history_prompt: Option<app::render::history_prompt::HistoryPromptRects>,
+    pub fetch_keep: Option<app::render::fetch_keep_dialog::FetchKeepRects>,
     /// Hit-rects for the reset dialog (when open).
     pub reset_dialog: Option<app::render::reset_dialog::ResetDialogRects>,
     /// Hit-rects for the region prompt (when open) — its option rows and its buttons (SQ-0439).
@@ -1131,7 +1132,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, history_prompt: overlay_rects.history_prompt, reset_dialog: overlay_rects.reset_dialog, region_prompt: overlay_rects.region_prompt, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_prompt_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, history_prompt: overlay_rects.history_prompt, fetch_keep: overlay_rects.fetch_keep, reset_dialog: overlay_rects.reset_dialog, region_prompt: overlay_rects.region_prompt, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_prompt_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
 }
 
 // ── Command-band mouse routing ───────────────────────────────────────────────
@@ -2151,6 +2152,35 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         state.push_notice(
                             "[Recording turn history. Rewind will have something to show after your next move.]",
                         );
+                    }
+                    OverlayAct::FetchKeep(mode) => {
+                        // SQ-1086: a download's one chance to become a permanent
+                        // part of the library. The fetched file itself is left
+                        // exactly where it is either way — it is the file THIS
+                        // session was booted from and its basename is the save
+                        // key (`storage::story_key_for`), so moving or deleting
+                        // it out from under a running game is the one destructive
+                        // thing this could do. A keep is a COPY.
+                        if let Some(prompt) = state.overlays.fetch_keep.take() {
+                            match mode {
+                                Some(mode) => match app::story_url::keep_in_library(
+                                    &prompt.fetched.path, &prompt.library_dir, mode,
+                                ) {
+                                    Ok(dest) => {
+                                        let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("it").to_string();
+                                        state.push_notice(&format!(
+                                            "[Kept in your library as {name}. It will be there next time.]"
+                                        ));
+                                    }
+                                    Err(e) => state.push_notice(&format!("[Could not keep it: {e}]")),
+                                },
+                                None => state.push_notice(&format!(
+                                    "[Not kept. Playing from {}.]",
+                                    prompt.fetched.path.display()
+                                )),
+                            }
+                        }
+                        state.overlays.dialog_focus = 0;
                     }
                     OverlayAct::AuxArchive => {
                         let mode = app::config::AuxStorage::Archive;
