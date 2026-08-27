@@ -3013,7 +3013,20 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                 // Recording IS on and the history is still empty, which is only
                 // true before the first move. Saying so beats a dialog offering to
                 // switch on what is already on.
-                state.push_notice("[No turns recorded yet — rewind will have something after your next move.]");
+                //
+                // SQ-1045: this was a bracketed TOAST, and it was the one line in
+                // the tree wearing the Z-machine parser's own `[…]` voice while
+                // firing mid-play in answer to something the player did — exactly
+                // the impersonation the assist register exists to end. It is also
+                // help rather than a report: it does not say a thing failed, it
+                // says what to do to get what was wanted. So it is an assist, and
+                // being one it now persists in the transcript (a toast that
+                // expires is the worst surface for advice), carries the marker
+                // into a copy-paste and a screen reader, and can be hidden with
+                // the rest of them by `/filter story`.
+                state.push_assist(&crate::assist::Assist::help(
+                    "nothing to rewind yet — there will be after your next move.",
+                ));
             }
         }
 
@@ -6108,12 +6121,18 @@ mod tests {
         assert_eq!(s.overlays.dialog_focus, 0, "focus starts on the affirmative button");
 
         // Recording ON but nothing yet → say so; do not offer what is already on.
+        // SQ-1045: said in the assist voice now, in the transcript, rather than as
+        // a bracketed toast that expires before advice can be acted on.
         let mut s = AppState::default();
         s.config.record_turn_history = true;
-        let before = s.notifications.history().len();
+        s.assist_preamble_shown = true; // the once-per-session flourish has its own case
         apply_action(Action::OpenHistory, &mut s, &mut m);
         assert!(!s.overlays.history_prompt, "no prompt when the setting is already on");
-        assert!(s.notifications.history().len() > before, "but the player is told why nothing opened");
+        let told = s.transcript.last().cloned().unwrap_or_default();
+        // (The kind tag, and that it is what `/filter` separates on, is
+        // `assist_voice`'s business — naming the variant here would trip its
+        // one-producer guard, which is the guard doing its job.)
+        assert!(told.starts_with(crate::assist::PREFIX), "the player is told why nothing opened: {told:?}");
 
         // History present → open the replay, whatever the setting says.
         let mut s = AppState::default();

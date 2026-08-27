@@ -104,6 +104,10 @@ pub struct SymbolSet {
     pub meta_gutter: char,
     /// Gutter marker glyph for WARNING transcript lines.
     pub warning_gutter: char,
+    /// Gutter marker glyph for ASSIST transcript lines (SQ-1045). The meta
+    /// gutter's thin bar, one step wider: an assist is the app's own margin lit,
+    /// not a different piece of furniture.
+    pub assist_gutter: char,
     /// Header marker for the room dock while it FOLLOWS the player.
     ///
     /// Hollow against [`Self::dock_pinned`]'s filled, the same reading the portal
@@ -177,6 +181,7 @@ impl Default for SymbolSet {
             dock_following: '◇',
             dock_pinned: '◆',
             meta_gutter: '▏',
+            assist_gutter: '▎',
             warning_gutter: '!',
             diagonal_corners: true,
         }
@@ -452,6 +457,7 @@ impl SymbolSet {
             portal: PortalGlyphs::preset(&cfg.portal_icons).unwrap_or_else(|| SymbolSet::default().portal),
             meta_gutter: SymbolSet::default().meta_gutter,
             warning_gutter: SymbolSet::default().warning_gutter,
+            assist_gutter: SymbolSet::default().assist_gutter,
             dock_following: SymbolSet::default().dock_following,
             dock_pinned: SymbolSet::default().dock_pinned,
             diagonal_corners: cfg.diagonal_corners,
@@ -603,6 +609,7 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "portal.marker"    => s.portal.marker = ch,
         "gutter.meta"      => s.meta_gutter = ch,
         "gutter.warning"   => s.warning_gutter = ch,
+        "gutter.assist"    => s.assist_gutter = ch,
         "dock.following"   => s.dock_following = ch,
         "dock.pinned"      => s.dock_pinned = ch,
         _ => {} // unknown key — ignored

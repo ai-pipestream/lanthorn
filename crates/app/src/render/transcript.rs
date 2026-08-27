@@ -625,7 +625,7 @@ pub(crate) const META_GUTTER: u16 = 2;
 /// and selecting can never drift apart again (SQ-0665).
 pub(crate) fn text_origin_col(kind: TranscriptKind) -> u16 {
     match kind {
-        TranscriptKind::Meta | TranscriptKind::Warning => META_GUTTER,
+        TranscriptKind::Meta | TranscriptKind::Warning | TranscriptKind::Assist => META_GUTTER,
         TranscriptKind::Story | TranscriptKind::Input => 0,
     }
 }
@@ -780,7 +780,7 @@ pub(crate) fn wrap_lines_kinded_extend(
         match kind {
             // Meta/Warning are app-generated (always unstyled) and use hanging
             // wrap, whose indentation shifts offsets — emit empty runs.
-            TranscriptKind::Meta | TranscriptKind::Warning => {
+            TranscriptKind::Meta | TranscriptKind::Warning | TranscriptKind::Assist => {
                 let w = width.saturating_sub(META_GUTTER);
                 for row in wrap_line_hanging(line, w, leading_spaces(line).max(2)) {
                     out.push(WrappedRow { text: row, kind, style, runs: Vec::new(), band: None, float: None });
@@ -2242,6 +2242,10 @@ fn render_middle(
         let transcript_input = reground(state.colors.theme.get("transcript_input").style);
         let transcript_meta = reground(state.colors.theme.get("transcript_meta").style);
         let transcript_warning = reground(state.colors.theme.get("transcript_warning").style);
+        // Assist lines arrive with their tone's style already resolved (the
+        // `transcript_styles` override above), so this is only the floor a
+        // hand-made or restored Assist line falls back to.
+        let transcript_assist = reground(state.colors.theme.get("transcript_assist").style);
         let filtered_styles: Vec<Style> = visible_indices
             .iter()
             .zip(filtered_kinds.iter())
@@ -2272,6 +2276,7 @@ fn render_middle(
                     TranscriptKind::Input   => transcript_input,
                     TranscriptKind::Meta    => transcript_meta,
                     TranscriptKind::Warning => transcript_warning,
+                    TranscriptKind::Assist  => transcript_assist,
                 }
             })
             .collect();
@@ -2435,6 +2440,10 @@ fn render_middle(
         let (gutter, marker_style) = match wr.kind {
             TranscriptKind::Meta    => (Some(state.symbols.meta_gutter), meta_marker),
             TranscriptKind::Warning => (Some(state.symbols.warning_gutter), warning_marker),
+            // The assist gutter is drawn in the line's OWN style, so the caution
+            // tone's mark is as loud as its text; meta/warning take a separate
+            // marker selector because their text is uniformly muted.
+            TranscriptKind::Assist  => (Some(state.symbols.assist_gutter), wr.style),
             TranscriptKind::Story | TranscriptKind::Input => (None, Style::default()),
         };
         if let Some(glyph) = gutter {
