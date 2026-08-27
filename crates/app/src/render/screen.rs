@@ -9036,6 +9036,51 @@ mod tests {
         assert_eq!(story_screen_dims(Rect::new(0, 0, 80, 0), &state), None);
     }
 
+    /// The declared width has to follow the map pane DISAPPEARING (SQ-1084).
+    ///
+    /// This is a guard on a fact that is invisible at the call site rather than on
+    /// arithmetic. `story_screen_dims` was never wrong; what was wrong was the pane
+    /// handed to it at boot. `startup::pre_boot_host_screen` synthesises an
+    /// `AppState` to ask "how wide is the story pane before there is a state", and
+    /// it set four fields on it and not `layout` — so `compute_pane_layout` split
+    /// the frame for a visible map every time, and any story whose map the player
+    /// had hidden was told HALF the terminal it actually had. Nothing looked wrong:
+    /// prose is re-wrapped by us and has no leading run to misplace, so the damage
+    /// showed only where a game centres or indents with spaces of its own — a title
+    /// screen, a menu, an epigraph — which then sat centred in the left half of a
+    /// full-width pane. Measured on Anchorhead at 100 columns: column 16 against
+    /// `zvm-cli`'s 40.
+    ///
+    /// So this asserts the RELATIONSHIP, not two numbers: hiding the map must widen
+    /// the declared screen by most of the frame. A future layout change may move
+    /// either figure; it must not make them equal.
+    #[test]
+    fn the_declared_width_follows_the_map_pane_being_hidden() {
+        let frame = Rect::new(0, 0, 100, 32);
+        let mut state = frameless_state();
+
+        state.layout = crate::state::Layout::Split;
+        let split = crate::layout::compute_pane_layout(frame, &state, 0);
+        let (_, with_map) = story_screen_dims(split.story, &state).expect("a split pane");
+
+        state.layout = crate::state::Layout::TranscriptFull;
+        let full = crate::layout::compute_pane_layout(frame, &state, 0);
+        let (_, without_map) = story_screen_dims(full.story, &state).expect("a full pane");
+
+        assert!(
+            without_map > with_map + 30,
+            "hiding the map must widen the declared screen: got {without_map} without the map \
+             against {with_map} with it, on a 100-column frame. Equal or nearly-equal numbers mean \
+             the layout is being measured for a visible map whatever the state says, which is \
+             SQ-1084 — a story then centres its title for half the screen it has"
+        );
+        assert!(
+            without_map >= 90,
+            "with the map hidden the story pane is the whole frame less chrome, so the declared \
+             width should be near 100 on a 100-column frame; got {without_map}"
+        );
+    }
+
     #[test]
     fn story_screen_dims_subtract_the_margin_and_the_upper_window_frame() {
         // The declared screen is the region the game's own screen actually gets:
