@@ -781,6 +781,7 @@ fn medium_name(image: Option<app::hints::DiskImage>) -> String {
         Some(D::ProDos) => "an Apple ProDOS floppy",
         Some(D::InfocomBootDisk) => "an Apple self-booting floppy",
         Some(D::CommodoreD64) => "a Commodore 1541 floppy",
+        Some(D::CommodoreG64) => "a Commodore 1541 floppy, nibbled to GCR",
         Some(D::Iso9660) => "an ISO 9660 CD-ROM",
         None => "a story file",
     }

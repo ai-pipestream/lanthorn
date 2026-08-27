@@ -14,6 +14,7 @@ mod cd;
 pub mod d64;
 pub mod dos_order;
 pub mod fat12;
+pub mod g64;
 pub mod hfs;
 pub mod infocom_boot;
 pub mod infocom_packed;

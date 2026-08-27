@@ -298,6 +298,18 @@ const MEDIA: &[Medium] = &[
     // `app::hints::load_mounted_story` on 2026-08-14, like every row above.
     Medium { title: "Trinity (Commodore 128)", file: "TRINITY1.D64", image: Some(DiskImage::CommodoreD64), version: 4, release: 12, serial: "860926" },
     Medium { title: "Trinity (Commodore 128, side 2)", file: "TRINITY2.D64", image: Some(DiskImage::CommodoreD64), version: 4, release: 12, serial: "860926" },
+    // *Plundered Hearts* is the 1987 Commodore floppy as a **raw GCR
+    // bitstream** — a `.g64` rather than a `.d64`, which is a nibble of the
+    // physical track rather than a dump of its decoded sectors (SQ-1095). Forty
+    // tracks, no half-tracks, and five tracks at the end that are not sectors at
+    // all; the story is seventeen sectors to a track from track 5, a third
+    // layout in three Commodore presses.
+    //
+    // **And it is the same build as the bare story file beside it** — v3 r26
+    // s870730, byte-identical to `plunderedhearts-r26-s870730.z3` for all
+    // 128,962 bytes, which is what makes this row an oracle for the GCR decoder
+    // rather than one more thing that looks plausible. Pinned in `blorb::g64`.
+    Medium { title: "Plundered Hearts (Commodore, GCR)", file: "plundered_hearts[infocom_1987](r26)(!).g64", image: Some(DiskImage::CommodoreG64), version: 3, release: 26, serial: "870730" },
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -547,6 +559,7 @@ fn ctx(m: &Medium) -> String {
             Some(DiskImage::ProDos) => "Apple ProDOS floppy",
             Some(DiskImage::InfocomBootDisk) => "Apple self-booting floppy",
             Some(DiskImage::CommodoreD64) => "Commodore 1541 floppy",
+            Some(DiskImage::CommodoreG64) => "Commodore 1541 floppy (GCR bitstream)",
             Some(DiskImage::Iso9660) => "ISO 9660 CD-ROM",
             None => "story file",
         },
@@ -1032,6 +1045,14 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             // palette and the default colour pair, none of which anything here
             // establishes. Argued at `InterpreterProfile::Commodore128`.
             Some(DiskImage::CommodoreD64) => InterpreterProfile::Commodore128,
+            // **The same floppy in a different container** (SQ-1095), and the
+            // same answer for the reason the two Apple II arms above give: a
+            // `.g64` and a `.d64` are one medium dumped two ways, and §11.1.3
+            // asks which MACHINE the interpreter runs on. Nothing observable
+            // rides on it here either — *Plundered Hearts* is Version 3 and
+            // `$1E` means nothing before Version 4 — so this is consistency
+            // with its neighbour rather than a fresh claim about the press.
+            Some(DiskImage::CommodoreG64) => InterpreterProfile::Commodore128,
             // **The one row that states no machine because the MEDIUM has
             // none** (SQ-0871), which is a different thing from the IBM PC's
             // deliberate decline above it. A CD-ROM carries both machines'

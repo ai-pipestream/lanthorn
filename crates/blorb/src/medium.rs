@@ -65,6 +65,7 @@
 
 use crate::adf::{Adf, looks_like_story};
 use crate::d64::D64;
+use crate::g64::G64;
 use crate::fat12::Fat12;
 use crate::hfs::Hfs;
 use crate::infocom_boot::InfocomBoot;
@@ -287,6 +288,23 @@ pub enum DiskImage {
     /// game of 262,064 bytes that no single 174,848-byte floppy could hold. See
     /// [`crate::d64`].
     CommodoreD64,
+    /// The **same 1541 disk, dumped as a raw GCR bitstream** — conventionally
+    /// `.g64` (SQ-1095).
+    ///
+    /// A row of its own rather than a second spelling on the one above, and the
+    /// reason is that this is not a wrapper. [`DiskImage::Hfs`] and
+    /// [`DiskImage::ProDos`] each accept a bare volume *or* the same volume
+    /// behind a DiskCopy 4.2 or `2IMG` header, because the sectors either way
+    /// are the file's own bytes. A G64 has no sectors in it at all: it is sync
+    /// marks, GCR-encoded blocks and gaps, and every sector this reader hands
+    /// on was computed. Folding that into the `.d64` sniff would put a
+    /// forty-track bitstream decode inside a test whose whole virtue is that it
+    /// leaves at the first line on a file of the wrong length.
+    ///
+    /// Everything after the decode is the row above's: the same 1541 geometry,
+    /// the same checksum scan, the same interpreter number, and the same answer
+    /// about paging a story across two disks. See [`crate::g64`].
+    CommodoreG64,
     /// An **ISO 9660 CD-ROM** — *The Lost Treasures of Infocom* I and II
     /// (SQ-0871).
     ///
@@ -790,6 +808,33 @@ const FORMATS: &[Format] = &[
         extensions: &["d64"],
         looks_like: <D64 as Volume>::looks_like,
         mount: mount_boxed::<D64>,
+        pages_across_images: true,
+    },
+    Format {
+        image: DiskImage::CommodoreG64,
+        // The ENCODING, because that is the only thing this row does not share
+        // with the one above it. "CBM" names the machine and would be equally
+        // true here, which is exactly why it would tell a picker nothing.
+        label: "GCR",
+        // **7, the Commodore 128 — the same answer as the `.d64` row, and
+        // deliberately not a fresh one.** §11.1.3's question is which machine
+        // the interpreter runs on; a bitstream dump and a sector dump of the
+        // same floppy cannot disagree about that, and two Commodore rows
+        // answering differently would be saying the number is a property of the
+        // CONTAINER. The argument is at [`COMMODORE_128_INTERPRETER_NUMBER`] and
+        // is not restated. `--interpreter 8` names the Commodore 64.
+        interpreter_number: Some(COMMODORE_128_INTERPRETER_NUMBER),
+        implies_ibm_pc: false,
+        // `.g64` is the only spelling the format has ever had; it is what the
+        // signature says (`GCR-1541`) and what every nibbler writes.
+        extensions: &["g64"],
+        looks_like: <G64 as Volume>::looks_like,
+        mount: mount_boxed::<G64>,
+        // True, on the same ground as the row above: this is a raw-sector
+        // Commodore press, and a release that pages a story across two floppies
+        // pages it across two whatever they were dumped into.
+        // `crate::d64::story_across` decodes a G64 side to sectors before it
+        // reads one, so the two containers reach it in one shape.
         pages_across_images: true,
     },
     Format {
@@ -1455,6 +1500,53 @@ impl Volume for D64 {
     }
 }
 
+/// **The same disk as the impl above, arriving as a bitstream** (SQ-1095).
+///
+/// Every answer is [`D64`]'s, because a mounted [`G64`] *is* a mounted `D64`:
+/// the decode happens once, in [`G64::mount`], and what comes out of it has no
+/// memory of having been GCR. So there is no second story-finding path to drift
+/// away from the first, and the `stories` override below is the same override
+/// for the same reason. See [`crate::g64`].
+impl Volume for G64 {
+    fn looks_like(raw: &[u8]) -> bool {
+        G64::looks_like_g64(raw)
+    }
+
+    fn mount(raw: Vec<u8>) -> Option<G64> {
+        G64::mount(&raw).ok()
+    }
+
+    fn volume_name(&self) -> Option<&str> {
+        G64::volume_name(self)
+    }
+
+    fn file_count(&self) -> usize {
+        G64::file_count(self)
+    }
+
+    fn contents(&self) -> Vec<(String, Vec<u8>)> {
+        G64::contents(self)
+    }
+
+    fn read_named(&self, name: &str) -> Option<Vec<u8>> {
+        G64::read_named(self, name)
+    }
+
+    fn story(&self) -> Option<DiskStory> {
+        G64::story(self).map(DiskStory::from)
+    }
+
+    fn pictures(&self) -> Option<DiskArt> {
+        G64::pictures(self).map(DiskArt::from)
+    }
+
+    /// Overridden for the reason the impl above states: `contents()` here is a
+    /// story found by checksum, not a directory listing to run a heuristic over.
+    fn stories(&self) -> Vec<DiskStory> {
+        Volume::story(self).into_iter().collect()
+    }
+}
+
 // ── A mounted disk ────────────────────────────────────────────────────────────
 
 /// An open release disk, whatever format it turned out to be.
@@ -1879,6 +1971,10 @@ mod tests {
             // No `files` either, and for the same reason: a Commodore press
             // keeps its story in raw sectors outside the filesystem.
             DiskImage::CommodoreD64 => crate::d64::tests::sample_disk(&story),
+            // The same disk as the row above, GCR-encoded into a bitstream —
+            // which is what makes the property test below a round trip through
+            // the decoder rather than a second look at a sector dump.
+            DiskImage::CommodoreG64 => crate::g64::tests::sample_disk(&story),
         }
     }
 
@@ -1909,7 +2005,7 @@ mod tests {
             DiskImage::InfocomBootDisk => ("T3/S0", &[]),
             // The same, and the same reason — and the sample keeps its story at
             // track 3 sector 0 because that is where *Trinity* keeps its own.
-            DiskImage::CommodoreD64 => ("T3/S0", &[]),
+            DiskImage::CommodoreD64 | DiskImage::CommodoreG64 => ("T3/S0", &[]),
         }
     }
 
@@ -1930,6 +2026,7 @@ mod tests {
             DiskImage::ProDos,
             DiskImage::InfocomBootDisk,
             DiskImage::CommodoreD64,
+            DiskImage::CommodoreG64,
             DiskImage::Iso9660,
         ];
         for image in census {
@@ -1970,6 +2067,12 @@ mod tests {
                 // story here that reads it is on a Commodore 128 disk. Argued in
                 // full at [`COMMODORE_128_INTERPRETER_NUMBER`].
                 DiskImage::CommodoreD64 => ("CBM", Some(COMMODORE_128_INTERPRETER_NUMBER)),
+                // …and the bitstream dump of the same floppy answers the same
+                // number, because §11.1.3 asks which MACHINE the interpreter
+                // runs on and a container cannot change that. Its label names
+                // the encoding, which is the only thing the two rows do not
+                // share (SQ-1095).
+                DiskImage::CommodoreG64 => ("GCR", Some(COMMODORE_128_INTERPRETER_NUMBER)),
             };
             assert!(DiskImage::all().any(|d| d == image), "{image:?} has no row in FORMATS");
             assert_eq!(image.label(), label, "{image:?}");
@@ -2297,6 +2400,15 @@ mod tests {
                     assert_eq!(DiskImage::detect(&blank), None, "no story, no Commodore disk");
                     continue;
                 }
+                // Excluded on the same ground, and the assertion is worth more
+                // here than on the row above: the bitstream really does decode —
+                // 683 sectors of it — and is still refused, because what makes
+                // these bytes a release is the story and not the sectors.
+                DiskImage::CommodoreG64 => {
+                    let blank = crate::g64::tests::g64_of(&vec![0u8; crate::d64::D64_LEN]);
+                    assert_eq!(DiskImage::detect(&blank), None, "no story, no Commodore disk");
+                    continue;
+                }
             };
             let disk = MountedDisk::mount(raw).expect("a boot disk still mounts");
             assert_eq!(disk.file_count(), 2, "{image:?}");
@@ -2359,7 +2471,11 @@ mod tests {
         // Exactly one row wants whole images, and it is the Commodore's.
         let paging: Vec<DiskImage> =
             FORMATS.iter().filter(|f| f.pages_across_images).map(|f| f.image).collect();
-        assert_eq!(paging, vec![DiskImage::CommodoreD64], "only a raw-sector set needs the images");
+        assert_eq!(
+            paging,
+            vec![DiskImage::CommodoreD64, DiskImage::CommodoreG64],
+            "only a raw-sector set needs the images, and both Commodore containers are one"
+        );
 
         let mut ran = 0;
         for (fixture, image) in [
@@ -2449,6 +2565,16 @@ mod tests {
                 // `real_media_releases`.
                 DiskImage::CommodoreD64 => {
                     ("Hitchhikers_Guide_to_the_Galaxy_The_1984_Infocom.d64", "T5/S0", 3, false)
+                }
+                // **The only bitstream dump in the corpus** (SQ-1095) —
+                // *Plundered Hearts* release 26, serial 870730, off a 1987
+                // 40-track C64 floppy nibbled to GCR. Its story is seventeen
+                // sectors of every track from track 5, which is a third layout
+                // in three presses, and what comes off it is byte-identical to
+                // `plunderedhearts-r26-s870730.z3` — pinned in `crate::g64`,
+                // where the oracle lives.
+                DiskImage::CommodoreG64 => {
+                    ("plundered_hearts[infocom_1987](r26)(!).g64", "T5/S0", 3, false)
                 }
             };
             // `stories/` for a floppy, `treasures/` for a CD-ROM — both
