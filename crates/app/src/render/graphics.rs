@@ -387,6 +387,80 @@ pub fn v6_fit_source(
     (scaled, Resize::Fit(None))
 }
 
+/// The composite as the protocol must HOLD it — padded out to the whole cells it
+/// will be placed over — and the picture's own device-pixel rect inside that box
+/// (SQ-1081).
+///
+/// **Kitty scales a virtual placement's image to the cell rectangle it covers.**
+/// lanthorn's own transmit says so in as many words (`r=`/`c=` in
+/// [`kitty_transmit_virtual`]), `ratatui-image`'s says it by omission, and the
+/// placement oracle — a port of Ghostty's core — resolves it that way, which is why
+/// `tests/pty_stream/raster.rs` composites by scaling a placement's source rect onto
+/// its destination. So wherever the image and the cells it is placed over disagree,
+/// the pixels the player sees are the protocol's image RESAMPLED BY THE TERMINAL,
+/// through whatever filter that terminal smooths with — and against artwork with no
+/// intermediate tones in it (`machine-screenshots/amiga-journey.png`, the Amiga
+/// release at the party menu) that is pure loss: every edge in the frame softened to
+/// reconstruct detail the source never had. Sixel and iTerm2 draw at their own pixel
+/// size instead, so for them the pad is inert — a transparent margin that merely makes
+/// the picture centre in the cells the placement already reserved.
+///
+/// They disagree because [`Picker::new_protocol`] SHORT-CIRCUITS. Its `needs_resize`
+/// returns `None` the moment the pre-scaled image already fits, handing the protocol
+/// the image untouched under a cell rect rounded UP — so the composite is placed over
+/// a box up to a cell taller and wider than itself. Measured on a 640x400 press at
+/// the gallery's 16x32 kitty cell:
+///
+/// ```text
+///   pane     s      composite     placed over        terminal stretch
+///   82x28    2.00   1280x800   →  80x25 = 1280x800     1.00000   (exact)
+///   60x24    1.50    960x600   →  60x19 = 960x608      1.01333   ← every row resampled
+///   76x40    1.90   1216x760   →  76x24 = 1216x768     1.01053
+/// ```
+///
+/// That is the whole of "a fractional magnification interpolates every edge", and it
+/// is why the 0.3 gallery had to pin its raster shots to a whole `s`: at `s = 2` a
+/// 640x400 press lands on `16s x 32s` exactly and the stretch is 1. It is not about
+/// the fraction as such — `s = 1.2` on an 8x16 cell reaches 768x480, whole cells on
+/// both axes, and is already exact — it is about landing on the CELL GRID, which a
+/// whole `s` on a matched cell does by luck and a fractional one essentially never does.
+///
+/// Padding costs nothing anyone can see: the cell rect is `ceil(pixels / cell)` either
+/// way, so the composite occupies the SAME cells and nothing centred against
+/// `Protocol::size()` moves. What changes is that the terminal has a 1:1 blit to do
+/// instead of a resample. The pad is split evenly around the picture, because this
+/// image is a game screen being letterboxed rather than a picture in a box — one more
+/// sub-cell of margin on each side, not a whole cell of it below. (Only on the arm
+/// this pads; the shrinking one belongs to the crate, which lays its picture top-left.)
+///
+/// Nothing here touches the SHRINKING arm, which never had the defect: there the
+/// protocol still has a resize to do, `Resize::resize` runs, and it pads its own
+/// output onto the cell grid already. All this wants from that arm is where the
+/// picture will land inside it, which is [`fit_proportionally`] — the same arithmetic
+/// the crate's `needs_resize_pixels` performs, reproduced here for exactly this
+/// purpose.
+fn v6_pad_to_cells(
+    img: image::RgbaImage,
+    box_w: u32,
+    box_h: u32,
+    fs: ratatui_image::FontSize,
+) -> (image::RgbaImage, (u32, u32, u32, u32)) {
+    let (fw, fh) = (u32::from(fs.width.max(1)), u32::from(fs.height.max(1)));
+    let (iw, ih) = img.dimensions();
+    if iw > box_w || ih > box_h {
+        let (dw, dh) = fit_proportionally(iw, ih, box_w.min(iw), box_h.min(ih));
+        return (img, (0, 0, dw, dh));
+    }
+    let (pw, ph) = (iw.div_ceil(fw) * fw, ih.div_ceil(fh) * fh);
+    if (pw, ph) == (iw, ih) {
+        return (img, (0, 0, iw, ih));
+    }
+    let (ox, oy) = ((pw - iw) / 2, (ph - ih) / 2);
+    let mut padded = image::RgbaImage::new(pw, ph);
+    image::imageops::replace(&mut padded, &img, i64::from(ox), i64::from(oy));
+    (padded, (ox, oy, iw, ih))
+}
+
 /// How [`resize_directional`] will treat a resample, for the band log and
 /// `/dump-windows` (SQ-0824). Which filter a band went through is not inferable from
 /// its cell rect — the direction depends on the band's own native extent against its
@@ -923,6 +997,17 @@ struct V6Ready {
     proto: Protocol,
     native_w: u16,
     native_h: u16,
+    /// Where the composite itself lies inside the cell rect the protocol reports,
+    /// in device pixels: `(off_x, off_y, w, h)` (SQ-1081).
+    ///
+    /// It is not the whole of that rect, because the rect is `ceil`ed onto the cell
+    /// grid and the picture is centred in what that leaves — see [`v6_pad_to_cells`].
+    /// The click map has to invert through the PICTURE and not through the box, or a
+    /// click reads a game pixel up to a cell out. (It used to invert through the box
+    /// and be right anyway, on the magnifying arm only, because the terminal was
+    /// stretching the picture to fill it. On the shrinking arm, where the protocol
+    /// has always padded, it was quietly wrong by the same amount.)
+    pic: (u32, u32, u32, u32),
     /// The kitty image id this composite was last PLACED as, read back off the
     /// placement (SQ-0753). `None` under a non-kitty protocol, and until the first
     /// [`GraphicsRender::redraw_v6`]. Without it the full-frame composite — the
@@ -1606,18 +1691,35 @@ impl GraphicsRender {
         let fs = picker.font_size();
         let box_w = area.width as u32 * fs.width.max(1) as u32;
         let box_h = area.height as u32 * fs.height.max(1) as u32;
-        let proto = if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
-            v6_halfblocks_protocol(canvas, box_w, box_h, fs, lock)?
+        let (proto, pic) = if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
+            // Half-blocks never had the stretch to fix: `Halfblocks::encode` resolves
+            // the image onto the cell grid itself, so there is no pixel size for a
+            // terminal to disagree with. Its own arm builds the grid exactly, and its
+            // picture therefore IS the whole cell rect.
+            let proto = v6_halfblocks_protocol(canvas, box_w, box_h, fs, lock)?;
+            let sz = proto.size();
+            let box_px = (
+                0,
+                0,
+                u32::from(sz.width) * u32::from(fs.width.max(1)),
+                u32::from(sz.height) * u32::from(fs.height.max(1)),
+            );
+            (proto, box_px)
         } else {
             let (img, fit) = v6_fit_source(canvas, box_w, box_h, lock, v6_upscale_cap(picker));
+            // Out to whole cells, so the terminal blits the composite 1:1 instead of
+            // resampling it into a box up to a cell bigger than itself (SQ-1081).
+            let (img, pic) = v6_pad_to_cells(img, box_w, box_h, fs);
             let img = image::DynamicImage::ImageRgba8(img);
             let size = Size::new(area.width, area.height);
-            match reuse {
+            let proto = match reuse {
                 Some(id) => picker.new_protocol_with_id(img, size, fit, id).ok()?,
                 None => picker.new_protocol(img, size, fit).ok()?,
-            }
+            };
+            (proto, pic)
         };
         Some(V6Ready {
+            pic,
             gen,
             area_w: area.width,
             area_h: area.height,
@@ -1807,6 +1909,7 @@ impl GraphicsRender {
         let ht = sz.height.min(area.height);
         let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - ht) / 2, w, ht);
         let (native_w, native_h) = (ready.native_w, ready.native_h);
+        let pic = ready.pic;
         // Queued deletes ride out on this placement, in the same batch (SQ-0637's
         // rule); deferred back to the queue if this backend has no row to carry them.
         // The supersede-deletes ride BEHIND it instead (SQ-0817) — see
@@ -1827,9 +1930,11 @@ impl GraphicsRender {
             r.placed_id = placed_id;
         }
         // Record the letterbox geometry so a click in the pane can be mapped
-        // back to a game pixel (Lane M). The image fills `dest`'s cells
-        // aspect-preserved, so the click map's image rect is `dest` in device
-        // pixels and its native extent is the canvas dimensions.
+        // back to a game pixel (Lane M). `dest`'s cells are the box the composite is
+        // PLACED over; `pic` is where the composite itself lies inside that box, which
+        // is what a click has to invert through (SQ-1081) — the ceil onto the cell grid
+        // leaves up to a cell of margin, and the terminal no longer stretches the
+        // picture across it.
         let fs = picker.font_size();
         let (cw, ch) = (fs.width.max(1), fs.height.max(1));
         self.note_op(GraphicsOp::Place {
@@ -1841,10 +1946,10 @@ impl GraphicsRender {
             pane_y: area.y,
             cell_w: cw,
             cell_h: ch,
-            img_x: (dest.x - area.x) as f32 * cw as f32,
-            img_y: (dest.y - area.y) as f32 * ch as f32,
-            img_w: dest.width as f32 * cw as f32,
-            img_h: dest.height as f32 * ch as f32,
+            img_x: (dest.x - area.x) as f32 * cw as f32 + pic.0 as f32,
+            img_y: (dest.y - area.y) as f32 * ch as f32 + pic.1 as f32,
+            img_w: pic.2 as f32,
+            img_h: pic.3 as f32,
             native_w,
             native_h,
             packed_text: Vec::new(),
@@ -3473,6 +3578,171 @@ mod resample_tests {
                 );
             }
         }
+    }
+
+    // -- SQ-1081: a fractional magnification and the terminal's own resample -----
+
+    /// Every press this sweep can put on screen, at its unit-screen size. Three real
+    /// ones, because the pad is arithmetic about `native · s` against the CELL and a
+    /// press whose height happens to divide the cell would prove nothing about the
+    /// others (the 640x400 rows are the whole modern corpus, 480x304 the Macintosh's
+    /// monochrome plate, 560x384 Arthur's Apple II and Journey r77).
+    const PRESSES: [(u32, u32); 3] = [(640, 400), (480, 304), (560, 384)];
+
+    /// The pixel dimensions a placed protocol DECLARES on the wire, read back off the
+    /// bytes it wrote into the buffer rather than out of the encoder — `f=32` with
+    /// `s=W,v=H` is `W · H · 4` bytes of RGBA, which is what [`measure_transmit`]
+    /// counts. `None` when nothing was transmitted.
+    fn wire_pixels(proto: &Protocol, dest: Rect) -> Option<u64> {
+        let mut buf = Buffer::empty(Rect::new(0, 0, dest.right(), dest.bottom()));
+        super::place_protocol(proto, dest, &mut buf)?;
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        let m = measure_transmit(&text);
+        (m.uploads > 0).then_some(m.pixels)
+    }
+
+    /// **The composite fills the cells it is placed over, at every magnification.**
+    ///
+    /// A terminal scales a placement's image to the cell rectangle the placement
+    /// names. `Picker::new_protocol` short-circuits its own resize the moment the
+    /// pre-scaled image already fits, so the raster composite used to be handed over
+    /// at `round(native · s)` pixels under a cell rect rounded UP — and the terminal
+    /// made up the difference by resampling the whole frame. At the gallery's 16x32
+    /// kitty cell over a 640x400 press that is a 1.013x vertical stretch at `s = 1.5`
+    /// and a 1.011x one at `s = 1.9`, against artwork (see
+    /// `machine-screenshots/amiga-journey.png`) that has no intermediate tones to
+    /// reconstruct — which is the whole of "a fractional scale interpolates every edge
+    /// in the frame", and why the 0.3 gallery had to pin its raster shots to a whole
+    /// magnification.
+    ///
+    /// The claim is read OFF THE WIRE: the pixels the transmit declares must be exactly
+    /// the pixels the placement covers. Both halves of the sweep matter — the rows
+    /// where the pad is zero are the ones that must not have moved, and the rows where
+    /// it is not are what the case is for. `a_whole_magnification_on_a_matched_cell_is_untouched`
+    /// below pins the first half on its own.
+    ///
+    /// FALSIFY by returning `(img, (0, 0, iw, ih))` unconditionally from the magnifying
+    /// branch of `v6_pad_to_cells`: every row whose guard reports a non-zero pad fails,
+    /// declaring fewer pixels than its placement covers by exactly that pad.
+    #[test]
+    fn the_raster_composite_fills_the_cells_it_is_placed_over() {
+        let mut padded_rows = 0usize;
+        for (nw, nh) in PRESSES {
+            let canvas = dithered_plate(nw, nh);
+            for (fw, fh) in [(16u16, 32u16), (8, 16), (8, 18)] {
+                let picker = super::kitty_picker(fw, fh);
+                for (cols, rows) in [(82u16, 28u16), (60, 24), (76, 40), (100, 30), (122, 41), (92, 32)] {
+                    let area = Rect::new(0, 0, cols, rows);
+                    let (bw, bh) = (u32::from(cols) * u32::from(fw), u32::from(rows) * u32::from(fh));
+                    let (raw, _) =
+                        super::v6_fit_source(&canvas, bw, bh, None, super::v6_upscale_cap(&picker));
+                    let (rw, rh) = raw.dimensions();
+                    let ready = GraphicsRender::encode_v6(&picker, &canvas, 0, area, None, None)
+                        .expect("kitty always builds a protocol");
+                    let sz = ready.proto.size();
+                    let (box_w, box_h) =
+                        (u32::from(sz.width) * u32::from(fw), u32::from(sz.height) * u32::from(fh));
+                    let dest = Rect::new(0, 0, sz.width, sz.height);
+                    let got = wire_pixels(&ready.proto, dest).expect("kitty transmits its pixels");
+                    assert_eq!(
+                        got,
+                        u64::from(box_w) * u64::from(box_h) * 4,
+                        "{nw}x{nh} press, {fw}x{fh} cell, {cols}x{rows} pane: the composite is \
+                         placed over {}x{} cells = {box_w}x{box_h} device pixels but declares \
+                         {got} bytes of image. A placement whose image is smaller than its own \
+                         cell rect is one the TERMINAL resamples — every edge in the frame \
+                         interpolated, which is precisely what a fractional magnification must \
+                         stop doing (SQ-1081).",
+                        sz.width, sz.height
+                    );
+                    // Where the composite lies inside that box, and whether this row had
+                    // anything to prove. `rw x rh` is the magnifying arm's own output;
+                    // the shrinking arm hands the canvas over whole and the protocol
+                    // resizes it, so only the pad is asserted there.
+                    if rw <= bw && rh <= bh {
+                        let (ox, oy) = ((box_w - rw) / 2, (box_h - rh) / 2);
+                        assert_eq!(
+                            ready.pic,
+                            (ox, oy, rw, rh),
+                            "{nw}x{nh} press, {fw}x{fh} cell, {cols}x{rows} pane: the click map \
+                             inverts through the PICTURE, centred in the cells it was padded out to"
+                        );
+                        if (rw, rh) != (box_w, box_h) {
+                            padded_rows += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            padded_rows >= 20,
+            "non-vacuity: only {padded_rows} rows of this sweep landed off the cell grid, so the \
+             case would pass with no padding at all. The sweep has to keep reaching the \
+             magnifications the defect lives at."
+        );
+    }
+
+    /// The other half, stated on its own so a regression cannot hide in an aggregate:
+    /// **the pad is zero where the composite already lands on whole cells, so those
+    /// frames are what they were.**
+    ///
+    /// That is every case the corpus is tested at and every raster frame the gallery
+    /// ships: a 640x400 press at `s = 2` on the 16x32 cell chosen to match it
+    /// (`gallery.toml`'s `8s x 16s` rule) reaches 1280x800, exactly 80x25 cells. It is
+    /// NOT a property of the fraction — `s = 1.2` on an 8x16 cell reaches 768x480 and
+    /// is exact too — it is a property of landing on the grid.
+    #[test]
+    fn a_whole_magnification_on_a_matched_cell_is_untouched() {
+        use ratatui_image::FontSize;
+        let canvas = dithered_plate(640, 400);
+        for (fw, fh, cols, rows, want) in [
+            (16u16, 32u16, 82u16, 28u16, (1280u32, 800u32)), // the gallery's own rung, s = 2
+            (8, 16, 162, 53, (1280, 800)),                   // s = 2 on the ordinary cell
+            (8, 16, 82, 25, (640, 400)),                     // s = 1
+            (8, 16, 100, 30, (768, 480)),                    // s = 1.2, fractional and still exact
+        ] {
+            let fs = FontSize::new(fw, fh);
+            let (bw, bh) = (u32::from(cols) * u32::from(fw), u32::from(rows) * u32::from(fh));
+            let (raw, _) = super::v6_fit_source(&canvas, bw, bh, None, Some(super::MAX_V6_UPSCALE));
+            assert_eq!(raw.dimensions(), want, "{fw}x{fh} cell, {cols}x{rows} pane: the pre-scale");
+            let (padded, pic) = super::v6_pad_to_cells(raw.clone(), bw, bh, fs);
+            assert_eq!(
+                padded.as_raw(),
+                raw.as_raw(),
+                "{fw}x{fh} cell, {cols}x{rows} pane: {}x{} is whole cells already, so the image \
+                 handed to the protocol must be byte for byte the one that was scaled",
+                want.0, want.1
+            );
+            assert_eq!(pic, (0, 0, want.0, want.1), "…and it occupies all of them");
+        }
+    }
+
+    /// The shrinking arm never had the defect and must not acquire one: the protocol
+    /// still has a resize to do there, and `Resize::resize` pads its own output onto
+    /// the cell grid. All [`v6_pad_to_cells`] does is say where the picture lands.
+    ///
+    /// It is the same claim as above read from the other side — the wire pixels in
+    /// `the_raster_composite_fills_the_cells_it_is_placed_over` cover the shrinking
+    /// panes too — but the PICTURE rect is what the click map reads, and inverting a
+    /// click through the padded box instead of the picture was already wrong here
+    /// before this quest existed.
+    #[test]
+    fn a_shrinking_pane_reports_the_picture_and_not_the_padded_box() {
+        use ratatui_image::FontSize;
+        let canvas = dithered_plate(640, 400);
+        // 60x24 at 8x16: a 480x384 box, so the fit lands on 480x300 inside 60x19 cells
+        // (480x304) — four rows of padding the protocol lays down itself.
+        let (bw, bh) = (480u32, 384u32);
+        let (raw, _) = super::v6_fit_source(&canvas, bw, bh, None, Some(super::MAX_V6_UPSCALE));
+        assert_eq!(raw.dimensions(), (640, 400), "a pane below native size pre-scales nothing");
+        let (out, pic) = super::v6_pad_to_cells(raw.clone(), bw, bh, FontSize::new(8, 16));
+        assert_eq!(out.as_raw(), raw.as_raw(), "the canvas goes to the protocol untouched");
+        assert_eq!(
+            pic,
+            (0, 0, 480, 300),
+            "the picture inside the protocol's 480x304 box is the aspect-preserving fit, laid \
+             down top-left — which is where `Resize::resize` puts it"
+        );
     }
 
     // -- SQ-0964: the upscale cap is a budget, and half-blocks spends none ------
