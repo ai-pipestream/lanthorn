@@ -525,14 +525,16 @@ pub enum HintResolution {
 ///
 /// Discovery order:
 /// 1. Remembered: the per-IFID association from `index`.
-/// 2. Sibling files: any `.z3/.z5/.z8` whose name is a hint sidecar
+/// 2. The story's OWN container: when `story_path` is itself a ZIP, a
+///    hint-sidecar entry inside it (SQ-1085).
+/// 3. Sibling files: any `.z3/.z5/.z8` whose name is a hint sidecar
 ///    ([`is_hint_sidecar`]) in the same directory as `story_path` — this finds
 ///    SLAG files like `deadlineinv.z5` while skipping full Solid Gold games
 ///    like `zork1-invclues-r52-s871125.z5`.
-/// 3. Sibling ZIP: any `.zip` in the same directory that contains a hint-sidecar
+/// 4. Sibling ZIP: any `.zip` in the same directory that contains a hint-sidecar
 ///    entry; returns `ZipEntry` so the caller can extract the bytes with
 ///    `read_zip_entry`.
-/// 4. Else: `AskUser` (caller should open the file browser).
+/// 5. Else: `AskUser` (caller should open the file browser).
 pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> HintResolution {
     // Step 1: remembered association.
     if let Some(remembered) = index.get(ifid) {
@@ -541,7 +543,23 @@ pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> 
         }
     }
 
-    // Steps 2 + 3: scan siblings, collecting zip files for step 3.
+    // Step 2: the container the story came out of (SQ-1085). A download that
+    // packs the clues beside the game has already answered the question, so it
+    // is asked before the directory — which is a place a person filed things,
+    // and where an ambiguous pair of sidecars deliberately stops the search
+    // (step 3 returns `AskUser` rather than falling through to the zips).
+    if is_zip(story_path) {
+        let stem = story_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if let Ok(Some(entry)) = find_hint_entry_in_zip(story_path, &stem) {
+            return HintResolution::ZipEntry { zip_path: story_path.to_path_buf(), entry };
+        }
+    }
+
+    // Steps 3 + 4: scan siblings, collecting zip files for step 4.
     if let Some(dir) = story_path.parent() {
         // The story's own stem drives story-aware matching (`zork1.z5` → `zork1`).
         let story_stem = story_path
@@ -562,18 +580,18 @@ pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> 
                     Some(n) => n,
                     None => continue,
                 };
-                // Step 2: collect hint sidecars (ranked below); skips full
+                // Step 3: collect hint sidecars (ranked below); skips full
                 // Solid Gold games that carry a release/serial marker.
                 if is_hint_sidecar(name) {
                     hint_files.push(path.clone());
                 }
-                // Collect ZIPs for step 3.
+                // Collect ZIPs for step 4.
                 if name.to_ascii_lowercase().ends_with(".zip") {
                     zips.push(path);
                 }
             }
 
-            // Step 2: rank the sibling hint files. Prefer a story-stem match,
+            // Step 3: rank the sibling hint files. Prefer a story-stem match,
             // then a lone generic; multiple generics with no story match are
             // ambiguous — ask the user rather than guess.
             if !hint_files.is_empty() {
@@ -593,7 +611,7 @@ pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> 
                 return HintResolution::AskUser;
             }
 
-            // Step 3: look inside sibling ZIPs for a hint entry, story-aware.
+            // Step 4: look inside sibling ZIPs for a hint entry, story-aware.
             zips.sort();
             for zip_path in zips {
                 if let Ok(Some(entry_name)) = find_hint_entry_in_zip(&zip_path, &story_stem) {
@@ -749,7 +767,7 @@ fn mount_disk(
 }
 
 /// Read a story file's executable bytes, transparently unwrapping a ZIP whose
-/// first `.z3/.z5/.z8` entry is the story, or a release disk image — Amiga or
+/// first story entry is the game, or a release disk image — Amiga or
 /// Macintosh — whose filesystem holds one. Does not classify the engine — see
 /// [`load_story`] / [`extract_story`].
 ///
@@ -819,21 +837,253 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
         };
     }
     if raw.starts_with(ZIP_MAGIC) {
-        // It's a ZIP — find the first story entry.
-        let pred = |name: &str| {
-            let lower = name.to_ascii_lowercase();
-            lower.ends_with(".z3") || lower.ends_with(".z5") || lower.ends_with(".z8")
-        };
-        match read_zip_entry(path, pred)? {
-            Some(bytes) => Ok((bytes, None)),
+        // A ZIP is somebody's DOWNLOAD, not a lanthorn container (the `.lanthorn`
+        // archive is that, and it is a zip too — see `crate::archive`). So it is
+        // opened the way a release floppy is: by asking what is INSIDE each
+        // entry, not what its name claims. SQ-1085.
+        let scan = first_zip_story(path)?;
+        return match scan.story {
+            Some((_name, bytes)) => Ok((bytes, None)),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("no .z3/.z5/.z8 entry found in zip: {}", path.display()),
+                format!(
+                    "no story file inside the zip {} ({} entr{} read; none is a Blorb, \
+                     a Z-machine story, a Glulx image or a Scott Adams database)",
+                    path.display(),
+                    scan.examined,
+                    if scan.examined == 1 { "y" } else { "ies" },
+                ),
             )),
-        }
-    } else {
-        Ok((raw, None))
+        };
     }
+    Ok((raw, None))
+}
+
+/// Total inflated bytes one scan of a ZIP will read before it gives up
+/// (SQ-1085).
+///
+/// **A different question from [`MAX_ZIP_ENTRY`], and deliberately not a
+/// multiple of it.** That one bounds a BUFFER — how much memory a single entry
+/// may occupy at once. This one bounds WORK — how long a launch may spend
+/// inflating before it concludes there is no game in here. Tying the two
+/// together is how the pair goes wrong: raising the buffer to cover
+/// *Kerkerkruip* would otherwise have raised the whole-archive budget to half a
+/// gigabyte, which is not a launch anybody wants to wait through.
+///
+/// 128 MiB is set from the work side. The scan STOPS at the first entry whose
+/// content is a story, so an ordinary download spends the size of its game and
+/// nothing more; the budget is only reached by an archive of large entries that
+/// are not stories, and at deflate's throughput that worst case is well under a
+/// second. It leaves room for the largest game known plus its resources plus a
+/// couple of large decoys ahead of them in archive order, and a zip bomb still
+/// cannot exceed it.
+const MAX_ZIP_SCAN: u64 = 128 * 1024 * 1024;
+
+/// The two limits above, pinned against what the corpus actually HOLDS — at
+/// compile time, because a number that has to cover a real file is a fact about
+/// the build and not a thing to discover when a player opens a zip (SQ-1085).
+///
+/// `Kerkerkruip.gblorb` is the largest runnable file in this repo's `stories/`
+/// and `InfocomMasterpieces.img` the largest disc. Both are gitignored, so they
+/// are NAMED here rather than measured: a check that reads them would pass
+/// vacuously in CI, which is exactly how a 4 MiB cap survived a change that made
+/// it wrong.
+const LARGEST_GAME_IN_CORPUS: u64 = 22_109_534; // stories/Kerkerkruip.gblorb
+const LARGEST_DISC_IN_CORPUS: u64 = 12_582_912; // stories/InfocomMasterpieces.img
+const _: () = assert!(
+    MAX_ZIP_ENTRY > LARGEST_GAME_IN_CORPUS,
+    "one zip entry must be able to hold the largest game anybody ships",
+);
+const _: () = assert!(
+    MAX_ZIP_ENTRY > LARGEST_DISC_IN_CORPUS,
+    "…and a compilation disc, which the classifier already recognises",
+);
+const _: () = assert!(
+    MAX_ZIP_SCAN > MAX_ZIP_ENTRY,
+    "the whole-archive budget must be able to read past one full-size entry",
+);
+
+/// Hand every entry of the ZIP at `path` that could plausibly BE a story or a
+/// resource file to `visit`, as (stored name, inflated bytes), stopping early
+/// when `visit` returns `true`. Answers how many entries were actually read.
+///
+/// Two things are skipped without inflating: a directory entry, and an entry
+/// whose declared size is zero or past [`MAX_ZIP_ENTRY`]. The declared size is
+/// the archive's own claim and so is attacker data — it is used only to SKIP,
+/// never to size a buffer, and an entry that lies low is still bounded by the
+/// capped read below (and then skipped, because a story never overflows it).
+fn for_each_zip_entry(
+    path: &Path,
+    mut visit: impl FnMut(&str, Vec<u8>) -> bool,
+) -> io::Result<usize> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path)?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let mut budget = MAX_ZIP_SCAN;
+    let mut examined = 0usize;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let declared = entry.size();
+        if declared == 0 || declared > MAX_ZIP_ENTRY || declared > budget {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        (&mut entry).take(MAX_ZIP_ENTRY + 1).read_to_end(&mut buf)?;
+        budget = budget.saturating_sub(buf.len() as u64);
+        if buf.len() as u64 > MAX_ZIP_ENTRY {
+            // The declared size lied — the entry inflates past a cap set to
+            // cover the largest game anybody ships (see [`MAX_ZIP_ENTRY`]), so
+            // it is not a candidate. The scan carries on rather than erroring,
+            // because one hostile entry must not hide a real game beside it.
+            continue;
+        }
+        examined += 1;
+        if visit(&name, buf) {
+            break;
+        }
+    }
+    Ok(examined)
+}
+
+/// The first entry of the ZIP at `path` whose CONTENT is a story lanthorn can
+/// run, with the name the archive stores it under — and how many entries were
+/// read looking for it (SQ-1085).
+///
+/// **Classified by content, exactly as a release floppy's files are.** The zip
+/// branch used to name three extensions, so `.z4`, `.z6`, `.z7`, `.ulx`,
+/// `.zblorb` and a Scott Adams `.dat` were all unreachable inside a zip while
+/// opening the very same file loose worked — and the one format whose whole
+/// point is that it ships artwork, Version 6, was the one a zip could not carry.
+/// [`extract_story`] already knows what a story is and says so for every engine;
+/// asking it is both broader and stricter than any list of spellings.
+fn first_zip_story(path: &Path) -> io::Result<ZipScan> {
+    let mut story: Option<(String, Vec<u8>)> = None;
+    let examined = for_each_zip_entry(path, |name, bytes| match extract_story(bytes.clone()) {
+        Ok(_) => {
+            story = Some((name.to_string(), bytes));
+            true
+        }
+        Err(_) => false,
+    })?;
+    Ok(ZipScan { story, examined })
+}
+
+/// What one scan of a ZIP for a story found, and how hard it looked.
+struct ZipScan {
+    /// The first entry whose content is a story: the name the archive stores it
+    /// under, and its bytes.
+    story: Option<(String, Vec<u8>)>,
+    /// How many entries were actually inflated. The refusal quotes it, so an
+    /// archive holding nothing lanthorn runs reads differently from one whose
+    /// entries were all too large to be a story.
+    examined: usize,
+}
+
+/// Does the file at `path` begin with the ZIP local-file-header signature?
+///
+/// By its bytes rather than by its extension, for the same reason
+/// [`read_story_file`] sniffs one: the container a player downloaded is
+/// whatever it is, whatever it is called.
+pub(crate) fn is_zip(path: &Path) -> bool {
+    use std::io::Read as _;
+    let mut head = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && head == *ZIP_MAGIC
+}
+
+/// Resource-container spellings looked for INSIDE a zip. The same four
+/// `blorb::RESOURCE_BLORB_EXTS` names, which is `pub(crate)` there.
+const ZIP_BLORB_EXTS: [&str; 4] = ["blb", "blorb", "zblorb", "gblorb"];
+
+/// The Blorb of resources the ZIP at `zip_path` carries beside its story, and a
+/// display path naming it, or `None` (SQ-1085).
+///
+/// **The defect this exists for**: the zip branch handed back `None` where the
+/// disk-image branch hands back the medium the story was mounted out of, so a
+/// `Journey.blb` sitting in the same zip as `journey.z6` was never opened. A
+/// zipped Version 6 game loaded and then drew nothing.
+///
+/// The rule mirrors [`blorb::resolve_resource_blorb`]'s, read across the
+/// archive's entries instead of a directory's files: an entry that parses as a
+/// Blorb carrying resources is a candidate, the sole candidate wins, and several
+/// are ranked by how much of the ZIP's own stem they share — refusing on a tie
+/// rather than drawing another game's plates. A `.zblorb` holding both the story
+/// and its resources is the sole candidate for the same reason the loose file is
+/// its own tier 1: the story and the artwork came out of one file.
+pub(crate) fn zip_resource_blorb(zip_path: &Path) -> Option<(blorb::Blorb, std::path::PathBuf)> {
+    if !is_zip(zip_path) {
+        return None;
+    }
+    let mut candidates: Vec<(String, blorb::Blorb)> = Vec::new();
+    for_each_zip_entry(zip_path, |name, bytes| {
+        let base = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+        if !ZIP_BLORB_EXTS.iter().any(|e| base.ends_with(&format!(".{e}"))) {
+            return false;
+        }
+        if !blorb::Blorb::is_blorb(&bytes) {
+            return false;
+        }
+        if let Ok(b) = blorb::Blorb::parse(bytes) {
+            if !b.resources().is_empty() {
+                candidates.push((name.to_string(), b));
+            }
+        }
+        false
+    })
+    .ok()?;
+    let named = |name: &str| zip_path.join(name);
+    if candidates.len() == 1 {
+        let (name, b) = candidates.pop()?;
+        return Some((b, named(&name)));
+    }
+    // Several: rank by shared stem with the zip itself, which is the nearest
+    // thing an archive has to the story's name.
+    let stem = zip_path.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    let mut best: Option<(usize, String, blorb::Blorb)> = None;
+    let mut tied = false;
+    for (name, b) in candidates {
+        let base = name.rsplit('/').next().unwrap_or(&name);
+        let cand_stem = Path::new(base)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let Some(plen) = zip_stem_prefix_match(&stem, &cand_stem) else {
+            continue;
+        };
+        match &best {
+            Some((bp, _, _)) if *bp > plen => {}
+            Some((bp, _, _)) if *bp == plen => tied = true,
+            _ => {
+                best = Some((plen, name, b));
+                tied = false;
+            }
+        }
+    }
+    if tied {
+        return None;
+    }
+    best.map(|(_, name, b)| (b, named(&name)))
+}
+
+/// [`blorb::resolve_resource_blorb`]'s stem rule, restated for zip entries
+/// because `blorb` keeps its copy private: the shorter stem must be a full
+/// prefix of the longer, and at least three characters, so `zork1`↔`zork1-sounds`
+/// pairs and `zork0`↔`zork1` does not.
+fn zip_stem_prefix_match(story_stem: &str, cand_stem: &str) -> Option<usize> {
+    let plen = story_stem.bytes().zip(cand_stem.bytes()).take_while(|(a, b)| a == b).count();
+    let shorter = story_stem.len().min(cand_stem.len());
+    (plen >= 3 && plen == shorter).then_some(plen)
 }
 
 /// Load a story from `path`, classified by engine ([`LoadedStory`]).
@@ -991,10 +1241,35 @@ fn unrunnable(bytes: &[u8]) -> String {
     )
 }
 
-/// Cap on one extracted ZIP entry (SQ-0660). Story files here are Z-code
-/// images, whose format tops out at 512 KiB; 4 MiB is generous headroom while
-/// still stopping a hostile zip from inflating a multi-GB entry into memory.
-const MAX_ZIP_ENTRY: u64 = 4 * 1024 * 1024;
+/// Cap on one extracted ZIP entry (SQ-0660, raised SQ-1085) — the largest
+/// buffer one entry may inflate into.
+///
+/// **It has to cover the largest thing lanthorn RUNS, and that is no longer a
+/// Z-code image.** The cap was 4 MiB against a zip branch that accepted `.z3`,
+/// `.z5` and `.z8` only, and a Z-machine story tops out at 512 KiB, so it was
+/// eight times the format's own ceiling. Opening a zip by CONTENT changed what
+/// the constant has to cover and the constant did not move with it — and neither
+/// Glulx nor Blorb has a ceiling to appeal to (a Blorb chunk length is a 32-bit
+/// word, Glulx's address space is 32-bit), so the number can only come from what
+/// people actually ship.
+///
+/// What this repo's own `stories/` holds, largest first:
+///
+/// | file | size |
+/// |---|---|
+/// | `Kerkerkruip.gblorb` | 21.1 MB |
+/// | `Kerkerkruip.b10.gblorb` | 13.6 MB |
+/// | `InfocomMasterpieces.img` (a disc, not a story) | 12.0 MB |
+/// | `Never Gives Up Her Dead.gblorb` | 11.1 MB |
+/// | `CounterfeitMonkey-11.gblorb` | 10.8 MB |
+/// | `cragne.gblorb` | 8.5 MB |
+///
+/// 32 MiB clears the largest of those by half again, and clears the compilation
+/// disc too — a zipped disk image is a plausible next case, since the zip branch
+/// hands its bytes to the same classifier that already recognises one. It is
+/// still a single bounded allocation, and a hostile zip claiming multiple GB is
+/// stopped exactly as it was.
+const MAX_ZIP_ENTRY: u64 = 32 * 1024 * 1024;
 
 /// Return the bytes of the first ZIP entry whose name satisfies `pred`.
 ///
@@ -1298,6 +1573,19 @@ mod tests {
     // Build a minimal Blorb wrapping a single Exec chunk of the given type.
     // Mirrors the blorb crate's builder shape: FORM/IFRS + RIdx + Exec/0 chunk.
     fn make_blorb(exec_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        make_blorb_indexed(b"Exec", exec_type, payload)
+    }
+
+    // The same builder with the RIdx usage spelled out, so a RESOURCE-only
+    // Blorb — one `Pict`, no executable — can be built too. That is the shape
+    // `Journey.blb` has, and the one SQ-1085's zip tier has to find.
+    fn make_blorb_indexed(usage: &[u8; 4], chunk_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        make_blorb_multi(&[(usage, chunk_type, payload)])
+    }
+
+    // …and with several index entries, which is how a `.zblorb` carries its
+    // story and its pictures in one file.
+    fn make_blorb_multi(entries: &[(&[u8; 4], &[u8; 4], &[u8])]) -> Vec<u8> {
         fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
             let mut v = Vec::new();
             v.extend_from_slice(ty);
@@ -1308,18 +1596,26 @@ mod tests {
             }
             v
         }
-        // RIdx has one entry; the Exec chunk follows it.
-        let ridx_data_len = 4 + 12;
-        let exec_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+        // RIdx first; the resource chunks follow it in order. Offsets are from
+        // the start of the FORM: 12 bytes of FORM+IFRS header, 8 of RIdx chunk
+        // header, then the index itself (padded to even).
+        let ridx_data_len = 4 + 12 * entries.len();
+        let mut off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
         let mut ridx = Vec::new();
-        ridx.extend_from_slice(&1u32.to_be_bytes()); // count
-        ridx.extend_from_slice(b"Exec");
-        ridx.extend_from_slice(&0u32.to_be_bytes()); // number
-        ridx.extend_from_slice(&(exec_off as u32).to_be_bytes());
+        ridx.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        let mut body = Vec::new();
+        for (n, (usage, chunk_type, payload)) in entries.iter().enumerate() {
+            ridx.extend_from_slice(*usage);
+            ridx.extend_from_slice(&(n as u32).to_be_bytes());
+            ridx.extend_from_slice(&(off as u32).to_be_bytes());
+            let c = chunk(chunk_type, payload);
+            off += c.len();
+            body.extend_from_slice(&c);
+        }
         let mut inner = Vec::new();
         inner.extend_from_slice(b"IFRS");
         inner.extend_from_slice(&chunk(b"RIdx", &ridx));
-        inner.extend_from_slice(&chunk(exec_type, payload));
+        inner.extend_from_slice(&body);
         let mut file = Vec::new();
         file.extend_from_slice(b"FORM");
         file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
@@ -1339,6 +1635,277 @@ mod tests {
         let out = load_story_bytes(&path).expect("zblorb load");
         assert_eq!(out, zcode);
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── A zip is a volume, not a wrapper around one file (SQ-1085) ───────────
+
+    /// A scratch directory of this test's own, removed first so a previous run
+    /// cannot answer for this one.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("bm-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    /// Write a zip at `path` holding each `(entry name, bytes)` in order,
+    /// STORED so what comes back out is what went in.
+    fn write_zip(path: &Path, entries: &[(&str, Vec<u8>)]) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).unwrap();
+        let mut zw = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(bytes).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    /// A Scott Adams database small enough to inline — the header the loader's
+    /// own sniff reads, and nothing more.
+    fn sample_scott() -> Vec<u8> {
+        b"32767 1 0 1 2 6 1 0 3 125 0 1\n".to_vec()
+    }
+
+    /// **The whole of limit one**: the zip branch named three extensions, so
+    /// every other format lanthorn opens perfectly well as a loose file was
+    /// refused inside a zip — `.z6` above all, the one format whose point is
+    /// that it ships artwork.
+    ///
+    /// Classified by CONTENT, so the name each entry is stored under is not what
+    /// is being asserted: the same bytes under a nonsense extension still open.
+    #[test]
+    fn a_zip_yields_every_format_a_loose_file_does() {
+        let base = scratch("zip-formats");
+
+        // (stored name, bytes, the engine it must come back as)
+        type Case = (&'static str, Vec<u8>, fn(&LoadedStory) -> bool);
+        let cases: Vec<Case> = vec![
+            ("journey.z6", sample_zcode(6), |l| matches!(l, LoadedStory::ZCode(_))),
+            ("trinity.z4", sample_zcode(4), |l| matches!(l, LoadedStory::ZCode(_))),
+            ("shogun.z7", sample_zcode(7), |l| matches!(l, LoadedStory::ZCode(_))),
+            ("cm.ulx", b"Glul-and-then-some".to_vec(), |l| matches!(l, LoadedStory::Glulx(_))),
+            ("adventureland.dat", sample_scott(), |l| matches!(l, LoadedStory::Scott(_))),
+            ("curses.zblorb", make_blorb(b"ZCOD", b"ZCODE-PAYLOAD"), |l| {
+                matches!(l, LoadedStory::ZCode(_))
+            }),
+            ("glulx.gblorb", make_blorb(b"GLUL", b"GLULPAYLOAD"), |l| {
+                matches!(l, LoadedStory::Glulx(_))
+            }),
+            // Content, not spelling: a v6 story stored under a name that claims
+            // nothing at all.
+            ("STORY.DATA", sample_zcode(6), |l| matches!(l, LoadedStory::ZCode(_))),
+        ];
+
+        for (name, bytes, is_right) in cases {
+            let zip_path = base.join(format!("{}.zip", name.replace('.', "_")));
+            write_zip(&zip_path, &[(name, bytes)]);
+            let loaded = load_story(&zip_path)
+                .unwrap_or_else(|e| panic!("a zip holding {name} must open: {e}"));
+            assert!(is_right(&loaded), "{name} came out of the zip as the wrong engine");
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A story nested in a folder inside the zip — how every download from the
+    /// IF Archive is actually laid out — and the non-story entries beside it.
+    #[test]
+    fn a_zip_finds_the_story_past_a_folder_and_its_readme() {
+        let base = scratch("zip-nested");
+        let story = sample_zcode(5);
+        let zip_path = base.join("zork1.zip");
+        write_zip(
+            &zip_path,
+            &[
+                ("Zork I/readme.txt", b"Zork I, from the IF Archive.\n".to_vec()),
+                ("Zork I/cover.png", vec![0x89, b'P', b'N', b'G', 13, 10, 26, 10, 0, 0, 0, 13]),
+                ("Zork I/zork1.z5", story.clone()),
+            ],
+        );
+        assert_eq!(load_story(&zip_path).unwrap(), LoadedStory::ZCode(story));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The whole of limit two**: the zip branch handed back `None` where the
+    /// disk-image branch hands back the medium, so a `Journey.blb` in the same
+    /// zip as `journey.z6` was never opened and a zipped Version 6 game drew
+    /// nothing.
+    #[test]
+    fn a_blorb_inside_the_zip_is_the_storys_resource_source() {
+        let base = scratch("zip-blorb");
+        let zip_path = base.join("journey.zip");
+        write_zip(
+            &zip_path,
+            &[
+                ("journey.z6", sample_zcode(6)),
+                ("Journey.blb", make_blorb_indexed(b"Pict", b"PNG ", b"pixels")),
+            ],
+        );
+
+        // The story still opens…
+        assert!(matches!(load_story(&zip_path), Ok(LoadedStory::ZCode(_))));
+        // …and its artwork comes with it.
+        let found = crate::graphics::resource_blorb(&zip_path).found;
+        let (blorb, path) = found.expect("the Blorb in the zip is the story's resource source");
+        assert_eq!(blorb.resources().len(), 1, "the Pict resource is indexed");
+        assert!(
+            path.to_string_lossy().ends_with("journey.zip/Journey.blb"),
+            "the display path names the entry inside the archive: {}",
+            path.display(),
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A `.zblorb` carrying the story AND its resources is its own source, the
+    /// same way a loose one is `blorb::resolve_resource_blorb`'s tier 1.
+    #[test]
+    fn a_zipped_self_blorb_is_its_own_resource_source() {
+        let base = scratch("zip-selfblorb");
+        let zip_path = base.join("curses.zip");
+        let both =
+            make_blorb_multi(&[(b"Exec", b"ZCOD", b"ZCODE-PAYLOAD"), (b"Pict", b"PNG ", b"pix")]);
+        write_zip(&zip_path, &[("curses.zblorb", both)]);
+        assert_eq!(load_story(&zip_path).unwrap(), LoadedStory::ZCode(b"ZCODE-PAYLOAD".to_vec()));
+        assert!(
+            crate::graphics::resource_blorb(&zip_path).found.is_some(),
+            "a zipped self-blorb must reach its own resources",
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Two games' archives in one zip: ranked by how much of the zip's own stem
+    /// they share, and REFUSED on a tie rather than drawing the other game's
+    /// plates — `blorb::resolve_resource_blorb`'s rule, over entries.
+    #[test]
+    fn two_blorbs_in_one_zip_are_ranked_by_stem_and_refused_on_a_tie() {
+        let base = scratch("zip-twoblorbs");
+        let pict = |tag: &[u8]| make_blorb_indexed(b"Pict", b"PNG ", tag);
+
+        // Named for one of them: that one wins.
+        let named = base.join("journey.zip");
+        write_zip(
+            &named,
+            &[
+                ("journey.z6", sample_zcode(6)),
+                ("journey.blb", pict(b"journeys")),
+                ("arthur.blb", pict(b"arthurs")),
+            ],
+        );
+        let (_, path) = crate::graphics::resource_blorb(&named).found.expect("the stem decides");
+        assert!(path.to_string_lossy().ends_with("journey.blb"), "{}", path.display());
+
+        // Named for neither: nothing is drawn, rather than the first one found.
+        let anon = base.join("infocom-graphics.zip");
+        write_zip(
+            &anon,
+            &[
+                ("journey.z6", sample_zcode(6)),
+                ("journey.blb", pict(b"journeys")),
+                ("arthur.blb", pict(b"arthurs")),
+            ],
+        );
+        assert!(
+            crate::graphics::resource_blorb(&anon).found.is_none(),
+            "an ambiguous pair must draw nothing, not the wrong game's plates",
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The clues a download packs beside the game are found in the game's own
+    /// container, not only in a sibling zip.
+    #[test]
+    fn hints_are_found_inside_the_storys_own_zip() {
+        let base = scratch("zip-hints");
+        let zip_path = base.join("deadline.zip");
+        write_zip(
+            &zip_path,
+            &[("deadline.z3", sample_zcode(3)), ("deadlineinv.z5", sample_zcode(5))],
+        );
+        let got = resolve_hint_source(&zip_path, "ZCODE-NOTHING", &load_hint_index(&base));
+        assert_eq!(
+            got,
+            HintResolution::ZipEntry {
+                zip_path: zip_path.clone(),
+                entry: "deadlineinv.z5".to_string()
+            },
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The cap that rejects a zip has to cover what lanthorn RUNS.** SQ-1085
+    /// widened the classifier to accept Glulx and Blorb by content while
+    /// [`MAX_ZIP_ENTRY`] still stood at the 4 MiB a Z-code-only branch needed —
+    /// so every real Glulx game was skipped WITHOUT being inflated, and the
+    /// launch reported "no story file inside the zip", which reads as a
+    /// legitimately empty archive. Half the fix did not work, silently.
+    ///
+    /// A synthetic Glulx Blorb past the old cap, because the real ones
+    /// (`Kerkerkruip.gblorb`, `CounterfeitMonkey-11.gblorb`) live in gitignored
+    /// `stories/` and a case built on those goes vacuous in CI — which is how
+    /// this would have escaped a second time.
+    #[test]
+    fn a_glulx_game_past_the_old_four_mib_cap_still_opens_out_of_a_zip() {
+        const OLD_CAP: usize = 4 * 1024 * 1024;
+        let base = scratch("zip-bigglulx");
+
+        // Six MiB of payload: half again the cap that used to reject it, and
+        // small enough that the deflate costs nothing.
+        let payload = vec![0x47u8; 6 * 1024 * 1024];
+        let gblorb = make_blorb(b"GLUL", &payload);
+        assert!(gblorb.len() > OLD_CAP, "the fixture must cross the old cap");
+
+        let zip_path = base.join("kerkerkruip.zip");
+        {
+            use std::io::Write as _;
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("kerkerkruip.gblorb", opts).unwrap();
+            zw.write_all(&gblorb).unwrap();
+            zw.finish().unwrap();
+        }
+
+        match load_story(&zip_path) {
+            Ok(LoadedStory::Glulx(bytes)) => assert_eq!(
+                bytes.len(),
+                payload.len(),
+                "the whole executable comes back, not a truncated prefix",
+            ),
+            other => panic!("a zipped Glulx game past the old cap must open: {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **A zip is a convenience for what somebody downloaded; it is not a
+    /// lanthorn container.** The `.lanthorn` archive is that, and it is a zip
+    /// too — so the one thing this must never do is open one as a game. It
+    /// carries a map, a Quetzal save and some PNGs, and not one of them is a
+    /// story; the refusal says so instead of running a save file.
+    #[test]
+    fn a_lanthorn_archive_is_not_a_story_container() {
+        let base = scratch("zip-archive");
+        let path = base.join("ZCODE-12345.lanthorn");
+        write_zip(
+            &path,
+            &[
+                ("meta.json", br#"{"name":"Zork I","turns":42}"#.to_vec()),
+                ("map.json", br#"{"rooms":[]}"#.to_vec()),
+                ("game.qzl", b"FORMIFZSjunk-quetzal-bytes".to_vec()),
+                ("pictures/win1.png", vec![0x89, b'P', b'N', b'G', 13, 10, 26, 10]),
+            ],
+        );
+        let err = load_story(&path).expect_err("a save archive is not a game");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("no story file inside the zip"), "{err}");
         let _ = std::fs::remove_dir_all(&base);
     }
 

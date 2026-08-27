@@ -1464,7 +1464,16 @@ pub struct ResourceBlorb {
 /// they asked for is theirs to make. And a Blorb that IS the story file is its
 /// own container by construction and is never tested.
 pub fn resource_blorb(story_path: &std::path::Path) -> ResourceBlorb {
-    let Some((blorb, path)) = blorb::resolve_resource_blorb(story_path) else {
+    // A ZIP the player downloaded is asked FIRST, and only when the story came
+    // out of one (SQ-1085). The archive holding both the story and its `.blb` is
+    // one download, which is the relation `blorb::resolve_resource_blorb`'s tier
+    // 1 already treats as conclusive for a `.zblorb`; a same-stem file sitting
+    // beside the zip is a person's own filing and keeps the tier it always had.
+    // `zip_resource_blorb` opens with a four-byte magic check, so a loose story
+    // pays nothing for this.
+    let found = crate::hints::zip_resource_blorb(story_path)
+        .or_else(|| blorb::resolve_resource_blorb(story_path));
+    let Some((blorb, path)) = found else {
         return ResourceBlorb { found: None, refused: None };
     };
     match build_mismatch(story_path, &blorb, &path) {
@@ -2364,5 +2373,128 @@ mod tests {
         src.dims(1);
         assert!(src.current_plte.is_none(), "a size query must not establish the palette");
         assert_eq!(top_left(&src.image(2).unwrap()), [170, 0, 170, 255], "adaptive still on its placeholder");
+    }
+
+    /// **`graphics::resource_blorb` is the only way in, and this is what keeps
+    /// it so** (SQ-1085).
+    ///
+    /// A bare `blorb::resolve_resource_blorb` knows the filesystem and nothing
+    /// else. Every tier `app` has added since — the build-mismatch refusal
+    /// (SQ-0866) and now the ZIP a player downloaded the game in — lives in the
+    /// wrapper, so a call that skips it silently resolves from an older set of
+    /// rules and produces a plausible answer rather than an error. That is
+    /// exactly the shape CLAUDE.md's refactoring policy names, and `reset.rs`
+    /// has already been on the wrong side of it once (SQ-1022).
+    ///
+    /// It cannot be made unreachable — `blorb` is a dependency and its function
+    /// is public — so it is made VISIBLE instead. Two exemptions, both narrow:
+    /// `graphics.rs` itself, which is the wrapper; and anything below a file's
+    /// own `#[cfg(test)] mod tests`, where a harness building its own
+    /// `PictSource` from a loose story file is stating its inputs rather than
+    /// resolving a launch.
+    ///
+    /// # A test MODULE, not any test item
+    ///
+    /// `#[cfg(test)]` sits on individual items too, and saying nothing about
+    /// the item AFTER it is the whole point of an item attribute. Latching on
+    /// the bare attribute read 59 lines of `render/screen.rs` and skipped the
+    /// other 12,251 — the largest and most-edited file in the crate, and the
+    /// one where somebody reaching for a Blorb is most likely to reach for the
+    /// bare call. Three more files carry an early item attribute:
+    /// `render/transcript.rs` (line 13, a `use`), `render/v6_layout.rs` (187, a
+    /// `const`) and `config_template.rs` (38, a `use`).
+    ///
+    /// So the latch requires the attribute to be followed by a `mod`
+    /// declaration, which is this tree's one convention for a test module and
+    /// always the last thing in the file. Anything else — a test-only `use`,
+    /// `const` or helper `fn` — leaves the scan running, and a bare call inside
+    /// such a helper would be reported. That is the right way round: a false
+    /// report is answered by moving the helper into `mod tests`, where a missed
+    /// one is answered by nobody, because it looks exactly like a pass.
+    ///
+    /// # And the scan proves it reached the code
+    ///
+    /// A source scanner that silently stops scanning is indistinguishable from
+    /// a passing one, which is how the latch bug survived review. So the reach
+    /// is asserted too, against the file that exposed it.
+    #[test]
+    fn resource_blorb_is_resolved_through_this_module_only() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().and_then(|x| x.to_str()) == Some("rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src_root, &mut files);
+        files.sort();
+        assert!(files.len() > 10, "the walk found the source tree: {}", files.len());
+
+        let mut bad = Vec::new();
+        let mut examined_total = 0usize;
+        let mut examined_screen = 0usize;
+        for file in files {
+            if file.file_name().and_then(|n| n.to_str()) == Some("graphics.rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let lines: Vec<&str> = text.lines().collect();
+            let mut examined = 0usize;
+            for (n, line) in lines.iter().enumerate() {
+                // `#[cfg(test)]` on a `mod` ends the production half of the
+                // file; on any other item it says nothing about what follows.
+                if line.trim_start().starts_with("#[cfg(test)]") {
+                    let next = lines[n + 1..].iter().find(|l| !l.trim().is_empty());
+                    if next.is_some_and(|l| l.trim_start().starts_with("mod ")
+                        || l.trim_start().starts_with("pub mod ")
+                        || l.trim_start().starts_with("pub(crate) mod "))
+                    {
+                        break;
+                    }
+                }
+                examined += 1;
+                // Comments and doc links name it on purpose; this is about code.
+                let code = match line.find("//") {
+                    Some(i) => &line[..i],
+                    None => line,
+                };
+                if code.contains("blorb::resolve_resource_blorb(") {
+                    bad.push(format!("  {}:{}  {}", file.display(), n + 1, line.trim()));
+                }
+            }
+            examined_total += examined;
+            if file.ends_with("render/screen.rs") {
+                examined_screen = examined;
+            }
+        }
+
+        // The reach, stated against the file that caught the latch bug.
+        // `render/screen.rs` keeps its `#[cfg(test)] mod tests` at the end and
+        // has carried over 8,000 production lines for a long time; the broken
+        // latch read 59 of them. Floors rather than exact counts, because both
+        // files grow — but a latch that stops early cannot clear them.
+        assert!(
+            examined_screen > 5_000,
+            "the scan must read the BODY of render/screen.rs, not stop at its first \
+             `#[cfg(test)]` item — examined {examined_screen} lines",
+        );
+        assert!(
+            examined_total > 80_000,
+            "the scan must read the crate, not a prologue of it — examined \
+             {examined_total} lines across app/src",
+        );
+
+        assert!(
+            bad.is_empty(),
+            "resolve the resource Blorb through `crate::graphics::resource_blorb`, which \
+             carries the zip tier and the build-mismatch refusal:\n{}",
+            bad.join("\n"),
+        );
     }
 }

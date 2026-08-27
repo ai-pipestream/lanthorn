@@ -352,7 +352,14 @@ pub fn resolve_aux(
 ) -> StoryAux {
     // Only record an ASSOCIATED blorb (a different file); the self-blorb case is
     // already carried in StoryMeta.self_blorb.
-    let assoc_blorb = match blorb::resolve_resource_blorb(&entry.path) {
+    //
+    // Through `graphics::resource_blorb` (SQ-1085), because the panel's job is
+    // to name the archive the LAUNCH will draw from, and the bare `blorb` call
+    // is no longer that: it cannot see inside a zip. It also stops listing a
+    // Blorb that names a different build, which the launch has refused since
+    // SQ-0866 — showing the player a sidecar nothing will read was telling them
+    // something untrue.
+    let assoc_blorb = match crate::graphics::resource_blorb(&entry.path).found {
         Some((b, src)) if src != entry.path => Some((src, chunks_of(&b))),
         _ => None,
     };
