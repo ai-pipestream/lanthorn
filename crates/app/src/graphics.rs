@@ -1464,7 +1464,16 @@ pub struct ResourceBlorb {
 /// they asked for is theirs to make. And a Blorb that IS the story file is its
 /// own container by construction and is never tested.
 pub fn resource_blorb(story_path: &std::path::Path) -> ResourceBlorb {
-    let Some((blorb, path)) = blorb::resolve_resource_blorb(story_path) else {
+    // A ZIP the player downloaded is asked FIRST, and only when the story came
+    // out of one (SQ-1085). The archive holding both the story and its `.blb` is
+    // one download, which is the relation `blorb::resolve_resource_blorb`'s tier
+    // 1 already treats as conclusive for a `.zblorb`; a same-stem file sitting
+    // beside the zip is a person's own filing and keeps the tier it always had.
+    // `zip_resource_blorb` opens with a four-byte magic check, so a loose story
+    // pays nothing for this.
+    let found = crate::hints::zip_resource_blorb(story_path)
+        .or_else(|| blorb::resolve_resource_blorb(story_path));
+    let Some((blorb, path)) = found else {
         return ResourceBlorb { found: None, refused: None };
     };
     match build_mismatch(story_path, &blorb, &path) {
