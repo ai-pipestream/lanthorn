@@ -35,17 +35,24 @@ whatever the filter selects. So selection roughly halves the loop (321s → 157s
 cannot do better than the build. The linker is already Apple's fast `ld-1267` and the
 volume is an SSD; neither is worth chasing.
 
-**Parallelism is capped at 8 on purpose, and the numbers above predate the cap.**
-`.cargo/config.toml` sets `jobs = 8` and `.config/nextest.toml` sets
-`test-threads = 8`, against a machine with 12 logical cores (8 performance + 4
+**Parallelism is capped at 6 on purpose, and the numbers above predate the cap.**
+`.cargo/config.toml` sets `jobs = 6` and `.config/nextest.toml` sets
+`test-threads = 6`, against a machine with 12 logical cores (8 performance + 4
 efficiency). Uncapped, cargo takes every core for the two-to-five minutes a rebuild
 runs and the machine is unusable for the whole of it — and clippy is a second full
-build with its own fingerprints. The four efficiency cores are now left alone. That
-trade is deliberate: expect the timings above to be somewhat worse, and do not
-"fix" it by raising the cap. CI is exempt — both workflows export
-`CARGO_BUILD_JOBS` from the runner's own core count before installing Rust, because
-a 3-4 core runner running eight rustc processes is slower AND puts a crate the size
-of `app` near the memory ceiling.
+build with its own fingerprints. Six leaves the four efficiency cores AND two
+performance cores for everything else. That trade is deliberate: expect the timings
+above to be somewhat worse, and do not "fix" it by raising the cap.
+
+**It was 8 first, and 8 was still too many.** The four efficiency cores were left
+alone and the machine was nevertheless sluggish through a rebuild, so the cap came
+down to 6 on measured comfort rather than on the core count (2026-08-27). If you
+find yourself reasoning from "12 cores, 8 of them fast" to a higher number, that is
+the argument that has already been tried.
+
+CI is exempt — both workflows export `CARGO_BUILD_JOBS` from the runner's own core
+count before installing Rust, because a 3-4 core runner running six or eight rustc
+processes is slower AND puts a crate the size of `app` near the memory ceiling.
 
 - **While iterating**, run the suites that cover what you touched — by NAME under
   nextest (`cargo nextest run -p app v6_arthur_status`), never by `--test`, since the

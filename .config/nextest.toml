@@ -1,8 +1,8 @@
-# The test-run counterpart of `.cargo/config.toml`'s `jobs = 8` — see the reasoning
-# there. nextest defaults to one test process per core; capped at 8 so a full
+# The test-run counterpart of `.cargo/config.toml`'s `jobs = 6` — see the reasoning
+# there. nextest defaults to one test process per core; capped at 6 so a full
 # `--workspace` gate leaves this machine usable while it runs.
 #
 # This bounds the TESTS only. The build in front of them is cargo's, and that is the
 # half that actually saturates the machine.
 [profile.default]
-test-threads = 8
+test-threads = 6

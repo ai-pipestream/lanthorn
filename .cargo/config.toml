@@ -7,11 +7,13 @@
 # a 5.8s warm suite), so the machine is saturated for the whole of it, and clippy is
 # a full second build with its own fingerprints.
 #
-# 8 leaves the four efficiency cores for everything else. It is a deliberate trade
-# of some wall-clock for a responsive machine, not a tuning guess.
+# 6 leaves the four efficiency cores AND two performance cores for everything else.
+# It is a deliberate trade of some wall-clock for a responsive machine, not a tuning
+# guess — and it was lowered from 8 because 8 still made the machine sluggish during
+# a rebuild in practice. Measured comfort beats the core count on paper.
 #
 # CI is exempt: the workflow sets CARGO_BUILD_JOBS, and the environment variable
 # wins over this file. A 4-core runner running 8 concurrent rustc processes is
 # slower AND risks the memory ceiling on a crate the size of `app`.
 [build]
-jobs = 8
+jobs = 6
