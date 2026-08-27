@@ -85,25 +85,21 @@ release, four binaries in each: `lanthorn` itself plus the no-map CLI players
 (`zvm-cli` / `gvm-cli` / `scott-cli`). Extract it and run:
 
 ```bash
-# Play a story
-./lanthorn path/to/story.z5
-
-# Point it at a directory to open the story picker instead
-./lanthorn ~/if-games/
+lanthorn ~/if-games/        # a directory — opens the story picker. The usual way in.
+lanthorn zork1.z3           # or straight into one game
 ```
+
+lanthorn offers to remember the first directory you open, so a bare **`lanthorn`**
+goes there next time. It opens disk images too — see
+[**Play the original disks**](#play-the-original-disks). `lanthorn --help` has the
+flags; the ones people reach for are `--no-sound`, `--no-images` and
+`--image-protocol`.
 
 ---
 
 ## Try these first
 
 A few things worth doing in your first ten minutes. Everything else can wait.
-
-**At launch**
-
-| | |
-|---|---|
-| `lanthorn ~/if-games/` | Opens the picker on a whole directory. It offers to remember it, so a bare `lanthorn` goes there next time. |
-| `lanthorn "Zork I.d64"` | Hand it a disk image and it plays the build on that floppy, dressed the way *that machine* dressed it — its colours, its status line, its cursor. |
 
 **In the story picker**
 
@@ -126,35 +122,6 @@ A few things worth doing in your first ten minutes. Everything else can wait.
 
 And the thing that needs no keys at all: **walk around, and watch the map draw
 itself.**
-
----
-
-## Launching it
-
-**Go straight into one game**
-
-```bash
-lanthorn stories/zork1.z3               # a bare story file
-lanthorn Advent.zblorb                  # a Blorb — its art and sound come with it
-lanthorn adventureland.dat              # a Scott Adams game
-```
-
-**Play it off the disk it shipped on**
-
-```bash
-lanthorn "Zork Zero.adf"                            # an Amiga floppy, presented as an Amiga
-lanthorn "Zork Zero Disk.image"                     # a Macintosh floppy
-lanthorn "LostTreasures1.iso" --story 3             # a compilation disc, by position…
-lanthorn "InfocomMasterpieces.img" --story arthur   # …or by name
-```
-
-**Turn things off**
-
-```bash
-lanthorn stories/sherlock.z5 --no-sound          # quiet; the border still flashes as the cue
-lanthorn stories/zork0.z6 --no-images            # skip the artwork; the prose still plays
-lanthorn stories/zork0.z6 --image-protocol kitty # force a protocol instead of auto-detecting
-```
 
 ---
 
