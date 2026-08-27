@@ -589,7 +589,7 @@ fn an_ordinary_story_file_keeps_the_default_interpreter() {
 fn a_real_release_floppy_tells_the_game_which_machine_it_is() {
     let Some(image) = story_path("Zork - The Undiscovered Underground.adf") else { return };
 
-    let text = stdout_of(&run(&image, &["--no-more"], "version\nquit\ny\n"));
+    let text = stdout_of(&run(&image, &["--pager", "off"], "version\nquit\ny\n"));
     assert!(
         text.contains("Release 16 / Serial number 970828"),
         "this is the build the floppy carries:\n{text}"
@@ -600,7 +600,7 @@ fn a_real_release_floppy_tells_the_game_which_machine_it_is() {
     );
 
     // And the override, on the same real media.
-    let text = stdout_of(&run(&image, &["--no-more", "-I", "6"], "version\nquit\ny\n"));
+    let text = stdout_of(&run(&image, &["--pager", "off", "-I", "6"], "version\nquit\ny\n"));
     assert!(text.contains("Interpreter 6 "), "-I outranks the floppy:\n{text}");
 }
 
@@ -647,7 +647,7 @@ fn a_release_paged_across_its_volumes_opens_from_any_one_of_them() {
     for (name, v6) in ACROSS_THE_SET {
         let Some(image) = story_path(name) else { continue };
         ran += 1;
-        let out = run(&image, &["--no-more"], "\nversion\nquit\ny\n");
+        let out = run(&image, &["--pager", "off"], "\nversion\nquit\ny\n");
         let err = stderr_of(&out);
         assert!(
             !err.contains("no story file on this disk image"),
@@ -707,7 +707,7 @@ fn a_single_volume_release_is_unaffected_by_the_sets_beside_it() {
     let Some(image) = story_path("Hitchhikers_Guide_to_the_Galaxy_The_1984_Infocom.d64") else {
         return;
     };
-    let text = stdout_of(&run(&image, &["--no-more"], "quit\ny\n"));
+    let text = stdout_of(&run(&image, &["--pager", "off"], "quit\ny\n"));
     assert!(
         text.contains("Release 47 / Serial number 840914"),
         "the lone floppy's own build, not a set's:\n{text}"
@@ -787,7 +787,7 @@ fn an_explicit_machine_brings_its_default_colours_with_it() {
     // `InterpreterProfile` answers `IbmPc` for every story with no medium, so
     // without the gate `-I 6` (and the plain default) would paint everything blue.
     //
-    // So a hand-named machine reaches `$1E` and stops there, and `--system-colours`
+    // So a hand-named machine reaches `$1E` and stops there, and `--colour machine`
     // is how a player says they meant the whole machine.
     for (n, name, want) in [
         (3u8, "Macintosh", "[3/9/2/]"),
@@ -799,10 +799,10 @@ fn an_explicit_machine_brings_its_default_colours_with_it() {
             named.contains(&format!("[{n}/2/9/]")),
             "--interpreter {n} ({name}) names the machine and defers the page\n   got: {named}"
         );
-        let opted = stdout_of(&run(&story, &["-I", &n.to_string(), "--system-colours"], ""));
+        let opted = stdout_of(&run(&story, &["-I", &n.to_string(), "--colour", "machine"], ""));
         assert!(
             opted.contains(want),
-            "--interpreter {n} --system-colours reports its own $2C/$2D\n  want: {want}\n   got: {opted}"
+            "--interpreter {n} --colour machine reports its own $2C/$2D\n  want: {want}\n   got: {opted}"
         );
     }
 
@@ -818,17 +818,17 @@ fn an_explicit_machine_brings_its_default_colours_with_it() {
     // gate: without it, `-I 6` on any story anyone opened would paint it blue.
     assert!(pc.contains("[6/2/9/]"), "…and a hand-named IBM PC still defers:\n{pc}");
     // …until the player says they meant it.
-    let pc_opt = stdout_of(&run(&story, &["-I", "6", "--system-colours"], ""));
+    let pc_opt = stdout_of(&run(&story, &["-I", "6", "--colour", "machine"], ""));
     assert!(
         pc_opt.contains("[6/6/9/]"),
-        "--system-colours advertises the machine's own blue under white:\n{pc_opt}"
+        "--colour machine advertises the machine's own blue under white:\n{pc_opt}"
     );
 
-    // The override contract (SQ-0839/SQ-0855): `--no-game-colours` declares the
+    // The override contract (SQ-0839/SQ-0855): `--game-colours off` declares the
     // interpreter COLOURLESS (§8.3.2), so no machine's page is advertised even
     // when one is asked for by name. The number still lands — that is not a
     // colour — and the pair falls back to the seed.
-    let mono = stdout_of(&run(&story, &["-I", "3", "--no-game-colours"], ""));
+    let mono = stdout_of(&run(&story, &["-I", "3", "--game-colours", "off"], ""));
     assert!(
         mono.contains("[3/2/9/]"),
         "a colourless interpreter advertises no machine page:\n{mono}"
@@ -862,8 +862,8 @@ fn a_story_off_a_floppy_is_told_the_whole_machine() {
     let text = stdout_of(&run(&image, &["-I", "3"], ""));
     assert!(text.contains("[3/2/9/]"), "-I names the Macintosh and defers its page:\n{text}");
     // The whole machine is still one flag away.
-    let text = stdout_of(&run(&image, &["-I", "3", "--system-colours"], ""));
-    assert!(text.contains("[3/9/2/]"), "-I --system-colours brings its page too:\n{text}");
+    let text = stdout_of(&run(&image, &["-I", "3", "--colour", "machine"], ""));
+    assert!(text.contains("[3/9/2/]"), "-I --colour machine brings its page too:\n{text}");
 
     let _ = std::fs::remove_file(&image);
 }
@@ -926,7 +926,7 @@ fn an_unmodelled_machine_says_so_instead_of_quietly_becoming_an_ibm_pc() {
 fn the_prodos_press_names_its_machine_and_reports_that_machines_page() {
     let Some(image) = story_path("Beyond Zork (1988)(Infocom).2mg") else { return };
 
-    let text = stdout_of(&run(&image, &["--no-more"], "begin\n\n\n\n\nversion\nquit\ny\n"));
+    let text = stdout_of(&run(&image, &["--pager", "off"], "begin\n\n\n\n\nversion\nquit\ny\n"));
     assert!(
         text.contains("Release 57 / Serial Number 871221"),
         "this is the build the ProDOS press carries:\n{text}"

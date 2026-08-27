@@ -12,7 +12,7 @@
 //!   different things, and every device box downstream is derived from it — this
 //!   is what bit SQ-0973, where a nominal 10x20 produced a 4580x2880 box.
 //! * A capability list is empty both when the terminal said "no" and when nobody
-//!   asked (`--no-images`, `--image-protocol halfblocks`, a non-tty).
+//!   asked (`--images off`, `--image-protocol halfblocks`, a non-tty).
 //! * Kitty transmission compression (`o=z`) fails silently in both directions: a
 //!   terminal that cannot inflate simply draws nothing, and the capability
 //!   quietly reverting to raw looks like nothing at all (SQ-0991/0992).
@@ -140,7 +140,7 @@ pub enum CellSource {
     /// answer after the window was rescaled, most likely. Reported rather than
     /// guessed at.
     Unexplained,
-    /// There is no picker, so there is no cell size: `--no-images`.
+    /// There is no picker, so there is no cell size: `--images off`.
     None,
 }
 
@@ -152,7 +152,7 @@ pub enum Probe {
     Asked,
     /// `--image-protocol halfblocks`: `Picker::halfblocks()` asks nothing.
     NotAskedHalfblocksForced,
-    /// `--no-images`: there is no picker.
+    /// `--images off`: there is no picker.
     NotAskedImagesOff,
 }
 
@@ -311,7 +311,7 @@ pub fn dump_lines(s: &TerminalSnapshot) -> Vec<DumpLine> {
     // ── protocol ─────────────────────────────────────────────────────────────
     match (&s.protocol, &s.forced_protocol) {
         (None, _) if s.probe == Probe::NotAskedImagesOff => out.push(assumed(
-            "  graphics protocol: none — images are off (--no-images); nothing below was detected",
+            "  graphics protocol: none — images are off (--images off); nothing below was detected",
         )),
         (None, _) => out.push(assumed(
             "  graphics protocol: none — no picker was built, so the capability query found \
@@ -380,7 +380,7 @@ pub fn dump_lines(s: &TerminalSnapshot) -> Vec<DumpLine> {
     // ── capabilities ─────────────────────────────────────────────────────────
     match (s.probe, s.capabilities.is_empty()) {
         (Probe::NotAskedImagesOff, _) => {
-            out.push(assumed("  capabilities: NOT ASKED — --no-images, so no probe was sent"))
+            out.push(assumed("  capabilities: NOT ASKED — --images off, so no probe was sent"))
         }
         (Probe::NotAskedHalfblocksForced, _) => out.push(assumed(
             "  capabilities: NOT ASKED — --image-protocol halfblocks builds a picker that never \
@@ -682,7 +682,7 @@ mod tests {
 
         s.probe = Probe::NotAskedImagesOff;
         let l = dump_lines(&s).into_iter().find(|l| l.text.contains("capabilities")).unwrap();
-        assert!(l.text.contains("--no-images"), "{}", l.text);
+        assert!(l.text.contains("--images off"), "{}", l.text);
     }
 
     /// The question that prompted the whole command. Both directions, because

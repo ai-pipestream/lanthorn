@@ -48,7 +48,7 @@
 //! **`honor_game_colours` is the master switch and this one is narrower.** A
 //! player who turns game colours off has said "keep my terminal's colours", and
 //! a blue Amiga page painted over that would be fighting them — so an off
-//! `honor_game_colours` (from `--no-game-colours`, a `garglk.ini` stylehint, the
+//! `honor_game_colours` (from `--game-colours`, a `garglk.ini` stylehint, the
 //! per-game sidecar, or SQ-0860's monochrome-artwork force-off) takes the period
 //! look with it. The reverse does **not** hold, which is the whole reason
 //! [`crate::config::Config::period_look`] exists separately: declining the look
@@ -63,7 +63,7 @@
 //! `NO_COLOR` has no reader in the TUI at all — it is a convention about adding
 //! ANSI colour to command output, and lanthorn is a full-screen program whose
 //! whole surface is decoration. `zvm-cli` is where it applies, and there it
-//! already folds into the same `honor` flag `--no-game-colours` sets, so the
+//! already folds into the same `honor` flag `--game-colours` sets, so the
 //! period look inherits the composition rather than restating it.
 //!
 //! # What the terminal can and cannot say

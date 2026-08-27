@@ -1,7 +1,7 @@
 //! One argument scanner, three flag tables.
 //!
 //! The flags themselves genuinely differ — `zvm-cli` has `--volume` and
-//! `-I`, `gvm-cli` has `--no-accel`, `scott-cli` has `--seed` — but the *rules*
+//! `-I`, `gvm-cli` has `--accel`, `scott-cli` has `--seed` — but the *rules*
 //! for reading them do not, and each CLI had its own loop applying them. That
 //! went the way these things go: `scott-cli` rejected unknown flags, `zvm-cli`
 //! ended its match in `_ => {}` and `gvm-cli` scanned inline, so a mistyped

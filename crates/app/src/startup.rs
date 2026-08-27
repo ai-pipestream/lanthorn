@@ -510,7 +510,7 @@ pub(crate) fn boot_story(
         })
     };
 
-    // In-game graphics Picker (None when --no-images or unavailable). Built once
+    // In-game graphics Picker (None when --images off or unavailable). Built once
     // and reused both for the Glulx session's char-cell pixel size and, below,
     // AppState.game_picker (the render side already tolerates None).
     let game_picker = if cfg.images { picker_ui::build_cover_picker(cfg.image_protocol) } else { None };
@@ -581,11 +581,12 @@ pub(crate) fn boot_story(
     let garglk_overlay = app::garglk_ini::discover(&story_path);
     let garglk_line = garglk_overlay.as_ref().map(|ov| {
         let summary = ov.apply(&mut cs);
-        // …unless `--no-game-colours` was typed on this launch, which outranks both
+        // …unless `--game-colours` was typed on this launch, which outranks both
         // per-game layers for the same reason `--interpreter` outranks the sidecar:
         // a flag is a deliberate instruction for the run, and a file beside the story
-        // is not (SQ-0855).
-        if let Some(h) = ov.honor_game_colours.filter(|_| !cli.no_game_colours) {
+        // is not (SQ-0855). In BOTH directions since SQ-1082 — `--game-colours on`
+        // is as much an instruction as `off` was.
+        if let Some(h) = ov.honor_game_colours.filter(|_| cli.game_colours.is_none()) {
             // A garglk.ini found beside THIS story speaks for this story, so it is
             // pinned as one-run: the global config must not learn it (SQ-0807).
             cfg.honor_game_colours = h;
@@ -598,9 +599,11 @@ pub(crate) fn boot_story(
     // user's explicit choice in force. The IFID is computed here (from the raw
     // bytes) and reused for the map dir / identity below.
     let ifid = compute_ifid(&story_bytes);
-    if let Some(v) = app::styles::read_per_game_honor(&game_dir).filter(|_| !cli.no_game_colours) {
+    if let Some(v) =
+        app::styles::read_per_game_honor(&game_dir).filter(|_| cli.game_colours.is_none())
+    {
         // The sidecar's key is this game's, not the global default's — pinned for
-        // the same reason the garglk overlay above is (SQ-0807). `--no-game-colours`
+        // the same reason the garglk overlay above is (SQ-0807). `--game-colours`
         // outranks it, as above.
         cfg.honor_game_colours = v;
         cfg.one_run.pin(app::config::keys::HONOR_GAME_COLOURS, v);
@@ -622,7 +625,7 @@ pub(crate) fn boot_story(
     // game's choice can never be written back into the user's global config.toml by
     // a later settings-screen save (`OneRunOverrides`). Editing the row itself
     // releases the pin, which is what a deliberate global edit looks like.
-    // …and `--v6-pixel-lock` outranks the sidecar, exactly as `--no-game-colours`
+    // …and `--v6-pixel-lock` outranks the sidecar, exactly as `--game-colours`
     // outranks the two per-game layers above: a flag is an instruction for the
     // launch you typed it on, a file beside the story is not (SQ-1079).
     let v6_pixel_lock_base = cfg.v6_pixel_lock;
@@ -646,17 +649,16 @@ pub(crate) fn boot_story(
     // page and ink, not the user's terminal's. `honor_game_colours = false` still
     // wins over both — that declares the interpreter colourless (§8.3.2) and
     // leaves the VM's own black-on-white seed alone.
-    let mut host_default_colours = if cfg.honor_game_colours {
-        cfg.machine_default_colours().or_else(|| {
-            app::colors::host_default_colour_pair(
-                cs.theme.get("transcript").style,
-                term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
-                term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
-            )
-        })
-    } else {
-        None
-    };
+    // SQ-1082: which of the three sources answers is `--colour`'s to say, and
+    // the chain lives in ONE place now — `reset.rs` kept its own copy of it, and
+    // a third input would have had to be added to both.
+    let mut host_default_colours = app::colors::host_default_colours(
+        &cfg,
+        cfg.machine_default_colours(),
+        cs.theme.get("transcript").style,
+        term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
+        term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
+    );
     // SQ-0679/SQ-0680: the real story-pane `(rows, cols)`, measured before the
     // engine exists, so a v4/v5 story's boot-time status-bar layout already
     // targets it instead of the zvm 80×24 fallback. `None` (size query failed,
@@ -827,7 +829,14 @@ pub(crate) fn boot_story(
                 zvm::screen::set_palette(palette);
                 // …and the pair §8.3.3 reports is the card's, not the machine's:
                 // black 2 rather than blue 6, with the ink unmoved at white 9.
-                host_default_colours = Some(pair);
+                // A card is the machine's own display, so `--colour theme` and
+                // `--colour terminal` decline it with the rest of that source
+                // (SQ-1082); the palette is set either way, being a table the
+                // artwork's colour numbers resolve through rather than a claim
+                // about the default page.
+                if cfg.colour_source == app::config::ColourSource::Machine {
+                    host_default_colours = Some(pair);
+                }
             }
             // SQ-0837/SQ-0838: then the archive the MEDIUM supplied, and only
             // then the machine. The archive comes first because Infocom's own
@@ -1153,7 +1162,7 @@ pub(crate) fn boot_story(
     // SQ-0855: and whether a flag put it there, which the base alone cannot say —
     // the post-IFID `reload_style` below re-reads both per-story sources from disk
     // and would otherwise let either of them overrule the flag.
-    state.no_game_colours_cli = cli.no_game_colours;
+    state.game_colours_cli = cli.game_colours.map(bool::from);
     // SQ-0860: and whether the artwork declared the interpreter colourless, for the
     // same reason — the reload below re-reads the per-story files, and neither of
     // them knows what archive was loaded.

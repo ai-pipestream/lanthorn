@@ -217,7 +217,15 @@ fn parse_interpreter_version(s: &str) -> Result<u8, String> {
     version = buildinfo::LONG,
     about = "Interactive-fiction interpreter (Z-machine, Glulx, Scott Adams) with live automapping",
     // Show `lanthorn <version>` at the top of --help (clap omits it by default).
-    help_template = "{before-help}{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\n{all-args}{after-help}"
+    help_template = "{before-help}{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\n{all-args}{after-help}",
+    // SQ-1093: one wrap authority, shared with the three CLIs' hand-written
+    // `HELP` constants. `term_width` PINS the width rather than capping a
+    // detected one, which is the point: the `wrap_help` feature reflows to
+    // whatever the terminal happens to be, so the same paragraph came out at 80
+    // columns in one window and 200 in another — and next to `zvm-cli`, whose
+    // prose is a string constant, the two front-ends disagreed outright. See
+    // `cli_host::HELP_WIDTH` for why 80.
+    term_width = cli_host::HELP_WIDTH
 )]
 pub struct Cli {
     /// Path to a story file (.z3/.z5/.z8 etc.) or a directory to browse. When
@@ -242,47 +250,63 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Disable Glulx accelerated-function interception (debug; default: enabled)
-    #[arg(long)]
-    pub no_accel: bool,
+    /// Glulx accelerated-function interception (debug; default: on).
+    #[arg(long, value_enum, value_name = "ON|OFF")]
+    pub accel: Option<OnOff>,
 
-    /// Disable sound for this run (bleeps + sampled audio); the border still
-    /// flashes as the accessibility cue. Overrides the config's `enable_sound`.
-    #[arg(long)]
-    pub no_sound: bool,
+    /// Sound for this run (bleeps + sampled audio); with it off the border still
+    /// flashes as the accessibility cue. Overrides the config's `enable_sound`
+    /// in both directions, so `--sound on` plays a story whose config persisted
+    /// `enable_sound = false`.
+    //
+    // SQ-1082: which is the whole point of the rename. Spelled `--no-sound`, this
+    // was one-way — it could force sound off for a run, and nothing on the command
+    // line could force it on.
+    #[arg(long, value_enum, value_name = "ON|OFF")]
+    pub sound: Option<OnOff>,
 
     /// Force the terminal image protocol for cover art (default: auto-detect).
     #[arg(long, value_enum, default_value_t = ImageProtocol::Auto)]
     pub image_protocol: ImageProtocol,
 
-    /// Disable all image rendering (in-game graphics + story-picker cover art).
-    #[arg(long)]
-    pub no_images: bool,
+    /// Image rendering — in-game graphics and story-picker cover art (default: on).
+    #[arg(long, value_enum, value_name = "ON|OFF")]
+    pub images: Option<OnOff>,
 
-    /// Ignore the colours the game asks for, and tell it the interpreter has none:
-    /// `set_colour` / true-colour output on the Z-machine, Glk stylehints on Glulx.
-    /// The theme's own colours still paint everything.
+    /// Honour the colours the GAME asks for: `set_colour` / true-colour output on
+    /// the Z-machine, Glk stylehints on Glulx. `off` tells the story the
+    /// interpreter has none at all (ZMSD §8.3.2) and lets the theme paint
+    /// everything.
     ///
-    /// Overrides the config's `honor_game_colours`, and outranks a `garglk.ini`
-    /// beside the story or this game's own sidecar — an instruction for the launch
-    /// you typed it on, exactly as `--interpreter` is. Never written back to
-    /// config.toml; `/set-game-colours on` still turns them back on mid-game.
-    #[arg(long)]
-    pub no_game_colours: bool,
+    /// Overrides the config's `honor_game_colours` in both directions, and
+    /// outranks a `garglk.ini` beside the story or this game's own sidecar — an
+    /// instruction for the launch you typed it on, exactly as `--interpreter` is.
+    /// Never written back to config.toml; `/set-game-colours` still overrides it
+    /// mid-game.
+    ///
+    /// A different question from `--colour`: this one is whether the story's own
+    /// requests are obeyed, that one is what DEFAULT resolves to.
+    #[arg(long = "game-colours", alias = "game-colors", value_enum, value_name = "ON|OFF")]
+    pub game_colours: Option<OnOff>,
 
-    /// Present the MACHINE's own default colours even off original media (SQ-0928).
+    /// Where the story pane's DEFAULT page and ink come from — the pair reported
+    /// to the story in header `$2C`/`$2D` (SQ-1082).
     ///
-    /// A machine's §8.3.3 pair — the IBM PC's blue under white, the Amiga's grey
-    /// under white — describes a machine, and running a story off its release disk
-    /// makes that description true of the launch. It applies automatically there.
-    /// Opening a bare story file does not: nothing named a machine, so nothing is
-    /// presented and your terminal governs.
+    /// Three sources. lanthorn already consults them machine-first, falling
+    /// through to the theme and then to the terminal; naming one pins it instead
+    /// of letting that chain run. (They are listed below in the other order,
+    /// narrowest first, which is where each one falls through TO.)
     ///
-    /// Use this when you have named one yourself and mean it:
-    /// `--interpreter 4 --system-colours` gets you the Amiga's page on a plain
-    /// `.z3`. It cannot conjure a machine where none was named.
-    #[arg(long)]
-    pub system_colours: bool,
+    /// `machine` is also the opt-in that says you mean the number you typed: a
+    /// release disk names its own machine and gets that pair automatically, while
+    /// `--interpreter 4 --colour machine` gets the Amiga's page on a plain `.z3`.
+    /// It cannot conjure a machine where none was named.
+    ///
+    /// Absent, the full chain runs, which is `machine` without that opt-in.
+    /// Inert under `--game-colours off`: an interpreter that has just declared
+    /// itself colourless has no default page and ink to report.
+    #[arg(long = "colour", alias = "color", value_enum, value_name = "SOURCE")]
+    pub colour: Option<ColourSource>,
 
     /// Interpreter number to advertise in the story header (0x1E).
     ///
@@ -434,6 +458,34 @@ impl From<OnOff> for bool {
     fn from(v: OnOff) -> bool {
         matches!(v, OnOff::On)
     }
+}
+
+/// Which source the story pane's DEFAULT page and ink are taken from (SQ-1082).
+///
+/// Not a new idea — these are the three arms of the `or_else` chain
+/// `colors::host_default_colours` has always resolved `$2C`/`$2D` through, given
+/// names so one of them can be pinned outright. The variants are ordered from
+/// the narrowest source to the widest, and each falls through to the one above
+/// it when its own source has nothing to say.
+///
+/// A DIFFERENT axis from `honor_game_colours`, which is whether the story's own
+/// `set_colour` requests are obeyed. The two were conflated because one branch
+/// answered both at once; see `colors::host_default_colours` for where they part.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum ColourSource {
+    /// the OSC 10/11 probe — your terminal's own text and background
+    Terminal,
+    /// your style.toml's transcript colours, when it names both; else terminal
+    Theme,
+    //
+    // The DEFAULT variant, because it is the chain that already ran — asking for
+    // it explicitly adds only the `Asked` opt-in
+    // (`ProfileSource::licenses_machine_colours`), which is what
+    // `--system-colours` used to be on its own.
+    /// the machine's own ZMSD §8.3.3 pair, when one is named; else theme
+    #[default]
+    Machine,
 }
 
 /// Terminal image protocol for cover art. `Auto` detects the best available
@@ -906,6 +958,7 @@ pub mod keys {
     pub const V6_PIXEL_LOCK: &str = "v6_pixel_lock";
     pub const V6_RENDER: &str = "v6_render";
     pub const SYSTEM_FONT_DISK: &str = "system_font_disk";
+    pub const SYSTEM_COLOURS: &str = "system_colours";
 }
 
 /// A value a one-run source pinned, in the shape the TOML key holds it.
@@ -937,8 +990,8 @@ impl From<&str> for OneRunValue {
 /// story's artwork — all of them mutate the live [`Config`], and [`write_config_at`]
 /// writes any value that differs from the default. So without this, the first
 /// settings save of the session — the story browser's "remember this directory?"
-/// prompt is enough — makes a throwaway choice permanent AND global. `--no-sound`
-/// once, and sound is off for every story forever.
+/// prompt is enough — makes a throwaway choice permanent AND global. One
+/// `--sound off`, and sound is off for every story forever.
 ///
 /// One rule covers every key: **while the live value still equals what the one-run
 /// source pinned, the file's own value (or its absence) is left exactly as it is.**
@@ -1384,6 +1437,16 @@ pub struct Config {
     /// [`ProfileSource::Fallback`](crate::interpreter::ProfileSource::Fallback).
     #[serde(default = "default_system_colours")]
     pub system_colours: bool,
+    /// Which of the three default-colour sources this launch draws its page and
+    /// ink from — `--colour terminal|theme|machine` (SQ-1082).
+    ///
+    /// Not a config key: it is an instruction for the launch you typed it on,
+    /// like `--interpreter`, and the persisted half of the same subject is
+    /// `system_colours` above. [`ColourSource::Machine`] is the default because
+    /// it IS the chain that runs when nothing is said; naming it on the command
+    /// line additionally sets `system_colours` for the run.
+    #[serde(skip)]
+    pub colour_source: ColourSource,
     /// The picture archive named for THIS launch — `--pictures`, or a choice the
     /// launch-options dialog made and the user did not persist (SQ-0789/0791).
     ///
@@ -1417,7 +1480,7 @@ pub struct Config {
     #[serde(default = "default_volume")]
     pub volume: u8,
     /// Whether Glulx accel interception is active. Runtime-only (set from the
-    /// --no-accel CLI flag); intentionally not persisted or user-facing.
+    /// --accel off CLI flag); intentionally not persisted or user-facing.
     #[serde(skip, default = "default_acceleration")]
     pub acceleration: bool,
     /// Cover-art image protocol. Runtime-only (set from --image-protocol);
@@ -1425,7 +1488,7 @@ pub struct Config {
     #[serde(skip, default = "default_image_protocol")]
     pub image_protocol: ImageProtocol,
     /// Whether image rendering (in-game graphics + cover art) is enabled.
-    /// Runtime-only (set from --no-images); not persisted.
+    /// Runtime-only (set from --images); not persisted.
     #[serde(skip, default = "default_images")]
     pub images: bool,
     /// Active debug-trace sections. Runtime-only (from --trace / /trace); not persisted.
@@ -1595,6 +1658,7 @@ impl Default for Config {
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             interpreter_source: crate::interpreter::ProfileSource::Fallback,
             system_colours: default_system_colours(),
+            colour_source: ColourSource::default(),
             pictures_override: None,
             disk_entry: None,
             enable_sound: default_enable_sound(),
@@ -1727,7 +1791,7 @@ pub fn resolve(cli: &Cli) -> Config {
     // CLI overrides beat the file — and every one of them that lands on a key
     // `write_config_at` persists is PINNED as it lands, so a later settings save
     // cannot bake this run's instruction into the file (SQ-0807; see
-    // `OneRunOverrides`). `--no-accel`, `--image-protocol`, `--no-images`,
+    // `OneRunOverrides`). `--accel`, `--image-protocol`, `--images`,
     // `--trace` and `--pictures` need no pin: their fields are `#[serde(skip)]`
     // and never written at all.
     if let Some(dir) = &cli.user_dir {
@@ -1739,28 +1803,40 @@ pub fn resolve(cli: &Cli) -> Config {
         cfg.one_run.pin(keys::USER_DIR, dir.to_string_lossy().into_owned());
     }
 
-    cfg.acceleration = !cli.no_accel;
+    // SQ-1082: every switch below is `Option<OnOff>`, and the `Option` is the
+    // point. These were negative-only — `--no-sound`, `--no-images` — which made
+    // them ONE-WAY: they could force a setting off for a run and nothing on the
+    // command line could force it on, so a config carrying `enable_sound = false`
+    // could only be overridden by editing the file. A bare `bool` cannot carry
+    // the third answer that fixes it, because "not mentioned" then reads as
+    // "off" and a flag's absence starts turning persisted `true` values off,
+    // which is the same defect facing the other way.
+    //
+    // `acceleration` and `images` are `#[serde(skip)]`, so they need no one-run
+    // pin — there is no key for a settings save to bake them into.
+    if let Some(v) = cli.accel {
+        cfg.acceleration = v.into();
+    }
     cfg.image_protocol = cli.image_protocol;
-    cfg.images = !cli.no_images;
-    // One-way override: `--no-sound` forces sound off for this run, but its
-    // absence must not turn on a config that persisted `enable_sound = false`.
-    if cli.no_sound {
-        cfg.enable_sound = false;
-        cfg.one_run.pin(keys::ENABLE_SOUND, false);
+    if let Some(v) = cli.images {
+        cfg.images = v.into();
+    }
+    if let Some(v) = cli.sound {
+        cfg.enable_sound = v.into();
+        cfg.one_run.pin(keys::ENABLE_SOUND, bool::from(v));
     }
 
-    // One-way override, same shape as `--no-sound` above: `--no-game-colours`
-    // declares the interpreter colourless for this run, but its absence must not
-    // turn colours ON for a config that persisted `honor_game_colours = false`.
-    // Set on the LIVE value every render site reads, so a mid-game
-    // `/set-game-colours on` still wins — the pin releases the moment the value
-    // stops being ours, exactly as `--interpreter`'s does (SQ-0855).
+    // `--game-colours` is set on the LIVE value every render site reads, so a
+    // mid-game `/set-game-colours` still wins — the pin releases the moment the
+    // value stops being ours, exactly as `--interpreter`'s does (SQ-0855).
     //
     // `boot_story` keeps the two per-game layers that come later — a `garglk.ini`
-    // beside the story, and this game's sidecar — from turning it back on.
-    if cli.no_game_colours {
-        cfg.honor_game_colours = false;
-        cfg.one_run.pin(keys::HONOR_GAME_COLOURS, false);
+    // beside the story, and this game's sidecar — from overriding it, now in
+    // BOTH directions: a flag is an instruction for the launch you typed it on
+    // whichever way it points.
+    if let Some(v) = cli.game_colours {
+        cfg.honor_game_colours = v.into();
+        cfg.one_run.pin(keys::HONOR_GAME_COLOURS, bool::from(v));
     }
 
     // SQ-1079: the two v6 render settings, said before the game boots. Both are
@@ -1776,13 +1852,22 @@ pub fn resolve(cli: &Cli) -> Config {
         cfg.one_run.pin(keys::V6_PIXEL_LOCK, bool::from(lock));
     }
 
-    // SQ-0928: the opt-in for a machine's own colours off original media. A flag
-    // for the launch you typed it on, like the two above, so it is not written
-    // back — but it needs no one-run pin, because unlike `honor_game_colours`
-    // nothing per-story recomputes it and there is no in-session command to
-    // override.
-    if cli.system_colours {
-        cfg.system_colours = true;
+    // SQ-1082: which of the three default-colour sources answers for this launch.
+    // `--colour machine` subsumes what `--system-colours` was (SQ-0928): the
+    // opt-in that licenses a machine's own §8.3.3 pair when the MEDIUM did not
+    // name the machine but you did, with `--interpreter`. The other two arms
+    // narrow the chain instead, which nothing could ask for before.
+    //
+    // Pinned, unlike `--system-colours`, which set a persisted key and left no
+    // record that this run had done it — so one `--system-colours` launch plus
+    // any settings save (the browser's "remember this directory?" is enough)
+    // wrote `system_colours = true` into the user's file for good.
+    if let Some(src) = cli.colour {
+        cfg.colour_source = src;
+        if src == ColourSource::Machine {
+            cfg.system_colours = true;
+            cfg.one_run.pin(keys::SYSTEM_COLOURS, true);
+        }
     }
 
     // `--interpreter N` beats the file's `interpreter_number`; absent, the
@@ -1841,7 +1926,7 @@ impl ConfigDoc<'_> {
     /// dropped.
     ///
     /// …and neither half applies while a one-run source still owns the value: this
-    /// run's `--no-sound` is not a setting, so the file keeps whatever it said.
+    /// run's `--sound off` is not a setting, so the file keeps whatever it said.
     fn put(&mut self, key: &str, value: toml_edit::Value, is_default: bool) {
         if self.one_run.still_holds(key, &value) {
             return;
@@ -2372,12 +2457,12 @@ mod tests {
             user_dir: None,
             data_dir: None,
             config: Some(path.to_path_buf()),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number,
             interpreter_version: None,
             pictures: None,
@@ -2458,12 +2543,12 @@ mod tests {
             user_dir: Some(PathBuf::from("/tmp/from-cli")),
             data_dir: None,
             config: Some(cfg_path.clone()),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2487,12 +2572,12 @@ mod tests {
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2516,12 +2601,12 @@ mod tests {
             user_dir: None,
             data_dir: None,
             config: Some(cfg_path.clone()),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -2809,6 +2894,7 @@ use_defaults = false
             interpreter_profile: crate::interpreter::InterpreterProfile::default(),
             interpreter_source: crate::interpreter::ProfileSource::Fallback,
             system_colours: default_system_colours(),
+            colour_source: ColourSource::default(),
             pictures_override: None,
             disk_entry: None,
             enable_sound: true,
@@ -3102,7 +3188,7 @@ use_defaults = false
     }
 
     #[test]
-    fn acceleration_defaults_true_and_no_accel_disables() {
+    fn acceleration_defaults_true_and_accel_off_disables() {
         assert!(Config::default().acceleration);
 
         let cli = Cli {
@@ -3110,12 +3196,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
-            no_accel: true,
-            no_sound: false,
+            accel: Some(OnOff::Off),
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3131,18 +3217,18 @@ use_defaults = false
     }
 
     #[test]
-    fn no_sound_flag_disables_enable_sound() {
+    fn the_sound_flag_moves_enable_sound_both_ways() {
         let base = Cli {
             story: Some(PathBuf::from("foo.z5")),
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3156,8 +3242,11 @@ use_defaults = false
         // Absent flag: sound stays on (config default).
         assert!(resolve(&base).enable_sound);
         // Flag present: sound forced off for this run.
-        let muted = Cli { no_sound: true, ..base };
+        let muted = Cli { sound: Some(OnOff::Off), ..base };
         assert!(!resolve(&muted).enable_sound);
+        // The other direction — which `--no-sound` had no way to say (SQ-1082) —
+        // is pinned against a persisted `false` in
+        // `the_sound_flag_moves_enable_sound_both_ways_for_one_run_only`.
     }
 
     /// SQ-1079: `--v6-render` and `--v6-pixel-lock` beat the file for the launch
@@ -3178,12 +3267,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(cfg_path.clone()),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3272,12 +3361,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(cfg_path.clone()),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3301,12 +3390,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3323,7 +3412,7 @@ use_defaults = false
     }
 
     #[test]
-    fn images_defaults_true_and_no_images_disables() {
+    fn images_defaults_true_and_images_off_disables() {
         assert!(Config::default().images);
 
         let cli = Cli {
@@ -3331,12 +3420,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: true,
-            no_game_colours: false,
-            system_colours: false,
+            images: Some(OnOff::Off),
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3396,12 +3485,12 @@ use_defaults = false
             user_dir: Some(dir.clone()),
             data_dir: None,
             config: None,
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3454,12 +3543,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(home.join("config.toml")),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3500,12 +3589,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(path.clone()),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3561,13 +3650,13 @@ use_defaults = false
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `--no-sound` silences ONE run. Before SQ-0807 `write_config_at` put
-    /// `enable_sound` unconditionally, so the first settings save of a `--no-sound`
+    /// `--sound off` silences ONE run. Before SQ-0807 `write_config_at` put
+    /// `enable_sound` unconditionally, so the first settings save of a `--sound off`
     /// session — the story browser's "remember this directory?" prompt is enough —
     /// wrote `enable_sound = false` into config.toml and every later launch was
     /// silent, with nothing on screen to say why.
     #[test]
-    fn no_sound_flag_does_not_persist_enable_sound() {
+    fn sound_off_flag_does_not_persist_enable_sound() {
         let dir = std::env::temp_dir().join(format!("bm-nosound-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3575,7 +3664,7 @@ use_defaults = false
         // Present AND at its default — the case `put` rewrites either way.
         std::fs::write(&cfg_path, "# mine\nenable_sound = true\n").unwrap();
 
-        let cli = Cli { no_sound: true, ..cli_with_config(&cfg_path, None) };
+        let cli = Cli { sound: Some(OnOff::Off), ..cli_with_config(&cfg_path, None) };
         let mut cfg = resolve(&cli);
         assert!(!cfg.enable_sound, "the flag silences this run");
 
@@ -3583,7 +3672,7 @@ use_defaults = false
         let back = std::fs::read_to_string(&cfg_path).unwrap();
         assert!(
             toml::from_str::<Config>(&back).unwrap().enable_sound,
-            "--no-sound is for one run; the FILE must still say true: {back}"
+            "--sound off is for one run; the FILE must still say true: {back}"
         );
         assert!(back.contains("# mine"), "and the user's comment survives: {back}");
 
@@ -3649,7 +3738,7 @@ use_defaults = false
         let cfg_path = dir.join("config.toml");
         std::fs::write(&cfg_path, "enable_sound = true\n").unwrap();
 
-        let cli = Cli { no_sound: true, ..cli_with_config(&cfg_path, None) };
+        let cli = Cli { sound: Some(OnOff::Off), ..cli_with_config(&cfg_path, None) };
         let mut cfg = resolve(&cli);
 
         // Merely differing from the pin is enough: the pin no longer describes it.
@@ -3691,12 +3780,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(cfg_path.clone()),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3748,12 +3837,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(cfg_path.clone()),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3803,12 +3892,12 @@ use_defaults = false
             user_dir: None,
             data_dir: None,
             config: Some(cfg_path.clone()),
-            no_accel: false,
-            no_sound: false,
+            accel: None,
+            sound: None,
             image_protocol: ImageProtocol::Auto,
-            no_images: false,
-            no_game_colours: false,
-            system_colours: false,
+            images: None,
+            game_colours: None,
+            colour: None,
             interpreter_number: None,
             interpreter_version: None,
             pictures: None,
@@ -3857,9 +3946,7 @@ use_defaults = false
     #[test]
     fn every_flag_lanthorn_accepts_parses_and_the_old_spelling_is_gone() {
         use clap::Parser;
-        for flag in [
-            "--no-accel", "--no-sound", "--no-images", "--no-game-colours", "--debug",
-        ] {
+        for flag in ["--debug", "--machines"] {
             let cli = Cli::try_parse_from(["lanthorn", flag, "g.z5"])
                 .unwrap_or_else(|e| panic!("{flag} should parse: {e}"));
             assert_eq!(
@@ -3878,6 +3965,11 @@ use_defaults = false
             ("--trace", "screen"),
             ("--pictures", "g.mg1"),
             ("--story", "arthur"),
+            ("--accel", "on"),
+            ("--sound", "off"),
+            ("--images", "on"),
+            ("--game-colours", "off"),
+            ("--colour", "machine"),
         ] {
             let cli = Cli::try_parse_from(["lanthorn", flag, value, "g.z5"])
                 .unwrap_or_else(|e| panic!("{flag} {value} should parse: {e}"));
@@ -3892,17 +3984,88 @@ use_defaults = false
         // line moved.
         let cli = Cli::try_parse_from(["lanthorn", "--interpreter", "4", "g.z5"]).unwrap();
         assert_eq!(cli.interpreter_number, Some(4), "--interpreter sets interpreter_number");
-        assert!(!cli.no_game_colours, "and is nothing to do with colours");
+        assert!(cli.game_colours.is_none(), "and is nothing to do with colours");
 
-        assert!(
-            Cli::try_parse_from(["lanthorn", "--interpreter-number", "6", "g.z5"]).is_err(),
-            "the old spelling is gone outright — no deprecated alias before release"
-        );
+        // SQ-1082: every negative-only switch is now `--<noun> on|off`, the value
+        // is REQUIRED (a bare `--sound` invites "is that on, or a toggle?"), and
+        // the old spelling is gone outright rather than surviving as an alias
+        // nobody maintains. `--system-colours` went with them: `--colour machine`
+        // is the same request said on the axis it belongs to.
+        for old in [
+            "--no-accel",
+            "--no-sound",
+            "--no-images",
+            "--no-game-colours",
+            "--system-colours",
+            "--system-colors",
+            "--interpreter-number",
+        ] {
+            assert!(
+                Cli::try_parse_from(["lanthorn", old, "g.z5"]).is_err(),
+                "{old} is gone outright — no deprecated alias before release"
+            );
+        }
+        for bare in ["--accel", "--sound", "--images", "--game-colours", "--colour"] {
+            assert!(
+                Cli::try_parse_from(["lanthorn", bare, "g.z5"]).is_err(),
+                "{bare} requires its value; a bare form is an ambiguity, not a shorthand"
+            );
+        }
         // And the help text a user reads names the new spelling, not the old one.
         let help = <Cli as clap::CommandFactory>::command().render_long_help().to_string();
         assert!(help.contains("--interpreter <N>"), "help offers --interpreter: {help}");
         assert!(!help.contains("--interpreter-number"), "and never the old name: {help}");
-        assert!(help.contains("--no-game-colours"), "help offers --no-game-colours: {help}");
+        for new in ["--accel <ON|OFF>", "--sound <ON|OFF>", "--images <ON|OFF>",
+                    "--game-colours <ON|OFF>", "--colour <SOURCE>"] {
+            assert!(help.contains(new), "help offers {new}: {help}");
+        }
+        // No negative-only switch survives in the OPTION column. Matched on the
+        // column rather than on the whole text, because prose in a doc comment may
+        // legitimately name one (`--no-tap` is `ring_scout`'s, and this help
+        // describes lanthorn's neighbours).
+        for line in help.lines() {
+            let t = line.trim_start();
+            assert!(
+                !t.starts_with("--no-") && !t.contains(" --no-"),
+                "a negative-only switch survives: {line}"
+            );
+        }
+    }
+
+    /// SQ-1093. One wrap authority, and `lanthorn` is one of the four front-ends
+    /// that must answer with the same number.
+    ///
+    /// The reported symptom was a `--help` showing two: prose wrapped at ~83
+    /// columns beside a generated list that ran to the terminal's edge, so the
+    /// right margin was ragged in a way that reads as a rendering fault. clap's
+    /// `wrap_help` reflows to whatever the terminal happens to be, which is a
+    /// second authority all by itself — the same paragraph came out at 80 columns
+    /// in one window and 200 in another, and never matched `zvm-cli`, whose help
+    /// is a string constant. `term_width` pins it; this asserts the pin.
+    ///
+    /// Rendered through `render_long_help`, which is what `--help` prints, so a
+    /// doc comment long enough to overflow fails here rather than on a user's
+    /// screen.
+    #[test]
+    fn every_help_line_fits_the_one_width_all_four_front_ends_share() {
+        let cmd = <Cli as clap::CommandFactory>::command();
+        for (which, text) in [
+            ("--help", cmd.clone().render_long_help().to_string()),
+            ("-h", cmd.clone().render_help().to_string()),
+        ] {
+            let over = cli_host::overlong_help_lines(&text);
+            assert!(
+                over.is_empty(),
+                "{which} must wrap at {}, but {over:?} do not:\n{text}",
+                cli_host::HELP_WIDTH
+            );
+        }
+        // Non-vacuity: the help is long enough for the width to mean something.
+        let long = cmd.clone().render_long_help().to_string();
+        assert!(
+            long.lines().filter(|l| l.chars().count() > cli_host::HELP_WIDTH - 10).count() > 5,
+            "the text should be filling the width, not merely short of it"
+        );
     }
 
     /// SQ-1078: `--story` names a game ON a volume, and the two spellings must
@@ -3979,37 +4142,39 @@ use_defaults = false
         assert!(help.contains("--machines"), "help offers --machines: {help}");
     }
 
-    /// SQ-0855: `--no-game-colours` is an instruction for one launch, exactly as
-    /// `--no-sound` and `--interpreter` are. It must reach the LIVE
+    /// SQ-0855: `--game-colours` is an instruction for one launch, exactly as
+    /// `--sound` and `--interpreter` are. It must reach the LIVE
     /// `honor_game_colours` every render site gates on — a flag that set some separate
     /// field would look right at launch and drift the moment `/set-game-colours`
     /// toggled it — and must never be written back to config.toml.
     ///
-    /// Both modes of the key are pinned, per the project's colour-render convention:
-    /// `true` is the shipped default and the primary baseline, and a file that already
-    /// says `false` must not be turned ON by the flag's absence.
+    /// SQ-1082: and it must move the key BOTH WAYS. `--no-game-colours` could only
+    /// ever force them off, so a config carrying `honor_game_colours = false` had no
+    /// command line that could override it — you had to edit the file. The three
+    /// states are pinned here against both persisted values, which is the whole
+    /// point of `Option<OnOff>`: absent has to leave a stored `true` alone as surely
+    /// as a stored `false`.
     #[test]
-    fn no_game_colours_flag_forces_colours_off_for_one_run_only() {
-        let dir = std::env::temp_dir().join(format!("bm-nogamecolours-{}", std::process::id()));
+    fn the_game_colours_flag_moves_the_key_both_ways_for_one_run_only() {
+        let dir = std::env::temp_dir().join(format!("bm-gamecolours-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cfg_path = dir.join("config.toml");
+        let flagged = |v: Option<OnOff>| Cli { game_colours: v, ..cli_with_config(&cfg_path, None) };
+
+        // ── a config that says TRUE ───────────────────────────────────────────
         // The key is PRESENT and at its default — the case `put` rewrites either way.
         std::fs::write(&cfg_path, "# mine\nhonor_game_colours = true\n").unwrap();
-
-        // Without the flag, the shipped default stands.
-        let base = cli_with_config(&cfg_path, None);
-        assert!(resolve(&base).honor_game_colours, "the file's true loads untouched");
-
-        // With it, the live value every render site reads is off.
-        let mut cfg = resolve(&Cli { no_game_colours: true, ..cli_with_config(&cfg_path, None) });
-        assert!(!cfg.honor_game_colours, "the flag declares the interpreter colourless");
+        assert!(resolve(&flagged(None)).honor_game_colours, "absent: the file's true stands");
+        assert!(resolve(&flagged(Some(OnOff::On))).honor_game_colours, "on: agrees with it");
+        let mut cfg = resolve(&flagged(Some(OnOff::Off)));
+        assert!(!cfg.honor_game_colours, "off: the interpreter is declared colourless");
 
         write_config(&dir, &cfg).unwrap();
         let back = std::fs::read_to_string(&cfg_path).unwrap();
         assert!(
             toml::from_str::<Config>(&back).unwrap().honor_game_colours,
-            "--no-game-colours is for one run; the FILE must still say true: {back}"
+            "--game-colours off is for one run; the FILE must still say true: {back}"
         );
         assert!(back.contains("# mine"), "and the user's comment survives: {back}");
 
@@ -4022,16 +4187,148 @@ use_defaults = false
             "an explicit off persists: {back}"
         );
 
-        // The other mode: a config that already says false stays false, and the
-        // flag's ABSENCE must not turn colours back on (the one-way rule --no-sound
-        // follows).
-        std::fs::write(&cfg_path, "honor_game_colours = false\n").unwrap();
-        assert!(!resolve(&base).honor_game_colours, "an off config is left off");
+        // ── a config that says FALSE ──────────────────────────────────────────
+        // The direction that had no command line at all before SQ-1082.
+        std::fs::write(&cfg_path, "# mine\nhonor_game_colours = false\n").unwrap();
+        assert!(!resolve(&flagged(None)).honor_game_colours, "absent: an off config is left off");
+        assert!(!resolve(&flagged(Some(OnOff::Off))).honor_game_colours, "off: agrees with it");
+        let mut cfg = resolve(&flagged(Some(OnOff::On)));
+        assert!(cfg.honor_game_colours, "on: the flag OVERRIDES a persisted false");
+
+        write_config(&dir, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
         assert!(
-            !resolve(&Cli { no_game_colours: true, ..cli_with_config(&cfg_path, None) })
-                .honor_game_colours,
-            "and the flag agrees with it rather than fighting it"
+            !toml::from_str::<Config>(&back).unwrap().honor_game_colours,
+            "--game-colours on is for one run too; the FILE must still say false: {back}"
         );
+        cfg.one_run.release(keys::HONOR_GAME_COLOURS);
+        write_config(&dir, &cfg).unwrap();
+        assert!(
+            toml::from_str::<Config>(&std::fs::read_to_string(&cfg_path).unwrap())
+                .unwrap()
+                .honor_game_colours,
+            "and an explicit on persists, symmetrically"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1082: `--sound`, the same three states against both persisted values.
+    ///
+    /// Sound is the flag the quest was reported on: `--no-sound` forced it off for
+    /// a run and nothing could force it ON, so `enable_sound = false` in the file
+    /// was only reachable by editing the file.
+    #[test]
+    fn the_sound_flag_moves_enable_sound_both_ways_for_one_run_only() {
+        let dir = std::env::temp_dir().join(format!("bm-soundboth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        let flagged = |v: Option<OnOff>| Cli { sound: v, ..cli_with_config(&cfg_path, None) };
+
+        std::fs::write(&cfg_path, "enable_sound = false\n").unwrap();
+        assert!(!resolve(&flagged(None)).enable_sound, "absent: a persisted false survives");
+        assert!(!resolve(&flagged(Some(OnOff::Off))).enable_sound, "off: agrees with it");
+        let cfg = resolve(&flagged(Some(OnOff::On)));
+        assert!(cfg.enable_sound, "on: the flag OVERRIDES a persisted false");
+        write_config(&dir, &cfg).unwrap();
+        assert!(
+            !toml::from_str::<Config>(&std::fs::read_to_string(&cfg_path).unwrap())
+                .unwrap()
+                .enable_sound,
+            "and it is still for one run only"
+        );
+
+        std::fs::write(&cfg_path, "enable_sound = true\n").unwrap();
+        assert!(resolve(&flagged(None)).enable_sound, "absent: a persisted true survives");
+        assert!(!resolve(&flagged(Some(OnOff::Off))).enable_sound, "off: overrides it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1082, end to end: the real `argv`, through the real clap surface, onto
+    /// a real `config.toml`.
+    ///
+    /// The two tests above build a `Cli` literal, which pins `resolve` and not
+    /// the SPELLING; this one types the flag. Both persisted switches, both
+    /// stored values, all three states — and the state that matters most is the
+    /// flag being ABSENT, which must leave the file's value alone whichever way
+    /// it points. That is the regression `Option<OnOff>` exists to prevent: a
+    /// bare `bool` reads "not mentioned" as "off" and starts turning persisted
+    /// `true` values off.
+    #[test]
+    fn the_typed_flags_move_both_persisted_switches_both_ways() {
+        use clap::Parser;
+        let dir = std::env::temp_dir().join(format!("bm-argvboth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        let path = cfg_path.to_string_lossy().into_owned();
+        let run = |args: &[&str]| {
+            let mut argv = vec!["lanthorn", "--config", &path];
+            argv.extend_from_slice(args);
+            argv.push("g.z5");
+            resolve(&Cli::try_parse_from(argv).expect("the flags parse"))
+        };
+
+        for stored in [true, false] {
+            std::fs::write(
+                &cfg_path,
+                format!("enable_sound = {stored}\nhonor_game_colours = {stored}\n"),
+            )
+            .unwrap();
+            let absent = run(&[]);
+            assert_eq!(absent.enable_sound, stored, "absent must not move enable_sound");
+            assert_eq!(
+                absent.honor_game_colours, stored,
+                "absent must not move honor_game_colours"
+            );
+            for (want, sound, colours) in
+                [(true, "on", "on"), (false, "off", "off")]
+            {
+                let cfg = run(&["--sound", sound, "--game-colours", colours]);
+                assert_eq!(cfg.enable_sound, want, "--sound {sound} over a stored {stored}");
+                assert_eq!(
+                    cfg.honor_game_colours, want,
+                    "--game-colours {colours} over a stored {stored}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1082: `--colour machine` is what `--system-colours` was, and it is pinned
+    /// now — the old flag set a PERSISTED key with no record that a one-run source
+    /// had done it, so one `--system-colours` launch plus any settings save wrote
+    /// `system_colours = true` into the user's file for good.
+    #[test]
+    fn colour_machine_licenses_the_machine_for_one_run_only() {
+        let dir = std::env::temp_dir().join(format!("bm-colourmachine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "# mine\n").unwrap();
+        let flagged =
+            |v: Option<ColourSource>| Cli { colour: v, ..cli_with_config(&cfg_path, None) };
+
+        // Absent: the full chain runs, which IS `machine` — minus its opt-in.
+        let plain = resolve(&flagged(None));
+        assert_eq!(plain.colour_source, ColourSource::Machine, "the chain that already ran");
+        assert!(!plain.system_colours, "but nothing licensed a machine nobody named");
+
+        let cfg = resolve(&flagged(Some(ColourSource::Machine)));
+        assert!(cfg.system_colours, "--colour machine is the opt-in --system-colours was");
+        write_config(&dir, &cfg).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !toml::from_str::<Config>(&back).unwrap().system_colours,
+            "and it is for one run; the FILE must not learn it: {back}"
+        );
+
+        // The narrowing arms take no licence with them — they decline the machine.
+        for src in [ColourSource::Theme, ColourSource::Terminal] {
+            let cfg = resolve(&flagged(Some(src)));
+            assert_eq!(cfg.colour_source, src);
+            assert!(!cfg.system_colours, "{src:?} asks for a source, not for a machine");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

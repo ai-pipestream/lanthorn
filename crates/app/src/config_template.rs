@@ -194,7 +194,7 @@ const INTERPRETER: &[Row] = &[
         "true",
         &[
             "Honour game-set colours. Set false to use only the configured theme.",
-            "Override for a single run with `lanthorn --no-game-colours`.",
+            "Override for a single run with `lanthorn --game-colours on|off`.",
         ],
     ),
     d(

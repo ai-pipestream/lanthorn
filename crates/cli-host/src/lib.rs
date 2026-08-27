@@ -34,7 +34,10 @@ pub mod term;
 pub mod titles;
 
 pub use args::{Matches, Opt, scan};
-pub use flags::{EXIT_USAGE, handled_common_flags, looks_like_flag, usage_error};
+pub use flags::{
+    EXIT_USAGE, HELP_WIDTH, handled_common_flags, looks_like_flag, on_off, overlong_help_lines,
+    usage_error, wrap_tokens,
+};
 pub use line::LineHold;
 pub use input::{key_press, read_byte_or_eof, read_byte_stdin, read_line_or_eof, read_line_stdin};
 pub use menu::{Emission, MENU_COMMAND, MenuBlock, MenuTracker, NavKey, Typed, is_menu_request};

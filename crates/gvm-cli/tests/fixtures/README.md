@@ -34,7 +34,7 @@ queries — is unreachable from Glulx bytecode and remains unimplemented; the
 ### Out of scope (excluded; not yet implemented)
 
 - `acceleration` — accelerated functions ARE intercepted (on by default;
-  `--no-accel` disables); this glulxercise group is simply not in the in-scope
+  `--accel off` disables); this glulxercise group is simply not in the in-scope
   assertion list above.
 - `doubleconv`/`doublearith`/… — double-precision opcodes are deferred
   (gestalt Double = 0). Single-precision `floatconv`/`floatarith` ARE implemented

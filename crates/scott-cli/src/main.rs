@@ -131,7 +131,14 @@ struct Args {
     path: String,
     seed: Option<u32>,
     max_turns: Option<u64>,
-    no_more: bool,
+    /// `--pager on|off`: [MORE] paging. This was `--no-more`/`--no-page` before
+    /// SQ-1082, which could only ever turn it off — and named the PROMPT rather
+    /// than the feature. `pager` is the noun the code already used
+    /// (`cli_host::pager`), the one the help already used ("[MORE] paging"), and
+    /// the one a terminal user already has; `--more on|off` reads as a
+    /// comparative and `--page on|off` as a verb missing its object. One noun
+    /// across all four front-ends now.
+    pager: bool,
     /// `--data-dir`: where saves live. `None` puts them beside the `.dat`, which
     /// is what `cli_host::game_dir` does for the other two hosts.
     data_dir: Option<String>,
@@ -142,7 +149,7 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--screen-reader", "--plain"]),
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
-    cli_host::Opt::flag(&["--no-more", "--no-page"]),
+    cli_host::Opt::valued(&["--pager"]),
     cli_host::Opt::valued(&["--seed"]),
     cli_host::Opt::valued(&["--max-turns"]),
     cli_host::Opt::valued(&["--data-dir"]),
@@ -166,7 +173,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         path: m.first_positional().ok_or("no story file given")?.to_string(),
         seed: num("--seed")?.map(|v| v as u32),
         max_turns: num("--max-turns")?,
-        no_more: m.has("--no-more"),
+        pager: cli_host::on_off("--pager", m.value("--pager"))?.unwrap_or(true),
         data_dir: m.value("--data-dir").map(str::to_string),
     })
 }
@@ -332,33 +339,36 @@ scott-cli — DOS-style Scott Adams (ScottFree) player (no map)
 Usage: scott-cli [OPTIONS] <adv.dat>
 
 Arguments:
-  <adv.dat>           Scott Adams ScottFree .dat adventure
+  <adv.dat>             Scott Adams ScottFree .dat adventure
 
 Host commands (typed at any prompt, never passed to the game):
-  /status         Repeat the room block (location, exits, what is here)
-  /save [name]    Save the game. Bare, it lists what you already have and asks;
-                  with a name it goes straight there (and still asks before
-                  overwriting). Scott has no save format of its own, so these are
-                  the host's own snapshots and carry .sav rather than .qzl.
-  /restore [name] Restore. Bare, it lists your saves and takes a number or a
-                  name. A save from a different adventure is refused rather than
-                  half-applied. Alias: /load
+  /status               Repeat the room block (location, exits, what is here)
+  /save [name]          Save the game. Bare, it lists what you already have and
+                        asks; with a name it goes straight there (and still asks
+                        before overwriting). Scott has no save format of its
+                        own, so these are the host's own snapshots and carry
+                        .sav rather than .qzl.
+  /restore [name]       Restore. Bare, it lists your saves and takes a number or
+                        a name. A save from a different adventure is refused
+                        rather than half-applied. Alias: /load
 
 Options:
-      --screen-reader Linear plain text (alias: --plain; also selected by
-                      TERM=dumb). Hands line editing and echo back to the
-                      terminal and drops the em-dash divider rule, which a
-                      reader can only spell out. Scott has no status window to
-                      suppress — the room block IS the story — so there is no
-                      --story-only here. Ask for the room again any time with
-                      /status.
-      --no-more       Disable [MORE] paging on long output (alias: --no-page)
-      --seed <n>      Seed the RNG for reproducible play
-      --data-dir <p>  Where saves live (default: a .save directory beside the
-                      .dat, the same rule zvm-cli and gvm-cli follow)
-      --max-turns <n> Stop after n turns (headless/testing)
-  -V, --version       Print version and exit
-  -h, --help          Print this help and exit
+      --screen-reader   Linear plain text (alias: --plain; also selected by
+                        TERM=dumb). Hands line editing and echo back to the
+                        terminal and drops the em-dash divider rule, which a
+                        reader can only spell out. Scott has no status window to
+                        suppress — the room block IS the story — so there is no
+                        --story-only here. Ask for the room again any time with
+                        /status.
+      --pager <on|off>  [MORE] paging on long output. Default on, and off
+                        wherever it could not work anyway: --screen-reader, or a
+                        piped stdout.
+      --seed <n>        Seed the RNG for reproducible play
+      --data-dir <path> Where saves live (default: a .save directory beside the
+                        .dat, the same rule zvm-cli and gvm-cli follow)
+      --max-turns <n>   Stop after n turns (headless/testing)
+  -V, --version         Print version and exit
+  -h, --help            Print this help and exit
 ";
 
 fn main() {
@@ -427,7 +437,7 @@ fn main() {
     // never answer the prompt — and is off in screen-reader mode by choice.
     let term_rows = terminal::size().map(|(_, r)| r).unwrap_or(24);
     let mut pager = cli_host::Pager::new(
-        mode.both_tty() && !args.no_more && !mode.plain(),
+        mode.both_tty() && args.pager && !mode.plain(),
         cli_host::Pager::height_for(term_rows),
     );
     let interactive_pager = mode.both_tty();
@@ -656,5 +666,32 @@ mod tests {
         // window boundary it stands for (SQ-0608).
         assert_eq!(separator("I'm in a forest", true), None);
         assert_eq!(separator(&"x".repeat(60), true), None);
+    }
+}
+
+#[cfg(test)]
+mod help_width_tests {
+    /// SQ-1093. One wrap authority across all four front-ends. The reported
+    /// symptom was a `--help` showing two at once — prose hand-wrapped to about
+    /// 83 columns beside a run that nothing measured — so the right margin read
+    /// as a rendering fault rather than a layout choice. `cli_host::HELP_WIDTH`
+    /// is the number; this is scott-cli's half of the pin.
+    #[test]
+    fn every_help_line_fits_the_one_width_all_four_front_ends_share() {
+        let over = cli_host::overlong_help_lines(super::HELP);
+        assert!(
+            over.is_empty(),
+            "--help must wrap at {}, but {over:?} do not:\n{}",
+            cli_host::HELP_WIDTH,
+            super::HELP
+        );
+        assert!(
+            super::HELP
+                .lines()
+                .filter(|l| l.chars().count() > cli_host::HELP_WIDTH - 10)
+                .count()
+                > 5,
+            "the text should be filling the width, not merely short of it"
+        );
     }
 }

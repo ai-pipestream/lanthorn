@@ -554,7 +554,7 @@ fn build_machine(
     // release disk makes that description true of the launch. Naming a number by
     // hand does not — `--interpreter 6` on a bare `.z5` used to advertise the IBM
     // PC's page, and now that the IBM PC states one (blue under white) that would
-    // paint every story anyone opened that way. `--system-colours` is the opt-in
+    // paint every story anyone opened that way. `--colour machine` is the opt-in
     // for a player who named the machine and meant it.
     if let Some(m) = interpreter_number.and_then(zvm::interpreter::machine) {
         zvm::screen::set_palette(m.palette);
@@ -586,16 +586,25 @@ struct Args {
     story_pick: Option<String>,
     story_only: bool,
     show_status: bool,
-    no_aux: bool,
-    no_more: bool,
-    no_timed_input: bool,
-    no_sound: bool,
+    /// SQ-1082: the four switches below are `--<noun> on|off`, resolved to the
+    /// value in force for this run. `zvm-cli` has no config file, so the third
+    /// state `lanthorn` needs — "not mentioned", which must leave a persisted
+    /// value alone — collapses here into the default beside each one. What does
+    /// NOT collapse is the spelling: one concept under two names across two
+    /// binaries is the defect SQ-1078 existed to remove, and a `--no-sound` here
+    /// beside a `--sound on|off` there would put it straight back.
+    aux: bool,
+    pager: bool,
+    timed_input: bool,
+    sound: bool,
     data_dir: Option<String>,
     honor_colours: bool,
     /// `--period-look`: dress the screen as the story's own machine did (SQ-0873).
     period_look: bool,
-    /// `--system-colours`: present a named machine's own `$2C`/`$2D` pair (SQ-0928).
-    system_colours: bool,
+    /// `--colour machine`: present a named machine's own `$2C`/`$2D` pair
+    /// (SQ-0928, respelled by SQ-1082). `None` leaves the medium to decide, which
+    /// is the rule `machine_colours` applies further down.
+    colour_machine: Option<bool>,
     interpreter: Option<u8>,
     volume: Option<u8>,
     /// `--pin <top|bottom>` (or `--scrollback`): where the fixed rows sit.
@@ -608,15 +617,15 @@ struct Args {
 /// Options whose value is read further down (`--volume`, `-I`) still belong
 /// here, because this is what tells an unrecognised flag from a story path.
 const OPTS: &[cli_host::Opt] = &[
-    cli_host::Opt::flag(&["--story-only", "--lower-only", "--no-status"]),
+    cli_host::Opt::flag(&["--story-only", "--lower-only"]),
     cli_host::Opt::flag(&["--show-status"]),
-    cli_host::Opt::flag(&["--no-aux"]),
-    cli_host::Opt::flag(&["--no-more", "--no-page"]),
-    cli_host::Opt::flag(&["--no-timed-input"]),
-    cli_host::Opt::flag(&["--no-sound"]),
-    cli_host::Opt::flag(&["--no-game-colours"]),
+    cli_host::Opt::valued(&["--aux"]),
+    cli_host::Opt::valued(&["--pager"]),
+    cli_host::Opt::valued(&["--timed-input"]),
+    cli_host::Opt::valued(&["--sound"]),
+    cli_host::Opt::valued(&["--game-colours", "--game-colors"]),
     cli_host::Opt::flag(&["--period-look"]),
-    cli_host::Opt::flag(&["--system-colours", "--system-colors"]),
+    cli_host::Opt::valued(&["--colour", "--color"]),
     cli_host::Opt::flag(&["--screen-reader", "--plain"]),
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
@@ -629,34 +638,54 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--scrollback"]),
 ];
 
+/// `--colour terminal|machine`: which source the story pane's DEFAULT page and
+/// ink come from (SQ-1082). `Some(true)` is the machine, `Some(false)` the
+/// terminal, `None` the rule already in force — the medium decides.
+///
+/// `lanthorn` takes a third value here, `theme`, and `zvm-cli` cannot: a theme is
+/// a `style.toml`, and this binary has none. Named in the error rather than
+/// merely absent from it, because "unknown value" would read as a typo when it is
+/// really the right word at the wrong front-end.
+fn parse_colour_source(value: Option<&str>) -> Result<Option<bool>, String> {
+    match value {
+        None => Ok(None),
+        Some("machine") => Ok(Some(true)),
+        Some("terminal") => Ok(Some(false)),
+        Some("theme") => Err(
+            "--colour theme names lanthorn's style.toml theme, and zvm-cli has none; \
+             try terminal or machine"
+                .to_string(),
+        ),
+        Some(v) => Err(format!("--colour takes terminal or machine, got '{v}'")),
+    }
+}
+
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let m = cli_host::scan(argv, OPTS)?;
     if m.positional.len() > 1 {
         return Err(format!("unexpected extra argument: {}", m.positional[1]));
     }
-    // Renamed in SQ-0613: `--no-status` read as the same thing plain mode does
-    // to the status line, and it is stronger than that. Say so rather than
-    // ignoring it, which would look like it worked.
-    if argv.iter().any(|a| a == "--no-status") {
-        eprintln!(
-            "{}: --no-status has been renamed --story-only (it suppresses the whole \
-             upper window, menus included); honouring it this time.",
-            env!("CARGO_PKG_NAME")
-        );
-    }
+    // SQ-0613 renamed `--no-status` to `--story-only`, because it read as the same
+    // thing plain mode does to the status line and is stronger than that — it
+    // suppresses the whole upper window, menus included. It survived as a third
+    // alias that printed a notice; SQ-1082 removed it outright, on the same rule
+    // that took `--no-sound` away. Pre-release, an alias is only the old spelling
+    // living on somewhere nobody maintains it, and `--status on|off` is not the
+    // conversion: it would re-tell the very lie the rename removed.
     Ok(Args {
         story: m.first_positional().map(str::to_string),
         story_pick: m.value("--story").map(str::to_string),
         story_only: m.has("--story-only"),
         show_status: m.has("--show-status"),
-        no_aux: m.has("--no-aux"),
-        no_more: m.has("--no-more"),
-        no_timed_input: m.has("--no-timed-input"),
-        no_sound: m.has("--no-sound"),
+        aux: cli_host::on_off("--aux", m.value("--aux"))?.unwrap_or(true),
+        pager: cli_host::on_off("--pager", m.value("--pager"))?.unwrap_or(true),
+        timed_input: cli_host::on_off("--timed-input", m.value("--timed-input"))?.unwrap_or(true),
+        sound: cli_host::on_off("--sound", m.value("--sound"))?.unwrap_or(true),
         data_dir: m.value("--data-dir").map(str::to_string),
-        honor_colours: !m.has("--no-game-colours"),
+        honor_colours: cli_host::on_off("--game-colours", m.value("--game-colours"))?
+            .unwrap_or(true),
         period_look: m.has("--period-look"),
-        system_colours: m.has("--system-colours") || m.has("--system-colors"),
+        colour_machine: parse_colour_source(m.value("--colour"))?,
         // Lenient, as before: a bad value falls back to the engine default
         // rather than refusing to start.
         interpreter: m.value("--interpreter").and_then(|v| v.parse::<u8>().ok()),
@@ -855,8 +884,8 @@ const NO_MENU: &str = "[no menu is open]";
 // ── aux ("global state") persistence ──────────────────────────────────────────
 
 /// Load the IFID-keyed aux file into the machine's aux_data (preload); warn on decode error.
-fn aux_preload(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
-    if no_aux {
+fn aux_preload(machine: &mut Machine, aux_file: &Path, aux: bool) {
+    if !aux {
         return;
     }
     if let Ok(bytes) = fs::read(aux_file) {
@@ -871,8 +900,8 @@ fn aux_preload(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
 }
 
 /// Flush aux_data to the per-game aux file when dirty; clear the flag regardless.
-fn aux_flush(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
-    if no_aux || !machine.aux_dirty {
+fn aux_flush(machine: &mut Machine, aux_file: &Path, aux: bool) {
+    if !aux || !machine.aux_dirty {
         return;
     }
     if let Some(dir) = aux_file.parent() {
@@ -1233,13 +1262,13 @@ Arguments:
                         A compilation disk holds several stories; pick one with
                         --story, and each of them keeps its own saves. A release
                         pressed across several volumes is opened by naming ANY
-                        one of them — the rest are found beside it. Graphical
-                        v6 stories are not supported — play those with lanthorn.
+                        one of them — the rest are found beside it. Graphical v6
+                        stories are not supported — play those with lanthorn.
 
 Host commands (never passed to the game):
   /status               Repeat the current status line / upper window
-  /pin [top|bottom]     Move the status line / upper window between the top of the
-                        screen and the bottom; bare /pin swaps. See --pin.
+  /pin [top|bottom]     Move the status line / upper window between the top of
+                        the screen and the bottom; bare /pin swaps. See --pin.
   /menu                 Re-read the open menu, host-numbered. In --screen-reader
                         mode a menu keypress is a whole typed line, so /menu —
                         and a bare item number, which jumps to that item — work
@@ -1252,8 +1281,8 @@ Options:
                         hands line editing and echo back to the terminal, and
                         turns off the [MORE] pager. The status line is not
                         narrated every turn (see --show-status); menus and forms
-                        still are. Ask for the status any time with /status.
-                        A menu that repaints as its marker moves is announced in
+                        still are. Ask for the status any time with /status. A
+                        menu that repaints as its marker moves is announced in
                         one line rather than re-read (see /menu above).
       --story-only      Show only the story text: suppress the whole upper
                         window, menus and forms included. Stronger than what
@@ -1268,44 +1297,62 @@ Options:
                         with a single story needs no flag; without one, and
                         without a terminal to ask at, a multi-story disk lists
                         what it found and stops rather than blocking.
-      --no-aux          Don't read or write v5 auxiliary (VFS) sidecar files
-      --no-more         Disable [MORE] paging on long output (alias: --no-page)
-      --pin <top|bottom> Where the status line and upper window are pinned.
+      --aux <on|off>    Read and write v5 auxiliary (VFS) sidecar files. Default
+                        on.
+      --pager <on|off>  [MORE] paging on long output. Default on, and off
+                        wherever it could not work anyway: --screen-reader, or a
+                        piped stdout.
+      --pin <top|bottom>
+                        Where the status line and upper window are pinned.
                         Default top, where Infocom put them.
 
-                        Pinning at the BOTTOM is what gets you terminal scrollback,
-                        and the reason is not obvious: a terminal only archives a
-                        line that scrolls off the TOP of the screen, which it judges
-                        by the scroll region's top margin. Pinned at the top, the
-                        region starts at row 2, nothing ever leaves the screen, and
-                        every line you have read is discarded. Pinned at the bottom
-                        the region starts at row 1 again, so the story scrolls into
-                        your terminal's own history — with its wheel, its selection
-                        and its search. Nothing is buffered by lanthorn either way.
-                        Swap it mid-game with /pin.
+                        Pinning at the BOTTOM is what gets you terminal
+                        scrollback, and the reason is not obvious: a terminal
+                        only archives a line that scrolls off the TOP of the
+                        screen, which it judges by the scroll region's top
+                        margin. Pinned at the top, the region starts at row 2,
+                        nothing ever leaves the screen, and every line you have
+                        read is discarded. Pinned at the bottom the region
+                        starts at row 1 again, so the story scrolls into your
+                        terminal's own history — with its wheel, its selection
+                        and its search. Nothing is buffered by lanthorn either
+                        way. Swap it mid-game with /pin.
       --scrollback      Alias for --pin bottom, named for what it is for.
-      --no-timed-input  Ignore timed-input interrupts
-      --no-game-colours Ignore the game's set_colour / true-colour output
-                        (also honoured: NO_COLOR)
-      --system-colours  Advertise a named machine's own default page and ink
-                        ($2C/$2D). Automatic off release media — that is what the
-                        disk means — so this is only for a machine you named
-                        yourself with -I, on a story that did not come off one.
-                        (alias: --system-colors)
+      --timed-input <on|off>
+                        Honour timed-input interrupts (read / read_char with a
+                        time and a routine). Default on.
+      --game-colours <on|off>
+                        Honour the game's set_colour / true-colour output.
+                        Default on; NO_COLOR turns it off too. (alias:
+                        --game-colors)
+      --colour <terminal|machine>
+                        Where the DEFAULT page and ink reported in $2C/$2D come
+                        from. `machine` advertises a named machine's own pair;
+                        `terminal` declines it and leaves your terminal's
+                        colours in force.
+
+                        Unset, the medium decides: a story opened off a release
+                        disk gets that machine's pair, because the disk is what
+                        makes the description true of the launch, while a number
+                        you typed at a bare story file does not. So `machine` is
+                        the opt-in for a machine you named yourself with -I and
+                        meant. (alias: --color; lanthorn also takes `theme`,
+                        which needs a style.toml this binary has none of.)
       --period-look     Dress the screen as this story's own machine did: its
-                        page and ink, its status band, its cursor shape. Only for
-                        a v1-v4 story (colour arrives with v5, so anything shown
-                        for one is presentation), and only where the medium or -I
-                        names a machine we have a capture of. Off by default —
-                        this is your terminal, not a pane we own; lanthorn turns
-                        it on. Suppressed by --no-game-colours and NO_COLOR.
-      --no-sound        Disable sound (bleeps + sampled audio)
+                        page and ink, its status band, its cursor shape. Only
+                        for a v1-v4 story (colour arrives with v5, so anything
+                        shown for one is presentation), and only where the
+                        medium or -I names a machine we have a capture of. Off
+                        by default — this is your terminal, not a pane we own;
+                        lanthorn turns it on. Suppressed by --game-colours off
+                        and NO_COLOR.
+      --sound <on|off>  Sound: bleeps and sampled audio. Default on.
       --volume <0-100>  Set the master volume
-  -I, --interpreter <n> Set the Z-machine interpreter number (ZMSD 11.1.3:
-                        1 DECSystem-20, 2 Apple IIe, 3 Macintosh, 4 Amiga,
-                        5 Atari ST, 6 IBM PC, …). Overrides the medium: a story
-                        opened off a release floppy defaults to that machine's
-                        number, and this beats it.
+  -I, --interpreter <n> Set the Z-machine interpreter number (ZMSD 11.1.3: 1
+                        DECSystem-20, 2 Apple IIe, 3 Macintosh, 4 Amiga, 5 Atari
+                        ST, 6 IBM PC, …). Overrides the medium: a story opened
+                        off a release floppy defaults to that machine's number,
+                        and this beats it.
       --data-dir <path> Base dir for saves/sidecars (default: beside the story)
       --machines        Print the ZMSD 11.1.3 machine table — every setting each
                         interpreter number carries (its default page and ink,
@@ -1327,31 +1374,50 @@ Options:
 /// a second list of formats, kept by hand, going quietly stale — so this one is
 /// generated. A new row in `FORMATS` reaches this text with no edit here.
 ///
-/// The two substitutions are placed on lines of their own so a longer list
-/// cannot ruin the paragraph's wrapping.
+/// The two substitutions are placed on lines of their own, and WRAPPED to
+/// `cli_host::HELP_WIDTH` as they land (SQ-1093). Joining the lists and printing
+/// them was a line nothing measured: the extension list had grown to 117 columns
+/// and ran off the terminal's edge in the middle of a help whose every other line
+/// is 80 or less, which is the ragged right margin the wrap fix exists to end.
 fn help() -> String {
     use blorb::medium::DiskImage;
-    /// The indent the two substituted blocks sit at in [`HELP`].
-    const INDENT: &str = "                          ";
-    let exts: Vec<String> = blorb::medium::image_extensions().map(|e| format!(".{e}")).collect();
+    /// The column the two substituted blocks sit at in [`HELP`].
+    const INDENT: usize = 26;
+    let exts: Vec<String> = comma_run(blorb::medium::image_extensions().map(|e| format!(".{e}")));
     // A machine's number is a DEFAULT the row states; a row may honestly have
     // none — the IBM PC's is version-dependent (6 for Version 6, 1 otherwise),
     // so `Fat12Dos` states nothing and the rule already in force stands.
-    let numbered: Vec<String> = DiskImage::all()
-        .filter_map(|d| d.interpreter_number().map(|n| format!("{} {n}", d.label())))
-        .collect();
+    let numbered = comma_run(
+        DiskImage::all()
+            .filter_map(|d| d.interpreter_number().map(|n| format!("{} {n}", d.label()))),
+    );
     let unnumbered: Vec<&str> =
         DiskImage::all().filter(|d| d.interpreter_number().is_none()).map(|d| d.label()).collect();
-    let mut machines = numbered.join(", ");
+    let mut machines = cli_host::wrap_tokens(&numbered, INDENT);
     if !unnumbered.is_empty() {
-        // Its own line: the clause is long, and one more format must not push
-        // the paragraph past the terminal's width.
-        machines.push_str(&format!(
-            "\n{INDENT}{} states none — whatever default is in force stands",
-            unnumbered.join(", "),
-        ));
+        // Its own line: the clause is a sentence rather than a list item, and
+        // reads as one only when it starts fresh.
+        let clause = format!("{} states none — whatever default is in force stands", unnumbered.join(", "));
+        let words: Vec<&str> = clause.split_whitespace().collect();
+        machines.push('\n');
+        machines.push_str(&" ".repeat(INDENT));
+        machines.push_str(&cli_host::wrap_tokens(&words, INDENT));
     }
-    HELP.replace("{DISK_EXTENSIONS}", &exts.join(", ")).replace("{DISK_MACHINES}", &machines)
+    HELP.replace("{DISK_EXTENSIONS}", &cli_host::wrap_tokens(&exts, INDENT))
+        .replace("{DISK_MACHINES}", &machines)
+}
+
+/// The items of a comma-separated run, each carrying its own trailing comma so
+/// `cli_host::wrap_tokens` can break between them and never inside one.
+fn comma_run(items: impl Iterator<Item = String>) -> Vec<String> {
+    let mut v: Vec<String> = items.collect();
+    let last = v.len().saturating_sub(1);
+    for (i, s) in v.iter_mut().enumerate() {
+        if i != last {
+            s.push(',');
+        }
+    }
+    v
 }
 
 fn main() {
@@ -1462,20 +1528,20 @@ fn main() {
     }
 
     // Paging is only safe when BOTH ends are TTYs (else it would block the
-    // headless harness); --no-more disables it.
+    // headless harness); --pager off disables it.
     let (mut term_rows, mut term_cols) = detect_term_size();
     // Plain mode also drops the pager: a [MORE] prompt is a blocking modal that
     // hides the rest of the output behind a keypress, which is exactly the shape
     // a screen reader cannot cope with (SQ-0606).
-    let paging = both_tty && !args.no_more && !mode.plain();
+    let paging = both_tty && args.pager && !mode.plain();
     let mut page_height = cli_host::Pager::height_for(term_rows);
     // Timed reads (read/read_char time+routine) are honored unless disabled.
-    let timed = !args.no_timed_input;
-    let sound_enabled = !args.no_sound;
+    let timed = args.timed_input;
+    let sound_enabled = args.sound;
     let volume = args.volume.unwrap_or(100);
 
     // `NO_COLOR` (no-color.org) means colour, not layout: it drops the game's
-    // colours exactly as `--no-game-colours` does, and leaves the pinned status
+    // colours exactly as `--game-colours off` does, and leaves the pinned status
     // line alone. Plain mode emits no escapes at all, so colour is moot there.
     let honor = args.honor_colours && !cli_host::no_color();
     // The override ordering, and it is a contract (SQ-0839): a number named on
@@ -1500,9 +1566,9 @@ fn main() {
     // SQ-0928: a machine's `$2C`/`$2D` describes a MACHINE, and running a story off
     // its release disk makes that description true of the launch. Naming a number
     // by hand does not — and now that the IBM PC states a pair (blue under white),
-    // `-I 6` on a bare `.z5` would otherwise paint it. `--system-colours` is the
+    // `-I 6` on a bare `.z5` would otherwise paint it. `--colour machine` is the
     // opt-in for a player who named the machine and meant it.
-    let machine_colours = args.interpreter.is_none() || args.system_colours;
+    let machine_colours = args.colour_machine.unwrap_or(args.interpreter.is_none());
     // SQ-0872: a number naming a machine `zvm::interpreter` does not model still
     // reaches `$1E` — that is the honest fallback, since the story asked and the
     // standard has an answer — but everything else about the presentation is then
@@ -1538,7 +1604,7 @@ fn main() {
     };
     machine.set_honor_game_colours(honor);
     machine.set_sound_available(sound_enabled);
-    aux_preload(&mut machine, &aux_file, args.no_aux);
+    aux_preload(&mut machine, &aux_file, args.aux);
 
     // SQ-0873: `--period-look` — dress the terminal as this story's own machine
     // did. Every clause of the gate below is load-bearing:
@@ -1548,7 +1614,7 @@ fn main() {
     //   what a machine drew for one is presentation. For v5+ the machine's own
     //   pair is already seeded above, out of Infocom's source, as a fact the story
     //   can read — a different claim entirely, and this must not touch it.
-    // - **`honor`**, which is `--no-game-colours` and `NO_COLOR` folded together
+    // - **`honor`**, which is `--game-colours off` and `NO_COLOR` folded together
     //   a hundred lines up. A player who said "keep my terminal's colours" is not
     //   answered by painting it a different colour of our own choosing.
     // - **a TTY, and not plain mode.** Escapes into a pipe are noise, and plain
@@ -1639,7 +1705,7 @@ fn main() {
     };
 
     // Plain mode does not narrate the status line every turn unless asked
-    // (SQ-0612). `--no-status` still wins outright: it is the stronger,
+    // (SQ-0612). `--story-only` still wins outright: it is the stronger,
     // already-documented switch and suppresses the upper window entirely.
     let quiet_status_line = mode.plain() && !args.show_status;
     let mut view = screen::ScreenView::new(
@@ -1714,7 +1780,7 @@ fn main() {
             machine.screen.erase_lower_requested = false;
         }
         // Persist aux tables as soon as the game commits one.
-        aux_flush(&mut machine, &aux_file, args.no_aux);
+        aux_flush(&mut machine, &aux_file, args.aux);
 
         match step {
             StepResult::Continue => {}
@@ -1758,7 +1824,7 @@ fn main() {
                 };
                 machine.set_honor_game_colours(honor);
                 machine.set_sound_available(sound_enabled);
-                aux_preload(&mut machine, &aux_file, args.no_aux);
+                aux_preload(&mut machine, &aux_file, args.aux);
             }
 
             StepResult::NeedLine { .. } => {
@@ -2089,13 +2155,14 @@ mod arg_tests {
     fn parses_flags_and_story() {
         let a = parse_args(&["zvm-cli".into(), "--story-only".into(), "game.z5".into()]).expect("valid args");
         assert_eq!(a.story.as_deref(), Some("game.z5"));
-        assert!(a.story_only && !a.no_aux);
+        assert!(a.story_only && a.aux);
 
-        let b = parse_args(&["zvm-cli".into(), "--no-aux".into(), "g".into()]).expect("valid args");
-        assert!(b.no_aux && !b.story_only);
+        let b = parse_args(&["zvm-cli".into(), "--aux".into(), "off".into(), "g".into()])
+            .expect("valid args");
+        assert!(!b.aux && !b.story_only);
 
         let c = parse_args(&["zvm-cli".into(), "g".into()]).expect("valid args");
-        assert!(!c.story_only && !c.no_aux);
+        assert!(!c.story_only && c.aux);
     }
 
     /// `--story` (which story off a disk image) and `--story-only` (suppress the
@@ -2121,19 +2188,83 @@ mod arg_tests {
     #[test]
     fn every_documented_flag_parses() {
         for flag in [
-            "--story-only", "--lower-only", "--no-status", "--show-status", "--no-aux",
-            "--no-more", "--no-page", "--no-timed-input", "--no-sound", "--no-game-colours",
-            "--period-look", "--system-colours", "--system-colors", "--screen-reader", "--plain",
+            "--story-only", "--lower-only", "--show-status", "--period-look",
+            "--screen-reader", "--plain", "--scrollback",
         ] {
             let a = parse_args(&["zvm-cli".into(), flag.into(), "g".into()]).expect("valid args");
             assert_eq!(a.story.as_deref(), Some("g"), "{flag} should leave the story path alone");
         }
         // Value-taking flags: the value must be consumed, not read as the story.
-        for (flag, value) in [("--volume", "50"), ("-I", "6"), ("--interpreter", "6"),
-                              ("--data-dir", "/tmp/x"), ("--story", "2")] {
+        for (flag, value) in [
+            ("--volume", "50"), ("-I", "6"), ("--interpreter", "6"),
+            ("--data-dir", "/tmp/x"), ("--story", "2"), ("--pin", "bottom"),
+            ("--aux", "on"), ("--pager", "off"), ("--timed-input", "on"),
+            ("--sound", "off"), ("--game-colours", "on"), ("--game-colors", "on"),
+            ("--colour", "machine"), ("--color", "terminal"),
+        ] {
             let a = parse_args(&["zvm-cli".into(), flag.into(), value.into(), "g".into()]).expect("valid args");
             assert_eq!(a.story.as_deref(), Some("g"), "{flag} {value} swallowed the story path");
         }
+    }
+
+    /// SQ-1082. Every negative-only switch is `--<noun> on|off` now, the value is
+    /// required, and the old spelling is gone outright — pre-release, an alias is
+    /// only the old name living on somewhere nobody maintains it.
+    ///
+    /// `--no-status` goes with them and does NOT become `--status on|off`:
+    /// SQ-0613 renamed it to `--story-only` precisely because it was STRONGER
+    /// than its name (it suppresses the whole upper window, menus included), and
+    /// `--status` would re-tell the same lie in the new grammar.
+    #[test]
+    fn the_negative_only_spellings_are_gone_and_the_new_ones_need_a_value() {
+        let err = |args: &[&str]| {
+            let v: Vec<String> = std::iter::once("zvm-cli".to_string())
+                .chain(args.iter().map(|s| s.to_string()))
+                .collect();
+            parse_args(&v).expect_err("should be rejected")
+        };
+        for old in [
+            "--no-aux", "--no-more", "--no-page", "--no-timed-input", "--no-sound",
+            "--no-game-colours", "--no-status", "--system-colours", "--system-colors",
+        ] {
+            assert!(err(&[old, "g"]).contains("unknown option"), "{old} should be gone");
+        }
+        // A bare form is an ambiguity ("is that on, or a toggle?"), not a
+        // shorthand: the scanner takes the story path as the value and then finds
+        // no story, or refuses the value outright.
+        for bare in ["--aux", "--pager", "--timed-input", "--sound", "--game-colours"] {
+            let e = err(&[bare, "g"]);
+            assert!(e.contains("takes on or off"), "{bare}: {e}");
+        }
+        assert!(err(&["--sound"]).contains("--sound needs a value"));
+        assert!(err(&["--colour", "chartreuse", "g"]).contains("terminal or machine"));
+        // The value `lanthorn` takes and this binary cannot, named rather than
+        // merely absent: it is the right word at the wrong front-end.
+        assert!(err(&["--colour", "theme", "g"]).contains("style.toml"));
+    }
+
+    /// SQ-1093. One wrap authority across all four front-ends, and this is the
+    /// help that showed two of them at once: prose hand-wrapped to about 83
+    /// columns, and a disk-format list joined from `blorb::medium`'s table that
+    /// nothing measured and that had reached 117.
+    ///
+    /// Asserted on `help()`, not on `HELP`, because the two substituted runs are
+    /// exactly the part that went unmeasured — a new row in `FORMATS` reaches
+    /// this text with no edit here, and must not push it off the edge.
+    #[test]
+    fn every_help_line_fits_the_one_width_all_four_front_ends_share() {
+        let text = help();
+        let over = cli_host::overlong_help_lines(&text);
+        assert!(
+            over.is_empty(),
+            "--help must wrap at {}, but {over:?} do not:\n{text}",
+            cli_host::HELP_WIDTH
+        );
+        assert!(!text.contains('{'), "every substitution was made: {text}");
+        assert!(
+            text.lines().filter(|l| l.chars().count() > cli_host::HELP_WIDTH - 10).count() > 5,
+            "the text should be filling the width, not merely short of it"
+        );
     }
 
     /// SQ-0614. A mistyped flag used to be ignored outright: `--no-statu` did
@@ -2155,39 +2286,66 @@ mod arg_tests {
     }
 
     /// SQ-0613. `--no-status` read as the same thing plain mode does to the
-    /// status line while being stronger than it, so it was renamed. The old
-    /// spelling still works — silently ignoring it would look like it had.
+    /// status line while being stronger than it, so it was renamed; SQ-1082
+    /// dropped the surviving alias. Both remaining spellings still select it.
     #[test]
-    fn the_old_and_new_spellings_all_select_story_only() {
-        for flag in ["--story-only", "--lower-only", "--no-status"] {
+    fn both_spellings_select_story_only() {
+        for flag in ["--story-only", "--lower-only"] {
             let a = parse_args(&["zvm-cli".into(), flag.into(), "g".into()]).expect("valid args");
             assert!(a.story_only, "{flag} should select story-only");
             assert_eq!(a.story.as_deref(), Some("g"), "{flag} is not the story path");
         }
     }
 
+    /// SQ-1082. Each converted switch says both things, and says nothing when it
+    /// is absent — which here means the default beside it in `Args`, `zvm-cli`
+    /// having no config file for a third state to protect.
     #[test]
-    fn parses_no_more_flag() {
-        let a = parse_args(&["zvm-cli".into(), "--no-more".into(), "g".into()]).expect("valid args");
-        assert!(a.no_more);
-        let b = parse_args(&["zvm-cli".into(), "g".into()]).expect("valid args");
-        assert!(!b.no_more);
+    fn the_converted_switches_say_on_off_and_default_on() {
+        let p = |args: &[&str]| {
+            let v: Vec<String> = std::iter::once("zvm-cli")
+                .chain(args.iter().copied())
+                .map(String::from)
+                .collect();
+            parse_args(&v).expect("valid args")
+        };
+        for (flag, get) in [
+            ("--aux", (|a: &Args| a.aux) as fn(&Args) -> bool),
+            ("--pager", |a: &Args| a.pager),
+            ("--timed-input", |a: &Args| a.timed_input),
+            ("--sound", |a: &Args| a.sound),
+            ("--game-colours", |a: &Args| a.honor_colours),
+        ] {
+            assert!(get(&p(&["g"])), "{flag} defaults on");
+            assert!(get(&p(&[flag, "on", "g"])), "{flag} on");
+            assert!(!get(&p(&[flag, "off", "g"])), "{flag} off");
+        }
     }
 
+    /// SQ-1082. `--colour` is `--system-colours` said on the axis it belongs to,
+    /// with the arm nobody could ask for before: declining a machine the MEDIUM
+    /// named. Unset leaves SQ-0928's rule alone — the disk licenses the pair, a
+    /// number you typed does not.
     #[test]
-    fn parses_no_timed_input_flag() {
-        let a = parse_args(&["zvm-cli".into(), "--no-timed-input".into(), "g".into()]).expect("valid args");
-        assert!(a.no_timed_input);
-        let b = parse_args(&["zvm-cli".into(), "g".into()]).expect("valid args");
-        assert!(!b.no_timed_input);
-    }
-
-    #[test]
-    fn parses_no_sound_flag() {
-        let a = parse_args(&["zvm-cli".into(), "--no-sound".into(), "g".into()]).expect("valid args");
-        assert!(a.no_sound);
-        let b = parse_args(&["zvm-cli".into(), "g".into()]).expect("valid args");
-        assert!(!b.no_sound);
+    fn colour_names_the_default_page_source_and_unset_leaves_the_medium_to_decide() {
+        let p = |args: &[&str]| {
+            let v: Vec<String> = std::iter::once("zvm-cli")
+                .chain(args.iter().copied())
+                .map(String::from)
+                .collect();
+            parse_args(&v).expect("valid args")
+        };
+        assert_eq!(p(&["g"]).colour_machine, None, "unset: the medium decides");
+        assert_eq!(p(&["--colour", "machine", "g"]).colour_machine, Some(true));
+        assert_eq!(p(&["--colour", "terminal", "g"]).colour_machine, Some(false));
+        assert_eq!(p(&["--color", "machine", "g"]).colour_machine, Some(true), "US spelling");
+        // The rule `machine_colours` applies, stated here so the three states are
+        // visible together: unset means "did anyone but me name this machine?".
+        let licensed = |a: &Args| a.colour_machine.unwrap_or(a.interpreter.is_none());
+        assert!(licensed(&p(&["g"])), "nothing named a machine by hand");
+        assert!(!licensed(&p(&["-I", "4", "g"])), "a number you typed licenses nothing");
+        assert!(licensed(&p(&["-I", "4", "--colour", "machine", "g"])), "…until you say so");
+        assert!(!licensed(&p(&["--colour", "terminal", "g"])), "and it declines both ways");
     }
 
     /// These were three separate scans of argv; they read off the one scan now
@@ -2206,7 +2364,7 @@ mod arg_tests {
         assert_eq!(p(&["g"]).volume, None);
 
         assert!(p(&["g"]).honor_colours);
-        assert!(!p(&["--no-game-colours", "g"]).honor_colours);
+        assert!(!p(&["--game-colours", "off", "g"]).honor_colours);
         assert!(!p(&["g"]).period_look, "off by default: this is the user's terminal");
         assert!(p(&["--period-look", "g"]).period_look);
 

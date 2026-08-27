@@ -2073,7 +2073,7 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             state.set_status(if state.config.honor_timed_input { "timed input on" } else { "timed input off" });
         }
         Action::ToggleSound => {
-            // Reaching for the key is a decision, so it ends any hold `--no-sound`
+            // Reaching for the key is a decision, so it ends any hold `--sound`
             // had on this run's value — the same rule the settings rows follow
             // (SQ-0807).
             state.config.one_run.release(crate::config::keys::ENABLE_SOUND);
@@ -2938,7 +2938,7 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                 // user's own choice straight back off. Untouched rows keep their
                 // pin, so saving some unrelated setting changes nothing here.
                 if !state.config.one_run.holds(crate::config::keys::HONOR_GAME_COLOURS) {
-                    state.no_game_colours_cli = false;
+                    state.game_colours_cli = None;
                     state.artwork_declines_colours = false;
                 }
                 if let Some(b) = state.audio.as_mut() {
@@ -5160,8 +5160,8 @@ mod tests {
         assert!(s.config.watch_style, "ConfigSave should apply the working config");
     }
 
-    /// SQ-0807: editing a settings row ends the one-run hold on its key. `--no-sound`
-    /// pins `enable_sound = false`; toggling the row on and back off again lands on
+    /// SQ-0807: editing a settings row ends the one-run hold on its key.
+    /// `--sound off` pins `enable_sound = false`; toggling the row on and back off again lands on
     /// the very value the flag asked for, and the value-equality rule alone would
     /// read that as "still the flag's" and refuse to save the user's actual choice.
     #[test]
@@ -5173,7 +5173,7 @@ mod tests {
         let cfg_path = dir.join("config.toml");
         std::fs::write(&cfg_path, "enable_sound = true\n").unwrap();
 
-        // What `--no-sound` leaves behind.
+        // What `--sound off` leaves behind.
         let mut s = AppState::default();
         s.config.config_file = cfg_path.clone();
         s.config.enable_sound = false;
@@ -5206,7 +5206,7 @@ mod tests {
 
     /// SQ-0860: the same rule, one layer further out. A one-run hold on
     /// `honor_game_colours` also lives on `AppState` — the artwork's force-off and
-    /// `--no-game-colours` — and `reload_style` re-applies those on every reload,
+    /// `--game-colours` — and `reload_style` re-applies those on every reload,
     /// so releasing the `one_run` pin alone would let the next style reload
     /// recompute the user's deliberate choice straight back off. Editing the row
     /// must end both holds; saving with the row untouched must end neither.

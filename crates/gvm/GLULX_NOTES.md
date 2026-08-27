@@ -548,7 +548,7 @@ and opcode dispatch entirely. Interception happens at the two call choke
 points — `call_function` and `op_tailcall` — so it applies uniformly whether a
 game calls an accelerated function directly or tail-calls into one. This is
 behaviorally transparent (the transcript is byte-identical with acceleration on
-or off) and is **on by default**, with a `--no-accel` flag (`gvm-cli` and the
+or off) and is **on by default**, with an `--accel on|off` flag (`gvm-cli` and the
 app) as an escape hatch for diagnosing any mismatch. On CounterfeitMonkey-11,
 acceleration cuts the dispatched-opcode count from init to the first prompt by
 roughly 7.9× (23.78M → 3.00M). Accordingly the `Acceleration` (9) and

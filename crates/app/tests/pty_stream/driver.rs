@@ -163,7 +163,7 @@ pub struct Spec {
     /// for one that tried for kitty and lost.
     pub answer_kitty: bool,
     /// Run this exact argument list instead of lanthorn's own
-    /// `<story> --user-dir … --no-sound`.
+    /// `<story> --user-dir … --sound off`.
     ///
     /// For the CLI clients (`zvm-cli`, `gvm-cli`, `scott-cli`), which take
     /// neither a `--user-dir` nor a map pane, and one of which — `zvm-cli
@@ -410,7 +410,8 @@ fn spawn(spec: &Spec, pty: &Pty) -> std::io::Result<Child> {
             cmd.arg(&spec.story)
                 .arg("--user-dir")
                 .arg(&spec.user_dir)
-                .arg("--no-sound")
+                .arg("--sound")
+                .arg("off")
                 .args(&spec.extra_args);
         }
     }

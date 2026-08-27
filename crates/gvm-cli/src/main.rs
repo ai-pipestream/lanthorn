@@ -687,11 +687,11 @@ Arguments:
   <story>               Glulx story (.ulx) or Blorb (.gblorb)
 
 Host commands (never passed to the game):
-  /status           Repeat the current Glk grid windows (status line)
-  /menu             Re-read the open menu, host-numbered. In --screen-reader
-                    mode a menu keypress is a whole typed line, so /menu — and a
-                    bare item number, which jumps to that item — work at a menu's
-                    own prompt as well as at a line prompt.
+  /status               Repeat the current Glk grid windows (status line)
+  /menu                 Re-read the open menu, host-numbered. In --screen-reader
+                        mode a menu keypress is a whole typed line, so /menu —
+                        and a bare item number, which jumps to that item — work
+                        at a menu's own prompt as well as at a line prompt.
 
 Options:
       --screen-reader   Linear plain text (alias: --plain; also selected by
@@ -710,23 +710,29 @@ Options:
                         of it.
       --show-status     Narrate the status bar whenever the story updates it,
                         undoing --screen-reader's quietening.
-      --pin <top|bottom> Where stacked grid windows (the status bar, a menu) are
+      --pin <top|bottom>
+                        Where stacked grid windows (the status bar, a menu) are
                         pinned. Default top, where the game asked for them.
 
-                        Pinning at the BOTTOM is what gets you terminal scrollback:
-                        a terminal only archives a line that scrolls off the TOP of
-                        the screen, judged by the scroll region's top margin, so
-                        chrome at the top means nothing ever leaves and every line
-                        you have read is discarded. Honoured for the ordinary
-                        layout — grids stacked above one full-width story window —
-                        and ignored for anything Glk arranges differently, such as
-                        a side-by-side split or a graphics window, which have no
-                        top and bottom to swap.
+                        Pinning at the BOTTOM is what gets you terminal
+                        scrollback: a terminal only archives a line that scrolls
+                        off the TOP of the screen, judged by the scroll region's
+                        top margin, so chrome at the top means nothing ever
+                        leaves and every line you have read is discarded.
+                        Honoured for the ordinary layout — grids stacked above
+                        one full-width story window — and ignored for anything
+                        Glk arranges differently, such as a side-by-side split
+                        or a graphics window, which have no top and bottom to
+                        swap.
       --scrollback      Alias for --pin bottom, named for what it is for.
-      --no-game-colours Ignore the game's Glk stylehint colours
-                        (also honoured: NO_COLOR)
-      --no-more         Disable [MORE] paging on long output (alias: --no-page)
-      --no-accel        Disable Glulx accelerated-function interception
+      --game-colours <on|off>
+                        Honour the game's Glk stylehint colours. Default on;
+                        NO_COLOR turns it off too. (alias: --game-colors)
+      --pager <on|off>  [MORE] paging on long output. Default on, and off
+                        wherever it could not work anyway: --screen-reader, or a
+                        piped stdout.
+      --accel <on|off>  Glulx accelerated-function interception. Default on; off
+                        is for debugging a game that misbehaves under it.
       --data-dir <path> Base dir for saves/sidecars (default: beside the story)
   -V, --version         Print version and exit
   -h, --help            Print this help and exit
@@ -734,9 +740,12 @@ Options:
 
 /// Every option `gvm-cli` accepts; `cli_host::args` applies the rules.
 const OPTS: &[cli_host::Opt] = &[
-    cli_host::Opt::flag(&["--no-game-colours"]),
-    cli_host::Opt::flag(&["--no-accel"]),
-    cli_host::Opt::flag(&["--no-more", "--no-page"]),
+    // SQ-1082: `--<noun> on|off`, the spelling `zvm-cli` and `lanthorn` use. One
+    // concept under two names across three binaries is the drift SQ-1078 existed
+    // to remove, and these were `--no-game-colours` / `--no-accel` / `--no-more`.
+    cli_host::Opt::valued(&["--game-colours", "--game-colors"]),
+    cli_host::Opt::valued(&["--accel"]),
+    cli_host::Opt::valued(&["--pager"]),
     cli_host::Opt::flag(&["--story-only"]),
     cli_host::Opt::flag(&["--show-status"]),
     cli_host::Opt::flag(&["--screen-reader", "--plain"]),
@@ -768,12 +777,22 @@ fn main() {
             HELP,
         );
     }
-    // Honour the game's stylehint colours by default; --no-game-colours opts out
-    // (mirrors zvm-cli), as does NO_COLOR — which is about colour only, not
+    // Honour the game's stylehint colours by default; `--game-colours off` opts
+    // out (mirrors zvm-cli), as does NO_COLOR — which is about colour only, not
     // layout.
-    let honor = !m.has("--no-game-colours") && !cli_host::no_color();
+    // SQ-1082: each switch is `on`/`off` with a default of on, and a value that
+    // is neither is a usage error rather than a silent fallback.
+    let on_off = |flag: &str| match cli_host::on_off(flag, m.value(flag)) {
+        Ok(v) => v.unwrap_or(true),
+        Err(e) => cli_host::usage_error(name, &e, HELP),
+    };
+    let honor = on_off("--game-colours") && !cli_host::no_color();
     // Acceleration (Glulx accelfunc interception) is on by default.
-    let accel = !m.has("--no-accel");
+    let accel = on_off("--accel");
+    // Resolved HERE and not where the pager is built, so a bad value is a usage
+    // error before the story is read rather than after: `--pager bogus x.ulx`
+    // must complain about `bogus`, not about `x.ulx`.
+    let pager = on_off("--pager");
     let data_dir: Option<String> = m.value("--data-dir").map(str::to_string);
     let Some(path) = m.first_positional().map(str::to_string) else {
         cli_host::usage_error(name, "no story file given", HELP);
@@ -826,7 +845,7 @@ fn main() {
     // prompt) and is off in screen-reader mode by choice — a blocking prompt
     // hiding the rest of the output is the worst shape for a reader (SQ-0617).
     let interactive = mode.both_tty();
-    let paging = interactive && !m.has("--no-more") && !mode.plain();
+    let paging = interactive && pager && !mode.plain();
     backend.set_paging(paging, interactive);
     backend.set_data_blorb(blorb);
     let mut machine = Machine::with_glk(mem, Box::new(backend));
@@ -1496,5 +1515,32 @@ mod tests {
         assert!(m.restore_quetzal(&bytes).is_ok(), "the written .qzl round-trips via restore_quetzal");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod help_width_tests {
+    /// SQ-1093. One wrap authority across all four front-ends. The reported
+    /// symptom was a `--help` showing two at once — prose hand-wrapped to about
+    /// 83 columns beside a run that nothing measured — so the right margin read
+    /// as a rendering fault rather than a layout choice. `cli_host::HELP_WIDTH`
+    /// is the number; this is gvm-cli's half of the pin.
+    #[test]
+    fn every_help_line_fits_the_one_width_all_four_front_ends_share() {
+        let over = cli_host::overlong_help_lines(super::HELP);
+        assert!(
+            over.is_empty(),
+            "--help must wrap at {}, but {over:?} do not:\n{}",
+            cli_host::HELP_WIDTH,
+            super::HELP
+        );
+        assert!(
+            super::HELP
+                .lines()
+                .filter(|l| l.chars().count() > cli_host::HELP_WIDTH - 10)
+                .count()
+                > 5,
+            "the text should be filling the width, not merely short of it"
+        );
     }
 }

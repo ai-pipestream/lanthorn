@@ -26,7 +26,7 @@
 //! honouring exactly the colours that paint a two-colour stencil out.
 //!
 //! The fix carries the fact on `AppState::artwork_declines_colours` and folds it
-//! into `reload_style`'s per-story answer, beside SQ-0855's `no_game_colours_cli`
+//! into `reload_style`'s per-story answer, beside SQ-0855's `game_colours_cli`
 //! — a per-story value, so it stays PINNED rather than lowering the base.
 //!
 //! Both fixtures are gitignored commercial media; every test here skips

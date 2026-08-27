@@ -319,7 +319,7 @@ fn a_halfblock_shot_may_not_ask_for_placement_cells() {
 /// player's real lanthorn home.
 #[test]
 fn a_shot_may_not_pass_an_argument_the_tool_owns() {
-    for owned in ["--image-protocol", "--user-dir", "--no-sound"] {
+    for owned in ["--image-protocol", "--user-dir", "--sound"] {
         let bad = parse_one(&format!("{GOOD}args = [\"{owned}\", \"x\"]\n"));
         let e = bad.unwrap_err();
         assert!(e.contains(owned), "the error must name `{owned}`: {e}");

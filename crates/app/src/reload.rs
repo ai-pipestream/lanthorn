@@ -92,10 +92,12 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         crate::styles::read_per_game_honor(&state.game_dir)
     };
     let garglk_honor = state.garglk_overlay.as_ref().and_then(|o| o.honor_game_colours);
-    // SQ-0855: …unless `--no-game-colours` was typed on this launch, which outranks
-    // both per-story sources — see `AppState::no_game_colours_cli`. Still expressed
+    // SQ-0855: …unless `--game-colours` was typed on this launch, which outranks
+    // both per-story sources — see `AppState::game_colours_cli`. Still expressed
     // as a per-story value rather than by lowering the base, so it is PINNED below
-    // and cannot reach the global config.toml.
+    // and cannot reach the global config.toml. SQ-1082 made it symmetric, so
+    // `--game-colours on` now overrules a sidecar that turned them off, which is
+    // what a flag typed on this launch ought to have done all along.
     // SQ-0860: …or unless the artwork in hand has no colours to give, which is the
     // same shape of fact and gets the same treatment. `startup.rs` forces the key
     // off and pins it before the engine is built (SQ-0806/SQ-0846); this recompute
@@ -104,10 +106,15 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     // every consumer that reads `config.honor_game_colours` after boot. Both of
     // these say "off, for this run" and neither may reach the user's file, so both
     // ride the per-story value rather than lowering the base.
-    let per_story_honor = if state.no_game_colours_cli || state.artwork_declines_colours {
+    // The artwork's force-off is checked FIRST and is not overridable here: it is
+    // a fact about the rendition in hand — a two-colour stencil has no colours to
+    // give — rather than a preference, and honouring colours over it paints the
+    // stencil out (SQ-0860). `/set-game-colours` clears both holds together, which
+    // is still the way to say "I know, do it anyway".
+    let per_story_honor = if state.artwork_declines_colours {
         Some(false)
     } else {
-        per_game_honor.or(garglk_honor)
+        state.game_colours_cli.or(per_game_honor).or(garglk_honor)
     };
     state.config.honor_game_colours = per_story_honor.unwrap_or(state.honor_game_colours_base);
     // SQ-0807: whatever this recompute lands on, say where it came from. A per-game
@@ -373,14 +380,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// SQ-0855: `--no-game-colours` outranks BOTH per-story sources a reload re-reads
+    /// SQ-0855: `--game-colours` outranks BOTH per-story sources a reload re-reads
     /// from disk. Lowering `honor_game_colours_base` alone is not enough — the base is
     /// only the fallback, so a `garglk.ini` beside the story or a sidecar `honor` key
     /// left by an earlier run would turn the game's colours back on at the boot
     /// `reload_style`, and the flag would do nothing on exactly the stories that have
     /// an opinion about colour.
     #[test]
-    fn a_cli_no_game_colours_outranks_garglk_and_the_per_game_sidecar() {
+    fn a_cli_game_colours_flag_outranks_garglk_and_the_per_game_sidecar() {
         let dir = temp_dir("honor-cli-flag");
         let global = seed_style(&dir);
         let game_dir = dir.join("game.save");
@@ -394,9 +401,9 @@ mod tests {
         state.config.config_file = cfg_path.clone();
         state.config.style = Some(global.to_string_lossy().to_string());
         state.game_dir = game_dir.clone();
-        // As `resolve()` leaves a `--no-game-colours` launch: base lowered, flag noted.
+        // As `resolve()` leaves a `--game-colours off` launch: base lowered, flag noted.
         state.honor_game_colours_base = false;
-        state.no_game_colours_cli = true;
+        state.game_colours_cli = Some(false);
         // Both per-story sources ask loudly for the game's colours.
         state.garglk_overlay = Some(crate::garglk_ini::GarglkOverlay {
             honor_game_colours: Some(true),
@@ -420,7 +427,7 @@ mod tests {
         );
 
         // `/set-game-colours` is the user overriding their own flag, and clears it.
-        state.no_game_colours_cli = false;
+        state.game_colours_cli = None;
         reload_style(&mut state);
         assert!(
             state.config.honor_game_colours,
@@ -444,7 +451,7 @@ mod tests {
         state.config.style = Some(global.to_string_lossy().to_string());
         state.game_dir = game_dir.clone();
         state.honor_game_colours_base = true;
-        state.no_game_colours_cli = false;
+        state.game_colours_cli = None;
 
         // The shipped default (true) with a sidecar asking for off.
         crate::styles::write_per_game_honor(&game_dir, Some(false)).unwrap();
@@ -481,7 +488,7 @@ mod tests {
         state.config.style = Some(global.to_string_lossy().to_string());
         state.game_dir = game_dir.clone();
         state.honor_game_colours_base = base;
-        state.no_game_colours_cli = false;
+        state.game_colours_cli = None;
         state.config.honor_game_colours = base;
         if base {
             // The archive declared the interpreter colourless (SQ-0806/SQ-0846).
