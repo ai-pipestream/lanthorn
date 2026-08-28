@@ -32,8 +32,22 @@ fn story(name: &str) -> Option<Vec<u8>> {
 }
 
 fn recipe(bytes: &[u8]) -> ShadowRecipe {
+    recipe_in(bytes, PathBuf::new(), Vec::new())
+}
+
+/// The same recipe with the live game's own persistent data, which the shadow
+/// may READ and never write (SQ-1124).
+///
+/// **Both halves or neither**, on the evidence: Counterfeit Monkey checks a
+/// 52-byte marker in the Glk file VFS and only then `@restore`s the
+/// `_Counterfeit_Monkey-startup-data.qzl` beside it. Given the `.qzl` alone it
+/// never asks for it and re-runs the whole initialisation — which is exactly
+/// what the case below measures.
+fn recipe_in(bytes: &[u8], store: PathBuf, vfs: Vec<u8>) -> ShadowRecipe {
     ShadowRecipe {
         story_bytes: Arc::new(bytes.to_vec()),
+        store,
+        vfs_bytes: Arc::new(vfs),
         honor_game_colours: true,
         interpreter_number: None,
         random_seed: None,
@@ -81,6 +95,12 @@ impl Play {
             .push_transcript_kind(r.transcript.trim_end_matches('\n'), TranscriptKind::Story);
         let printed = !r.transcript.trim().is_empty();
         app::vocab::offer_vocabulary(&mut self.state, &*self.session, cmd, printed);
+        // The beat after the turn (SQ-1124). The offer is asked of a worker
+        // thread and shown when it answers; the event loop collects it with
+        // `poll_vocabulary_offer` a frame or two later, and a harness that wants
+        // to assert on it waits here instead of racing the thread. Nothing about
+        // WHAT is shown differs — only when.
+        app::vocab::settle_vocabulary_offer(&mut self.state);
     }
 
     fn walk(&mut self, cmds: &[&str]) {
@@ -350,56 +370,122 @@ fn the_cost_of_a_vetted_offer_on_the_z_machine() {
 /// directions: the memory map is megabytes rather than kilobytes, and
 /// Counterfeit Monkey's initialisation is millions of opcodes even accelerated.
 ///
-/// **This is the story that says no.** The shadow boots in over two seconds and
-/// each shadow turn costs a fifth of one, so a full offer — a control pair per
-/// candidate plus the candidates — would be several seconds of stall between the
-/// player's command and lanthorn's reply. The seam measures that and switches
-/// itself off for the session rather than spending it on every failed word, and
-/// the offer falls back to naming what the dictionary holds.
+/// **This is the story that said no**, and the reason it said no was ours.
+/// SQ-1121 booted the shadow from the story bytes with an empty persistent
+/// store, so Counterfeit Monkey re-ran the whole initialisation the LIVE session
+/// skips — 2.1 s, measured — and the seam latched `too_slow` and declined to vet
+/// the corpus's biggest game for the rest of the session.
 ///
-/// Numbers, not an estimate: the case prints them.
+/// The live session is fast because of its own file cache: CM `@save`s a
+/// `_Counterfeit_Monkey-startup-data` slot on its first launch and `@restore`s it
+/// on every later one, which lanthorn services silently against the per-story
+/// directory (the CHANGELOG's "5.4s → 0.76s from the second launch"). The shadow
+/// now reads that same store, READ-ONLY, and takes the same path.
+///
+/// The case measures all three: the live cold boot that writes the cache, the
+/// live warm boot that reads it, and a shadow booted each way. Numbers, not an
+/// estimate — it prints them.
 #[test]
-fn a_story_too_slow_to_probe_switches_the_seam_off() {
+fn counterfeit_monkeys_shadow_boots_the_way_the_live_game_boots() {
     let Some(bytes) = story("CounterfeitMonkey-11.gblorb") else { return };
     let app::hints::LoadedStory::Glulx(image) = app::hints::extract_story(bytes.clone())
         .expect("CounterfeitMonkey-11.gblorb is a readable container")
     else {
         panic!("CounterfeitMonkey-11.gblorb is a Glulx story");
     };
-    let t0 = std::time::Instant::now();
-    let live =
-        app::glulx_session::GlulxSession::new(image, 80, 24, true, false, false, (8, 16), None, &[])
-            .expect("Counterfeit Monkey boots");
-    let live_boot = t0.elapsed();
-    let save = live.save_state();
 
+    let dir = std::env::temp_dir().join(format!("lanthorn-sq1124-cm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp game_dir");
+
+    // The live session, twice, against a persistent store it may write: the
+    // first launch runs the initialisation and leaves the cache, the second
+    // restores it. If the second is not dramatically faster, this fixture is not
+    // the game the finding is about and every number below is meaningless.
+    let live_in = |dir: PathBuf, vfs: &[u8]| {
+        let b = blorb::Blorb::parse(bytes.clone()).ok();
+        app::glulx_session::GlulxSession::new_in(
+            dir, image.clone(), 80, 24, true, false, false, false, (8, 16), b, vfs,
+            [[(None, None); 11]; 2], false, None,
+        )
+        .expect("Counterfeit Monkey boots")
+    };
+    let t = std::time::Instant::now();
+    let cold_session = live_in(dir.clone(), &[]);
+    let live_cold = t.elapsed();
+    let vfs = app::engine::Engine::vfs_bytes(&cold_session);
+    eprintln!("  vfs after the cold boot: {} bytes, dirty={}", vfs.len(),
+        app::engine::Engine::vfs_dirty(&cold_session));
+    drop(cold_session);
+    let t = std::time::Instant::now();
+    let live = live_in(dir.clone(), &vfs);
+    let live_warm = t.elapsed();
+    let save = live.save_state();
+    let cached: Vec<String> = std::fs::read_dir(&dir)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into()).collect())
+        .unwrap_or_default();
+
+    // SQ-1121's shadow: no store at all.
+    let mut blind = app::probe::ShadowProbe::default();
+    blind.arm(recipe(&bytes));
+    let t = std::time::Instant::now();
+    let blind_run = blind.run(&live, &["take zqxwvj".to_string()]);
+    let blind_cold = t.elapsed();
+
+    // SQ-1124's shadow: the live game's own store, read-only.
     let mut probe = app::probe::ShadowProbe::default();
-    probe.arm(recipe(&bytes));
-    let t1 = std::time::Instant::now();
+    probe.arm(recipe_in(&bytes, dir.clone(), vfs.clone()));
+    let t = std::time::Instant::now();
     let first = probe.run(&live, &["take zqxwvj".to_string()]);
-    let cold = t1.elapsed();
+    let cold = t.elapsed();
+    let t = std::time::Instant::now();
+    let second = probe.run(&live, &["take zqxwvj".to_string()]);
+    let warm = t.elapsed();
+
     eprintln!(
-        "Glulx (Counterfeit Monkey 11, {} KiB container): live boot {live_boot:?}; \
-         snapshot {} bytes; first probe {cold:?} (shadow boot included); \
-         answered={}; seam now armed={} too_slow={}",
+        "Glulx (Counterfeit Monkey 11, {} KiB container): \n  \
+         live boot cold {live_cold:?}, warm {live_warm:?} (cache: {cached:?})\n  \
+         snapshot {} bytes\n  \
+         shadow, NO store (SQ-1121):   first probe {blind_cold:?}, answered={}\n  \
+         shadow, live store read-only: first probe {cold:?}, answered={}; \
+         warm probe {warm:?}, answered={}\n  \
+         seam armed={} after {} probes",
         bytes.len() / 1024,
         save.bytes.len(),
+        blind_run.is_some(),
         first.is_some(),
+        second.is_some(),
         probe.is_armed(),
-        probe.is_too_slow(),
+        probe.probes,
     );
-    assert!(
-        !probe.is_armed(),
-        "the seam paid for a shadow this expensive and then kept asking"
-    );
-    assert!(probe.is_too_slow(), "and it must say WHY it stopped, not read as unarmed");
 
-    // Paying it once is the whole bargain: a second ask costs nothing at all.
-    let t2 = std::time::Instant::now();
-    assert!(probe.run(&live, &["take zqxwvj".to_string()]).is_none());
-    let again = t2.elapsed();
-    eprintln!("  and the next ask costs {again:?}");
-    assert!(again < std::time::Duration::from_millis(5), "the refusal is not free: {again:?}");
+    // Non-vacuity: the cache has to exist, or the shadow read nothing and the
+    // comparison is of two identical cold boots.
+    assert!(
+        cached.iter().any(|f| f.ends_with(".qzl")),
+        "Counterfeit Monkey wrote no fixed-name save, so there was no cache to read: {cached:?}"
+    );
+    assert!(!vfs.is_empty(), "and no VFS marker, which is the half that makes it ASK");
+    assert!(
+        live_warm * 2 < live_cold,
+        "the live warm boot ({live_warm:?}) is not meaningfully faster than the cold one \
+         ({live_cold:?}) — this fixture does not use the cache and the finding does not apply"
+    );
+    // The claim.
+    assert!(first.is_some(), "the shadow answered nothing");
+    assert!(probe.is_armed(), "the seam gave up on a story it can now afford");
+    assert!(
+        cold * 2 < blind_cold,
+        "reading the live game's store bought nothing: {cold:?} against {blind_cold:?}"
+    );
+
+    // And it wrote nothing while doing it: the store holds exactly what the live
+    // session left there.
+    let after: Vec<String> = std::fs::read_dir(&dir)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into()).collect())
+        .unwrap_or_default();
+    assert_eq!(cached.len(), after.len(), "the shadow wrote into the live game's store");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A lighter Glulx story is a different answer, and the seam has to reach it —
@@ -420,19 +506,17 @@ fn a_lighter_glulx_story_is_still_probed() {
     let t = std::time::Instant::now();
     let run = probe.run(&live, &["zqxwvj".to_string(), "take zqxwvj".to_string()]);
     eprintln!(
-        "Glulx (Coloratura, {} KiB): two probes in {:?}, armed={} too_slow={}",
+        "Glulx (Coloratura, {} KiB): two probes in {:?}, armed={}",
         bytes.len() / 1024,
         t.elapsed(),
         probe.is_armed(),
-        probe.is_too_slow(),
     );
-    if let Some(run) = run {
-        for s in &run.steps {
-            eprintln!("  {:?} -> {:?}", s.command, s.reply.trim());
-        }
-        eprintln!("  refusal: {:?}", run.refusal_from(0).sentences().collect::<Vec<_>>());
+    assert!(probe.is_armed(), "the seam gave up on a story of this size");
+    let run = run.expect("the shadow answered nothing");
+    for s in &run.steps {
+        eprintln!("  {:?} -> {:?}", s.command, s.reply.trim());
     }
-    assert!(probe.is_armed(), "a story this size must not trip the too-slow latch");
+    eprintln!("  refusal: {:?}", run.refusal_from(0).sentences().collect::<Vec<_>>());
 }
 
 /// **The offer survives on a two-word parser**, end to end — the case that
@@ -458,6 +542,7 @@ fn a_two_word_parser_is_not_silenced_by_its_own_prompt() {
         state.push_transcript_kind(&format!("> {cmd}"), TranscriptKind::Input);
         state.push_transcript_kind(r.transcript.trim_end_matches('\n'), TranscriptKind::Story);
         app::vocab::offer_vocabulary(&mut state, &*session, cmd, !r.transcript.trim().is_empty());
+        app::vocab::settle_vocabulary_offer(&mut state); // the beat after the turn (SQ-1124)
     }
     let lines = assists(&state);
     eprintln!("Scott adv14a.dat, vetted: {lines:?} ({} probes)", state.probe.probes);
@@ -492,4 +577,169 @@ fn a_scott_adams_story_forks_and_answers() {
         "a two-word parser handed nonsense taught the shadow nothing"
     );
     assert!(probe.is_armed(), "a database this small must not trip the too-slow latch");
+}
+
+// ── Off the main thread, and what that costs (SQ-1124) ──────────────────────
+
+/// **What the player's turn now pays.** The vetting happens on a worker thread,
+/// so the only main-thread cost of an offer is taking the snapshot and hashing
+/// the world — everything after that is the worker's. SQ-1121 spent the whole
+/// run inline under a 400 ms budget; there is no budget any more because there
+/// is no stall to cap.
+///
+/// Prints both halves for every engine the corpus reaches, so the claim is a
+/// measurement rather than an assertion about a design.
+#[test]
+fn asking_costs_the_players_turn_a_snapshot_and_nothing_else() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.walk(TO_THE_LAMP);
+    let cmds: Vec<String> =
+        ["zqxwvj", "light sword", "light water", "light lamp"].iter().map(|s| s.to_string()).collect();
+
+    // Cold — the ask that also causes the shadow's boot, which is the worst case
+    // and still costs the caller only the snapshot.
+    let t = std::time::Instant::now();
+    let token = p.state.probe.ask(&*p.session, &cmds).expect("the seam is armed");
+    let ask_cold = t.elapsed();
+    let t = std::time::Instant::now();
+    let answered = p.state.probe.settle().is_some();
+    let worker_cold = t.elapsed();
+
+    let t = std::time::Instant::now();
+    p.state.probe.ask(&*p.session, &cmds).expect("the seam is still armed");
+    let ask_warm = t.elapsed();
+    let t = std::time::Instant::now();
+    p.state.probe.settle();
+    let worker_warm = t.elapsed();
+
+    eprintln!(
+        "Zork I r88, Living Room, four commands: token {token}, answered={answered}\n  \
+         main thread: ask {ask_cold:?} cold, {ask_warm:?} warm\n  \
+         worker:      {worker_cold:?} cold (boot included), {worker_warm:?} warm"
+    );
+    // The number that matters: what the player waits for. A snapshot of a .z3 is
+    // a few hundred bytes and a world print is a handful of hashes.
+    assert!(
+        ask_warm < std::time::Duration::from_millis(5),
+        "asking is supposed to be free: {ask_warm:?}"
+    );
+    assert!(
+        ask_cold < worker_cold,
+        "the ask paid for the boot, which is exactly what it must not do"
+    );
+}
+
+/// **A late offer that missed its turn is dropped, not printed.**
+///
+/// The player typed again while the shadow was still thinking, so the answer
+/// describes a command that is no longer the last one on screen. SQ-1125 (a
+/// prompt-anchored hint, which would have made lateness invisible) is parked, so
+/// the answer is discarded — silently, which is this feature's existing
+/// discipline rather than a new rule.
+///
+/// Falsify by removing the epoch check in `poll_vocabulary_offer`: the line then
+/// appears underneath a `look` that never provoked it.
+#[test]
+fn an_offer_that_arrives_after_the_player_typed_again_is_dropped() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.walk(TO_THE_LAMP);
+
+    // The turn that asks — without the beat afterwards, which is the whole point.
+    let r = p.session.submit("illuminate lamp");
+    p.state.push_transcript_kind("> illuminate lamp", TranscriptKind::Input);
+    p.state.push_transcript_kind(r.transcript.trim_end_matches('\n'), TranscriptKind::Story);
+    app::vocab::offer_vocabulary(&mut p.state, &*p.session, "illuminate lamp", true);
+    assert!(p.assists().is_empty(), "the offer was shown synchronously after all");
+
+    // The player types again before the shadow answers.
+    p.state.begin_turn();
+    let after = p.session.submit("look");
+    p.state.push_transcript_kind(after.transcript.trim_end_matches('\n'), TranscriptKind::Story);
+
+    let shown = app::vocab::settle_vocabulary_offer(&mut p.state);
+    assert!(!shown, "a stale answer reached the transcript");
+    assert!(
+        p.assists().is_empty(),
+        "a suggestion was printed under the wrong command: {:?}",
+        p.assists()
+    );
+    // And the state is clean: nothing is left waiting for a turn that has passed.
+    assert!(p.state.probe.is_armed(), "the seam gave up over a dropped answer");
+    assert!(!p.state.probe.is_busy(), "the worker is still holding the stale question");
+}
+
+/// **A player scrolled back reading is not yanked to the bottom.**
+///
+/// A synchronous offer lands inside a turn the player is already watching; a
+/// late one arrives unprompted, and if it moved the view it would move it while
+/// somebody is reading. It does not: the transcript pane is bottom-anchored and
+/// an insert above the prompt scrolls HISTORY up, and nothing on the offer's path
+/// touches `transcript_scroll`.
+#[test]
+fn a_late_offer_leaves_a_scrolled_back_reader_where_they_were() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.walk(TO_THE_LAMP);
+    p.state.transcript_scroll = 7;
+    p.turn("illuminate lamp");
+    assert_eq!(p.assists(), vec!["try instead — light"], "the offer must actually have landed");
+    assert_eq!(p.state.transcript_scroll, 7, "the late insert moved the reader's view");
+}
+
+/// **What asking the story beats guessing from its prose** (SQ-1042's
+/// `ObjectWords`, folded into `absent_nouns` by SQ-1124).
+///
+/// The controls need two dictionary nouns that are NOT in scope. The old rule
+/// substring-matched them against the lowercased PRINTED names of everything the
+/// player can see, which answers a different question: a thing printed as `brass
+/// lantern` also answers to `lamp`, `lantern` and `light`, and a rule reading the
+/// printed name finds one of them and misses the rest. Picking a noun that is
+/// really here makes the control succeed, the pair disagree, and the run learn
+/// nothing.
+///
+/// The case counts the disagreement on a real story in a real room rather than
+/// asserting it exists.
+#[test]
+fn the_scope_test_asks_the_story_instead_of_reading_its_prose() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.walk(TO_THE_LAMP);
+
+    let mut vs = app::vocab::VocabState::default();
+    let v = vs.get(&*p.session).expect("Zork I has a dictionary");
+    let intro = p.session.introspect().expect("the Z-machine introspects");
+    let player = intro.player_object();
+    let mut in_scope: Vec<app::engine::ObjectWords> = Vec::new();
+    if let Some(room) = p.session.current_location().map(|l| l.number) {
+        in_scope.extend(intro.room_objects_excluding(room, player));
+    }
+    if let Some(pl) = player {
+        in_scope.extend(intro.contents(pl));
+    }
+    let printed: Vec<String> =
+        in_scope.iter().filter_map(|o| o.display_name()).map(|n| n.to_lowercase()).collect();
+
+    // Nouns the OLD rule called absent that an object here really answers to —
+    // every one of them a control that would have succeeded and taught nothing.
+    let mut wrong: Vec<&str> = Vec::new();
+    let mut total = 0usize;
+    for w in v.nouns().filter(|w| w.chars().count() >= 3) {
+        total += 1;
+        let lower = w.to_lowercase();
+        let old_says_absent = !printed.iter().any(|n| n.contains(&lower));
+        let really_here = in_scope.iter().any(|o| o.refers_to(w));
+        if old_says_absent && really_here {
+            wrong.push(w);
+        }
+    }
+    eprintln!(
+        "Zork I r88, Living Room: {} objects in scope, printed as {printed:?}\n  \
+         {} of {total} dictionary nouns were called absent by the printed-name rule \
+         while something here answers to them: {wrong:?}",
+        in_scope.len(),
+        wrong.len(),
+    );
+    assert!(
+        !wrong.is_empty(),
+        "the printed-name rule agreed with the story everywhere here, so this room \
+         cannot show the difference — pick another"
+    );
 }

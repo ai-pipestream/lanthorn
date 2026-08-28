@@ -280,8 +280,26 @@ Two things about it are load-bearing and easy to get wrong:
   wrong room, so controls and question run in the same `run`, off the same
   snapshot.
 
+- **It runs on a worker thread, and a late answer is dropped** (SQ-1124). Only
+  the story interpreter belongs on the main thread, so `ShadowProbe::ask` hands
+  the worker a snapshot and returns; the event loop collects the answer with
+  `poll` and the offer arrives a beat after the game's reply. There is no
+  budget and no too-slow latch: a slow story simply answers later, and an answer
+  that arrives after the player has typed again is *stale* — it would attach a
+  suggestion to a command that never provoked it — so it is discarded. Measured
+  on Zork I, the player's turn now pays ~1 ms (a snapshot and a world hash)
+  against SQ-1121's whole 12–15 ms run.
+- **A shadow boots the way the LIVE game boots.** It reads the live game's own
+  per-story store and Glk VFS — read-only, through
+  `glulx_session::GameStore::read_only`, so it can never write what it reads.
+  Booting with neither is not "isolated" so much as a *different launch*:
+  Counterfeit Monkey checks a 52-byte VFS marker and then `@restore`s
+  `_Counterfeit_Monkey-startup-data.qzl`, and a shadow given neither re-ran the
+  whole initialisation the live session skips (2.4 s against 0.53 s, measured).
+  Both halves are needed: the `.qzl` alone is never asked for.
+
 Isolation is explicit rather than assumed: the shadow boots with sound and
-graphics off, no Blorb, an empty `game_dir` and an empty Glk VFS, and an in-game
+graphics off, no Blorb, a read-only store it may never write, and an in-game
 `@save`/`@restore` or a Glk filename prompt inside a probe is answered *failed*
 so the VM unwinds where it stands. `app::vocab` is the first consumer (SQ-1121,
 vetting a suggestion before it is offered); SQ-1043's irreversible-move caution

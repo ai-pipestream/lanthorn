@@ -2274,6 +2274,21 @@ pub struct AppState {
     /// Session state and never persisted — an archive carries the recipe already,
     /// in the story file it names.
     pub probe: crate::probe::ShadowProbe,
+    /// A vocabulary offer that has been asked of the shadow and not yet answered
+    /// (SQ-1124). At most one: a second question while this is outstanding is not
+    /// asked at all, and that offer falls back to what it can say unvetted.
+    pub vocab_pending: Option<crate::vocab::PendingOffer>,
+    /// Which player turn the session is on, counted by lanthorn rather than by
+    /// the story (SQ-1124).
+    ///
+    /// Bumped by [`Self::begin_turn`] at the head of every turn finisher, and
+    /// used for exactly one thing: an answer the shadow hands back late belongs
+    /// to the turn that asked for it, and printing it against a later one would
+    /// attach a suggestion to a command that never provoked it. Distinct from
+    /// [`Self::turns`], which counts the STORY's turns, is written into a save's
+    /// `Meta`, and comes back from a restore at whatever it was — none of which
+    /// is what a staleness test wants.
+    pub turn_epoch: u64,
     /// Optional per-line render-style override, parallel to `transcript`. In-memory
     /// only (not persisted). `None` = use the line's per-kind style. Kept length-
     /// synced by `push_transcript_kind`; read defensively by the renderer.
@@ -3105,6 +3120,8 @@ impl Default for AppState {
             assist_preamble_shown: false,
             vocab: crate::vocab::VocabState::default(),
             probe: crate::probe::ShadowProbe::default(),
+            vocab_pending: None,
+            turn_epoch: 0,
             transcript_styles: Vec::new(),
             transcript_runs: Vec::new(),
             transcript_para: Vec::new(),
@@ -4477,6 +4494,18 @@ impl AppState {
     /// means and where to switch it off.
     ///
     /// See [`crate::assist`] for what an assist line may and may not say.
+    /// A new player turn is starting: everything the previous one was still
+    /// waiting on is now stale (SQ-1124).
+    ///
+    /// Called at the head of every turn finisher — a typed command, a resumed
+    /// read, a game-driven turn — because "the player has moved on" is what
+    /// makes a late offer wrong, and each of those three is a way for that to
+    /// happen. Bumping twice for one turn would cost nothing; missing one prints
+    /// a suggestion against the wrong command.
+    pub fn begin_turn(&mut self) {
+        self.turn_epoch = self.turn_epoch.wrapping_add(1);
+    }
+
     pub fn push_assist(&mut self, assist: &crate::assist::Assist) {
         // The switch is checked HERE rather than at each of the five call sites,
         // for the reason everything else about the register is: a feature that

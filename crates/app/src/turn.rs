@@ -78,6 +78,9 @@ pub(crate) fn finish_command_turn(
     map_area: Rect,
     bg_tidy_counter: &mut u32,
 ) -> bool {
+    // The player has typed again, so anything the shadow is still working on for
+    // an earlier turn is stale (SQ-1124).
+    state.begin_turn();
     if result.erase_lower { state.mark_screen_clear(); }
     // A read that ended on a terminating character with nothing typed and
     // nothing printed adds nothing to the transcript — see
@@ -548,6 +551,7 @@ pub(crate) fn finish_resumed_turn(
     ifid: &str,
     map_area: Rect,
 ) -> bool {
+    state.begin_turn(); // see `finish_command_turn` (SQ-1124)
     state.push_transcript(&result.transcript);
     apply_turn_events(state, &result);
     if let Some(note) = &result.info {
@@ -751,6 +755,7 @@ pub(crate) fn apply_game_driven_result(
     session: &dyn Engine,
     driver: app::pager::Driver,
 ) -> bool {
+    state.begin_turn(); // see `finish_command_turn` (SQ-1124)
     if result.erase_lower {
         // A game-driven screen clear is a menu redraw navigated by keystrokes —
         // Counterfeit Monkey's help menu clears the primary buffer and reprints

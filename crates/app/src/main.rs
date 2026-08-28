@@ -1846,6 +1846,10 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // *carried* on the very next frame (SQ-0664).
         needs_redraw |= loop_tick::refresh_command_band(&mut state, &*session);
         needs_redraw |= loop_tick::expire_sound_and_settle_dock(&mut state);
+        // A vocabulary offer the shadow was asked for a turn or two ago (SQ-1124).
+        // It lands above the prompt like any other assist; an answer that arrives
+        // after the player has typed again is stale and drops silently.
+        needs_redraw |= app::vocab::poll_vocabulary_offer(&mut state);
 
         // Draw — unless we're mid-drain of an input burst (skip_draw), in which
         // case the deferred redraw happens once the queue empties. last_panes and

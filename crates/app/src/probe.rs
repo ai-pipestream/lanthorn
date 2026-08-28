@@ -10,6 +10,25 @@
 //! into a probe rather than a probe with a question in it, so this is the
 //! generalisation SQ-0785's later note asked for rather than a re-landing.
 //!
+//! # Off the main thread, and booted the way the LIVE game boots (SQ-1124)
+//!
+//! Two things SQ-1121 got wrong, both fixed here and both worth stating because
+//! the wrong version looked reasonable.
+//!
+//! **A budget is a cap on a stall, not a fix for one.** The shadow ran inline
+//! under 400 ms, spent between the player's command and lanthorn's reply. Even
+//! Zork I's measured 12 ms was main-thread time bought for an optional feature.
+//! The shadow now lives on a worker thread ([`ShadowProbe`]); an offer is asked
+//! for and collected a beat later, and the transcript takes the late arrival
+//! through the same insert-above-prompt an assist has always used. An answer
+//! that arrives after the player has typed again is stale and is dropped.
+//!
+//! **A shadow booted from the story bytes alone is not the same launch.** It got
+//! an empty persistent store and an empty file VFS, so Counterfeit Monkey re-ran
+//! the initialisation the live session skips — 2.1 s, measured — and the seam
+//! wrote the story off. Both are now the live game's own, read-only. See
+//! [`ShadowRecipe::store`].
+//!
 //! A **shadow** is a second [`Engine`] running the same story, driven from a
 //! snapshot of the live one. Commands typed into it never reach the screen, the
 //! filesystem, the sound card or the archive; when the answer has been read off
@@ -73,33 +92,17 @@
 
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::engine::Engine;
 
-/// How long one `run` may spend in the shadow before it gives up and reports
-/// nothing. The offer it feeds appears between the player's command and the
-/// game's reply, so a probe that overruns must go quiet rather than stall the
-/// turn; the caller falls back to whatever it would have said unvetted.
-pub const BUDGET: Duration = Duration::from_millis(400);
-
-/// How long the shadow's own BOOT may take before this story is written off as
-/// too slow to probe.
-///
-/// Separate from [`BUDGET`] because it is a different cost with a different
-/// shape: it is paid once a session rather than once an offer, and no cap can
-/// stop it being paid — a boot cannot be measured until it has happened. So the
-/// cap's job is only to decide whether to pay it a SECOND time, and it is
-/// generous: Counterfeit Monkey's initialisation is millions of opcodes even
-/// accelerated and takes over two seconds here, which is affordable once and
-/// nowhere near affordable per turn.
-pub const BOOT_BUDGET: Duration = Duration::from_millis(1500);
-
-/// The most commands one `run` will type into the shadow, whatever the caller
-/// asks for. A belt to the budget's braces: a story that answers instantly can
-/// still not be walked through a hundred candidates. Sized for a question plus
-/// its controls — [`crate::vocab`] asks three or four things and runs two
-/// controls for each.
+/// The most commands one question will type into the shadow, whatever the
+/// caller asks for. A story that answers instantly still cannot be walked
+/// through a hundred candidates, and the worker must not be given work that
+/// outlives the turn that wanted it by minutes. Sized for a question plus its
+/// controls — [`crate::vocab`] asks three or four things and runs two controls
+/// for each.
 pub const MAX_PROBES: usize = 16;
 
 // ── The recipe a shadow is built from ───────────────────────────────────────
@@ -122,11 +125,30 @@ pub const MAX_PROBES: usize = 16;
 /// it. If a caller ever needs a shadow's GEOMETRY, this is the value that has to
 /// grow a `MachineBoot` — do that rather than adding the one field you happen to
 /// want.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ShadowRecipe {
     /// The story file exactly as it was loaded, before any container was
     /// unwrapped — `hints::extract_story` does that again for the shadow.
     pub story_bytes: std::sync::Arc<Vec<u8>>,
+    /// The live game's per-story directory, which the shadow reads and never
+    /// writes (SQ-1124).
+    ///
+    /// This is the whole of the boot fix. A Glulx game's own fixed-name saves
+    /// live here, and for Counterfeit Monkey one of them is the cache that lets
+    /// it skip its initialisation — the "5.4s → 0.76s from the second launch"
+    /// the CHANGELOG records. A shadow booted with no store re-runs that
+    /// initialisation every session; a shadow pointed at the live store takes
+    /// the same `@restore` path the live launch took. Read-only by construction
+    /// ([`crate::glulx_session::GameStore`]), so the shadow can never write the
+    /// cache it reads.
+    ///
+    /// Empty for a session with no per-story directory, which is every
+    /// test-built recipe and costs only the old behaviour.
+    pub store: std::path::PathBuf,
+    /// The Glk file VFS the live session booted with, for the same reason: a
+    /// game may read a cache out of it during initialisation (SQ-0290). Never
+    /// written back — a shadow's VFS dies with it.
+    pub vfs_bytes: std::sync::Arc<Vec<u8>>,
     /// Z-machine: whether the game may pick its own colours. Irrelevant to what
     /// a probe reads, but a boot fact, and a shadow that differs from the live
     /// game in any boot fact is a different game.
@@ -345,33 +367,91 @@ fn signature(reply: &str, command: &str) -> Vec<String> {
 
 // ── The seam ────────────────────────────────────────────────────────────────
 
-/// A silent copy of the live game, kept between questions.
+/// One question, on its way to the worker.
+struct Job {
+    token: u64,
+    save: crate::engine::EngineSave,
+    baseline: WorldPrint,
+    commands: Vec<String>,
+}
+
+/// One answer, on its way back.
+///
+/// Everything in it is plain data — `String`, `Vec<u8>`, numbers — which is what
+/// lets the shadow stay on the worker thread and never cross back. No `Engine`
+/// is `Send`, and none needs to be: the worker BUILDS its own from the recipe.
+#[derive(Debug)]
+pub struct Answer {
+    /// Which question this answers. A caller that has moved on compares this
+    /// against what it asked and drops anything it no longer wants.
+    pub token: u64,
+    /// What the shadow said, or `None` when it could not be asked at all.
+    pub run: Option<ProbeRun>,
+    /// The shadow could not be built, or would not take the live state. The seam
+    /// switches itself off for the session rather than retrying every turn.
+    broken: bool,
+    /// Commands typed into the shadow for this question.
+    probes: u32,
+    /// Wall time the worker spent on it, the boot included.
+    spent: Duration,
+}
+
+/// The worker thread's end of the seam.
+struct Worker {
+    jobs: mpsc::Sender<Job>,
+    answers: mpsc::Receiver<Answer>,
+}
+
+/// A silent copy of the live game, kept between questions, **on its own thread**.
 ///
 /// Lives on [`crate::state::AppState`] because it is per-session state with a
 /// lazy, expensive body: the shadow is booted the first time anything asks a
 /// question and reused for every later one, so a story whose initialisation
-/// costs millions of opcodes pays that once. A boot that fails disables the
-/// seam for the session rather than being retried every turn.
+/// costs millions of opcodes pays that once. A boot that fails disables the seam
+/// for the session rather than being retried every turn.
+///
+/// # Why a thread, and what that changed (SQ-1124)
+///
+/// SQ-1121 ran the shadow inline, between the player's command and lanthorn's
+/// reply, under a 400 ms budget. That budget was the wrong shape twice over: it
+/// is a cap on a stall rather than a fix for one — even Zork I's measured 12 ms
+/// is main-thread time bought for an optional feature — and it forced a
+/// `too_slow` latch that wrote off the corpus's biggest game after a single
+/// measurement.
+///
+/// So the shadow lives on a worker. [`ShadowProbe::ask`] hands it a snapshot and
+/// a list of commands and returns immediately; [`ShadowProbe::poll`] collects
+/// the answer whenever it arrives, which the event loop does every pass. Only
+/// the story interpreter runs on the main thread, which is the direction the
+/// project has been moving in anyway.
+///
+/// **Both budgets are gone with it**, and so is `too_slow`. A slow game simply
+/// answers later, or not before the player types again — and then its answer is
+/// stale and is dropped, which is the silence discipline this feature already
+/// had rather than a new rule. What remains is [`MAX_PROBES`], which bounds the
+/// WORK rather than the wait.
+///
+/// One question is in flight at a time. A second ask while the first is running
+/// is refused (`None`), and the caller falls back to what it can say unvetted —
+/// which bounds the queue at one and means a game that answers slowly degrades
+/// to SQ-1041's behaviour instead of piling up turns of stale work.
 #[derive(Default)]
 pub struct ShadowProbe {
     recipe: Option<ShadowRecipe>,
-    shadow: Option<Box<dyn Engine>>,
+    worker: Option<Worker>,
     /// The shadow could not be built; stop trying.
     broken: bool,
-    /// This story answers too slowly to be probed between a command and its
-    /// reply, so the seam switches itself off for the session (SQ-1121).
-    ///
-    /// Measured rather than guessed, and latched rather than retried: a heavy
-    /// Glulx story costs seconds per shadow turn, and a budget that merely cuts
-    /// each offer short would spend that on EVERY failed word for the whole
-    /// session and show nothing extra for it. Paying it once and then declining
-    /// is the only shape that bounds the cost.
-    too_slow: bool,
+    /// The token of the question the worker is working on, if any.
+    inflight: Option<u64>,
+    /// Monotonic, so an answer can always be matched to its question even after
+    /// the caller has stopped caring about it.
+    next_token: u64,
     /// Commands typed into a shadow this session, and the time they took —
     /// the numbers `/info` would want, and the ones that say whether this is
     /// affordable on a given story.
     pub probes: u32,
-    /// Total time spent inside `run`, boot included.
+    /// Total time spent inside the worker, boot included. Wall time on the
+    /// WORKER, which is no longer time the player waited.
     pub spent: Duration,
 }
 
@@ -379,9 +459,9 @@ impl std::fmt::Debug for ShadowProbe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShadowProbe")
             .field("armed", &self.recipe.is_some())
-            .field("booted", &self.shadow.is_some())
+            .field("worker", &self.worker.is_some())
             .field("broken", &self.broken)
-            .field("too_slow", &self.too_slow)
+            .field("inflight", &self.inflight)
             .field("probes", &self.probes)
             .field("spent", &self.spent)
             .finish()
@@ -389,35 +469,57 @@ impl std::fmt::Debug for ShadowProbe {
 }
 
 impl ShadowProbe {
-    /// Give the seam what it needs to build a shadow. Until this is called
-    /// there is no probing — every test-built `AppState` is in that state, and
-    /// so is a session whose story bytes were never kept.
+    /// Give the seam what it needs to build a shadow, and start the thread that
+    /// will build it. Until this is called there is no probing — every
+    /// test-built `AppState` is in that state, and so is a session whose story
+    /// bytes were never kept.
+    ///
+    /// The thread is started here and the shadow is NOT: the worker blocks on
+    /// its first job, so a session that never asks anything pays one parked
+    /// thread and no initialisation at all.
     pub fn arm(&mut self, recipe: ShadowRecipe) {
+        let (jobs, job_rx) = mpsc::channel::<Job>();
+        let (answer_tx, answers) = mpsc::channel::<Answer>();
+        let build = recipe.clone();
+        // Detached on purpose. Joining would mean the app waits at exit for a
+        // boot it no longer wants; dropping the sender ends the worker's `recv`
+        // and it unwinds by itself, and a process exit ends it whatever it is
+        // doing. Nothing it owns outlives it — the shadow's store is read-only
+        // and its VFS is in memory.
+        std::thread::Builder::new()
+            .name("lanthorn-shadow".into())
+            .spawn(move || shadow_worker(build, job_rx, answer_tx))
+            .ok();
         self.recipe = Some(recipe);
-        self.shadow = None;
+        self.worker = Some(Worker { jobs, answers });
         self.broken = false;
-        self.too_slow = false;
+        self.inflight = None;
     }
 
-    /// True when a question could be asked — armed, not already given up on, and
-    /// not on a story that has proved too slow to ask.
+    /// True when a question could be asked — armed and not already given up on.
     pub fn is_armed(&self) -> bool {
-        self.recipe.is_some() && !self.broken && !self.too_slow
+        self.recipe.is_some() && self.worker.is_some() && !self.broken
     }
 
-    /// True when this story answered, but too slowly to keep asking. Distinct
-    /// from never having been armed: something WAS measured.
-    pub fn is_too_slow(&self) -> bool {
-        self.too_slow
+    /// True when a question is out with the worker and its answer has not been
+    /// collected yet.
+    pub fn is_busy(&self) -> bool {
+        self.inflight.is_some()
     }
 
     /// Type each of `commands` into a silent copy of `live`, every one of them
-    /// from the same snapshot, and report what each did.
+    /// from the same snapshot — **later**, on the worker thread.
     ///
-    /// `None` when there is no shadow to ask — unarmed, un-bootable, the live
-    /// engine mid-`@save`, or the budget spent. That is "no answer", never "no".
-    pub fn run(&mut self, live: &dyn Engine, commands: &[String]) -> Option<ProbeRun> {
-        if !self.is_armed() || commands.is_empty() || commands.len() > MAX_PROBES {
+    /// Returns the token the answer will carry, or `None` when there is nothing
+    /// to ask: unarmed, un-bootable, already busy, the live engine mid-`@save`,
+    /// or a list longer than [`MAX_PROBES`]. That is "no answer", never "no".
+    ///
+    /// The snapshot and the world print are taken HERE, on the caller's thread,
+    /// because both are questions about the LIVE engine and it may not cross a
+    /// thread. Everything after them is the worker's.
+    pub fn ask(&mut self, live: &dyn Engine, commands: &[String]) -> Option<u64> {
+        if !self.is_armed() || self.is_busy() || commands.is_empty() || commands.len() > MAX_PROBES
+        {
             return None;
         }
         // Snapshotting a suspended VM would capture it mid-file-operation, and
@@ -425,96 +527,158 @@ impl ShadowProbe {
         if live.is_saveload_pending() {
             return None;
         }
-        let started = Instant::now();
-        let save = live.save_state();
-        let baseline = WorldPrint::of(live);
+        let token = self.next_token.wrapping_add(1);
+        let job = Job {
+            token,
+            save: live.save_state(),
+            baseline: WorldPrint::of(live),
+            commands: commands.to_vec(),
+        };
+        self.worker.as_ref()?.jobs.send(job).ok()?;
+        self.next_token = token;
+        self.inflight = Some(token);
+        Some(token)
+    }
 
-        if self.shadow.is_none() {
-            let recipe = self.recipe.clone()?;
-            let booting = Instant::now();
-            match boot_shadow(&recipe) {
-                Ok(e) => self.shadow = Some(e),
-                Err(_) => {
-                    self.broken = true;
-                    self.spent += started.elapsed();
-                    return None;
-                }
-            }
-            // The boot is over; the only question left is whether to ever pay it
-            // again. Answer it here rather than letting the per-offer budget
-            // discover the same thing on every failed word for the rest of the
-            // session.
-            if booting.elapsed() > BOOT_BUDGET {
-                self.too_slow = true;
-                self.shadow = None;
-                self.spent += started.elapsed();
-                return None;
-            }
+    /// Collect an answer if one has arrived. Never blocks; call it every pass of
+    /// the event loop.
+    pub fn poll(&mut self) -> Option<Answer> {
+        let answer = self.worker.as_ref()?.answers.try_recv().ok()?;
+        self.settled(&answer);
+        Some(answer)
+    }
+
+    /// Block until the question in flight answers. **Not for the event loop** —
+    /// this is the measurement and test path, and the one place a caller
+    /// deliberately wants the old synchronous cost so it can print it.
+    pub fn settle(&mut self) -> Option<Answer> {
+        self.inflight?;
+        let answer = self.worker.as_ref()?.answers.recv().ok()?;
+        self.settled(&answer);
+        Some(answer)
+    }
+
+    /// Fold a collected answer's bookkeeping back in.
+    fn settled(&mut self, answer: &Answer) {
+        self.probes += answer.probes;
+        self.spent += answer.spent;
+        if answer.broken {
+            self.broken = true;
         }
-        let shadow = self.shadow.as_mut()?;
-
-        let mut steps = Vec::with_capacity(commands.len());
-        let mut overran = false;
-        for command in commands {
-            if started.elapsed() > BUDGET {
-                overran = true;
-                break;
-            }
-            if shadow.restore_state(&save).is_err() {
-                // A shadow that will not take the live state is no shadow.
-                self.shadow = None;
-                self.broken = true;
-                self.spent += started.elapsed();
-                return None;
-            }
-            let _ = shadow.take_transcript();
-            let _ = shadow.take_transcript_elems();
-            let result = shadow.submit(command);
-            self.probes += 1;
-            // ISOLATION. Nothing typed in here may reach a file. A game that
-            // suspends for its own `@save`/`@restore`, or asks Glk for a
-            // filename, is answered "that failed" so the VM unwinds inside the
-            // shadow, and the step is thrown away.
-            let escaped = result.pending_io.is_some() || shadow.pending_filename().is_some();
-            if escaped {
-                unwind_io(shadow.as_mut(), result.pending_io);
-            }
-            steps.push(ProbeStep {
-                command: command.clone(),
-                reply: result.transcript.clone(),
-                location: result.location.as_ref().map(|l| l.number),
-                world: WorldPrint::of(&**shadow),
-                quit: result.quit,
-                escaped,
-            });
+        if self.inflight == Some(answer.token) {
+            self.inflight = None;
         }
+    }
 
-        // A shadow the probe QUIT is dead, and restoring memory under it does
-        // not bring it back — the next `submit` would return nothing and the
-        // run after this one would silently read every reply as empty. Throw it
-        // away and let the next question boot a fresh one. (Found by `quti` on
-        // a Scott story: the shadow quit, and the very next offer went unvetted
-        // with no sign anything was wrong.)
-        if steps.iter().any(|s| s.quit) {
-            self.shadow = None;
-        } else {
-            // Otherwise leave the shadow on the snapshot rather than on the last
-            // probe's aftermath, so a shadow that is never asked again is
-            // holding a state the live game actually reached.
-            let _ = shadow.restore_state(&save);
-            let _ = shadow.take_transcript();
-        }
-
-        // A run that ran out of budget is a run whose caller cannot use the
-        // answer, and the next one will overrun in the same place. Latch it.
-        if overran {
-            self.too_slow = true;
-        }
-
-        self.spent += started.elapsed();
-        (!steps.is_empty()).then_some(ProbeRun { baseline, steps })
+    /// Ask and wait — the synchronous shape, kept for measurement harnesses and
+    /// for tests that want one answer and no event loop.
+    ///
+    /// Nothing in the app calls this: an offer asks with [`ask`](Self::ask) and
+    /// collects with [`poll`](Self::poll), which is the entire point of SQ-1124.
+    pub fn run(&mut self, live: &dyn Engine, commands: &[String]) -> Option<ProbeRun> {
+        self.ask(live, commands)?;
+        self.settle()?.run
     }
 }
+
+/// The worker thread: owns the shadow for the life of the session, and is the
+/// only thing that ever touches it.
+///
+/// Exits when the sender is dropped, which is what `arm` (re-arming) and dropping
+/// the [`ShadowProbe`] both do.
+fn shadow_worker(recipe: ShadowRecipe, jobs: mpsc::Receiver<Job>, answers: mpsc::Sender<Answer>) {
+    let mut shadow: Option<Box<dyn Engine>> = None;
+    while let Ok(job) = jobs.recv() {
+        let started = Instant::now();
+        let mut probes = 0u32;
+        let answer = match serve(&recipe, &mut shadow, &job, &mut probes) {
+            Ok(run) => Answer {
+                token: job.token,
+                run,
+                broken: false,
+                probes,
+                spent: started.elapsed(),
+            },
+            Err(()) => {
+                shadow = None;
+                Answer {
+                    token: job.token,
+                    run: None,
+                    broken: true,
+                    probes,
+                    spent: started.elapsed(),
+                }
+            }
+        };
+        if answers.send(answer).is_err() {
+            return; // nobody is listening any more
+        }
+    }
+}
+
+/// Run one job in the shadow, booting it first if this is the first question.
+///
+/// `Err(())` is "there is no usable shadow" — the boot failed, or it would not
+/// take the live state — which disables the seam. `Ok(None)` is "nothing to
+/// report", which does not.
+fn serve(
+    recipe: &ShadowRecipe,
+    shadow: &mut Option<Box<dyn Engine>>,
+    job: &Job,
+    probes: &mut u32,
+) -> Result<Option<ProbeRun>, ()> {
+    if shadow.is_none() {
+        *shadow = Some(boot_shadow(recipe).map_err(|_| ())?);
+    }
+    let engine = shadow.as_mut().ok_or(())?;
+
+    let mut steps = Vec::with_capacity(job.commands.len());
+    for command in &job.commands {
+        if engine.restore_state(&job.save).is_err() {
+            // A shadow that will not take the live state is no shadow.
+            return Err(());
+        }
+        let _ = engine.take_transcript();
+        let _ = engine.take_transcript_elems();
+        let result = engine.submit(command);
+        *probes += 1;
+        // ISOLATION. Nothing typed in here may reach a file. A game that
+        // suspends for its own `@save`/`@restore`, or asks Glk for a
+        // filename, is answered "that failed" so the VM unwinds inside the
+        // shadow, and the step is thrown away.
+        let escaped = result.pending_io.is_some() || engine.pending_filename().is_some();
+        if escaped {
+            unwind_io(engine.as_mut(), result.pending_io);
+        }
+        steps.push(ProbeStep {
+            command: command.clone(),
+            reply: result.transcript.clone(),
+            location: result.location.as_ref().map(|l| l.number),
+            world: WorldPrint::of(&**engine),
+            quit: result.quit,
+            escaped,
+        });
+    }
+
+    // A shadow the probe QUIT is dead, and restoring memory under it does
+    // not bring it back — the next `submit` would return nothing and the
+    // run after this one would silently read every reply as empty. Throw it
+    // away and let the next question boot a fresh one. (Found by `quti` on
+    // a Scott story: the shadow quit, and the very next offer went unvetted
+    // with no sign anything was wrong.)
+    if steps.iter().any(|s| s.quit) {
+        *shadow = None;
+    } else {
+        // Otherwise leave the shadow on the snapshot rather than on the last
+        // probe's aftermath, so a shadow that is never asked again is
+        // holding a state the live game actually reached.
+        let _ = engine.restore_state(&job.save);
+        let _ = engine.take_transcript();
+    }
+
+    Ok((!steps.is_empty()).then_some(ProbeRun { baseline: job.baseline, steps }))
+}
+
 
 /// Answer whatever host I/O the shadow suspended on with a failure, so the VM
 /// resumes and unwinds *inside* the shadow instead of sitting suspended.
@@ -541,10 +705,19 @@ fn unwind_io(shadow: &mut dyn Engine, io: Option<crate::session::PendingIo>) {
 
 /// Boot a silent, disposable engine for the same story.
 ///
-/// Everything that could reach outside the process is off: no sound, no
-/// graphics, no Blorb, no persistent store (an empty `game_dir`, so the game's
-/// own fixed-name Glk saves auto-fail) and an empty file VFS, so nothing the
-/// live session cached is visible and nothing the shadow writes survives it.
+/// Everything that could WRITE outside the process is off: no sound, no
+/// graphics, no Blorb, and a **read-only** persistent store, so the game's own
+/// fixed-name Glk saves are answered "that failed" and nothing the shadow does
+/// survives it.
+///
+/// What it may READ is the live game's own persistent data, and that is
+/// SQ-1124's boot fix (see [`ShadowRecipe::store`]). SQ-1121 booted with an
+/// empty store and an empty VFS, which is not "isolated" so much as "a different
+/// launch of the story": Counterfeit Monkey then re-ran the initialisation the
+/// live session had already skipped, and the seam wrote the whole story off as
+/// too slow to probe. Reading the store costs nothing and is not a leak — the
+/// data is this very game's, and the shadow is about to have the live snapshot
+/// restored over it anyway.
 fn boot_shadow(recipe: &ShadowRecipe) -> Result<Box<dyn Engine>, String> {
     match crate::hints::extract_story(recipe.story_bytes.as_ref().clone())
         .map_err(|e| e.to_string())?
@@ -565,16 +738,14 @@ fn boot_shadow(recipe: &ShadowRecipe) -> Result<Box<dyn Engine>, String> {
             Ok(Box::new(s))
         }
         crate::hints::LoadedStory::Glulx(bytes) => {
-            let s = crate::glulx_session::GlulxSession::new(
+            let s = crate::glulx_session::GlulxSession::new_shadow(
+                recipe.store.clone(),
                 bytes,
                 recipe.screen.0,
                 recipe.screen.1,
                 recipe.acceleration,
-                false, // graphics
-                false, // sound
-                (8, 16),
-                None,  // no picture Blorb
-                &[],   // empty VFS: no sidecar, live or otherwise
+                &recipe.vfs_bytes,
+                recipe.random_seed,
             )
             .map_err(|e| format!("{e:?}"))?;
             Ok(Box::new(s))

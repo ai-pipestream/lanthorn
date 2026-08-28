@@ -112,9 +112,62 @@ pub struct GlulxSession {
     /// [`Engine::set_strip_prompt`].
     strip_prompt: bool,
     /// The per-story persistent store for the game's OWN fixed-name saves
-    /// (`create_by_name`). Empty = no store (game-auto saves auto-fail). See
-    /// [`drive_auto`].
-    game_dir: std::path::PathBuf,
+    /// (`create_by_name`), and whether this session may write to it. Empty = no
+    /// store (game-auto saves auto-fail). See [`drive_auto`] and [`GameStore`].
+    store: GameStore,
+}
+
+/// Where a drive services the game's own fixed-name (`create_by_name`) saves,
+/// and whether this session may WRITE there.
+///
+/// The directory and the permission are one subject and travel as one value
+/// (CLAUDE.md's refactoring policy): a caller that supplied the path and forgot
+/// the flag would get a session that silently writes into a store it was only
+/// ever meant to read, and nothing downstream could tell.
+///
+/// Three shapes, and the third is what SQ-1124 added. A launched game gets a
+/// [`writable`](GameStore::writable) store; a test gets [`none`](GameStore::none)
+/// and the game's own saves auto-fail; a **shadow** ([`crate::probe`]) gets
+/// [`read_only`](GameStore::read_only) — it may READ the live game's init cache,
+/// which is the difference between Counterfeit Monkey's shadow booting in a
+/// fraction of a second and re-running its whole initialisation, and it may write
+/// nothing at all.
+#[derive(Clone, Debug, Default)]
+pub struct GameStore {
+    dir: std::path::PathBuf,
+    writable: bool,
+}
+
+impl GameStore {
+    /// A store the game may read and write — a launched session.
+    pub fn writable(dir: std::path::PathBuf) -> GameStore {
+        GameStore { dir, writable: true }
+    }
+
+    /// A store the game may READ and never write — a shadow.
+    pub fn read_only(dir: std::path::PathBuf) -> GameStore {
+        GameStore { dir, writable: false }
+    }
+
+    /// No store at all: the game's own fixed-name saves auto-fail.
+    pub fn none() -> GameStore {
+        GameStore::default()
+    }
+
+    /// The directory, or an empty path when there is no store.
+    fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// True when there is no store configured.
+    fn absent(&self) -> bool {
+        self.dir.as_os_str().is_empty()
+    }
+
+    /// True when this session may write into the store.
+    fn may_write(&self) -> bool {
+        self.writable && !self.absent()
+    }
 }
 
 /// Wall-clock budget for a single drive (one turn's worth of execution). A
@@ -196,25 +249,19 @@ fn drive(machine: &mut Machine) -> DriveStop {
     }
 }
 
-/// Drive to a player-facing stop, transparently servicing the game's OWN
-/// (`create_by_name`) `@save`/`@restore` against `game_dir` — no host UI. A
-/// game-managed `@save` writes `<game_dir>/<name>.qzl`; a game-managed
-/// `@restore` reads it if present, else fails cleanly (so a first run runs the
-/// game's init). Only the player's SAVE/RESTORE verb (`create_by_prompt`), or
-/// any save when no store is configured (`game_dir` empty), bubbles up as
-/// `DriveStop::Save`/`Restore`.
 /// Seed the machine's host-managed SavedGame existence index from every
-/// `<game_dir>/*.qzl` on disk (raw basename minus the `.qzl` suffix, matching
+/// `<store>/*.qzl` on disk (raw basename minus the `.qzl` suffix, matching
 /// how [`drive_auto`] writes and how the index is keyed), so a `create_by_name`
 /// game probing `glk_fileref_does_file_exist` before `@restore` sees its save
-/// across launches (SQ-0301). No-op when `game_dir` is empty (the no-store
-/// path) or unreadable. Over-seeding player-save `.qzl` names is inert — a game
-/// only ever probes names it created.
-fn seed_saved_games(machine: &mut Machine, game_dir: &std::path::Path) {
-    if game_dir.as_os_str().is_empty() {
+/// across launches (SQ-0301). No-op when there is no store, or it is unreadable.
+/// Over-seeding player-save `.qzl` names is inert — a game only ever probes names
+/// it created. Runs for a READ-ONLY store too: a shadow must see the cache it is
+/// about to restore, or it never asks for it.
+fn seed_saved_games(machine: &mut Machine, store: &GameStore) {
+    if store.absent() {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(game_dir) else {
+    let Ok(entries) = std::fs::read_dir(store.dir()) else {
         return;
     };
     for entry in entries.flatten() {
@@ -230,7 +277,14 @@ fn seed_saved_games(machine: &mut Machine, game_dir: &std::path::Path) {
     }
 }
 
-fn drive_auto(machine: &mut Machine, game_dir: &std::path::Path) -> DriveStop {
+/// Drive to a player-facing stop, transparently servicing the game's OWN
+/// (`create_by_name`) `@save`/`@restore` against `store` — no host UI. A
+/// game-managed `@save` writes `<store>/<name>.qzl`; a game-managed `@restore`
+/// reads it if present, else fails cleanly (so a first run runs the game's init).
+/// Only the player's SAVE/RESTORE verb (`create_by_prompt`), or any save when
+/// there is no store, bubbles up as `DriveStop::Save`/`Restore`. A read-only
+/// store reads as usual and answers every write with a clean failure.
+fn drive_auto(machine: &mut Machine, store: &GameStore) -> DriveStop {
     loop {
         let stop = drive(machine);
         let restore = match stop {
@@ -241,19 +295,26 @@ fn drive_auto(machine: &mut Machine, game_dir: &std::path::Path) -> DriveStop {
         let req = machine.pending_saveload_request().unwrap_or_default();
         // The player's verb (by_prompt), an unknown target, or no store: let the
         // caller decide (host UI in a turn, auto-fail in a non-interactive drive).
-        if req.by_prompt || req.name.is_empty() || game_dir.as_os_str().is_empty() {
+        if req.by_prompt || req.name.is_empty() || store.absent() {
             return stop;
         }
-        let path = game_dir.join(format!("{}.qzl", req.name));
+        let path = store.dir().join(format!("{}.qzl", req.name));
         if restore {
             match std::fs::read(&path) {
                 Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {}
                 _ => machine.complete_restore_failure(),
             }
-        } else {
-            let ok = std::fs::create_dir_all(game_dir).is_ok()
+        } else if store.may_write() {
+            let ok = std::fs::create_dir_all(store.dir()).is_ok()
                 && std::fs::write(&path, machine.save_quetzal()).is_ok();
             machine.complete_save(ok);
+        } else {
+            // A READ-ONLY store (a shadow). The game is told its own save failed,
+            // which it already handles — a first run of any story gets exactly
+            // that answer — and nothing reaches the disk. Reads above are still
+            // served, which is the whole point: the cache the live session wrote
+            // is what makes the shadow's boot cheap.
+            machine.complete_save(false);
         }
         // Keep driving: the op may chain into another game-managed save/restore.
     }
@@ -264,9 +325,9 @@ fn drive_auto(machine: &mut Machine, game_dir: &std::path::Path) -> DriveStop {
 /// resize, sound-notify) is auto-failed — those paths have no UI to prompt the
 /// player, and leaving the VM suspended would wedge the next turn. The game's
 /// OWN fixed-name saves are serviced silently by [`drive_auto`] first.
-fn drive_settled(machine: &mut Machine, game_dir: &std::path::Path) -> (InputKind, bool) {
+fn drive_settled(machine: &mut Machine, store: &GameStore) -> (InputKind, bool) {
     loop {
-        match drive_auto(machine, game_dir) {
+        match drive_auto(machine, store) {
             DriveStop::Input(k) => return (k, false),
             DriveStop::Event => return (InputKind::Event, false),
             DriveStop::Quit => return (InputKind::Line, true),
@@ -337,6 +398,73 @@ impl GlulxSession {
         debug: bool,
         random_seed: Option<u32>,
     ) -> Result<GlulxSession, GError> {
+        let store = if game_dir.as_os_str().is_empty() {
+            GameStore::none()
+        } else {
+            GameStore::writable(game_dir)
+        };
+        Self::new_with_store(
+            store, image, cols, rows, acceleration, graphics_enabled, sound_enabled,
+            borderless, char_px, pict_blorb, vfs_bytes, theme, debug, random_seed,
+        )
+    }
+
+    /// A silent copy of a launched game, for [`crate::probe`] — the same
+    /// constructor with a **read-only** persistent store.
+    ///
+    /// This is the whole of SQ-1124's boot fix, and it is one word. A shadow
+    /// booted with no store re-runs the story's initialisation from cold, which
+    /// on Counterfeit Monkey is millions of opcodes even accelerated; booted
+    /// against the live game's own store it takes the same `@restore`-the-init-
+    /// cache path the live session took at launch (the CHANGELOG's "5.4s →
+    /// 0.76s from the second launch"), and reaches a prompt in a fraction of the
+    /// time. The store is read-only, so the shadow can never write the cache it
+    /// reads, nor anything else — see [`GameStore`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_shadow(
+        game_dir: std::path::PathBuf,
+        image: Vec<u8>,
+        cols: u32,
+        rows: u32,
+        acceleration: bool,
+        vfs_bytes: &[u8],
+        random_seed: Option<u32>,
+    ) -> Result<GlulxSession, GError> {
+        Self::new_with_store(
+            GameStore::read_only(game_dir),
+            image,
+            cols,
+            rows,
+            acceleration,
+            false, // graphics
+            false, // sound
+            false, // borderless
+            (8, 16),
+            None, // no picture Blorb
+            vfs_bytes,
+            [[(None, None); 11]; 2],
+            false, // no execution trace
+            random_seed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_store(
+        store: GameStore,
+        image: Vec<u8>,
+        cols: u32,
+        rows: u32,
+        acceleration: bool,
+        graphics_enabled: bool,
+        sound_enabled: bool,
+        borderless: bool,
+        char_px: (u32, u32),
+        pict_blorb: Option<blorb::Blorb>,
+        vfs_bytes: &[u8],
+        theme: crate::glk_backend::GlkStylePairs,
+        debug: bool,
+        random_seed: Option<u32>,
+    ) -> Result<GlulxSession, GError> {
         let mem = Memory::new(image)?;
         let picts = crate::graphics::PictSource::new(pict_blorb);
         let mut backend = Box::new(AppGlk::with_graphics(cols, rows, char_px, picts));
@@ -363,13 +491,13 @@ impl GlulxSession {
         // existence index is session-transient, so a create_by_name game probing
         // glk_fileref_does_file_exist during init would otherwise never see its
         // own on-disk save across launches (SQ-0301).
-        seed_saved_games(&mut machine, &game_dir);
+        seed_saved_games(&mut machine, &store);
         // `--debug` (SQ-0465): enable execution tracing BEFORE the boot drive so
         // the game's initialisation code is captured in the coverage set — a
         // later `/debug` toggle cannot see the boot PCs. Off by default, so a
         // normal launch keeps the single-branch hot loop with zero trace work.
         machine.trace_exec = debug;
-        let (pending, quit) = drive_settled(&mut machine, &game_dir);
+        let (pending, quit) = drive_settled(&mut machine, &store);
         let mut session = GlulxSession {
             machine,
             pending,
@@ -385,7 +513,7 @@ impl GlulxSession {
             last_room: None,
             room_lock: crate::glulx_roomlock::RoomLock::new(0, 0),
             strip_prompt: true,
-            game_dir,
+            store,
         };
         session.refresh_screen();
         session.room_lock = match session.remembered_room_global() {
@@ -459,7 +587,7 @@ impl GlulxSession {
         }
         self.set_screen_size(cols, rows);
         self.machine.rearrange();
-        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
         self.pending = pending;
         self.quit = quit;
         self.refresh_screen();
@@ -492,7 +620,7 @@ impl GlulxSession {
         self.deferred_resize = None;
         self.set_screen_size(cols, rows);
         self.machine.rearrange();
-        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
         self.pending = pending;
         self.quit = quit;
     }
@@ -508,7 +636,7 @@ impl GlulxSession {
         if self.game_io_pending() {
             return;
         }
-        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
         self.pending = pending;
         self.quit = quit;
     }
@@ -536,7 +664,7 @@ impl GlulxSession {
     /// `pending`/`quit` left unchanged, since the game is mid-turn); the run loop
     /// performs the file I/O and calls `resume_save`/`resume_restore`.
     fn drive_turn(&mut self) {
-        match drive_auto(&mut self.machine, &self.game_dir) {
+        match drive_auto(&mut self.machine, &self.store) {
             DriveStop::Input(k) => {
                 self.pending = k;
                 self.quit = false;
@@ -737,7 +865,7 @@ impl GlulxSession {
 
     /// Where the learned `location` address is remembered for this story.
     fn room_global_path(&self) -> Option<std::path::PathBuf> {
-        (!self.game_dir.as_os_str().is_empty()).then(|| self.game_dir.join("room-global"))
+        (!self.store.absent()).then(|| self.store.dir().join("room-global"))
     }
 
     /// The address learned in an earlier run of this story, if any.
@@ -758,6 +886,9 @@ impl GlulxSession {
     /// Remember a freshly learned address for later runs. Best-effort: a story
     /// with no writable directory simply re-learns next time.
     fn remember_room_global(&self, addr: u32) {
+        if !self.store.may_write() {
+            return;
+        }
         if let Some(p) = self.room_global_path() {
             if let Some(dir) = p.parent() {
                 let _ = std::fs::create_dir_all(dir);
@@ -1210,7 +1341,7 @@ impl Engine for GlulxSession {
             if self.pending_filename.take().is_some() {
                 self.machine.supply_filename(None);
             }
-            let _ = drive_settled(&mut self.machine, &self.game_dir);
+            let _ = drive_settled(&mut self.machine, &self.store);
             // The abandoned verb's tail ("Failed.") describes a run that is being
             // replaced and would land above the archive's own restored scrollback.
             let _ = self.take_transcript_elems();
@@ -1230,7 +1361,7 @@ impl Engine for GlulxSession {
         // line prompt, and `pending` is what the app renders its input bar from.
         // The machine is parked at its select (guaranteed by the block above), so
         // this re-reports the restored suspension without executing anything.
-        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
         self.pending = pending;
         self.quit = quit;
         // A size queued while the dialog was open would otherwise be stranded: the
@@ -1271,7 +1402,7 @@ impl Engine for GlulxSession {
         // Run the save-verb tail out to the next prompt, so the session is
         // re-armed at a clean input request rather than parked mid-verb
         // (mirrors the Z-machine's `restore_game_save`).
-        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
         self.pending = pending;
         self.quit = quit;
         self.pending_io = None;
