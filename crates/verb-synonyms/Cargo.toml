@@ -1,0 +1,10 @@
+[package]
+name = "verb-synonyms"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
