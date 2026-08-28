@@ -939,6 +939,34 @@ pub trait Engine {
         }
     }
 
+    // ── the story's own vocabulary (SQ-1041) ──
+
+    /// What the story's parser accepts — its verbs and their sentence shapes,
+    /// its whole dictionary, and how much of a word that dictionary keeps.
+    ///
+    /// Read ONCE a session and cached (`crate::vocab::VocabState`): the tables
+    /// are static, so nothing a turn does can change an answer. `None` — the
+    /// default — for an engine with nothing to give and for a story with no
+    /// readable grammar, a menu-driven Version 6 game being the real example,
+    /// and it means the vocabulary offer stays silent for the whole session.
+    fn story_vocabulary(&self) -> Option<crate::vocab::StoryVocabulary> {
+        None
+    }
+
+    /// Does the story's own dictionary hold this word — asked of the ENGINE, so
+    /// the story's key truncation is applied the way the story applies it?
+    ///
+    /// `None` — the default — means "I have no lookup of my own; use the
+    /// snapshot's". That is the right answer for Glulx and for a Scott Adams
+    /// database, both of which truncate by plain characters, so
+    /// [`crate::vocab::StoryVocabulary::knows`] is exact for them. The Z-machine
+    /// truncates by Z-CHARACTERS — `flashlight` is stored as `flashl`, and a
+    /// character outside alphabet A0 costs more than one of them — so only its
+    /// own encoder can answer, and `GameSession` overrides this.
+    fn knows_word(&self, _word: &str) -> Option<bool> {
+        None
+    }
+
     // ── capabilities / escape hatch ──
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;

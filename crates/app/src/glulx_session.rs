@@ -1346,6 +1346,25 @@ impl Engine for GlulxSession {
         self.machine.seed_ever_executed(pcs);
     }
 
+    /// The story's grammar and dictionary, as the engine-neutral snapshot.
+    ///
+    /// `None` when the Glulx grammar tables cannot be located, or when the
+    /// dictionary is Unicode-valued — `gvm::grammar` refuses both, and there is
+    /// nothing to offer from a table we could not read.
+    fn story_vocabulary(&self) -> Option<crate::vocab::StoryVocabulary> {
+        let mem = self.machine.mem();
+        let grammar = gvm::grammar::Grammar::load(mem).ok()?;
+        let words = grammar
+            .words()
+            .map(|w| (w.to_string(), grammar.roles(w).unwrap_or_default()))
+            .collect();
+        let preps = grammar.prepositions().iter().cloned().collect();
+        // Glulx truncates by plain characters, so `DICT_WORD_SIZE` is a
+        // character count and the snapshot's own `knows` is exact.
+        let key_len = grammar.tables().dict_word_size as usize;
+        Some(crate::vocab::StoryVocabulary::new(grammar.verbs().to_vec(), words, preps, key_len))
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

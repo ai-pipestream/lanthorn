@@ -143,6 +143,16 @@ pub(crate) fn finish_command_turn(
         state.push_transcript(note);
     }
 
+    // The story's own vocabulary, when the command held a word the story cannot
+    // have understood (SQ-1041). HERE, after the game's reply is in the
+    // transcript, so the offer reads underneath the refusal it answers rather
+    // than above it — and only for a turn that printed something, because a turn
+    // that printed nothing rejected nothing. Silence is the usual outcome; see
+    // `app::vocab` for the four gates it has to pass first.
+    let printed = !silent
+        && (!result.transcript.trim().is_empty() || !result.transcript_elems.is_empty());
+    app::vocab::offer_vocabulary(state, &*session, cmd, printed);
+
     // Capture room + connection counts before apply_turn, to detect
     // whether THIS turn actually changed the graph (a non-mutating
     // command like "look" leaves both unchanged).

@@ -375,6 +375,59 @@ impl Engine for ScottSession {
         Some(&self.vm)
     }
 
+    /// A two-word parser's vocabulary, in the same neutral shape the Z-machine
+    /// and Glulx answer in.
+    ///
+    /// There is no grammar module to read and none is needed: a Scott Adams
+    /// game's whole grammar is `VERB NOUN`, with the noun optional, so every verb
+    /// gets those two lines and the action number is the verb's own index. The
+    /// vocabulary lists carry synonyms as `*`-prefixed entries following the
+    /// canonical word (`Database::match_verb` resolves them that way), which is
+    /// exactly `Verb::words` — the first spelling, then its synonyms.
+    fn story_vocabulary(&self) -> Option<crate::vocab::StoryVocabulary> {
+        use grammar_model::{NounKind, Slot, SyntaxLine, Token, Verb, WordRoles};
+        let db = self.vm.database();
+        let mut words: std::collections::BTreeMap<String, WordRoles> =
+            std::collections::BTreeMap::new();
+        let mut verbs: Vec<Verb> = Vec::new();
+        for (i, entry) in db.verbs.iter().enumerate() {
+            let word = entry.trim_start_matches('*').trim().to_lowercase();
+            // A database pads its vocabulary lists with `.` for a slot no word
+            // reaches; it is a placeholder, not a word somebody could type.
+            if !word.chars().any(char::is_alphanumeric) {
+                continue;
+            }
+            words.entry(word.clone()).or_default().verb = true;
+            if entry.starts_with('*') {
+                // A synonym of the nearest preceding canonical verb.
+                if let Some(v) = verbs.last_mut() {
+                    v.words.push(word);
+                }
+            } else {
+                let lines = vec![
+                    SyntaxLine::new(i as u16, false, Vec::new()),
+                    SyntaxLine::new(i as u16, false, vec![Slot::one(Token::Noun(NounKind::Noun))]),
+                ];
+                verbs.push(Verb::new(i as u32, 0, vec![word], lines));
+            }
+        }
+        for entry in &db.nouns {
+            let word = entry.trim_start_matches('*').trim().to_lowercase();
+            if word.chars().any(char::is_alphanumeric) {
+                words.entry(word).or_default().noun = true;
+            }
+        }
+        // `word_length` is a character count (`Database::match_verb` truncates
+        // both sides to it), and 0 there means "compare whole words" — which is
+        // what the snapshot's own 0 means too.
+        Some(crate::vocab::StoryVocabulary::new(
+            verbs,
+            words,
+            std::collections::BTreeSet::new(),
+            db.word_length,
+        ))
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

@@ -354,4 +354,5 @@ pub mod theme;
 pub mod tidy;
 pub mod trace;
 pub mod vfs_store;
+pub mod vocab;
 pub mod watch;

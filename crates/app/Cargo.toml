@@ -24,6 +24,9 @@ cli-host = { path = "../cli-host" }
 zvm = { path = "../zvm" }
 gvm = { path = "../gvm" }
 scott = { path = "../scott" }
+# SQ-1041: the shape of what a story's parser accepts, produced by both grammar
+# readers, so the vocabulary offer is one piece of code for every engine.
+grammar-model = { path = "../grammar-model" }
 mapper = { path = "../mapper" }
 blorb = { path = "../blorb" }
 audio = { path = "../audio" }

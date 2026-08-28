@@ -16,6 +16,9 @@ mod fixture_paths;
 
 #[path = "suites/assist_voice.rs"]
 mod assist_voice;
+
+#[path = "suites/vocabulary_offer.rs"]
+mod vocabulary_offer;
 #[path = "suites/cell_dump_command.rs"]
 mod cell_dump_command;
 #[path = "suites/death_turn_tried.rs"]
