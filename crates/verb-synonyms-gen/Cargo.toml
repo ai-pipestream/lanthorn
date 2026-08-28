@@ -1,0 +1,28 @@
+[package]
+name = "verb-synonyms-gen"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+publish = false
+
+# The offline generator behind `crates/verb-synonyms/data/`. A development tool:
+# it is never linked into `lanthorn`, and it exists so the shipped table can be
+# rebuilt from its inputs rather than being an unreproducible blob.
+[[bin]]
+name = "verb-synonyms-gen"
+path = "src/main.rs"
+
+[lib]
+name = "verb_synonyms_gen"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+# Story readers, for the `harvest` step only. Path deps, no external crates:
+# nothing here needs one, and keeping it that way means the generator builds
+# anywhere the workspace does.
+zvm = { path = "../zvm" }
+gvm = { path = "../gvm" }
+scott = { path = "../scott" }
+blorb = { path = "../blorb" }
+grammar-model = { path = "../grammar-model" }
