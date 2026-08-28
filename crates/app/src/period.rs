@@ -283,8 +283,10 @@ fn painted(look: &PeriodLook) -> [(&'static str, &'static str, Style); 10] {
         ("transcript_warning", "alert", page),
         // SQ-1045: the assist voice sits in the same stream as the meta lines and
         // has to take the machine's page with them, or an assist under a period
-        // look is the one line still wearing the host theme's ground.
-        ("transcript_assist", "accent", page),
+        // look is the one line still wearing the host theme's ground. Both tones
+        // ride `alert` — the yellow slot — and separate by weight, so the role
+        // named here is the same one twice.
+        ("transcript_assist", "alert", page),
         ("transcript_assist_caution", "alert", page),
     ]
 }

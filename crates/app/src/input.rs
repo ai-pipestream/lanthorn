@@ -4247,6 +4247,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         24 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_v6_render(&mut cs.working.v6_render, 1); } }
         25 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
         26 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_pixel_lock = !cs.working.v6_pixel_lock; } }
+        27 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.guidance = !cs.working.guidance; } }
         _ => {}
     }
 }
@@ -4293,6 +4294,9 @@ fn one_run_key_for_row(row: usize) -> Option<&'static str> {
         // is the user speaking about every game, so it ends the hold and the value
         // persists to the global config like any other setting.
         26 => Some(keys::V6_PIXEL_LOCK),
+        // SQ-1045: `--guidance off` pins the key for the launch; editing the row
+        // is the user overruling their own flag, so it ends the hold and persists.
+        27 => Some(keys::GUIDANCE),
         _ => None,
     }
 }
@@ -4335,6 +4339,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         23 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
         24 => config_cycle_v6_render(&mut working.v6_render, delta),
         26 => working.v6_pixel_lock = !working.v6_pixel_lock,
+        27 => working.guidance = !working.guidance,
         _ => {}
     }
 }
@@ -6125,14 +6130,16 @@ mod tests {
         // a bracketed toast that expires before advice can be acted on.
         let mut s = AppState::default();
         s.config.record_turn_history = true;
-        s.assist_preamble_shown = true; // the once-per-session flourish has its own case
+        s.assist_preamble_shown = true; // the once-per-session introduction has its own case
         apply_action(Action::OpenHistory, &mut s, &mut m);
         assert!(!s.overlays.history_prompt, "no prompt when the setting is already on");
         let told = s.transcript.last().cloned().unwrap_or_default();
-        // (The kind tag, and that it is what `/filter` separates on, is
-        // `assist_voice`'s business — naming the variant here would trip its
-        // one-producer guard, which is the guard doing its job.)
-        assert!(told.starts_with(crate::assist::PREFIX), "the player is told why nothing opened: {told:?}");
+        // The line carries no marker of its own — on screen the mark in the gutter
+        // is what identifies it, and the kind tag is what `/filter` and the
+        // exporter separate on. Both are `assist_voice`'s business; naming the
+        // variant here would trip its one-producer guard, which is the guard doing
+        // its job.
+        assert!(told.contains("rewind"), "the player is told why nothing opened: {told:?}");
 
         // History present → open the replay, whatever the setting says.
         let mut s = AppState::default();

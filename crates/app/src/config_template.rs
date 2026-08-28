@@ -151,6 +151,16 @@ const INTERFACE: &[Row] = &[
         ],
     ),
     d("command_prefix", "\"/\"", &["The character that routes a line to a slash command."]),
+    d(
+        "guidance",
+        "true",
+        &[
+            "Lanthorn's Guiding Light: help offered while you play — the words the",
+            "parser knows, a completed noun, a caution before a move that cannot be",
+            "undone. Marked in the margin with its own glyph rather than in the text;",
+            "\"gutter.assist\" in style.toml sets the mark. False for silence.",
+        ],
+    ),
     d("show_status_bar", "true", &["Show the status/score bar across the top of the story pane."]),
     d("show_room_numbers", "false", &["Show room numbers (#id) inside Boxes-zoom room boxes."]),
     d("split_ratio", "50", &["The story pane's share of the story/map split, as a percentage."]),

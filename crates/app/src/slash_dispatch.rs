@@ -510,11 +510,13 @@ pub(crate) fn dispatch_slash_outcome(
             state.set_status(format!("filter: {}", label));
         }
         SlashOutcome::Export(dest) => {
-            let lines: Vec<String> = state
-                .visible_transcript_indices()
-                .into_iter()
-                .map(|i| state.transcript[i].clone())
-                .collect();
+            // The VISIBLE transcript as a FILE should carry it: an assist
+            // identifies itself on screen with the mark in its gutter, and a file
+            // has no gutter, no colour and nothing a screen reader can voice, so
+            // `Lanthorn: ` goes back on the front of every line that is ours
+            // (SQ-1045). `AppState` owns that rule, next to the door the lines
+            // came through.
+            let lines: Vec<String> = state.transcript_for_export();
             match export_transcript(&lines, dest.as_deref(), game_dir) {
                 Ok(path) => state.set_status(format!("exported: {}", path.display())),
                 Err(e)   => state.set_status(format!("export failed: {}", e)),
@@ -593,6 +595,24 @@ pub(crate) fn dispatch_slash_outcome(
                 }
                 Err(e) => state.set_status(format!("set-game-borders failed: {e}")),
             }
+        }
+        SlashOutcome::SetGuidance(opt) => {
+            // SQ-1045: Lanthorn's Guiding Light, on or off for this session. Bare
+            // toggles, as `set-v6-pixel-lock` does; the settings screen is the
+            // persistence path, which is where the introduction line sends the
+            // player who wants it off for good.
+            let next = opt.unwrap_or(!state.config.guidance);
+            state.config.guidance = next;
+            // Said as META, not as an assist: this is a report of something
+            // lanthorn did, and an assist announcing that assists are now off
+            // would be the one line the switch could not silence.
+            state.push_transcript_internal(
+                &format!(
+                    "Lanthorn's Guiding Light: {} (session only — the settings screen persists it)",
+                    if next { "on" } else { "off" }
+                ),
+                TranscriptKind::Meta,
+            );
         }
         SlashOutcome::SetV6Render(opt) => {
             // Live, session-only switch for testing the two v6 looks; the

@@ -1,4 +1,4 @@
-//! The assist voice, and the two things that keep it honest (SQ-1045).
+//! Lanthorn's Guiding Light, and the things that keep it honest (SQ-1045).
 //!
 //! Five features print through this register — SQ-1041's vocabulary offer,
 //! SQ-1042's completion, SQ-1043's irreversibility caution, SQ-1044's recap, and
@@ -10,37 +10,41 @@
 //! blame the game. Infocom's parser speaks in brackets (`[I don't know the word
 //! "illuminate".]`), so a helper in the same stream is confusable by default.
 //!
-//! Two mechanisms, and the cases below prove each rather than asserting it:
+//! Attribution is carried differently on each surface, and nobody is on two of
+//! them at once. The cases below prove each rather than asserting it:
 //!
 //! * **`TranscriptKind::Assist`** — the line is told from the story by its KIND,
-//!   which means the test holds even against a story that prints our own marker
-//!   verbatim (`an_assist_is_told_from_the_story_by_its_kind_not_its_text`), and
-//!   `/filter story` can hide every assist for a player who wants 1982.
-//! * **the marker in the text** — `Lanthorn: `, applied by
-//!   `AppState::push_assist` and by nothing else, because the kind does not
-//!   survive a copy-paste, a saved transcript, a screenshot in a bug report, or a
-//!   screen reader, to which no colour or gutter glyph is audible.
+//!   which holds even against a story that prints our own words verbatim
+//!   (`an_assist_is_told_from_the_story_by_its_kind_not_its_text`), and lets
+//!   `/filter story` hide every assist for a player who wants 1982.
+//! * **the mark, on screen** — the gutter glyph IS the icon
+//!   (`symbols.assist_gutter`, `●` by default), and the text carries no prefix at
+//!   all. The introduction shows the configured glyph, so a font that lacks it
+//!   fails visibly in the one sentence that explains the mark.
+//! * **the words, in a file** — `AppState::transcript_for_export` puts
+//!   `Lanthorn: ` back on, because a saved transcript has no gutter, no colour and
+//!   nothing a screen reader can voice.
 //!
 //! The source-level case at the bottom is the one that matters most, for the same
 //! reason `palette_lock_discipline` exists: the next four features are written by
-//! someone with no reason to know any of this, and a hand-built `Assist` line
-//! that skips the marker would look perfectly fine in review.
+//! someone with no reason to know any of this, and a hand-built assist line would
+//! look perfectly fine in review.
 
-use app::assist::{Assist, AssistTone, PREAMBLE, PREFIX};
+use app::assist::{Assist, AssistTone, EXPORT_PREFIX, preamble};
 use app::state::{AppState, TranscriptFilter, TranscriptKind};
 
 fn kinds_of(s: &AppState) -> Vec<TranscriptKind> {
     s.transcript_kinds.clone()
 }
 
-/// The whole quest in one case: a story that prints our exact marker is STILL
-/// told apart from an assist, because the separation is the kind and not the
-/// wording. Falsify by tagging the assist `TranscriptKind::Meta` (or `Story`) in
+/// The whole quest in one case: a story that prints our exact words is STILL told
+/// apart from an assist, because the separation is the kind and not the wording.
+/// Falsify by tagging the assist `TranscriptKind::Meta` (or `Story`) in
 /// `push_assist` — the two lines become indistinguishable and this fails.
 #[test]
 fn an_assist_is_told_from_the_story_by_its_kind_not_its_text() {
     let mut s = AppState::default();
-    s.assist_preamble_shown = true; // the flourish has its own case
+    s.assist_preamble_shown = true; // the introduction has its own case
     s.push_assist(&Assist::help("this story knows — light · turn on · burn"));
     let ours = s.transcript.last().cloned().unwrap();
 
@@ -53,6 +57,59 @@ fn an_assist_is_told_from_the_story_by_its_kind_not_its_text() {
     assert_eq!(k[k.len() - 1], TranscriptKind::Story);
 }
 
+/// On screen the line is the caller's words and NOTHING else — the mark in the
+/// gutter is what says whose it is. Falsify by putting the prefix back into
+/// `Assist::lines`: the assist stops matching what was asked for, and a
+/// forty-column pane starts spending ten of them on furniture.
+#[test]
+fn on_screen_an_assist_wears_the_mark_and_not_the_words() {
+    let mut s = AppState::default();
+    s.assist_preamble_shown = true;
+    s.push_assist(&Assist::help("this story knows — light"));
+    assert_eq!(s.transcript.last().unwrap(), "this story knows — light");
+    assert!(
+        !s.transcript.iter().any(|l| l.starts_with(EXPORT_PREFIX)),
+        "no prefix on screen: {:?}",
+        s.transcript
+    );
+
+    // And the mark exists, and is not the glyph Infocom spends on footnotes.
+    assert_eq!(s.symbols.assist_gutter, '●');
+    assert_ne!(s.symbols.assist_gutter, '*', "asterisks are Infocom's footnote marker");
+}
+
+/// A file has no gutter and no colour, so the export puts the words back —
+/// exactly once, on the assist lines and on nothing else.
+#[test]
+fn an_exported_transcript_says_who_was_speaking() {
+    let mut s = AppState::default();
+    s.assist_preamble_shown = true;
+    s.push_transcript_kind("West of House", TranscriptKind::Story);
+    s.push_assist(&Assist::help("this story knows:\nlight · turn on · burn"));
+    s.push_transcript_kind("style reloaded", TranscriptKind::Meta);
+
+    // By kind, not by index: an app-generated line is INSERTED above a trailing
+    // story line in inline-prompt mode, so the order on screen is not the order
+    // these were pushed in (`insert_above_prompt_at`).
+    let out = s.transcript_for_export();
+    assert_eq!(out.len(), s.transcript.len(), "export covers the visible transcript");
+    let at = |k: TranscriptKind| -> Vec<String> {
+        kinds_of(&s)
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| **x == k)
+            .map(|(i, _)| out[i].clone())
+            .collect()
+    };
+    assert_eq!(at(TranscriptKind::Story), vec!["West of House"], "the story's own line is untouched");
+    assert_eq!(at(TranscriptKind::Meta), vec!["style reloaded"], "a slash dump is not ours to attribute this way");
+    assert_eq!(
+        at(TranscriptKind::Assist),
+        vec![format!("{EXPORT_PREFIX}this story knows:"), "  light · turn on · burn".to_string()],
+        "the first line is marked, the continuation hangs rather than being marked twice"
+    );
+}
+
 /// `/filter story` is the player asking for 1982, and 1982 had no assists.
 /// `/filter meta` is the opposite half. Both must partition the same transcript.
 #[test]
@@ -63,10 +120,9 @@ fn the_transcript_filter_separates_assists_from_the_story() {
     s.push_assist(&Assist::help("this story knows — light"));
     s.push_transcript_kind("style reloaded", TranscriptKind::Meta);
 
-    let assist_row = s
-        .transcript
+    let assist_row = kinds_of(&s)
         .iter()
-        .position(|l| l.starts_with(PREFIX))
+        .position(|k| *k == TranscriptKind::Assist)
         .expect("the assist line is in the transcript");
 
     s.transcript_filter = TranscriptFilter::Story;
@@ -81,37 +137,61 @@ fn the_transcript_filter_separates_assists_from_the_story() {
     assert_eq!(s.visible_transcript_indices_from(0).len(), s.transcript.len());
 }
 
-/// The marker is mandatory and never tapers. The flourish above it is what
-/// tapers — once per session, so the twentieth assist of a session is one line.
+/// The introduction fires once a session, above the first assist, and it shows
+/// the glyph ACTUALLY in force — which is what makes it a self-test for a font
+/// that has no glyph for the mark. Falsify by hard-coding `●` in `preamble`: a
+/// user who set `gutter.assist` to something else is then told about a mark they
+/// will never see.
 #[test]
-fn the_flourish_tapers_and_the_marker_never_does() {
+fn the_introduction_fires_once_and_shows_the_mark_in_force() {
     let mut s = AppState::default();
+    s.symbols.assist_gutter = '◈';
     s.push_assist(&Assist::help("first"));
-    assert_eq!(s.transcript[0], PREAMBLE);
-    assert_eq!(s.transcript[1], format!("{PREFIX}first"));
+    assert_eq!(s.transcript[0], preamble('◈'));
+    assert!(s.transcript[0].contains('◈'), "the introduction shows the configured mark");
+    assert!(s.transcript[0].contains("settings"), "and where to turn it off");
+    assert_eq!(s.transcript[1], "first");
 
     for n in 0..20 {
         s.push_assist(&Assist::caution(format!("later {n}")));
     }
-    assert_eq!(s.transcript.iter().filter(|l| l.as_str() == PREAMBLE).count(), 1);
-    assert!(s.transcript[2..].iter().all(|l| l.starts_with(PREFIX)));
+    assert_eq!(
+        s.transcript.iter().filter(|l| l.contains("Guiding Light")).count(),
+        1,
+        "the introduction is once a session"
+    );
     assert!(kinds_of(&s).iter().all(|k| *k == TranscriptKind::Assist));
+}
+
+/// The switch is real, and it is checked at the one door rather than at five call
+/// sites: with guidance off, nothing reaches the transcript at all — not even the
+/// introduction, which would otherwise be the one line the switch cannot silence.
+#[test]
+fn guidance_off_silences_the_whole_set_including_its_introduction() {
+    let mut s = AppState::default();
+    assert!(s.config.guidance, "the light is on by default");
+    s.config.guidance = false;
+    s.push_assist(&Assist::help("this story knows — light"));
+    s.push_assist(&Assist::caution("that cannot be undone."));
+    assert!(s.transcript.is_empty(), "guidance off means silence: {:?}", s.transcript);
+
+    // And back on, the session still owes the player its introduction.
+    s.config.guidance = true;
+    s.push_assist(&Assist::help("this story knows — light"));
+    assert_eq!(s.transcript.len(), 2, "introduction, then the assist: {:?}", s.transcript);
 }
 
 /// Nothing lanthorn says as an assist may wear the parser's `[…]`, and no line of
 /// it may sit flush left where a skimming eye reads it as prose: a continuation
-/// hangs under the marker instead.
+/// hangs under the first line instead.
 #[test]
-fn no_assist_line_is_bracketed_or_flush_left_and_unmarked() {
+fn no_assist_line_is_bracketed_or_a_flush_left_continuation() {
     let mut s = AppState::default();
     s.assist_preamble_shown = true;
     s.push_assist(&Assist::help("this story knows:\nlight · turn on · burn"));
     for line in &s.transcript {
         assert!(!line.starts_with('['), "assist line wears the parser's brackets: {line:?}");
     }
-    // The FIRST line is marked — a rule the indent test below must not be able to
-    // satisfy on its own, or removing the marker entirely would still pass.
-    assert!(s.transcript[0].starts_with(PREFIX), "the first assist line is unmarked: {:?}", s.transcript[0]);
     assert!(
         s.transcript[1..].iter().all(|l| l.starts_with("  ")),
         "a continuation sits flush left where it reads as prose: {:?}",
@@ -120,13 +200,20 @@ fn no_assist_line_is_bracketed_or_flush_left_and_unmarked() {
 }
 
 /// The two tones must actually be two, or SQ-1043's "you cannot undo this" looks
-/// exactly like SQ-1042's completion.
+/// exactly like SQ-1042's completion. They share the yellow slot (`alert`) and
+/// separate by WEIGHT, the way `transcript_crash` separates from
+/// `transcript_warning`, so this pins that they still resolve apart.
 #[test]
 fn the_caution_tone_is_styled_apart_from_the_ordinary_light() {
     let s = AppState::default();
     let help = s.colors.theme.get(AssistTone::Help.selector()).style;
     let caution = s.colors.theme.get(AssistTone::Caution.selector()).style;
     assert_ne!(help, caution, "both tones resolved to the same style");
+    assert_eq!(help.fg, caution.fg, "one slot — the light is yellow either way");
+    assert!(
+        caution.add_modifier.contains(ratatui::style::Modifier::BOLD),
+        "the caution tone is the louder one: {caution:?}"
+    );
     // And both are themeable rather than hard-coded: the selectors exist.
     assert!(help.fg.is_some() && caution.fg.is_some());
 }
@@ -157,16 +244,16 @@ fn app_sources() -> Vec<(String, String)> {
 /// **`AppState::push_assist` is the only door into the assist voice.**
 ///
 /// A caller that tags a line `TranscriptKind::Assist` itself has skipped the
-/// marker, the tone's style and the once-per-session flourish — and produced a
-/// line that is attributable to the CODE but not to a reader, which is the half
-/// that survives a copy-paste and therefore the half that matters. The compiler
-/// cannot catch it (the variant has to be public for the renderer and the filter
-/// to match on it), so it is caught here, at the moment the file is written.
+/// tone's style, the once-per-session introduction, the player's `guidance`
+/// switch, and the export marker that is the only attribution a saved file
+/// carries. The compiler cannot catch it (the variant has to be public for the
+/// renderer and the filter to match on it), so it is caught here, at the moment
+/// the file is written.
 ///
-/// Three files may name the variant, and each for a reason that is not
-/// production of a line: `state.rs` holds the door itself and the `/filter`
-/// bucketing, `assist.rs` documents the register, and `render/transcript.rs` has
-/// to MATCH on it to draw the gutter, reserve the indent and pick the style. A
+/// Three files may name the variant, and each for a reason that is not production
+/// of a line: `state.rs` holds the door itself, the `/filter` bucketing and the
+/// export marking, `assist.rs` documents the register, and `render/transcript.rs`
+/// has to MATCH on it to draw the mark, reserve the indent and pick the style. A
 /// fourth file naming it is a second producer.
 ///
 /// Falsified by adding `TranscriptKind::Assist` to any other file under
@@ -189,19 +276,22 @@ fn push_assist_is_the_only_producer_of_an_assist_line() {
     assert!(
         offenders.is_empty(),
         "these files build an assist line without going through AppState::push_assist, so they \
-         skip the mandatory \"{PREFIX}\" marker: {offenders:?}"
+         skip the tone's style, the introduction, the guidance switch and the \"{EXPORT_PREFIX}\" \
+         export marker: {offenders:?}"
     );
 }
 
 /// The register's constants, checked where the next four lanes will copy them
-/// from: the marker names the app, the flourish explains what the marker MEANS
-/// (it is the one chance to say so), and neither is in the parser's voice.
+/// from: the file marker names the app, the introduction names the FEATURE (it is
+/// the one chance to say what the mark means and where to switch it off), and
+/// neither is in the parser's voice.
 #[test]
 fn the_register_says_who_is_speaking() {
-    assert!(PREFIX.starts_with("Lanthorn"));
-    assert!(PREAMBLE.starts_with("Lanthorn"));
-    assert!(PREAMBLE.contains("interpreter") && PREAMBLE.contains("story"));
-    assert!(!PREAMBLE.starts_with('[') && !PREFIX.starts_with('['));
-    // Short enough to arrive mid-play without pushing the story off a small pane.
-    assert!(PREFIX.len() <= 12, "the marker rides on every assist line: {PREFIX:?}");
+    assert!(EXPORT_PREFIX.starts_with("Lanthorn"));
+    let p = preamble('●');
+    assert!(p.starts_with("Lanthorn's Guiding Light"));
+    assert!(p.contains("settings"), "the introduction says where to disable it: {p:?}");
+    assert!(!p.starts_with('[') && !EXPORT_PREFIX.starts_with('['));
+    // Short enough to ride on every exported assist line without reflowing it.
+    assert!(EXPORT_PREFIX.len() <= 12, "{EXPORT_PREFIX:?}");
 }

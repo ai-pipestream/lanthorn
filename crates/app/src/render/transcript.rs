@@ -4673,6 +4673,42 @@ mod tests {
         assert_eq!(buf.cell((0, input_y)).unwrap().style().fg, Some(Color::Cyan)); // transcript_input
     }
 
+    /// SQ-1045: on screen an assist is identified by its MARK and by nothing
+    /// else — the text carries no `Lanthorn: ` any more — so the mark had better
+    /// be drawn, in the row's own style, with the words starting past it.
+    ///
+    /// Falsify by dropping the `Assist` arm from either `text_origin_col` or the
+    /// gutter match: the glyph vanishes (or the text slides under it) and the one
+    /// thing that says whose the line is goes with it.
+    #[test]
+    fn an_assist_row_is_identified_by_its_mark_in_the_gutter() {
+        use ratatui::style::Color;
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.assist_preamble_shown = true; // the introduction has its own case
+        state.push_assist(&crate::assist::Assist::caution("that cannot be undone."));
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        let mark = state.symbols.assist_gutter.to_string();
+        let y = (1u16..9)
+            .find(|&y| buf.cell((0, y)).map(|c| c.symbol()) == Some(mark.as_str()))
+            .expect("the assist mark must appear in column 0");
+        // Drawn in the LINE's style, not a separate marker selector: the caution
+        // tone's mark is as loud as its text.
+        assert_eq!(buf.cell((0, y)).unwrap().style().fg, Some(Color::Yellow));
+        assert!(buf.cell((0, y)).unwrap().modifier.contains(Modifier::BOLD), "the caution mark is the loud one");
+        // The words start past the two-column gutter, and are the caller's alone.
+        let row: String = (0..40u16)
+            .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(row.starts_with(&format!("{mark} that cannot")), "mark, gutter, then the words: {row:?}");
+        assert!(!row.contains("Lanthorn:"), "the marker belongs to the exported file, not the screen: {row:?}");
+    }
+
     #[test]
     fn crash_lines_render_with_crash_style() {
         use ratatui::style::Color;

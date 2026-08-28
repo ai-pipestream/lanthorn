@@ -57,6 +57,29 @@ carrying `enable_sound = false` could only be overridden by editing the file.
   wrapped themselves at ~83 columns while a generated list ran to 117 and was
   wrapped by the terminal, so one help screen showed two authorities.
 
+### Lanthorn's Guiding Light
+
+- **lanthorn can now help you play**, and says so once: a single line above its
+  first offer of the session — *"Lanthorn's Guiding Light is enabled and will
+  display guidance using ●. This can be disabled in the settings menu."* After
+  that the help arrives unannounced, marked in the margin by that one glyph and
+  never in the story's own voice.
+- **The mark is the whole of the attribution on screen.** No prefix rides the
+  text, so a forty-column pane spends one column on saying whose a line is. Both
+  tones — the ordinary light, and the caution before a move that cannot be
+  undone — are drawn in your terminal's **yellow**, the caution bold, which reads
+  on a light page as well as a dark one. `transcript_assist`,
+  `transcript_assist_caution` and the glyph itself (`"gutter.assist"`) are all
+  yours in `style.toml`; point it at a patched font's own lamp (U+F1A60) if you
+  have one installed.
+- **An exported transcript carries the words instead.** A file has no margin and
+  no colour, so `export-transcript` writes `Lanthorn: ` onto the front of every
+  line that is ours — the surface where the distinction has to survive a
+  copy-paste.
+- **One switch for the whole set**: `--guidance on|off` for a launch,
+  `/set-guidance` (bare toggles) for a session, and a `guidance` row on the
+  settings screen that persists it.
+
 ### Original media
 
 - **`.g64` GCR bitstream disks.** A `.g64` holds the raw bitstream a 1541's head

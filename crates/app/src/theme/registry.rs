@@ -216,14 +216,31 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("transcript_meta", Section::Elements, Kind::Style, Some("muted"), glyph("▏")),
     row("transcript_warning", Section::Elements, Kind::Style, Some("alert"), glyph("!")),
     row("transcript_crash", Section::Elements, Kind::Style, Some("alert"), mods(true, false, false, false)),
-    // SQ-1045: the assist voice. `accent` rather than `muted`, because unlike a
-    // slash dump an assist is FOR the player and has to be noticed once; the
-    // caution tone is the one assist that costs the player their game if it is
-    // missed, so it takes `alert`. Both carry a gutter glyph of their own — the
-    // same thin bar the meta gutter uses, one step wider, so an assist reads as
-    // the app's own margin lit rather than as a different piece of furniture.
-    row("transcript_assist", Section::Elements, Kind::Style, Some("accent"), glyph("\u{258e}")),
-    row("transcript_assist_caution", Section::Elements, Kind::Style, Some("alert"), glyph("\u{258e}")),
+    // SQ-1045: Lanthorn's Guiding Light. A light is YELLOW, and the yellow slot is
+    // `alert` — so the two assist tones share that role and separate by WEIGHT,
+    // exactly as `transcript_crash` (bold `alert`) separates from
+    // `transcript_warning` (plain `alert`) two rows up, and as `glk.buffer.alert`
+    // does from its own. An eighth role would be a new name for a colour the
+    // terminal already has one of.
+    //
+    // A role rather than an RGB literal is the whole reason the change is safe on
+    // both grounds: yellow resolves through the player's own palette, so it is
+    // Solarized Light's `#b58900` on `#fdf6e3` and their scheme's yellow on a dark
+    // page, with no lightness test in lanthorn (see `colors.rs`'s note that the
+    // accents are chosen to be legible on any page).
+    //
+    // The glyph is the MARK — the icon that identifies an assist on screen now
+    // that the text carries no prefix. `symbols.assist_gutter` is what the
+    // renderer actually draws; this keeps the two spellings of the default in one
+    // sentence of each other.
+    row("transcript_assist", Section::Elements, Kind::Style, Some("alert"), glyph("●")),
+    row(
+        "transcript_assist_caution",
+        Section::Elements,
+        Kind::Style,
+        Some("alert"),
+        Delta { glyph: Some("●".to_string()), ..mods(true, false, false, false) },
+    ),
     // ── §2a/§2b panel.* (shared panel chrome) ────────────────────────────────
     // Transparent by default (no parent/bg) so panels show the terminal
     // background out of the box; set a bg here to give panels a solid surface.
