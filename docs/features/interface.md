@@ -379,6 +379,18 @@ know which side you're on).
   **VERB — yours** for the same reason. Only the story's own grammar goes
   unlabelled, because only then is there nothing to admit.
 
+  **Infocom's own test rig stays out of it.** A word whose first character is
+  `#` or `$` never reaches the column: `#record`, `#unrecord`, `#command` and
+  `#random` are the regression harness Infocom shipped in the retail builds —
+  record a playthrough, replay it with the random numbers pinned, diff the two —
+  and `$verify` is the checksum check. Zork I r52 holds all five, and
+  alphabetical order used to park them in the first five rows, which is the
+  worst possible place to meet something that is not part of the game. That is a
+  rule about the sigil, not a list of words, so it needs no setting and no
+  upkeep. **Display only**, like everything else the column hides: `$verify`
+  still works when you type it, and it is the quickest way to see which
+  interpreter number lanthorn is reporting to a game.
+
   The object columns are **live**: they read the running story's object tree and
   refresh every turn, so taking something moves it from *here* to *carried* as
   you watch. (Glulx and Scott have no object tree yet, so *here* degrades to a
@@ -465,6 +477,16 @@ know which side you're on).
   Neither the band's attention nor the other three columns move with it. While it is open
   it subsumes the inventory dock — the *carried* column IS your inventory —
   which returns when you close it.
+
+  A quick action fires the bare word, so the VERB column drops a word the quick
+  row can finish on its own — the compass, `inventory`, `wait`, `again` — and
+  keeps one it cannot. `look` stays in the column even though it sits on the
+  quick row, because *look at*, *look under*, *look behind* and *look in* are
+  sentences no button can reach; so do `enter` and `exit`, which really take an
+  object in most Infocom games despite being the rose's `in`/`out` under another
+  name. The test is the story's own grammar rather than a list, so Deadline —
+  where `wait for the coroner` is a real syntax line — keeps `wait` in the
+  column, and Zork I, whose `wait` is bare and nothing else, does not.
 
   The quick actions are deliberately *not* read from the grammar: on the Infocom
   family the compass is not in the verb table at all — `north` is a dictionary

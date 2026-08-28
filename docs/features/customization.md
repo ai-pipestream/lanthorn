@@ -605,6 +605,14 @@ re-seed the new template, or hand-write the new shape from
   knows: typing it parses exactly as it always did, and Lanthorn's Guiding Light
   still offers it when you reach for a word close to it. Nothing here touches
   what the parser accepts, what the synonym data holds, or what a game prints.
+
+  **There is no key for Infocom's test rig, and that is deliberate.** Verbs
+  beginning `#` or `$` — `#record`, `#command`, `#random`, `$verify` — are kept
+  out of the VERB column by a rule about the sigil, not by a list of words. The
+  adult list is a *judgement*, so it ships written out where you can read and
+  edit it; the sigil rule is *structure*, there is nothing to disagree with, and
+  folding the two together would make both harder to reason about. It is
+  display-only in exactly the same way: typing `$verify` still works.
 - **v6 story rendering** — `v6_render` selects how graphical v6 titles (*Zork Zero*,
   *Shogun*, …) draw their story pane on an image-capable terminal: `hybrid`
   (the default) keeps the story text as real terminal text inside an image

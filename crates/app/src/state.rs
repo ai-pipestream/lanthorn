@@ -477,14 +477,32 @@ impl CommandBandState {
 
     /// The column's items before filtering.
     ///
-    /// `COL_VERB` excludes any word that is also in the quick row (SQ-0667):
-    /// showing `look`/`wait`/`again`/etc. in both places is redundant, and the
-    /// quick row is one click away regardless. The exclusion follows
-    /// `self.quick` — the *effective* list (the user's configured `quick` when
-    /// set, else the built-in row) — so removing a word from a custom `quick`
-    /// puts it back here. Direction words compare by the direction they name,
-    /// not by spelling, so the quick row's `n` excludes the table's `north`
-    /// (the compass otherwise appeared in both places).
+    /// `COL_VERB` excludes a quick word only when the quick row's one click
+    /// really is the whole of what that word can do (SQ-0667, narrowed by
+    /// SQ-1128).
+    ///
+    /// A quick pick fires the BARE word at once. For `n`, `wait`, `again` and
+    /// `inventory` that is the entire sentence and a second row for it is pure
+    /// duplication. For a verb that takes an object it is not: `look at the
+    /// mirror`, `enter the boat`, `bow to the king` and Deadline's `wait for
+    /// the coroner` are all sentences the button cannot reach, and the column
+    /// is the only place they can be started from. So the test is
+    /// [`VerbEntry::takes_object`] — the STORY's answer, read off its raw
+    /// syntax lines rather than off the shapes the band can compose, because
+    /// every one of Zork I's `look` lines is a shape the band drops.
+    ///
+    /// Measured over the corpus, that returns `look` (49 of 60 stories with a
+    /// readable grammar), `enter` (49) and `exit` (47) — excluded as
+    /// direction-equivalents of `in`/`out` — Deadline's `wait` (29), and `bow`
+    /// (12), which `parse_direction` calls north because a ship's bow points
+    /// forward. `inventory` and `again` take an object in no story in the
+    /// corpus and stay out of the column everywhere.
+    ///
+    /// The exclusion still follows `self.quick` — the *effective* list (the
+    /// user's configured `quick` when set, else the built-in row) — so removing
+    /// a word from a custom `quick` puts it back here. Direction words still
+    /// compare by the direction they name, not by spelling, so the quick row's
+    /// `n` excludes the table's `north`.
     pub fn items(&self, col: usize) -> Vec<String> {
         use mapper::direction::parse_direction;
         let same_word = |q: &str, w: &str| {
@@ -498,7 +516,9 @@ impl CommandBandState {
             COL_VERB => self
                 .verbs
                 .iter()
-                .filter(|v| !self.quick.iter().any(|q| same_word(q, &v.word)))
+                .filter(|v| {
+                    v.takes_object || !self.quick.iter().any(|q| same_word(q, &v.word))
+                })
                 .map(|v| v.word.clone())
                 .collect(),
             COL_HERE => self.here.clone(),

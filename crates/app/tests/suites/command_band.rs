@@ -14,11 +14,12 @@
 //! vacuously when it is absent (the `any_v6_story_present` pattern).
 
 
+use app::config::Config;
 use app::engine::Engine;
 use app::graphics::PictSource;
 use app::render::command_band::{
-    default_quick, default_verbs, refresh_objects, refresh_verbs, VerbSource, COL_CARRIED,
-    COL_HERE, COL_SECOND, COL_VERB,
+    default_quick, default_verbs, refresh_objects, refresh_verbs, verbs_from_grammar, VerbSource,
+    VerbTable, COL_CARRIED, COL_HERE, COL_SECOND, COL_VERB,
 };
 use app::session::GameSession;
 use app::state::{AppState, CommandBandState};
@@ -453,7 +454,8 @@ fn the_verb_column_is_the_running_story_s_own_grammar() {
     // verb's synonyms in dictionary order, so the first is merely the
     // alphabetically-earliest). This is why the column is every SPELLING.
     // Asked of the TABLE rather than the column, because `items(COL_VERB)`
-    // drops anything already one click away on the quick row — `look` is there.
+    // drops what the quick row can finish in one click — SQ-1128 narrowed that
+    // to words that cannot take an object, which is the case below.
     for word in ["take", "look", "put", "throw", "open", "read", "turn"] {
         assert!(
             band.verb_by_word(word).is_some(),
@@ -464,6 +466,146 @@ fn the_verb_column_is_the_running_story_s_own_grammar() {
     let mut sorted = after.clone();
     sorted.sort();
     assert_eq!(after, sorted, "alphabetical — the only order a list this long can be scanned in");
+}
+
+/// SQ-1128, on the story that raised it: the column jumped from `lock` to
+/// `lose` because `look` was on the quick row, and the user concluded the
+/// feature was broken.
+///
+/// A quick pick fires the BARE word, so a quick row is only a substitute for a
+/// word that IS complete bare. Zork I's look-verb has twelve syntax lines,
+/// eleven of them `gaze at/in/under/behind/… OBJ`; not one of them survives
+/// into `VerbEntry::lines`, which is why a rule asked through `max_nouns()`
+/// would still drop it. `takes_object` is asked of the raw grammar instead.
+///
+/// The same argument returns two more Zork I words nobody noticed missing:
+/// `enter` and `exit`, excluded as direction-equivalents of the quick row's
+/// `in`/`out` and both really `enter OBJ` / `exit OBJ` here. Across the corpus
+/// it also returns `bow` — `mapper::direction::parse_direction` calls it north,
+/// because a ship's bow points forward — in the twelve stories that have it
+/// (Sherlock, Trinity, Plundered Hearts, …); Zork I is not one of them.
+///
+/// Falsify by reverting `items(COL_VERB)` to the flat quick exclusion: every
+/// word in the first loop disappears from the column with the reported symptom.
+#[test]
+fn quick_words_that_take_an_object_stay_in_zork_i_s_column() {
+    let Some(session) = boot_zmachine("zork1-r88-s840726.z3") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+    assert!(refresh_verbs(&mut state, &session));
+    let band = state.overlays.command_band.as_ref().unwrap();
+    let items = band.items(COL_VERB);
+
+    // Non-vacuity: this really is the story's own 200-odd word column.
+    assert_eq!(band.verb_source, VerbSource::Story);
+    assert!(items.len() > 200, "the whole grammar: {}", items.len());
+
+    for word in ["look", "enter", "exit"] {
+        assert!(
+            items.contains(&word.to_string()),
+            "`{word}` takes an object in Zork I, so one click cannot finish it"
+        );
+    }
+    // The reported symptom, exactly: no gap between `lock` and `lose`.
+    let lock = items.iter().position(|w| w == "lock").expect("Zork I has `lock`");
+    let lose = items.iter().position(|w| w == "lose").expect("Zork I has `lose`");
+    assert!(
+        items[lock..lose].contains(&"look".to_string()),
+        "the column no longer jumps `lock` → `lose`: {:?}",
+        &items[lock..=lose]
+    );
+
+    // …and the words the quick row really does finish are still excluded.
+    // Zork I's `wait` has one bare line and nothing else (Deadline's has
+    // `wait for OBJ`, which is why this is asked of the grammar, not of a list).
+    for word in ["wait", "inventory", "again", "north", "south"] {
+        assert!(
+            !items.contains(&word.to_string()),
+            "`{word}` is complete on its own and stays on the quick row"
+        );
+    }
+    assert!(band.verb_by_word("wait").is_some(), "…still in the TABLE, just not the column");
+}
+
+// ── SQ-1126: Infocom's own test rig is not something to try ──────────────────
+
+/// Zork I r52 ships five sigil verbs in its retail grammar, and alphabetical
+/// order put every one of them at the TOP of the column: `#command`, `#random`,
+/// `#record`, `#unrecor`, `$verif`. They are Infocom's regression rig (record a
+/// playthrough, replay it with the RNG pinned) plus the §15 checksum check —
+/// not part of the game, and the first thing a browsing player met.
+///
+/// The rule is structural, so this asks it of the production path: the story's
+/// own grammar through `Config::layer_band_verbs`, which is the one place a
+/// column is assembled. Falsify by dropping `without_sigil_verbs` from
+/// `Config::for_display` — the five words come back, in the same first five
+/// rows.
+#[test]
+fn zork_i_r52_s_column_drops_the_test_harness_verbs() {
+    let Some(session) = boot_zmachine("zork1-invclues-r52-s871125.z5") else { return };
+    let vocab = session.story_vocabulary().expect("Zork I r52's grammar reads");
+    let entries = verbs_from_grammar(vocab.verbs());
+
+    let unfiltered: Vec<String> = entries.iter().map(|e| e.word.clone()).collect();
+    for word in ["#command", "#random", "#record", "#unrecor", "$verif"] {
+        assert!(unfiltered.contains(&word.to_string()), "r52 really holds `{word}`");
+    }
+    assert_eq!(
+        unfiltered[..5],
+        ["#command", "#random", "#record", "#unrecor", "$verif"],
+        "…at the very top of an alphabetical column, which is the whole complaint"
+    );
+
+    let column = |cfg: &Config| -> Vec<String> {
+        cfg.layer_band_verbs(VerbTable::new(entries.clone(), VerbSource::Story))
+            .entries
+            .into_iter()
+            .map(|e| e.word)
+            .collect()
+    };
+
+    // With the adult list off, the sigil rule is the ONLY thing removing rows,
+    // so the delta is exactly the five — and it is not on that list, which is
+    // the point of keeping a rule and a judgement apart.
+    let sigils_only = column(&Config { hide_adult_words: false, ..Config::default() });
+    assert_eq!(
+        unfiltered.len() - sigils_only.len(),
+        5,
+        "five words out of {}: a rule, not a scrub",
+        unfiltered.len()
+    );
+
+    let filtered = column(&Config::default());
+    for shown in [&sigils_only, &filtered] {
+        assert!(
+            !shown.iter().any(|w| w.starts_with('#') || w.starts_with('$')),
+            "no sigil word survives: {:?}",
+            &shown[..8]
+        );
+        assert_eq!(shown[0], "activate", "the column now opens on a verb a player would try");
+        for kept in ["take", "look", "pray", "dig", "count"] {
+            assert!(shown.contains(&kept.to_string()), "`{kept}` is untouched");
+        }
+    }
+}
+
+/// DISPLAY ONLY, against the real parser (the SQ-1122 pin, applied to the other
+/// rule): `$verify` is a genuinely useful diagnostic — the easiest way to see
+/// which interpreter number lanthorn reports to a game without a debug build —
+/// so it must still work when typed. Filter the column, not the parser.
+#[test]
+fn typing_a_sigil_command_still_reaches_zork_i_s_parser() {
+    let Some(mut session) = boot_zmachine("zork1-invclues-r52-s871125.z5") else { return };
+    let reply = session.submit("$verify").transcript.to_lowercase();
+    assert!(!reply.is_empty(), "the turn produced a reply");
+    assert!(
+        !reply.contains("don't know the word"),
+        "the story still knows the word it always knew: {reply:?}"
+    );
+    assert!(
+        reply.contains("verif") || reply.contains("disk") || reply.contains("interpreter"),
+        "and it is the checksum check answering: {reply:?}"
+    );
 }
 
 /// The shapes come off the story's syntax lines too, not off a declared arity —

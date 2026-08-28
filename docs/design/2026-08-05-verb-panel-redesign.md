@@ -153,6 +153,8 @@ the narrow-band fallback.
    the default config only because the two rows spell it differently (quick:
    `n s e w`, table: `north south east west`) — that is refinement 2 at the
    top of this document ("not in the table ⇒ solo"), not a new rule.
+   **Narrowed 2026-08-28 (SQ-1128)** — see the amendment at the foot of this
+   document: a quick word is excluded only when it takes no object.
 
 ### Amendments (2026-08-05, user feedback after first use)
 
@@ -830,6 +832,38 @@ needed a new selector.
   symptom first — including two live regressions caught this way after an
   initial fix shipped too eagerly (the double-verb Tab bug above, and the
   Esc-never-closes bug the two amendment sections above describe).
+
+### Amendment (2026-08-28, SQ-1128 — decision 5 narrowed)
+
+Decision 5 ("the VERB column excludes quick words") was the right idea with the
+wrong test. A quick pick fires the **bare** word, so the quick row substitutes
+for a column row only when the bare word is the whole sentence. `n`, `wait`,
+`again` and `inventory` qualify; `look` does not — `look at`, `look under`,
+`look behind` and `look in` are sentences the button cannot reach and the column
+is the only way to start them. The user went looking for `look`, found the
+column jump from `lock` to `lose`, and concluded the feature was broken.
+
+The rule is now: **exclude a quick word only when the story's grammar gives it
+no object slot at all.** Two things about "at all" matter.
+
+* It is asked of the RAW `grammar_model::SyntaxLine`s, not of `VerbEntry::lines`.
+  `VerbLine::from_syntax` drops every shape whose literal precedes the first
+  object, so Zork I's look-verb — twelve lines, eleven of them
+  `gaze at/in/under/behind/… OBJ` — arrives at the band with `max_nouns() == 0`.
+  A rule asked through the composable shapes would still have dropped `look`.
+  `VerbEntry::takes_object` carries the story's answer beside them.
+* It follows the effective `quick` list exactly as before, so the config-aware
+  half of decision 5 is unchanged — but a custom `quick` can no longer hide an
+  object-taking verb from the column, because a button never could do that
+  verb's job.
+
+Measured over the 60 stories in `stories/` with a readable Z grammar, the rule
+returns `look` (49 stories), `enter` (49) and `exit` (47) — the last two excluded
+as direction-equivalents of the rose's `in`/`out` — Deadline-style `wait` (29,
+`wait for OBJ` / `wait until OBJ`), and `bow` (12), which
+`mapper::direction::parse_direction` reads as north because a ship's bow points
+forward. `inventory` and `again` take an object in no story in the corpus and
+stay out of every column; so do the eight compass points.
 
 ## Out of scope (this redesign)
 
