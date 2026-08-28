@@ -4,8 +4,15 @@
 // v3: 1-byte object numbers, 32 attrs, 31-word default table, 9-byte entries.
 // v4+: 2-byte object numbers, 48 attrs, 63-word default table, 14-byte entries.
 
+use crate::dictionary;
+use crate::grammar;
 use crate::memory::Memory;
 use crate::text::decode_string;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The shared answer type, re-exported so `zvm::objects::ObjectWords` names it
+/// — as `zvm::grammar` re-exports the rest of `grammar-model`.
+pub use grammar_model::ObjectWords;
 
 // ── Layout helpers ────────────────────────────────────────────────────────────
 
@@ -463,6 +470,322 @@ pub fn object_snapshot(mem: &Memory, obj: u16) -> ObjectSnapshot {
         parent: get_parent(mem, obj),
         name: short_name(mem, obj),
     }
+}
+
+// ── Parse names: what an object can be CALLED ────────────────────────────────
+//
+// `short_name` above answers what a story *prints* for an object. It does not
+// answer what a player may TYPE for it, and the two are different sets: Zork
+// I's "brass lantern" is reached by `lamp`, `lanter` and `light`, none of which
+// is the printed name, and an Inform 7 object has no printed name at all.
+//
+// ── Where the words are, and why the property number is not a constant ───────
+//
+// Both compiler families store the words the same way — a property whose data
+// is an array of 2-byte **dictionary entry addresses** — and disagree about
+// which property that is.
+//
+//   * **Inform**, on both back-ends, always uses property 1. This is hard-coded
+//     in the compiler rather than conventional: `Inform6/src/objects.c` reads
+//     "A special rule applies to values in double-quotes of the built-in
+//     property `name`, which always has number 1: such property values are
+//     dictionary entries and not static strings", and
+//     `objects_begin_pass()` seeds `commonprops[1]` as the first of three
+//     predefined common properties before any user property is numbered.
+//     Inform 7 keeps it: `inform7/runtime-module/Chapter 7/Name Properties.w`
+//     — "the names of objects are parsed as nouns using the values of two
+//     properties: `name`, a simple array of dictionary words, and `parse_name`,
+//     a GPR function".
+//
+//   * **Infocom's own games** number ZIL's `SYNONYM` property per game, and the
+//     numbers really do move. Measured here over the `stories/` corpus, one
+//     story at a time: 14 in Seastalker, 17 in Zork II, Zork III, Suspect,
+//     Hollywood Hijinx and the Zork I sampler, 18 in Zork I, Moonmist and
+//     Wishbringer, 19 in Deadline, Enchanter, Planetfall, Infidel, Ballyhoo,
+//     Cutthroats, The Witness and The Lurking Horror, 29 in Plundered Hearts,
+//     31 in Spellbreaker, The Hitchhiker's Guide and Leather Goddesses, and
+//     45–63 in the v4–v6 games. **Nothing in the image names it**: the game's
+//     own parser reaches it through a constant compiled into its code.
+//
+// So the number is DETECTED for Infocom and KNOWN for Inform, and either way it
+// travels inside [`ParseNames`] rather than being asked of the caller — a
+// caller who guessed 1 on Zork I would get plausible garbage out of whatever
+// property 1 happens to hold.
+//
+// ── What is deliberately NOT read: Infocom adjectives ────────────────────────
+//
+// Every Infocom object keeps its ADJECTIVES in a second property, and they are
+// real parse words: Zork Zero's "Dirigible Hangar" answers `hangar` under
+// property 51 and `dirigible`/`large` under property 46; A Mind Forever
+// Voyaging's park answers `park garden gardens common commons` under 52 and
+// `kennedy riverside halley church street small downtown old popular public`
+// under 51. From V4 onwards those are dictionary addresses like the nouns; in
+// V1–3 they are one-byte *adjective numbers*, resolved against the dictionary,
+// where an adjective's entry carries the `DESC` flag ($20) with `DATA_FIRST` =
+// `ADJ_FIRST` ($02) and holds its number in the first data byte — confirmed on
+// Zork I, whose `brass` reads `flags=$22 d0=$dd` and whose brass lantern's
+// property 16 is the single byte `$dd`.
+//
+// They are not merged in, for two reasons that both point the same way. The
+// V1–3 property NUMBER cannot be detected with any margin worth trusting: any
+// short property of small byte values matches "every byte is a known adjective
+// number", and the object-count and adjective-coverage rankings pick DIFFERENT
+// properties (Hitchhiker p29 has 131 objects covering 125 of 220 adjectives,
+// p30 has 117 covering 193; Moonmist's p17, p18 and p19 are within a whisker of
+// one another). And merging the V4+ ones alone would make an object's word list
+// mean something different per story version while `property` below could name
+// only one of the two properties it came from.
+//
+// So `brass` is absent from an Infocom object's words, this comment is the
+// reason, and the V4+ half of it is a straightforward follow-up for anyone who
+// wants it: the adjective property is the runner-up that `infocom_property`
+// already identifies and discards.
+
+/// Inform's `name` property, on every Inform story and both back-ends.
+pub const INFORM_NAME_PROPERTY: u8 = 1;
+
+/// A property must be an array of dictionary addresses on at least this many
+/// objects before it is believed to be a parse-name property. Below it there is
+/// no story here, only coincidence.
+const MIN_AGREEING_OBJECTS: usize = 4;
+
+/// …or, where the runner-up is not the adjectives, the leader must beat it by
+/// this factor to be a story-wide convention rather than a coincidence.
+const REQUIRED_MARGIN: usize = 2;
+
+/// How many objects the object-entry table holds.
+///
+/// ZMSD §12.3 gives no count — the entries simply stop where the first property
+/// table begins. Every entry names its own property table, and the lowest such
+/// address is where the entries must end, so walking forwards while the next
+/// entry still fits below the lowest address seen so far settles it in one pass
+/// without trusting any single object.
+pub fn object_count(mem: &Memory) -> u16 {
+    let base = entries_base(mem);
+    let esz = entry_size(mem.version());
+    let poff = if mem.version() <= 3 { 7 } else { 12 };
+    let mut end = mem.len() as u32;
+    let mut n: u16 = 0;
+    let mut i: u32 = 0;
+    while base + (i + 1) * esz <= end && i < u16::MAX as u32 {
+        let ptbl = mem.read_word(base + i * esz + poff) as u32;
+        if ptbl > base && ptbl < end {
+            end = ptbl;
+        }
+        i += 1;
+        n = i as u16;
+    }
+    n
+}
+
+/// The reader for one story's parse names: which property holds them, and the
+/// dictionary needed to turn the addresses in it back into words.
+///
+/// Built once per story ([`detect`](ParseNames::detect)) and then asked about
+/// objects. It answers with [`ObjectWords`], which carries the object's number,
+/// its printed name and its words together. Asking for the words alone is not
+/// offered: a caller holding words without the name cannot say which thing they
+/// belong to, and one holding the name without the words is offering a player
+/// something the parser never agreed to accept.
+#[derive(Debug, Clone)]
+pub struct ParseNames {
+    property: u8,
+    key_chars: usize,
+    words: BTreeMap<u32, String>,
+}
+
+impl ParseNames {
+    /// Work out where this story keeps its parse names, and refuse if it does
+    /// not keep them anywhere readable.
+    ///
+    /// Inform's number is known from the compiler and only *verified* here.
+    /// Infocom's is found by tallying, over the whole object table, which
+    /// properties hold an array of dictionary addresses, and then taking the
+    /// one whose objects **contain** every other candidate's — see
+    /// [`candidate_properties`] for why that test and not a bigger count.
+    ///
+    /// `None` for a story with no parse names to read, which is a real answer
+    /// and not only a failure. Journey and Scopa have no parser and no word
+    /// arrays; `stories/advent.z8` — the 1993 port of the original Adventure,
+    /// which boots and plays fine — implements its own tokeniser over its own
+    /// word table and leaves the Z-machine dictionary declaring **zero
+    /// entries**; `stories/ImpossibleStairs.z8` was built by a compiler that is
+    /// neither Inform nor ZIL (no `name` property, no dictionary flag bytes,
+    /// and `UUID` where Inform writes its version string).
+    pub fn detect(mem: &Memory) -> Option<ParseNames> {
+        let index = Self::dictionary_index(mem);
+        if index.by_address.is_empty() {
+            return None;
+        }
+        let candidates = candidate_properties(mem, &index.by_address);
+        let property = if grammar::detect_format(mem).is_inform() {
+            // Known, not chosen — but still checked, so a story that is not
+            // laid out the way its header claims refuses rather than reading
+            // whatever property 1 happens to hold.
+            let agreeing = candidates.get(&INFORM_NAME_PROPERTY).map_or(0, BTreeSet::len);
+            (agreeing >= MIN_AGREEING_OBJECTS).then_some(INFORM_NAME_PROPERTY)?
+        } else {
+            infocom_property(&candidates)?
+        };
+        Some(ParseNames { property, key_chars: index.key_chars, words: index.by_address })
+    }
+
+    /// The same reader with the property number supplied instead of worked out.
+    ///
+    /// For a story whose convention is known from outside — a disassembly, a
+    /// reference dump — or to falsify [`detect`](ParseNames::detect) by asking
+    /// for the wrong property and watching every object refuse. The documented
+    /// default is [`INFORM_NAME_PROPERTY`]; nothing here assumes it.
+    pub fn with_property(mem: &Memory, property: u8) -> Option<ParseNames> {
+        let index = Self::dictionary_index(mem);
+        if index.by_address.is_empty() {
+            return None;
+        }
+        Some(ParseNames { property, key_chars: index.key_chars, words: index.by_address })
+    }
+
+    /// Which property the words are read from.
+    pub fn property(&self) -> u8 {
+        self.property
+    }
+
+    /// What object `obj` is, and what it can be called.
+    ///
+    /// `None` when the object has no such property, when its data is not a
+    /// whole number of words, or when **any** entry in it is not the address of
+    /// a dictionary word. That last one is the point: a property that is not a
+    /// word array yields nothing, rather than a list of plausible-looking words
+    /// decoded from arbitrary addresses.
+    pub fn of(&self, mem: &Memory, obj: u16) -> Option<ObjectWords> {
+        let data = get_prop_addr(mem, obj, self.property);
+        if data == 0 {
+            return None;
+        }
+        let len = get_prop_len(mem, data) as u32;
+        if len < 2 || !len.is_multiple_of(2) {
+            return None;
+        }
+        let mut words = Vec::with_capacity(len as usize / 2);
+        for i in 0..len / 2 {
+            let addr = mem.read_word(data as u32 + i * 2) as u32;
+            words.push(self.words.get(&addr)?.clone());
+        }
+        Some(ObjectWords::new(
+            u32::from(obj),
+            short_name(mem, obj),
+            words,
+            Some(u32::from(self.property)),
+            Some(self.key_chars),
+        ))
+    }
+
+    /// Every object that answers, in object-number order.
+    pub fn all(&self, mem: &Memory) -> Vec<ObjectWords> {
+        (1..=object_count(mem)).filter_map(|obj| self.of(mem, obj)).collect()
+    }
+
+    /// The first object, in object-number order, that `word` refers to.
+    pub fn find(&self, mem: &Memory, word: &str) -> Option<ObjectWords> {
+        (1..=object_count(mem)).filter_map(|obj| self.of(mem, obj)).find(|o| o.refers_to(word))
+    }
+
+    fn dictionary_index(mem: &Memory) -> DictionaryIndex {
+        let dict = dictionary::load(mem);
+        let by_address =
+            grammar::dictionary_words(mem).into_iter().map(|w| (w.address, w.text)).collect();
+        // §13.3/§13.4: a v1–3 key is 4 bytes holding 6 Z-characters, a v4+ key
+        // 6 bytes holding 9. `Dictionary::key_len` is the byte figure; the
+        // character figure is what truncates a player's word.
+        let key_chars = dict.key_len() as usize / 2 * 3;
+        DictionaryIndex { by_address, key_chars }
+    }
+}
+
+/// The dictionary, indexed the way a parse-name property refers to it.
+struct DictionaryIndex {
+    by_address: BTreeMap<u32, String>,
+    key_chars: usize,
+}
+
+/// Which objects hold an array of dictionary addresses under each property
+/// number.
+fn candidate_properties(
+    mem: &Memory,
+    by_address: &BTreeMap<u32, String>,
+) -> BTreeMap<u8, BTreeSet<u16>> {
+    let mut found: BTreeMap<u8, BTreeSet<u16>> = BTreeMap::new();
+    for obj in 1..=object_count(mem) {
+        let mut prop = 0u8;
+        loop {
+            prop = get_next_prop(mem, obj, prop);
+            if prop == 0 {
+                break;
+            }
+            let data = get_prop_addr(mem, obj, prop);
+            let len = get_prop_len(mem, data) as u32;
+            if data == 0 || len < 2 || !len.is_multiple_of(2) {
+                continue;
+            }
+            let all_words = (0..len / 2)
+                .all(|i| by_address.contains_key(&(mem.read_word(data as u32 + i * 2) as u32)));
+            if all_words {
+                found.entry(prop).or_default().insert(obj);
+            }
+        }
+    }
+    found
+}
+
+/// Pick the Infocom parse-name property out of the candidates, or refuse.
+///
+/// **The test is containment, not size.** Every Infocom game from V3 to V6
+/// keeps its ADJECTIVES in a second property, and from V4 onwards those are
+/// dictionary addresses too — so two properties are word arrays and the counts
+/// alone are not decisive: Zork Zero leads 432 to 306, A Mind Forever Voyaging
+/// 404 to 326, Trinity 450 to 344. But an object cannot have adjectives without
+/// having nouns, and measured across the corpus the runner-up's objects are a
+/// **strict subset** of the leader's in every single game — `|adj \ syn| = 0`
+/// for Zork Zero, Arthur, Shogun, A Mind Forever Voyaging, Beyond Zork, Border
+/// Zone, Bureaucracy, Nord and Bert, Trinity, Zork I, Moonmist, Seastalker and
+/// The Hitchhiker's Guide, with the leader holding 57 to 242 objects the
+/// runner-up does not.
+///
+/// Containment also settles the V6 games, which nothing else did: their
+/// dictionary flags sit in the entry's last byte and mark almost nothing a
+/// noun (Zork Zero: 24 of 1624 words, Shogun: 6 of 1389), so filtering the
+/// candidate words by part of speech — which does separate the V4/V5 games
+/// cleanly — leaves V6 with no candidates at all.
+///
+/// Containment is not the only way through, because the runner-up is not always
+/// the adjectives. Planetfall's property 14 is a word array on twelve objects
+/// that shares exactly one of them with property 19's 146 — some other list
+/// entirely (object 254 answers `zzmgck` under 19 and `foo` under 14) — so it
+/// is neither contained nor negligible by count alone. A leader that beats the
+/// runner-up by [`REQUIRED_MARGIN`] is a story-wide convention next to
+/// something that is not, and passes on that instead. The two tests are a
+/// disjunction: Zork Zero leads 432 to 306 and needs containment, Planetfall
+/// leads 146 to 12 and needs the margin, and neither test alone takes both.
+///
+/// Refuses when the leader does neither, or ties with the runner-up. Candidates
+/// below the runner-up are not tested — that tail is noise, a handful of
+/// objects whose two-byte property happens to hold a dictionary address, and
+/// demanding anything of it refused six games these two tests settle.
+fn infocom_property(candidates: &BTreeMap<u8, BTreeSet<u16>>) -> Option<u8> {
+    let mut ranked: Vec<(&u8, &BTreeSet<u16>)> = candidates.iter().collect();
+    // Largest first; ties broken by property number so the answer is stable.
+    ranked.sort_by_key(|(p, s)| (std::cmp::Reverse(s.len()), **p));
+    let (best, best_objects) = *ranked.first()?;
+    if best_objects.len() < MIN_AGREEING_OBJECTS {
+        return None;
+    }
+    if let Some((_, second)) = ranked.get(1) {
+        let contained = second.is_subset(best_objects);
+        let outnumbered = best_objects.len() >= second.len().saturating_mul(REQUIRED_MARGIN);
+        if second.len() == best_objects.len() || !(contained || outnumbered) {
+            return None;
+        }
+    }
+    Some(*best)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

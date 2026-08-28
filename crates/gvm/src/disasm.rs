@@ -1268,12 +1268,26 @@ impl DisasmCache {
     /// A short decoded preview of the string object at `addr` (E0/E1/E2), capped
     /// and lossy. `None` if `addr` is not a string object.
     pub fn string_preview(&self, mem: &Memory, addr: u32) -> Option<String> {
-        const CAP: usize = 40;
+        string_text(mem, self.decode_table, addr, Some(40))
+    }
+}
+
+/// Decode the string object at `addr` — `E0` (C string), `E1` (compressed
+/// against the header's decoding table) or `E2` (Unicode) — stopping after
+/// `cap` characters when one is given.
+///
+/// `None` if `addr` does not begin a string object. Free-standing because a
+/// caller that has an address and a decoding table should not have to build a
+/// whole disassembly to read one string: `gvm::objects` reads an object's
+/// hardware name this way.
+pub fn string_text(mem: &Memory, decode_table: u32, addr: u32, cap: Option<usize>) -> Option<String> {
+    {
+        let cap = cap.unwrap_or(usize::MAX);
         match mem.read8(addr)? {
             0xE0 => {
                 let mut s = String::new();
                 let mut a = addr + 1;
-                while s.chars().count() < CAP {
+                while s.chars().count() < cap {
                     let b = mem.read8(a)?;
                     if b == 0 {
                         break;
@@ -1286,7 +1300,7 @@ impl DisasmCache {
             0xE2 => {
                 let mut s = String::new();
                 let mut a = addr + 4;
-                while s.chars().count() < CAP {
+                while s.chars().count() < cap {
                     let w = mem.read32(a)?;
                     if w == 0 {
                         break;
@@ -1296,10 +1310,13 @@ impl DisasmCache {
                 }
                 Some(s)
             }
-            0xE1 => walk_e1(mem, self.decode_table, addr + 1, Some(CAP)).map(|(_, t)| t),
+            0xE1 => walk_e1(mem, decode_table, addr + 1, Some(cap)).map(|(_, t)| t),
             _ => None,
         }
     }
+}
+
+impl DisasmCache {
 
     /// A hover/help description for the instruction at `addr`: the opcode's
     /// one-sentence summary, then a line per operand — its resolved value,

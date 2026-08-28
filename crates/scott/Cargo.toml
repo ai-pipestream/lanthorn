@@ -10,3 +10,7 @@ license.workspace = true
 doctest = false
 
 [dependencies]
+# The shared answer type both VM crates already return (SQ-1103/SQ-1118) — an
+# internal, zero-dependency workspace crate, so this stays a zero-EXTERNAL-
+# dependency crate exactly as before.
+grammar-model = { path = "../grammar-model" }

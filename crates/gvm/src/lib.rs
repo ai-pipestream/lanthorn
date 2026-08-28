@@ -19,6 +19,7 @@ pub mod glk;
 pub mod grammar;
 pub mod header;
 pub mod memory;
+pub mod objects;
 pub mod trace;
 mod unicode_norm;
 #[rustfmt::skip]

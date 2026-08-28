@@ -1,3 +1,5 @@
+pub use grammar_model::ObjectWords;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Database {
     pub max_carry: i32,
@@ -61,6 +63,52 @@ impl Database {
     /// As `match_verb`, for the noun vocabulary.
     pub fn match_noun(&self, word: &str) -> Option<u16> {
         match_word(&self.nouns, word, self.word_length)
+    }
+
+    /// What item `index` is, and what it can be **called**.
+    ///
+    /// A Scott Adams database has no properties and no per-object word arrays —
+    /// there was never anywhere to put them. What it has is a flat noun table
+    /// and, on each item that the player can pick up, a trailing `/NOUN/`
+    /// marker naming the one noun that refers to it (`extract_auto_noun` in the
+    /// loader lifts it out of the description at load time). The words that
+    /// refer to an item are therefore that noun plus the `*`-prefixed synonyms
+    /// that follow it in the table, which is what the two-word parser resolves
+    /// through [`match_noun`](Database::match_noun) anyway.
+    ///
+    /// `None` for an item with no marker — scenery, messages, the pieces of the
+    /// map that exist only to be looked at. That is not a limitation of this
+    /// reader: those items have no word, and the parser cannot name them either.
+    ///
+    /// Answers with the same [`ObjectWords`] the Z-machine and Glulx readers
+    /// return, so a caller asking "what is this and what can it be called" gets
+    /// one shape from all three engines.
+    pub fn item_words(&self, index: usize) -> Option<ObjectWords> {
+        let item = self.items.get(index)?;
+        let noun = item.auto_noun.as_deref()?;
+        let number = self.match_noun(noun)? as usize;
+        // The canonical entry, then every `*`-prefixed synonym that follows it,
+        // which is exactly the run `match_word` walks back through.
+        let mut words = Vec::new();
+        for entry in &self.nouns[number..] {
+            if words.is_empty() || entry.starts_with('*') {
+                words.push(entry.trim_start_matches('*').to_lowercase());
+            } else {
+                break;
+            }
+        }
+        words.retain(|w| !w.is_empty());
+        if words.is_empty() {
+            return None;
+        }
+        Some(ObjectWords::new(
+            index as u32,
+            item.text.clone(),
+            words,
+            // No properties exist here to have read them from.
+            None,
+            (self.word_length > 0).then_some(self.word_length),
+        ))
     }
 }
 
