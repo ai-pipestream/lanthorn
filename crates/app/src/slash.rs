@@ -119,6 +119,12 @@ pub enum SlashOutcome {
     /// in the per-game `config.toml` sidecar, never the global one. Handled in
     /// `slash_dispatch`.
     SetV6PixelLock(V6PixelLockArg),
+    /// Switch Lanthorn's Guiding Light on or off for this session (`Some`), or
+    /// flip whatever is in force (`None` = bare), SQ-1045. Session-only, the way
+    /// [`SlashOutcome::SetV6Render`] is — the settings screen is the persistence
+    /// path, and the introduction line points there. Handled in `slash_dispatch`
+    /// (mutates `state.config.guidance`).
+    SetGuidance(Option<bool>),
     /// Act on the pre-game story browser. The browser has no `AppState`, so it
     /// cannot take an [`Action`]; its verbs are their own type and are applied
     /// by the picker loop. See [`crate::browser`] (SQ-0796).
@@ -469,6 +475,14 @@ pub static COMMANDS: &[CommandSpec] = &[
             Some("off")  => SlashOutcome::SetV6PixelLock(V6PixelLockArg::Off),
             Some("auto") => SlashOutcome::SetV6PixelLock(V6PixelLockArg::Auto),
             Some(s) => err(format!("set-v6-pixel-lock: unknown argument '{s}' (on | off | auto, or bare to toggle)")),
+        } },
+    CommandSpec { name: "set-guidance", category: Category::Style, context: Context::Global,
+        usage: "set-guidance [on|off]", description: "Lanthorn's Guiding Light: help while you play, marked in the margin — bare toggles; session-only (the settings screen persists)",
+        dispatch: |a| match a.first().copied() {
+            None        => SlashOutcome::SetGuidance(None),
+            Some("on")  => SlashOutcome::SetGuidance(Some(true)),
+            Some("off") => SlashOutcome::SetGuidance(Some(false)),
+            Some(s) => err(format!("set-guidance: unknown argument '{s}' (on | off, or bare to toggle)")),
         } },
     CommandSpec { name: "set-game-borders", category: Category::Style, context: Context::Global,
         usage: "set-game-borders on|off|auto", description: "show this game's Glk window borders (on), or render borderless/abutting (off); auto = default (on); persisted per-game",
@@ -972,7 +986,7 @@ mod tests {
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
         // Total count matches the spec table (Game 12, Map 21, View 6,
-        // Transcript 3, Style 8, Export 3, Animation 4, Help 3). `open-saves`
+        // Transcript 3, Style 9, Export 3, Animation 4, Help 3). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
         // `debug` (SQ-0169) opens the Z-machine debug inspector. `open-gallery`
         // and `open-style-editor` were removed (SQ-0309): the interactive
@@ -997,7 +1011,9 @@ mod tests {
         // always were, `move-region` — two entries out, one in.
         // SQ-1086 added `open-url`: a URL is accepted wherever a story path is,
         // and this is the browser's door to one.
-        assert_eq!(COMMANDS.len(), 80, "registry must match the spec's Full command table");
+        // SQ-1045 added `set-guidance`, the switch for Lanthorn's Guiding Light —
+        // the assist set as a whole, not one feature of it.
+        assert_eq!(COMMANDS.len(), 81, "registry must match the spec's Full command table");
     }
 
     /// SQ-0796: `Category::ORDER` must list every category, or a whole group of
@@ -1146,6 +1162,14 @@ mod tests {
         assert!(matches!(parse("set-v6-pixel-lock auto", '/'), SlashOutcome::SetV6PixelLock(V6PixelLockArg::Auto)));
         assert!(matches!(parse("set-v6-pixel-lock", '/'), SlashOutcome::SetV6PixelLock(V6PixelLockArg::Toggle)));
         assert!(matches!(parse("set-v6-pixel-lock maybe", '/'), SlashOutcome::Error(_)));
+        // SQ-1045: on/off, bare toggles, anything else is an error rather than a
+        // silent no-op — the same shape, one state shorter (there is no `auto`:
+        // guidance is one global setting with nothing per-game to inherit from).
+        assert!(matches!(parse("set-guidance on", '/'), SlashOutcome::SetGuidance(Some(true))));
+        assert!(matches!(parse("set-guidance off", '/'), SlashOutcome::SetGuidance(Some(false))));
+        assert!(matches!(parse("set-guidance", '/'), SlashOutcome::SetGuidance(None)));
+        assert!(matches!(parse("set-guidance maybe", '/'), SlashOutcome::Error(_)));
+        assert_eq!(find_command("set-guidance").expect("set-guidance").category, Category::Style);
         assert_eq!(find_command("set-v6-pixel-lock").expect("set-v6-pixel-lock").category, Category::Style);
     }
 

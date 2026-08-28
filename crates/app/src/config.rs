@@ -289,6 +289,21 @@ pub struct Cli {
     #[arg(long = "game-colours", alias = "game-colors", value_enum, value_name = "ON|OFF")]
     pub game_colours: Option<OnOff>,
 
+    /// Lanthorn's Guiding Light — the help lanthorn offers while you PLAY: the
+    /// words the parser knows, a completed noun, a caution before a move that
+    /// cannot be undone (default: on).
+    ///
+    /// One switch for the whole set. `/set-guidance` says the same thing mid-game
+    /// and the settings screen persists it; this is the launch you typed it on,
+    /// and like every other flag here it is never written back to config.toml.
+    //
+    // Spelled `--guidance`, not `--set-guidance`: every flag in all four
+    // front-ends is a bare noun with a value (`--sound`, `--images`, `--accel`,
+    // `--game-colours`), and the `set-` belongs to the slash command, whose
+    // registry requires a verb.
+    #[arg(long, value_enum, value_name = "ON|OFF")]
+    pub guidance: Option<OnOff>,
+
     /// Where the story pane's DEFAULT page and ink come from — the pair reported
     /// to the story in header `$2C`/`$2D` (SQ-1082).
     ///
@@ -964,6 +979,7 @@ pub mod keys {
     pub const ENABLE_SOUND: &str = "enable_sound";
     pub const INTERPRETER_NUMBER: &str = "interpreter_number";
     pub const V6_PIXEL_LOCK: &str = "v6_pixel_lock";
+    pub const GUIDANCE: &str = "guidance";
     pub const V6_RENDER: &str = "v6_render";
     pub const SYSTEM_FONT_DISK: &str = "system_font_disk";
     pub const SYSTEM_COLOURS: &str = "system_colours";
@@ -1164,6 +1180,21 @@ pub struct Config {
     /// it yourself.
     #[serde(default = "default_true")]
     pub hint_skip_screen_warning: bool,
+    /// Lanthorn's Guiding Light: whether lanthorn offers the player help *while
+    /// they play* — a vocabulary the parser knows, a completed noun, a caution
+    /// before a move that cannot be undone (SQ-1045).
+    ///
+    /// On by default, and one switch for the whole set rather than one per
+    /// feature: a player who does not want the interpreter talking over the story
+    /// wants none of them, and a player who does is not going to enumerate five.
+    /// `crate::state::AppState::push_assist` is where it is read, which is the one
+    /// door every assist goes through.
+    ///
+    /// `--guidance on|off` says it for a launch, `/set-guidance` for a session,
+    /// and the settings screen persists it — which is what the introduction line
+    /// promises when it says "the settings menu".
+    #[serde(default = "default_true")]
+    pub guidance: bool,
     /// Controls automatic background re-tidy when new rooms are discovered.
     /// Default: EveryRoom (re-tidy on each turn that finds a new room).
     #[serde(default)]
@@ -1629,6 +1660,7 @@ impl Default for Config {
             prompt_load_on_launch: true,
             record_turn_history: false,
             hint_skip_screen_warning: true,
+            guidance: true,
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
@@ -1757,6 +1789,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
             cfg.record_turn_history = from_file.record_turn_history;
             cfg.hint_skip_screen_warning = from_file.hint_skip_screen_warning;
+            cfg.guidance = from_file.guidance;
             cfg.background_tidy = from_file.background_tidy;
             cfg.aux_storage = from_file.aux_storage;
             cfg.v6_render = from_file.v6_render;
@@ -1832,6 +1865,14 @@ pub fn resolve(cli: &Cli) -> Config {
     if let Some(v) = cli.sound {
         cfg.enable_sound = v.into();
         cfg.one_run.pin(keys::ENABLE_SOUND, bool::from(v));
+    }
+
+    // Pinned like the rest: `guidance` is a persisted key, so one `--guidance off`
+    // launch plus any settings save would otherwise bake this run's instruction
+    // into the user's file for good.
+    if let Some(v) = cli.guidance {
+        cfg.guidance = v.into();
+        cfg.one_run.pin(keys::GUIDANCE, bool::from(v));
     }
 
     // `--game-colours` is set on the LIVE value every render site reads, so a
@@ -2089,6 +2130,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("show_room_numbers", cfg.show_room_numbers.into(), cfg.show_room_numbers == def.show_room_numbers);
     doc.put("show_status_bar", cfg.show_status_bar.into(), cfg.show_status_bar == def.show_status_bar);
     doc.put("hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
+    doc.put("guidance", cfg.guidance.into(), cfg.guidance == def.guidance);
     doc.put("watch_style", cfg.watch_style.into(), cfg.watch_style == def.watch_style);
     doc.put("record_turn_history", cfg.record_turn_history.into(), cfg.record_turn_history == def.record_turn_history);
     // Three one-run sources reach this key and `put` skips all three the same way:
@@ -2480,6 +2522,7 @@ mod tests {
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         }
     }
 
@@ -2566,6 +2609,7 @@ mod tests {
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
 
         let cfg = resolve(&cli);
@@ -2595,6 +2639,7 @@ mod tests {
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir.file_name().unwrap(), ".lanthorn");
@@ -2624,6 +2669,7 @@ mod tests {
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
@@ -2893,6 +2939,7 @@ use_defaults = false
             prompt_load_on_launch: true,
             record_turn_history: false,
             hint_skip_screen_warning: true,
+            guidance: true,
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
@@ -3237,6 +3284,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.acceleration);
@@ -3264,6 +3312,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         // Absent flag: sound stays on (config default).
         assert!(resolve(&base).enable_sound);
@@ -3308,6 +3357,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         // Absent flags: the file governs, as it always did.
         let plain = resolve(&base);
@@ -3402,6 +3452,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         assert!(resolve(&base).v6_arrow_keys, "persisted true must hold");
         let absent = Cli { config: Some(dir.join("missing.toml")), ..base };
@@ -3431,6 +3482,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         cli.trace = Some("screen,map".to_string());
         let cfg = resolve(&cli);
@@ -3461,6 +3513,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.images);
@@ -3526,6 +3579,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         // The read path follows --user-dir, and the resolved config remembers it.
         assert_eq!(config_path(&cli), dir.join("config.toml"));
@@ -3584,6 +3638,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         let mut cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, data, "the key still names the data root");
@@ -3630,6 +3685,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         let cfg = resolve(&cli);
         assert!(cfg.config_error.is_some(), "the parse failure is reported");
@@ -3821,6 +3877,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         });
         assert!(cfg.honor_game_colours, "the file's value loads");
 
@@ -3878,6 +3935,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         });
         assert!(!cfg.v6_pixel_lock, "the file's value loads");
 
@@ -3933,6 +3991,7 @@ use_defaults = false
             machines: false,
             trace: None,
             debug: false,
+            guidance: None,
         };
         // No flag: the file's Amiga (4) stands, and it is provenance-clean.
         let from_file = resolve(&base);

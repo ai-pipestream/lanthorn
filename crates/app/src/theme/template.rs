@@ -293,7 +293,8 @@ const MAP_OVERRIDES_BLOCK: &str = r#"
 # "path.ns" = "│"            # connector lines: path.<ns|ew|ne|nw|se|sw|nse|nsw|ews|ewn|cross>
 # "path.diag_ul" = "🮠"       # the four half-diagonals: path.<diag_ul|diag_ur|diag_ll|diag_lr>
 # "portal.up" = "↑"          # portal markers: portal.<up|down|in|out|marker|path|unknown>
-# "gutter.meta" = "▏"        # transcript gutter marks: gutter.<meta|warning>
+# "gutter.meta" = "▏"        # transcript gutter marks: gutter.<meta|warning|assist>
+# "gutter.assist" = "●"      # the mark of Lanthorn's Guiding Light (a patched font's lamp: U+F1A60)
 "#;
 
 const STATIC_EXAMPLES: &str = r#"# ── Story-line styling rules: recolour whole transcript lines matching a ────

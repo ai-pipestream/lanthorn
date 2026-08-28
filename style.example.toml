@@ -53,6 +53,8 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # transcript_meta = { parent = "muted", glyph = "▏" }
 # transcript_warning = { parent = "alert", glyph = "!" }
 # transcript_crash = { parent = "alert", bold = true }
+# transcript_assist = { parent = "alert", glyph = "●" }
+# transcript_assist_caution = { parent = "alert", bold = true, glyph = "●" }
 # more_prompt = { parent = "chrome", reversed = true }
 # tidy_progress = { parent = "accent" }
 # meta_marker = { parent = "muted" }
@@ -180,7 +182,8 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # "path.ns" = "│"            # connector lines: path.<ns|ew|ne|nw|se|sw|nse|nsw|ews|ewn|cross>
 # "path.diag_ul" = "🮠"       # the four half-diagonals: path.<diag_ul|diag_ur|diag_ll|diag_lr>
 # "portal.up" = "↑"          # portal markers: portal.<up|down|in|out|marker|path|unknown>
-# "gutter.meta" = "▏"        # transcript gutter marks: gutter.<meta|warning>
+# "gutter.meta" = "▏"        # transcript gutter marks: gutter.<meta|warning|assist>
+# "gutter.assist" = "●"      # the mark of Lanthorn's Guiding Light (a patched font's lamp: U+F1A60)
 
 # ── Debug inspector disassembly selectors.
 [debug]

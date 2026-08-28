@@ -206,7 +206,19 @@ switches that make lanthorn feel like yours without opening the whole registry.
   paint every `grue` red). The meta/warning gutter glyphs are now the `glyph`
   attribute directly on `transcript_meta` / `transcript_warning` (e.g.
   `transcript_meta = { parent = "muted", glyph = "▏" }`) rather than a separate
-  symbol override. `/dump-terminal`'s report rides the same transcript styling,
+  symbol override.
+  **Lanthorn's Guiding Light** — the help offered while you play — has two
+  selectors of its own: `transcript_assist` and `transcript_assist_caution`,
+  both parented on `alert` (your terminal's yellow slot, so it stays legible on
+  a light page as well as a dark one) and separated by weight, the caution tone
+  bold. What identifies those lines on screen is not their words but the **mark**
+  in their margin, `●` by default; the glyph is yours, under `[map.overrides]`:
+  `"gutter.assist" = "●"`. Point it at a patched font's own lamp — U+F1A60,
+  Nerd Fonts' `md-post_lamp` — if you have one installed. (Not `*`: Infocom
+  games spend asterisks on footnotes.) An **exported** transcript is the one
+  place the words appear instead, because a file has no margin and no colour:
+  every assist line comes out of `/export-transcript` prefixed `Lanthorn: `.
+  `/dump-terminal`'s report rides the same transcript styling,
   with two selectors of its own: `terminal_dump_heading` for its section headings
   and `terminal_dump_assumed` — parented on `alert` — for every line carrying a
   value lanthorn **guessed** rather than measured, or one it could not reach at
@@ -411,6 +423,15 @@ re-seed the new template, or hand-write the new shape from
   and it refuses to save settings over a file it couldn't read, so the text you
   need in order to find the mistake is never overwritten. Fix the file (or move
   it aside and let lanthorn seed a fresh one) and saving resumes.
+- **Lanthorn's Guiding Light** — `guidance` (default `true`) is the one switch
+  for everything lanthorn offers you *while you play*: the words this story's
+  parser knows, a completed noun, a caution before a move that cannot be taken
+  back. One switch rather than one per feature — a player who does not want the
+  interpreter talking over the story should not have to enumerate five of them.
+  `--guidance on|off` says it for a launch, `/set-guidance` (bare toggles, or
+  say `on`/`off`) for the session you are in, and the **settings screen**
+  persists it — which is where the one-line introduction above your first hint
+  sends you.
 - **A choice for one run stays a choice for one run.** `--sound off`, `--user-dir`,
   `--game-colours off` and `--interpreter` are instructions for the launch you typed
   them on,

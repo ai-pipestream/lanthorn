@@ -3013,7 +3013,20 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                 // Recording IS on and the history is still empty, which is only
                 // true before the first move. Saying so beats a dialog offering to
                 // switch on what is already on.
-                state.push_notice("[No turns recorded yet — rewind will have something after your next move.]");
+                //
+                // SQ-1045: this was a bracketed TOAST, and it was the one line in
+                // the tree wearing the Z-machine parser's own `[…]` voice while
+                // firing mid-play in answer to something the player did — exactly
+                // the impersonation the assist register exists to end. It is also
+                // help rather than a report: it does not say a thing failed, it
+                // says what to do to get what was wanted. So it is an assist, and
+                // being one it now persists in the transcript (a toast that
+                // expires is the worst surface for advice), carries the marker
+                // into a copy-paste and a screen reader, and can be hidden with
+                // the rest of them by `/filter story`.
+                state.push_assist(&crate::assist::Assist::help(
+                    "nothing to rewind yet — there will be after your next move.",
+                ));
             }
         }
 
@@ -4234,6 +4247,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         24 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_v6_render(&mut cs.working.v6_render, 1); } }
         25 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
         26 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_pixel_lock = !cs.working.v6_pixel_lock; } }
+        27 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.guidance = !cs.working.guidance; } }
         _ => {}
     }
 }
@@ -4280,6 +4294,9 @@ fn one_run_key_for_row(row: usize) -> Option<&'static str> {
         // is the user speaking about every game, so it ends the hold and the value
         // persists to the global config like any other setting.
         26 => Some(keys::V6_PIXEL_LOCK),
+        // SQ-1045: `--guidance off` pins the key for the launch; editing the row
+        // is the user overruling their own flag, so it ends the hold and persists.
+        27 => Some(keys::GUIDANCE),
         _ => None,
     }
 }
@@ -4322,6 +4339,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         23 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
         24 => config_cycle_v6_render(&mut working.v6_render, delta),
         26 => working.v6_pixel_lock = !working.v6_pixel_lock,
+        27 => working.guidance = !working.guidance,
         _ => {}
     }
 }
@@ -6108,12 +6126,20 @@ mod tests {
         assert_eq!(s.overlays.dialog_focus, 0, "focus starts on the affirmative button");
 
         // Recording ON but nothing yet → say so; do not offer what is already on.
+        // SQ-1045: said in the assist voice now, in the transcript, rather than as
+        // a bracketed toast that expires before advice can be acted on.
         let mut s = AppState::default();
         s.config.record_turn_history = true;
-        let before = s.notifications.history().len();
+        s.assist_preamble_shown = true; // the once-per-session introduction has its own case
         apply_action(Action::OpenHistory, &mut s, &mut m);
         assert!(!s.overlays.history_prompt, "no prompt when the setting is already on");
-        assert!(s.notifications.history().len() > before, "but the player is told why nothing opened");
+        let told = s.transcript.last().cloned().unwrap_or_default();
+        // The line carries no marker of its own — on screen the mark in the gutter
+        // is what identifies it, and the kind tag is what `/filter` and the
+        // exporter separate on. Both are `assist_voice`'s business; naming the
+        // variant here would trip its one-producer guard, which is the guard doing
+        // its job.
+        assert!(told.contains("rewind"), "the player is told why nothing opened: {told:?}");
 
         // History present → open the replay, whatever the setting says.
         let mut s = AppState::default();

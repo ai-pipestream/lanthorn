@@ -268,6 +268,7 @@ mod v6_palette_guard {
 pub mod anim;
 pub mod archive;
 pub mod assets;
+pub mod assist;
 pub mod cell_dump;
 pub mod aux_store;
 pub mod browser;

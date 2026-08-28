@@ -78,6 +78,17 @@ The mode is also `v6_render = "extended"` in `config.toml` and `--v6-render
 extended` on the command line, but the README is not the place to enumerate all
 three spellings — the features doc is.
 
+**Follows** the *"A real terminal UI"* bullet, as the last bullet in the list —
+it is a thing lanthorn does for the player rather than a surface it draws:
+
+> - **A light held up while you play** — Lanthorn's Guiding Light offers the
+>   words this story's parser knows, the noun you were reaching for, and a
+>   caution before a move that cannot be taken back. It says so once, then marks
+>   every later line with one glyph in the margin — never in the story's own
+>   voice, and never a spoiler. `--guidance off`, `/set-guidance`, or the
+>   settings screen turns it off.
+>   → [customization](docs/features/customization.md)
+
 ---
 
 ## Play the original disks
@@ -113,6 +124,17 @@ what a zip carries):
 **Replaces** *"or turn images off with `--no-images`"*:
 
 > or turn images off with `--images off`.
+
+---
+
+## Configuration
+
+**Follows** the paragraph beginning *"lanthorn reads
+`~/.lanthorn/config.toml`…"*:
+
+> An **exported transcript** is not quite what is on screen: lanthorn's own
+> guidance is marked in the margin while you play, and written out with the word
+> `Lanthorn:` in front of it, because a file has no margin and no colour.
 
 ---
 

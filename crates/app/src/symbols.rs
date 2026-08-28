@@ -104,6 +104,27 @@ pub struct SymbolSet {
     pub meta_gutter: char,
     /// Gutter marker glyph for WARNING transcript lines.
     pub warning_gutter: char,
+    /// The mark of Lanthorn's Guiding Light, drawn in the gutter of every ASSIST
+    /// transcript line (SQ-1045). It is not a bar beside an icon — it **is** the
+    /// icon, and the only thing that identifies an assist on screen, since the
+    /// lines themselves carry no marker in their text.
+    ///
+    /// `●` (U+25CF) by default, chosen by scanning the cmaps of eight text faces
+    /// on a working machine: every glyph that actually *depicts* a light misses
+    /// too many of them (`☼` 4/8, `★` 2/8, the dingbat stars 2/8), while the
+    /// filled circle reaches 6/8. It is a mark, not a picture, and a mark that
+    /// draws everywhere beats a lamp that draws in three fonts.
+    ///
+    /// A patched font has the lamp itself: set `[symbols.overrides]
+    /// "gutter.assist" = "\u{F1A60}"` — Nerd Fonts' `md-post_lamp`, verified
+    /// against the font's own `post` table rather than a cheat sheet — which
+    /// reaches the same 6/8, missing only the unpatched system faces. SQ-1104
+    /// will pick it automatically when a first-run font check can see it.
+    ///
+    /// **Not `*`**: Infocom games spend asterisks on footnotes, and a footnote
+    /// marker in the margin of an interpreter's own line is exactly the
+    /// impersonation this register exists to avoid.
+    pub assist_gutter: char,
     /// Header marker for the room dock while it FOLLOWS the player.
     ///
     /// Hollow against [`Self::dock_pinned`]'s filled, the same reading the portal
@@ -177,6 +198,7 @@ impl Default for SymbolSet {
             dock_following: '◇',
             dock_pinned: '◆',
             meta_gutter: '▏',
+            assist_gutter: '●',
             warning_gutter: '!',
             diagonal_corners: true,
         }
@@ -452,6 +474,7 @@ impl SymbolSet {
             portal: PortalGlyphs::preset(&cfg.portal_icons).unwrap_or_else(|| SymbolSet::default().portal),
             meta_gutter: SymbolSet::default().meta_gutter,
             warning_gutter: SymbolSet::default().warning_gutter,
+            assist_gutter: SymbolSet::default().assist_gutter,
             dock_following: SymbolSet::default().dock_following,
             dock_pinned: SymbolSet::default().dock_pinned,
             diagonal_corners: cfg.diagonal_corners,
@@ -603,6 +626,7 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "portal.marker"    => s.portal.marker = ch,
         "gutter.meta"      => s.meta_gutter = ch,
         "gutter.warning"   => s.warning_gutter = ch,
+        "gutter.assist"    => s.assist_gutter = ch,
         "dock.following"   => s.dock_following = ch,
         "dock.pinned"      => s.dock_pinned = ch,
         _ => {} // unknown key — ignored

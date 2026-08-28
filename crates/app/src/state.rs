@@ -791,14 +791,24 @@ pub const MAP_TRAIL_LEN: usize = 8;
 /// Category tag for each transcript entry.
 ///
 /// `Story` = game output. `Input` = the player's echoed command. `Meta` =
-/// app/slash output. `Warning` = VM diagnostics. The `/filter` view is coarse
-/// (story = Story+Input, meta = Meta+Warning); the styling is per-variant.
+/// app/slash output. `Warning` = VM diagnostics. `Assist` = lanthorn helping the
+/// player play (SQ-1045). The `/filter` view is coarse (story = Story+Input, meta
+/// = everything lanthorn wrote); the styling is per-variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptKind {
     Story,
     Input,
     Meta,
     Warning,
+    /// A line from the assist set — a vocabulary offer, a completion, a caution
+    /// before an irreversible move, a pointer at the hints that exist.
+    ///
+    /// This variant is what makes an assist distinguishable to the CODE and to
+    /// `/filter`, rather than distinguishable only by its wording. It is produced
+    /// by [`AppState::push_assist`] and nothing else: see [`crate::assist`] for
+    /// the register these lines are written in, and why every one of them also
+    /// carries the marker in its text.
+    Assist,
 }
 
 /// Push a turn's ordered elements into the transcript: text runs via
@@ -2205,6 +2215,11 @@ pub struct AppState {
     pub transcript: Vec<String>,
     /// Parallel kind tag for each entry in `transcript` (always same length).
     pub transcript_kinds: Vec<TranscriptKind>,
+    /// Whether this session has already shown [`crate::assist::preamble`], the
+    /// one-time flourish above the first assist. Session state, deliberately not
+    /// persisted: a restore into a fresh run should introduce the voice again,
+    /// because the player of that run may never have seen it.
+    pub assist_preamble_shown: bool,
     /// Optional per-line render-style override, parallel to `transcript`. In-memory
     /// only (not persisted). `None` = use the line's per-kind style. Kept length-
     /// synced by `push_transcript_kind`; read defensively by the renderer.
@@ -2996,6 +3011,7 @@ impl Default for AppState {
             death_watch: crate::session::DeathWatch::default(),
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
+            assist_preamble_shown: false,
             transcript_styles: Vec::new(),
             transcript_runs: Vec::new(),
             transcript_para: Vec::new(),
@@ -4188,7 +4204,12 @@ impl AppState {
                 match self.transcript_filter {
                     TranscriptFilter::Both => true,
                     TranscriptFilter::Story => matches!(kind, TranscriptKind::Story | TranscriptKind::Input),
-                    TranscriptFilter::Meta => matches!(kind, TranscriptKind::Meta | TranscriptKind::Warning),
+                    // Assist joins the META bucket, not the story one: `/filter
+                    // story` is the player asking for 1982, and an assist is
+                    // exactly what 1982 did not have (SQ-1045).
+                    TranscriptFilter::Meta => {
+                        matches!(kind, TranscriptKind::Meta | TranscriptKind::Warning | TranscriptKind::Assist)
+                    }
                 }
             })
             .collect()
@@ -4318,6 +4339,60 @@ impl AppState {
                     self.transcript_images.push(None);
                 }
             }
+        }
+    }
+
+    /// The visible transcript as a FILE should carry it (SQ-1045).
+    ///
+    /// Identical to what is on screen except for one thing: an assist gets its
+    /// `Lanthorn: ` back. On screen the mark in the gutter says whose the line is;
+    /// an exported file has no gutter, no colour and nothing a screen reader can
+    /// voice, so the words are the only carrier left — and this is the surface the
+    /// original all-lines-marked design was really about. See [`crate::assist`].
+    pub fn transcript_for_export(&self) -> Vec<String> {
+        self.visible_transcript_indices()
+            .into_iter()
+            .map(|i| match self.transcript_kinds.get(i) {
+                Some(TranscriptKind::Assist) => crate::assist::export_line(&self.transcript[i]),
+                _ => self.transcript[i].clone(),
+            })
+            .collect()
+    }
+
+    /// Say something to the player in the assist voice — Lanthorn's Guiding Light
+    /// (SQ-1045).
+    ///
+    /// **This is the only door.** It honours the player's `guidance` switch, tags
+    /// the line [`TranscriptKind::Assist`] so `/filter`, the exporter and the
+    /// renderer can tell it from the story without reading it, resolves the tone's
+    /// `style.toml` selector, and shows the once-per-session introduction above
+    /// the first assist a session displays. A caller that assembles any of that
+    /// itself has reinvented the register, which is the thing this quest exists to
+    /// stop — `tests/suites/assist_voice.rs` fails a source file that tries.
+    ///
+    /// The introduction is built around the glyph actually in force
+    /// ([`crate::symbols::SymbolSet::assist_gutter`], which is what the renderer
+    /// draws in the gutter), because that sentence is also the glyph's self-test:
+    /// a font without the mark shows a box in the one line that says what the box
+    /// means and where to switch it off.
+    ///
+    /// See [`crate::assist`] for what an assist line may and may not say.
+    pub fn push_assist(&mut self, assist: &crate::assist::Assist) {
+        // The switch is checked HERE rather than at each of the five call sites,
+        // for the reason everything else about the register is: a feature that
+        // forgets to ask is a feature the player cannot turn off.
+        if !self.config.guidance {
+            return;
+        }
+        if !self.assist_preamble_shown {
+            self.assist_preamble_shown = true;
+            let intro = self.colors.theme.get(crate::assist::AssistTone::Help.selector()).style;
+            let line = crate::assist::preamble(self.symbols.assist_gutter);
+            self.push_transcript_internal_styled(&line, TranscriptKind::Assist, intro);
+        }
+        let style = self.colors.theme.get(assist.tone().selector()).style;
+        for line in assist.lines() {
+            self.push_transcript_internal_styled(&line, TranscriptKind::Assist, style);
         }
     }
 
