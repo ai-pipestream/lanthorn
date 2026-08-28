@@ -4955,6 +4955,34 @@ impl Engine for GameSession {
         self.machine.seed_executed(pcs.iter().copied());
     }
 
+    /// The story's grammar and dictionary, as the engine-neutral snapshot.
+    ///
+    /// `None` for a story with no grammar table at all — `Grammar::load` answers
+    /// `Absent` for a menu-driven Version 6 game such as Journey, which has no
+    /// verbs for an offer to reach.
+    fn story_vocabulary(&self) -> Option<crate::vocab::StoryVocabulary> {
+        let mem = &self.machine.mem;
+        let grammar = zvm::grammar::Grammar::load(mem).ok()?;
+        let words = grammar
+            .words()
+            .map(|w| (w.to_string(), grammar.roles(w).unwrap_or_default()))
+            .collect();
+        let preps = grammar.prepositions().iter().cloned().collect();
+        // `Dictionary::key_len` is the encoded key in BYTES — 4 in v1-3, 6 in
+        // v4+ (ZMSD §13.3/§13.4) — and two bytes hold three Z-characters, so the
+        // dictionary keeps six characters of a word, or nine.
+        let key_len = zvm::dictionary::load(mem).key_len() as usize / 2 * 3;
+        Some(crate::vocab::StoryVocabulary::new(grammar.verbs().to_vec(), words, preps, key_len))
+    }
+
+    /// The story's OWN dictionary lookup, which encodes the word the way the game
+    /// encodes it — so the Z-machine's Z-character truncation is applied exactly,
+    /// including for a word whose characters do not all cost one Z-character.
+    fn knows_word(&self, word: &str) -> Option<bool> {
+        let mem = &self.machine.mem;
+        Some(zvm::dictionary::load(mem).lookup(mem, word) != 0)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

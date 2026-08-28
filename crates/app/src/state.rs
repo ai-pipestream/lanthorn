@@ -2227,6 +2227,12 @@ pub struct AppState {
     /// persisted: a restore into a fresh run should introduce the voice again,
     /// because the player of that run may never have seen it.
     pub assist_preamble_shown: bool,
+    /// The story's own vocabulary, and which unknown words this session has
+    /// already answered (SQ-1041). Read from the engine the first time an offer
+    /// is considered and cached — the tables are static — and deliberately not
+    /// persisted: a restore into a fresh run is a session that has said nothing
+    /// yet.
+    pub vocab: crate::vocab::VocabState,
     /// Optional per-line render-style override, parallel to `transcript`. In-memory
     /// only (not persisted). `None` = use the line's per-kind style. Kept length-
     /// synced by `push_transcript_kind`; read defensively by the renderer.
@@ -3019,6 +3025,7 @@ impl Default for AppState {
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
             assist_preamble_shown: false,
+            vocab: crate::vocab::VocabState::default(),
             transcript_styles: Vec::new(),
             transcript_runs: Vec::new(),
             transcript_para: Vec::new(),

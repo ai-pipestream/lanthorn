@@ -76,6 +76,24 @@ carrying `enable_sound = false` could only be overridden by editing the file.
   no colour, so `export-transcript` writes `Lanthorn: ` onto the front of every
   line that is ours — the surface where the distinction has to survive a
   copy-paste.
+- **When the parser rejects a word, lanthorn offers the story's own.** Mistype
+  the lantern and the light says `this story knows — lantern`; type `smel` and it
+  answers `smell · sniff`, because that is how *this* story groups the word. It
+  never rewrites what you typed and never sends anything on your behalf — a wrong
+  guess costs a keystroke rather than a turn.
+  - It works out that a word was rejected from the **story's own dictionary**,
+    not from the game's wording, so it fires the same on a story that words the
+    refusal its own way ("Why, I don't even know what that verb means!") as it
+    does on Infocom's `I don't know the word "…".`
+  - Three sources, all of them the story's: a word one keystroke away, a word you
+    typed a different ending on (`opening` → `open`), and the story's own
+    synonyms for a verb once it is identified.
+  - It only ever names words this story's parser will accept — including spelling
+    out the truncated keys an older dictionary stores, so a Version 3 game says
+    `leaflet` rather than the `leafle` on disk.
+  - And it stays quiet far more often than it speaks: one wrong word in the
+    command and no more, a single-keystroke miss and nothing weaker, once per
+    word per session, and nothing at all when it has nothing good.
 - **One switch for the whole set**: `--guidance on|off` for a launch,
   `/set-guidance` (bare toggles) for a session, and a `guidance` row on the
   settings screen that persists it.

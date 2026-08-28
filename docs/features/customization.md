@@ -444,6 +444,16 @@ re-seed the new template, or hand-write the new shape from
   say `on`/`off`) for the session you are in, and the **settings screen**
   persists it — which is where the one-line introduction above your first hint
   sends you.
+  The **vocabulary offer** is the first of them: when a word in your command is
+  not in the story's dictionary, the light names words that are — one keystroke
+  away (`lanturn` → `lantern`), the same word with a different ending (`opening`
+  → `open`), or the story's own synonyms for a verb once it has one
+  (`smell · sniff`). Never more than three, never a word the parser would refuse,
+  and never a rewrite of what you typed: it is an offer, and the command you sent
+  went to the game exactly as you wrote it. It works from the dictionary rather
+  than from the game's reply, so it behaves the same on a story that words its
+  refusal however it likes — and it says nothing at all unless it is confident,
+  which is most turns.
 - **A choice for one run stays a choice for one run.** `--sound off`, `--user-dir`,
   `--game-colours off` and `--interpreter` are instructions for the launch you typed
   them on,

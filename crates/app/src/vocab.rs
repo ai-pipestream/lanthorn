@@ -1,0 +1,833 @@
+//! The story's own vocabulary, offered when the parser cannot have understood
+//! the player (SQ-1041).
+//!
+//! ```text
+//! > light lanturn
+//! I don't know the word "lanturn".
+//! ● this story knows — lantern
+//! ```
+//!
+//! This is the first feature to speak through [`crate::assist`]. Guess-the-verb
+//! and its quieter cousin, the near-miss spelling, are the canonical way these
+//! games fail a player who has no nostalgia for them: the player knows what they
+//! want, the story knows the word, and the two never meet.
+//!
+//! # It OFFERS; it never substitutes
+//!
+//! The original proposal was a pre-parser that understood a larger vocabulary and
+//! rewrote the command before the game saw it. That is the wrong shape, and the
+//! quest inverts it. A wrong rewrite does not fail loudly — `light lanturn`
+//! silently becoming `light lantern` is fine right up until it becomes `burn
+//! lantern`, which costs a turn, possibly a life, and the player never learns it
+//! happened. A wrong suggestion costs a keystroke. So the command goes through
+//! untouched and lanthorn speaks only afterwards, and only to name words the
+//! story itself holds.
+//!
+//! # How we know the parser rejected a word — without reading the game's prose
+//!
+//! Every family phrases the refusal differently (`[I don't know the word
+//! "lanturn".]`, `You can't see any such thing.`, `You use word(s) I don't
+//! know!`), and a detector built on those strings is broken by the next game.
+//! It does not have to be one: the story's dictionary is a static table, so **a
+//! word absent from it cannot be understood, and that is knowable without the
+//! game saying anything at all**. [`Engine::knows_word`] asks the story's own
+//! dictionary — through `zvm`'s encoder, so the Z-machine's key truncation is
+//! applied the way the game applies it — and the answer is the same whatever the
+//! game prints.
+//!
+//! [`Engine::knows_word`]: crate::engine::Engine::knows_word
+//!
+//! # Where a candidate may come from
+//!
+//! Three sources today, all of them answerable from the story file alone, and
+//! [`StoryVocabulary::candidates`] simply concatenates them:
+//!
+//! 1. **A near miss.** `lanturn` is one keystroke from `lantern`, and a
+//!    near-miss against a word this story really holds is strong evidence.
+//! 2. **A different ending.** `lighting`, `lights` and `lighted` all stem to
+//!    `light`. The dictionary truncates (`lighti` in a Version 3 game), so the
+//!    stem has to be built rather than found by prefix.
+//! 3. **The story's own synonyms.** Once a VERB is identified,
+//!    [`grammar_model::Verb::words`] is every spelling the dictionary gives it —
+//!    free, and on all three engines.
+//!
+//! What is deliberately **not** here is meaning. `illuminate` → `light` is the
+//! frustration everybody names first and the one thing a story file cannot
+//! answer: edit distance puts it eight keystrokes away, stemming reaches nothing,
+//! and the story's synonym groups only ever group words it already knows. That
+//! bridge needs a corpus and is SQ-1110's; it will arrive as one more source
+//! feeding the list below, which is why the sources are a concatenation and not a
+//! chain.
+//!
+//! Whatever proposes a candidate, [`StoryVocabulary::offer`] intersects it with
+//! this story's dictionary before anything is shown. **The player must never be
+//! shown a word the parser would reject** — that is the invariant a new source
+//! must not be able to break, so the gate is unconditional rather than a promise
+//! each source keeps for itself.
+//!
+//! # And it stays quiet unless it is confident
+//!
+//! An assist read on its twentieth firing is the test the register sets, and a
+//! suggestion that fires on every failed turn is wallpaper. Four gates, in
+//! [`offer_vocabulary`] and [`StoryVocabulary::offer`]:
+//!
+//! * **exactly one** word of the command is unknown — two is a sentence about
+//!   things this story has never heard of, or a name typed at a prompt, not a
+//!   command with one word wrong in it;
+//! * an unknown word in the **opening** position is answered with verbs and
+//!   nothing else, and one **inside** the command with words the dictionary marks
+//!   as things rather than actions;
+//! * the miss is a **single keystroke** or a plain change of ending — nothing
+//!   weaker, because a coincidence at distance two is how a player's name gets
+//!   answered with `march`;
+//! * and a word is answered **once a session**.
+//!
+//! With nothing that passes, we say nothing. That is the common answer, and with
+//! no source of meaning yet it is the common answer more often than not.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use grammar_model::{Verb, WordRoles};
+
+use crate::engine::Engine;
+use crate::state::AppState;
+
+// ── The vocabulary a story has, as one engine-neutral value ─────────────────
+
+/// Where in the command the unknown word sat.
+///
+/// The parser reads the first word as the action, so the two positions want
+/// different answers and mixing them is what makes existing interactive-fiction
+/// help feel stupid: a noun offered where a verb belongs is not a command, and a
+/// verb offered where a noun belongs names nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    /// The first word — the story reads this as the action.
+    Opening,
+    /// Any later word — part of a noun phrase.
+    Inside,
+}
+
+/// What a story's parser will accept, as much of it as an offer needs: the verbs
+/// with their sentence shapes, the whole dictionary with its parts of speech, and
+/// how much of a word the dictionary keeps.
+///
+/// Built once per session from [`Engine::story_vocabulary`] and cached in
+/// [`VocabState`] — the tables are static, so no later turn can change an answer
+/// here.
+#[derive(Debug, Clone, Default)]
+pub struct StoryVocabulary {
+    verbs: Vec<Verb>,
+    /// Dictionary spelling → index into `verbs`; the first verb claiming a
+    /// spelling wins, as in both engines' readers.
+    by_word: BTreeMap<String, usize>,
+    /// Every word the dictionary holds, as stored, with its parts of speech.
+    words: BTreeMap<String, WordRoles>,
+    /// Each stored word cut to [`key_len`](Self::key_len), pointing back at the
+    /// spelling it was cut from. A Z-machine or Glulx key is already at most that
+    /// long and maps to itself; a Scott Adams database lists its words in full and
+    /// then matches only the first `word_length` characters of them, so `score`
+    /// and `scoreboard` both have to arrive at the same entry.
+    by_trunc: BTreeMap<String, String>,
+    /// Every literal word the grammar uses — the story's prepositions.
+    prepositions: BTreeSet<String>,
+    /// How many CHARACTERS of a word the dictionary keeps; 0 = the whole word.
+    /// Six or nine on the Z-machine (§13.3/§13.4's six and nine Z-characters),
+    /// `DICT_WORD_SIZE` on Glulx, the header's word length on a Scott Adams
+    /// database. `flashlight` is stored as `flashl` in a Version 3 game, and
+    /// comparing untruncated forms would report every long word unknown.
+    key_len: usize,
+}
+
+impl StoryVocabulary {
+    /// Assemble the snapshot. The four facts are one subject — a caller holding
+    /// the verbs always holds the rest — so they arrive together rather than
+    /// being filled in field by field.
+    pub fn new(
+        verbs: Vec<Verb>,
+        words: BTreeMap<String, WordRoles>,
+        prepositions: BTreeSet<String>,
+        key_len: usize,
+    ) -> StoryVocabulary {
+        let mut by_word = BTreeMap::new();
+        for (i, v) in verbs.iter().enumerate() {
+            for w in &v.words {
+                by_word.entry(w.to_lowercase()).or_insert(i);
+            }
+        }
+        let cut = |w: &str| -> String {
+            if key_len == 0 {
+                w.to_string()
+            } else {
+                w.chars().take(key_len).collect()
+            }
+        };
+        let mut by_trunc = BTreeMap::new();
+        for w in words.keys() {
+            by_trunc.entry(cut(w)).or_insert_with(|| w.clone());
+        }
+        StoryVocabulary { verbs, by_word, words, by_trunc, prepositions, key_len }
+    }
+
+    /// True when there is nothing here worth consulting. A menu-driven Version 6
+    /// game has no grammar at all, and an empty dictionary can answer nothing.
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+
+    /// `word` cut down to what the dictionary would store of it.
+    fn truncated(&self, word: &str) -> String {
+        if self.key_len == 0 {
+            word.to_string()
+        } else {
+            word.chars().take(self.key_len).collect()
+        }
+    }
+
+    /// Does the story's dictionary hold this word?
+    ///
+    /// The fallback for an engine that cannot answer for itself — exact for
+    /// Glulx and for a Scott Adams database, both of which truncate by plain
+    /// characters. The Z-machine truncates by Z-CHARACTERS, so `GameSession`
+    /// overrides [`Engine::knows_word`] with its own encoder and never reaches
+    /// this.
+    pub fn knows(&self, word: &str) -> bool {
+        self.stored(word).is_some()
+    }
+
+    /// The dictionary entry a spelling reaches, truncation included: `examine`
+    /// finds the `examin` a Version 3 dictionary actually stores.
+    fn stored(&self, word: &str) -> Option<(&String, WordRoles)> {
+        let w = word.to_lowercase();
+        let key = self.by_trunc.get(&self.truncated(&w))?;
+        self.words.get_key_value(key).map(|(k, r)| (k, *r))
+    }
+
+    /// The verb a spelling reaches, truncation included.
+    pub fn verb_named(&self, word: &str) -> Option<&Verb> {
+        let (stored, _) = self.stored(word)?;
+        self.by_word.get(stored).map(|&i| &self.verbs[i])
+    }
+
+    /// Every verb, in grammar-table order.
+    pub fn verbs(&self) -> &[Verb] {
+        &self.verbs
+    }
+
+    /// True if the grammar writes this word literally into some line.
+    fn is_preposition(&self, word: &str) -> bool {
+        self.prepositions.contains(&word.to_lowercase())
+    }
+}
+
+// ── The offer ───────────────────────────────────────────────────────────────
+
+/// One word this story holds that the player may have meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Candidate {
+    /// The dictionary spelling, exactly as the story stores it.
+    word: String,
+    /// 0 for a word the player nearly typed, 1 for a synonym reached through
+    /// one. A direct answer always outranks an aside.
+    tier: usize,
+    /// How far from what was typed — the edit distance, or 0 for a stem.
+    distance: usize,
+    /// Where the word sits in the table it came from — the dictionary, or the
+    /// verb's own list of spellings — so the story's ordering breaks a tie.
+    order: usize,
+}
+
+/// The most an offer may name. Three, and it is a limit rather than a target:
+/// the whole verb list is useless (Zork I knows hundreds) and a list long enough
+/// to scan is a list the player reads instead of playing.
+pub const MAX_OFFERED: usize = 3;
+
+/// The shortest word worth answering. Below this every dictionary has a neighbour
+/// one keystroke away and the evidence is worthless.
+const MIN_LEN: usize = 4;
+
+/// Words the parser ignores and a shape count must ignore with it.
+const ARTICLES: &[&str] = &["the", "a", "an", "some", "my", "his", "her", "its", "their"];
+
+impl StoryVocabulary {
+    /// Every word this story holds that the player may have meant by `typed`.
+    ///
+    /// The sources are CONCATENATED, not chained: each proposes independently
+    /// and the ranking in [`offer`](Self::offer) settles them. SQ-1110's
+    /// meaning-driven expansion joins the list here, as one more `extend`, and
+    /// needs to know nothing about the two below it.
+    fn candidates(&self, typed: &str, position: Position) -> Vec<Candidate> {
+        let mut out = Vec::new();
+        self.by_near_miss(typed, position, &mut out);
+        self.by_ending(typed, position, &mut out);
+        // SQ-1110: `self.by_meaning(typed, position, &mut out)` — the player-word
+        // → story-verb table harvested from the corpus. It cannot be answered
+        // from a story file, which is why it is not here yet.
+        self.by_story_synonym(position, &mut out);
+        out
+    }
+
+    /// One keystroke wrong: a substitution, an insertion, a deletion or a
+    /// transposition. Nothing further — at distance two a six-letter word matches
+    /// something in every dictionary, and answering a player's name with `march`
+    /// is exactly the wallpaper the register forbids.
+    ///
+    /// The comparison is between TRUNCATED forms, because that is the comparison
+    /// the story's own parser makes. A Version 3 dictionary stores `lanter`, so
+    /// `lanturn` is two edits from what is on disk and one edit from what the
+    /// parser would have matched — and a rule about keystrokes has to be read in
+    /// the space the keystrokes are judged in, or the commonest near miss in the
+    /// commonest games is out of reach.
+    fn by_near_miss(&self, typed: &str, position: Position, out: &mut Vec<Candidate>) {
+        let key = self.truncated(typed);
+        for (order, (word, roles)) in self.words.iter().enumerate() {
+            if !self.fills(word, *roles, position) || word.chars().count() < MIN_LEN {
+                continue;
+            }
+            if osa(&key, &self.truncated(word)) == 1 {
+                out.push(Candidate { word: word.clone(), tier: 0, distance: 1, order });
+            }
+        }
+    }
+
+    /// A different ending on the same word: `lighting`, `lights` and `lighted`
+    /// are all `light`. Prefix matching cannot find this — the dictionary stores
+    /// `lighti` for the first of them in a Version 3 game — so the stem is built
+    /// and then looked up.
+    fn by_ending(&self, typed: &str, position: Position, out: &mut Vec<Candidate>) {
+        for stem in stems(typed) {
+            let Some((word, roles)) = self.stored(&stem) else { continue };
+            if !self.fills(word, roles, position) {
+                continue;
+            }
+            let word = word.clone();
+            let order = self.words.keys().position(|k| *k == word).unwrap_or(0);
+            if !out.iter().any(|c| c.word == word) {
+                out.push(Candidate { word, tier: 0, distance: 0, order });
+            }
+        }
+    }
+
+    /// What else this story calls the verbs already found. `Verb::words` is every
+    /// dictionary spelling of one verb, so a story that groups `take` with `get`
+    /// and `hold` teaches the player its own vocabulary at no cost — and only
+    /// after the direct answers, because it is an aside.
+    fn by_story_synonym(&self, position: Position, out: &mut Vec<Candidate>) {
+        if position != Position::Opening {
+            return;
+        }
+        let found: Vec<String> = out.iter().map(|c| c.word.clone()).collect();
+        for w in &found {
+            let Some(verb) = self.verb_named(w) else { continue };
+            for (order, other) in verb.words.iter().enumerate() {
+                // A one-letter abbreviation (`q`, `x`, `g`) is real vocabulary
+                // and a wasted slot: the offer has three, and a player reading
+                // `quit · q` learned one word.
+                if other.chars().count() < 2 {
+                    continue;
+                }
+                if other != w && !out.iter().any(|c| c.word == *other) {
+                    out.push(Candidate { word: other.clone(), tier: 1, distance: 0, order });
+                }
+            }
+        }
+    }
+
+    /// Can this dictionary word stand where the unknown one stood? The opening
+    /// word of a command is the action, so only a verb belongs there; anywhere
+    /// else it is part of a noun phrase, and a verb is not.
+    fn fills(&self, word: &str, roles: WordRoles, position: Position) -> bool {
+        match position {
+            Position::Opening => self.by_word.contains_key(word),
+            Position::Inside => {
+                !self.by_word.contains_key(word) && (roles.noun || roles.adjective)
+            }
+        }
+    }
+
+    /// The words to offer for `typed`, which sat at `position` and was followed
+    /// by `rest`. `prose` is what the story has printed so far — see
+    /// [`spell_out`](Self::spell_out).
+    ///
+    /// Empty when nothing is confident enough to say, which is the common answer
+    /// and the important one.
+    pub fn offer(
+        &self,
+        typed: &str,
+        position: Position,
+        rest: &[&str],
+        prose: &[String],
+    ) -> Vec<String> {
+        let typed = typed.to_lowercase();
+        if self.truncated(&typed).chars().count() < MIN_LEN || self.is_empty() {
+            return Vec::new();
+        }
+        let mut found = self.candidates(&typed, position);
+
+        // The invariant, applied once and to everything: only words THIS story
+        // holds are ever shown. Every source above already draws from the
+        // dictionary, so today this removes nothing — it is here so that a source
+        // added later cannot put a word on screen that the parser would refuse.
+        found.retain(|c| self.knows(&c.word) && c.word != typed);
+
+        // The sentence the player typed, as the last tie-break and no more than
+        // that. `SyntaxLine::accepts` matches on the NUMBER of noun phrases and
+        // the literal prepositions, never on which object — whether a verb
+        // applies to *that* lantern is decided by the game at runtime and is not
+        // in the tables — so it separates candidates that are otherwise equal and
+        // is not evidence on its own.
+        let (nouns, preps) = self.shape(rest);
+        let preps: Vec<&str> = preps.iter().map(String::as_str).collect();
+        let misfits = |c: &Candidate| match self.verb_named(&c.word) {
+            Some(v) => !v.accepts(nouns, &preps),
+            None => true,
+        };
+
+        found.sort_by_key(|c| (c.tier, c.distance, misfits(c), c.order, c.word.clone()));
+        let mut seen = BTreeSet::new();
+        let mut picks = Vec::new();
+        for c in found {
+            // A word still sitting at the truncation limit is a FRAGMENT — `exam`,
+            // `leafle` — and the story would accept it typed back. As the ANSWER
+            // that is worth showing; as an aside beside a word we did spell out it
+            // is only noise, so `look · exam · desc` becomes `look`.
+            let word = match (self.spell_out(&c.word, prose), c.tier) {
+                (Some(w), _) => w,
+                (None, 0) => c.word.clone(),
+                (None, _) => continue,
+            };
+            if seen.insert(word.clone()) {
+                picks.push(word);
+            }
+            if picks.len() == MAX_OFFERED {
+                break;
+            }
+        }
+        picks
+    }
+
+    /// A dictionary key, spelled the way the story spells it — `None` when it
+    /// sits at the truncation limit and the story has never printed it whole.
+    ///
+    /// A Version 3 dictionary keeps six characters, so it holds `leafle` for the
+    /// leaflet and `mailbo` for the mailbox. Both are what the parser matches and
+    /// both would be typed back successfully — and `● this story knows — leafle`
+    /// reads as our bug, which is exactly the misattribution the register exists
+    /// to prevent.
+    ///
+    /// The story has already printed the whole word, so that is where it is
+    /// recovered from: a word in the transcript that truncates to this key is the
+    /// key's full spelling, and typing it reaches the same entry. The SHORTEST
+    /// such word wins, so `bottled` never stands in for `bottle`; a key the prose
+    /// spells exactly is already whole; and a key the prose has never carried is
+    /// offered as stored, because a truncated key is still a word that works.
+    fn spell_out(&self, stored: &str, prose: &[String]) -> Option<String> {
+        if self.key_len == 0 || stored.chars().count() != self.key_len {
+            return Some(stored.to_string());
+        }
+        let mut best: Option<String> = None;
+        for line in prose {
+            // Split on the hyphen too: `lantern-bearer` is a compound of the
+            // story's prose, not a spelling of the key, and it would otherwise
+            // outrank the word itself.
+            for w in line.split(|c: char| !c.is_alphanumeric() && c != '\'') {
+                let w = w.to_lowercase();
+                if w == stored {
+                    return Some(stored.to_string());
+                }
+                if w.chars().count() > self.key_len
+                    && self.truncated(&w) == stored
+                    && best.as_ref().is_none_or(|b| w.len() < b.len())
+                {
+                    best = Some(w);
+                }
+            }
+        }
+        best
+    }
+
+    /// How many noun phrases the player supplied and which prepositions they
+    /// used, reading their words the way the parser splits them: a run of words
+    /// between prepositions is one noun phrase, and an article is not a word.
+    fn shape(&self, rest: &[&str]) -> (usize, Vec<String>) {
+        let mut nouns = 0;
+        let mut preps = Vec::new();
+        let mut in_phrase = false;
+        for w in rest {
+            let w = w.to_lowercase();
+            if ARTICLES.contains(&w.as_str()) {
+                continue;
+            }
+            if self.is_preposition(&w) {
+                preps.push(w);
+                in_phrase = false;
+            } else if !in_phrase {
+                nouns += 1;
+                in_phrase = true;
+            }
+        }
+        (nouns, preps)
+    }
+}
+
+/// The words `w` might be an inflected form of.
+///
+/// English regular endings only, and deliberately generous: every stem is looked
+/// up in the story's dictionary afterwards, so a stem that is not a word costs
+/// nothing. Irregulars (`lit`, `ate`, `took`) are out of reach here and stay
+/// that way until there is a corpus to read them from.
+fn stems(w: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        if s.chars().count() >= 2 && !out.contains(&s) {
+            out.push(s);
+        }
+    };
+    for suffix in ["ing", "ed", "es", "s", "en", "er", "ly"] {
+        let Some(base) = w.strip_suffix(suffix) else { continue };
+        let ch: Vec<char> = base.chars().collect();
+        if ch.len() < 2 {
+            continue;
+        }
+        push(base.to_string());
+        push(format!("{base}e")); // taking → take
+        if ch[ch.len() - 1] == ch[ch.len() - 2] && !"aeiou".contains(ch[ch.len() - 1]) {
+            push(ch[..ch.len() - 1].iter().collect()); // running → run
+        }
+        if ch[ch.len() - 1] == 'i' {
+            let mut y: String = ch[..ch.len() - 1].iter().collect();
+            y.push('y');
+            push(y); // carries → carry
+        }
+    }
+    out
+}
+
+/// Optimal string alignment distance: a substitution, an insertion, a deletion
+/// or a TRANSPOSITION each cost one.
+///
+/// Transpositions have to cost one or the commonest typo of all is out of reach
+/// — plain Levenshtein scores `tkae` against `take` at two, the same as an
+/// unrelated word, so the offer would either miss every swapped pair or have to
+/// admit coincidences at distance two in order to catch them.
+fn osa(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (n, m) = (a.len(), b.len());
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+    if n.abs_diff(m) > 1 {
+        return 2; // more than one keystroke apart; the exact figure is unused
+    }
+    let mut prev2 = vec![0usize; m + 1];
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut cur = vec![0usize; m + 1];
+    for i in 1..=n {
+        cur[0] = i;
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut v = (cur[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                v = v.min(prev2[j - 2] + 1);
+            }
+            cur[j] = v;
+        }
+        std::mem::swap(&mut prev2, &mut prev);
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m]
+}
+
+// ── Session state ───────────────────────────────────────────────────────────
+
+/// The story's vocabulary as this session has it, and what has already been
+/// offered.
+///
+/// Deliberately not persisted: a saved game restored a week later is a session
+/// that has said nothing yet, and the player will have forgotten anyway.
+#[derive(Debug, Clone, Default)]
+pub struct VocabState {
+    loaded: bool,
+    story: Option<StoryVocabulary>,
+    /// Unknown words already answered, so the twentieth `lanturn` is silent.
+    offered: BTreeSet<String>,
+}
+
+impl VocabState {
+    /// The story's vocabulary, read from the engine the first time it is asked
+    /// for. `None` for a story with no readable dictionary — a menu-driven
+    /// Version 6 game, or an engine that has none to give.
+    pub fn get(&mut self, engine: &dyn Engine) -> Option<&StoryVocabulary> {
+        if !self.loaded {
+            self.loaded = true;
+            self.story = engine.story_vocabulary().filter(|v| !v.is_empty());
+        }
+        self.story.as_ref()
+    }
+
+    /// True the first time `word` is answered, false ever after.
+    fn first_time(&mut self, word: &str) -> bool {
+        self.offered.insert(word.to_string())
+    }
+}
+
+// ── The turn hook ───────────────────────────────────────────────────────────
+
+/// Split a typed command the way a parser would: words, lowercased, with the
+/// punctuation a player sprinkles on stripped off.
+fn words_of(cmd: &str) -> Vec<String> {
+    cmd.split(|c: char| c.is_whitespace() || c == ',' || c == '.' || c == ';')
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '\'').to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Offer the story's own vocabulary, if there is anything worth offering, for a
+/// command holding exactly one word the story's dictionary does not have.
+///
+/// Called once per completed line-input turn, after the game's own reply is in
+/// the transcript, so the offer reads underneath the refusal it answers.
+/// `printed` says whether the turn produced any output at all: a turn that
+/// printed nothing rejected nothing.
+pub fn offer_vocabulary(state: &mut AppState, engine: &dyn Engine, cmd: &str, printed: bool) {
+    // Asked HERE as well as at `push_assist`'s door, and only as an early exit:
+    // with the light off there is no reason to read a story's grammar tables, and
+    // no word may be recorded as answered by a line nobody was shown.
+    if !state.config.guidance || !printed {
+        return;
+    }
+    let words = words_of(cmd);
+    if words.is_empty() {
+        return;
+    }
+
+    // What the story has printed, so a truncated dictionary key can be shown the
+    // way the story itself spells it. Taken from the transcript rather than the
+    // last turn alone: the leaflet is named the turn it is revealed and mistyped
+    // several turns later.
+    let prose = std::mem::take(&mut state.transcript);
+    let mut vocab = std::mem::take(&mut state.vocab);
+    let offer = (|| {
+        let prose = &prose;
+        let v = vocab.get(engine)?;
+        let knows = |w: &str| engine.knows_word(w).unwrap_or_else(|| v.knows(w));
+        // EXACTLY one word wrong. Two is a sentence about things this story has
+        // never heard of, or a name typed at a prompt — and speaking into a name
+        // prompt is a far worse mistake than staying quiet.
+        let mut unknown = words.iter().enumerate().filter(|(_, w)| !knows(w));
+        let (at, word) = unknown.next()?;
+        if unknown.next().is_some() {
+            return None;
+        }
+        // A bare number is a menu answer or a disambiguation, never a word
+        // somebody meant to spell.
+        if word.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let position = if at == 0 { Position::Opening } else { Position::Inside };
+        let rest: Vec<&str> = words[at + 1..].iter().map(String::as_str).collect();
+        let picks = v.offer(word, position, &rest, prose);
+        if picks.is_empty() {
+            return None;
+        }
+        vocab.first_time(word).then(|| picks.join(" · "))
+    })();
+    state.vocab = vocab;
+    state.transcript = prose;
+
+    if let Some(list) = offer {
+        state.push_assist(&crate::assist::Assist::help(format!("this story knows — {list}")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grammar_model::{NounKind, Slot, SyntaxLine, Token};
+
+    fn noun() -> Slot {
+        Slot::one(Token::Noun(NounKind::Noun))
+    }
+
+    fn word(w: &str) -> Slot {
+        Slot::one(Token::Word(w.to_string()))
+    }
+
+    fn roles(verb: bool, noun: bool) -> WordRoles {
+        let mut r = WordRoles::default();
+        r.verb = verb;
+        r.noun = noun;
+        r
+    }
+
+    /// A pocket Zork with a Version 3 dictionary — six-character keys, so
+    /// `examine` is stored as `examin` and `lantern` fits whole.
+    fn pocket_zork() -> StoryVocabulary {
+        let verbs = vec![
+            Verb::new(
+                255,
+                0,
+                vec!["light".into(), "burn".into()],
+                vec![SyntaxLine::new(1, false, vec![noun()])],
+            ),
+            Verb::new(
+                254,
+                0,
+                vec!["take".into(), "get".into(), "hold".into()],
+                vec![
+                    SyntaxLine::new(5, false, vec![noun()]),
+                    SyntaxLine::new(6, false, vec![noun(), word("from"), noun()]),
+                ],
+            ),
+            Verb::new(253, 0, vec!["examin".into()], vec![SyntaxLine::new(7, false, vec![noun()])]),
+        ];
+        let mut words = BTreeMap::new();
+        for w in ["light", "burn", "take", "get", "hold", "examin"] {
+            words.insert(w.to_string(), roles(true, false));
+        }
+        // A Version 3 dictionary cannot store a key longer than six characters,
+        // so the lantern is on disk as `lanter` — which is what makes the prose
+        // the only place its whole spelling exists.
+        for w in ["lanter", "lamp", "sword", "case", "the"] {
+            words.insert(w.to_string(), roles(false, true));
+        }
+        let preps: BTreeSet<String> = ["from"].iter().map(|s| s.to_string()).collect();
+        StoryVocabulary::new(verbs, words, preps, 6)
+    }
+
+    /// The headline case: one keystroke wrong on a noun, answered with the word
+    /// the story actually holds.
+    ///
+    /// `lanturn` is TWO edits from the `lanter` on disk and one from what the
+    /// parser would have matched, so this also pins that the comparison happens
+    /// in the parser's own truncated space — falsify by comparing untruncated
+    /// forms and the offer disappears.
+    #[test]
+    fn a_near_miss_is_answered_with_the_word_the_story_holds() {
+        let v = pocket_zork();
+        let prose = vec!["A battery-powered brass lantern is on the trophy case.".to_string()];
+        assert_eq!(v.offer("lanturn", Position::Inside, &[], &prose), vec!["lantern"]);
+        assert_eq!(v.offer("swrod", Position::Inside, &[], &[]), vec!["sword"]);
+    }
+
+    /// The story printed the whole word, so that is where the whole word comes
+    /// from. Without the prose the key is offered as stored — still a word the
+    /// parser accepts, which is why it is shown rather than swallowed.
+    #[test]
+    fn a_truncated_key_is_spelled_out_of_the_storys_own_prose() {
+        let v = pocket_zork();
+        assert_eq!(v.offer("lanturn", Position::Inside, &[], &[]), vec!["lanter"]);
+        let prose = vec!["The lanterns and the lantern-bearer are here.".to_string()];
+        assert_eq!(
+            v.offer("lanturn", Position::Inside, &[], &prose),
+            vec!["lantern"],
+            "the shortest spelling wins, so `lanterns` never stands in for `lantern`"
+        );
+    }
+
+    /// A transposition is one keystroke, and the commonest typo there is — and
+    /// identifying the VERB brings the story's own synonyms with it, free.
+    #[test]
+    fn a_mistyped_verb_brings_the_storys_own_synonyms_with_it() {
+        let v = pocket_zork();
+        assert_eq!(v.offer("tkae", Position::Opening, &["lamp"], &[]), vec!["take", "get", "hold"]);
+        assert_eq!(v.offer("ligth", Position::Opening, &["lamp"], &[]), vec!["light", "burn"]);
+    }
+
+    /// An ending the story does not inflect. The dictionary stores `lighti` for
+    /// `lighting` in a Version 3 game, so a prefix match cannot find this.
+    #[test]
+    fn a_different_ending_stems_back_to_the_word_the_story_knows() {
+        let v = pocket_zork();
+        assert_eq!(v.offer("lighting", Position::Opening, &["lamp"], &[]), vec!["light", "burn"]);
+        assert_eq!(v.offer("lanterns", Position::Inside, &[], &[]), vec!["lanter"]);
+        assert_eq!(v.offer("taking", Position::Opening, &["lamp"], &[]), vec!["take", "get", "hold"]);
+    }
+
+    /// A verb where a noun belongs is not a noun, and a noun where a verb belongs
+    /// is not a command. The two positions never trade answers.
+    #[test]
+    fn the_position_of_the_unknown_word_decides_what_may_answer_it() {
+        let v = pocket_zork();
+        // `lanturn` is one keystroke from a noun, and nothing a command opens with.
+        assert!(v.offer("lanturn", Position::Opening, &[], &[]).is_empty());
+        // `tkae` is one keystroke from a verb, and no kind of thing.
+        assert!(v.offer("tkae", Position::Inside, &[], &[]).is_empty());
+    }
+
+    /// Never more than three, however much the story knows.
+    #[test]
+    fn an_offer_is_at_most_three_words_long() {
+        let v = pocket_zork();
+        assert!(v.offer("tkae", Position::Opening, &["lamp"], &[]).len() <= MAX_OFFERED);
+    }
+
+    /// Nothing confident, nothing said — the common answer, and the important one.
+    #[test]
+    fn silence_is_the_common_answer() {
+        let v = pocket_zork();
+        assert!(v.offer("xyzzy", Position::Opening, &["lamp"], &[]).is_empty());
+        assert!(v.offer("illuminate", Position::Opening, &["lamp"], &[]).is_empty(), "meaning is SQ-1110's");
+        assert!(v.offer("cas", Position::Inside, &[], &[]).is_empty(), "three letters is not evidence");
+        assert!(StoryVocabulary::default().offer("lanturn", Position::Inside, &[], &[]).is_empty());
+    }
+
+    /// Only words THIS story holds, whatever proposed them. Falsified by pushing
+    /// a candidate the dictionary lacks: the gate in `offer` drops it.
+    #[test]
+    fn nothing_is_offered_that_the_parser_would_reject() {
+        let v = pocket_zork();
+        for typed in ["lanturn", "swrod", "lighting", "tkae"] {
+            for pos in [Position::Opening, Position::Inside] {
+                for w in v.offer(typed, pos, &[], &[]) {
+                    assert!(v.knows(&w), "{w:?} is not in this story's dictionary");
+                }
+            }
+        }
+    }
+
+    /// Truncation is by the dictionary's key length, so a long word finds the key
+    /// the story really stores.
+    #[test]
+    fn a_long_word_is_matched_against_what_the_dictionary_kept_of_it() {
+        let v = pocket_zork();
+        assert!(v.knows("examination"), "`examin` is what a v3 dictionary stores");
+        assert!(!v.knows("xyzzy"));
+        assert_eq!(v.verb_named("examine").and_then(Verb::word), Some("examin"));
+    }
+
+    #[test]
+    fn optimal_string_alignment_counts_a_swap_as_one() {
+        assert_eq!(osa("take", "take"), 0);
+        assert_eq!(osa("tkae", "take"), 1);
+        assert_eq!(osa("takes", "take"), 1);
+        assert_eq!(osa("tae", "take"), 1);
+        assert_eq!(osa("rake", "take"), 1);
+        assert!(osa("illuminate", "light") > 1);
+    }
+
+    #[test]
+    fn stems_reach_the_regular_endings_and_admit_the_irregular_ones_are_out_of_reach() {
+        assert!(stems("lighting").contains(&"light".to_string()));
+        assert!(stems("taking").contains(&"take".to_string()));
+        assert!(stems("running").contains(&"run".to_string()));
+        assert!(stems("carries").contains(&"carry".to_string()));
+        assert!(stems("lights").contains(&"light".to_string()));
+        assert!(stems("lit").is_empty(), "an irregular form is SQ-1110's to reach");
+    }
+
+    #[test]
+    fn a_command_is_split_the_way_a_parser_splits_it() {
+        assert_eq!(
+            words_of("  Light  the LANTURN, please. "),
+            ["light", "the", "lanturn", "please"]
+        );
+        assert!(words_of("   ").is_empty());
+    }
+}

@@ -125,6 +125,7 @@ dependencies = [
  "flate2",
  "font8x8",
  "fontdue",
+ "grammar-model",
  "gvm",
  "hyperrat",
  "image",
