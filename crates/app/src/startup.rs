@@ -1932,6 +1932,14 @@ pub(crate) fn boot_story(
     // shadow itself is not booted here: most sessions never ask it anything.
     state.probe.arm(app::probe::ShadowRecipe {
         story_bytes: std::sync::Arc::new(story_bytes.clone()),
+        // The live game's own persistent data, read-only (SQ-1124). Without it a
+        // shadow of Counterfeit Monkey re-runs the initialisation this launch
+        // skipped, which is the whole of SQ-1121's "too slow to probe".
+        store: game_dir.clone(),
+        // Taken from the LIVE SESSION rather than from the sidecar on disk: on a
+        // first launch the sidecar is empty and the session's is not, and it is
+        // the session's that makes the shadow cheap.
+        vfs_bytes: std::sync::Arc::new(session.vfs_bytes()),
         honor_game_colours: state.config.honor_game_colours,
         interpreter_number: state.config.interpreter_number,
         random_seed: Some(state.config.effective_random_seed()),

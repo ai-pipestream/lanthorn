@@ -2792,6 +2792,78 @@ mod tests {
             .collect()
     }
 
+    /// **What a late insert-above-prompt costs the wrap cache** (SQ-1124).
+    ///
+    /// `touch_transcript(TranscriptEdit::Rewrote)` is the difference between the
+    /// cache extending its rows and throwing them away (SQ-1034), and an
+    /// insert-above-prompt is not an append: it moves a line the cache has
+    /// already wrapped, so the next frame rebuilds from line zero.
+    ///
+    /// That cost has always been paid — every `push_transcript_internal` in
+    /// inline-prompt mode does it, which is every `/help`, every save banner and
+    /// every assist. What SQ-1124 changed is WHEN: a vocabulary offer that used
+    /// to land inside the turn the player was waiting on can now land a beat
+    /// later, while they are typing. So the question is not whether the rebuild
+    /// is free (it is not) but whether it is small enough to disappear into a
+    /// keystroke, at the width where wrapping is worst.
+    ///
+    /// Measured here at 40 columns, which is a narrow pane, over transcripts up
+    /// to the scrollback lengths a long session reaches. The case prints the
+    /// table and holds the ceiling; a regression that made the rebuild
+    /// super-linear would blow through it long before a player noticed.
+    #[test]
+    fn a_late_insert_above_the_prompt_rebuilds_the_wrap_within_a_keystroke() {
+        let cols = 40u16;
+        let area = Rect::new(0, 0, cols, 24);
+        let mut worst = std::time::Duration::ZERO;
+        let mut table = String::new();
+        for lines in [200usize, 1_000, 5_000, 20_000] {
+            let mut state = AppState::default();
+            state.colors = crate::colors::ColorScheme::terminal_default();
+            state.assist_preamble_shown = true;
+            for i in 0..lines {
+                state.push_transcript_kind(
+                    &format!(
+                        "{i} You are standing in an open field west of a white house, with a \
+                         boarded front door. There is a small mailbox here."
+                    ),
+                    TranscriptKind::Story,
+                );
+            }
+            // Warm the cache the way a frame does.
+            let mut buf = Buffer::empty(area);
+            let normal = state.colors.theme.get("story_text").style;
+            render_middle(&state, &mut buf, area, normal, None);
+            let t = std::time::Instant::now();
+            render_middle(&state, &mut buf, area, normal, None);
+            let cached = t.elapsed();
+
+            // The late arrival: exactly what `push_assist` does in inline-prompt
+            // mode — an insert ABOVE the trailing story prompt, hence a Rewrote.
+            let style = state.colors.theme.get("assist_help").style;
+            state.push_transcript_internal_styled(
+                "try instead — light",
+                TranscriptKind::Assist,
+                style,
+            );
+            let t = std::time::Instant::now();
+            render_middle(&state, &mut buf, area, normal, None);
+            let rebuilt = t.elapsed();
+
+            worst = worst.max(rebuilt);
+            table.push_str(&format!(
+                "\n  {lines:>6} lines: cached frame {cached:>12?}, frame after a late insert {rebuilt:>12?}"
+            ));
+        }
+        eprintln!("Wrap rebuild after an insert-above-prompt, {cols} columns:{table}");
+        // A keystroke's worth of headroom on the longest transcript measured.
+        // Debug build, so the shipped binary is several times quicker than this.
+        assert!(
+            worst < std::time::Duration::from_millis(120),
+            "a late offer would hitch the typing it lands in the middle of: {worst:?}"
+        );
+    }
+
     #[test]
     fn notification_toast_is_a_right_anchored_bordered_box() {
         let mut state = AppState::default();
