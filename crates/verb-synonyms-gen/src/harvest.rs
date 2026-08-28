@@ -14,7 +14,14 @@
 //!     grammar tables are DERIVED rather than named by a header field, so a
 //!     story whose tables cannot be located is refused; that is the reader
 //!     working, not failing, and such stories are skipped.
-//!   * Scott Adams — `scott::Database::verbs`, which is the verb table itself.
+//!   * Scott Adams — `scott::Database::verbs`, which is the verb table itself,
+//!     with a `*`-prefixed entry read as a synonym of the nearest preceding
+//!     unprefixed one.
+//!
+//! Two things come back from each: the SPELLINGS, and the GROUPING — which
+//! spellings the story's author declared to be one verb. The second is what
+//! SQ-1115 added; before it, `verb_words()` was flattened and the author's own
+//! synonym sets were thrown away. See [`Harvest::groups`].
 //!
 //! Disk images (`.dsk`, `.adf`, `.d64`, `.2mg`, …) are deliberately NOT read
 //! here. Mounting them lives in `app`, and depending on `app` from a generator
@@ -43,8 +50,30 @@ pub struct Harvest {
     pub skipped: Vec<(PathBuf, String)>,
     /// Per-engine tallies of files that contributed, indexed by [`ENGINE_Z`] &c.
     pub by_engine: [usize; 3],
+    /// Every synonym GROUP the corpus declares: the spellings one verb entry
+    /// carries, sorted and deduplicated, mapped to the stories declaring
+    /// exactly that set.
+    ///
+    /// This is the grouping `verb_words()` throws away, and recovering it is
+    /// the point of SQ-1115. A verb entry is the game author's own statement
+    /// that these spellings are ONE action — a stronger authority for a parser
+    /// than a lexicographer's view of English, and free, since the grammar is
+    /// already loaded. See [`Harvest::record_group`].
+    pub groups: BTreeMap<Vec<String>, BTreeSet<String>>,
+    /// Spellings that appeared in two different verb entries of ONE story.
+    ///
+    /// Should be empty: a dictionary word resolves to a single verb number, so
+    /// a spelling belongs to one entry per story — which is what lets `build`
+    /// count a pair's support by summing the entries that contain it. Measured
+    /// rather than assumed, and reported.
+    pub double_booked: BTreeSet<String>,
     /// The story currently being read, for [`Harvest::record`].
     story: String,
+    /// Which verb entry of the current story each spelling appeared in, for
+    /// [`Harvest::double_booked`].
+    entry_of: BTreeMap<String, usize>,
+    /// Verb entries seen so far in the current story, for the same.
+    entries: usize,
 }
 
 /// Index into [`Harvest::by_engine`] — Z-machine.
@@ -55,6 +84,14 @@ pub const ENGINE_GLULX: usize = 1;
 pub const ENGINE_SCOTT: usize = 2;
 
 impl Harvest {
+    /// Start reading a new story. The per-entry bookkeeping is per story, so it
+    /// is cleared here rather than accumulated across the corpus.
+    fn begin(&mut self, story: String) {
+        self.story = story;
+        self.entry_of.clear();
+        self.entries = 0;
+    }
+
     /// Note that the story now being read accepts `word`.
     fn record(&mut self, word: String) {
         self.sources
@@ -67,6 +104,36 @@ impl Harvest {
     /// How many stories in the corpus accept `word`.
     pub fn story_count(&self, word: &str) -> usize {
         self.sources.get(word).map_or(0, BTreeSet::len)
+    }
+
+    /// Note that the story now being read declares `words` as ONE verb — that
+    /// is, as spellings of a single action.
+    ///
+    /// Only the spellings themselves are grouped, never the verb-plus-literal
+    /// phrases `absorb` synthesises: a story that groups `turn` with `rotate`
+    /// has said nothing about whether `rotate on` is a thing its syntax lines
+    /// accept, and pairing the cross product would invent evidence.
+    fn record_group(&mut self, words: &[String]) {
+        let mut set: Vec<String> = words.to_vec();
+        set.sort();
+        set.dedup();
+        if set.len() < 2 {
+            return;
+        }
+        let id = self.entries;
+        self.entries += 1;
+        for w in &set {
+            match self.entry_of.insert(w.clone(), id) {
+                Some(prev) if prev != id => {
+                    self.double_booked.insert(w.clone());
+                }
+                _ => {}
+            }
+        }
+        self.groups
+            .entry(set)
+            .or_default()
+            .insert(self.story.clone());
     }
 
     /// Merge one story's verb words, plus the verb-plus-literal PHRASES its
@@ -97,6 +164,21 @@ impl Harvest {
                 .filter(|w| plausible(w))
                 .map(|w| w.to_string())
                 .collect();
+            // The GROUP is recorded at the two-character floor, not the
+            // three-character one. `plausible` keeps `x`, `g` and `n` out of
+            // the vocabulary because they cannot be looked up in a thesaurus —
+            // but a group needs no lookup, and the entry the corpus states 28
+            // times is `go` / `walk` / `run`, whose first member the
+            // three-character floor silently deletes. `go` is the commonest
+            // verb in interactive fiction; a group that cannot suggest it is
+            // the poorer for a rule that was never about grouping.
+            self.record_group(
+                &v.words
+                    .iter()
+                    .filter(|w| groupable(w))
+                    .map(|w| w.to_string())
+                    .collect::<Vec<String>>(),
+            );
             if heads.is_empty() {
                 continue;
             }
@@ -155,6 +237,17 @@ fn particle(word: &str) -> bool {
         && word.starts_with(|c: char| c.is_ascii_lowercase())
 }
 
+/// A spelling worth keeping as a member of a synonym GROUP.
+///
+/// Two characters rather than three — see [`Harvest::absorb`]; the floor is
+/// there only to keep single-letter abbreviations (`x`, `g`, `l`, `i`) out,
+/// since a player shown `x` learns nothing.
+fn groupable(word: &str) -> bool {
+    word.len() >= 2
+        && word.bytes().all(|c| c.is_ascii_lowercase() || c == b'-')
+        && word.starts_with(|c: char| c.is_ascii_lowercase())
+}
+
 fn plausible(word: &str) -> bool {
     word.len() >= 3
         && word.bytes().all(|c| c.is_ascii_lowercase() || c == b'-')
@@ -174,10 +267,11 @@ pub fn sweep(dir: &Path, out: &mut Harvest) -> std::io::Result<()> {
         if !readable(&path) {
             continue;
         }
-        out.story = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        out.begin(
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        );
         match harvest_file(&path, out) {
             Ok(()) => {}
             Err(why) => out.skipped.push((path, why)),
@@ -247,15 +341,32 @@ fn harvest_scott(bytes: &[u8], out: &mut Harvest) -> Result<(), String> {
     }
     let db = scott::Database::parse(&text).map_err(|e| format!("scott: {e:?}"))?;
     let mut n = 0;
+    // Scott's verb table is flat, and a `*`-prefixed entry is a synonym of the
+    // nearest preceding unprefixed one (`scott::Database::match_verb`). So a
+    // run of entries IS a verb entry in the Z-machine sense, and the `*` is the
+    // grouping — which is why it is stripped BEFORE `plausible` rather than
+    // after: `*take` starts with a character `plausible` refuses, so every
+    // Scott synonym in the corpus was being dropped on the floor before
+    // SQ-1115, vocabulary and grouping alike.
+    let mut run: Vec<String> = Vec::new();
     for v in db.verbs.clone() {
-        // Scott's verb table is upper case and truncated to the game's word
-        // length; what survives is still the game's own spelling.
-        let w = v.to_ascii_lowercase();
+        let canonical = !v.starts_with('*');
+        // Upper case and truncated to the game's word length; what survives is
+        // still the game's own spelling.
+        let w = v.trim_start_matches('*').to_ascii_lowercase();
+        if canonical {
+            out.record_group(&run);
+            run.clear();
+        }
         if plausible(&w) {
-            out.record(w);
+            out.record(w.clone());
             n += 1;
         }
+        if groupable(&w) {
+            run.push(w);
+        }
     }
+    out.record_group(&run);
     if n == 0 {
         return Err("no verbs".into());
     }
