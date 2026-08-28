@@ -7454,9 +7454,10 @@ mod tests {
         assert!(!band(&s).col_reachable(COL_SECOND));
 
         // solo: still nothing else, and the phrase is already complete.
-        // Every default solo verb lives on the quick row and is therefore
-        // excluded from the VERB column (SQ-0667, direction-aware), so give
-        // the table a synthetic bare verb to exercise the shape.
+        // Every default solo verb the quick row can finish on its own is
+        // excluded from the VERB column (SQ-0667, direction-aware; narrowed by
+        // SQ-1128, which put `look` back), so give the table a synthetic bare
+        // verb rather than leaning on which built-ins survive the filter.
         s.overlays
             .command_band
             .as_mut()
@@ -7896,7 +7897,18 @@ mod tests {
         let mut mapper = Mapper::default();
         open_band(&mut s);
         apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
-        let row = band(&s).row_sel.expect("armed on the first press");
+        assert_eq!(band(&s).row_sel, Some(0), "armed on the first press");
+        // …and moved off row 0 by the second, because the generic column now
+        // opens on `look` (SQ-1128), whose shape takes no object and so opens
+        // no column to advance INTO. This case is about advancing, so it needs
+        // a row that can.
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        let row = band(&s).row_sel.expect("still armed");
+        let word = band(&s).items(COL_VERB)[row].clone();
+        assert!(
+            band(&s).verb_by_word(&word).is_some_and(|v| v.max_nouns() > 0),
+            "`{word}` must be a verb the band can carry an object for"
+        );
         assert_eq!(
             command_band_intercept(key(KeyCode::Tab), &s),
             Some(Action::BandTabPick(COL_VERB, row))

@@ -466,6 +466,16 @@ know which side you're on).
   it subsumes the inventory dock — the *carried* column IS your inventory —
   which returns when you close it.
 
+  A quick action fires the bare word, so the VERB column drops a word the quick
+  row can finish on its own — the compass, `inventory`, `wait`, `again` — and
+  keeps one it cannot. `look` stays in the column even though it sits on the
+  quick row, because *look at*, *look under*, *look behind* and *look in* are
+  sentences no button can reach; so do `enter` and `exit`, which really take an
+  object in most Infocom games despite being the rose's `in`/`out` under another
+  name. The test is the story's own grammar rather than a list, so Deadline —
+  where `wait for the coroner` is a real syntax line — keeps `wait` in the
+  column, and Zork I, whose `wait` is bare and nothing else, does not.
+
   The quick actions are deliberately *not* read from the grammar: on the Infocom
   family the compass is not in the verb table at all — `north` is a dictionary
   "special" word that never reaches a syntax line — so Zork I's 134 verbs name

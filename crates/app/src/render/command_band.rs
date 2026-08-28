@@ -177,11 +177,35 @@ pub struct VerbEntry {
     /// way the band treats it as complete on its own, which is what a quick
     /// action IS.
     pub lines: Vec<VerbLine>,
+    /// **The story lets this verb take an object**, whether or not the band
+    /// knows how to compose one (SQ-1128).
+    ///
+    /// Deliberately NOT `max_nouns() > 0`. [`lines`](Self::lines) is what the
+    /// band can BUILD, and it drops every shape whose literal precedes the
+    /// first object — Zork I's look-verb has twelve syntax lines, eleven of them
+    /// `gaze at/under/behind/in OBJ`, and not one survives into `lines`. Asked
+    /// through `lines`, that verb answers "takes nothing", which is false about
+    /// the story and is what hid `look` from the VERB column.
+    ///
+    /// [`verbs_from_grammar`] fills this from the RAW
+    /// [`grammar_model::SyntaxLine`]s; [`VerbEntry::new`] derives it from the
+    /// lines it is handed, which is the right answer for a table (the
+    /// built-ins, `[command_band] verbs`) whose shapes ARE its whole grammar.
+    pub takes_object: bool,
 }
 
 impl VerbEntry {
     pub fn new(word: &str, lines: Vec<VerbLine>) -> Self {
-        VerbEntry { word: word.to_string(), lines }
+        let takes_object = lines.iter().any(|l| l.nouns > 0);
+        VerbEntry { word: word.to_string(), lines, takes_object }
+    }
+
+    /// Record that the grammar gives this verb an object slot the band cannot
+    /// compose — the `look at noun` case (SQ-1128). The shapes are unchanged:
+    /// the object columns stay shut, and only the quick-row exclusion reads it.
+    pub fn also_takes_object(mut self) -> Self {
+        self.takes_object = true;
+        self
     }
 
     /// The most objects any of this verb's lines takes — 0 for a verb that only
@@ -370,6 +394,16 @@ pub const DEFAULT_QUICK: &[&str] = &[
     "wait", "again",
 ];
 
+/// Built-in verbs whose object arrives through a LEADING preposition, which
+/// [`VerbLine`] cannot represent and the band cannot compose (SQ-1128).
+///
+/// `look at`, `look under`, `look behind`, `look in` — generic interactive
+/// fiction accepts all four and none of them is `look noun`, so the entry keeps
+/// its bare line and carries [`VerbEntry::takes_object`] beside it. That fact is
+/// the whole difference between `look`, which the quick row's one click cannot
+/// finish, and `wait`/`again`/`inventory`, which it can.
+const BUILTIN_LEADING_PREP_OBJECT: &[&str] = &["look"];
+
 /// The built-in verb table as owned entries — the fallback, labelled as such.
 pub fn default_verbs() -> VerbTable {
     let entries = BUILTIN_VERBS
@@ -384,7 +418,12 @@ pub fn default_verbs() -> VerbTable {
                     _ => VerbLine::bare(),
                 })
                 .collect();
-            VerbEntry::new(w, lines)
+            let entry = VerbEntry::new(w, lines);
+            if BUILTIN_LEADING_PREP_OBJECT.contains(&w) {
+                entry.also_takes_object()
+            } else {
+                entry
+            }
         })
         .collect();
     VerbTable::new(entries, VerbSource::Builtin)
@@ -418,12 +457,25 @@ pub fn verbs_from_grammar(verbs: &[grammar_model::Verb]) -> Vec<VerbEntry> {
                 }
             }
         }
+        // Asked of the RAW syntax lines, not of `lines`: "the story lets this
+        // verb take an object" is a different question from "the band knows how
+        // to compose one", and only the first decides whether a quick word is
+        // redundant in the column (SQ-1128).
+        let takes_object =
+            verb.lines.iter().any(|l| l.slots.iter().any(grammar_model::Slot::is_noun_slot));
         for word in &verb.words {
             let word = word.to_lowercase();
             if word.chars().count() < 2 {
                 continue;
             }
-            out.entry(word.clone()).or_insert_with(|| VerbEntry::new(&word, lines.clone()));
+            out.entry(word.clone()).or_insert_with(|| {
+                let e = VerbEntry::new(&word, lines.clone());
+                if takes_object {
+                    e.also_takes_object()
+                } else {
+                    e
+                }
+            });
         }
     }
     out.into_values().collect()
@@ -1387,9 +1439,9 @@ mod tests {
         let s = state_with_band();
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
         let out = dump(&buf);
-        // `take`, not `look` — `look` is in the default quick row, so SQ-0667
-        // excludes it from the VERB column (see
-        // `verb_column_excludes_quick_words` in `state.rs`).
+        // `take` — an ordinary object verb, unaffected by the quick-row
+        // exclusion in either direction (see
+        // `verb_column_excludes_quick_words_that_cannot_take_an_object`).
         assert!(out.contains("take"), "a verb");
         assert!(out.contains("carried"), "the carried column header");
     }
@@ -2078,6 +2130,30 @@ mod tests {
         let look = entries.iter().find(|e| e.word == "look").expect("look");
         assert_eq!(look.max_nouns(), 0, "`look at noun` is not `look noun`");
         assert!(look.accepts(0));
+        // …and yet the STORY takes an object here, which is the distinction
+        // SQ-1128 turns on: the band cannot compose `look at OBJ`, but the
+        // sentence exists, so a quick-row `look` is not the whole of `look`.
+        assert!(look.takes_object, "`look at OBJ` is a noun-slot line the raw grammar has");
+        let take = entries.iter().find(|e| e.word == "take").expect("take");
+        assert!(take.takes_object, "and an ordinary object verb agrees both ways");
+    }
+
+    /// A verb with no noun slot ANYWHERE in its raw grammar answers false, which
+    /// is what keeps `wait`/`again`/`inventory` off the column (SQ-1128).
+    /// Falsifies against reading `takes_object` off `lines` instead of the raw
+    /// syntax — which would answer the same here and wrongly for `look` above.
+    #[test]
+    fn a_genuinely_bare_verb_takes_no_object() {
+        let verbs = vec![grammar_model::Verb::new(
+            253,
+            0,
+            vec!["wait".into(), "z".into()],
+            vec![line(vec![])],
+        )];
+        let entries = verbs_from_grammar(&verbs);
+        let wait = entries.iter().find(|e| e.word == "wait").expect("wait");
+        assert!(!wait.takes_object, "one bare line and nothing else");
+        assert_eq!(wait.max_nouns(), 0);
     }
 
     /// The fallback labels itself and the story's own column does not — the
@@ -2089,14 +2165,15 @@ mod tests {
         assert_eq!(VerbSource::Configured.column_label(), Some("VERB — yours"));
     }
 
-    /// SQ-0667: the VERB column excludes anything already one click away on
-    /// the quick row — showing it twice is redundant. Falsifies against HEAD,
-    /// where `items(COL_VERB)` is just the raw verb table.
+    /// SQ-0667, narrowed by SQ-1128: the VERB column excludes a quick word only
+    /// when the quick row's one click is the WHOLE of what that word can do.
+    /// `wait`, `again` and `inventory` are complete in themselves; the compass
+    /// is too. Falsifies against HEAD, where `items(COL_VERB)` is just the raw
+    /// verb table.
     #[test]
-    fn verb_column_excludes_quick_words() {
+    fn verb_column_excludes_quick_words_that_cannot_take_an_object() {
         let band = CommandBandState::new(default_verbs(), default_quick());
         let items = band.items(COL_VERB);
-        assert!(!items.contains(&"look".to_string()), "`look` is in the default quick row");
         assert!(!items.contains(&"wait".to_string()));
         assert!(!items.contains(&"again".to_string()));
         assert!(!items.contains(&"inventory".to_string()));
@@ -2109,14 +2186,30 @@ mod tests {
         assert!(items.contains(&"take".to_string()), "an ordinary verb is unaffected");
     }
 
+    /// The reported defect (SQ-1128): the column jumped from `lock` to `lose`
+    /// because `look` sat on the quick row — but the button only ever fires the
+    /// bare word, and `look at`/`under`/`behind`/`in` are the column's alone.
+    /// The same argument returns `enter`, which the quick row's `in` excluded by
+    /// direction equivalence. Falsifies against the pre-SQ-1128 filter.
+    #[test]
+    fn a_quick_word_that_takes_an_object_stays_in_the_verb_column() {
+        let band = CommandBandState::new(default_verbs(), default_quick());
+        let items = band.items(COL_VERB);
+        assert!(items.contains(&"look".to_string()), "the word the user went looking for: {items:?}");
+        assert!(
+            items.contains(&"enter".to_string()),
+            "`in` is direction-equivalent to `enter`, which takes an object: {items:?}"
+        );
+    }
+
     /// Direction equivalence follows the EFFECTIVE quick list too: a custom
     /// quick row without `n` puts `north` back in the VERB column.
     #[test]
     fn a_direction_dropped_from_quick_returns_to_the_verb_column() {
-        let band = CommandBandState::new(default_verbs(), vec!["look".to_string()]);
+        let band = CommandBandState::new(default_verbs(), vec!["inventory".to_string()]);
         let items = band.items(COL_VERB);
         assert!(items.contains(&"north".to_string()), "`n` no longer in quick -> `north` returns");
-        assert!(!items.contains(&"look".to_string()));
+        assert!(!items.contains(&"inventory".to_string()), "…and the one word still on it stays out");
     }
 
     /// The exclusion is config-aware: it follows the EFFECTIVE `quick` list
@@ -2124,12 +2217,25 @@ mod tests {
     /// word from a custom `quick` puts it back in the VERB column.
     #[test]
     fn verb_column_exclusion_follows_a_custom_quick_list() {
-        let mut band = CommandBandState::new(default_verbs(), vec!["take".to_string()]);
-        assert!(!band.items(COL_VERB).contains(&"take".to_string()), "custom quick excludes `take`");
-        assert!(band.items(COL_VERB).contains(&"look".to_string()), "…and un-excludes `look`, no longer in quick");
+        let mut band = CommandBandState::new(default_verbs(), vec!["wait".to_string()]);
+        assert!(!band.items(COL_VERB).contains(&"wait".to_string()), "custom quick excludes `wait`");
+        assert!(
+            band.items(COL_VERB).contains(&"again".to_string()),
+            "…and un-excludes `again`, no longer in quick"
+        );
 
         band.quick.clear();
-        assert!(band.items(COL_VERB).contains(&"take".to_string()), "removed from quick -> back in VERB");
+        assert!(band.items(COL_VERB).contains(&"wait".to_string()), "removed from quick -> back in VERB");
+    }
+
+    /// …and a custom quick list cannot hide an object-taking verb either: the
+    /// rule is about what the word can DO, not about which list it is on
+    /// (SQ-1128). Somebody who puts `take` on their quick row still needs the
+    /// column to say `take lantern`.
+    #[test]
+    fn a_custom_quick_list_still_cannot_hide_an_object_verb() {
+        let band = CommandBandState::new(default_verbs(), vec!["take".to_string()]);
+        assert!(band.items(COL_VERB).contains(&"take".to_string()), "one click cannot finish `take`");
     }
 
     // ── SQ-0677: stacked quick block, dividers, current-column hint ────────────
