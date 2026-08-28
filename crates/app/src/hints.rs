@@ -1799,8 +1799,14 @@ mod tests {
         let found = crate::graphics::resource_blorb(&zip_path).found;
         let (blorb, path) = found.expect("the Blorb in the zip is the story's resource source");
         assert_eq!(blorb.resources().len(), 1, "the Pict resource is indexed");
+        // `Path::ends_with`, not `to_string_lossy().ends_with`: the former compares
+        // whole COMPONENTS and reads `/` as a separator on Windows too, while the
+        // latter compares bytes and so demanded a separator the platform does not
+        // write. `named()` builds this with `PathBuf::join`, which yields `\` on
+        // Windows — correct for a path a Windows player reads, and the reason the
+        // string form was red on CI and green on every developer machine.
         assert!(
-            path.to_string_lossy().ends_with("journey.zip/Journey.blb"),
+            path.ends_with("journey.zip/Journey.blb"),
             "the display path names the entry inside the archive: {}",
             path.display(),
         );
