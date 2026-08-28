@@ -49,7 +49,7 @@
 //! Once per session, above the first assist, [`preamble`] says:
 //!
 //! ```text
-//! Lanthorn's Guiding Light is enabled and will display guidance using ●. This can be disabled in the settings menu.
+//! Lanthorn's Guiding Light: lines marked ● are the interpreter's, not the story's — turn it off in the settings menu.
 //! ```
 //!
 //! with the **configured** glyph substituted, never a hard-coded dot. That is
@@ -57,6 +57,15 @@
 //! sees a tofu box in the one sentence that tells them what the box is and where
 //! to turn it off. Reword this line freely, but never into a sentence that omits
 //! the icon.
+//!
+//! It is deliberately **just-in-time rather than a startup banner**. An earlier
+//! draft announced the feature at session start — "is enabled and will display
+//! guidance using ●" — which reads as a promise and costs a line of chrome on
+//! every launch, including the many sessions where no assist ever fires. Firing
+//! it above the first assist means it only ever appears when there is a mark on
+//! screen to explain, and the sentence can therefore explain THAT MARK rather
+//! than forecast one. It also opens with [`NAME`], which is what keeps
+//! [`export_line`] from introducing it a second time in a saved file.
 //!
 //! # What an assist line looks like
 //!
@@ -128,7 +137,7 @@ pub const CONT_INDENT: &str = "  ";
 /// they will be seeing — and so a font missing it fails visibly HERE, in the one
 /// line that also says where to switch the feature off. See the module docs.
 pub fn preamble(icon: char) -> String {
-    format!("{FEATURE} is enabled and will display guidance using {icon}. This can be disabled in the settings menu.")
+    format!("{FEATURE}: lines marked {icon} are the interpreter's, not the story's — turn it off in the settings menu.")
 }
 
 /// One transcript line as a **saved transcript** should carry it.
