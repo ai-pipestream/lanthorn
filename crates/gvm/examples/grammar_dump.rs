@@ -11,7 +11,7 @@
 //!
 //!     cargo run -p gvm --example grammar_dump -- stories/Eat_Me.gblorb
 
-use gvm::grammar::Grammar;
+use gvm::grammar::{Grammar, RoutineRef};
 use gvm::memory::Memory;
 
 /// Pull the `GLUL` chunk out of a Blorb, or pass a bare Glulx image through.
@@ -36,6 +36,17 @@ fn glulx_image(bytes: Vec<u8>) -> Option<Vec<u8>> {
         i += 8 + len + (len & 1);
     }
     None
+}
+
+/// A routine token's address in hex, which is what `glulxdump` prints. Glulx
+/// tokens hold plain addresses; `RoutineRef`'s other two spellings are the
+/// Z-machine's preactions index and packed address, and no Glulx story can
+/// produce either.
+fn hex(r: &RoutineRef) -> String {
+    match r {
+        RoutineRef::Address(a) => format!("{a:x}"),
+        other => other.describe(),
+    }
 }
 
 fn main() {
@@ -114,10 +125,10 @@ fn main() {
                     .map(|t| match t {
                         gvm::grammar::Token::Noun(k) => format!("1:{}", k.name()),
                         gvm::grammar::Token::Word(_) => "2".to_string(),
-                        gvm::grammar::Token::FilteredNoun(a) => format!("3:{a:x}"),
+                        gvm::grammar::Token::FilteredNoun(r) => format!("3:{}", hex(r)),
                         gvm::grammar::Token::Attribute(a) => format!("4:{a:x}"),
-                        gvm::grammar::Token::Scope(a) => format!("5:{a:x}"),
-                        gvm::grammar::Token::Routine(a) => format!("6:{a:x}"),
+                        gvm::grammar::Token::Scope(r) => format!("5:{}", hex(r)),
+                        gvm::grammar::Token::Routine(r) => format!("6:{}", hex(r)),
                         _ => "?".to_string(),
                     })
                     .collect();
