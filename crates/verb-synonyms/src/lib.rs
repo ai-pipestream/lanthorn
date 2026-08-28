@@ -13,12 +13,27 @@
 //!
 //! ## Where the data came from, and how to regenerate it
 //!
-//! `crates/verb-synonyms-gen` builds the table from WordNet 3.0 (Princeton
-//! University) and the 12dicts 6.0.2 lemmatized frequency list (Alan Beale,
-//! under the AGID terms), against the verb vocabulary harvested from every story
-//! its three parsers can read. See that crate's `README.md` for the exact source
-//! versions and the two commands; the licence notices both sources require are
-//! in `THIRD-PARTY-NOTICES.md` at the repository root.
+//! Two sources, and the first of them is interactive fiction itself.
+//!
+//! Every story's grammar declares its verbs in GROUPS — `Verb 'examine' 'x'
+//! 'watch' 'describe' 'inspect'` is one entry, and it is that game's author
+//! stating that those spellings are one action. Where several stories declare
+//! the same set independently, it is shipped as a group. That source outranks
+//! the second one, because it answers the parser's question rather than
+//! English's: WordNet relates `inspect` to `case`, `visit` and `audit`, and to
+//! `examine` not at all, while fourteen stories in the corpus put `inspect` and
+//! `examine` on one verb.
+//!
+//! The second is WordNet 3.0 (Princeton University), filtered by the 12dicts
+//! 6.0.2 lemmatized frequency list (Alan Beale, under the AGID terms) down to
+//! the senses the IF vocabulary actually touches. It covers everything the
+//! corpus never happened to group.
+//!
+//! `crates/verb-synonyms-gen` builds the table from both, against the verb
+//! vocabulary harvested from every story its three parsers can read. See that
+//! crate's `README.md` for the exact source versions and the two commands; the
+//! licence notices WordNet and 12dicts require are in `THIRD-PARTY-NOTICES.md`
+//! at the repository root.
 //!
 //! ## How to use it
 //!
@@ -83,14 +98,16 @@ fn index() -> &'static Index {
     })
 }
 
-/// Every group `word` belongs to, in that word's own WordNet sense order —
-/// commonest sense first.
+/// Every group `word` belongs to, best guess first: the groups games declared
+/// for it, then its WordNet senses, commonest sense first.
 ///
 /// The order is the whole reason the file must never be sorted. A word is
 /// polysemous: `draw` is *pull*, *sketch* and *attract*, and it sits in one
 /// group per sense. Walking them in order and stopping early shows the player
 /// the reading they most likely meant, and keeps a rare fifth sense from
-/// crowding out the common first one.
+/// crowding out the common first one. A group the corpus itself declared comes
+/// ahead of all of them, because a game's own verb entry is a stronger
+/// statement about what a word does in a parser than any sense ranking.
 ///
 /// `word` must already be a base form; see the module docs.
 pub fn groups(word: &str) -> impl Iterator<Item = &'static [&'static str]> {

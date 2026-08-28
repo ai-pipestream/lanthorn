@@ -16,7 +16,7 @@
 # parser would reject is worthless.  An inflected spelling is dropped only when
 # every story that accepts it also accepts its base form.
 #
-# 119 stories read; 9893 spellings.
+# 119 stories read; 10023 spellings.
 aaaaah	1	
 aaaah	1	
 aaah	1	
@@ -53,7 +53,7 @@ accuse for	1
 accuse with	2	
 achieve	2	achieve
 achieveme	3	
-acqu	2	
+acqu	4	
 acquire	2	acquire
 acquire flight	1	
 acquire from	2	
@@ -63,6 +63,7 @@ acquire with	2
 act	3	act
 act like	1	
 act with	1	
+acti	1	
 actions	2	
 actions off	2	
 actions on	2	
@@ -78,6 +79,7 @@ add	2	add
 add to	1	add to
 addres	2	
 address	2	address
+adju	1	
 adjust	37	adjust
 adjust clock	1	
 adjust fire	5	
@@ -244,7 +246,7 @@ apologize	3	apologize
 apologize to	2	
 append	1	append
 append to	1	
-appl	1	
+appl	3	
 applau	5	
 applaud	3	applaud
 apply	27	apply
@@ -273,7 +275,8 @@ arrr at	2
 arrrr	2	
 arrrr at	2	
 art	1	
-asce	4	
+asc	1	
+asce	8	
 ascend	11	ascend
 ascend by	1	
 ascend down	1	
@@ -287,7 +290,7 @@ ascii	1
 ascii off	1	
 ascii on	1	
 aside	1	
-ask	79	ask
+ask	87	ask
 ask about	62	
 ask for	61	ask for
 ask how	2	
@@ -309,8 +312,8 @@ assault	7	assault
 assault with	7	
 assemble	1	assemble
 assist	1	assist
-att	4	
-atta	11	
+att	6	
+atta	22	
 attach	64	attach
 attach around	15	
 attach before	1	
@@ -363,8 +366,8 @@ auto-play	1
 autoplay	1	
 avaunt	1	
 avoid	2	avoid
-awak	1	
-awake	68	awake
+awak	3	
+awake	69	awake
 awake up	68	
 awake with	1	
 awaken	38	awaken
@@ -390,10 +393,10 @@ bake	5	bake
 bal	1	
 balanc	1	
 balanc with	1	
-ball	5	ball
+ball	9	ball
 ballroom	1	
 bandage	1	bandage
-bang	5	bang
+bang	6	bang
 bang at	2	
 bang down	2	
 bang off	1	
@@ -424,7 +427,7 @@ barter with	2
 bash	2	bash
 bash with	2	
 bask	1	bask
-bast	7	
+bast	14	
 bastard	1	
 baste	1	baste
 bat	2	bat
@@ -438,7 +441,7 @@ bathe through	3
 bathe to	8	
 bathe under	3	
 bathe up	5	
-batt	1	
+batt	2	
 batter	1	batter
 battle	2	battle
 battle at	1	
@@ -450,7 +453,7 @@ beam	1	beam
 bear	1	bear
 bearing	1	
 beast	1	
-beat	7	beat
+beat	8	beat
 beat about	1	beat about
 beat around	1	
 beat at	2	
@@ -479,14 +482,14 @@ begin to	1
 begone	7	
 begone away	6	
 begone out	6	
-behe	1	
+behe	2	
 behead	1	behead
 behold	1	behold
 bellow	2	bellow
 bellow at	1	
 bellow to	1	
 bellow with	1	
-belt	2	belt
+belt	3	belt
 belt with	1	
 bend	7	bend
 bend back	1	
@@ -513,7 +516,7 @@ blackbird pie	1
 blackbird pies	1	
 blade	1	
 blarn	1	
-blas	1	
+blas	4	
 blast	18	blast
 blast at	11	
 blast off	1	blast off
@@ -532,6 +535,8 @@ blind with	17
 blindfold	1	blindfold
 blindfold with	1	
 blitz	1	blitz
+blo	1	
+bloc	1	
 block	20	block
 block beneath	1	
 block down	6	
@@ -545,7 +550,7 @@ block window	1
 block with	16	
 blorb	1	
 blorpl	1	
-blow	45	blow
+blow	47	blow
 blow at	4	
 blow in	17	
 blow into	2	
@@ -557,7 +562,7 @@ blow through	6
 blow up	20	blow up
 blow with	8	
 blubber	1	blubber
-boar	1	
+boar	2	
 board	32	board
 board down	2	
 board in	3	
@@ -572,10 +577,10 @@ boast	2	boast
 body	4	body
 body surf	1	
 bodysurf	1	
-bog	1	bog
+bog	2	bog
 bok	1	
 boleyn	1	
-boll	6	
+boll	12	
 bolt	1	bolt
 bolt to	1	
 bolt with	1	
@@ -591,6 +596,7 @@ boot	1	boot
 bother	11	bother
 bottlenos	1	
 bottlenos dolphin	1	
+boun	2	
 bounce	9	bounce
 bounce across	1	
 bounce around	3	
@@ -642,9 +648,9 @@ brandish	2	brandish
 brandish at	2	
 brandish near	1	
 brandish over	1	
-bre	6	
-brea	22	
-break	71	break
+bre	7	
+brea	30	
+break	72	break
 break against	1	
 break by	1	
 break down	40	break down
@@ -712,10 +718,10 @@ buckle together	1
 buckle up	1	
 buckle with	1	
 bug	6	bug
-bugg	3	
-bui	1	
-buil	5	
-build	3	build
+bugg	4	
+bui	3	
+buil	10	
+build	4	build
 build from	2	
 build in	1	build in
 build over	1	
@@ -724,8 +730,8 @@ buk bawk	1
 bullshit	1	bullshit
 bun	1	
 buns	1	
-bur	2	bur
-burn	64	burn
+bur	5	bur
+burn	71	burn
 burn at	4	
 burn down	18	burn down
 burn fire	3	
@@ -745,12 +751,14 @@ burst with	3
 bury	7	bury
 bury in	7	
 bury under	1	
+bus	1	bus
+bust	1	bust
 butchered	1	
 butchered carcass	1	
 butchered pig	1	
 butterfly	1	butterfly
 butts	1	
-buy	54	buy
+buy	55	buy
 buy for	1	
 buy from	16	
 buy in	1	buy in
@@ -758,7 +766,8 @@ buy with	15
 bye	16	
 cackle	3	cackle
 cackle at	2	
-call	39	call
+cal	2	
+call	41	call
 call bonnie	1	
 call bonstance	1	
 call by	1	
@@ -774,7 +783,7 @@ call to	24
 call up	6	call up
 call using	1	
 call with	5	
-calm	1	calm
+calm	2	calm
 camembert	1	
 can	1	can
 cancel	1	cancel
@@ -793,11 +802,12 @@ capture from	1
 capture with	1	
 carcass	1	
 cardinal	1	
-care	1	care
+care	2	care
 caress	1	caress
 caress with	1	
 cargo	1	
-carry	68	carry
+carr	3	
+carry	69	carry
 carry all	6	
 carry apart	5	
 carry back	1	carry back
@@ -857,7 +867,7 @@ carve with	3
 cas	1	
 cash	2	cash
 caskly	1	
-cast	17	cast
+cast	19	cast
 cast anghofio	1	
 cast at	7	
 cast away	7	cast away
@@ -889,8 +899,9 @@ cast xyzzy	1
 castles	1	
 casu	1	
 casu marzu	1	
-cat	1	cat
+cat	6	cat
 catastrop	1	
+catc	6	
 catch	33	catch
 catch apart	4	
 catch behind	2	
@@ -926,6 +937,7 @@ challenge with	1
 champ	1	champ
 champ on	1	
 champagne	1	
+chan	2	
 chandelie	1	
 change	6	change
 change at	1	
@@ -961,7 +973,7 @@ cheat	2	cheat
 cheat at	1	
 cheathub	1	
 cheatrift	1	
-chec	1	
+chec	2	
 check	47	check
 check acknowled	1	
 check contents	1	
@@ -999,7 +1011,7 @@ cherub	1
 cherubino	1	
 cherubs	1	
 chestnuts	1	
-chew	13	chew
+chew	14	chew
 chew on	2	
 chico	1	
 child	1	
@@ -1020,7 +1032,7 @@ choo	1
 choose	7	choose
 choose on	1	
 choose with	2	
-chop	52	chop
+chop	60	chop
 chop down	12	chop down
 chop in	2	
 chop it	1	
@@ -1032,7 +1044,7 @@ chop throug	1
 chop through	9	
 chop up	5	chop up
 chop with	21	
-chuc	6	
+chuc	12	
 chuck	29	chuck
 chuck across	1	
 chuck against	4	
@@ -1067,14 +1079,14 @@ clamber through	1
 clamber under	1	
 clamber up	1	
 clamp	1	clamp
-clap	10	clap
+clap	11	clap
 clap once	1	
 claw	1	claw
 claw at	1	
 claw on	1	
-cle	2	
-clea	2	
-clean	60	clean
+cle	3	
+clea	3	
+clean	61	clean
 clean against	1	
 clean away	2	
 clean in	6	
@@ -1123,7 +1135,7 @@ cleave up	3
 cleave with	5	
 cleesh	1	
 cleves	1	
-cli	1	
+cli	9	
 click	5	click
 click heels	1	
 click on	2	
@@ -1131,10 +1143,10 @@ click with	2
 click your	1	
 cliff	1	
 cliffs	1	
-clim	27	
+clim	35	
 climax	2	climax
 climax with	2	
-climb	69	climb
+climb	70	climb
 climb aboard	1	
 climb across	1	
 climb behind	1	
@@ -1162,7 +1174,7 @@ clip	2	clip
 clip loose	1	
 clip throug	1	
 clip with	1	
-clo	5	
+clo	6	
 cloak	1	cloak
 cloak room	1	
 cloaks	1	
@@ -1174,7 +1186,7 @@ clocks	1
 clog	2	clog
 clog with	2	
 clos	16	
-close	70	close
+close	71	close
 close eyes	1	
 close for	1	
 close in	1	close in
@@ -1187,12 +1199,13 @@ close with	8
 cloud	1	cloud
 clouds	1	
 cls	1	
-clue	13	clue
+clue	14	clue
 clue off	10	
 clues	11	
 clues off	8	
 cock	1	cock
 cold	2	
+coll	1	
 collap	1	
 collapse	3	collapse
 collect	1	collect
@@ -1245,6 +1258,7 @@ comfor up	1
 comfor with	1	
 comfort	4	comfort
 comfort up	2	
+comm	1	
 comman	2	
 command	3	command
 commands	6	
@@ -1267,7 +1281,7 @@ complete	2	complete
 complete walkthrou	1	
 compli	2	
 complimen	1	
-conc	2	
+conc	4	
 concea	7	
 concea behind	5	
 concea from	6	
@@ -1326,6 +1340,7 @@ connect to	9
 connect together	2	
 connect up	1	
 connect with	2	
+cons	1	
 consequen	1	
 consider	5	consider
 consider about	2	
@@ -1365,7 +1380,7 @@ converse to	1
 converse with	1	
 convert	1	convert
 coo	2	coo
-cook	9	cook
+cook	10	cook
 cook with	2	
 cooked	1	cook
 cool	1	cool
@@ -1396,7 +1411,7 @@ countess	1
 court	1	court
 court fool	1	
 cousin	1	
-cove	3	
+cove	4	
 cover	50	cover
 cover eyes	1	
 cover in	1	
@@ -1407,7 +1422,8 @@ cover window	1
 cover with	23	
 cow	1	cow
 cows	1	
-crac	2	
+cra	1	
+crac	3	
 crack	48	crack
 crack against	1	
 crack at	1	
@@ -1424,7 +1440,7 @@ crack throug	2
 crack through	5	
 crack using	2	
 crack with	29	
-cran	1	
+cran	3	
 crank	5	crank
 crank back	1	
 crank off	1	
@@ -1435,7 +1451,7 @@ crap	5	crap
 crap in	2	
 crap on	2	
 crater	1	
-craw	1	
+craw	5	
 crawl	20	crawl
 crawl across	2	
 crawl around	9	
@@ -1467,6 +1483,7 @@ crawl toward	1
 crawl towards	1	
 crawl under	15	
 crawl up	12	
+crea	3	
 crease	1	crease
 create	1	create
 create drink	1	
@@ -1496,7 +1513,7 @@ cremate with	2
 crimson	1	crimson
 cro	2	
 cros	1	
-cross	56	cross
+cross	57	cross
 cross aftermath	1	
 cross and	1	
 cross ballroom	1	
@@ -1538,7 +1555,8 @@ crouch down	6
 crouch in	9	
 crouch on	8	
 crouch under	5	
-crow	1	crow
+crow	2	crow
+crum	1	
 crumble	3	crumble
 crumble down	3	
 crumble in	3	
@@ -1558,7 +1576,7 @@ crush on	5
 crush out	4	crush out
 crush up	1	
 crush with	7	
-cry	14	cry
+cry	15	cry
 cry at	4	
 cry over	1	
 cry to	4	
@@ -1567,12 +1585,12 @@ cuff	3	cuff
 cuff to	1	
 cum	2	
 cum with	2	
-cunt	4	
+cunt	7	
 curdle	2	curdle
 curdle with	2	
 currant	1	
 currants	1	
-curse	19	curse
+curse	20	curse
 curse at	1	
 curse on	2	
 curses	11	
@@ -1583,7 +1601,7 @@ curtsy	2	curtsy
 curtsy to	2	
 cuss	1	cuss
 custom	1	
-cut	89	cut
+cut	96	cut
 cut down	10	cut down
 cut in	1	cut in
 cut it	1	
@@ -1606,7 +1624,7 @@ cyr-jone	1
 daemons	1	
 daemons off	1	
 daemons on	1	
-dam	3	dam
+dam	4	dam
 damage	37	damage
 damage down	36	
 damage in	12	
@@ -1623,8 +1641,8 @@ damn it	1
 damn on	2	
 damnit	1	
 dan	1	
-danc	2	
-dance	15	dance
+danc	4	
+dance	16	dance
 dance with	6	
 dancer	1	
 dancers	1	
@@ -1652,7 +1670,7 @@ debark	14	debark
 debark from	2	
 debug	1	debug
 debugclon	1	
-deca	1	
+deca	2	
 decimate	1	decimate
 decimate down	1	
 decimate with	1	
@@ -1689,7 +1707,7 @@ deflat with	1
 deflate	6	deflate
 deflate with	2	
 del	2	
-dela	1	
+dela	2	
 delete	3	delete
 delete browser	1	
 delete chat	1	
@@ -1732,10 +1750,11 @@ demolish through	4
 demolish with	10	
 denox	1	
 deny	2	deny
+dep	1	
 depart	24	depart
 depart from	1	
 depart through	1	
-depo	2	
+depo	4	
 deposi	1	
 deposi in	1	
 deposi on	1	
@@ -1744,11 +1763,14 @@ deposit down	1
 deposit in	2	
 deposit on	1	
 depossess	1	
+des	3	
+desc	9	
 descen	11	
 descen by	1	
 descen to	1	
 descen under	1	
 descend	13	descend
+descr	1	
 descri	24	
 descri for	7	
 descri in	15	
@@ -1786,7 +1808,7 @@ describe through	8
 describe with	6	
 design	1	design
 desist	1	desist
-dest	7	
+dest	18	
 destiny	1	
 destro	25	
 destro down	25	
@@ -1822,15 +1844,15 @@ detonate	3	detonate
 devastate	1	devastate
 devastate down	1	
 devastate with	1	
-devo	3	
+devo	6	
 devour	19	devour
 devour from	1	
 devour on	1	
-dia	1	
+dia	2	
 diagno	18	
 diagnose	14	diagnose
 diagnose with	1	
-dial	16	dial
+dial	17	dial
 dial around	5	
 dial at	1	
 dial in	1	
@@ -1887,12 +1909,13 @@ dip throug	1
 dip under	3	
 dir	1	
 dirox	1	
+dis	2	
 disable	2	disable
 disarray	1	disarray
 disassemb	3	
 disassemb up	3	
 disassemb with	3	
-disc	3	disk
+disc	8	disk
 discard	30	discard
 discard against	30	
 discard all	3	
@@ -1954,12 +1977,12 @@ dislocate over	1
 dislocate to	5	
 dislocate up	1	
 dislocate with	4	
-dism	1	
+dism	2	
 dismiss	3	dismiss
 dismou	2	
 dismount	7	dismount
 dismount from	1	
-disp	1	
+disp	2	
 dispat	11	
 dispat with	11	
 dispatch	3	dispatch
@@ -2014,8 +2037,9 @@ dock	4	dock
 dock at	1	
 dock on	1	
 dock with	2	
+dodg	1	
 dodge	3	dodge
-doff	45	doff
+doff	52	doff
 doff from	6	
 dolphin	1	
 dolphins	1	
@@ -2023,17 +2047,17 @@ domino	1
 domino mask	1	
 domo	1	
 domo arigato	1	
-don	60	don
+don	69	don
 don as	1	
 don blindfold	1	
-dona	1	
+dona	2	
 donate	30	donate
 donate back	4	
 donate for	2	
 donate to	30	
 donate up	6	
 dontparse	2	
-dous	4	
+dous	8	
 douse	24	douse
 douse in	2	
 douse oil	1	
@@ -2048,7 +2072,7 @@ doze on	8
 doze with	2	
 dozo	1	
 dra	1	
-drag	45	drag
+drag	46	drag
 drag apart	5	
 drag away	1	
 drag back	1	
@@ -2102,7 +2126,7 @@ dreams	1
 dress	12	dress
 dress for	1	
 dress in	2	
-dri	7	
+dri	8	
 dribble	1	dribble
 dribble around	1	
 drift	1	drift
@@ -2110,7 +2134,7 @@ drill	2	drill
 drill in	2	drill in
 drill throug	1	
 drill with	2	
-drin	9	
+drin	13	
 drink	72	drink
 drink down	1	drink down
 drink from	38	
@@ -2123,7 +2147,7 @@ drip from	1
 drip in	1	
 drip on	1	
 drip out	1	
-driv	2	
+driv	3	
 drive	15	drive
 drive after	1	
 drive around	3	drive around
@@ -2140,7 +2164,7 @@ drive to	6
 drive under	2	
 drive up	3	drive up
 drive with	2	
-dro	7	
+dro	8	
 drool	4	drool
 drool at	2	
 drool in	2	
@@ -2188,7 +2212,7 @@ dry on	4
 dry out	1	dry out
 dry over	1	
 dry with	4	
-duck	7	duck
+duck	8	duck
 duck around	1	
 duck away	1	
 duck behind	2	
@@ -2202,7 +2226,7 @@ duck with	1
 duel	1	duel
 duke	1	
 dummy	2	dummy
-dump	22	dump
+dump	26	dump
 dump at	3	
 dump before	3	
 dump dead	1	
@@ -2242,7 +2266,7 @@ earn	2	earn
 earth	1	earth
 easy	1	
 easy mode	1	
-eat	100	eat
+eat	110	eat
 eat from	3	
 eat on	1	eat on
 eat with	1	
@@ -2274,10 +2298,10 @@ embark on	4	embark on
 embrac	1	
 embrace	31	embrace
 emerge	1	emerge
-emp	2	
+emp	4	
 empath	1	
 empath with	1	
-empl	1	
+empl	2	
 employ	8	employ
 employ on	1	
 empt	15	
@@ -2299,7 +2323,7 @@ enable	3	enable
 enable graphics	1	
 enchan	2	
 enchant	1	enchant
-end	2	end
+end	4	end
 end turn	1	
 enemies	2	
 engage	1	engage
@@ -2313,8 +2337,9 @@ enscon behind	1
 enscon from	1	
 enscon under	1	
 enslave	2	enslave
-ente	6	
-enter	70	enter
+ent	9	
+ente	24	
+enter	71	enter
 enter aftermath	1	
 enter ballroom	1	
 enter banquet	1	
@@ -2380,8 +2405,9 @@ espnis	1
 etiquette	1	
 evacua	1	
 evacua from	1	
-exa	2	
-exam	19	
+exa	8	
+exam	35	
+exami	1	
 examin	24	
 examin for	7	
 examin in	15	
@@ -2436,7 +2462,7 @@ exchange to	1
 exchange with	2	
 excite	2	excite
 excuse	1	excuse
-exer	1	
+exer	2	
 exerci	1	
 exex	1	
 exfil	1	
@@ -2444,7 +2470,8 @@ exha	1
 exhale	2	exhale
 exhibit	1	exhibit
 exhibit to	1	
-exit	68	exit
+exi	1	
+exit	69	exit
 exit color	1	
 exit colour	1	
 exit from	3	
@@ -2500,13 +2527,14 @@ explore over	1
 explore through	1	
 explore up	1	
 expose	2	expose
-exte	1	
+ext	1	
+exte	2	
 extend	8	extend
 extend back	1	
 extend to	1	extend to
 extend up	3	
 extend with	2	
-exti	5	
+exti	11	
 exting	19	
 extingui	1	
 extinguis	18	
@@ -2548,7 +2576,7 @@ facts	1
 faint	3	faint
 faint in	1	
 faint on	1	
-fall	3	fall
+fall	4	fall
 fall across	1	
 fall asleep	1	fall asleep
 fall down	1	fall down
@@ -2565,7 +2593,7 @@ fan	1	fan
 farewe	2	
 farewell	12	
 fart	4	fart
-fast	6	fast
+fast	10	fast
 fast forward	1	
 fast-forw	1	
 fast-forw to	1	
@@ -2591,7 +2619,7 @@ fate	1	fate
 feast	1	feast
 feast on	1	
 feast upon	1	
-fee	4	fee
+fee	6	fee
 feed	79	feed
 feed blood	2	
 feed cpr	1	
@@ -2600,7 +2628,7 @@ feed over	3
 feed to	62	
 feed up	1	
 feed with	10	
-feel	74	feel
+feel	81	feel
 feel in	7	
 feel inside	2	
 feel on	11	
@@ -2626,8 +2654,9 @@ fiddle	9	fiddle
 fiddle while	1	
 fiddle with	8	fiddle with
 fie	1	
+fig	1	
 figaro	1	
-figh	1	
+figh	4	
 fight	68	fight
 fight against	1	
 fight back	1	fight back
@@ -2642,7 +2671,7 @@ fight using	2
 fight with	49	
 fighttest	1	
 fighttest vs	1	
-fil	2	
+fil	3	
 filch	1	filch
 filch from	1	
 filch inventory	1	
@@ -2654,7 +2683,7 @@ file fingernail	1
 file my	1	
 file nails	1	
 filfre	1	
-fill	61	fill
+fill	62	fill
 fill at	11	
 fill car	1	
 fill cup	1	
@@ -2668,7 +2697,7 @@ fill up	1	fill up
 fill water	1	
 fill with	39	
 fin	5	fin
-find	52	find
+find	53	find
 find among	1	
 find at	1	
 find cellarium	1	
@@ -2682,7 +2711,7 @@ find with	1
 finger	3	finger
 finish	2	finish
 fip	1	
-fire	35	fire
+fire	37	fire
 fire at	21	
 fire in	1	
 fire off	1	
@@ -2703,13 +2732,15 @@ fit on	2
 fit over	1	
 fit to	1	
 fit under	1	
-fix	53	fix
+fix	58	fix
 fix on	1	
 fix onto	1	
 fix to	4	
 fix up	4	fix up
 fix with	19	
-flap	3	flap
+fla	1	
+flap	4	flap
+flas	1	
 flash	2	flash
 flash at	1	
 flash in	1	
@@ -2757,7 +2788,7 @@ fling throug	3
 fling through	9	
 fling to	10	
 fling up	1	
-flip	45	flip
+flip	47	flip
 flip around	15	
 flip at	1	
 flip away	1	
@@ -2791,7 +2822,7 @@ flood with	2
 flu	1	
 flush	14	flush
 flush down	1	flush down
-flut	1	
+flut	2	
 fly	32	fly
 fly across	1	
 fly around	1	
@@ -2816,19 +2847,20 @@ focus in	1
 focus on	2	focus on
 focus with	1	
 foe	1	
+fol	2	
 fold	12	fold
 fold around	4	
 fold in	4	
 fold out	3	
 fold up	7	fold up
-foll	4	
+foll	6	
 follies	1	
 follow	44	follow
 follow rat	1	
 follow to	4	
 follow tracks	1	
 folly	1	
-fond	1	
+fond	2	
 fondle	10	fondle
 fondle in	2	
 fondle inside	2	
@@ -2844,7 +2876,7 @@ footlight	1
 footno	2	
 footnote	2	footnote
 for	2	
-forc	4	
+forc	7	
 force	9	force
 force apart	2	
 force behind	3	
@@ -2875,7 +2907,7 @@ fracture	1	fracture
 fracture down	1	
 fracture off	1	
 fratto	1	
-free	43	free
+free	44	free
 free from	23	
 free with	8	
 freshe	1	
@@ -2889,7 +2921,7 @@ friendly on	1
 frighten	3	frighten
 frippi	1	
 fripping	1	
-fris	3	
+fris	5	
 frisk	13	frisk
 frisk for	13	
 frisk in	13	
@@ -2906,8 +2938,8 @@ frown at	3
 frown to	2	
 fry	3	fry
 fublitske	1	
-fuc	1	
-fuck	50	fuck
+fuc	3	
+fuck	52	fuck
 fuck it	1	
 fuck off	2	fuck off
 fuck on	2	
@@ -2980,7 +3012,7 @@ genuflect	5	genuflect
 genuflect at	1	
 genuflect before	5	
 genuflect to	5	
-gest	1	
+gest	2	
 gestur	7	
 gestur at	7	
 gestur to	7	
@@ -2988,7 +3020,7 @@ gesture	5	gesture
 gesture at	4	
 gesture to	4	
 gesture toward	1	
-get	117	get
+get	118	get
 get across	1	get across
 get all	4	
 get away	4	get away
@@ -3042,7 +3074,8 @@ giggle at	1
 gin	1	gin
 girgol	1	
 girl	1	
-give	86	give
+giv	3	
+give	95	give
 give and	2	
 give back	4	give back
 give blood	2	
@@ -3101,7 +3134,8 @@ gorge	1	gorge
 gorge on	1	
 goto	4	
 gown	1	gown
-grab	54	grab
+gra	3	
+grab	74	grab
 grab apart	4	
 grab before	1	
 grab behind	2	
@@ -3145,7 +3179,7 @@ graphics	2
 graphics mode	1	
 graphics off	2	
 graphics on	2	
-gras	1	
+gras	2	
 grasp	3	grasp
 grasp down	1	
 grasp from	1	
@@ -3186,9 +3220,11 @@ grip on	1
 grip throug	1	
 grip through	1	
 grip with	1	
+gro	1	
 groan	3	groan
 groom	1	groom
 groove	2	groove
+grop	1	
 grope	9	grope
 grope for	4	grope for
 grope in	6	
@@ -3231,7 +3267,7 @@ gut	1	gut
 guzzle	15	guzzle
 guzzle from	12	
 gyrate	1	gyrate
-hack	6	hack
+hack	10	hack
 haggle	2	haggle
 haggle with	2	
 hai	1	
@@ -3241,7 +3277,7 @@ hair	2
 halp	1	
 halt	3	halt
 ham	1	ham
-hamm	1	
+hamm	2	
 hammer	3	hammer
 hammer about	1	
 hammer around	1	
@@ -3340,6 +3376,7 @@ haw at	2
 haw ha	2	
 haw haw	2	
 haw hee	2	
+hea	3	
 head	5	head
 head across	1	
 head after	1	
@@ -3367,7 +3404,7 @@ head up	5	head up
 head with	2	
 headbutt	1	headbutt
 heal	2	heal
-hear	49	hear
+hear	53	hear
 hear aside	1	
 hear for	2	
 hear to	5	
@@ -3426,7 +3463,7 @@ hey	2
 hey up	1	
 hiccough	2	hiccough
 hiccup	2	hiccup
-hide	47	hide
+hide	48	hide
 hide across	1	
 hide agains	1	
 hide among	1	
@@ -3479,7 +3516,7 @@ hilightin	1
 hilightin off	1	
 hilightin on	1	
 hilite	1	
-hint	51	hint
+hint	54	hint
 hint about	1	
 hint attendant	1	
 hint beatrice	1	
@@ -3494,7 +3531,7 @@ hints	37
 hints off	11	
 hiss	3	hiss
 hiss at	2	
-hit	79	hit
+hit	89	hit
 hit about	1	
 hit against	1	
 hit around	2	
@@ -3527,7 +3564,8 @@ hoist	11	hoist
 hoist out	1	
 hoist up	10	
 hoist with	5	
-hold	76	hold
+hol	2	
+hold	85	hold
 hold against	4	
 hold all	6	
 hold apart	5	
@@ -3574,6 +3612,7 @@ hold undressed	2
 hold up	36	hold up
 hold with	18	
 hold your	1	
+holl	3	
 holler	3	holler
 holler at	1	
 holler to	1	
@@ -3588,7 +3627,7 @@ honk	2	honk
 honk at	2	
 honk on	1	
 honk with	1	
-hook	14	hook
+hook	15	hook
 hook around	3	
 hook before	1	
 hook from	1	
@@ -3640,7 +3679,7 @@ hot take	1
 hottake	1	
 hour	1	
 hours	1	
-hove	1	heave
+hove	2	heave
 how	7	
 how do	1	
 how play	1	
@@ -3678,7 +3717,7 @@ hurdle over	7
 hurdle through	6	
 hurdle to	5	
 hurdle up	5	
-hurl	46	hurl
+hurl	50	hurl
 hurl across	1	
 hurl against	2	
 hurl at	41	
@@ -3704,7 +3743,7 @@ hurrah	2	hurrah
 hurrah for	2	
 hurray	2	
 hurray for	2	
-hurt	27	hurt
+hurt	28	hurt
 hurt down	2	
 hurt in	2	
 hurt into	1	
@@ -3723,7 +3762,9 @@ ialdabaol	2
 identi	1	
 identity	1	
 idiot	4	
-igni	6	
+ign	3	
+igni	16	
+ignit	1	
 ignite	23	ignite
 ignite down	17	
 ignite in	1	
@@ -3807,7 +3848,7 @@ inquire	2	inquire
 inquire about	1	
 inquire for	1	
 inquire on	1	
-ins	2	
+ins	3	
 inscri	2	
 inscri in	2	
 inscri on	2	
@@ -3818,7 +3859,7 @@ inscribe in	3
 inscribe on	3	
 inscribe over	1	
 inscribe with	3	
-inse	7	
+inse	11	
 insert	68	insert
 insert across	17	
 insert agains	6	
@@ -3850,7 +3891,7 @@ insert under	39
 insert up	3	
 insert with	2	
 inside	6	
-insp	7	
+insp	14	
 inspec	14	
 inspec for	6	
 inspec in	7	
@@ -3866,6 +3907,7 @@ inspect on	8
 inspect room	1	
 inspect through	7	
 inspect with	5	
+inst	1	
 instal	2	instal
 instal down	1	
 instal in	1	
@@ -3896,11 +3938,12 @@ interroga	5
 interroga about	5	
 interroga for	3	
 interv	1	
+into	1	
 intone	1	intone
 inv	42	
 inv tall	4	
 inv wide	4	
-inve	37	
+inve	38	
 inven	1	
 invent	26	invent
 invent love	1	
@@ -3913,6 +3956,7 @@ invisiclu	8
 invisiclu off	8	
 invite	1	invite
 invocatio	1	
+invok	1	
 invoke	3	invoke
 invoke at	2	
 invoke on	2	
@@ -3927,7 +3971,7 @@ isogi	1
 itch	2	itch
 iye	1	
 izyuk	2	
-jab	18	jab
+jab	19	jab
 jab at	1	
 jab on	1	
 jab with	17	
@@ -3948,7 +3992,7 @@ jar	1	jar
 jar with	1	
 jellyfish	1	
 jellyfish gown	1	
-jemm	1	
+jemm	2	
 jemmy	2	
 jemmy apart	2	
 jemmy open	2	
@@ -3990,7 +4034,7 @@ join to	1
 join with	1	
 jostle	8	jostle
 jostle with	4	
-jot	2	jot
+jot	3	jot
 jot in	1	
 jot on	1	
 journal	1	
@@ -3999,8 +4043,8 @@ joust with	1
 jukes	1	
 julia	1	
 julia egg	1	
-jum	7	
-jump	96	jump
+jum	8	
+jump	97	jump
 jump across	29	
 jump at	3	
 jump back	1	
@@ -4058,9 +4102,10 @@ key	1	key
 key in	1	
 key into	1	
 key on	1	
+keyi	1	
 khion	1	
-kic	3	
-kick	57	kick
+kic	7	
+kick	61	kick
 kick around	5	kick around
 kick at	3	
 kick back	1	kick back
@@ -4071,8 +4116,8 @@ kick laughter	1
 kick through	1	
 kick with	7	
 kielbasa	1	
-kil	2	
-kill	96	kill
+kil	7	
+kill	100	kill
 kill against	1	
 kill by	1	
 kill down	1	
@@ -4088,8 +4133,8 @@ kindle up	3
 kindle with	4	
 kinjiru	1	
 kion	1	
-kis	1	
-kiss	72	kiss
+kis	3	
+kiss	73	kiss
 kiss on	2	
 kiss with	1	
 kitchen	1	
@@ -4104,7 +4149,7 @@ kneel on	1
 kneel to	11	
 knio	2	
 knio at	2	
-kno	1	
+kno	2	
 knoc	1	
 knock	50	knock
 knock at	41	
@@ -4183,7 +4228,7 @@ latch	4	latch
 latch to	1	
 latch with	4	
 latitu	1	
-laug	1	
+laug	2	
 laugh	17	laugh
 laugh and	1	
 laugh as	1	
@@ -4207,7 +4252,7 @@ launch	23	launch
 launder	1	launder
 launder up	1	
 lawn	1	
-lay	27	lay
+lay	28	lay
 lay across	12	
 lay against	4	
 lay around	8	
@@ -4241,6 +4286,7 @@ lay under	22
 lay underneat	1	
 lay up	5	lay up
 layout	1	
+lea	9	
 lead	9	lead
 lead apart	3	
 lead around	4	
@@ -4262,14 +4308,14 @@ leaf with	1
 leak	2	leak
 leak in	2	
 leak on	2	
-lean	25	lean
+lean	26	lean
 lean across	1	
 lean agains	5	
 lean against	7	lean against
 lean on	23	lean on
 lean to	1	
 lean up	4	
-leap	46	leap
+leap	54	leap
 leap across	28	
 leap at	1	
 leap down	17	
@@ -4295,8 +4341,8 @@ learn in	1
 lease	1	lease
 lease from	1	
 leash	1	leash
-leav	11	
-leave	71	leave
+leav	31	
+leave	72	leave
 leave at	3	
 leave before	3	
 leave color	1	
@@ -4335,7 +4381,7 @@ let of	2
 let out	2	let out
 letter-re	1	
 letter-re from	1	
-leve	7	
+leve	8	
 level	1	level
 level off	1	level off
 level out	1	
@@ -4373,8 +4419,9 @@ lie to	1
 lie top	4	
 lie under	2	
 lie up	3	
+lif	1	
 life	1	
-lift	47	lift
+lift	53	lift
 lift finger	1	
 lift fingers	1	
 lift from	2	
@@ -4389,7 +4436,7 @@ lift up	37	lift up
 lift with	7	
 liftoff	1	
 lig	6	
-ligh	27	
+ligh	29	
 light	62	light
 light fire	3	
 light from	1	
@@ -4417,12 +4464,13 @@ liquify	1	liquify
 liquify with	1	
 lis	3	
 liskon	1	
-list	11	list
+list	12	list
 list exit	1	
 list exits	1	
 list test	1	
 list tests	1	
 list trophies	2	
+liste	1	
 listen	70	listen
 listen at	6	
 listen doorway	1	
@@ -4440,7 +4488,7 @@ litter	1	litter
 little	1	
 little comedy	1	
 lizowurt	1	
-loa	2	
+loa	3	
 load	19	load
 load behind	1	
 load down	2	load down
@@ -4459,7 +4507,8 @@ loaf about	1
 loaf around	1	
 loan	2	loan
 loan to	2	
-loc	1	
+loc	4	
+loca	4	
 locate	5	locate
 locate cellarium	1	
 locate in	1	
@@ -4468,7 +4517,7 @@ locate on	2
 locate out	2	
 locate with	1	
 locati	1	
-lock	77	lock
+lock	79	lock
 lock to	2	
 lock with	64	
 login	1	
@@ -4482,8 +4531,8 @@ loiter until	1
 lol	1	
 long	31	long
 longit	1	
-loo	8	
-look	103	look
+loo	10	
+look	109	look
 look among	1	
 look around	47	look around
 look at	71	look at
@@ -4536,8 +4585,9 @@ loosen	6	loosen
 loosen with	4	
 lose	6	lose
 love	5	love
-lowe	1	
-lower	38	lower
+low	1	low
+lowe	3	
+lower	39	lower
 lower down	7	
 lower in	5	
 lower on	1	
@@ -4580,8 +4630,8 @@ maggot	1
 maggots	1	
 mail	2	mail
 mail to	2	
-mak	3	
-make	47	make
+mak	4	
+make	53	make
 make betwee	1	
 make deal	1	
 make drink	1	
@@ -4615,7 +4665,7 @@ malyon	2
 mammoth	1	
 mammoths	1	
 manacl	1	
-manu	1	
+manu	2	
 map	9	map
 map off	1	
 map on	1	
@@ -4679,7 +4729,7 @@ melt with	13
 memori	3	
 memories	1	
 memory	3	
-mend	5	mend
+mend	7	mend
 menu	6	
 mesmer	1	
 mess	2	mess
@@ -4703,7 +4753,7 @@ mirror	1	mirror
 misera	1	
 miserable	1	
 missions	1	
-mix	11	mix
+mix	13	mix
 mix and	1	
 mix in	1	mix in
 mix into	3	
@@ -4727,7 +4777,7 @@ moor around	1
 moor to	1	
 moor up	1	
 moor with	1	
-mop	5	mop
+mop	6	mop
 mop up	2	mop up
 mop with	2	
 mordex	1	
@@ -4740,7 +4790,7 @@ motion at	6
 motion to	6	
 motley	1	motley
 moul	2	
-moun	1	
+moun	4	
 mount	16	mount
 mount down	2	
 mount in	3	
@@ -4752,8 +4802,8 @@ mount to	1
 mount under	1	
 mount up	2	mount up
 mountain	1	
-mov	1	
-move	97	move
+mov	3	
+move	103	move
 move against	1	
 move apart	3	
 move around	8	move around
@@ -4792,7 +4842,7 @@ much	1
 much obliged	1	
 mumble	8	mumble
 munch	2	munch
-murd	2	
+murd	4	
 murder	63	murder
 murder against	1	
 murder by	1	
@@ -4817,6 +4867,7 @@ nap in	21
 nap on	21	
 nap with	3	
 nautical	1	
+navi	1	
 naw	5	
 nay	9	
 needle	1	needle
@@ -4828,7 +4879,7 @@ neh	1
 neigh	1	neigh
 never	3	
 next	1	
-nibb	4	
+nibb	8	
 nibble	15	nibble
 nibble on	1	
 nick	1	nick
@@ -4860,7 +4911,7 @@ northw	1
 northwest	2	
 noscript	17	
 nosh	1	nosh
-note	3	note
+note	4	note
 notebookc	1	
 notify	39	notify
 notify off	32	
@@ -4905,7 +4956,7 @@ observe on	4
 observe room	1	
 observe through	7	
 observe with	5	
-obta	3	
+obta	6	
 obtain	1	obtain
 obtain from	1	
 obtain in	1	
@@ -4916,13 +4967,13 @@ obtain up	1
 ocean	1	
 odysse	2	
 odysseus	2	
-off	5	off
+off	7	off
 off bow	1	
 off port	1	
 off quarter	1	
 off starboard	1	
 off the	1	
-offe	5	
+offe	10	
 offend	1	offend
 offer	69	offer
 offer and	2	
@@ -4945,8 +4996,8 @@ okay	23	okay
 omg	1	
 onegin	1	
 oohh	1	
-ope	7	
-open	107	open
+ope	9	
+open	108	open
 open brass	1	
 open in	1	
 open lock	1	
@@ -4995,9 +5046,10 @@ ovidio from	1
 oyster	1	oyster
 oysters	1	
 ozmoo	2	
+pac	1	
 pace	2	pace
 pack	3	pack
-padd	2	
+padd	4	
 paddle	3	paddle
 paddle for	1	
 paddle to	1	
@@ -5040,6 +5092,7 @@ patch	12	patch
 patch with	12	
 patriarch	1	
 patriarch off	1	
+paus	1	
 pause	5	pause
 pause for	1	
 pause until	1	
@@ -5048,7 +5101,7 @@ pauses off	1
 pauses on	1	
 paw	3	paw
 paw at	2	
-pay	52	pay
+pay	54	pay
 pay and	2	
 pay blood	2	
 pay cpr	1	
@@ -5065,7 +5118,7 @@ peck	2	peck
 peck at	1	peck at
 pecorino	1	
 pecorino cheese	1	
-peda	1	
+peda	2	
 pedal	1	pedal
 peddle	1	peddle
 peddle in	1	
@@ -5152,12 +5205,12 @@ perfor with	1
 perform	2	perform
 perform on	1	
 performan	1	
-peru	1	
+peru	2	
 peruse	5	peruse
 peruse about	1	
 peruse in	1	
 peruse throug	2	
-pet	49	pet
+pet	50	pet
 pet in	1	
 pet on	8	
 pet over	2	
@@ -5189,7 +5242,8 @@ phone with	4
 phonograp	1	
 photograp	1	
 photograp with	1	
-pick	75	pick
+pic	5	
+pick	90	pick
 pick all	1	
 pick everything	1	
 pick in	2	
@@ -5199,6 +5253,7 @@ pick through	1
 pick up	69	pick up
 pick with	43	
 picket	1	picket
+picku	1	
 piddle	2	piddle
 piddle in	2	
 piddle on	2	
@@ -5235,6 +5290,7 @@ pin off	2
 pin on	1	
 pin to	3	
 pin with	2	
+pinc	1	
 pinch	5	pinch
 pinch from	2	
 pinch in	1	
@@ -5248,7 +5304,7 @@ pinch with	1
 pinch your	1	
 piroue	1	
 piroue with	1	
-piss	20	piss
+piss	29	piss
 piss in	7	
 piss off	1	
 piss on	10	
@@ -5271,7 +5327,8 @@ pitch throug	5
 pitch through	9	
 pitch to	12	
 pitch up	1	
-pla	1	
+pla	2	
+plac	1	
 place	47	place
 place across	20	
 place agains	6	
@@ -5352,7 +5409,7 @@ plead	2	plead
 plead for	2	
 plead with	1	
 plonk	1	plonk
-plot	2	plot
+plot	3	plot
 plot course	1	
 plot for	1	
 plot to	2	
@@ -5368,7 +5425,7 @@ pluck on	1
 pluck out	1	
 pluck up	1	
 pluck with	2	
-plug	31	plug
+plug	33	plug
 plug across	1	
 plug around	1	
 plug back	1	
@@ -5388,6 +5445,7 @@ plugh	22
 plunk	1	plunk
 plus	1	
 pocket	3	pocket
+poi	1	
 point	37	point
 point at	37	
 point for	4	
@@ -5398,8 +5456,9 @@ point out	5	point out
 point to	27	
 point toward	1	
 point with	10	
-pois	2	
-poke	35	poke
+pois	3	
+pok	2	
+poke	36	poke
 poke at	3	poke at
 poke face	1	
 poke from	2	
@@ -5423,7 +5482,7 @@ poleva	1
 poleva on	1	
 poleva over	1	
 poleva with	1	
-poli	7	
+poli	14	
 polish	39	polish
 polish across	2	
 polish against	1	
@@ -5467,7 +5526,8 @@ possess	1	possess
 possessio	1	
 possib	1	
 possibly	1	
-pou	2	
+pou	4	
+poun	2	
 pounce	2	pounce
 pound	12	pound
 pound about	1	
@@ -5481,7 +5541,7 @@ pound out	3
 pound over	1	
 pound to	1	
 pound with	8	
-pour	57	pour
+pour	61	pour
 pour against	1	
 pour at	2	
 pour down	1	pour down
@@ -5514,10 +5574,11 @@ pray	47	pray
 pray for	8	
 pray to	5	
 pray with	1	
-pre	2	
+pre	3	
+prep	1	
 prepar	1	
 prepar from	1	
-pres	13	
+pres	26	
 presen	4	
 presen to	4	
 presen with	1	
@@ -5529,7 +5590,7 @@ present the	1
 present to	34	
 preser	1	
 preserve	4	preserve
-press	67	press
+press	68	press
 press agains	3	
 press against	2	
 press at	4	
@@ -5583,7 +5644,7 @@ print with	2
 priority	1	
 priority off	1	
 priority on	1	
-pris	3	
+pris	6	
 prise	3	prise
 prise apart	2	
 prise open	2	
@@ -5594,9 +5655,10 @@ prize	2	prize
 prize apart	2	
 prize open	2	
 prize with	2	
+prob	1	
 probe	1	probe
 probe with	1	
-proc	2	
+proc	5	
 procee	24	
 procee across	2	
 procee after	1	
@@ -5643,7 +5705,7 @@ proclaim	4	proclaim
 proclaim to	4	
 procure	1	procure
 procure with	1	
-prod	6	prod
+prod	7	prod
 prod at	2	
 prod with	3	
 progre	1	
@@ -5678,7 +5740,7 @@ prune that	1
 prune throug	2	
 prune through	1	
 prune with	12	
-pry	18	pry
+pry	19	pry
 pry apart	2	
 pry door	1	
 pry from	1	
@@ -5691,15 +5753,15 @@ pry out	9
 pry to	1	
 pry up	8	
 pry with	14	
-puff	4	puff
+puff	6	puff
 puff and	2	
 puff at	2	
 puff puff	2	
 puke	5	puke
 puke at	1	
 puke on	1	
-pul	4	
-pull	89	pull
+pul	6	
+pull	96	pull
 pull apart	8	
 pull around	6	
 pull aside	1	
@@ -5735,7 +5797,8 @@ pump	11	pump
 pump out	1	
 pump up	9	
 pump with	9	
-pun	1	pun
+pun	2	pun
+punc	4	
 punch	49	punch
 punch against	1	
 punch around	1	
@@ -5759,6 +5822,7 @@ puncture with	1
 punt	2	punt
 punt back	1	
 punt in	1	
+purc	1	
 purcha	6	
 purcha from	5	
 purcha with	3	
@@ -5771,7 +5835,8 @@ purigi	1
 purloin	2	purloin
 pursue	36	pursue
 pursue to	4	
-push	90	push
+pus	4	
+push	101	push
 push agains	3	
 push against	2	
 push aside	1	push aside
@@ -5808,7 +5873,7 @@ push underneat	1
 push up	23	push up
 push with	13	
 push-sing	1	
-put	80	put
+put	100	put
 put across	22	put across
 put agains	6	
 put against	6	
@@ -5859,6 +5924,7 @@ put under	43	put under
 put underneat	2	
 put up	3	put up
 put with	5	
+puto	2	
 pyrdebug	1	
 quadox	1	
 quaff	12	quaff
@@ -5898,7 +5964,8 @@ rafters	1
 rage	1	rage
 rage quit	1	
 ragequit	1	
-rais	1	
+rai	1	
+rais	3	
 raise	43	raise
 raise finger	1	
 raise fingers	1	
@@ -5942,7 +6009,7 @@ rap on	41
 rap out	4	
 rap over	4	
 rap with	5	
-rape	34	rape
+rape	35	rape
 rape off	2	
 rape with	2	
 rapier	1	
@@ -5959,13 +6026,13 @@ rattle	14	rattle
 rattle at	3	
 rattle with	5	
 ratto	1	
-rava	1	
+rava	2	
 raven	1	raven
 ravish	6	ravish
 rcro	1	
 re-sort	1	
 re-sort out	1	
-rea	8	
+rea	9	
 reac	1	
 reach	30	reach
 reach for	10	
@@ -5981,7 +6048,7 @@ reach to	4
 reach under	3	
 reach up	2	
 reach with	10	
-read	102	read
+read	108	read
 read about	25	
 read acknowled	1	
 read between	1	
@@ -6016,6 +6083,7 @@ rebuild	1	rebuild
 recall	5	recall
 recall formulae	1	
 recall formulas	1	
+rech	2	
 recharge	2	recharge
 recharge at	1	
 recite	1	recite
@@ -6039,6 +6107,7 @@ recline near	1
 recline on	9	
 recline over	1	
 recline under	1	
+reco	1	
 recollect	1	recollect
 recombine	1	recombine
 reconnect	1	
@@ -6059,7 +6128,7 @@ red death	1
 red glove	1	
 red salon	1	
 reduce	1	reduce
-refi	1	
+refi	2	
 refill	2	refill
 refill with	1	
 reflec	1	
@@ -6070,18 +6139,22 @@ reflect into	1
 reform	2	reform
 refrain	1	refrain
 refresh	5	refresh
+refu	1	
 refual	1	
 refuel	1	refuel
 refuel at	1	
 refuse	7	refuse
 regurg	1	
 regurgita	1	
+rel	3	
+rela	1	
 relations	1	
 relax	6	relax
 relax for	2	
 relax till	1	
 relax until	2	
-rele	2	
+rele	10	
+relea	1	
 releas	20	
 releas down	13	
 releas from	1	
@@ -6109,14 +6182,16 @@ relinquis	1
 reload	2	reload
 reload from	1	
 reload with	1	
-rem	1	
-rema	1	
+rem	6	
+rema	2	
 reme	1	
 remember	12	remember
 remember about	1	
 remember formulae	1	
 remember formulas	1	
-remo	28	
+remm	1	
+remo	31	
+remov	1	
 remove	70	remove
 remove all	1	
 remove blindfold	1	
@@ -6156,7 +6231,7 @@ renumerat	2
 renumerat to	1	
 renumerat with	2	
 rep	1	
-repa	5	
+repa	16	
 repair	34	repair
 repair with	19	
 repeat	1	repeat
@@ -6164,7 +6239,8 @@ repel	2	repel
 repel off	2	
 repel with	2	
 repent	6	repent
-repl	5	
+repl	8	
+repla	1	
 replac	5	
 replac for	1	
 replac with	2	
@@ -6200,8 +6276,11 @@ request	3	request
 request for	1	
 request from	2	
 request of	1	
+res	1	
+resc	1	
 rescue	15	rescue
 rescue to	1	
+rese	2	
 research	2	research
 reset	6	reset
 reset to	1	
@@ -6300,13 +6379,14 @@ rezrov	5
 rhineston	1	
 riddle	1	riddle
 riddle while	1	
-ride	26	ride
+ride	30	ride
 ride in	9	
 ride on	9	
 ride to	2	
 rift	1	
 rifttest	1	
-ring	22	ring
+rin	1	
+ring	23	ring
 ring at	1	
 ring down	2	
 ring for	1	
@@ -6316,10 +6396,10 @@ ring to	1
 ring under	3	
 ring up	2	ring up
 ring with	7	
-rins	1	
+rins	4	
 rinse	3	rinse
 rinse in	1	
-rip	20	rip
+rip	25	rip
 rip apart	1	
 rip down	4	
 rip from	1	
@@ -6373,7 +6453,7 @@ rock-a-	1
 rock-a- with	1	
 roff	1	
 roger	1	
-roll	34	roll
+roll	35	roll
 roll against	1	
 roll around	1	roll around
 roll away	1	
@@ -6406,7 +6486,8 @@ root	1	root
 root among	1	
 root amongst	1	
 root into	1	
-rota	3	
+rop	1	
+rota	8	
 rotate	48	rotate
 rotate around	12	
 rotate at	1	
@@ -6445,7 +6526,7 @@ rotate with	8
 rough	1	rough
 rough up	1	rough up
 roulette	1	
-rous	1	
+rous	2	
 rouse	22	rouse
 rouse up	21	
 rouse with	1	
@@ -6459,7 +6540,7 @@ rrr	2
 rrr at	2	
 rrrr	2	
 rrrr at	2	
-rub	89	rub
+rub	90	rub
 rub across	2	
 rub against	4	
 rub betwee	1	
@@ -6475,7 +6556,7 @@ rub throug	1
 rub to	12	
 rub together	2	
 rub with	44	
-ruin	5	ruin
+ruin	9	ruin
 ruin down	1	
 ruin off	1	
 rules	1	
@@ -6495,7 +6576,7 @@ rummage through	8
 rummage under	5	
 rummage with	2	
 rumor	1	rumor
-run	73	run
+run	99	run
 run abeam	1	
 run across	9	run across
 run aft	1	
@@ -6575,7 +6656,7 @@ saddle	1	saddle
 saddle with	1	
 saffron	1	
 sai	1	
-sail	7	sail
+sail	8	sail
 sail across	1	
 sail by	1	
 sail from	1	
@@ -6614,7 +6695,7 @@ saw off	1
 saw through	1	
 saw up	1	
 saw with	1	
-say	105	say
+say	109	say
 say about	4	
 say angarithe	1	
 say anghofio	1	
@@ -6666,7 +6747,7 @@ say yourself	1
 sayonara	1	
 sbb	1	
 sbq	1	
-scal	1	
+scal	2	
 scale	52	scale
 scale aboard	1	
 scale across	1	
@@ -6727,8 +6808,8 @@ scour through	2
 scowl	2	scowl
 scowl at	2	
 scowl to	2	
-scr	2	
-scra	2	
+scr	6	
+scra	3	
 scrag	1	scrag
 scrag with	1	
 scram	10	scram
@@ -6768,7 +6849,8 @@ scratch on	5
 scratch over	2	
 scratch to	2	
 scratch with	7	
-scre	1	
+scre	9	
+screa	1	
 scream	46	scream
 scream at	33	
 scream for	3	
@@ -6844,6 +6926,7 @@ scrutiniz on	1
 sculpt	2	sculpt
 sculpt into	1	
 scuttle	1	scuttle
+sea	2	
 seabed	1	
 seal	3	seal
 seal off	1	seal off
@@ -6851,7 +6934,7 @@ seal on	1
 seal up	1	
 seal with	1	
 sealing	1	
-sear	11	sear
+sear	21	sear
 search	68	search
 search about	1	
 search among	1	
@@ -6875,6 +6958,7 @@ secret behind	1
 secret from	1	
 secret under	1	
 secrets	2	
+secu	1	
 secure	29	secure
 secure around	11	
 secure before	1	
@@ -6885,9 +6969,9 @@ secure togeth	2
 secure together	5	
 secure up	21	
 secure with	21	
-sedu	1	
+sedu	2	
 seduce	3	seduce
-see	28	see
+see	34	see
 see around	2	
 see at	3	
 see behind	2	
@@ -6906,13 +6990,13 @@ see under	3
 see up	3	
 see with	7	
 seed	1	seed
-seek	33	seek
+seek	34	seek
 seek crabs	1	
 seek in	2	
 seek on	1	
 seen	3	see
 seen at	1	
-seiz	2	
+seiz	4	
 seize	11	seize
 seize apart	4	
 seize down	4	
@@ -6998,8 +7082,9 @@ settle at	5
 settle down	5	settle down
 settle in	5	
 settle on	5	settle on
+setu	1	
 setup	1	
-seve	1	
+seve	2	
 sever	8	sever
 sever down	4	
 sever off	1	
@@ -7009,14 +7094,14 @@ sever up	3
 sever with	6	
 sex	1	sex
 seymour	1	
-sha	2	
+sha	4	
 shackl	1	
 shade	5	shade
 shade on	3	
 shade over	3	
 shade with	3	
 shadow	1	shadow
-shak	4	
+shak	8	
 shake	42	shake
 shake at	3	
 shake from	4	
@@ -7039,7 +7124,7 @@ sharpen on	1
 sharpen with	2	
 shatter	1	shatter
 shatter with	1	
-shav	1	
+shav	2	
 shazam	2	
 sheathe	2	sheathe
 shed	41	shed
@@ -7049,12 +7134,13 @@ shelve	1	shelve
 shh	1	
 shhh	1	
 shhhh	1	
+shi	1	
 shield	5	shield
 shield from	1	
 shield over	4	
 shield up	4	
 shield with	5	
-shif	5	
+shif	10	
 shift	40	shift
 shift against	1	
 shift away	1	
@@ -7086,7 +7172,7 @@ shift up	2
 shift with	11	
 shih	1	
 shih tzu	1	
-shin	4	shin
+shin	8	shin
 shine	42	shine
 shine across	2	
 shine against	1	
@@ -7105,14 +7191,14 @@ shine up	3	shine up
 shine with	15	
 ship	2	ship
 ship to	1	
-shit	36	shit
+shit	43	shit
 shit in	1	
 shit on	3	
 shiver	1	shiver
-sho	4	
+sho	5	
 shock	2	shock
 shoe	1	shoe
-shoo	16	shoo
+shoo	19	shoo
 shoot	32	shoot
 shoot at	21	
 shoot in	1	
@@ -7121,14 +7207,14 @@ shoot on	1
 shoot through	1	
 shoot with	20	
 shop	1	shop
-shor	2	
+shor	3	
 short	32	short
 short out	1	
 short to	1	
 short with	1	
 shorte	1	
 shorten	1	shorten
-shou	2	
+shou	4	
 should	1	
 shout	66	shout
 shout angarithe	1	
@@ -7162,7 +7248,7 @@ shout with	3
 shout xyzzy	2	
 shout you	1	
 shout yourself	1	
-shov	3	
+shov	8	
 shove	17	shove
 shove against	1	
 shove at	4	
@@ -7192,7 +7278,7 @@ shove with	5
 shovel	1	shovel
 shovel down	1	
 shovel in	1	shovel in
-show	63	show
+show	64	show
 show commands	2	
 show map	2	
 show on	1	
@@ -7215,8 +7301,9 @@ shriek at	2
 shriek to	2	
 shriek with	1	
 shrug	5	shrug
+shu	3	
 shush	2	shush
-shut	68	shut
+shut	76	shut
 shut down	3	shut down
 shut eyes	1	
 shut for	7	
@@ -7276,7 +7363,7 @@ signal to	2
 signal up	1	
 signal with	1	
 silence	3	silence
-sing	26	sing
+sing	29	sing
 sing at	3	
 sing song	1	
 sing to	6	
@@ -7351,7 +7438,8 @@ skip through	6
 skip to	8	
 skip under	6	
 skip up	8	
-slam	9	slam
+sla	2	
+slam	10	slam
 slam for	1	
 slam in	1	
 slam off	5	
@@ -7363,7 +7451,7 @@ slap at	7
 slap back	1	
 slap in	2	
 slap with	25	
-slas	1	
+slas	2	
 slash	15	slash
 slash down	5	
 slash it	1	
@@ -7377,7 +7465,7 @@ slash up	5
 slash with	14	
 slaver	2	slaver
 slaver on	1	
-slay	29	slay
+slay	33	slay
 slay in	2	
 slay with	27	
 sle	1	
@@ -7389,8 +7477,8 @@ sleep on	25
 sleep with	3	sleep with
 sleeping	1	
 sli	1	
-slic	5	
-slice	59	slice
+slic	13	
+slice	60	slice
 slice down	8	
 slice in	1	
 slice it	1	
@@ -7402,7 +7490,7 @@ slice throug	8
 slice through	11	slice through
 slice up	4	slice up
 slice with	38	
-slid	1	slide
+slid	2	slide
 slide	36	slide
 slide across	2	
 slide against	1	
@@ -7422,7 +7510,7 @@ slide to	13
 slide under	28	
 slide underneat	1	
 slide with	3	
-slin	6	
+slin	12	
 sling	2	sling
 sling at	2	
 sling in	2	
@@ -7441,12 +7529,13 @@ slit down	1
 slit off	1	
 slow	2	slow
 slow fall	1	
-slug	1	slug
+slug	3	slug
 slug with	1	
 slumber	1	slumber
 slumber in	1	
 slumber on	1	
 slurp	1	slurp
+sma	4	
 smack	4	smack
 smack back	1	
 smack down	1	
@@ -7455,8 +7544,8 @@ smack into	1
 smack laughter	1	
 smack through	1	
 smack with	3	
-smas	15	
-smash	70	smash
+smas	26	
+smash	71	smash
 smash against	1	
 smash by	1	
 smash down	40	
@@ -7471,7 +7560,7 @@ smash through	7
 smash up	1	smash up
 smash using	2	
 smash with	51	
-sme	1	
+sme	2	
 smear	7	smear
 smear in	1	
 smear into	1	
@@ -7481,10 +7570,11 @@ smear onto	2
 smear over	3	
 smear with	2	
 smee	1	
-smel	5	
+smel	7	
 smell	68	smell
 smell air	1	
 smell room	1	
+smil	1	
 smile	27	smile
 smile at	23	
 smile to	10	
@@ -7517,7 +7607,7 @@ snap fingers	1
 snap on	1	
 snap over	1	
 snap with	5	
-snat	1	
+snat	2	
 snatch	13	snatch
 snatch apart	4	
 snatch behind	1	
@@ -7543,9 +7633,10 @@ sneer	7	sneer
 sneer at	7	
 sneer to	7	
 sneeze	7	sneeze
+sni	1	
 snicker	2	snicker
 snicker at	1	
-snif	1	
+snif	3	
 sniff	68	sniff
 sniff air	1	
 sniff room	1	
@@ -7600,8 +7691,9 @@ spank	2	spank
 spank at	2	
 spank with	2	
 spare	1	spare
-spea	2	
-speak	55	speak
+spe	2	
+spea	7	
+speak	56	speak
 speak about	3	
 speak angarithe	1	
 speak at	3	
@@ -7633,11 +7725,13 @@ speak with	9
 speak xyzzy	2	
 speak you	1	
 speak yourself	1	
+spel	1	
 spells	5	
 spend	1	spend
 spend on	1	
 spew	1	spew
-spil	1	
+spi	5	
+spil	5	
 spill	38	spill
 spill against	1	
 spill at	2	
@@ -7651,7 +7745,7 @@ spill out	18	spill out
 spill over	10	spill over
 spill throug	1	
 spill through	2	
-spin	36	spin
+spin	37	spin
 spin around	7	spin around
 spin at	1	
 spin back	1	
@@ -7680,6 +7774,7 @@ splash at	2
 splash in	2	
 splash on	2	
 splash with	2	
+spli	1	
 splice	1	splice
 splice with	1	
 splintere	1	
@@ -7690,6 +7785,7 @@ split throug	3
 split through	4	
 split up	3	split up
 split with	7	
+spra	1	
 spray	13	spray
 spray at	2	
 spray in	1	
@@ -7699,7 +7795,7 @@ spre	2
 spread	6	spread
 spread apart	1	
 spread arms	1	
-spri	4	
+spri	6	
 spring	1	spring
 spring with	1	
 sprink	6	
@@ -7762,6 +7858,7 @@ squeeze to	2
 squeeze under	1	
 squeeze up	1	
 squeeze with	1	
+squez	1	
 squi	1	
 squidge	2	
 squidge into	2	
@@ -7787,8 +7884,8 @@ squish on	2
 squish over	2	
 sshh	1	
 sshhh	1	
-sta	2	
-stab	36	stab
+sta	3	
+stab	37	stab
 stab down	2	
 stab in	3	
 stab into	1	
@@ -7805,16 +7902,16 @@ stain with	2
 staircase	1	
 stake	1	stake
 stakes	1	
-stal	2	
+stal	4	
 stalk	1	stalk
 stalk to	1	
-stam	3	
+stam	5	
 stamp	6	stamp
 stamp down	3	stamp down
 stamp on	3	
 stamp over	3	
 stamp with	1	
-stan	3	
+stan	5	
 stand	70	stand
 stand about	1	
 stand agains	3	
@@ -7834,7 +7931,7 @@ stand on	61
 stand to	2	
 stand under	9	
 stand up	68	stand up
-star	6	star
+star	8	star
 starboard	1	starboard
 starboard aft	1	
 starboard bow	1	
@@ -7901,6 +7998,7 @@ stay in	1
 stay on	1	stay on
 stay till	3	
 stay until	6	
+stea	1	
 steal	17	steal
 steal apart	3	
 steal down	4	
@@ -7915,7 +8013,7 @@ steal rid	1
 steal to	4	
 steal up	11	
 steal with	8	
-stee	1	
+stee	2	
 steer	10	steer
 steer after	1	
 steer around	8	
@@ -7939,7 +8037,7 @@ steer up	4
 steer upside	1	
 steer with	2	
 stella	1	
-step	42	step
+step	43	step
 step across	6	
 step after	1	
 step around	29	
@@ -7969,7 +8067,7 @@ step to	31
 step under	17	
 step up	31	step up
 step with	8	
-stic	1	
+stic	2	
 stick	20	stick
 stick across	9	
 stick agains	1	
@@ -8009,9 +8107,10 @@ stick with	6	stick with
 stimul	1	
 stimulate	1	stimulate
 stinglai	1	
-stir	1	stir
+stir	2	stir
 stir with	1	
 sto	2	
+stom	1	
 stoop	1	stoop
 stop	26	stop
 stop about	1	
@@ -8026,8 +8125,9 @@ stop until	1
 stop with	2	
 stopper	1	stopper
 stopper with	1	
-stor	1	
+stor	2	
 stow	2	stow
+str	1	
 straig	1	
 straighte	6	
 straighte up	1	
@@ -8052,7 +8152,7 @@ stretc up	1
 stretch	5	stretch
 stretch out	2	stretch out
 stretch up	1	
-stri	1	
+stri	2	
 stride	1	stride
 stride across	1	
 stride around	1	
@@ -8082,7 +8182,7 @@ strike through	1
 strike to	1	
 strike with	42	
 strip	12	strip
-stro	1	
+stro	3	
 stroke	11	stroke
 stroke for	1	
 stroke in	1	
@@ -8106,7 +8206,7 @@ stroll to	3
 stroll under	3	
 stroll up	3	
 strum	1	strum
-stud	1	stud
+stud	3	stud
 study	22	study
 study for	13	
 study from	1	
@@ -8119,6 +8219,7 @@ study throug	4
 study through	7	
 study under	1	
 study with	7	
+stuf	1	
 stuff	35	stuff
 stuff across	15	
 stuff agains	6	
@@ -8175,6 +8276,7 @@ suggestiv	1
 sui	1	
 suicide	2	
 suit	1	suit
+sum	1	sum
 summer	1	summer
 summon	7	summon
 summon brambles	2	
@@ -8231,6 +8333,7 @@ suspend on	2
 swab	2	swab
 swab up	2	
 swab with	2	
+swal	1	
 swallo	24	
 swallo from	14	
 swallo in	1	
@@ -8247,7 +8350,7 @@ swap	4	swap
 swap for	4	
 swap to	1	
 swap with	4	
-swat	8	swat
+swat	9	swat
 swat at	5	
 swat in	1	
 swat on	1	
@@ -8270,7 +8373,7 @@ swi	6
 swig	2	swig
 swill	10	swill
 swill from	10	
-swim	68	swim
+swim	69	swim
 swim across	4	
 swim around	1	
 swim behind	1	
@@ -8342,7 +8445,8 @@ tackle over	1
 tackle undressed	1	
 tackle up	1	
 tackle with	1	
-take	83	take
+tak	10	
+take	107	take
 take all	6	
 take apart	5	take apart
 take back	1	take back
@@ -8394,8 +8498,8 @@ take undressed	3
 take up	39	take up
 take with	28	
 take your	1	
-tal	1	
-talk	69	talk
+tal	2	
+talk	78	talk
 talk about	11	talk about
 talk at	3	
 talk body	1	
@@ -8431,20 +8535,21 @@ tame	3	tame
 tame with	1	
 tangle	1	tangle
 tangle cord	1	
-tap	12	tap
+tap	14	tap
 tap against	1	
 tap at	2	
 tap down	2	
 tap on	8	
 tap out	2	tap out
 tap with	5	
-tape	1	tape
-tast	6	
-taste	66	taste
+tape	2	tape
+tas	2	
+tast	15	
+taste	67	taste
 taunt	7	taunt
 teach	3	teach
 teach to	1	
-tear	21	tear
+tear	24	tear
 tear apart	1	tear apart
 tear away	1	tear away
 tear down	5	tear down
@@ -8471,7 +8576,7 @@ telephone on	1
 telephone renee	1	
 telephone up	1	
 telephone with	1	
-tell	69	tell
+tell	71	tell
 tell about	60	
 tell for	2	
 tell how	2	
@@ -8487,7 +8592,7 @@ tell who	2
 telox	1	
 temple	3	
 tense	1	tense
-test	6	test
+test	7	test
 test for	5	
 test in	2	
 test off	2	
@@ -8520,7 +8625,7 @@ think	30	think
 think about	5	think about
 thou	3	
 thoughts	2	
-thr	4	
+thr	7	
 thread	3	thread
 thread behind	1	
 thread down	1	
@@ -8533,7 +8638,7 @@ thread over	1
 thread through	1	
 thread under	1	
 threaten	2	threaten
-thro	17	
+thro	24	
 throck	1	
 throttle	1	throttle
 throttle down	1	
@@ -8595,6 +8700,7 @@ thump using	2
 thump with	11	
 thwack	1	thwack
 thwack with	1	
+tic	3	
 tickle	4	tickle
 tickle me	1	
 tickle on	1	
@@ -8620,6 +8726,7 @@ tie togeth	2
 tie together	6	
 tie up	25	tie up
 tie with	24	
+tight	1	
 tighten	2	tighten
 tighten down	1	
 tighten in	2	
@@ -8636,7 +8743,7 @@ tinkle	4	tinkle
 tinkle in	3	
 tinkle on	3	
 tinsot	1	
-tip	8	tip
+tip	9	tip
 tip from	1	
 tip in	2	
 tip on	2	
@@ -8701,7 +8808,8 @@ torture laughter	1
 torture through	1	
 torture using	1	
 torture with	9	
-toss	51	toss
+tos	3	
+toss	58	toss
 toss across	1	
 toss agains	1	
 toss against	5	
@@ -8728,8 +8836,9 @@ toss with	14
 total	1	total
 total in	1	
 total on	1	
-touc	7	
-touch	69	touch
+tou	5	
+touc	14	
+touch	70	touch
 touch against	2	
 touch in	3	
 touch inside	2	
@@ -8739,9 +8848,12 @@ touch throug	1
 touch to	14	
 touch together	2	
 touch with	40	
+towa	2	
+towar	1	
 towers	1	
 toy	7	toy
 toy with	7	toy with
+trac	1	
 trace	9	trace
 trace around	1	
 trace for	3	
@@ -8801,7 +8913,7 @@ trample on	3
 trample out	2	
 trample over	3	
 trample with	2	
-tran	1	
+tran	3	
 trance	1	trance
 transcrip	30	
 transcrip off	30	
@@ -8861,6 +8973,7 @@ treasure	1	treasure
 tree	2	tree
 tremendou	1	
 tremendou kielbasa	1	
+tri	1	
 trim	3	trim
 trip	3	trip
 trip in	1	
@@ -8918,7 +9031,7 @@ try hand	1
 try my	1	
 try on	1	try on
 try our	1	
-tug	34	tug
+tug	40	tug
 tug apart	4	
 tug back	1	
 tug behind	1	
@@ -8944,8 +9057,8 @@ tune on	1
 tune to	4	
 tune up	1	tune up
 tune with	1	
-tur	2	
-turn	86	turn
+tur	3	
+turn	88	turn
 turn around	18	turn around
 turn at	1	
 turn away	1	turn away
@@ -8989,9 +9102,10 @@ tutorial mode	1
 tutorial off	1	
 tutorial on	1	
 tweeze	1	tweeze
+twi	1	
 twirl	3	twirl
 twirl with	1	
-twis	4	
+twis	12	
 twist	35	twist
 twist around	5	twist around
 twist away	1	
@@ -9053,17 +9167,19 @@ unatta from	14
 unatta with	1	
 unattach	11	
 unattach from	5	
+unb	1	
 unbalance	1	unbalance
 unbar	4	unbar
 unbar with	3	
 unbloc	1	
 unblock	1	unblock
-unbo	3	
+unbo	4	
 unbolt	2	unbolt
 unbolt with	1	
 unbuck	1	
 unbuck from	1	
 unc	2	
+unca	1	
 unco	1	
 uncooked	1	
 uncork	2	uncork
@@ -9079,10 +9195,10 @@ uncrum	1
 uncrumple	1	
 uncuff	3	
 uncuff from	3	
-undo	14	undo
+undo	16	undo
 undo from	2	
 undo with	5	
-undr	1	
+undr	2	
 undres	4	
 undress	12	undress
 unexpecte	1	
@@ -9093,6 +9209,7 @@ unfasten	15	unfasten
 unfasten from	4	
 unfasten with	1	
 unflatten	3	
+unfo	1	
 unfold	11	unfold
 unfold up	2	
 unfold with	2	
@@ -9121,8 +9238,9 @@ unlatch	1
 unlear	3	
 unleash	1	unleash
 unli	28	
-unlo	15	
+unlo	25	
 unload	1	unload
+unloc	1	
 unlock	69	unlock
 unlock with	65	
 unlox	1	
@@ -9148,11 +9266,13 @@ unpossess	1
 unpronoun	1	
 unprotect	1	
 unra	1	
+unrav	1	
 unravel	1	unravel
 unready	2	
 unro	1	
 unroll	8	unroll
 unroll up	1	
+unsc	1	
 unscre	1	
 unscre from	1	
 unscre with	1	
@@ -9201,6 +9321,7 @@ unshutter	1
 unshutter up	1	
 unshutter with	1	
 unspac	3	
+unst	1	
 unstra	1	
 unstrap	3	unstrap
 unsummon	1	
@@ -9211,14 +9332,16 @@ untang with	1
 untangle	4	untangle
 untangle cord	1	
 untether	1	
-unti	6	
-untie	40	untie
+unti	8	
+untie	41	untie
 untie from	20	
 untie with	3	
+unwe	1	
 unweav	1	
 unwield	3	
 unwind	1	unwind
 unwind up	1	
+unwr	1	
 unwrap	37	unwrap
 unwrap brass	1	
 unwrap from	7	
@@ -9240,7 +9363,7 @@ urinat on	1
 urinate	5	urinate
 urinate in	3	
 urinate on	4	
-use	56	use
+use	59	use
 use agains	2	
 use code	1	
 use implant	1	
@@ -9250,7 +9373,8 @@ use onto	1
 use sign	1	
 use to	1	
 use with	3	
-util	1	
+using	1	
+util	2	
 utter	11	utter
 utter to	8	
 vacate	1	vacate
@@ -9332,7 +9456,7 @@ vule	1
 vull	1	
 vulle	1	
 wad	1	wad
-wade	26	wade
+wade	27	wade
 wade across	1	
 wade around	1	
 wade away	1	
@@ -9352,7 +9476,7 @@ wail	3	wail
 wail at	2	
 wail to	2	
 wail with	1	
-wait	96	wait
+wait	97	wait
 wait for	30	
 wait in	2	
 wait line	1	
@@ -9362,12 +9486,13 @@ wait trolley	1
 wait until	9	
 wak	3	
 wakarimas	1	
-wake	75	wake
+wake	76	wake
 wake up	69	wake up
 wake with	1	
 waken	1	waken
 waking up	1	
-walk	75	walk
+wal	9	
+walk	92	walk
 walk abeam	1	
 walk across	9	
 walk aft	1	
@@ -9456,7 +9581,7 @@ wander out	1
 wander over	1	
 wander through	1	
 wander up	1	
-wank	1	wank
+wank	2	wank
 wanted	1	want
 wanted list	1	
 warble	1	warble
@@ -9473,8 +9598,8 @@ warn about	2
 warp	1	warp
 warren	1	
 warren egg	1	
-was	1	be
-wash	27	wash
+was	2	be
+wash	29	wash
 wash away	2	wash away
 wash face	1	
 wash hands	2	
@@ -9488,6 +9613,8 @@ wash with	11
 waste	2	waste
 waste on	1	
 waste with	1	
+wat	1	
+watc	1	
 watch	54	watch
 watch acknowled	1	
 watch around	1	
@@ -9523,8 +9650,8 @@ watch with	8
 water	4	water
 water with	3	
 watkin	1	
-wav	3	
-wave	72	wave
+wav	4	
+wave	74	wave
 wave across	1	
 wave around	2	
 wave at	41	
@@ -9543,7 +9670,7 @@ wax	2	wax
 wax with	1	
 waylay	2	waylay
 wazzum	2	
-wea	2	
+wea	3	
 wear	98	wear
 wear as	1	
 wear blindfold	1	
@@ -9553,7 +9680,7 @@ weave to	1
 weave up	1	
 weave with	1	
 wed	3	wed
-wedg	1	
+wedg	2	
 wedge	12	wedge
 wedge across	3	
 wedge agains	2	
@@ -9584,6 +9711,7 @@ wee-wee in	1
 wee-wee on	1	
 weep	6	weep
 wei	1	
+weig	1	
 weigh	4	weigh
 weigh out	1	
 weigh up	1	
@@ -9636,7 +9764,7 @@ whirl on	1
 whirl right	1	
 whirl to	2	
 whirl with	1	
-whis	1	
+whis	4	
 whisk	1	whisk
 whispe	1	
 whispe about	1	
@@ -9704,7 +9832,7 @@ wind up	13	wind up
 wind upside	1	
 wind with	1	
 windsurf	1	windsurf
-wing	1	wing
+wing	2	wing
 wink	3	wink
 wink at	3	wink at
 winnag	5	
@@ -9726,7 +9854,7 @@ wish	6	wish
 wish for	3	
 wish with	2	
 wit	2	
-with	8	
+with	18	
 withdr	11	
 withdraw	13	withdraw
 withdraw from	2	
@@ -9753,7 +9881,7 @@ work	4	work
 work on	3	work on
 work with	3	
 world	1	
-wors	1	
+wors	2	
 worship	2	worship
 worship to	1	
 would	1	
@@ -9761,7 +9889,7 @@ wound	8	wound
 wound down	1	
 wound off	1	
 wound with	7	
-wrap	21	wrap
+wrap	24	wrap
 wrap around	17	
 wrap in	15	
 wrap on	6	
@@ -9787,7 +9915,8 @@ wreck using	2
 wreck with	34	
 wrestle	2	wrestle
 wrestle with	2	
-wring	3	wring
+wri	1	
+wring	4	wring
 wring from	1	wring from
 wring in	1	
 wring into	2	
@@ -9831,6 +9960,7 @@ xyzjailbr	1
 xyzrift	1	
 xyztool	1	
 xyztp	1	
+xyzz	1	
 xyzzy	26	
 xzilch	1	
 yabba	1	
@@ -9861,8 +9991,8 @@ yeah to	2
 yearn	2	yearn
 yearn for	2	
 yearn with	2	
-yel	1	
-yell	50	yell
+yel	6	
+yell	60	yell
 yell at	34	
 yell for	3	
 yell in	2	

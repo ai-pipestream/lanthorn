@@ -1,6 +1,45 @@
-//! Steps 2 and 3 — turn WordNet's verb synsets into the shipped table, keeping
-//! only the groups a story could ever match, and audit the result against the
-//! commonest English verbs.
+//! Steps 2 and 3 — turn the corpus's own verb entries and WordNet's verb
+//! synsets into the shipped table, keeping only the groups a story could ever
+//! match, and audit the result against the commonest English verbs.
+//!
+//! ## Two sources, and which one wins
+//!
+//! A group comes from one of two places, and they are never merged into each
+//! other:
+//!
+//!   * a **verb entry** some stories declare — the spellings one game's author
+//!     wrote on a single verb (`Verb 'examine' 'x' 'inspect' 'describe'`),
+//!     harvested by [`crate::harvest`] and read here from `if_groups.tsv`;
+//!   * a **WordNet synset**, filtered as it always was.
+//!
+//! Where they disagree the corpus wins, and the mechanism is the file's line
+//! ORDER: a game-derived group ranks ahead of every synset containing the same
+//! word, so a consumer walking a word's groups meets it first. Nothing is
+//! deleted to make room. WordNet keeps saying what it said, one line lower.
+//!
+//! The reason is not that WordNet is bad but that it answers a different
+//! question. It says how English uses a word; a parser asks which words name
+//! one ACTION. On `inspect` the two come apart completely: WordNet's groups for
+//! it are `case`, `visit`, `audit`/`scrutinize` — the police-procedural sense —
+//! and not one of them contains `examine`, because English does not treat those
+//! two as synonyms. Dozens of games do, on the same verb, and that is the fact
+//! a player who typed `inspect` needs. The corpus is also free (the grammar is
+//! already loaded to read the vocabulary out of) and carries no licence
+//! obligation, being read out of behaviour rather than out of a lexicon.
+//!
+//! ## What is NOT done: no union across entries
+//!
+//! Two stories may group a word differently, and the tempting move — take every
+//! pair of spellings that ever shared a verb and close it transitively — is a
+//! catastrophe. One chain through a light verb (`get`, `turn`, `set`) collapses
+//! half the table into a single group, which is the same failure the "exactly
+//! one hop" rule below exists to prevent. So there is no union at all: a group
+//! is ONE verb entry, exactly as some author wrote it. What "across the corpus"
+//! means here is only that identical entries are pooled and COUNTED, and the
+//! count is the evidence — one story is one author's idiom (the corpus has a
+//! game whose `attack` verb carries thirty-three spellings, `vandalise` and
+//! `torture` among them), while a set several stories declare independently is
+//! an IF convention. See [`Params::game_support`].
 //!
 //! ## What a row is
 //!
@@ -88,6 +127,12 @@
 //! 3. **The prune.** A group containing no harvested IF verb at all can never
 //!    survive the intersection at lookup, so it is general English costing
 //!    bytes for nothing.
+//!
+//! A game-derived group needs none of the first two — every member is a word
+//! some parser accepts, so there is nothing to prune and no sense to cap — but
+//! it gets the register filter for a different reason: a dictionary TRUNCATES,
+//! and `startl`, `procee` and `walkthrou` are what a game's vocabulary actually
+//! holds. Offering a player one of those is worse than offering nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -115,6 +160,26 @@ pub struct Params {
     /// Union a synset with its immediate hypernym when the synset alone
     /// contains no IF verb. Off, the table is pure synsets.
     pub gap_fill: bool,
+    /// How many stories must declare a verb entry before its spellings are
+    /// believed as a group. One story is one author's idiom — the corpus has a
+    /// game whose `attack` verb carries thirty-three spellings including
+    /// `vandalise` and `torture` — and corroboration is the only signal
+    /// available that separates an idiom from an IF convention.
+    pub game_support: usize,
+    /// Discard a game-derived group wider than this, rather than trimming it:
+    /// a set too wide to believe is evidence about that one game, and picking
+    /// which of its members to keep would be the editorial judgement this
+    /// generator exists to avoid.
+    ///
+    /// Thirteen, and the number is measured rather than chosen. The widest set
+    /// the corpus corroborates strongly is `attack break crack destroy fight
+    /// hit kill murder punch smash thump torture wreck` — thirteen spellings,
+    /// declared verbatim by TWENTY of the 119 stories, which is the Inform
+    /// library's own grammar and the single most authoritative group in the
+    /// whole corpus. A cap of twelve refuses exactly that one. Above thirteen
+    /// the next candidates are single-game sprees: a fourteen-member `walk`
+    /// and a thirty-three-member `attack` carrying `vandalise` and `torture`.
+    pub game_group_cap: usize,
 }
 
 impl Default for Params {
@@ -126,6 +191,8 @@ impl Default for Params {
             common_bands: 11,
             hyponym_cap: 25,
             gap_fill: true,
+            game_support: 2,
+            game_group_cap: 13,
         }
     }
 }
@@ -141,13 +208,33 @@ pub struct IfVerb {
     pub stories: usize,
 }
 
+/// One synonym group a story's own grammar declares: the spellings one verb
+/// entry carries, and how many stories declare exactly that set.
+///
+/// Read from `if_groups.tsv`, which the harvest writes and which is committed
+/// for the same reason `if_verbs.tsv` is — so a rebuild needs no corpus.
+#[derive(Debug, Clone)]
+pub struct GameGroup {
+    pub words: Vec<String>,
+    pub stories: usize,
+}
+
 /// One group as the generator holds it, before the members are written out.
 struct Group {
     members: Vec<String>,
-    /// The synset the group came from.
+    /// The synset the group came from, or 0 for a game-derived group.
     origin: u32,
     /// The hypernym it was unioned with, for a gap-fill group.
     via: Option<u32>,
+    /// True when the group is a story's own verb entry rather than a synset.
+    ///
+    /// This is what gives the corpus precedence: a game-derived group ranks
+    /// ahead of every WordNet group for each of its members (see
+    /// [`order_by_sense`]), and it wins an exact-membership tie. Provenance
+    /// does not travel into the shipped table — every row there is members and
+    /// nothing else — because the consumer has no use for it; the evidence
+    /// stays greppable in `if_groups.tsv`, one line per declared set.
+    game: bool,
 }
 
 /// Everything the run learned, for the report and the tests.
@@ -163,12 +250,32 @@ pub struct Report {
     pub subsumed: usize,
     /// Groups the gap-fill produced by unioning a synset with its hypernym.
     pub gap_filled: usize,
+    /// Distinct verb entries the corpus declares, before any threshold.
+    pub game_sets: usize,
+    /// …corroborated by at least `game_support` stories.
+    pub game_corroborated: usize,
+    /// …and kept, after the member filter, the two-member floor and the cap.
+    pub game_kept: usize,
+    /// Game-derived sets dropped for being wider than `game_group_cap`, worst
+    /// first — the evidence for whether the bound is doing anything.
+    pub game_oversize: Vec<(usize, Vec<String>)>,
+    /// The widest game-derived groups that WERE kept, worst first. If the
+    /// corroboration threshold is too loose, this is where it shows.
+    pub game_widest: Vec<(usize, Vec<String>)>,
+    /// Synsets whose membership a game-derived group already had, exactly —
+    /// where the lexicographer and the game authors agree word for word.
+    pub game_agrees: usize,
     /// Common verbs (bands 1..=`common_bands`) after lemmatising and dedup.
     pub common_verbs: Vec<String>,
     /// Common verbs that reach a surviving group by plain synonymy.
     pub hits_synonymy: usize,
     /// …and after the gap-fill.
+    pub hits_gap_filled: usize,
+    /// …and after the game-derived groups: every channel, which is what the
+    /// shipped table reaches.
     pub hits_total: usize,
+    /// Common verbs that ONLY the game-derived groups reach.
+    pub game_only: Vec<String>,
     /// Common verbs that reach nothing.
     pub misses: Vec<String>,
     /// Per-word sense-order constraints the linear file could not satisfy,
@@ -183,6 +290,7 @@ pub struct Report {
 /// Build the groups.
 pub fn build(
     verbs: &[IfVerb],
+    games: &[GameGroup],
     wn: &WordNet,
     freq: &Frequency,
     p: &Params,
@@ -219,9 +327,160 @@ pub fn build(
     let common: BTreeSet<String> = common_verbs(wn, freq, p).into_iter().collect();
 
     let mut groups: Vec<Group> = Vec::new();
-    let mut seen_sets: BTreeSet<Vec<String>> = BTreeSet::new();
+    let mut seen_sets: BTreeMap<Vec<String>, bool> = BTreeMap::new();
     let mut in_group: BTreeMap<String, usize> = BTreeMap::new();
     let mut by_synonymy: BTreeSet<String> = BTreeSet::new();
+    let mut by_gap: BTreeSet<String> = BTreeSet::new();
+    let mut by_game: BTreeSet<String> = BTreeSet::new();
+
+    // ── Pass 0: the corpus's own verb entries ────────────────────────────────
+    //
+    // FIRST, so that where a game entry and a synset have the same membership
+    // the game's copy is the one kept — see `keep`, which discards the second
+    // of two identical sets.
+    //
+    // A member has to be a word a person would recognise, and the filter is a
+    // dictionary lookup rather than a judgement: `investiga`, `startl`,
+    // `walkthrou` and `procee` are what a dictionary holds after truncating to
+    // six or nine characters, and offering a player `procee` would be worse
+    // than offering nothing.
+    //
+    // The test is the register filter's own — WordNet knows it as a verb, or
+    // 12dicts ranks its headword within `band_cap` — rather than a new axis of
+    // judgement, and unlike pass 1 there is no is-an-IF-verb exemption to
+    // soften it: every member here is an IF verb by construction, which is
+    // exactly why the exemption would let every truncation through. It keeps
+    // `hint`, `nope` and `credits`; it drops `bast` and `boll`, a fibre and a
+    // cotton pod, which is what a four-letter verb table happens to spell two
+    // ruder words as.
+    //
+    // What it cannot catch is a truncation that IS a common word: `board`
+    // truncated to four characters is `boar`, and no filter made of shape or
+    // frequency can tell that from the animal. It survives as a member of the
+    // `go` group, and can only ever be offered to a player of a game whose
+    // dictionary really does hold `boar`.
+    let recognised = |w: &str| {
+        wn.senses.contains_key(w)
+            || freq
+                .lemma_of
+                .get(w)
+                .and_then(|h| freq.band.get(h))
+                .is_some_and(|&b| b <= p.band_cap)
+    };
+
+    // …except that the corpus can explain most of its own truncations, and a
+    // group is where that is worth doing: `examin`, `inspec`, `procee` and
+    // `scrutiniz` are not words, but each is the unambiguous prefix of a word
+    // that OTHER stories in this corpus spell in full, and the truncating
+    // parser accepts the full spelling too — it truncates the player's input by
+    // the same rule.
+    //
+    // Two bounds keep this from guessing. The expansion must be a spelling the
+    // CORPUS attests, never one invented out of a dictionary, so a member is
+    // always a word some real parser takes; and it must be unique, so `brea`
+    // (break / breath / breathe) and `atta` (attach / attack) are left alone.
+    //
+    // And it applies at SIX or NINE characters only, which is where a
+    // Z-machine dictionary truncates (v1–v3 and v4–v8 respectively). That is
+    // not a tuning knob but the shape of the defect: Scott Adams tables
+    // truncate at their own word length, three to five characters, and a prefix
+    // that short does not identify a word. Measured — allowed down to three,
+    // the unique expansion of `arr`, in a group that is plainly a pirate's
+    // growl, is `arrest`.
+    let spellings: Vec<&str> = verbs
+        .iter()
+        .map(|v| v.emit.as_str())
+        .filter(|s| !s.contains(' '))
+        .collect();
+    let unique_prefix = |w: &str, of: &mut dyn Iterator<Item = &str>| -> Option<String> {
+        let mut found: Option<String> = None;
+        for s in of {
+            if s.len() > w.len() && s.starts_with(w) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(s.to_string());
+            }
+        }
+        found
+    };
+    let untruncate = |w: &str| -> Option<String> {
+        if w.len() != 6 && w.len() != 9 {
+            return None;
+        }
+        if let Some(attested) =
+            unique_prefix(w, &mut spellings.iter().copied().filter(|s| recognised(s)))
+        {
+            return Some(attested);
+        }
+        // At NINE characters the true word has at least ten letters, which no
+        // Z-machine dictionary can hold — so no story can attest it and the
+        // rule above must come up empty for exactly the words most worth
+        // recovering: `extinguis`, `interroga`, `deactivat`, `incinerat`. A
+        // nine-character prefix is long enough to name one verb, so WordNet is
+        // allowed to finish the word where the corpus cannot, and only there.
+        // Uniqueness is over VERB lemmas: `extinguisher` and `interrogation`
+        // share the prefix and are not verbs, and asking the whole dictionary
+        // would refuse every one of these.
+        if w.len() == 9 {
+            return unique_prefix(w, &mut wn.senses.keys().map(String::as_str));
+        }
+        None
+    };
+
+    report.game_sets = games.len();
+    for g in games {
+        if g.stories < p.game_support {
+            continue;
+        }
+        report.game_corroborated += 1;
+        let mut members: Vec<String> = g
+            .words
+            .iter()
+            .filter_map(|w| {
+                if recognised(w) {
+                    Some(w.clone())
+                } else {
+                    untruncate(w)
+                }
+            })
+            .collect();
+        members.sort();
+        members.dedup();
+        if members.len() < 2 {
+            continue;
+        }
+        if members.len() > p.game_group_cap {
+            report.game_oversize.push((g.stories, members));
+            continue;
+        }
+        for w in &members {
+            by_game.insert(w.clone());
+        }
+        let widest = (g.stories, members.clone());
+        if keep(
+            Group {
+                members,
+                origin: 0,
+                via: None,
+                game: true,
+            },
+            &mut groups,
+            &mut seen_sets,
+            &mut in_group,
+            report,
+        ) {
+            report.game_kept += 1;
+            report.game_widest.push(widest);
+        }
+    }
+    report
+        .game_widest
+        .sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(b.0.cmp(&a.0)));
+    report.game_widest.truncate(12);
+    report
+        .game_oversize
+        .sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(b.0.cmp(&a.0)));
 
     // ── Pass 1: one group per synset ─────────────────────────────────────────
     for (&offset, syn) in &wn.synsets {
@@ -245,6 +504,7 @@ pub fn build(
                 members,
                 origin: offset,
                 via: None,
+                game: false,
             },
             &mut groups,
             &mut seen_sets,
@@ -308,11 +568,15 @@ pub fn build(
                     continue;
                 }
                 report.gap_filled += 1;
+                for w in &union {
+                    by_gap.insert(w.clone());
+                }
                 keep(
                     Group {
                         members: union,
                         origin: offset,
                         via: Some(*target),
+                        game: false,
                     },
                     &mut groups,
                     &mut seen_sets,
@@ -329,6 +593,13 @@ pub fn build(
     // synsets all unioned with the same hypernym. A group whose members are a
     // subset of another group's says nothing the larger one does not, and
     // costs a line. This is not merging: no group gains a member.
+    //
+    // WITHIN one provenance only. A game-derived group swallowed by a wider
+    // synset would lose the precedence the corpus earned it — the whole point
+    // of reading the grouping — and a synset swallowed by a game group would
+    // lose its position in its other members' sense order, which no larger
+    // group can restore. Each source's own redundancy is collapsed on its own
+    // terms; the overlap between the two is left standing and counted.
     {
         let sets: Vec<BTreeSet<&str>> = groups
             .iter()
@@ -348,6 +619,7 @@ pub fn build(
             for &j in &by_member[*anchor] {
                 if i != j
                     && !drop[j]
+                    && groups[i].game == groups[j].game
                     && (sets[j].len() > s.len() || (sets[j].len() == s.len() && j < i))
                     && s.is_subset(&sets[j])
                 {
@@ -379,7 +651,16 @@ pub fn build(
     }
 
     let groups = order_by_sense(groups, wn, report);
-    audit(&groups, &by_synonymy, wn, freq, p, report);
+    audit(
+        &groups,
+        &by_synonymy,
+        &by_gap,
+        &by_game,
+        wn,
+        freq,
+        p,
+        report,
+    );
     report.widest.extend(
         in_group
             .iter()
@@ -417,21 +698,30 @@ fn assemble(
 }
 
 /// Record a group unless an identical one is already there.
+///
+/// The game-derived pass runs first, so an identical synset arriving later is
+/// the one discarded — which is both sources agreeing word for word, counted
+/// separately as [`Report::game_agrees`] rather than as noise.
 fn keep(
     g: Group,
     groups: &mut Vec<Group>,
-    seen: &mut BTreeSet<Vec<String>>,
+    seen: &mut BTreeMap<Vec<String>, bool>,
     in_group: &mut BTreeMap<String, usize>,
     report: &mut Report,
-) {
-    if !seen.insert(g.members.clone()) {
+) -> bool {
+    if let Some(&was_game) = seen.get(&g.members) {
         report.duplicates += 1;
-        return;
+        if was_game && !g.game {
+            report.game_agrees += 1;
+        }
+        return false;
     }
+    seen.insert(g.members.clone(), g.game);
     for w in &g.members {
         *in_group.entry(w.clone()).or_default() += 1;
     }
     groups.push(g);
+    true
 }
 
 /// Put the groups in an order that, for every word, presents that word's groups
@@ -445,16 +735,28 @@ fn keep(
 /// remaining group. Every constraint broken that way is counted, because a large
 /// number would mean the ordering claim in the file header is not worth much.
 fn order_by_sense(groups: Vec<Group>, wn: &WordNet, report: &mut Report) -> Vec<Vec<String>> {
-    // For each word, its groups in that word's sense order.
+    // For each word, its groups in that word's sense order — with every
+    // game-derived group ahead of every synset.
+    //
+    // THIS IS THE PRECEDENCE RULE, and it is the whole of it. Where the two
+    // sources disagree about what a word means, the corpus wins, because a
+    // game author writing `Verb 'examine' 'x' 'inspect'` has stated what the
+    // word means IN A PARSER, which is the only question this table asks.
+    // WordNet's answer is not deleted — it sits below, and reaches a story
+    // that implements a word no game in the corpus grouped.
     let mut by_word: BTreeMap<&str, Vec<(usize, usize)>> = BTreeMap::new();
     for (i, g) in groups.iter().enumerate() {
         for w in &g.members {
             let senses = wn.senses.get(w.as_str()).map_or(&[][..], Vec::as_slice);
-            let rank = senses
-                .iter()
-                .position(|o| *o == g.origin)
-                .or_else(|| g.via.and_then(|v| senses.iter().position(|o| *o == v)))
-                .unwrap_or(usize::MAX);
+            let rank = if g.game {
+                0
+            } else {
+                senses
+                    .iter()
+                    .position(|o| *o == g.origin)
+                    .or_else(|| g.via.and_then(|v| senses.iter().position(|o| *o == v)))
+                    .map_or(usize::MAX, |r| r + 1)
+            };
             by_word.entry(w.as_str()).or_default().push((rank, i));
         }
     }
@@ -534,6 +836,8 @@ fn order_by_sense(groups: Vec<Group>, wn: &WordNet, report: &mut Report) -> Vec<
 fn audit(
     groups: &[Vec<String>],
     by_synonymy: &BTreeSet<String>,
+    by_gap: &BTreeSet<String>,
+    by_game: &BTreeSet<String>,
     wn: &WordNet,
     freq: &Frequency,
     p: &Params,
@@ -545,6 +849,23 @@ fn audit(
         .iter()
         .filter(|w| by_synonymy.contains(*w) && all.contains(w.as_str()))
         .count();
+    // The three channels are cumulative on the SAME basis, so every number is
+    // comparable with the run before the corpus grouping existed: plain
+    // synonymy, then what the gap-fill adds, then what the games add.
+    report.hits_gap_filled = common
+        .iter()
+        .filter(|w| (by_synonymy.contains(*w) || by_gap.contains(*w)) && all.contains(w.as_str()))
+        .count();
+    report.game_only = common
+        .iter()
+        .filter(|w| {
+            by_game.contains(*w)
+                && !by_synonymy.contains(*w)
+                && !by_gap.contains(*w)
+                && all.contains(w.as_str())
+        })
+        .cloned()
+        .collect();
     report.hits_total = common.iter().filter(|w| all.contains(w.as_str())).count();
     report.misses = common
         .iter()

@@ -23,6 +23,35 @@ has written — so the vocabulary is harvested, WordNet is filtered down to the
 synsets that vocabulary actually touches, and the result is shipped as a table
 with no runtime dependency and no network.
 
+## The corpus is a thesaurus too
+
+A thesaurus is not the only source, and for this job it is not the best one.
+Every story's grammar declares its verbs in GROUPS — `Verb 'examine' 'x'
+'watch' 'describe' 'inspect'` is one entry, and it is that game's author saying
+those five spellings are one action. The harvest used to flatten that into a
+bare word list; now it keeps the grouping, and a set several stories declare
+independently is shipped as a group in its own right.
+
+That source is better than WordNet at exactly the job here, because it answers
+the parser's question rather than English's. `inspect` is the case that made the
+point: WordNet's groups for it are `case`, `visit` and `audit`/`scrutinize` —
+the police sense — and not one of them holds `examine`, which is what every
+player who types `inspect` means. Fourteen stories in this corpus put the two on
+one verb. It is also free (the grammar is already loaded), and it carries no
+licence obligation, being read out of behaviour rather than out of a lexicon.
+
+There is **no union across entries**. A group is one verb entry as some author
+wrote it; identical entries from different stories are pooled and counted, and
+the count is all the merging there is. Taking every pair of spellings that ever
+shared a verb and closing it transitively would run one chain through a light
+verb like `get` or `turn` and collapse half the table into a single group.
+
+Where the two sources disagree, the games win — by line ORDER, not by deletion.
+A game-derived group is placed ahead of every WordNet group holding the same
+word, so a consumer walking a word's groups meets it first; WordNet's answer
+still follows, one line lower, and still reaches a story that implements a word
+no game in the corpus grouped.
+
 ## Sources
 
 Neither is vendored; both are downloaded by `fetch-sources.sh`, which pins the
@@ -53,23 +82,29 @@ and the inflection map come from one file.
 ```sh
 ./crates/verb-synonyms-gen/fetch-sources.sh /tmp/verbsyn      # ~22 MB of downloads
 
-# Step 1 — the IF vocabulary. Needs a corpus of story files; its output is
-# COMMITTED (if_verbs.tsv), so step 2 is reproducible without one.
+# Step 1 — the IF vocabulary AND the corpus's own verb entries. Needs a corpus
+# of story files; both outputs are COMMITTED (if_verbs.tsv, if_groups.tsv), so
+# step 2 is reproducible without one.
 cargo run -p verb-synonyms-gen -- harvest \
     --corpus stories --corpus unit_tests \
     --wordnet /tmp/verbsyn/WordNet-3.0/dict \
     --freq /tmp/verbsyn/12dicts/Lemmatized/2+2+3frq.txt \
-    -o crates/verb-synonyms-gen/if_verbs.tsv
+    -o crates/verb-synonyms-gen/if_verbs.tsv \
+    --groups crates/verb-synonyms-gen/if_groups.tsv
 
 # Step 2 — the shipped table.
 cargo run -p verb-synonyms-gen -- build \
     --wordnet /tmp/verbsyn/WordNet-3.0/dict \
     --freq /tmp/verbsyn/12dicts/Lemmatized/2+2+3frq.txt \
     --if-verbs crates/verb-synonyms-gen/if_verbs.tsv \
+    --if-groups crates/verb-synonyms-gen/if_groups.tsv \
     -o crates/verb-synonyms/src/synonym_groups.tsv
 
 cargo nextest run -p verb-synonyms   # the canonical mappings must survive
 ```
+
+Leaving `--if-groups` off builds the WordNet half alone, which is how the two
+sources are measured apart.
 
 Both steps print a report to stderr. The number to look at is the coverage
 audit: what fraction of the commonest English verbs (12dicts bands 1–11,
@@ -80,16 +115,33 @@ row count — and it is what tells you whether a change to the filters helped.
 ### The knobs
 
 `build` takes `--sense-cap`, `--band-cap`, `--group-cap`, `--hyponym-cap`,
-`--common-bands` and `--no-gap-fill`; the defaults are in `Params::default` and
-each is documented where it is declared. They are on the command line so that a
-retune can be argued with rather than recompiled.
+`--common-bands`, `--no-gap-fill`, `--game-support` and `--game-group-cap`; the
+defaults are in `Params::default` and each is documented where it is declared.
+They are on the command line so that a retune can be argued with rather than
+recompiled.
 
-## Why `if_verbs.tsv` is committed
+Measured for `--game-support` (the number of stories that must declare a verb
+entry before it is believed), on the 1,365-verb basis:
 
-It is a sorted list of ordinary English verb spellings with a count of how many
-stories accept each — `take 118`, `xyzzy 9`. It carries no game text, no game
-titles and no attribution of any word to any story: the per-story detail exists
-only in the harvest's stderr report. `stories/` is gitignored because it holds
-commercial game files; a de-duplicated vocabulary list drawn across 119 of them
-is not one, and committing it is what makes step 2 — and therefore the shipped
-table — reproducible by CI and by anyone without the corpus.
+| support | game groups kept | rows | table | coverage |
+|---|---|---|---|---|
+| — (WordNet only) | 0 | 2,759 | 74 KB | 88.8% |
+| 1 | 1,425 | 3,463 | 90 KB | 90.5% |
+| **2** | **546** | **3,068** | **81 KB** | **90.0%** |
+| 3 | 306 | 2,946 | 78 KB | 89.5% |
+
+One story is one author's idiom: at support 1 the corpus contributes a
+33-member `attack` group carrying `vandalise` and `torture`, and a 21-member
+`cut`. Two is where those disappear and the survivors are IF conventions.
+
+## Why `if_verbs.tsv` and `if_groups.tsv` are committed
+
+One is a sorted list of ordinary English verb spellings with a count of how many
+stories accept each — `take 118`, `xyzzy 9`; the other is a sorted list of the
+verb entries those stories declare, with a count of how many declare each —
+`29 awake awaken wake`. Neither carries game text, game titles or any
+attribution of a word to a story: the per-story detail exists only in the
+harvest's stderr report. `stories/` is gitignored because it holds commercial
+game files; a de-duplicated vocabulary list drawn across 119 of them is not one,
+and committing both is what makes step 2 — and therefore the shipped table —
+reproducible by CI and by anyone without the corpus.

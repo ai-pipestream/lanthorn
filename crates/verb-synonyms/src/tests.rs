@@ -19,7 +19,7 @@ fn dictionary<'a>(words: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
 #[test]
 fn table_is_present_and_parses() {
     assert!(
-        group_count() > 2000,
+        group_count() > 2500,
         "only {} groups — did the table get truncated?",
         group_count()
     );
@@ -48,6 +48,61 @@ fn canonical_mappings_survive_regeneration() {
         let got = suggest(typed, dictionary(&[known]), 4);
         assert_eq!(got, vec![known], "`{typed}` should reach `{known}`");
     }
+}
+
+/// The mappings the CORPUS supplies, which WordNet does not.
+///
+/// `inspect` is the one that found the hole (SQ-1115). WordNet's groups for it
+/// are `case`, `visit` and `audit`/`scrutinize` — the police-procedural sense,
+/// three groups without `examine` in any of them, because English does not
+/// treat the two as synonyms. Interactive fiction does, on the same verb, in
+/// game after game, and a table that misses that misses the head of the
+/// guess-the-verb distribution. Every pair below can be grepped out of
+/// `crates/verb-synonyms-gen/if_groups.tsv` with the number of stories that
+/// declare it.
+#[test]
+fn the_corpus_own_groupings_survive_regeneration() {
+    let cases: &[(&str, &str)] = &[
+        ("inspect", "examine"),
+        ("observe", "examine"),
+        ("describe", "examine"),
+        ("don", "wear"),
+        ("doff", "remove"),
+        ("scale", "climb"),
+        ("sniff", "smell"),
+        ("purchase", "buy"),
+        ("nap", "sleep"),
+        ("rouse", "wake"),
+        ("sip", "drink"),
+        ("embrace", "kiss"),
+        ("wade", "swim"),
+        ("scrub", "rub"),
+        ("douse", "extinguish"),
+        ("hint", "help"),
+        ("walk", "go"),
+        ("rummage", "search"),
+    ];
+    for &(typed, known) in cases {
+        let got = suggest(typed, dictionary(&[known]), 4);
+        assert_eq!(got, vec![known], "`{typed}` should reach `{known}`");
+    }
+}
+
+/// …and where the two sources disagree, the corpus is what a consumer meets
+/// first.
+///
+/// A story knowing both `examine` and `case` must be offered `examine`: the
+/// group games declared is ahead of every WordNet sense of `inspect`. Without
+/// the ordering rule this returns `case`, which is the defect this quest was
+/// opened for.
+#[test]
+fn a_game_declared_group_outranks_wordnet() {
+    let got = suggest("inspect", dictionary(&["examine", "case", "visit"]), 3);
+    assert_eq!(
+        got.first(),
+        Some(&"examine"),
+        "the corpus must outrank WordNet's police-procedural `inspect`: {got:?}"
+    );
 }
 
 #[test]

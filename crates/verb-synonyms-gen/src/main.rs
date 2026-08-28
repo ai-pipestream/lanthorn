@@ -1,21 +1,29 @@
 //! `verb-synonyms-gen` — rebuild the shipped player-word → IF-verb table.
 //!
 //! ```text
-//! verb-synonyms-gen harvest --corpus stories --corpus unit_tests -o if_verbs.tsv
+//! verb-synonyms-gen harvest --corpus stories --corpus unit_tests \
+//!     --wordnet <dict> --freq <2+2+3frq.txt> \
+//!     -o if_verbs.tsv --groups if_groups.tsv
 //! verb-synonyms-gen build --wordnet <dict> --freq <2+2+3frq.txt> \
-//!     --if-verbs if_verbs.tsv -o crates/verb-synonyms/src/player_verbs.tsv
+//!     --if-verbs if_verbs.tsv --if-groups if_groups.tsv \
+//!     -o crates/verb-synonyms/src/synonym_groups.tsv
 //! ```
+//!
+//! `--groups` and `--if-groups` are the corpus's OWN synonym groups — the
+//! spellings each story's author declared to be one verb. Leaving `--if-groups`
+//! off builds the WordNet half alone, which is how the two sources are measured
+//! apart.
 //!
 //! Argument parsing is hand-rolled rather than `clap`'d: this crate takes no
 //! external dependencies, which keeps it buildable in any checkout of the
 //! workspace and makes it obvious that nothing here reaches the shipped binary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use verb_synonyms_gen::build::{self, IfVerb, Params, Report};
+use verb_synonyms_gen::build::{self, GameGroup, IfVerb, Params, Report};
 use verb_synonyms_gen::harvest::{self, Harvest};
 use verb_synonyms_gen::sources::{Frequency, WordNet};
 
@@ -115,9 +123,38 @@ fn cmd_harvest(args: &[String]) -> Result<(), String> {
         "  {single} single words, {} verb+preposition phrases",
         h.verbs.len() - single
     );
+    eprintln!(
+        "{} synonym groups declared by the stories themselves ({} distinct sets)",
+        h.groups.values().map(BTreeSet::len).sum::<usize>(),
+        h.groups.len()
+    );
+    let corroborated = h.groups.values().filter(|s| s.len() > 1).count();
+    eprintln!("  {corroborated} of those sets are declared by more than one story");
+    eprintln!(
+        "  widest set: {} members",
+        h.groups.keys().map(Vec::len).max().unwrap_or(0)
+    );
+    if h.double_booked.is_empty() {
+        eprintln!("  no spelling appears in two verb entries of one story, as expected");
+    } else {
+        eprintln!(
+            "  {} spellings appear in TWO verb entries of one story: {}",
+            h.double_booked.len(),
+            h.double_booked
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
     eprintln!("{} files skipped:", h.skipped.len());
     for (p, why) in &h.skipped {
         eprintln!("  {} — {why}", p.display());
+    }
+
+    if let Some(path) = m.get("groups").and_then(|v| v.first()) {
+        write_groups(std::path::Path::new(path), &h)?;
     }
 
     let resolved = lemmatise(&h, &wn, &freq);
@@ -198,6 +235,54 @@ fn cmd_harvest(args: &[String]) -> Result<(), String> {
     .unwrap();
     for (w, stories, lemma) in &resolved {
         writeln!(f, "{w}\t{stories}\t{lemma}").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Write the corpus's own synonym sets — one verb entry per line, with the
+/// number of stories that declare exactly that set.
+///
+/// Committed for the same reason `if_verbs.tsv` is: it is what makes `build`
+/// reproducible without a corpus of commercial game files. And it carries no
+/// more than that list does — de-duplicated vocabulary, no game text, no
+/// titles, and no attribution of any word to any story; the per-story detail
+/// stays in this command's stderr report.
+fn write_groups(path: &std::path::Path, h: &Harvest) -> Result<(), String> {
+    let mut f = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let head = format!(
+        "\
+# Synonym groups declared by the stories themselves — the IF-native half of the
+# shipped table's evidence.  GENERATED; do not hand-edit.
+#
+# Regenerate:
+#   verb-synonyms-gen harvest --corpus stories --corpus unit_tests \\
+#       --wordnet <WordNet-3.0/dict> --freq <12dicts/Lemmatized/2+2+3frq.txt> \\
+#       -o crates/verb-synonyms-gen/if_verbs.tsv \\
+#       --groups crates/verb-synonyms-gen/if_groups.tsv
+#
+# One line per DISTINCT verb entry: the number of stories that declare exactly
+# that set of spellings, then the spellings, tab-separated and sorted.  A verb
+# entry is a game author's own statement that these words are one action — for
+# a parser that is a stronger authority than a thesaurus, and it is free, since
+# the grammar is already loaded to read the vocabulary out of.
+#
+# This file is EVIDENCE, not the table: no threshold has been applied.  A set
+# declared by one story may be that story's private idiom, which is why the
+# count is here and why `build --game-support` decides what to believe.  The
+# spellings are the stories' own, filtered only for shape (three or more
+# letters, so `x`, `g` and `n` are absent); the verb-plus-preposition phrases
+# `if_verbs.tsv` carries are NOT grouped, because a story that calls `turn` and
+# `rotate` one verb has said nothing about `rotate on`.
+#
+# {} stories read; {} distinct sets, {} declarations.
+",
+        h.read,
+        h.groups.len(),
+        h.groups.values().map(BTreeSet::len).sum::<usize>(),
+    );
+    write!(f, "{head}").map_err(|e| e.to_string())?;
+    for (set, stories) in &h.groups {
+        writeln!(f, "{}\t{}", stories.len(), set.join("\t")).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -304,6 +389,8 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         hyponym_cap: num(&m, "hyponym-cap", Params::default().hyponym_cap)?,
         common_bands: num(&m, "common-bands", Params::default().common_bands)?,
         gap_fill: !m.contains_key("no-gap-fill"),
+        game_support: num(&m, "game-support", Params::default().game_support)?,
+        game_group_cap: num(&m, "game-group-cap", Params::default().game_group_cap)?,
     };
     let wn = WordNet::load(std::path::Path::new(&one(&m, "wordnet")?))
         .map_err(|e| format!("wordnet: {e}"))?;
@@ -329,13 +416,42 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         })
         .collect();
 
+    // The corpus's own verb entries. Optional so that `--no-game-groups` is
+    // simply leaving the flag off, which is what makes the two halves of the
+    // table separable when a measurement needs them apart.
+    let games = match m.get("if-groups").and_then(|v| v.first()) {
+        None => Vec::new(),
+        Some(path) => read_game_groups(std::path::Path::new(path))?,
+    };
+
     let mut report = Report::default();
-    let table = build::build(&verbs, &wn, &freq, &p, &mut report);
+    let table = build::build(&verbs, &games, &wn, &freq, &p, &mut report);
 
     let out = PathBuf::from(one(&m, "out")?);
     write_table(&out, &table, &p, rows, verbs.len())?;
     print_report(&report, &table, &p, rows, verbs.len());
     Ok(())
+}
+
+/// Read `if_groups.tsv` — a story count, then that entry's spellings.
+fn read_game_groups(path: &std::path::Path) -> Result<Vec<GameGroup>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for line in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+    {
+        let mut f = line.split('\t');
+        let stories: usize = f
+            .next()
+            .and_then(|n| n.trim().parse().ok())
+            .ok_or_else(|| format!("{}: expected a story count: {line:?}", path.display()))?;
+        let words: Vec<String> = f.map(str::to_string).collect();
+        if words.len() >= 2 {
+            out.push(GameGroup { words, stories });
+        }
+    }
+    Ok(out)
 }
 
 fn write_table(
@@ -361,9 +477,23 @@ fn write_table(
 # per sense.  A tab is the separator because a member may itself contain a
 # space (`turn on`), and no dictionary word contains a tab.
 #
-# A group is one WordNet synset, filtered to words a player might type, plus —
-# where a synset no story could match has a hypernym that one can — that synset
-# unioned with its immediate hypernym.  Exactly one hop, never chained.
+# A group is one of two things, and neither is ever merged with the other:
+#
+#   * ONE VERB ENTRY some stories declare — the spellings a game's own author
+#     wrote on a single verb, which is that author saying these words are one
+#     action.  Believed only where several stories agree, and greppable in
+#     crates/verb-synonyms-gen/if_groups.tsv, which is where a row's provenance
+#     can be looked up: this file is members and nothing else.
+#   * ONE WORDNET SYNSET, filtered to words a player might type, plus — where a
+#     synset no story could match has a hypernym that one can — that synset
+#     unioned with its immediate hypernym.  Exactly one hop, never chained.
+#
+# WHERE THE TWO DISAGREE, THE GAMES WIN.  A game-derived group comes before
+# every synset containing the same word, because a game author writing
+# `Verb 'examine' 'x' 'inspect'` has stated what a word means IN A PARSER, and
+# that is the only question this table asks.  WordNet is not overruled, only
+# outranked: its groups still follow, and reach a story that implements a word
+# no game in the corpus grouped.
 #
 # AT LOOKUP, two rules define what this data means:
 #   1. Lemmatise the player's word FIRST.  Members are base forms, because an IF
@@ -375,13 +505,15 @@ fn write_table(
 #      group by construction and it is the one word known to have failed.
 #
 # LINE ORDER IS SIGNIFICANT — DO NOT SORT THIS FILE.  The groups containing any
-# given word appear in that word's own WordNet sense order, commonest sense
-# first, so a consumer can walk them most-likely-meaning first and stop after
-# three or four dictionary matches.  Sorting the file alphabetically destroys
-# that signal silently.  Member order within a line is significant too: verbs
-# the corpus actually uses come first, commonest first.
+# given word appear best-guess first: that word's game-derived groups, then its
+# synsets in WordNet's own sense order, commonest sense first.  A consumer can
+# therefore walk them and stop after three or four dictionary matches.  Sorting
+# the file alphabetically destroys that signal silently.  Member order within a
+# line is significant too: verbs the corpus actually uses come first, commonest
+# first.
 #
 # Built with: sense-cap {} band-cap {} group-cap {} hyponym-cap {} gap-fill {}
+#             game-support {} game-group-cap {}
 # From {} harvested IF spellings, {} of which WordNet knows as verbs.
 # {} groups, {} memberships.
 ",
@@ -390,6 +522,8 @@ fn write_table(
         p.group_cap,
         p.hyponym_cap,
         p.gap_fill,
+        p.game_support,
+        p.game_group_cap,
         harvested,
         expanded,
         groups.len(),
@@ -405,10 +539,18 @@ fn write_table(
 fn print_report(r: &Report, groups: &[Vec<String>], p: &Params, harvested: usize, expanded: usize) {
     eprintln!("harvested spellings           {harvested}");
     eprintln!("  WordNet knows as a verb     {expanded}");
+    eprintln!("verb entries the corpus declares  {}", r.game_sets);
+    eprintln!(
+        "  declared by >= {} stories    {}",
+        p.game_support, r.game_corroborated
+    );
+    eprintln!("  …kept as groups             {}", r.game_kept);
+    eprintln!("  …dropped as too wide        {}", r.game_oversize.len());
     eprintln!("synsets inside the sense cap  {}", r.groups_before_prune);
     eprintln!("  …containing an IF verb      {}", r.groups_after_prune);
     eprintln!("gap-fill groups (synset ∪ hypernym)  {}", r.gap_filled);
     eprintln!("duplicate groups discarded    {}", r.duplicates);
+    eprintln!("  …a synset a game already said {}", r.game_agrees);
     eprintln!("groups subsumed by another    {}", r.subsumed);
     eprintln!("sense-order constraints broken {}", r.order_conflicts);
     eprintln!("groups written                {}", groups.len());
@@ -431,9 +573,31 @@ fn print_report(r: &Report, groups: &[Vec<String>], p: &Params, harvested: usize
     );
     eprintln!(
         "  reached after gap-fill      {} ({:.1}%)",
+        r.hits_gap_filled,
+        100.0 * r.hits_gap_filled as f64 / n as f64
+    );
+    eprintln!(
+        "  reached after game groups   {} ({:.1}%)",
         r.hits_total,
         100.0 * r.hits_total as f64 / n as f64
     );
+    eprintln!(
+        "  …of which ONLY the games reach ({}): {}",
+        r.game_only.len(),
+        r.game_only.join(" ")
+    );
+    eprintln!("\nwidest game-derived groups kept:");
+    for (stories, g) in &r.game_widest {
+        eprintln!("  [{stories} stories] {}", g.join(" "));
+    }
+    eprintln!(
+        "\ngame-derived sets refused for being wider than {} ({}):",
+        p.game_group_cap,
+        r.game_oversize.len()
+    );
+    for (stories, g) in r.game_oversize.iter().take(10) {
+        eprintln!("  [{stories} stories, {} members] {}", g.len(), g.join(" "));
+    }
     eprintln!("\nwords in the most groups (polysemy check):");
     for (w, n) in &r.widest {
         eprintln!("  {w} ({n})");
