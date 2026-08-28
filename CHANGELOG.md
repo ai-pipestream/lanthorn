@@ -143,6 +143,14 @@ carrying `enable_sound = false` could only be overridden by editing the file.
   scrollback and map panning in a v6 game, as they do everywhere else. A game's
   own arrow bindings are now opt-in. v6 menus and "press any key" screens are
   unaffected either way.
+- The banner and opening room description no longer vanish one command into
+  play. A game that clears the screen during its own startup — the v5 Solid Gold
+  re-releases with built-in hints do, *Zork I* r52 and *The Hitchhiker's Guide*
+  r31 among them — had that clear held over and applied at the end of the
+  player's FIRST turn, wiping everything they had read so far. The boot now
+  drains the clear it issued, and ignores it as `zvm-cli` always has: the screen
+  the game erased is the one before its own banner, and nothing had been drawn
+  on it yet.
 
 ## v0.3.0 — 2026-08-26
 
