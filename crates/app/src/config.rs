@@ -1036,11 +1036,24 @@ pub enum V6RenderMode {
 /// compares the pinned value against the value it is about to write, and a
 /// second copy of this `match` that ever disagreed would silently un-pin the key
 /// (SQ-1079).
-fn v6_render_key(mode: V6RenderMode) -> &'static str {
+pub fn v6_render_key(mode: V6RenderMode) -> &'static str {
     match mode {
         V6RenderMode::Hybrid => "hybrid",
         V6RenderMode::Raster => "raster",
         V6RenderMode::Extended => "extended",
+    }
+}
+
+/// The mode a `v6_render` token names, or `None` for anything else — the inverse
+/// of [`v6_render_key`], used to read the per-game sidecar's own copy of the key
+/// (SQ-1123). An unrecognised token inherits the global mode rather than failing
+/// a boot, which is what every other malformed sidecar value already does.
+pub fn v6_render_from_key(token: &str) -> Option<V6RenderMode> {
+    match token {
+        "hybrid" => Some(V6RenderMode::Hybrid),
+        "raster" => Some(V6RenderMode::Raster),
+        "extended" => Some(V6RenderMode::Extended),
+        _ => None,
     }
 }
 

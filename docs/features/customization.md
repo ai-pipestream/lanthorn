@@ -34,9 +34,10 @@ still reach in and override any single selector by name.
   today's cyan+bold focus highlight), `panel.background` for the body fill, and
   `panel.title` / `panel.tab` / `panel.tab:active` / `panel.tab_divider` /
   `panel.terminator_left` / `panel.terminator_right` for the title/tab strip
-  inset in the top border, and `panel.control` / `panel.control:active` /
-  `panel.control:lit` / `panel.control:hover` for the clickable toggle controls
-  at that strip's right-hand end (every framed pane — story, map, dialogs, the command
+  inset in the top border, and `panel.control` (off) / `panel.control:lit` (on,
+  the `alert` role) / `panel.control:hover` for the clickable toggle controls on
+  the story pane's own frame — bracketed by the same terminator caps, and placed
+  on the border nearest whatever each one switches (every framed pane — story, map, dialogs, the command
   band and inventory dock, the debug inspector's window tabs, the story-list info
   panel — renders through this one shared panel component and these same
   selectors). The story pane's strip text is the resolved adventure title,
@@ -103,11 +104,12 @@ still reach in and override any single selector by name.
   set), `path_style` for cardinal (N/S/E/W) connectors, and a separate
   `portal_path_style` for vertical/portal (up/down/in/out) connectors so they
   can render distinctly (dotted by default). `control_icons` (plain | nerdfont)
-  picks the glyphs for the story pane's border toggle controls — the arrows that
-  show the map and verb panel, the Guiding Light's mark, and the two v6 render
-  switches — with the `nerdfont` arm substituting only the codepoints lanthorn
-  has verified by name (the four MDI chevrons and `md-post_lamp`) and leaving
-  the rest on Geometric Shapes, which a patched face draws identically. `diagonal_corners = false` turns
+  picks the glyphs for the story pane's border toggle controls — the map and
+  verb-panel toggles, the Guiding Light's mark, and the two v6 render switches.
+  `plain` is shape-based Geometric Shapes; `nerdfont` gives all eleven states a
+  named icon, every codepoint read from the font's own `post` table rather than
+  guessed from a name, with each control's states drawn from a single icon
+  family so a toggle changes shape without changing weight. `diagonal_corners = false` turns
   the half-diagonal corner stubs (🮠🮡🮢🮣) back into plain orthogonal exits, for
   fonts without Unicode 13 Legacy Computing coverage. Individual glyphs are
   overridden one slot at a time in a `[map.overrides]` table keyed by slot name
@@ -371,10 +373,13 @@ you write the file directly.
 
 **Per-game settings**: alongside that style file, a game's save directory can hold
 its own `config.toml` — a separate, deliberately tiny sidecar carrying at most
-`honor_game_colours`, `borderless_windows`, `show_map` and `v6_pixel_lock`. It is
-written for you when you toggle one of those for a story (`/set-game-colours`,
-`/set-game-borders`, `/set-v6-pixel-lock`, hiding the map), and it is a *sparse
-override layer*, not a copy of your global config:
+`honor_game_colours`, `borderless_windows`, `show_map`, `v6_pixel_lock`,
+`guidance`, `v6_render` and `command_band`. It is written for you when you
+toggle one of those for a story (`/set-game-colours`, `/set-game-borders`,
+`/set-v6-pixel-lock`, `/set-guidance`, `/set-v6-render`, hiding the map, opening
+the command band — or clicking any of the toggle controls in the story pane's
+border, which run exactly those commands), and it is a *sparse override layer*,
+not a copy of your global config:
 bare uncommented lines, only the keys that differ, and the file is deleted once
 nothing is overridden. An absent key means "inherit the global value" — which is
 why lanthorn never seeds the annotated template into a game directory, and why you
@@ -448,10 +453,15 @@ re-seed the new template, or hand-write the new shape from
   parser knows, a completed noun, a caution before a move that cannot be taken
   back. One switch rather than one per feature — a player who does not want the
   interpreter talking over the story should not have to enumerate five of them.
-  `--guidance on|off` says it for a launch, `/set-guidance` (bare toggles, or
-  say `on`/`off`) for the session you are in, and the **settings screen**
-  persists it — which is where the one-line introduction above your first hint
-  sends you.
+  `--guidance on|off` says it for a launch; `/set-guidance` (bare toggles, or say
+  `on`/`off`) — and the Guiding Light's own `●`/`○` control in the story pane's
+  bottom border — says it **for that story**, remembered in its own
+  `config.toml` sidecar, because whether you want help is a standing preference
+  about the game in front of you: off for the one you know by heart, on for the
+  one you just opened. `/set-guidance auto` hands the story back to your global
+  default. The **settings screen** sets that global default — the one new games
+  inherit — which is where the one-line introduction above your first hint sends
+  you.
   The **vocabulary offer** is the first of them: when a word in your command is
   not in the story's dictionary, the light names words that are — one keystroke
   away (`lanturn` → `lantern`), the same word with a different ending (`opening`
@@ -595,8 +605,9 @@ re-seed the new template, or hand-write the new shape from
   chrome ring; `raster` bakes the whole pane — frame, status, and story text —
   into one scaled pixel image instead. (A third mode, `frameless`, was removed —
   a config still naming it silently reads as `hybrid`.) It also cycles
-  in the settings screen, and `/set-v6-render` switches modes live mid-game
-  (session-only) for quick comparisons. (Applies only to graphical v6 stories;
+  in the settings screen, and `/set-v6-render` switches modes live mid-game —
+  remembered *for that story*, not for every story, so you can keep one game on
+  raster and another on hybrid. (Applies only to graphical v6 stories;
   other games are unaffected.) See [Graphical v6](v6-graphics.md) for the full
   picture.
 - **Fusing an EGA dither** — `fuse_art_dither` (default `true`) blends the colour

@@ -644,7 +644,14 @@ fn draw_story_panel(
     let views = app::render::controls::controls_for(state);
     let ctls: Vec<_> = views.iter().map(|v| v.as_header_control()).collect();
     let (frame, rects) = draw_panel_with_controls(buf, spec, &ctls, &state.colors.theme);
-    let hits = views.iter().map(|v| v.id).zip(rects).collect();
+    // A group the pane was too narrow to hold leaves zero-area rects behind; drop
+    // them here so `border_controls` carries only what is actually on screen.
+    let hits = views
+        .iter()
+        .map(|v| v.id)
+        .zip(rects)
+        .filter(|(_, r)| r.width > 0 && r.height > 0)
+        .collect();
     (frame, hits)
 }
 
@@ -2143,7 +2150,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // it, then goes on to be handled normally.
         if let Event::Mouse(m) = &event {
             use app::pane_drag::DragOutcome;
-            match app::pane_drag::on_mouse(&mut state, m, &last_panes.pane_layout, &last_panes.boundaries) {
+            match app::pane_drag::on_mouse(&mut state, m, &last_panes.pane_layout, &last_panes.boundaries, &last_panes.border_controls) {
                 DragOutcome::Ignored => {}
                 DragOutcome::Consumed => continue,
                 DragOutcome::Committed => {

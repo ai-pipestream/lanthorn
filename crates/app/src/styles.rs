@@ -11,49 +11,169 @@ pub fn per_game_style_path(game_dir: &Path) -> PathBuf {
     game_dir.join("style.toml")
 }
 
-/// The per-game NON-style config sidecar: `<game_dir>/config.toml`. Holds
-/// per-game overrides that are not part of the style schema
+/// The per-game NON-style config sidecar: `<game_dir>/config.toml` — i.e. inside
+/// the story's SAVE directory, beside its saves and aux data, not beside the
+/// story file. Holds per-game overrides that are not part of the style schema
 /// (`honor_game_colours`, `borderless_windows`, `show_map`, `pictures`,
-/// `v6_pixel_lock`), kept separate from `style.toml` so the style parser/writer
+/// `interpreter_number`, `v6_pixel_lock`, `guidance`, `v6_render`,
+/// `command_band`), kept separate from `style.toml` so the style parser/writer
 /// stays a pure style document.
+///
+/// Bare lines, never templated: an absent key means "inherit the global config",
+/// so a file that listed every key with its default could not express that. See
+/// [`PerGameConfig`].
 pub fn per_game_config_path(game_dir: &Path) -> PathBuf {
     game_dir.join("config.toml")
 }
 
-/// Read one boolean key from the per-game `config.toml`. `None` if the file is
-/// absent/unparseable or the key is missing.
-fn read_config_bool(game_dir: &Path, key: &str) -> Option<bool> {
-    let text = std::fs::read_to_string(per_game_config_path(game_dir)).ok()?;
-    text.parse::<toml::Value>().ok()?.get(key).and_then(|v| v.as_bool())
+/// Every per-game override the sidecar can carry, as ONE value (SQ-1123).
+///
+/// It was six positional `Option`s threaded through a private writer and
+/// repeated by each of six public setters, with a comment in the middle asking
+/// every future writer to remember to pass the keys it was not itself setting —
+/// a hand-maintained invariant across call sites, which is the shape this repo's
+/// refactoring policy names outright. Adding the three keys the border controls
+/// persist would have made it nine, edited in nine places. Read-modify-write of
+/// one struct cannot forget a key.
+///
+/// `None` everywhere is not "the defaults": it is **no sidecar at all**, and
+/// writing it deletes the file. Absent key = inherit the global config.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PerGameConfig {
+    pub honor_game_colours: Option<bool>,
+    pub borderless_windows: Option<bool>,
+    pub show_map: Option<bool>,
+    pub pictures: Option<String>,
+    pub interpreter_number: Option<u8>,
+    pub v6_pixel_lock: Option<bool>,
+    /// Lanthorn's Guiding Light, for this story (SQ-1123).
+    pub guidance: Option<bool>,
+    /// The v6 render mode for this story, as its config-file spelling
+    /// (`hybrid` / `raster` / `extended`) — SQ-1123.
+    pub v6_render: Option<String>,
+    /// Whether the command band opens with this story (SQ-1123).
+    pub command_band: Option<bool>,
 }
 
-/// Read one string key from the per-game `config.toml`, trimmed. `None` if the
-/// file is absent/unparseable, the key is missing, or its value is blank.
-fn read_config_str(game_dir: &Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(per_game_config_path(game_dir)).ok()?;
-    let v = text.parse::<toml::Value>().ok()?;
-    let s = v.get(key)?.as_str()?.trim();
-    if s.is_empty() { None } else { Some(s.to_string()) }
+impl PerGameConfig {
+    /// Every key the sidecar can carry, in the order [`PerGameConfig::write`]
+    /// emits them.
+    ///
+    /// **Derived from, not maintained alongside.** The global `config.toml`
+    /// template used to name the per-game keys in a hand-written sentence, and
+    /// it had gone stale — it still said "these three keys" long after
+    /// `v6_pixel_lock` and `borderless_windows` had joined. A list in prose,
+    /// sitting far from the code that decides what is per-game, goes stale
+    /// silently by construction. `config_template` builds its sentence from
+    /// this, and `write_emits_exactly_the_declared_keys` fails if the writer and
+    /// this list ever disagree.
+    pub const KEYS: &'static [&'static str] = &[
+        "honor_game_colours",
+        "borderless_windows",
+        "show_map",
+        "v6_pixel_lock",
+        "guidance",
+        "command_band",
+        "pictures",
+        "v6_render",
+        "interpreter_number",
+    ];
+
+    /// Read the sidecar. Every key absent when the file is missing or unparseable
+    /// — a corrupt sidecar inherits the global config rather than failing a boot.
+    pub fn read(game_dir: &Path) -> PerGameConfig {
+        let Some(v) = std::fs::read_to_string(per_game_config_path(game_dir))
+            .ok()
+            .and_then(|t| t.parse::<toml::Value>().ok())
+        else {
+            return PerGameConfig::default();
+        };
+        let b = |k: &str| v.get(k).and_then(|x| x.as_bool());
+        let s = |k: &str| {
+            v.get(k).and_then(|x| x.as_str()).map(str::trim).filter(|x| !x.is_empty())
+                .map(str::to_string)
+        };
+        PerGameConfig {
+            honor_game_colours: b("honor_game_colours"),
+            borderless_windows: b("borderless_windows"),
+            show_map: b("show_map"),
+            pictures: s("pictures"),
+            interpreter_number: v
+                .get("interpreter_number")
+                .and_then(|x| x.as_integer())
+                .and_then(|n| u8::try_from(n).ok()),
+            v6_pixel_lock: b("v6_pixel_lock"),
+            guidance: b("guidance"),
+            v6_render: s("v6_render"),
+            command_band: b("command_band"),
+        }
+    }
+
+    /// Write the sidecar, omitting every `None` key and DELETING the file when
+    /// nothing is set. Creates `game_dir` if needed, so a click on turn one of a
+    /// story that has never been saved writes the directory into existence.
+    pub fn write(&self, game_dir: &Path) -> std::io::Result<()> {
+        let path = per_game_config_path(game_dir);
+        let mut body = String::new();
+        let mut put_bool = |k: &str, v: Option<bool>| {
+            if let Some(v) = v {
+                body.push_str(&format!("{k} = {v}\n"));
+            }
+        };
+        put_bool("honor_game_colours", self.honor_game_colours);
+        put_bool("borderless_windows", self.borderless_windows);
+        put_bool("show_map", self.show_map);
+        put_bool("v6_pixel_lock", self.v6_pixel_lock);
+        put_bool("guidance", self.guidance);
+        put_bool("command_band", self.command_band);
+        if let Some(v) = &self.pictures {
+            body.push_str(&format!("pictures = {}\n", toml::Value::String(v.clone())));
+        }
+        if let Some(v) = &self.v6_render {
+            body.push_str(&format!("v6_render = {}\n", toml::Value::String(v.clone())));
+        }
+        if let Some(v) = self.interpreter_number {
+            body.push_str(&format!("interpreter_number = {v}\n"));
+        }
+        if body.is_empty() {
+            return match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            };
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, body)
+    }
+}
+
+/// Set one key and write the sidecar back, leaving every sibling key alone.
+fn edit(game_dir: &Path, f: impl FnOnce(&mut PerGameConfig)) -> std::io::Result<()> {
+    let mut cfg = PerGameConfig::read(game_dir);
+    f(&mut cfg);
+    cfg.write(game_dir)
 }
 
 /// Read the per-game `honor_game_colours` override, if the user set one.
 /// `None` = no override (fall back to garglk.ini, then the global config default).
 pub fn read_per_game_honor(game_dir: &Path) -> Option<bool> {
-    read_config_bool(game_dir, "honor_game_colours")
+    PerGameConfig::read(game_dir).honor_game_colours
 }
 
 /// Read the per-game `borderless_windows` override, if the user set one. `None`
 /// = no override (fall back to the default: honor the Glk border hint). When
 /// `Some(true)`, all window splits abut with no reserved gutter (SQ-0341).
 pub fn read_per_game_borderless(game_dir: &Path) -> Option<bool> {
-    read_config_bool(game_dir, "borderless_windows")
+    PerGameConfig::read(game_dir).borderless_windows
 }
 
 /// Read the per-game `show_map` override, if the user set one. `None` = no
 /// override (fall back to the default: the map panel is shown). When
 /// `Some(false)` the map panel starts hidden for this story (SQ-0304).
 pub fn read_per_game_show_map(game_dir: &Path) -> Option<bool> {
-    read_config_bool(game_dir, "show_map")
+    PerGameConfig::read(game_dir).show_map
 }
 
 /// Read the per-game `pictures` override — SQ-0734 tier 3, the user naming a
@@ -64,24 +184,16 @@ pub fn read_per_game_show_map(game_dir: &Path) -> Option<bool> {
 /// The value is a path: absolute, or relative to the STORY's own directory —
 /// "beside the story" is where these archives sit. Resolution and validation
 /// live in [`crate::graphics::PictureOverride::resolve`]; this only reads the key.
-///
-/// Hand-written until SQ-0789; the launch-options dialog now writes it too, via
-/// [`write_per_game_pictures`], but only when the user changed it.
 pub fn read_per_game_pictures(game_dir: &Path) -> Option<String> {
-    read_config_str(game_dir, "pictures")
+    PerGameConfig::read(game_dir).pictures
 }
 
 /// Read the per-game `interpreter_number` override — the machine this one story
 /// presents itself as, ZMSD §11.1.3 (SQ-0789). `None` = no override, so the
 /// launch's own precedence decides: a CLI number, else the flavour of a named
 /// picture archive, else the medium, else Frotz's rule.
-///
-/// Written only by the launch-options dialog's "save as default" checkbox, and
-/// only when the user changed it there.
 pub fn read_per_game_interpreter_number(game_dir: &Path) -> Option<u8> {
-    let text = std::fs::read_to_string(per_game_config_path(game_dir)).ok()?;
-    let v = text.parse::<toml::Value>().ok()?;
-    u8::try_from(v.get("interpreter_number")?.as_integer()?).ok()
+    PerGameConfig::read(game_dir).interpreter_number
 }
 
 /// Read the per-game `v6_pixel_lock` override, if the user set one (SQ-0945).
@@ -92,101 +204,55 @@ pub fn read_per_game_interpreter_number(game_dir: &Path) -> Option<u8> {
 /// [`crate::render::v6_layout::scale_ladder_step`] derives the ladder from — so
 /// the switch is per-game before it is global. Written by `set-v6-pixel-lock`.
 pub fn read_per_game_v6_pixel_lock(game_dir: &Path) -> Option<bool> {
-    read_config_bool(game_dir, "v6_pixel_lock")
+    PerGameConfig::read(game_dir).v6_pixel_lock
 }
 
-/// Write the per-game `config.toml` with the given overrides, omitting a `None`
-/// key and deleting the file entirely when all are `None`. Centralised so each
-/// key's writer preserves the others' values (SQ-0341). Creates `game_dir` if
-/// needed.
-fn write_per_game_config(
-    game_dir: &Path,
-    honor: Option<bool>,
-    borderless: Option<bool>,
-    show_map: Option<bool>,
-    pictures: Option<String>,
-    interpreter_number: Option<u8>,
-    v6_pixel_lock: Option<bool>,
-) -> std::io::Result<()> {
-    let path = per_game_config_path(game_dir);
-    let mut body = String::new();
-    if let Some(v) = honor {
-        body.push_str(&format!("honor_game_colours = {v}\n"));
-    }
-    if let Some(v) = borderless {
-        body.push_str(&format!("borderless_windows = {v}\n"));
-    }
-    if let Some(v) = show_map {
-        body.push_str(&format!("show_map = {v}\n"));
-    }
-    // Every writer rewrites the whole sidecar, so each must carry the keys it is
-    // not itself setting — otherwise toggling a colour preference would silently
-    // delete the picture archive the user chose and quietly revert the game to
-    // its Blorb art (SQ-0734).
-    if let Some(v) = pictures {
-        body.push_str(&format!("pictures = {}\n", toml::Value::String(v)));
-    }
-    if let Some(v) = interpreter_number {
-        body.push_str(&format!("interpreter_number = {v}\n"));
-    }
-    if let Some(v) = v6_pixel_lock {
-        body.push_str(&format!("v6_pixel_lock = {v}\n"));
-    }
-    if body.is_empty() {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
-        };
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, body)
+/// Read the per-game `guidance` override (SQ-1123). `None` = no override, so the
+/// global `guidance` decides.
+///
+/// Whether you want Lanthorn's Guiding Light is a standing preference about how
+/// you want to play a PARTICULAR story — off for the one you know by heart, on
+/// for the one you have just opened — so it is per-game before it is global.
+pub fn read_per_game_guidance(game_dir: &Path) -> Option<bool> {
+    PerGameConfig::read(game_dir).guidance
 }
 
-/// Persist (or clear) the per-game `honor_game_colours` override, preserving any
-/// `borderless_windows` / `show_map` override in the same sidecar. `Some(v)`
-/// writes it; `None` clears it (→ fall back to garglk.ini / the global default).
+/// Read the per-game `v6_render` override (SQ-1123), as its config spelling.
+/// `None` = no override, so the global `v6_render` decides.
+///
+/// Raster began as a FALLBACK — the mode you escaped to when hybrid could not
+/// cope — and a temporary escape hatch rightly did not persist. It is a
+/// destination now, with `extended` beside it, and a player may genuinely prefer
+/// raster for one game and hybrid for another. That makes the mode a property of
+/// the story, exactly as `v6_pixel_lock` already is.
+pub fn read_per_game_v6_render(game_dir: &Path) -> Option<String> {
+    PerGameConfig::read(game_dir).v6_render
+}
+
+/// Read the per-game `command_band` override (SQ-1123). `None` = no override, so
+/// the global `[command_band] auto_open` decides whether the band opens with the
+/// story.
+pub fn read_per_game_command_band(game_dir: &Path) -> Option<bool> {
+    PerGameConfig::read(game_dir).command_band
+}
+
+/// Persist (or clear) the per-game `honor_game_colours` override, preserving
+/// every sibling key. `Some(v)` writes it; `None` clears it (→ fall back to
+/// garglk.ini / the global default).
 pub fn write_per_game_honor(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
-    write_per_game_config(
-        game_dir,
-        value,
-        read_per_game_borderless(game_dir),
-        read_per_game_show_map(game_dir),
-        read_per_game_pictures(game_dir),
-        read_per_game_interpreter_number(game_dir),
-        read_per_game_v6_pixel_lock(game_dir),
-    )
+    edit(game_dir, |c| c.honor_game_colours = value)
 }
 
-/// Persist (or clear) the per-game `borderless_windows` override, preserving any
-/// `honor_game_colours` / `show_map` override in the same sidecar (SQ-0341).
+/// Persist (or clear) the per-game `borderless_windows` override, preserving
+/// every sibling key (SQ-0341).
 pub fn write_per_game_borderless(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
-    write_per_game_config(
-        game_dir,
-        read_per_game_honor(game_dir),
-        value,
-        read_per_game_show_map(game_dir),
-        read_per_game_pictures(game_dir),
-        read_per_game_interpreter_number(game_dir),
-        read_per_game_v6_pixel_lock(game_dir),
-    )
+    edit(game_dir, |c| c.borderless_windows = value)
 }
 
-/// Persist (or clear) the per-game `show_map` override, preserving any
-/// `honor_game_colours` / `borderless_windows` override in the same sidecar
-/// (SQ-0304).
+/// Persist (or clear) the per-game `show_map` override, preserving every sibling
+/// key (SQ-0304).
 pub fn write_per_game_show_map(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
-    write_per_game_config(
-        game_dir,
-        read_per_game_honor(game_dir),
-        read_per_game_borderless(game_dir),
-        value,
-        read_per_game_pictures(game_dir),
-        read_per_game_interpreter_number(game_dir),
-        read_per_game_v6_pixel_lock(game_dir),
-    )
+    edit(game_dir, |c| c.show_map = value)
 }
 
 /// Persist (or clear) the per-game `pictures` override — the launch-options
@@ -196,45 +262,40 @@ pub fn write_per_game_show_map(game_dir: &Path, value: Option<bool>) -> std::io:
 /// `Some(name)` names an archive beside the story; `None` clears the key, which
 /// is what "inherit" means and is NOT the same as writing the global default.
 pub fn write_per_game_pictures(game_dir: &Path, value: Option<String>) -> std::io::Result<()> {
-    write_per_game_config(
-        game_dir,
-        read_per_game_honor(game_dir),
-        read_per_game_borderless(game_dir),
-        read_per_game_show_map(game_dir),
-        value,
-        read_per_game_interpreter_number(game_dir),
-        read_per_game_v6_pixel_lock(game_dir),
-    )
+    edit(game_dir, |c| c.pictures = value)
 }
 
 /// Persist (or clear) the per-game `interpreter_number` override (SQ-0789),
 /// preserving every sibling key. `None` clears it back to inheriting the
 /// launch's own precedence.
 pub fn write_per_game_interpreter_number(game_dir: &Path, value: Option<u8>) -> std::io::Result<()> {
-    write_per_game_config(
-        game_dir,
-        read_per_game_honor(game_dir),
-        read_per_game_borderless(game_dir),
-        read_per_game_show_map(game_dir),
-        read_per_game_pictures(game_dir),
-        value,
-        read_per_game_v6_pixel_lock(game_dir),
-    )
+    edit(game_dir, |c| c.interpreter_number = value)
 }
 
 /// Persist (or clear) the per-game `v6_pixel_lock` override (SQ-0945),
 /// preserving every sibling key. `None` clears it back to inheriting the global
 /// `v6_pixel_lock`, which is NOT the same as writing the global value down.
 pub fn write_per_game_v6_pixel_lock(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
-    write_per_game_config(
-        game_dir,
-        read_per_game_honor(game_dir),
-        read_per_game_borderless(game_dir),
-        read_per_game_show_map(game_dir),
-        read_per_game_pictures(game_dir),
-        read_per_game_interpreter_number(game_dir),
-        value,
-    )
+    edit(game_dir, |c| c.v6_pixel_lock = value)
+}
+
+/// Persist (or clear) the per-game `guidance` override (SQ-1123), preserving
+/// every sibling key. `None` clears it back to inheriting the global setting.
+pub fn write_per_game_guidance(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
+    edit(game_dir, |c| c.guidance = value)
+}
+
+/// Persist (or clear) the per-game `v6_render` override (SQ-1123), preserving
+/// every sibling key. `None` clears it back to inheriting the global mode.
+pub fn write_per_game_v6_render(game_dir: &Path, value: Option<String>) -> std::io::Result<()> {
+    edit(game_dir, |c| c.v6_render = value)
+}
+
+/// Persist (or clear) the per-game `command_band` override (SQ-1123), preserving
+/// every sibling key. `None` clears it back to inheriting `[command_band]
+/// auto_open`.
+pub fn write_per_game_command_band(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
+    edit(game_dir, |c| c.command_band = value)
 }
 
 #[cfg(test)]
@@ -294,6 +355,104 @@ mod tests {
         // Clearing the last key removes the sidecar.
         write_per_game_honor(&dir, None).unwrap();
         assert!(!per_game_config_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The declared key list and the writer must agree, because the global
+    /// `config.toml` template tells the player what a per-game file may hold and
+    /// derives that sentence from [`PerGameConfig::KEYS`]. A key the writer
+    /// emits but the list omits is a setting nobody is told about; a key the
+    /// list names but the writer never emits is a promise nothing keeps.
+    #[test]
+    fn write_emits_exactly_the_declared_keys() {
+        let dir = tmp("keys");
+        let every = PerGameConfig {
+            honor_game_colours: Some(true),
+            borderless_windows: Some(true),
+            show_map: Some(true),
+            pictures: Some("Pic.data".into()),
+            interpreter_number: Some(6),
+            v6_pixel_lock: Some(true),
+            guidance: Some(true),
+            v6_render: Some("raster".into()),
+            command_band: Some(true),
+        };
+        every.write(&dir).unwrap();
+        let text = std::fs::read_to_string(per_game_config_path(&dir)).unwrap();
+        let written: Vec<&str> =
+            text.lines().filter_map(|l| l.split_once(" = ")).map(|(k, _)| k).collect();
+        assert_eq!(written, PerGameConfig::KEYS, "the writer and the declared list disagree");
+        // …and every one of them reads back, so the list is not merely spelled
+        // the same as what the writer prints.
+        assert_eq!(PerGameConfig::read(&dir), every);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1123: the three keys the border controls added persist, coexist with
+    /// every older key, and clear back to "inherit the global setting".
+    #[test]
+    fn the_border_controls_keys_roundtrip_and_coexist() {
+        let dir = tmp("controls");
+        assert_eq!(read_per_game_guidance(&dir), None);
+        assert_eq!(read_per_game_v6_render(&dir), None);
+        assert_eq!(read_per_game_command_band(&dir), None);
+
+        write_per_game_guidance(&dir, Some(false)).unwrap();
+        write_per_game_v6_render(&dir, Some("raster".into())).unwrap();
+        write_per_game_command_band(&dir, Some(true)).unwrap();
+        // …alongside two keys that predate them, to prove the shared sidecar is
+        // read-modify-written rather than rewritten from whatever the caller
+        // remembered to pass.
+        write_per_game_v6_pixel_lock(&dir, Some(true)).unwrap();
+        write_per_game_pictures(&dir, Some("Pic.data".into())).unwrap();
+
+        assert_eq!(read_per_game_guidance(&dir), Some(false));
+        assert_eq!(read_per_game_v6_render(&dir).as_deref(), Some("raster"));
+        assert_eq!(read_per_game_command_band(&dir), Some(true));
+        assert_eq!(read_per_game_v6_pixel_lock(&dir), Some(true));
+        assert_eq!(read_per_game_pictures(&dir).as_deref(), Some("Pic.data"));
+
+        // `auto` on one key clears exactly that key.
+        write_per_game_v6_render(&dir, None).unwrap();
+        assert_eq!(read_per_game_v6_render(&dir), None, "cleared");
+        assert_eq!(read_per_game_guidance(&dir), Some(false), "and only that one");
+        assert_eq!(read_per_game_v6_pixel_lock(&dir), Some(true));
+
+        // Clearing the last key removes the sidecar entirely — absent means
+        // inherit, which a file full of defaults could not say.
+        for f in [
+            write_per_game_guidance as fn(&Path, Option<bool>) -> std::io::Result<()>,
+            write_per_game_command_band,
+            write_per_game_v6_pixel_lock,
+        ] {
+            f(&dir, None).unwrap();
+        }
+        write_per_game_pictures(&dir, None).unwrap();
+        assert!(!per_game_config_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A click on turn one of a story that has never been saved must write the
+    /// sidecar into existence rather than fail — `game_dir` may not exist yet.
+    #[test]
+    fn a_write_creates_the_game_dir_it_needs() {
+        let dir = tmp("mkdir").join("never-saved.save");
+        assert!(!dir.exists());
+        write_per_game_guidance(&dir, Some(true)).unwrap();
+        assert_eq!(read_per_game_guidance(&dir), Some(true));
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// An unparseable sidecar inherits the global config rather than failing a
+    /// boot, and an unrecognised `v6_render` token is not a mode.
+    #[test]
+    fn a_broken_sidecar_reads_as_no_overrides() {
+        let dir = tmp("broken");
+        std::fs::write(per_game_config_path(&dir), "this is not = = toml\n").unwrap();
+        assert_eq!(PerGameConfig::read(&dir), PerGameConfig::default());
+        std::fs::write(per_game_config_path(&dir), "v6_render = \"sepia\"\n").unwrap();
+        assert_eq!(read_per_game_v6_render(&dir).as_deref(), Some("sepia"));
+        assert_eq!(crate::config::v6_render_from_key("sepia"), None, "…and names no mode");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

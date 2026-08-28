@@ -128,6 +128,25 @@ what a zip carries):
 
 ---
 
+## Playing aids
+
+**Follows** the paragraph introducing Lanthorn's Guiding Light — the pane's own
+switches are the visible half of the same idea:
+
+> The story pane's frame carries a few clickable switches, each showing what
+> state it is in. The map and the command band get an arrow pointing the way the
+> panel would move — `◀` on the bottom-right corner means "click and the map
+> comes back" — and the Guiding Light is a filled `●` when lit, hollow when out.
+> A graphical v6 story adds two more on the top border, for the render mode and
+> the pixel lock. Hover one for a line saying what a click does and which command
+> does the same, because a click *is* that command.
+>
+> What you switch there is remembered for **that story**, not for every story: a
+> map you hid, a light you put out, a render mode you preferred. The settings
+> screen still sets the default new games inherit.
+
+---
+
 ## Terminal support
 
 **Replaces** *"or turn images off with `--no-images`"*:

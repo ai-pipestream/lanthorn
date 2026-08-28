@@ -604,45 +604,100 @@ pub(crate) fn dispatch_slash_outcome(
             state.overlays.dialog_focus = 1;
             state.overlays.font_check = true;
         }
-        SlashOutcome::SetGuidance(opt) => {
-            // SQ-1045: Lanthorn's Guiding Light, on or off for this session. Bare
-            // toggles, as `set-v6-pixel-lock` does; the settings screen is the
-            // persistence path, which is where the introduction line sends the
-            // player who wants it off for good.
-            let next = opt.unwrap_or(!state.config.guidance);
-            state.config.guidance = next;
-            // Said as META, not as an assist: this is a report of something
-            // lanthorn did, and an assist announcing that assists are now off
-            // would be the one line the switch could not silence.
-            state.push_transcript_internal(
-                &format!(
-                    "Lanthorn's Guiding Light: {} (session only — the settings screen persists it)",
-                    if next { "on" } else { "off" }
-                ),
-                TranscriptKind::Meta,
-            );
-        }
-        SlashOutcome::SetV6Render(opt) => {
-            // Live, session-only switch for testing the v6 looks; the config
-            // screen remains the persistence path. Bare CYCLES — with three modes
-            // (SQ-1032) there is no "the other one" to toggle to, and the cycle is
-            // the order the settings screen's own row already walks.
-            use app::config::V6RenderMode;
-            let next = opt.unwrap_or(match state.config.v6_render {
-                V6RenderMode::Hybrid => V6RenderMode::Raster,
-                V6RenderMode::Raster => V6RenderMode::Extended,
-                V6RenderMode::Extended => V6RenderMode::Hybrid,
-            });
-            state.config.v6_render = next;
-            let label = match next {
-                V6RenderMode::Hybrid => "hybrid",
-                V6RenderMode::Raster => "raster",
-                V6RenderMode::Extended => "extended",
+        SlashOutcome::SetGuidance(arg) => {
+            // SQ-1045 put the Guiding Light on a switch; SQ-1123 made the switch
+            // stick to the GAME. Whether you want help is a standing preference
+            // about the story in front of you — off for the one you know by
+            // heart, on for the one you just opened — so it belongs in the
+            // per-game sidecar, exactly as `set-v6-pixel-lock` already does. The
+            // settings screen still owns the global default new games inherit.
+            use app::slash::GuidanceArg;
+            let want = match arg {
+                GuidanceArg::On => Some(true),
+                GuidanceArg::Off => Some(false),
+                GuidanceArg::Auto => None,
+                GuidanceArg::Toggle => Some(!state.config.guidance),
             };
-            state.push_transcript_internal(
-                &format!("v6 render: {label} (session only)"),
-                TranscriptKind::Meta,
-            );
+            match app::styles::write_per_game_guidance(game_dir, want) {
+                Ok(()) => {
+                    // `auto` falls back to the global value captured at boot —
+                    // the one the sidecar overrode, and the only place it survives.
+                    state.config.guidance = want.unwrap_or(state.guidance_base);
+                    // A per-game choice must never reach the user's global
+                    // config.toml: pin it while it is in force, release on `auto`.
+                    match want {
+                        Some(v) => state.config.one_run.pin(app::config::keys::GUIDANCE, v),
+                        None => state.config.one_run.release(app::config::keys::GUIDANCE),
+                    }
+                    let label = match want {
+                        Some(true) => "on",
+                        Some(false) => "off",
+                        None => "auto",
+                    };
+                    // Said as META, not as an assist: this is a report of something
+                    // lanthorn did, and an assist announcing that assists are now off
+                    // would be the one line the switch could not silence.
+                    state.push_transcript_internal(
+                        &format!(
+                            "Lanthorn's Guiding Light: {label} (for this game — guidance = {})",
+                            state.config.guidance
+                        ),
+                        TranscriptKind::Meta,
+                    );
+                }
+                Err(e) => state.set_status(format!("set-guidance failed: {e}")),
+            }
+        }
+        SlashOutcome::SetV6Render(arg) => {
+            // Session-only until SQ-1123, and that was the right design for what
+            // this once was: raster began as a FALLBACK — the mode you escaped to
+            // when hybrid could not cope — and a temporary escape hatch should not
+            // outlive the session. Raster is a destination now, with `extended`
+            // beside it (SQ-1032), and a player may genuinely prefer raster for one
+            // game and hybrid for another. So the mode sticks to the game it was
+            // chosen for, in the per-game sidecar, exactly as the pixel lock does.
+            //
+            // Bare CYCLES — with three modes there is no "the other one" to
+            // toggle to, and the cycle is the order the settings screen's own row
+            // already walks. The cycle never visits `auto`: "inherit" has no look
+            // of its own to show, so returning to the global default is the
+            // command's `auto` argument rather than a fourth step nobody could see.
+            use app::config::V6RenderMode;
+            use app::slash::V6RenderArg;
+            let want = match arg {
+                V6RenderArg::Mode(m) => Some(m),
+                V6RenderArg::Auto => None,
+                V6RenderArg::Cycle => Some(match state.config.v6_render {
+                    V6RenderMode::Hybrid => V6RenderMode::Raster,
+                    V6RenderMode::Raster => V6RenderMode::Extended,
+                    V6RenderMode::Extended => V6RenderMode::Hybrid,
+                }),
+            };
+            let key = want.map(|m| app::config::v6_render_key(m).to_string());
+            match app::styles::write_per_game_v6_render(game_dir, key.clone()) {
+                Ok(()) => {
+                    // Live from the next frame: the render reads this field afresh
+                    // every draw. `auto` falls back to the global mode captured at
+                    // boot, which is the value the sidecar overrode.
+                    state.config.v6_render = want.unwrap_or(state.v6_render_base);
+                    match key {
+                        Some(k) => state.config.one_run.pin(app::config::keys::V6_RENDER, k),
+                        None => state.config.one_run.release(app::config::keys::V6_RENDER),
+                    }
+                    let label = match want {
+                        Some(m) => app::config::v6_render_key(m),
+                        None => "auto",
+                    };
+                    state.push_transcript_internal(
+                        &format!(
+                            "v6 render: {label} (for this game — v6_render = {})",
+                            app::config::v6_render_key(state.config.v6_render)
+                        ),
+                        TranscriptKind::Meta,
+                    );
+                }
+                Err(e) => state.set_status(format!("set-v6-render failed: {e}")),
+            }
         }
         SlashOutcome::SetV6PixelLock(arg) => {
             // SQ-0945: the runtime switch for SQ-0936's magnification ladder.
@@ -1137,6 +1192,96 @@ mod debug_dispatch_tests {
         assert_eq!(app::styles::read_per_game_v6_pixel_lock(&dir), None, "the key is gone");
         assert!(state.config.v6_pixel_lock, "and the live value is the global one again");
         assert!(!state.config.one_run.holds(keys::V6_PIXEL_LOCK), "nothing overrides it now");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1123: `set-guidance` was session-only and now sticks to the game.
+    ///
+    /// Whether you want help is a standing preference about the story in front of
+    /// you — off for the one you know by heart, on for the one you just opened —
+    /// so it belongs beside the pixel lock in the per-game sidecar. The settings
+    /// screen still owns the global default new games inherit, which is what the
+    /// pin protects.
+    #[test]
+    fn set_guidance_persists_per_game_and_auto_falls_back_to_the_global() {
+        use app::config::keys;
+        use app::slash::GuidanceArg;
+        let dir = std::env::temp_dir().join(format!("bm-sq1123-g-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = AppState::default();
+        state.config.guidance = true;
+        state.guidance_base = true;
+
+        dispatch_in(&mut state, SlashOutcome::SetGuidance(GuidanceArg::Off), &dir);
+        assert!(!state.config.guidance, "off applies live");
+        assert_eq!(app::styles::read_per_game_guidance(&dir), Some(false), "and is written down");
+        assert!(state.config.one_run.holds(keys::GUIDANCE), "a per-game value is pinned");
+
+        // A bare toggle is what the border control sends, and it persists too.
+        dispatch_in(&mut state, SlashOutcome::SetGuidance(GuidanceArg::Toggle), &dir);
+        assert!(state.config.guidance);
+        assert_eq!(app::styles::read_per_game_guidance(&dir), Some(true));
+
+        // `auto` is the way back to the global default — the one thing a button
+        // that only ever writes a concrete value cannot reach.
+        state.guidance_base = false;
+        dispatch_in(&mut state, SlashOutcome::SetGuidance(GuidanceArg::Auto), &dir);
+        assert_eq!(app::styles::read_per_game_guidance(&dir), None, "the key is gone");
+        assert!(!state.config.guidance, "and the live value is the global one again");
+        assert!(!state.config.one_run.holds(keys::GUIDANCE));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1123: `set-v6-render` was session-only, and that was right for what it
+    /// then was — raster began as a FALLBACK, and an escape hatch should not
+    /// outlive the session. Raster is a destination now, with `extended` beside
+    /// it, so the mode sticks to the game it was chosen for.
+    ///
+    /// The bare CYCLE walks the three concrete modes and never visits `auto`:
+    /// "inherit" has no look of its own to show, so it is the command's argument
+    /// rather than a fourth step nobody could tell from the third.
+    #[test]
+    fn set_v6_render_persists_per_game_and_cycles_without_visiting_auto() {
+        use app::config::{keys, V6RenderMode};
+        use app::slash::V6RenderArg;
+        let dir = std::env::temp_dir().join(format!("bm-sq1123-r-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = AppState::default();
+        state.config.v6_render = V6RenderMode::Hybrid;
+        state.v6_render_base = V6RenderMode::Hybrid;
+
+        // Three bare cycles return to where they started, writing every step.
+        for want in [V6RenderMode::Raster, V6RenderMode::Extended, V6RenderMode::Hybrid] {
+            dispatch_in(&mut state, SlashOutcome::SetV6Render(V6RenderArg::Cycle), &dir);
+            assert_eq!(state.config.v6_render, want, "the cycle steps to {want:?}");
+            assert_eq!(
+                app::styles::read_per_game_v6_render(&dir).as_deref(),
+                Some(app::config::v6_render_key(want)),
+                "…and writes it down, so it survives the session",
+            );
+            assert!(state.config.one_run.holds(keys::V6_RENDER), "pinned out of the global file");
+        }
+
+        // Naming a mode is the same thing without the walk.
+        dispatch_in(
+            &mut state,
+            SlashOutcome::SetV6Render(V6RenderArg::Mode(V6RenderMode::Raster)),
+            &dir,
+        );
+        assert_eq!(state.config.v6_render, V6RenderMode::Raster);
+
+        // …and `auto` is how a game gets back to inheriting.
+        state.v6_render_base = V6RenderMode::Extended;
+        dispatch_in(&mut state, SlashOutcome::SetV6Render(V6RenderArg::Auto), &dir);
+        assert_eq!(app::styles::read_per_game_v6_render(&dir), None, "the key is gone");
+        assert_eq!(state.config.v6_render, V6RenderMode::Extended, "the global mode is back");
+        assert!(!state.config.one_run.holds(keys::V6_RENDER));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

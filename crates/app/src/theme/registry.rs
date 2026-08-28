@@ -257,15 +257,18 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // terminator glyphs default to the single-border caps ┤/├ (spec §2b).
     row("panel.terminator_left", Section::Panel, Kind::BorderGlyphs, Some("line"), glyph("┤")),
     row("panel.terminator_right", Section::Panel, Kind::BorderGlyphs, Some("line"), glyph("├")),
-    // SQ-1123: the clickable toggle controls in a pane's top border. Four
-    // states, because a control that looks the same on and off is half a
-    // control: `control` is the OFF/idle one, `:active` the ON one, `:lit` the
-    // Guiding Light's own yellow (the `alert` role, the same slot
-    // `transcript_assist` lights up in — one light, one colour), and `:hover`
-    // the pointer's. Hover wins over the other three, so a control the pointer
-    // is on always reads as reachable.
+    // SQ-1123: the clickable toggle controls on a pane's frame. Three states,
+    // because a control that looks the same on and off is half a control:
+    // `control` is the OFF/idle one, `:lit` is EVERY on state — the `alert`
+    // role, the same yellow slot `transcript_assist` lights up in, so the
+    // Guiding Light and its own mark in the gutter are one colour — and
+    // `:hover` is the pointer's, which wins over both so a control the pointer
+    // is on always reads as reachable whether or not it is on.
+    //
+    // There was a `:active` beside `:lit` while "on" and "lit" were different
+    // states. Every on state is lit now, so nothing could resolve to it, and a
+    // selector a themer can set and never see is worse than one that is absent.
     row("panel.control", Section::Panel, Kind::Style, Some("muted"), Delta::EMPTY),
-    row("panel.control:active", Section::Panel, Kind::Style, Some("accent"), mods(true, false, false, false)),
     row("panel.control:lit", Section::Panel, Kind::Style, Some("alert"), mods(true, false, false, false)),
     row("panel.control:hover", Section::Panel, Kind::Style, Some("accent"), mods(false, false, false, true)),
     // ── §3 glk.buffer.* (buffer base = text) ─────────────────────────────────
@@ -576,7 +579,6 @@ mod tests {
         "panel.terminator_left",
         "panel.terminator_right",
         "panel.control",
-        "panel.control:active",
         "panel.control:lit",
         "panel.control:hover",
         // §3 glk.buffer.*

@@ -1660,6 +1660,43 @@ pub fn cycle_focus(idx: usize, len: usize, delta: i32) -> usize {
 /// **Recenter**: calls `state.recenter_on(room_pos, 80, 24)` — a default pane
 /// size used when the render pane size is not yet available.  The run loop
 /// should call `state.recenter_on` with the real pane size when it knows it.
+/// Open or close the command band, without persisting anything (SQ-1123).
+///
+/// The band's open/closed state is a per-game preference now, written by
+/// [`Action::OpenCommandBand`]. `startup` opens the band at boot from
+/// `[command_band] auto_open` (or this game's own override), and that must NOT
+/// write a sidecar key — a global default that quietly pinned itself to the
+/// first game you opened would be a trap. So the state change lives here and the
+/// action adds the persistence on top of it.
+///
+/// `is_none` still guards the fresh-open branch, so a re-press while the band is
+/// mid-CLOSE (dock target `false`, content still alive for the slide-out)
+/// reopens it rather than double-firing a close, exactly as it always has.
+pub fn open_command_band(state: &mut AppState, mapper: &mut Mapper, open: bool) {
+    if !open {
+        apply_action(Action::BandClose, state, mapper);
+        return;
+    }
+    if state.overlays.command_band.is_none() {
+        let (verbs, warnings) = state.config.resolve_band_verbs();
+        for w in warnings {
+            state.push_transcript_kind(&w, crate::state::TranscriptKind::Warning);
+        }
+        let mut band = crate::state::CommandBandState::new(
+            verbs,
+            state.config.command_band.resolve_quick(),
+        );
+        // The band opens reading whatever is ALREADY on the prompt (SQ-0676): its
+        // phrase state follows the typed line, so a half-typed `take ` must light
+        // the object columns the moment the band appears, not one keystroke
+        // later. Object columns fill from the engine on the next tick.
+        band.sync_from_input(&state.input.value);
+        state.overlays.command_band = Some(band);
+    }
+    state.band_dock.toggle_to(true, false);
+    state.band_dock.arm(&state.config.animation);
+}
+
 pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
     // SQ-0676: the command band READS the story input line, so every action
     // that changes that line — typing, Backspace, a delete op, history recall,
@@ -2581,33 +2618,18 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             // F2 / `/open-command-band` is a TOGGLE (bug fix, SQ-0677): with
             // the band already open (its dock target is `open`, whether or
             // not the slide has settled), the SAME key/command closes it —
-            // Esc's ladder must never be the only one-key way out. `is_none`
-            // still guards the fresh-open branch below so a re-press while
-            // the band is mid-CLOSE (dock target `false`, content still
-            // alive for the slide-out) reopens it rather than double-firing
-            // a close, exactly as it always has.
-            if state.overlays.command_band.is_some() && state.band_dock.open {
-                apply_action(Action::BandClose, state, mapper);
-            } else {
-                if state.overlays.command_band.is_none() {
-                    let (verbs, warnings) = state.config.resolve_band_verbs();
-                    for w in warnings {
-                        state.push_transcript_kind(&w, crate::state::TranscriptKind::Warning);
-                    }
-                    let mut band = crate::state::CommandBandState::new(
-                        verbs,
-                        state.config.command_band.resolve_quick(),
-                    );
-                    // The band opens reading whatever is ALREADY on the prompt
-                    // (SQ-0676): its phrase state follows the typed line, so a
-                    // half-typed `take ` must light the object columns the
-                    // moment the band appears, not one keystroke later. Object
-                    // columns fill from the engine on the next tick.
-                    band.sync_from_input(&state.input.value);
-                    state.overlays.command_band = Some(band);
-                }
-                state.band_dock.toggle_to(true, false);
-                state.band_dock.arm(&state.config.animation);
+            // Esc's ladder must never be the only one-key way out.
+            let open = !(state.overlays.command_band.is_some() && state.band_dock.open);
+            open_command_band(state, mapper, open);
+            // Persist the band's on/off state per-game so it is restored the next
+            // time this story opens (SQ-1123) — the same rule `Action::ToggleMap`
+            // has followed since SQ-0304, and the reason `startup` opens the band
+            // through `open_command_band` directly instead of through this action:
+            // a global `[command_band] auto_open` must not silently become one
+            // game's pinned override. No game_dir → no sidecar (and it keeps unit
+            // tests off the filesystem).
+            if !state.game_dir.as_os_str().is_empty() {
+                let _ = crate::styles::write_per_game_command_band(&state.game_dir, Some(open));
             }
         }
 
@@ -7196,6 +7218,45 @@ mod tests {
         apply_action(Action::ToggleMap, &mut s, &mut m);
         assert!(matches!(s.layout, Layout::Split));
         assert_eq!(crate::styles::read_per_game_show_map(&game_dir), Some(true));
+        let _ = std::fs::remove_dir_all(&game_dir);
+    }
+
+    /// SQ-1123: the band toggle is a border control now, and what a control
+    /// switches it also remembers — in THIS game's sidecar, the same rule
+    /// `toggle-map` has followed since SQ-0304.
+    #[test]
+    fn open_command_band_persists_its_state_to_game_dir() {
+        use crate::state::AppState;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let game_dir = std::env::temp_dir()
+            .join(format!("bm-bandopen-{}-{}.save", std::process::id(), n));
+        std::fs::create_dir_all(&game_dir).unwrap();
+
+        let mut s = AppState::default();
+        s.game_dir = game_dir.clone();
+        let mut m = Mapper::default();
+
+        apply_action(Action::OpenCommandBand, &mut s, &mut m);
+        assert!(s.command_band_visible(), "it opens");
+        assert_eq!(crate::styles::read_per_game_command_band(&game_dir), Some(true));
+
+        apply_action(Action::OpenCommandBand, &mut s, &mut m);
+        assert_eq!(
+            crate::styles::read_per_game_command_band(&game_dir), Some(false),
+            "closing is a choice too, and an explicit false is not an absence",
+        );
+
+        // …and the boot path does NOT write: a global `[command_band] auto_open`
+        // must not pin itself to whichever story you happened to launch, which is
+        // the whole reason `open_command_band` exists beside the action.
+        crate::styles::write_per_game_command_band(&game_dir, None).unwrap();
+        open_command_band(&mut s, &mut m, true);
+        assert_eq!(
+            crate::styles::read_per_game_command_band(&game_dir), None,
+            "startup's own open leaves the sidecar alone",
+        );
         let _ = std::fs::remove_dir_all(&game_dir);
     }
 

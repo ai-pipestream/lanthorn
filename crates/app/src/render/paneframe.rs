@@ -342,6 +342,32 @@ pub fn draw_pane_frame_sides(buf: &mut Buffer, area: Rect, sides: PaneSides, gly
 pub struct HeaderControl {
     pub glyph: char,
     pub style: Style,
+    /// Which of the pane's border clusters this control belongs to (SQ-1123).
+    pub placement: ControlPlacement,
+}
+
+/// Where on a pane's frame a border control sits.
+///
+/// **A control sits where the thing it governs is, or where it would appear.**
+/// The command band opens BELOW the story pane, so its toggle rides the bottom
+/// border; the map lives to the RIGHT, so its toggle takes the bottom border's
+/// right-hand end, nearest the pane it summons; and the two v6 switches govern
+/// how the story pane ITSELF is drawn, so they stay on that pane's own top
+/// border. That is the same reasoning the arrow glyphs already encode — `▲`/`▼`
+/// for a panel below, `◀`/`▶` for one to the side — which a single cluster in
+/// one corner fought.
+///
+/// Geometry only, so this stays theme-agnostic like the rest of the module: the
+/// three variants are three anchors on the frame, and `render::controls` decides
+/// which control claims which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlPlacement {
+    /// Right-hand end of the TOP border.
+    TopRight,
+    /// Centred on the BOTTOM border.
+    BottomCentre,
+    /// Right-hand end of the BOTTOM border.
+    BottomRight,
 }
 
 /// The columns a cluster of `n` controls occupies: the two terminator caps plus
@@ -354,27 +380,33 @@ pub fn header_controls_width(n: usize) -> u16 {
     (2 + n + (n - 1)) as u16
 }
 
-/// Draw a control cluster right-aligned in `row_rect`, bracketed by the border's
-/// own terminator caps so it reads as part of the frame rather than as text
-/// sitting on it: `┤▶ ● ▲├`.
+/// Draw a control cluster in `row_rect`, bracketed by the border's own
+/// terminator caps so it reads as part of the frame rather than as text sitting
+/// on it: `┤▶ ● ▲├`.
+///
+/// `x` is the cluster's LEFT column, which the caller has already chosen —
+/// right-aligning against the inset for an anchored group, or centring in it for
+/// a floating one. Placing the cluster is the caller's job because on the bottom
+/// border two groups share one row and the anchored one has to be resolved first.
 ///
 /// Returns one 1x1 hit-rect per control, in the order given — the same rects the
 /// mouse handler hit-tests for both the click and the hover hint, so what is
 /// under the pointer can never disagree between them. An empty vec (and nothing
-/// drawn) when the row is too narrow to hold the cluster.
-pub fn draw_header_controls(
+/// drawn) when the row is too narrow to hold the cluster where it was asked for.
+pub fn draw_border_controls(
     buf: &mut Buffer,
     row_rect: Rect,
+    x: u16,
     controls: &[HeaderControl],
     caps: &InsetCaps,
     cap_style: Style,
 ) -> Vec<Rect> {
     let w = header_controls_width(controls.len());
-    if w == 0 || row_rect.height == 0 || row_rect.width < w {
+    if w == 0 || row_rect.height == 0 || x < row_rect.x || x + w > row_rect.right() {
         return Vec::new();
     }
     let row = row_rect.y;
-    let mut cx = row_rect.right() - w;
+    let mut cx = x;
 
     if let Some(c) = buf.cell_mut((cx, row)) {
         c.set_symbol(caps.left.as_str()).set_style(cap_style);
