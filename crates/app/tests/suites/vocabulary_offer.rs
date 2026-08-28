@@ -378,7 +378,6 @@ fn zork1_answers_the_misses_it_can_and_stays_quiet_otherwise() {
             "take leaflet",  // understood
             "unlock mailbox with key", // every word known; the failure is not vocabulary
             "marcus",        // a name: near nothing, so nothing is said
-            "illuminate lamp", // MEANING, which no story file can answer (SQ-1110)
         ],
     );
     assert_eq!(
@@ -388,8 +387,60 @@ fn zork1_answers_the_misses_it_can_and_stays_quiet_otherwise() {
             "this story knows — smell · sniff",
             "this story knows — open",
         ],
-        "three offers and five silences"
+        "three offers and four silences"
     );
+}
+
+/// **What the whole synonym effort was for**, on the game everybody meets first.
+/// `illuminate` is eight keystrokes from `light`, stems to nothing, and Zork's
+/// grammar relates them not at all — every source that reads FORM is blind to
+/// it, and the shipped table (SQ-1110, SQ-1115) is what closes the gap. This is
+/// the wire SQ-1041 left hanging and SQ-1119 ran.
+///
+/// `inspect` is the one the player reported. `doff` is the case that says the
+/// answer is not a fragment: `remove` is exactly the six characters a Version 3
+/// dictionary keeps, and the aside rule discarded it until a word's WHOLENESS
+/// travelled with it — without that, this reads `carry · remove · catch`, an
+/// answer that has thrown away its own reason for existing.
+///
+/// Falsify by removing `by_meaning` from `candidates`: all four fall silent.
+#[test]
+fn zork1_answers_a_word_it_never_heard_with_what_that_word_means() {
+    let Some(mut s) = zork1() else { return };
+    let (_state, lines) = play(
+        &mut s,
+        &["illuminate lamp", "inspect lamp", "conceal lamp", "doff sword"],
+    );
+    assert_eq!(
+        lines,
+        vec![
+            "this story knows — light",
+            "this story knows — examine · describe · see",
+            "this story knows — hide · place · put",
+            "this story knows — remove · carry · catch",
+        ]
+    );
+}
+
+/// And the silences the meaning source must keep, on the same story — the ones
+/// it is MOST able to erode, because a table of three thousand groups can always
+/// find something.
+///
+/// `purchase` and `hint` are in the table and answered by nothing, because Zork
+/// I's dictionary holds neither `buy` nor `help`: the intersection in `offer` is
+/// what makes the feature honest, and it is the whole reason no censorship of
+/// the table is needed. `don` means `wear`, which Zork DOES know, and is still
+/// unanswered — `MIN_LEN` refuses anything under four characters and is older
+/// than this source. `marcus` is a name and reaches the table not at all.
+#[test]
+fn zork1_stays_quiet_where_meaning_reaches_nothing_the_story_implements() {
+    let Some(mut s) = zork1() else { return };
+    let (_state, lines) = play(&mut s, &["purchase lamp", "hint", "don sword", "marcus"]);
+    assert!(lines.is_empty(), "{lines:?}");
+
+    let v = <app::session::GameSession as Engine>::story_vocabulary(&s).expect("zork1 has one");
+    assert!(!v.knows("buy") && !v.knows("help"), "the two the table proposes and Zork lacks");
+    assert!(v.knows("wear"), "and the one it has, which `don` is too short to reach");
 }
 
 /// **The case the whole detection design is for.** Dr Ludwig and the Devil
