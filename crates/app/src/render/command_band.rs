@@ -274,6 +274,32 @@ impl VerbTable {
     pub fn new(entries: Vec<VerbEntry>, source: VerbSource) -> VerbTable {
         VerbTable { entries, source }
     }
+
+    /// Drop the words `hidden` names — the adult list, applied to the assembled
+    /// column (SQ-1122).
+    ///
+    /// **Display only.** The story still knows every word taken out: typing one
+    /// parses exactly as it did before, and the Guiding Light still offers it
+    /// (`crate::vocab` does not read the list). What this removes is the
+    /// UNPROMPTED enumeration — a panel putting the word in front of somebody
+    /// who only opened a panel.
+    ///
+    /// Exact, case-insensitive, whole-word. Never a prefix match: see
+    /// [`crate::config::DEFAULT_ADULT_WORDS`] for the two real verbs a prefix
+    /// rule would have eaten. An empty `hidden` is a no-op, which is how both of
+    /// the config's off-switches restore the full column.
+    ///
+    /// Reached through [`crate::config::Config::resolve_band_verbs`] and
+    /// [`layer_band_verbs`](crate::config::Config::layer_band_verbs), which are
+    /// the two places a table is assembled; this is `pub` only so they can.
+    pub fn hiding(mut self, hidden: &[String]) -> VerbTable {
+        if hidden.is_empty() {
+            return self;
+        }
+        self.entries
+            .retain(|e| !hidden.iter().any(|h| h.eq_ignore_ascii_case(&e.word)));
+        self
+    }
 }
 
 impl Default for VerbTable {
@@ -426,10 +452,7 @@ pub fn refresh_verbs(state: &mut AppState, session: &dyn crate::engine::Engine) 
     state.vocab = vocab;
     let table = match story {
         Some(entries) if !entries.is_empty() => {
-            Some(state.config.command_band.layer_extra_verbs(VerbTable::new(
-                entries,
-                VerbSource::Story,
-            )))
+            Some(state.config.layer_band_verbs(VerbTable::new(entries, VerbSource::Story)))
         }
         _ => None,
     };

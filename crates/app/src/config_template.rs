@@ -10,14 +10,17 @@
 //! the case that surfaced it: a real, useful knob that was invisible unless you read
 //! the source.
 //!
-//! Two kinds of line, distinguished because only one of them is safe to blanket
-//! uncomment:
+//! Three kinds of line, distinguished because only some of them are safe to
+//! blanket uncomment:
 //!
 //! * [`Line::Default`] — the value shown IS the default. Uncommenting reproduces
 //!   current behaviour exactly (the `template_default_lines_are_really_the_defaults`
 //!   test proves it key by key).
 //! * [`Line::Example`] — the default cannot be written down (`None`, or a computed
 //!   path), so the value is an illustration. Uncommenting it CHANGES behaviour.
+//! * [`Line::Live`] — the value is the default AND the line ships uncommented,
+//!   because the setting is only a default if the player can see and edit what it
+//!   holds. `adult_words` is the one (SQ-1122); the same test proves its value.
 //!
 //! Section headers (`[search]`, `[animation]`, `[keymap]`) are emitted UNCOMMENTED,
 //! matching style.toml, and the schema `version` stamp is a live key: everything that
@@ -48,6 +51,14 @@ pub enum Line {
     /// The default is unrepresentable (`None`/computed); the value is an example and
     /// uncommenting it changes behaviour.
     Example,
+    /// The value is the default, and the line is written LIVE — uncommented — so
+    /// the file states it as content rather than as documentation.
+    ///
+    /// One setting uses this: `adult_words` (SQ-1122). What it holds is words
+    /// lanthorn declines to enumerate unprompted, and a filter nobody can inspect
+    /// is censorship where one written out in the player's own config file is a
+    /// default. Writing it live means it is edited, not first uncommented.
+    Live,
 }
 
 /// One documented setting: TOML key, the literal to show, whether that literal is
@@ -64,6 +75,9 @@ const fn d(key: &'static str, value: &'static str, doc: &'static [&'static str])
 }
 const fn ex(key: &'static str, value: &'static str, doc: &'static [&'static str]) -> Row {
     Row { key, value, line: Line::Example, doc }
+}
+const fn live(key: &'static str, value: &'static str, doc: &'static [&'static str]) -> Row {
+    Row { key, value, line: Line::Live, doc }
 }
 
 /// A group of settings under a banner comment. `table` names the TOML table the rows
@@ -170,6 +184,35 @@ const INTERFACE: &[Row] = &[
             "rather than merely lists. Costs a few invisible turns after a command",
             "the parser refused; nothing it does reaches the screen, your saves or",
             "the game you are playing. False still offers, more modestly.",
+        ],
+    ),
+    d(
+        "hide_adult_words",
+        "true",
+        &[
+            "Keep the words below out of any panel that ENUMERATES a story's",
+            "vocabulary unprompted — the command band's VERB column and its like.",
+            "Infocom's dictionaries are saltier than their prose, and a panel puts",
+            "the whole lot in front of anyone who opens it.",
+            "",
+            "DISPLAY ONLY. The story still knows every word: typing one parses",
+            "exactly as it always did, and Lanthorn's Guiding Light still offers it",
+            "when you reach for it. False shows the full column and keeps the list.",
+        ],
+    ),
+    live(
+        "adult_words",
+        "[\"fuck\", \"fucked\", \"fucking\", \"shit\", \"cunt\", \"cum\", \"wank\", \"bastard\", \"bitch\", \"asshole\", \"whore\", \"slut\", \"rape\", \"molest\"]",
+        &[
+            "…and these are the words. Written out, uncommented, and yours: shorten",
+            "it, extend it, or set it to [] to hide nothing. It is deliberately the",
+            "strong end only — `damn`, `barf`, `hell`, `crap` and `piss` are Infocom",
+            "being Infocom and stay visible. `rape` and `molest` are not swearing at",
+            "all; they are here because a panel listing them unbidden is worse.",
+            "",
+            "Matched whole and case-insensitively, never by prefix — old dictionaries",
+            "truncate, and a prefix rule wide enough to catch `bast` would also eat",
+            "the real verbs `rap` and `who`.",
         ],
     ),
     d("show_status_bar", "true", &["Show the status/score bar across the top of the story pane."]),
@@ -600,7 +643,9 @@ pub fn commented_template() -> String {
             if row.line == Line::Example {
                 out.push_str("# (example — the default is unset)\n");
             }
-            out.push_str(&format!("# {} = {}\n", row.key, row.value));
+            // A `Live` row is real config, not documentation of it (SQ-1122).
+            let hash = if row.line == Line::Live { "" } else { "# " };
+            out.push_str(&format!("{hash}{} = {}\n", row.key, row.value));
         }
     }
     out.push_str(TRAILER);
@@ -657,7 +702,10 @@ mod tests {
         live.sort_unstable();
         assert_eq!(
             live,
-            ["animation", "command_band", "keymap", "search", "version"],
+            // `adult_words` is the one SETTING written live (SQ-1122): the list is
+            // only a default if the player can read it, and it is the default, so
+            // the template is still a no-op as written.
+            ["adult_words", "animation", "command_band", "keymap", "search", "version"],
             "live keys: {parsed:?}"
         );
         for t in ["animation", "command_band", "keymap", "search"] {
@@ -722,7 +770,9 @@ mod tests {
     fn template_default_lines_are_really_the_defaults() {
         let base = shape(&Config::default());
         for (key, value, line) in all_rows() {
-            if line != Line::Default {
+            // `Live` rows are defaults as well — they are simply written
+            // uncommented, so their value has to be the default just as hard.
+            if line == Line::Example {
                 continue;
             }
             // Table rows need their header to land in the right section.
@@ -819,8 +869,8 @@ mod tests {
         live.sort_unstable();
         assert_eq!(
             live,
-            ["animation", "command_band", "default_story_dir", "keymap", "search", "version"],
-            "only the changed setting joins the stamp and the section headers: {after}"
+            ["adult_words", "animation", "command_band", "default_story_dir", "keymap", "search", "version"],
+            "only the changed setting joins the stamp, the seeded adult list and the section headers: {after}"
         );
         for t in ["animation", "command_band", "keymap", "search"] {
             assert!(parsed[t].as_table().is_some_and(|x| x.is_empty()), "[{t}] stays a bare header");

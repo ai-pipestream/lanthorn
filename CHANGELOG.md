@@ -131,6 +131,29 @@ carrying `enable_sound = false` could only be overridden by editing the file.
   `--font-check on`; `--font-check off` never asks, and there is a `font_check`
   row on the settings screen.
 
+### The command band
+
+- **The strong language stays out of the VERB column, and the list is yours.**
+  The column is the running story's own grammar now, and Infocom's dictionaries
+  are saltier than their prose — *Zork I*'s verb table really does hold `fuck`,
+  `shit`, `rape` and `molest` — so opening the band put the lot in front of
+  whoever pressed the key. `hide_adult_words` (default on) keeps the words in
+  `adult_words` out of any panel that enumerates a story's vocabulary unprompted.
+  - **The list ships written out and uncommented in your `config.toml`**, because
+    a filter nobody can inspect is censorship and one written in your own config
+    file is a default. Shorten it, extend it, or set it to `[]`.
+  - It is the strong end only — four words out of Zork I's two hundred and
+    fifty-odd. `damn` and `barf` are Infocom being Infocom and stay; so do
+    `hell`, `crap`, `screw`, `suck` and `piss`. `rape` and `molest` are not
+    swearing at all and are on the list anyway.
+  - **Two ways off, and neither destroys anything.** `hide_adult_words = false`
+    restores the full column and keeps the words, so turning it back on needs no
+    retyping; `adult_words = []` does the same from the other end. There is a
+    settings-screen row for the switch.
+  - **Display only.** Every word taken out is still a word the story knows:
+    typing it parses exactly as it always did, and Lanthorn's Guiding Light still
+    offers it when you reach for something close to it.
+
 ### Original media
 
 - **`.g64` GCR bitstream disks.** A `.g64` holds the raw bitstream a 1541's head

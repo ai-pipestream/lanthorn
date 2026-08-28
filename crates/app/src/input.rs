@@ -2590,7 +2590,7 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                 apply_action(Action::BandClose, state, mapper);
             } else {
                 if state.overlays.command_band.is_none() {
-                    let (verbs, warnings) = state.config.command_band.resolve_verbs();
+                    let (verbs, warnings) = state.config.resolve_band_verbs();
                     for w in warnings {
                         state.push_transcript_kind(&w, crate::state::TranscriptKind::Warning);
                     }
@@ -4277,6 +4277,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
             state.overlays.dialog_focus = 1;
             state.overlays.font_check = true;
         }
+        30 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hide_adult_words = !cs.working.hide_adult_words; } }
         _ => {}
     }
 }
@@ -4370,6 +4371,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         26 => working.v6_pixel_lock = !working.v6_pixel_lock,
         27 => working.guidance = !working.guidance,
         28 => working.guidance_probe = !working.guidance_probe,
+        30 => working.hide_adult_words = !working.hide_adult_words,
         _ => {}
     }
 }

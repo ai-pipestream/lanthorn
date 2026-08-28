@@ -14,6 +14,8 @@
 #[path = "suites/fixture_paths.rs"]
 mod fixture_paths;
 
+#[path = "suites/adult_words.rs"]
+mod adult_words;
 #[path = "suites/advent_toolbar.rs"]
 mod advent_toolbar;
 #[path = "suites/anchor_box_quote.rs"]

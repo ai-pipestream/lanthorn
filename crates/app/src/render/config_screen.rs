@@ -52,6 +52,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("guidance",             ConfigRowKind::Bool, "Lanthorn's Guiding Light: help offered while you play — the words the parser knows, a completed noun, a caution before a move that cannot be undone. Marked in the margin with its own glyph (style.toml's gutter.assist), never in the story's voice."),
     ("guidance_probe",       ConfigRowKind::Bool, "Vet the Guiding Light's word suggestions before showing them: each candidate is tried in a silent throwaway copy of the game and only what actually did something is offered. Nothing it does reaches the screen, your saves, or the game you are playing. Off, the light still offers — it just names what the dictionary holds instead of recommending."),
     ("font_check",           ConfigRowKind::Action, "Enter: compare two rows of glyphs and say which your terminal's font draws properly, setting the map's arrows, portal and stairs icons and the Guiding Light's mark together. Answers land in style.toml, not here, so this row is not part of Save."),
+    ("hide_adult_words",     ConfigRowKind::Bool, "Keep the strong language out of panels that list a story's whole vocabulary — the command band's VERB column and its like. Display only: the story still knows every word, typing one works exactly as before, and the Guiding Light still offers it. The words are the `adult_words` line in config.toml, there to be read, shortened or extended."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +267,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         // SQ-1104: an Action row has no value to report, so the column says what
         // the key does. `cfg` is untouched by it — the answer goes to style.toml.
         29 => "run…".to_string(),
+        30 => bool_str(cfg.hide_adult_words),
         _ => String::new(),
     }
 }
@@ -375,6 +377,25 @@ mod tests {
         apply_action(Action::ConfigCycle(1), &mut state, &mut m);
         let b2 = state.overlays.config_screen.as_ref().unwrap().working.hint_skip_screen_warning;
         assert_ne!(b1, b2, "hint_skip_screen_warning must flip via ←/→ too");
+
+        // The adult-list switch (SQ-1122) — the row APPENDED after `font_check`,
+        // and therefore the one whose index is easiest to add to three of the
+        // four matches instead of four. Both handlers, as above.
+        let aidx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "hide_adult_words").unwrap();
+        state.overlays.config_screen.as_mut().unwrap().scroll.selected = aidx;
+        let a0 = state.overlays.config_screen.as_ref().unwrap().working.hide_adult_words;
+        assert!(a0, "the switch is on out of the box");
+        apply_action(Action::ConfigToggle, &mut state, &mut m);
+        let a1 = state.overlays.config_screen.as_ref().unwrap().working.hide_adult_words;
+        assert_ne!(a0, a1, "hide_adult_words must toggle via Space");
+        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
+        let a2 = state.overlays.config_screen.as_ref().unwrap().working.hide_adult_words;
+        assert_ne!(a1, a2, "hide_adult_words must flip via ←/→ too");
+        assert_eq!(
+            config_row_value(&state.overlays.config_screen.as_ref().unwrap().working, aidx),
+            "true",
+            "and the value column reports the row it edits, not its neighbour"
+        );
 
         // The text-margin Num rows (SQ-0345) step via ConfigCycle, clamp at 0,
         // and ignore Space (Num rows only respond to ←/→).

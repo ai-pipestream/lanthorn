@@ -550,6 +550,37 @@ re-seed the new template, or hand-write the new shape from
   the one that goes unlabelled. `quick` replaces the one-click quick-action row,
   which is not read from the grammar — the compass is not in the verb table on
   the Infocom family at all.
+- **The adult list** — `hide_adult_words` (default `true`) and `adult_words`, both
+  **top level**, not part of `[command_band]`. Infocom's dictionaries are saltier
+  than their prose — Zork I's verb table holds `fuck`, `shit`, `rape` and
+  `molest` — and now that the VERB column is the story's real grammar, a panel
+  lists the lot to anyone who opens it. `hide_adult_words` keeps the words in
+  `adult_words` out of any panel that enumerates a story's vocabulary unprompted.
+
+  The default list is written out in your `config.toml`, **uncommented**, and is
+  deliberately the strong end only:
+
+  ```toml
+  adult_words = ["fuck", "fucked", "fucking", "shit", "cunt", "cum", "wank", "bastard", "bitch", "asshole", "whore", "slut", "rape", "molest"]
+  ```
+
+  `damn` and `barf` are Infocom being Infocom and stay visible; so do `hell`,
+  `crap`, `screw`, `suck`, `piss`, `pee` and `sod`. `rape` and `molest` are not
+  swearing at all — they are on the list because a panel listing them unbidden is
+  worse than any expletive. Matching is whole-word and case-insensitive, never by
+  prefix: old dictionaries truncate (a v6 story's four-character keys hold `bast`
+  for *bastard*), and a prefix rule wide enough to catch those would also eat the
+  real verbs `rap` and `who`. Add the truncations you want gone to your own list.
+
+  **Two switches, and either one turns it off.** `hide_adult_words = false`
+  restores the full column *and keeps the words*, so turning it back on needs no
+  retyping; `adult_words = []` does the same from the other end. The settings
+  screen flips the boolean. Shortening or extending the line changes what counts.
+
+  **It filters display only.** Every word taken out is still a word the story
+  knows: typing it parses exactly as it always did, and Lanthorn's Guiding Light
+  still offers it when you reach for a word close to it. Nothing here touches
+  what the parser accepts, what the synonym data holds, or what a game prints.
 - **v6 story rendering** — `v6_render` selects how graphical v6 titles (*Zork Zero*,
   *Shogun*, …) draw their story pane on an image-capable terminal: `hybrid`
   (the default) keeps the story text as real terminal text inside an image
