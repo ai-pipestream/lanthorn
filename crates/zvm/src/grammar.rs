@@ -58,6 +58,14 @@ use crate::dictionary::{self, Dictionary};
 use crate::memory::Memory;
 use crate::text::decode_string;
 
+// The shape of the ANSWER is shared with `gvm::grammar` and lives in the
+// `grammar-model` crate (SQ-1103); the READERS share nothing, and that split
+// was taken on evidence. Re-exported here so `zvm::grammar::Token` still names
+// the type. What stayed behind is what is about the FORMAT rather than the
+// answer: `GrammarFormat` (five table shapes, of which Glulx has none) and
+// `GrammarError` (whose refusals are this reader's, down to the variant).
+pub use grammar_model::{NounKind, RoutineRef, Slot, SyntaxLine, Token, Verb, WordRoles};
+
 // ── Format constants, from ztools `tx.h` and Inform Technical Manual §8.5 ────
 
 /// Infocom V1–5 dictionary flag: the word can be a verb.
@@ -128,9 +136,10 @@ pub enum GrammarError {
     BadTableSize,
 }
 
-// ── The value types ──────────────────────────────────────────────────────────
+// ── The one value type that is this engine's own ─────────────────────────────
 
-/// Which of the five table shapes a story uses.
+/// Which of the five table shapes a story uses. There is no Glulx counterpart:
+/// that back-end has exactly one shape, so it has nothing to report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GrammarFormat {
@@ -161,312 +170,6 @@ impl GrammarFormat {
     pub fn is_inform(self) -> bool {
         !self.is_infocom()
     }
-}
-
-/// The parser's built-in noun slots. Inform names all ten; Infocom's own tables
-/// distinguish none of them and always yield [`NounKind::Noun`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum NounKind {
-    Noun,
-    Held,
-    Multi,
-    MultiHeld,
-    MultiExcept,
-    MultiInside,
-    Creature,
-    Special,
-    Number,
-    /// GV2 only — Inform 5 and GV1 have no `topic` token.
-    Topic,
-}
-
-impl NounKind {
-    /// Inform's elementary token numbering (Technical Manual §8.6), shared by
-    /// GV1's values 0–8 and GV2's type-1 data 0–9.
-    fn from_elementary(v: u16) -> Option<NounKind> {
-        Some(match v {
-            0 => NounKind::Noun,
-            1 => NounKind::Held,
-            2 => NounKind::Multi,
-            3 => NounKind::MultiHeld,
-            4 => NounKind::MultiExcept,
-            5 => NounKind::MultiInside,
-            6 => NounKind::Creature,
-            7 => NounKind::Special,
-            8 => NounKind::Number,
-            9 => NounKind::Topic,
-            _ => return None,
-        })
-    }
-
-    /// The name Inform and `infodump` use for this slot.
-    pub fn name(self) -> &'static str {
-        match self {
-            NounKind::Noun => "noun",
-            NounKind::Held => "held",
-            NounKind::Multi => "multi",
-            NounKind::MultiHeld => "multiheld",
-            NounKind::MultiExcept => "multiexcept",
-            NounKind::MultiInside => "multiinside",
-            NounKind::Creature => "creature",
-            NounKind::Special => "special",
-            NounKind::Number => "number",
-            NounKind::Topic => "topic",
-        }
-    }
-}
-
-/// How a grammar line names a game routine. The two grammar versions number
-/// routines differently and neither number is the other's, so the distinction
-/// travels with the value rather than being inferred from the format later.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RoutineRef {
-    /// Inform 5 / GV1: an index into the "preactions" table, counted upwards
-    /// from 0 in order of first use (Inform Technical Manual §8.6).
-    Index(u8),
-    /// GV2: the routine's packed address, written straight into the token.
-    Packed(u16),
-}
-
-/// One position in a syntax line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Token {
-    /// A noun phrase the player supplies.
-    Noun(NounKind),
-    /// A literal word the player must type — a preposition, in practice.
-    Word(String),
-    /// A noun slot the game filters with a routine (`noun = Routine`).
-    FilteredNoun(RoutineRef),
-    /// A slot parsed entirely by a game routine.
-    Routine(RoutineRef),
-    /// A slot whose scope a game routine decides (`scope = Routine`).
-    Scope(RoutineRef),
-    /// A noun slot restricted to objects holding an attribute.
-    Attribute(u8),
-    /// Infocom Version 6's object slot. `attribute` is the attribute the game's
-    /// own "suggest a command" helper associates with the slot; `selector` is a
-    /// flags byte whose meaning Russotto's notes in `showverb.c` record as only
-    /// partly understood ($80 anything, $0F an object in scope, $14 possibly
-    /// held). Both are carried raw rather than guessed at.
-    InfocomObject { attribute: u8, selector: u8 },
-}
-
-impl Token {
-    /// True if this token is a slot the player fills with a noun phrase.
-    pub fn is_noun_slot(&self) -> bool {
-        !matches!(self, Token::Word(_))
-    }
-
-    /// The literal word this token requires, if it requires one.
-    pub fn word(&self) -> Option<&str> {
-        match self {
-            Token::Word(w) => Some(w.as_str()),
-            _ => None,
-        }
-    }
-}
-
-/// One position in a line, together with every token that may fill it.
-///
-/// Outside GV2's `/` alternative lists there is always exactly one; GV2 encodes
-/// `'in' / 'into' / 'inside'` as a single slot with three tokens, and a consumer
-/// that flattened those into three positions would report a sentence three words
-/// longer than the story accepts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Slot {
-    /// The alternatives, in table order; never empty.
-    pub alternatives: Vec<Token>,
-}
-
-impl Slot {
-    fn one(token: Token) -> Slot {
-        Slot { alternatives: vec![token] }
-    }
-
-    /// The sole token, when the slot has no alternatives.
-    pub fn only(&self) -> Option<&Token> {
-        match self.alternatives.as_slice() {
-            [t] => Some(t),
-            _ => None,
-        }
-    }
-
-    /// True if any alternative is a noun slot.
-    pub fn is_noun_slot(&self) -> bool {
-        self.alternatives.iter().any(Token::is_noun_slot)
-    }
-
-    /// True if `word` fills this slot literally.
-    pub fn accepts_word(&self, word: &str) -> bool {
-        self.alternatives.iter().any(|t| t.word() == Some(word))
-    }
-}
-
-/// One sentence shape a verb accepts: `TAKE noun FROM noun` is one line,
-/// `TAKE noun` another.
-///
-/// The action number, the slot order and GV2's reverse bit are one subject and
-/// travel together — a caller handed the slots alone can tell you the sentence
-/// is legal but not what the story will do with it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SyntaxLine {
-    /// The action this line performs. Indexes the actions table; the same
-    /// number appears in the `performing: nn` line of games with debugging on.
-    pub action: u16,
-    /// GV2's $400 bit: the action takes its two parameters in the other order.
-    /// Always false outside GV2.
-    pub reverse: bool,
-    /// The slots after the verb, in the order the player types them.
-    pub slots: Vec<Slot>,
-}
-
-impl SyntaxLine {
-    /// How many noun phrases the player supplies.
-    pub fn noun_count(&self) -> usize {
-        self.slots.iter().filter(|s| s.is_noun_slot()).count()
-    }
-
-    /// Every literal word this line requires, in order.
-    pub fn words(&self) -> Vec<&str> {
-        self.slots
-            .iter()
-            .flat_map(|s| s.alternatives.iter().filter_map(Token::word))
-            .collect()
-    }
-
-    /// True if this line accepts `nouns` noun phrases with exactly `words` as
-    /// its literal words, in order — the question "is `TAKE x FROM y` legal?".
-    pub fn accepts(&self, nouns: usize, words: &[&str]) -> bool {
-        if self.noun_count() != nouns {
-            return false;
-        }
-        let mut wanted = words.iter();
-        for slot in &self.slots {
-            if slot.is_noun_slot() {
-                continue;
-            }
-            match wanted.next() {
-                Some(w) if slot.accepts_word(w) => {}
-                _ => return false,
-            }
-        }
-        wanted.next().is_none()
-    }
-
-    /// A one-line rendering in `infodump -g`'s style, for debug inspectors and
-    /// for diffing this module against the reference implementation. **Not**
-    /// player-facing text: a consumer showing a suggestion writes its own.
-    pub fn describe(&self, verb: &str) -> String {
-        let mut out = String::from(verb);
-        for slot in &self.slots {
-            for (i, tok) in slot.alternatives.iter().enumerate() {
-                out.push(' ');
-                if i > 0 {
-                    out.push_str("/ ");
-                }
-                match tok {
-                    Token::Noun(k) => out.push_str(k.name()),
-                    Token::Word(w) => out.push_str(w),
-                    Token::FilteredNoun(r) => out.push_str(&format!("noun = [{}]", describe_ref(*r))),
-                    Token::Routine(r) => out.push_str(&format!("[{}]", describe_ref(*r))),
-                    Token::Scope(r) => out.push_str(&format!("scope = [{}]", describe_ref(*r))),
-                    Token::Attribute(a) => out.push_str(&format!("ATTRIBUTE({a})")),
-                    Token::InfocomObject { .. } => out.push_str("OBJ"),
-                }
-            }
-        }
-        out
-    }
-}
-
-fn describe_ref(r: RoutineRef) -> String {
-    match r {
-        RoutineRef::Index(i) => format!("parse {i}"),
-        RoutineRef::Packed(a) => format!("parse ${a:04x}"),
-    }
-}
-
-/// One verb of the story's grammar, with every spelling the dictionary gives it
-/// and every sentence shape it accepts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Verb {
-    /// The grammar verb number (Infocom/Inform count downwards from 255). For
-    /// [`GrammarFormat::InfocomV6`] this is the byte address of the verb record,
-    /// which is what that format's dictionary entries hold.
-    pub number: u16,
-    /// Every dictionary spelling of this verb, in dictionary order. The first
-    /// is the one `infodump` prints; the rest are its synonyms. May be empty for
-    /// a Version 6 verb slot no dictionary word reaches.
-    pub words: Vec<String>,
-    /// The sentence shapes, in table order.
-    pub lines: Vec<SyntaxLine>,
-}
-
-impl Verb {
-    /// The spelling to use when naming this verb; `None` for an unreachable slot.
-    pub fn word(&self) -> Option<&str> {
-        self.words.first().map(String::as_str)
-    }
-
-    /// True if the verb can be typed on its own, with no noun.
-    pub fn takes_bare(&self) -> bool {
-        self.lines.iter().any(|l| l.noun_count() == 0)
-    }
-
-    /// The largest number of noun phrases any of this verb's lines accepts.
-    pub fn max_nouns(&self) -> usize {
-        self.lines.iter().map(SyntaxLine::noun_count).max().unwrap_or(0)
-    }
-
-    /// Every literal word any of this verb's lines uses, deduplicated and sorted
-    /// — the prepositions this verb expects.
-    pub fn prepositions(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.lines.iter().flat_map(SyntaxLine::words).collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    }
-
-    /// True if some line of this verb accepts `nouns` noun phrases with exactly
-    /// `words` as its literal words: `take FROM` yes, `take WITH` no.
-    pub fn accepts(&self, nouns: usize, words: &[&str]) -> bool {
-        self.lines.iter().any(|l| l.accepts(nouns, words))
-    }
-}
-
-/// What parts of speech the dictionary marks a word with.
-///
-/// The flag byte's meaning differs between the Infocom and Inform families, so
-/// each field below documents which family sets it. `raw` is always the byte as
-/// stored, for a caller that needs a bit this does not name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub struct WordRoles {
-    /// Both families. Infocom bit $40; Inform bit 0.
-    pub verb: bool,
-    /// Both families, and the same bit ($80) in each.
-    pub noun: bool,
-    /// Infocom's DESC bit ($20) — a true adjective. Inform has no such bit and
-    /// this is always false there.
-    pub adjective: bool,
-    /// Infocom's PREP bit ($08). Inform's bit 3 covers the same ground (words
-    /// written literally into grammar lines), and is reported here.
-    pub preposition: bool,
-    /// Inform only (bit 1): the verb is a command to the interpreter rather
-    /// than a request in the game.
-    pub meta: bool,
-    /// Inform only (bit 2): the noun was declared plural with `//p`.
-    pub plural: bool,
-    /// Infocom only ($04): the word is "special" — a buzzword or direction.
-    pub special: bool,
-    /// The flag byte exactly as stored.
-    pub raw: u8,
 }
 
 /// A story's grammar: which words are verbs, and what each verb accepts.
@@ -523,7 +226,7 @@ impl Grammar {
         let mut prepositions: Vec<String> = verbs
             .iter()
             .flat_map(|v| v.lines.iter())
-            .flat_map(SyntaxLine::words)
+            .flat_map(SyntaxLine::literals)
             .map(str::to_string)
             .collect();
         prepositions.sort();
@@ -573,6 +276,14 @@ impl Grammar {
     /// The parts of speech the dictionary marks `word` with, if it knows it.
     pub fn roles(&self, word: &str) -> Option<WordRoles> {
         self.roles.get(&word.to_lowercase()).copied()
+    }
+
+    /// Every word the dictionary holds, sorted — the whole vocabulary, verbs
+    /// and nouns and buzzwords alike. `gvm::grammar::Grammar::words` answers
+    /// the same question about a Glulx story (SQ-1103); the words of one
+    /// syntax LINE are [`SyntaxLine::literals`].
+    pub fn words(&self) -> impl Iterator<Item = &str> {
+        self.roles.keys().map(String::as_str)
     }
 
     /// Unpacked byte addresses of the action routines, indexed by action number.
@@ -664,38 +375,31 @@ fn scan_dictionary(mem: &Memory, dict: &Dictionary, format: GrammarFormat) -> Ve
 }
 
 fn decode_roles(flags: u8, format: GrammarFormat) -> WordRoles {
+    // `WordRoles` is shared with `gvm` and `#[non_exhaustive]`, so it is built
+    // from the flag field and then filled in. The bits this family does not
+    // define are left false, which is exactly what they mean here: `singular`
+    // and `truncated` are Glulx's, and the Z-machine dictionary has no room
+    // for either.
+    let mut roles = WordRoles::from_raw(u16::from(flags));
     if format == GrammarFormat::InfocomV6 {
         // V6 moved the flags but kept Inform's bit 0 for "verb" (ztools
         // `VERB_V6` = $01) and $80 for noun.
-        WordRoles {
-            verb: flags & F_INFORM_VERB != 0,
-            noun: flags & F_INFORM_NOUN != 0,
-            raw: flags,
-            ..WordRoles::default()
-        }
+        roles.verb = flags & F_INFORM_VERB != 0;
+        roles.noun = flags & F_INFORM_NOUN != 0;
     } else if format.is_inform() {
-        WordRoles {
-            verb: flags & F_INFORM_VERB != 0,
-            noun: flags & F_INFORM_NOUN != 0,
-            adjective: false,
-            preposition: flags & F_INFORM_ADJ != 0,
-            meta: flags & F_INFORM_META != 0,
-            plural: flags & F_INFORM_PLURAL != 0,
-            special: false,
-            raw: flags,
-        }
+        roles.verb = flags & F_INFORM_VERB != 0;
+        roles.noun = flags & F_INFORM_NOUN != 0;
+        roles.preposition = flags & F_INFORM_ADJ != 0;
+        roles.meta = flags & F_INFORM_META != 0;
+        roles.plural = flags & F_INFORM_PLURAL != 0;
     } else {
-        WordRoles {
-            verb: flags & F_INFOCOM_VERB != 0,
-            noun: flags & F_INFOCOM_NOUN != 0,
-            adjective: flags & F_INFOCOM_DESC != 0,
-            preposition: flags & F_INFOCOM_PREP != 0,
-            meta: false,
-            plural: false,
-            special: flags & F_INFOCOM_SPECIAL != 0,
-            raw: flags,
-        }
+        roles.verb = flags & F_INFOCOM_VERB != 0;
+        roles.noun = flags & F_INFOCOM_NOUN != 0;
+        roles.adjective = flags & F_INFOCOM_DESC != 0;
+        roles.preposition = flags & F_INFOCOM_PREP != 0;
+        roles.special = flags & F_INFOCOM_SPECIAL != 0;
     }
+    roles
 }
 
 // ── Format detection ─────────────────────────────────────────────────────────
@@ -774,7 +478,8 @@ fn load_classic(
         // same convention in Infocom's own games).
         let number = 255u16.wrapping_sub(i as u16);
         let entry_ptr = layout.verb_table_base + i * 2;
-        let mut cur = read_word(mem, entry_ptr)? as u32;
+        let address = read_word(mem, entry_ptr)? as u32;
+        let mut cur = address;
         let count = read_byte(mem, cur)?;
         cur += 1;
         if count > MAX_LINES_PER_VERB {
@@ -786,7 +491,12 @@ fn load_classic(
             lines.push(read_classic_line(mem, &layout, &preps, &mut cur)?);
         }
 
-        verbs.push(Verb { number, words: spellings.remove(&number).unwrap_or_default(), lines });
+        verbs.push(Verb::new(
+            u32::from(number),
+            address,
+            spellings.remove(&number).unwrap_or_default(),
+            lines,
+        ));
     }
 
     let mut action_routines = Vec::with_capacity(layout.action_count as usize);
@@ -1060,7 +770,7 @@ fn read_classic_line(
             }
             let action = read_byte(mem, *cur + 7)?;
             *cur += 8;
-            Ok(SyntaxLine { action: action as u16, reverse: false, slots })
+            Ok(SyntaxLine::new(action as u16, false, slots))
         }
         GrammarFormat::InformGv2 => {
             let head = read_word(mem, *cur)?;
@@ -1087,7 +797,7 @@ fn read_classic_line(
                     return Err(GrammarError::BadSyntaxLine);
                 }
             }
-            Ok(SyntaxLine { action, reverse, slots })
+            Ok(SyntaxLine::new(action, reverse, slots))
         }
         GrammarFormat::InfocomV6 => unreachable!("V6 has no pointer table"),
     }
@@ -1120,17 +830,19 @@ fn infocom_line(
             slots.push(Slot::one(Token::Noun(NounKind::Noun)));
         }
     }
-    Ok(SyntaxLine { action: action as u16, reverse: false, slots })
+    Ok(SyntaxLine::new(action as u16, false, slots))
 }
 
 /// GV1 token byte → token (Inform Technical Manual §8.6).
 fn gv1_token(v: u8) -> Result<Token, GrammarError> {
     Ok(match v {
-        0..=8 => Token::Noun(NounKind::from_elementary(v as u16).expect("0..=8 is elementary")),
+        0..=8 => {
+            Token::Noun(NounKind::from_elementary(u32::from(v)).expect("0..=8 is elementary"))
+        }
         16..=47 => Token::FilteredNoun(RoutineRef::Index(v - 16)),
         48..=79 => Token::Routine(RoutineRef::Index(v - 48)),
         80..=111 => Token::Scope(RoutineRef::Index(v - 80)),
-        128..=175 => Token::Attribute(v - 128),
+        128..=175 => Token::Attribute(u32::from(v - 128)),
         // 9–15 and 112–127 are listed as illegal; 176+ was handled as a
         // preposition before reaching here.
         _ => return Err(GrammarError::BadSyntaxLine),
@@ -1140,10 +852,12 @@ fn gv1_token(v: u8) -> Result<Token, GrammarError> {
 /// GV2 token type and data → token (Inform Technical Manual §8.6).
 fn gv2_token(mem: &Memory, ty: u8, data: u16) -> Result<Token, GrammarError> {
     Ok(match ty {
-        1 => Token::Noun(NounKind::from_elementary(data).ok_or(GrammarError::BadSyntaxLine)?),
+        1 => Token::Noun(
+            NounKind::from_elementary(u32::from(data)).ok_or(GrammarError::BadSyntaxLine)?,
+        ),
         2 => Token::Word(dict_text(mem, data as u32)?),
         3 => Token::FilteredNoun(RoutineRef::Packed(data)),
-        4 => Token::Attribute(data as u8),
+        4 => Token::Attribute(u32::from(data)),
         5 => Token::Scope(RoutineRef::Packed(data)),
         6 => Token::Routine(RoutineRef::Packed(data)),
         _ => return Err(GrammarError::BadSyntaxLine),
@@ -1243,7 +957,7 @@ fn load_v6(mem: &Memory, words: &[DictWord]) -> Result<(Vec<Verb>, Vec<u32>), Gr
 
         let mut lines = Vec::new();
         if bare_action != 0xFFFF {
-            lines.push(SyntaxLine { action: bare_action, reverse: false, slots: Vec::new() });
+            lines.push(SyntaxLine::new(bare_action, false, Vec::new()));
         }
         if one_obj != 0 {
             lines.extend(read_v6_block(mem, one_obj, 1)?);
@@ -1252,11 +966,14 @@ fn load_v6(mem: &Memory, words: &[DictWord]) -> Result<(Vec<Verb>, Vec<u32>), Gr
             lines.extend(read_v6_block(mem, two_obj, 2)?);
         }
 
-        verbs.push(Verb {
-            number: addr as u16,
-            words: spellings.remove(&(addr as u16)).unwrap_or_default(),
+        // The record address is both this format's verb number and the place
+        // its sentence shapes are read from, since there is no pointer array.
+        verbs.push(Verb::new(
+            addr,
+            addr,
+            spellings.remove(&(addr as u16)).unwrap_or_default(),
             lines,
-        });
+        ));
         addr += 8;
     }
 
@@ -1291,7 +1008,7 @@ fn read_v6_block(mem: &Memory, base: u32, objects: u32) -> Result<Vec<SyntaxLine
             }
             slots.push(Slot::one(Token::InfocomObject { attribute, selector }));
         }
-        lines.push(SyntaxLine { action, reverse: false, slots });
+        lines.push(SyntaxLine::new(action, false, slots));
     }
     Ok(lines)
 }

@@ -101,6 +101,16 @@ use std::collections::BTreeMap;
 
 use crate::memory::Memory;
 
+// The shape of the ANSWER is shared with `zvm::grammar` and lives in the
+// `grammar-model` crate (SQ-1103); the READERS share nothing, for the reasons
+// set out at the bottom of this file. Re-exported here so
+// `gvm::grammar::Token` still names the type. What stayed behind is what is
+// about this FORMAT rather than about the answer: `Tables` (these addresses are
+// derived, so where they were found is part of the answer here and there is no
+// Z-machine counterpart) and `GrammarError` (whose refusals belong to a locator
+// that has to close a chain).
+pub use grammar_model::{NounKind, RoutineRef, Slot, SyntaxLine, Token, Verb, WordRoles};
+
 /// Inform's `*_DFLAG` dictionary flag bits (`Inform6/src/header.h`).
 const VERB_DFLAG: u16 = 1;
 const META_DFLAG: u16 = 2;
@@ -156,273 +166,7 @@ pub enum GrammarError {
     UnicodeDictionary,
 }
 
-// ── The value types ──────────────────────────────────────────────────────────
-//
-// Deliberately the same vocabulary as `zvm::grammar`, so that a consumer
-// written against one reads the other with a rename. They are separate types
-// rather than shared ones; see the note at the bottom of this file.
-
-/// The parser's built-in noun slots (Glulx Inform Tech. Ref. §6, sharing
-/// Z-machine GV2's elementary-token numbering).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum NounKind {
-    Noun,
-    Held,
-    Multi,
-    MultiHeld,
-    MultiExcept,
-    MultiInside,
-    Creature,
-    Special,
-    Number,
-    Topic,
-}
-
-impl NounKind {
-    fn from_elementary(v: u32) -> Option<NounKind> {
-        Some(match v {
-            0 => NounKind::Noun,
-            1 => NounKind::Held,
-            2 => NounKind::Multi,
-            3 => NounKind::MultiHeld,
-            4 => NounKind::MultiExcept,
-            5 => NounKind::MultiInside,
-            6 => NounKind::Creature,
-            7 => NounKind::Special,
-            8 => NounKind::Number,
-            9 => NounKind::Topic,
-            _ => return None,
-        })
-    }
-
-    /// The name Inform uses for this slot.
-    pub fn name(self) -> &'static str {
-        match self {
-            NounKind::Noun => "noun",
-            NounKind::Held => "held",
-            NounKind::Multi => "multi",
-            NounKind::MultiHeld => "multiheld",
-            NounKind::MultiExcept => "multiexcept",
-            NounKind::MultiInside => "multiinside",
-            NounKind::Creature => "creature",
-            NounKind::Special => "special",
-            NounKind::Number => "number",
-            NounKind::Topic => "topic",
-        }
-    }
-}
-
-/// One position in a syntax line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Token {
-    /// A noun phrase the player supplies.
-    Noun(NounKind),
-    /// A literal word the player must type — a preposition, in practice.
-    Word(String),
-    /// A noun slot the game filters with a routine (`noun = Routine`). Glulx
-    /// addresses are plain, so this is the routine's address as written.
-    FilteredNoun(u32),
-    /// A slot parsed entirely by a game routine.
-    Routine(u32),
-    /// A slot whose scope a game routine decides (`scope = Routine`).
-    Scope(u32),
-    /// A noun slot restricted to objects holding an attribute.
-    Attribute(u32),
-}
-
-impl Token {
-    /// True if this token is a slot the player fills with a noun phrase.
-    pub fn is_noun_slot(&self) -> bool {
-        !matches!(self, Token::Word(_))
-    }
-
-    /// The literal word this token requires, if it requires one.
-    pub fn word(&self) -> Option<&str> {
-        match self {
-            Token::Word(w) => Some(w.as_str()),
-            _ => None,
-        }
-    }
-}
-
-/// One position in a line, together with every token that may fill it.
-///
-/// Inform writes `'in' / 'into' / 'inside'` as one position with three
-/// alternatives; a consumer that flattened them would report a sentence two
-/// words longer than the story accepts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Slot {
-    /// The alternatives, in table order; never empty.
-    pub alternatives: Vec<Token>,
-}
-
-impl Slot {
-    fn one(t: Token) -> Slot {
-        Slot { alternatives: vec![t] }
-    }
-
-    /// The sole token, when the slot has no alternatives.
-    pub fn only(&self) -> Option<&Token> {
-        match self.alternatives.as_slice() {
-            [t] => Some(t),
-            _ => None,
-        }
-    }
-
-    /// True if any alternative is a noun slot.
-    pub fn is_noun_slot(&self) -> bool {
-        self.alternatives.iter().any(Token::is_noun_slot)
-    }
-
-    /// True if `word` fills this slot literally.
-    pub fn accepts_word(&self, word: &str) -> bool {
-        self.alternatives.iter().any(|t| t.word() == Some(word))
-    }
-}
-
-/// One sentence shape a verb accepts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SyntaxLine {
-    /// The action this line performs; indexes the actions table.
-    pub action: u16,
-    /// The line's flags byte, bit 0: swap `noun` and `second` when calling the
-    /// action. Glulx moved this out of the action number, where Z-machine GV2
-    /// keeps it as `$400`.
-    pub reverse: bool,
-    /// The slots after the verb, in the order the player types them.
-    pub slots: Vec<Slot>,
-}
-
-impl SyntaxLine {
-    /// How many noun phrases the player supplies.
-    pub fn noun_count(&self) -> usize {
-        self.slots.iter().filter(|s| s.is_noun_slot()).count()
-    }
-
-    /// Every literal word this line requires, in order.
-    pub fn words(&self) -> Vec<&str> {
-        self.slots.iter().flat_map(|s| s.alternatives.iter().filter_map(Token::word)).collect()
-    }
-
-    /// True if this line accepts `nouns` noun phrases with exactly `words` as
-    /// its literal words, in order.
-    pub fn accepts(&self, nouns: usize, words: &[&str]) -> bool {
-        if self.noun_count() != nouns {
-            return false;
-        }
-        let mut wanted = words.iter();
-        for slot in &self.slots {
-            if slot.is_noun_slot() {
-                continue;
-            }
-            match wanted.next() {
-                Some(w) if slot.accepts_word(w) => {}
-                _ => return false,
-            }
-        }
-        wanted.next().is_none()
-    }
-
-    /// A one-line rendering for debug inspectors and for diffing this module
-    /// against `glulxdump`. Not player-facing text.
-    pub fn describe(&self, verb: &str) -> String {
-        let mut out = String::from(verb);
-        for slot in &self.slots {
-            for (i, tok) in slot.alternatives.iter().enumerate() {
-                out.push(' ');
-                if i > 0 {
-                    out.push_str("/ ");
-                }
-                match tok {
-                    Token::Noun(k) => out.push_str(k.name()),
-                    Token::Word(w) => out.push_str(w),
-                    Token::FilteredNoun(a) => out.push_str(&format!("noun = [{a:#x}]")),
-                    Token::Routine(a) => out.push_str(&format!("[{a:#x}]")),
-                    Token::Scope(a) => out.push_str(&format!("scope = [{a:#x}]")),
-                    Token::Attribute(a) => out.push_str(&format!("ATTRIBUTE({a})")),
-                }
-            }
-        }
-        if self.reverse {
-            out.push_str(" REVERSE");
-        }
-        out
-    }
-}
-
-/// One verb of the story's grammar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Verb {
-    /// The verb's index in the grammar table's pointer array. Dictionary
-    /// records name a verb by this number.
-    pub number: u32,
-    /// Address of this verb's line block.
-    pub address: u32,
-    /// Every dictionary spelling of this verb, in dictionary order.
-    pub words: Vec<String>,
-    /// The sentence shapes, in table order.
-    pub lines: Vec<SyntaxLine>,
-}
-
-impl Verb {
-    /// The spelling to use when naming this verb; `None` for a verb slot no
-    /// dictionary word reaches.
-    pub fn word(&self) -> Option<&str> {
-        self.words.first().map(String::as_str)
-    }
-
-    /// True if the verb can be typed on its own, with no noun.
-    pub fn takes_bare(&self) -> bool {
-        self.lines.iter().any(|l| l.noun_count() == 0)
-    }
-
-    /// The largest number of noun phrases any of this verb's lines accepts.
-    pub fn max_nouns(&self) -> usize {
-        self.lines.iter().map(SyntaxLine::noun_count).max().unwrap_or(0)
-    }
-
-    /// Every literal word any of this verb's lines uses, deduplicated.
-    pub fn prepositions(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.lines.iter().flat_map(SyntaxLine::words).collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    }
-
-    /// True if some line accepts `nouns` noun phrases with exactly `words` as
-    /// its literal words: `put IN` yes, `put WITH` no.
-    pub fn accepts(&self, nouns: usize, words: &[&str]) -> bool {
-        self.lines.iter().any(|l| l.accepts(nouns, words))
-    }
-}
-
-/// What parts of speech the dictionary marks a word with — Inform's `*_DFLAG`
-/// bits (`Inform6/src/header.h`), which Glulx stores as a 16-bit field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub struct WordRoles {
-    /// Bit 0: used as a verb in the grammar.
-    pub verb: bool,
-    /// Bit 1: a meta verb — a command to the interpreter, not the game.
-    pub meta: bool,
-    /// Bit 2: plural, declared with `//p`.
-    pub plural: bool,
-    /// Bit 3: used as a preposition in the grammar.
-    pub preposition: bool,
-    /// Bit 4: singular, declared with `//s`.
-    pub singular: bool,
-    /// Bit 6: the word was truncated to the dictionary's word length.
-    pub truncated: bool,
-    /// Bit 7: used as a noun.
-    pub noun: bool,
-    /// The flag field exactly as stored.
-    pub raw: u16,
-}
+// ── The one value type that is this reader's own ─────────────────────────────
 
 /// Where the three Inform tables were found, and how big each is.
 ///
@@ -483,12 +227,7 @@ impl Grammar {
         for i in 0..tables.verb_count {
             let address = read32(mem, tables.grammar + 4 + i * 4)?;
             let lines = read_verb_lines(mem, address, &words)?.1;
-            verbs.push(Verb {
-                number: i,
-                address,
-                words: spellings.remove(&i).unwrap_or_default(),
-                lines,
-            });
+            verbs.push(Verb::new(i, address, spellings.remove(&i).unwrap_or_default(), lines));
         }
 
         let mut by_word = BTreeMap::new();
@@ -501,7 +240,7 @@ impl Grammar {
         let mut prepositions: Vec<String> = verbs
             .iter()
             .flat_map(|v| v.lines.iter())
-            .flat_map(SyntaxLine::words)
+            .flat_map(SyntaxLine::literals)
             .map(str::to_string)
             .collect();
         prepositions.sort();
@@ -556,7 +295,10 @@ impl Grammar {
         self.roles.get(&word.to_lowercase()).copied()
     }
 
-    /// Every word the dictionary holds, sorted.
+    /// Every word the dictionary holds, sorted — the whole vocabulary, verbs
+    /// and nouns and buzzwords alike. `zvm::grammar::Grammar::words` answers
+    /// the same question about a Z-machine story (SQ-1103); the words of one
+    /// syntax LINE are [`SyntaxLine::literals`].
     pub fn words(&self) -> impl Iterator<Item = &str> {
         self.roles.keys().map(String::as_str)
     }
@@ -756,6 +498,18 @@ fn read_dictionary(mem: &Memory, t: &Tables) -> Result<Vec<DictWord>, GrammarErr
             text.push(c as char); // records are Latin-1, lower-cased by Inform
         }
         let flags = read16(mem, entry + 1 + w)?;
+        // `WordRoles` is shared with `zvm` and `#[non_exhaustive]`, so it is
+        // built from the flag field and then filled in. The two bits left false
+        // are the Infocom family's — `adjective` and `special` — which no
+        // Inform back-end has.
+        let mut roles = WordRoles::from_raw(flags);
+        roles.verb = flags & VERB_DFLAG != 0;
+        roles.meta = flags & META_DFLAG != 0;
+        roles.plural = flags & PLURAL_DFLAG != 0;
+        roles.preposition = flags & PREP_DFLAG != 0;
+        roles.singular = flags & SING_DFLAG != 0;
+        roles.truncated = flags & TRUNC_DFLAG != 0;
+        roles.noun = flags & NOUN_DFLAG != 0;
         // The stored verb number is INVERTED: Inform counts down from $FFFF in
         // Glulx (and from $FF on the Z-machine), so the grammar table's index
         // for this verb is $FFFF minus what the record holds
@@ -764,16 +518,7 @@ fn read_dictionary(mem: &Memory, t: &Tables) -> Result<Vec<DictWord>, GrammarErr
         out.push(DictWord {
             address: entry,
             text,
-            roles: WordRoles {
-                verb: flags & VERB_DFLAG != 0,
-                meta: flags & META_DFLAG != 0,
-                plural: flags & PLURAL_DFLAG != 0,
-                preposition: flags & PREP_DFLAG != 0,
-                singular: flags & SING_DFLAG != 0,
-                truncated: flags & TRUNC_DFLAG != 0,
-                noun: flags & NOUN_DFLAG != 0,
-                raw: flags,
-            },
+            roles,
             verb_number,
         });
     }
@@ -816,7 +561,7 @@ fn read_verb_lines(
                 return Err(GrammarError::BadSyntaxLine);
             }
         }
-        lines.push(SyntaxLine { action, reverse: flags & 0x01 != 0, slots });
+        lines.push(SyntaxLine::new(action, flags & 0x01 != 0, slots));
     }
     Ok((cur, lines))
 }
@@ -831,10 +576,10 @@ fn decode_token(ty: u8, data: u32, words: &[DictWord]) -> Result<Token, GrammarE
                 .map(|w| w.text.clone())
                 .ok_or(GrammarError::BadSyntaxLine)?,
         ),
-        3 => Token::FilteredNoun(data),
+        3 => Token::FilteredNoun(RoutineRef::Address(data)),
         4 => Token::Attribute(data),
-        5 => Token::Scope(data),
-        6 => Token::Routine(data),
+        5 => Token::Scope(RoutineRef::Address(data)),
+        6 => Token::Routine(RoutineRef::Address(data)),
         _ => return Err(GrammarError::BadSyntaxLine),
     })
 }
@@ -853,7 +598,7 @@ fn read32(mem: &Memory, addr: u32) -> Result<u32, GrammarError> {
     mem.read32(addr).ok_or(GrammarError::Truncated)
 }
 
-// ── Why these types are gvm's own, and not shared with zvm ───────────────────
+// ── Why the reader is gvm's own and the answer is not ───────────────────────
 //
 // The two engines' grammar READERS have almost nothing in common. The formats
 // agree on the token type numbering and on nothing else: the Z-machine's table
@@ -863,22 +608,25 @@ fn read32(mem: &Memory, addr: u32) -> Result<u32, GrammarError> {
 // with a flags byte; its tokens are 1+2 bytes and these are 1+4; its dictionary
 // is Z-encoded with a game-chosen record length and this one is plain bytes
 // behind a type tag. `zvm::grammar` additionally carries four Infocom-era
-// shapes that have no Glulx counterpart at all.
+// shapes that have no Glulx counterpart at all. A trait over "read a byte / read
+// a word at an address" would abstract a handful of lines out of several hundred
+// while forcing two zero-dependency crates to name a shared vocabulary, so that
+// decision was taken on the evidence and stands.
 //
-// So a trait over "read a byte / read a word at an address" would abstract a
-// handful of lines out of several hundred while forcing both zero-dependency
-// crates to name a shared vocabulary. What the two DO share is the shape of the
-// ANSWER — `Token`, `NounKind`, `Slot`, `SyntaxLine`, `Verb`, `WordRoles` — and
-// the right way to share that is a small zero-dependency workspace crate both
-// depend on, not a trait over memory.
+// What the two DO share is the shape of the ANSWER — `Token`, `NounKind`,
+// `Slot`, `SyntaxLine`, `Verb`, `WordRoles`, the elementary-token numbering and
+// the six token types — and since SQ-1103 they share it as one thing: the
+// zero-dependency `grammar-model` crate, re-exported at the top of this file.
+// It was two near-identical copies for exactly as long as it took SQ-1040's
+// public API to settle, because lifting it out rewrites that API and was worth
+// doing once, on purpose, rather than as a side effect of adding this reader.
 //
-// That change is deliberately NOT made here: it would rewrite `zvm::grammar`'s
-// just-landed public API, and it is worth doing once, on purpose, rather than
-// as a side effect of adding the second reader. Until then the names are kept
-// identical so the conversion is mechanical, and the duplicated knowledge is
-// confined to the elementary-token numbering and the six token types — a
-// transcription of Inform's published constants, which is the same thing both
-// crates already do independently for their own opcode tables.
+// The join is not lossy in either direction. Three facts stayed with their
+// engines because they are about the FORMAT rather than the answer — this
+// module's `Tables` and `locate` (the Z-machine reads its address out of the
+// header and has nothing to locate), `zvm`'s `GrammarFormat` (five table shapes,
+// of which Glulx has one), and each engine's `GrammarError` (whose variants are
+// its own refusals down to the last one). Everything else is one type.
 
 #[cfg(test)]
 mod tests {

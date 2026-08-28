@@ -69,7 +69,7 @@ fn minizork_grammar_matches_infodump() {
     assert_eq!(unlock.number, 245);
     assert_eq!(unlock.lines.len(), 1);
     assert_eq!(unlock.lines[0].noun_count(), 2);
-    assert_eq!(unlock.lines[0].words(), vec!["with"]);
+    assert_eq!(unlock.lines[0].literals(), vec!["with"]);
 }
 
 #[test]

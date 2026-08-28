@@ -417,9 +417,15 @@ formats against Glulx's one. A trait over "read a byte at an address" would
 abstract a handful of lines out of several hundred while making two
 zero-dependency crates share a vocabulary. What they *do* share is the shape of
 the **answer** — `Token`, `NounKind`, `Slot`, `SyntaxLine`, `Verb`, `WordRoles`
-— and SQ-1103 tracks lifting those into one small zero-dependency crate, to be
-done before SQ-1041 hardens against either spelling. Names are identical on both
-sides today so that conversion stays mechanical.
+— and **SQ-1103 lifted those into `grammar-model`**, one small dependency-free
+workspace crate both readers produce and re-export, before SQ-1041 could harden
+against either spelling. What stayed behind is what is about a FORMAT rather
+than an answer: `GrammarFormat` (five table shapes here, one there),
+`gvm::grammar::Tables`/`locate` (addresses this reader gets from a header and
+that one has to derive), and each crate's own `GrammarError`. The join also
+settled the one asymmetry a consumer would have hit: `Grammar::words` now
+enumerates the whole dictionary on both engines, and the per-line accessor that
+used to squat on that name here is `SyntaxLine::literals`.
 
 ## 8. What machine knowledge is still in the wrong crate
 
