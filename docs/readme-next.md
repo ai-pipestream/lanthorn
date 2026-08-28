@@ -60,6 +60,26 @@ beside the directory and the disk image:
 
 ---
 
+## What it does
+
+**Replaces** the **Graphical v6, drawn properly** bullet:
+
+> - **Graphical v6, drawn properly** — *Zork Zero*'s illustrated frame at an
+>   authentic 640×400, set in the typeface the original interpreter used, read
+>   off the media rather than bundled. Three ways to draw it: **hybrid** puts
+>   text in real terminal cells and art in real pixels, **raster** paints the
+>   whole pane as one image in the game's own face, and **extended** keeps
+>   raster's face while growing the story downward instead of letterboxing it —
+>   a tall terminal gets more rows to read, with the side art tiled out of its
+>   own artwork at the artist's spacing. `/set-v6-render` cycles them.
+>   → [v6 graphics](docs/features/v6-graphics.md)
+
+The mode is also `v6_render = "extended"` in `config.toml` and `--v6-render
+extended` on the command line, but the README is not the place to enumerate all
+three spellings — the features doc is.
+
+---
+
 ## Play the original disks
 
 **Add** to the media table:
