@@ -187,6 +187,7 @@ fn enum_hint(row: &RegRow) -> &'static str {
         "map.arrow_set" => "   # filled | line | nerdfont | nf-bold | nf-box | nf-circle | nf-outline",
         "map.portal_icons" => "   # ascii | nerdfont | nerdfont-stairs",
         "map.path_style" | "map.portal_path_style" => "   # light | heavy | dotted",
+        "map.control_icons" => "   # plain | nerdfont   (the pane-border toggle controls)",
         // Story-list row badges (SQ-0559). Free-form, not enumerated — any string,
         // so a patched font can use a real icon instead of a bare letter.
         "badge_zcode" => "   # story-list badge: a Z-machine story",
@@ -295,6 +296,9 @@ const MAP_OVERRIDES_BLOCK: &str = r#"
 # "portal.up" = "↑"          # portal markers: portal.<up|down|in|out|marker|path|unknown>
 # "gutter.meta" = "▏"        # transcript gutter marks: gutter.<meta|warning|assist>
 # "gutter.assist" = "●"      # the mark of Lanthorn's Guiding Light (a patched font's lamp: U+F1A60)
+# "control.map_hide" = "▶"   # border toggles: control.<map_show|map_hide|band_show|band_hide>
+# "control.guidance_on" = "●" # …control.<guidance_on|guidance_off>
+# "control.lock_on" = "▣"    # …control.<render_hybrid|render_raster|render_extended|lock_on|lock_off>
 "#;
 
 const STATIC_EXAMPLES: &str = r#"# ── Story-line styling rules: recolour whole transcript lines matching a ────

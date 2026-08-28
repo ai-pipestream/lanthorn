@@ -56,6 +56,12 @@ pub const ASSIST_LAMP: char = '\u{F1A60}';
 pub const NERD_ARROWS: &str = "nerdfont";
 pub const NERD_PORTALS: &str = "nerdfont-stairs";
 
+/// …and the third: the pane-border toggle controls (SQ-1123). Its `"nerdfont"`
+/// arm draws the four MDI chevrons and the Guiding Light's lamp, all of which
+/// the sample row above already samples — a patched face that draws the row
+/// draws the controls.
+pub const NERD_CONTROLS: &str = "nerdfont";
+
 pub struct FontCheckRects {
     pub area: Rect,
     pub close: Option<Rect>,

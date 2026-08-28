@@ -257,6 +257,17 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // terminator glyphs default to the single-border caps ┤/├ (spec §2b).
     row("panel.terminator_left", Section::Panel, Kind::BorderGlyphs, Some("line"), glyph("┤")),
     row("panel.terminator_right", Section::Panel, Kind::BorderGlyphs, Some("line"), glyph("├")),
+    // SQ-1123: the clickable toggle controls in a pane's top border. Four
+    // states, because a control that looks the same on and off is half a
+    // control: `control` is the OFF/idle one, `:active` the ON one, `:lit` the
+    // Guiding Light's own yellow (the `alert` role, the same slot
+    // `transcript_assist` lights up in — one light, one colour), and `:hover`
+    // the pointer's. Hover wins over the other three, so a control the pointer
+    // is on always reads as reachable.
+    row("panel.control", Section::Panel, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("panel.control:active", Section::Panel, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    row("panel.control:lit", Section::Panel, Kind::Style, Some("alert"), mods(true, false, false, false)),
+    row("panel.control:hover", Section::Panel, Kind::Style, Some("accent"), mods(false, false, false, true)),
     // ── §3 glk.buffer.* (buffer base = text) ─────────────────────────────────
     row("glk.buffer.normal", Section::GlkBuffer, Kind::Style, Some("text"), Delta::EMPTY),
     row("glk.buffer.emphasized", Section::GlkBuffer, Kind::Style, Some("text"), mods(false, true, false, false)),
@@ -324,6 +335,7 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.portal_icons", Section::Map, Kind::Placement, None, glyph("ascii")),
     row("map.path_style", Section::Map, Kind::Placement, None, glyph("light")),
     row("map.portal_path_style", Section::Map, Kind::Placement, None, glyph("dotted")),
+    row("map.control_icons", Section::Map, Kind::Placement, None, glyph("plain")),
     // diagonal_corners is the one map knob that is a BOOL, not a preset name.
     // `Delta`'s value channels (colours, text modifiers, `glyph`) cannot carry
     // it, so the row exists for completeness and its value lives in
@@ -563,6 +575,10 @@ mod tests {
         "panel.tab_divider",
         "panel.terminator_left",
         "panel.terminator_right",
+        "panel.control",
+        "panel.control:active",
+        "panel.control:lit",
+        "panel.control:hover",
         // §3 glk.buffer.*
         "glk.buffer.normal",
         "glk.buffer.emphasized",
@@ -612,6 +628,7 @@ mod tests {
         "map.portal_icons",
         "map.path_style",
         "map.portal_path_style",
+        "map.control_icons",
         "map.diagonal_corners",
         // §4b debug.*
         "debug.pc",

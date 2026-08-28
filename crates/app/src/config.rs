@@ -64,6 +64,7 @@ pub(crate) fn default_badge_hint() -> String { "H".into() }
 pub(crate) fn default_badge_hint_available() -> String { "h".into() }
 pub(crate) fn default_diagonal_corners() -> bool { true }
 pub(crate) fn default_portal_path_style() -> String { "dotted".into() }
+pub(crate) fn default_control_icons() -> String { "plain".into() }
 
 /// The resolved map glyph configuration, built from style.toml's `[map]`
 /// section by `style::finalize_symbols`.  All fields default to the preset
@@ -87,6 +88,11 @@ pub struct SymbolConfig {
     /// ┊/┄ connectors the map has always drawn).
     #[serde(default = "default_portal_path_style")]
     pub portal_path_style: String,
+    /// Preset name for the pane-border toggle controls' glyphs (SQ-1123):
+    /// "plain" (Geometric Shapes, the default) or "nerdfont". The font check
+    /// writes this key alongside `arrow_set`/`portal_icons`.
+    #[serde(default = "default_control_icons")]
+    pub control_icons: String,
     /// Row story-type badge glyph for Z-code stories (default "Z").
     #[serde(default = "default_badge_zcode")]
     pub badge_zcode: String,
@@ -124,6 +130,7 @@ impl Default for SymbolConfig {
             portal_icons: default_portal_icons(),
             path_style: default_path_style(),
             portal_path_style: default_portal_path_style(),
+            control_icons: default_control_icons(),
             badge_zcode: default_badge_zcode(),
             badge_glulx: default_badge_glulx(),
             badge_blorb: default_badge_blorb(),

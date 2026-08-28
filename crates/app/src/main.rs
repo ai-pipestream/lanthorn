@@ -29,7 +29,8 @@ use app::render::hints_panel::{hint_input_action, hint_key_routes, HintInputAct,
 use app::render::command_band::draw_command_band;
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
 use app::render::paneframe::{build_layer_segments, InsetSegment};
-use app::render::panel::{draw_panel, PanelSpec, PanelStrip};
+use app::render::panel::{draw_panel, draw_panel_with_controls, PanelFrame, PanelSpec, PanelStrip};
+use app::render::controls::BorderControl;
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
 use mapper::layer::LayerId;
@@ -531,6 +532,11 @@ struct PaneRects {
     /// Hit-rects for each layer tab, paired with the layer id; the mouse
     /// handler hit-tests these to switch the viewed layer on click.
     layer_tabs: Vec<(LayerId, Rect)>,
+    /// Hit-rects for the story pane's border toggle controls (SQ-1123), paired
+    /// with what each one switches. One list for both the click path and the
+    /// `Moved` hover path, so the hint and the click can never resolve to
+    /// different controls.
+    border_controls: Vec<(BorderControl, Rect)>,
     /// Hit-rects for each debug window's tab, as `(window, tab, rect)`; the mouse
     /// handler hit-tests these to activate a debug tab on click.
     debug_tabs: Vec<(usize, usize, Rect)>,
@@ -623,6 +629,25 @@ fn panel_border(theme: &app::theme::resolve::Theme, focused: bool) -> Style {
     theme.get(if focused { "panel.border:active" } else { "panel.border" }).style
 }
 
+/// Draw the story pane with its border toggle controls (SQ-1123), returning the
+/// panel frame and each control's hit-rect paired with what it switches.
+///
+/// One helper for all three layouts the story pane is drawn in (debug-tiled,
+/// transcript-full, split): the cluster is the same in every one, and a layout
+/// that resolved its own list would be a fourth place for the v6-only pair to be
+/// forgotten.
+fn draw_story_panel(
+    buf: &mut ratatui::buffer::Buffer,
+    spec: &PanelSpec,
+    state: &AppState,
+) -> (PanelFrame, Vec<(BorderControl, Rect)>) {
+    let views = app::render::controls::controls_for(state);
+    let ctls: Vec<_> = views.iter().map(|v| v.as_header_control()).collect();
+    let (frame, rects) = draw_panel_with_controls(buf, spec, &ctls, &state.colors.theme);
+    let hits = views.iter().map(|v| v.id).zip(rects).collect();
+    (frame, hits)
+}
+
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
@@ -639,6 +664,7 @@ fn draw_frame(
     // the way `room_screen_rects` recomputes the drawn view's (SQ-0666).
     let mut map_hits: Option<Vec<(RoomId, Rect)>> = None;
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
+    let mut border_controls_out: Vec<(BorderControl, Rect)> = Vec::new();
     let mut room_dock_tabs_out: Vec<(app::state::RoomDockView, Rect)> = Vec::new();
     let mut debug_tabs_out: Vec<(usize, usize, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
@@ -765,7 +791,7 @@ fn draw_frame(
             let story_focused = resize_split_hl || state.focus == Focus::Game;
             let story_title_style = state.colors.theme.get("story_title").style;
             let story_segs = [InsetSegment { text: &state.pane_title, active: false }];
-            let story_fp = draw_panel(buf, &PanelSpec {
+            let (story_fp, story_ctls) = draw_story_panel(buf, &PanelSpec {
                 area: pane_layout.story,
                 border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
                 border_color: Some(story_border_color),
@@ -774,7 +800,8 @@ fn draw_frame(
                 header_on: state.colors.story_header_on,
                 strip: Some(PanelStrip { segments: &story_segs, base: story_title_style, active: story_title_style }),
                 body_fill: None,
-            }, &state.colors.theme);
+            }, state);
+            border_controls_out = story_ctls;
             let c = story_fp.content;
             let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
             transcript_max_scroll = m.max_scroll;
@@ -799,7 +826,7 @@ fn draw_frame(
                     let story_focused = state.focus == Focus::Game;
                     let story_title_style = state.colors.theme.get("story_title").style;
                     let story_segs = [InsetSegment { text: &state.pane_title, active: false }];
-                    let story_fp = draw_panel(buf, &PanelSpec {
+                    let (story_fp, story_ctls) = draw_story_panel(buf, &PanelSpec {
                         area: pane_layout.story,
                         border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
                         border_color: Some(story_border_style),
@@ -808,7 +835,8 @@ fn draw_frame(
                         header_on: state.colors.story_header_on,
                         strip: Some(PanelStrip { segments: &story_segs, base: story_title_style, active: story_title_style }),
                         body_fill: None,
-                    }, &state.colors.theme);
+                    }, state);
+                    border_controls_out = story_ctls;
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
@@ -833,7 +861,7 @@ fn draw_frame(
                     let story_focused = resize_split_hl || state.focus == Focus::Game;
                     let story_title_style = state.colors.theme.get("story_title").style;
                     let story_segs = [InsetSegment { text: &state.pane_title, active: false }];
-                    let story_fp = draw_panel(buf, &PanelSpec {
+                    let (story_fp, story_ctls) = draw_story_panel(buf, &PanelSpec {
                         area: pane_layout.story,
                         border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
                         border_color: Some(story_border_color),
@@ -842,7 +870,8 @@ fn draw_frame(
                         header_on: state.colors.story_header_on,
                         strip: Some(PanelStrip { segments: &story_segs, base: story_title_style, active: story_title_style }),
                         body_fill: None,
-                    }, &state.colors.theme);
+                    }, state);
+                    border_controls_out = story_ctls;
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
@@ -1094,6 +1123,15 @@ fn draw_frame(
             &mut palette_hits,
         ));
 
+        // ── Border-control hover hint (SQ-1123) ───────────────────────────────
+        // After the overlay ladder, so the hint floats above the panes; the
+        // hover is only ever SET while no modal overlay is open, so this can
+        // never sit under one. It paints and returns — no focus, no keyboard.
+        if state.control_hover.is_some() && !border_controls_out.is_empty() {
+            let views = app::render::controls::controls_for(state);
+            app::render::controls::draw_control_hint(buf, full, state, &views, &border_controls_out);
+        }
+
         // Story-pane text-selection highlight + copy extraction now happen inside
         // render_middle (render/transcript.rs), which has the full wrapped-row set
         // and can select text beyond the visible viewport. (SQ-0197)
@@ -1133,7 +1171,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, history_prompt: overlay_rects.history_prompt, font_check: overlay_rects.font_check, fetch_keep: overlay_rects.fetch_keep, reset_dialog: overlay_rects.reset_dialog, region_prompt: overlay_rects.region_prompt, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_prompt_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, border_controls: border_controls_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, history_prompt: overlay_rects.history_prompt, font_check: overlay_rects.font_check, fetch_keep: overlay_rects.fetch_keep, reset_dialog: overlay_rects.reset_dialog, region_prompt: overlay_rects.region_prompt, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_prompt_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
 }
 
 // ── Command-band mouse routing ───────────────────────────────────────────────
@@ -2124,6 +2162,23 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // anything else a `Moved` event might still need to do (the debug
         // panel's own hover tooltips, in particular).
         band_update_quick_hover(&mut state, &last_panes, &event);
+
+        // ── Border-control hover (SQ-1123) ────────────────────────────────────
+        // Same shape as the band's hover just above: pointer motion with no
+        // button held lights up whichever border control is under it, using
+        // LAST FRAME's hit rects — the same ones the click path resolves
+        // against. Never claims the event (a Moved event still has the debug
+        // panel's own tooltips to reach), and clears rather than leaving a
+        // stale control lit the moment the pointer moves off or a modal opens.
+        if let Event::Mouse(m) = &event {
+            if m.kind == crossterm::event::MouseEventKind::Moved {
+                let hover = app::render::controls::control_at(
+                    &state, &last_panes.border_controls, m.column, m.row,
+                );
+                // (`needs_redraw` is already set for every event above.)
+                state.control_hover = hover;
+            }
+        }
 
         // ── Common-dialog overlay intercept ladder (SQ-0307) ──────────────────
         // The aux / reset / save-name / text-entry / confirm-delete / quit /
@@ -3168,6 +3223,37 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     ) {
                         // (`needs_redraw` was already set for this event above.)
                         apply_action(action, &mut state, &mut mapper);
+                        continue 'event_loop;
+                    }
+                }
+                // Border toggle controls (SQ-1123): a left-click on one runs that
+                // control's own `slash::COMMANDS` entry, bare, through the ordinary
+                // slash pipeline — the same path the palette's row-click takes. A
+                // click IS the command, so whatever the command persists, a click
+                // persists too, and there is no second implementation of any toggle.
+                if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = m.kind {
+                    if let Some(ctl) = app::render::controls::control_at(
+                        &state, &last_panes.border_controls, m.column, m.row,
+                    ) {
+                        // The command's OWN context, looked up in the registry
+                        // rather than assumed: a control must parse exactly the
+                        // way the palette parses the same command.
+                        let ctx = slash::COMMANDS
+                            .iter()
+                            .find(|c| c.name == ctl.command())
+                            .map(|c| c.context)
+                            .unwrap_or(Context::Global);
+                        let outcome =
+                            slash::parse_in_context(ctl.command(), state.config.command_prefix, ctx);
+                        let should_break = dispatch_slash_outcome(
+                            outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
+                            &game_dir, &ifid, &arc_file, &story_bytes, &story_path,
+                            last_panes.map, last_panes.story, true,
+                        );
+                        lifecycle::flush_pending_config_write(&mut state);
+                        if should_break {
+                            break 'event_loop state.exit_target.into();
+                        }
                         continue 'event_loop;
                     }
                 }

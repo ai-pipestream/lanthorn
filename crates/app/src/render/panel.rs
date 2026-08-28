@@ -8,8 +8,8 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use super::paneframe::{
-    draw_framed, draw_header_plain, draw_top_inset, BorderStyle, InsetCaps, InsetSegment,
-    PaneGlyphs, PaneSides,
+    draw_framed, draw_header_controls, draw_header_plain, draw_top_inset, header_controls_width,
+    BorderStyle, HeaderControl, InsetCaps, InsetSegment, PaneGlyphs, PaneSides,
 };
 use crate::theme::resolve::{Provenance, Theme};
 
@@ -75,6 +75,26 @@ pub struct PanelFrame {
 /// strip, and an optional body fill. Returns the content/header rects and the
 /// strip's per-segment hit-rects.
 pub fn draw_panel(buf: &mut Buffer, spec: &PanelSpec, theme: &Theme) -> PanelFrame {
+    draw_panel_with_controls(buf, spec, &[], theme).0
+}
+
+/// [`draw_panel`], plus a cluster of clickable toggle controls right-aligned in
+/// the panel's top border row (SQ-1123).
+///
+/// The cluster's columns are taken OUT of the header rect before the title strip
+/// is drawn, so a long title is centred in what is left and can never overwrite
+/// a control — the alternative, drawing the controls over the finished strip,
+/// silently eats the end of the title on a narrow pane. When the header is too
+/// narrow to hold the cluster at all, nothing is drawn and the title keeps the
+/// whole row.
+///
+/// Returns the panel frame and one hit-rect per control, in the order given.
+pub fn draw_panel_with_controls(
+    buf: &mut Buffer,
+    spec: &PanelSpec,
+    controls: &[HeaderControl],
+    theme: &Theme,
+) -> (PanelFrame, Vec<Rect>) {
     let r = theme.get(spec.border_selector);
     let border_style = spec.border_style.or(r.border).unwrap_or(BorderStyle::None);
     let color = spec.border_color.unwrap_or(r.style);
@@ -90,13 +110,39 @@ pub fn draw_panel(buf: &mut Buffer, spec: &PanelSpec, theme: &Theme) -> PanelFra
 
     let caps = resolve_inset_caps(theme, border_style);
 
+    let mut control_rects = Vec::new();
     let mut tab_rects = Vec::new();
-    if let (Some(hrect), Some(strip)) = (framed.header, &spec.strip) {
-        tab_rects = if framed.header_bordered {
-            draw_top_inset(buf, hrect, strip.segments, strip.base, strip.active, &caps)
+    if let Some(hrect) = framed.header {
+        // The cluster's columns come out of the strip's FIRST, so an ordinary
+        // title is centred in what is left and the two never meet. One blank
+        // column is held back as well, so they never abut either.
+        let want = if framed.header_bordered && !controls.is_empty() {
+            header_controls_width(controls.len())
         } else {
-            draw_header_plain(buf, hrect, strip.segments, strip.base, strip.active)
+            0
         };
+        let mut strip_rect = hrect;
+        let draw_controls = want > 0 && hrect.width > want + 1;
+        if draw_controls {
+            strip_rect.width -= want;
+        }
+        if let Some(strip) = &spec.strip {
+            tab_rects = if framed.header_bordered {
+                draw_top_inset(buf, strip_rect, strip.segments, strip.base, strip.active, &caps)
+            } else {
+                draw_header_plain(buf, strip_rect, strip.segments, strip.base, strip.active)
+            };
+        }
+        // …and the cluster paints LAST, over the reserved columns. A single
+        // segment wider than the whole strip is drawn by `render_overflow`,
+        // which clips to the buffer rather than to the rect it was given — so a
+        // very long title runs straight through the reservation. Painting the
+        // controls afterwards means the worst that costs is the tail of a title
+        // nobody could read anyway, instead of a control that is invisible and
+        // still clickable.
+        if draw_controls {
+            control_rects = draw_header_controls(buf, hrect, controls, &caps, color);
+        }
     }
 
     if let Some(fill) = spec.body_fill {
@@ -110,7 +156,7 @@ pub fn draw_panel(buf: &mut Buffer, spec: &PanelSpec, theme: &Theme) -> PanelFra
         }
     }
 
-    PanelFrame { content: framed.content, header: framed.header, tab_rects }
+    (PanelFrame { content: framed.content, header: framed.header, tab_rects }, control_rects)
 }
 
 #[cfg(test)]

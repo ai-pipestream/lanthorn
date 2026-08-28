@@ -34,7 +34,9 @@ still reach in and override any single selector by name.
   today's cyan+bold focus highlight), `panel.background` for the body fill, and
   `panel.title` / `panel.tab` / `panel.tab:active` / `panel.tab_divider` /
   `panel.terminator_left` / `panel.terminator_right` for the title/tab strip
-  inset in the top border (every framed pane — story, map, dialogs, the command
+  inset in the top border, and `panel.control` / `panel.control:active` /
+  `panel.control:lit` / `panel.control:hover` for the clickable toggle controls
+  at that strip's right-hand end (every framed pane — story, map, dialogs, the command
   band and inventory dock, the debug inspector's window tabs, the story-list info
   panel — renders through this one shared panel component and these same
   selectors). The story pane's strip text is the resolved adventure title,
@@ -100,14 +102,20 @@ still reach in and override any single selector by name.
   Font Material Design families), `portal_icons` (including a 4-icon stairs
   set), `path_style` for cardinal (N/S/E/W) connectors, and a separate
   `portal_path_style` for vertical/portal (up/down/in/out) connectors so they
-  can render distinctly (dotted by default). `diagonal_corners = false` turns
+  can render distinctly (dotted by default). `control_icons` (plain | nerdfont)
+  picks the glyphs for the story pane's border toggle controls — the arrows that
+  show the map and verb panel, the Guiding Light's mark, and the two v6 render
+  switches — with the `nerdfont` arm substituting only the codepoints lanthorn
+  has verified by name (the four MDI chevrons and `md-post_lamp`) and leaving
+  the rest on Geometric Shapes, which a patched face draws identically. `diagonal_corners = false` turns
   the half-diagonal corner stubs (🮠🮡🮢🮣) back into plain orthogonal exits, for
   fonts without Unicode 13 Legacy Computing coverage. Individual glyphs are
   overridden one slot at a time in a `[map.overrides]` table keyed by slot name
   — `"room.normal.tl" = "+"`, `"arrow.north" = "^"`, `"path.diag_ul" = "/"`.
   On a **first launch** lanthorn asks which of two glyph rows your terminal draws
   properly and writes the answer into this section for you — `arrow_set`,
-  `portal_icons` and the Guiding Light's `"gutter.assist"` together, since a
+  `portal_icons`, `control_icons` and the Guiding Light's `"gutter.assist"`
+  together, since a
   patched font supplies all three or none of them. It has to ask: lanthorn writes
   characters and the font belongs to the terminal, and the nearest thing to a
   probe measures a glyph's *width*, which a missing-glyph box passes. It writes

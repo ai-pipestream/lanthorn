@@ -130,6 +130,9 @@ pub struct StyleSymbols {
     /// Line-art preset for the up/down/in/out portal connectors, styled
     /// separately from the cardinal `path_style`.
     pub portal_path_style: Option<String>,
+    /// Glyph preset for the pane-border toggle controls (SQ-1123): "plain" or
+    /// "nerdfont".
+    pub control_icons: Option<String>,
     pub badge_zcode: Option<String>,
     pub badge_glulx: Option<String>,
     pub badge_blorb: Option<String>,
@@ -157,6 +160,7 @@ pub fn finalize_symbols(s: &StyleSymbols) -> crate::config::SymbolConfig {
         portal_icons: s.portal_icons.clone().unwrap_or_else(crate::config::default_portal_icons),
         path_style: s.path_style.clone().unwrap_or_else(crate::config::default_path_style),
         portal_path_style: s.portal_path_style.clone().unwrap_or_else(crate::config::default_portal_path_style),
+        control_icons: s.control_icons.clone().unwrap_or_else(crate::config::default_control_icons),
         badge_zcode: s.badge_zcode.clone().unwrap_or_else(crate::config::default_badge_zcode),
         badge_glulx: s.badge_glulx.clone().unwrap_or_else(crate::config::default_badge_glulx),
         badge_blorb: s.badge_blorb.clone().unwrap_or_else(crate::config::default_badge_blorb),
@@ -288,6 +292,7 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         portal_icons: over.symbols.portal_icons.clone().or(base.symbols.portal_icons.clone()),
         path_style: over.symbols.path_style.clone().or(base.symbols.path_style.clone()),
         portal_path_style: over.symbols.portal_path_style.clone().or(base.symbols.portal_path_style.clone()),
+        control_icons: over.symbols.control_icons.clone().or(base.symbols.control_icons.clone()),
         badge_zcode: over.symbols.badge_zcode.clone().or(base.symbols.badge_zcode.clone()),
         badge_glulx: over.symbols.badge_glulx.clone().or(base.symbols.badge_glulx.clone()),
         badge_blorb: over.symbols.badge_blorb.clone().or(base.symbols.badge_blorb.clone()),
@@ -406,6 +411,7 @@ pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
                 "portal_icons" => symbols.portal_icons = val.as_str().map(str::to_string),
                 "path_style"   => symbols.path_style   = val.as_str().map(str::to_string),
                 "portal_path_style" => symbols.portal_path_style = val.as_str().map(str::to_string),
+                "control_icons" => symbols.control_icons = val.as_str().map(str::to_string),
                 "diagonal_corners"  => symbols.diagonal_corners  = val.as_bool(),
                 "overrides" => {
                     if let toml::Value::Table(ov) = val {
@@ -917,13 +923,14 @@ pub fn write_font_check_answer(path: &std::path::Path, nerdfont: bool) -> std::i
         doc["map"] = Item::Table(toml_edit::Table::new());
     }
     let lamp = crate::render::font_check_dialog::ASSIST_LAMP;
-    let (arrows, portals) = if nerdfont {
+    let (arrows, portals, controls) = if nerdfont {
         (
             crate::render::font_check_dialog::NERD_ARROWS,
             crate::render::font_check_dialog::NERD_PORTALS,
+            crate::render::font_check_dialog::NERD_CONTROLS,
         )
     } else {
-        ("filled", "ascii")
+        ("filled", "ascii", "plain")
     };
     // Both answers are written out, not just the affirmative one: the file is
     // then a record of what was DECIDED, and a later re-check that swings the
@@ -931,7 +938,7 @@ pub fn write_font_check_answer(path: &std::path::Path, nerdfont: bool) -> std::i
     // behind (`/run-font-check` after changing terminal fonts is the whole point
     // of the re-check).
     let note = if nerdfont { "  # set by the font check (patched Nerd Font)" } else { "  # set by the font check" };
-    for (key, name) in [("arrow_set", arrows), ("portal_icons", portals)] {
+    for (key, name) in [("arrow_set", arrows), ("portal_icons", portals), ("control_icons", controls)] {
         doc["map"][key] = value(name);
         if let Some(v) = doc["map"][key].as_value_mut() {
             v.decor_mut().set_suffix(note);

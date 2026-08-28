@@ -43,6 +43,11 @@ fn a_yes_installs_every_family_the_prompt_sampled() {
     assert_eq!(set.portal.up, want_portal.up, "the stairs arrived");
     assert_eq!(set.portal.marker, want_portal.marker);
     assert_eq!(set.assist_gutter, ASSIST_LAMP, "the Guiding Light's mark is the lamp");
+    assert_eq!(
+        set.controls,
+        app::symbols::ControlGlyphs::preset(app::render::font_check_dialog::NERD_CONTROLS).unwrap(),
+        "the border toggle controls came with the rest (SQ-1123)",
+    );
 
     // PRESET NAMES, not forty expanded per-slot overrides: the file has to stay
     // something a person can read and re-decide, and a later improvement to the
@@ -56,6 +61,10 @@ fn a_yes_installs_every_family_the_prompt_sampled() {
     );
     assert!(
         live.iter().any(|l| l.contains(&format!("portal_icons = \"{NERD_PORTALS}\""))),
+        "{text}"
+    );
+    assert!(
+        live.iter().any(|l| l.contains("control_icons = \"nerdfont\"")),
         "{text}"
     );
     assert!(
@@ -87,6 +96,7 @@ fn a_later_no_undoes_an_earlier_yes() {
         set.assist_gutter, plain.assist_gutter,
         "and back to ● — NOT `*`, which Infocom games spend on footnotes"
     );
+    assert_eq!(set.controls, plain.controls, "and back to the plain border controls");
 }
 
 /// A mark the user chose themselves is not ours to remove. The answer is about a
