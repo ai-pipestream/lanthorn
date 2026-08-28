@@ -824,6 +824,43 @@ fn default_user_dir() -> PathBuf {
 
 fn default_true() -> bool { true }
 
+// ── The adult list (SQ-1122) ─────────────────────────────────────────
+
+/// Words lanthorn does not ENUMERATE unprompted, unless the player says otherwise.
+///
+/// The principle, and the reason this is a top-level key rather than one of the
+/// command band's: *unprompted enumeration gets a default; what the player
+/// reached for does not.* A panel that lists a story's whole vocabulary puts
+/// these words in front of somebody who only opened a panel; a word the player
+/// typed, or one lanthorn offers BECAUSE they typed something close to it, is a
+/// different act and is never filtered — SQ-1115's "faithful, we don't censor"
+/// governs that half and still does. [`crate::vocab`] does not read this list,
+/// and must not start.
+///
+/// **Strong profanity only, plus two the user named.** Chosen by reading the
+/// corpus rather than from imagination: every word here is in some story's real
+/// dictionary or grammar (Zork I r88 alone holds `fuck`, `shit`, `rape` and
+/// `molest` in its verb table). `damn` and `barf` are Infocom being Infocom and
+/// stay visible; so do `hell`, `crap`, `screw`, `suck`, `piss`, `pee` and `sod`,
+/// which are coarse rather than obscene. `rape` and `molest` are not cuss words
+/// at all — they are here because listing them unbidden in a panel is worse
+/// than any expletive.
+///
+/// Matching is EXACT and case-insensitive, never by prefix. Old dictionaries
+/// truncate (a v6 story's four-character keys hold `bast` for *bastard*), and a
+/// prefix rule that caught those would also hide `rap` and `who`, which are real
+/// verbs in forty and twenty-five corpus stories respectively. Under-filtering
+/// is the instruction; a player who wants a truncation hidden adds it to their
+/// own `adult_words`.
+pub const DEFAULT_ADULT_WORDS: &[&str] = &[
+    "fuck", "fucked", "fucking", "shit", "cunt", "cum", "wank", "bastard", "bitch", "asshole",
+    "whore", "slut", "rape", "molest",
+];
+
+fn default_adult_words() -> Vec<String> {
+    DEFAULT_ADULT_WORDS.iter().map(|s| s.to_string()).collect()
+}
+
 // ── Background-tidy mode ──────────────────────────────────────────────────────
 
 /// Controls when the map is automatically re-tidied after new rooms are discovered.
@@ -1319,6 +1356,23 @@ pub struct Config {
     /// recommending anything (see `crate::vocab`).
     #[serde(default = "default_true")]
     pub guidance_probe: bool,
+    /// Keep [`adult_words`](Self::adult_words) out of any panel that ENUMERATES
+    /// a story's vocabulary unprompted (SQ-1122). Default true.
+    ///
+    /// The switch is separate from the list so that turning the filter off does
+    /// not destroy it: `hide_adult_words = false` restores the full column and
+    /// leaves the words where the player can still read them, and a
+    /// settings-screen row has a boolean to flip rather than a list it could not
+    /// edit.
+    #[serde(default = "default_true")]
+    pub hide_adult_words: bool,
+    /// The words themselves — see [`DEFAULT_ADULT_WORDS`] for what the default
+    /// holds and why. Shipped UNCOMMENTED in the seeded `config.toml`: a filter
+    /// nobody can inspect is censorship, one written out in the player's own
+    /// config file is a default. Emptying it restores the full column exactly as
+    /// `hide_adult_words = false` does.
+    #[serde(default = "default_adult_words")]
+    pub adult_words: Vec<String>,
     /// Controls automatic background re-tidy when new rooms are discovered.
     /// Default: EveryRoom (re-tidy on each turn that finds a new room).
     #[serde(default)]
@@ -1660,6 +1714,47 @@ pub struct Config {
 }
 
 impl Config {
+    /// The words no unprompted enumeration may show — the adult list when the
+    /// switch is on, and nothing at all when it is off or the list is empty
+    /// (SQ-1122).
+    ///
+    /// Both off-switches answer the same empty slice on purpose, so a caller has
+    /// one question to ask and cannot honour one of them and forget the other.
+    pub fn hidden_display_words(&self) -> &[String] {
+        if self.hide_adult_words { &self.adult_words } else { &[] }
+    }
+
+    /// The command band's VERB column as the band is BORN — `[command_band]`'s
+    /// own resolution with the adult list applied to whatever came out.
+    ///
+    /// This and [`layer_band_verbs`](Self::layer_band_verbs) are the only two
+    /// ways a `VerbTable` reaches the screen, and they live on `Config` rather
+    /// than on `CommandBandConfig` because the list is a top-level key: the band
+    /// section cannot see it, and a filter applied by each call site in turn is
+    /// a filter the next call site forgets. `adult_words_filter_every_assembly`
+    /// in `tests/suites/adult_words.rs` fails if `src/` grows a third one.
+    pub fn resolve_band_verbs(
+        &self,
+    ) -> (crate::render::command_band::VerbTable, Vec<String>) {
+        let (table, warnings) = self.command_band.resolve_verbs();
+        (table.hiding(self.hidden_display_words()), warnings)
+    }
+
+    /// The same for the table the story's own grammar produces a tick later —
+    /// `[command_band] extra_verbs` layered on, then the adult list applied.
+    ///
+    /// The filter runs AFTER `extra_verbs`, so it catches a word the player's own
+    /// list re-added as surely as one the story's grammar named. Somebody who
+    /// deliberately types a word into `extra_verbs` and wants it shown has the
+    /// two off-switches; the alternative reading would make `extra_verbs` a way
+    /// past a default nothing announces.
+    pub fn layer_band_verbs(
+        &self,
+        table: crate::render::command_band::VerbTable,
+    ) -> crate::render::command_band::VerbTable {
+        self.command_band.layer_extra_verbs(table).hiding(self.hidden_display_words())
+    }
+
     /// The machine's §8.3.3 default page and ink for THIS launch, or `None` when
     /// this launch has not earned them (SQ-0928).
     ///
@@ -1786,6 +1881,8 @@ impl Default for Config {
             hint_skip_screen_warning: true,
             guidance: true,
             guidance_probe: true,
+            hide_adult_words: true,
+            adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
@@ -1916,6 +2013,8 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.hint_skip_screen_warning = from_file.hint_skip_screen_warning;
             cfg.guidance = from_file.guidance;
             cfg.guidance_probe = from_file.guidance_probe;
+            cfg.hide_adult_words = from_file.hide_adult_words;
+            cfg.adult_words = from_file.adult_words;
             cfg.background_tidy = from_file.background_tidy;
             cfg.aux_storage = from_file.aux_storage;
             cfg.v6_render = from_file.v6_render;
@@ -2258,6 +2357,16 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
     doc.put("guidance", cfg.guidance.into(), cfg.guidance == def.guidance);
     doc.put("guidance_probe", cfg.guidance_probe.into(), cfg.guidance_probe == def.guidance_probe);
+    doc.put("hide_adult_words", cfg.hide_adult_words.into(), cfg.hide_adult_words == def.hide_adult_words);
+    // The LIST is the one setting lanthorn seeds LIVE rather than commented
+    // (SQ-1122), so `put`'s "always update a key the file already has" half keeps
+    // it in step — and its default-elision half means a player who deleted the
+    // line outright never gets it back uninvited.
+    let words = cfg.adult_words.iter().fold(toml_edit::Array::new(), |mut a, w| {
+        a.push(w.as_str());
+        a
+    });
+    doc.put("adult_words", words.into(), cfg.adult_words == def.adult_words);
     doc.put("watch_style", cfg.watch_style.into(), cfg.watch_style == def.watch_style);
     doc.put("record_turn_history", cfg.record_turn_history.into(), cfg.record_turn_history == def.record_turn_history);
     // Three one-run sources reach this key and `put` skips all three the same way:
@@ -3109,6 +3218,8 @@ use_defaults = false
             hint_skip_screen_warning: true,
             guidance: true,
             guidance_probe: true,
+            hide_adult_words: true,
+            adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
