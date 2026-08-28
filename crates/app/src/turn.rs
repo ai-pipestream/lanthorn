@@ -431,6 +431,9 @@ fn post_turn_bookkeeping(
     // its dictionary holds — and the transcript this reads changes once a turn,
     // which is exactly this often.
     app::input::refresh_seen_words(state, session);
+    // …and the words for the things that are actually here, which change with
+    // the room and are the ones a player cannot guess (SQ-1042).
+    app::input::refresh_scope_words(state, session);
 
     // Per-turn auto-save (when enabled). Non-fatal: failure is shown in the
     // transcript status line so the player is aware but the loop continues.

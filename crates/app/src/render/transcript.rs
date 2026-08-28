@@ -1618,7 +1618,12 @@ pub fn inventory_items(
 ) -> Vec<String> {
     let player = player_obj.or_else(|| introspect.and_then(|i| i.player_object()));
     match (player, introspect) {
-        (Some(obj), Some(intro)) => intro.contents(obj),
+        (Some(obj), Some(intro)) => {
+            // The printed name where the story has one; on Inform 7, which
+            // gives an object no hardware short name at all, the words it
+            // answers to are the only text naming it (SQ-1042).
+            intro.contents(obj).iter().filter_map(|o| o.display_name()).collect()
+        }
         _ => inventory_fallback.to_vec(),
     }
 }

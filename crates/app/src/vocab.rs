@@ -261,10 +261,138 @@ impl StoryVocabulary {
             .map(|(w, _)| w.as_str())
     }
 
+    /// The parts of speech this story gives `word`, truncation included —
+    /// `None` when the dictionary does not hold it at all.
+    ///
+    /// The one accessor SQ-1116 could not add because another lane held this
+    /// file, and the reason its noun scrape shows `the`, `a`, `you` and `my` on
+    /// Glulx: those genuinely are dictionary words, and only the story's own
+    /// **role** bits separate a thing from a function word. An English stop list
+    /// cannot — it was tried, and it also hid `here` from a story that
+    /// implements it (SQ-1116). See [`WordRoles`] for which bit each back-end
+    /// sets; note that Infocom marks a true adjective and neither Inform
+    /// back-end has such a bit, so an Inform adjective arrives as a noun.
+    pub fn roles(&self, word: &str) -> Option<WordRoles> {
+        self.stored(word).map(|(_, r)| r)
+    }
+
     /// True if the grammar writes this word literally into some line.
     fn is_preposition(&self, word: &str) -> bool {
         self.prepositions.contains(&word.to_lowercase())
     }
+}
+
+// ── What a thing may be called ──────────────────────────────────────────────
+
+/// The text to put on the input line for `obj` — a name this story's parser has
+/// agreed to accept — or `None` when the story holds no text for the object at
+/// all.
+///
+/// The command band used to offer the object's **printed** name, which is what
+/// the game writes when it mentions the thing and not what it answers to. The
+/// two barely overlap: Zork I prints `brass lantern` and its `SYNONYM` property
+/// holds `lamp`, `lanter` and `light`; it prints `bird's nest`, `ZORK owner's
+/// manual` and `number of ghosts`, none of which the parser can even tokenise
+/// as written, because `bird's`, `owner's` and `number` are not in its
+/// dictionary. A panel offering those is asserting something the story never
+/// promised.
+///
+/// So the name is composed of the printed name's own words, keeping only what
+/// the parser will take:
+///
+/// 1. **The noun** is the LAST printed word the object itself answers to —
+///    `coins` in `leather bag of coins`, `ghosts` in `number of ghosts`, `nest`
+///    in `bird's nest`. Last, not first, because English puts the head of the
+///    phrase there and the parser resolves on it.
+/// 2. **The adjectives** are the unbroken run of words before it that the story
+///    marks as adjectives, or that are the object's own parse names — `small
+///    mailbox`, `brass lantern`. It matters: `take rusty` and `take knife` are
+///    both needed when two knives are in the room. The run stops at the first
+///    word that is neither, which is what keeps the `of` out of `bag of coins`
+///    and the `owner's` out of `owner's manual`.
+/// 3. Where the printed name yields nothing — an **Inform 7** object, which has
+///    no printed name at all and whose word list is the only text naming it —
+///    the story's own first spelling for the object is used. Any one of an
+///    object's parse names identifies it on its own; the first is the story's
+///    own first answer, and choosing among them on any other grounds would be
+///    the guessing this replaces.
+/// 4. Where the story keeps no parse names anywhere — Journey has no parser,
+///    `advent.z8` brings its own — the printed name stands as it is. That is
+///    the old behaviour, kept for exactly the stories that can support nothing
+///    better.
+///
+/// `vocab` is `None` before the story's grammar has been read, and then only
+/// the object's own words can qualify a leading adjective; on Inform, where
+/// adjectives live in the name property beside the nouns, that loses nothing.
+pub fn typeable_name(
+    obj: &grammar_model::ObjectWords,
+    vocab: Option<&StoryVocabulary>,
+) -> Option<String> {
+    let tokens = printed_tokens(obj);
+    if let Some(noun) = tokens.iter().rposition(|t| obj.refers_to(t)) {
+        let qualifies =
+            |t: &str| obj.refers_to(t) || vocab.is_some_and(|v| v.roles(t).is_some_and(|r| r.adjective));
+        let mut start = noun;
+        while start > 0 && qualifies(tokens[start - 1]) {
+            start -= 1;
+        }
+        return Some(tokens[start..=noun].join(" "));
+    }
+    obj.words.first().cloned().or_else(|| obj.display_name())
+}
+
+/// Every word the parser accepts for `obj`, spelled the way the story SPELLS
+/// it wherever it can be — the completion source for what is in scope.
+///
+/// Two things a caller cannot get from the word list alone:
+///
+/// - **The full spelling.** A Version 3 dictionary keeps six Z-characters, so
+///   Zork I stores `lanter` and nothing more. Completing a player's `lan` to
+///   `lanter` offers them a fragment; the object's printed name holds `lantern`
+///   in full, and both reach the same entry because the parser truncates the
+///   player's word exactly as the dictionary truncated its own.
+/// - **The adjective.** Infocom keeps adjectives in a property of their own, so
+///   `brass` is nowhere in the lantern's `SYNONYM` list — but `take brass
+///   lantern` works, and a player who can see "brass lantern" written on the
+///   screen will type `bra` before they type `lam`.
+///
+/// So: the printed name's own words where the story answers to them or marks
+/// them adjectives, then every stored word that no such spelling already
+/// reaches. Zork I's lantern gives `brass`, `lantern`, `lamp`, `light`.
+pub fn typeable_words(
+    obj: &grammar_model::ObjectWords,
+    vocab: Option<&StoryVocabulary>,
+) -> Vec<String> {
+    let cut = |w: &str| -> String {
+        match obj.truncated_at {
+            Some(n) => w.to_lowercase().chars().take(n).collect(),
+            None => w.to_lowercase(),
+        }
+    };
+    let mut out: Vec<String> = Vec::new();
+    for t in printed_tokens(obj) {
+        let known = obj.refers_to(t)
+            || vocab.is_some_and(|v| v.roles(t).is_some_and(|r| r.adjective || r.noun));
+        if known && !out.iter().any(|w| w.eq_ignore_ascii_case(t)) {
+            out.push(t.to_lowercase());
+        }
+    }
+    for w in &obj.words {
+        if !out.iter().any(|t| cut(t) == cut(w)) {
+            out.push(w.clone());
+        }
+    }
+    out
+}
+
+/// The printed name split the way a player reads it: words, stripped of the
+/// punctuation a story sets around them.
+fn printed_tokens(obj: &grammar_model::ObjectWords) -> Vec<&str> {
+    obj.printed_name
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-'))
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 // ── The offer ───────────────────────────────────────────────────────────────
@@ -778,10 +906,12 @@ fn absent_nouns(v: &StoryVocabulary, engine: &dyn Engine, prose: &[String], avoi
     if let Some(intro) = engine.introspect() {
         let player = intro.player_object();
         if let Some(room) = engine.current_location().map(|l| l.number) {
-            seen.extend(intro.room_objects_excluding(room, player));
+            seen.extend(
+                intro.room_objects_excluding(room, player).iter().filter_map(|o| o.display_name()),
+            );
         }
         if let Some(p) = player {
-            seen.extend(intro.contents(p));
+            seen.extend(intro.contents(p).iter().filter_map(|o| o.display_name()));
         }
     }
     // The tail of the transcript, which is what the player can see on screen and

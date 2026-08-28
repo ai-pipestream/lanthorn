@@ -989,7 +989,10 @@ fn draw_frame(
             // the room the player is actually in.
             let room_objects: Vec<String> = match (room, state.tidy_anim.is_none()) {
                 (Some(id), true) if Some(id) == current_room => {
-                    engine.introspect().map(|i| i.room_objects(id)).unwrap_or_default()
+                    engine
+                        .introspect()
+                        .map(|i| i.room_objects(id).iter().filter_map(|o| o.display_name()).collect())
+                        .unwrap_or_default()
                 }
                 _ => Vec::new(),
             };

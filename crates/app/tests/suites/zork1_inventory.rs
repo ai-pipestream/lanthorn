@@ -78,7 +78,13 @@ fn zork1_carried_items_are_live_without_ever_typing_inventory() {
 
     // The *here* column source: the opening room really does hold the mailbox
     // and the boarded door.
-    let here = session.introspect().unwrap().room_objects(room.number);
+    let here: Vec<String> = session
+        .introspect()
+        .unwrap()
+        .room_objects(room.number)
+        .iter()
+        .filter_map(|o| o.display_name())
+        .collect();
     let here_l = lower(&here);
     assert!(here_l.contains("mailbox"), "here-column lists the mailbox: {here:?}");
     assert!(here_l.contains("door"), "here-column lists the front door: {here:?}");

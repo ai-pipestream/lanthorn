@@ -16,6 +16,10 @@ use std::collections::BTreeMap;
 
 use crate::session::{FilenameReq, InputKind, TurnResult};
 
+/// What an object is and what it can be called, re-exported so a caller of
+/// [`Introspect`] names it without depending on `grammar-model` directly.
+pub use grammar_model::ObjectWords;
+
 // ── Neutral key input ───────────────────────────────────────────────────────
 
 /// A neutral, terminal-agnostic key press.
@@ -443,21 +447,31 @@ impl ScreenModel {
 /// the aids degrade gracefully.
 ///
 /// Object handles are opaque `u16` identifiers; their meaning is engine-defined.
+///
+/// **Every object question answers with [`ObjectWords`]** — the thing's id, what
+/// the story PRINTS for it, and the words the parser will ACCEPT for it, as one
+/// value (SQ-1042). The three used to answer with display names alone, which
+/// left every caller guessing which word of "a battery-powered brass lantern"
+/// the parser had agreed to; Zork I accepts none of them and answers to `lamp`,
+/// `lanter` and `light` instead. Handing back a name without its words is what
+/// made the command band offer something the story never promised, and handing
+/// back words without a name would leave a panel unable to say which thing they
+/// belonged to — so neither half is offered on its own.
 pub trait Introspect {
     /// The parser vocabulary (used to seed autocomplete at startup).
     fn vocabulary(&self) -> Vec<String>;
-    /// The display names of the direct children of `container` (the inventory
-    /// strip passes the player object here).
-    fn contents(&self, container: u16) -> Vec<String>;
-    /// The objects located directly in `room`, formatted for the inspector.
-    fn room_objects(&self, room: u16) -> Vec<String>;
+    /// The direct children of `container` (the inventory strip passes the
+    /// player object here).
+    fn contents(&self, container: u16) -> Vec<ObjectWords>;
+    /// The objects located directly in `room`.
+    fn room_objects(&self, room: u16) -> Vec<ObjectWords>;
     /// Same as [`Self::room_objects`], but omitting `exclude` (the command
     /// band's "here" column passes the player object — SQ-0667). The player
     /// object is structurally a child of whatever room they're in, so
     /// without this it would show up in every room of every game; excluded
     /// by id, deliberately not by name (a scenery object could coincidentally
     /// share the player's printed name).
-    fn room_objects_excluding(&self, room: u16, exclude: Option<u16>) -> Vec<String>;
+    fn room_objects_excluding(&self, room: u16, exclude: Option<u16>) -> Vec<ObjectWords>;
     /// The object handles whose parent is `parent` (drives inventory tracking).
     fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16>;
     /// The player object, if it can be identified.

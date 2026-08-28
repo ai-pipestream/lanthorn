@@ -328,7 +328,10 @@ fn the_info_body_lists_the_current_rooms_objects_from_a_real_engine() {
     let objects = session
         .introspect()
         .expect("a Z-machine story has an object tree")
-        .room_objects(here);
+        .room_objects(here)
+        .iter()
+        .filter_map(|o| o.display_name())
+        .collect::<Vec<String>>();
     assert!(!objects.is_empty(), "the opening room has objects in it");
 
     // Map the room the way the app does, then draw the dock over it.

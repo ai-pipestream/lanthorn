@@ -3151,19 +3151,48 @@ pub fn refresh_seen_words(state: &mut AppState, engine: &dyn crate::engine::Engi
     state.seen_words = words;
 }
 
-/// The story's own words in its own recent output, as the command band's *here*
-/// fallback.
+/// Recompute [`AppState::scope_words`]: the words the parser accepts for the
+/// things that are in the room and in the player's hands.
 ///
-/// This was the old verb menu's ONLY noun source, which is exactly what was
-/// wrong with it. It survives as the degraded fallback for engines with no
-/// `Introspect` (Glulx, Scott): the band shows it as a "WHAT — seen" group so
-/// its lower quality is visible rather than mixed in with real objects. A
-/// Z-machine story never reaches this — it has a live object tree.
+/// This is the completion source SQ-1042 was raised for. `Introspect` walks the
+/// live object tree from the player's room outward — the floor, an open
+/// container standing on it, the room's shared scenery — and hands back each
+/// object's own parse names; [`crate::vocab::typeable_words`] spells them out
+/// where the printed name can (Zork I stores `lanter` and prints `lantern`) and
+/// adds the adjective Infocom keeps in a property of its own.
 ///
-/// What it no longer is, since SQ-1116, is a guess: the list is whatever the
-/// story's dictionary holds, refreshed by [`refresh_seen_words`].
-pub fn scraped_seen_nouns(state: &AppState) -> Vec<String> {
-    state.seen_words.clone()
+/// **Nothing here is a spoiler.** It names what the game itself would list in
+/// answer to `look` and `inventory`, and nothing else: the walk stops at a
+/// closed container's lid, so a thing the player has not yet opened is not a
+/// thing they can complete. That line is what separates a convenience from a
+/// puzzle solver, and it is the object tree's to draw, not ours.
+///
+/// Empty for an engine with no introspection (Glulx, Scott) — completion there
+/// still has the recent-prose scrape and the flat dictionary.
+pub fn refresh_scope_words(state: &mut AppState, engine: &dyn crate::engine::Engine) {
+    let Some(intro) = engine.introspect() else {
+        state.scope_words.clear();
+        return;
+    };
+    let player = state.player_obj.or_else(|| intro.player_object());
+    let mut objects = match engine.current_location().map(|l| l.number) {
+        Some(room) if room != 0 => intro.room_objects_excluding(room, player),
+        _ => Vec::new(),
+    };
+    if let Some(p) = player {
+        objects.extend(intro.contents(p));
+    }
+    let vocab = state.vocab.get(engine);
+    let mut words: Vec<String> = Vec::new();
+    for o in &objects {
+        for w in crate::vocab::typeable_words(o, vocab) {
+            if !words.iter().any(|x| x.eq_ignore_ascii_case(&w)) {
+                words.push(w);
+            }
+        }
+    }
+    words.sort_unstable();
+    state.scope_words = words;
 }
 
 /// Return up to `limit` names from `names` containing `body_token` ANYWHERE (case-insensitive),
@@ -3268,9 +3297,25 @@ pub(crate) fn recompute_suggestions(state: &mut AppState) {
         state.suggestions.clear();
         return;
     }
-    // The words the story has just used, which it also holds in its dictionary —
-    // read off the engine once a turn rather than re-scraped per keystroke.
-    state.suggestions = suggest(&state.dict_words, &state.seen_words, &partial, SUGGESTION_LIMIT);
+    // Three tiers, best first (SQ-1042): the words for the things that are
+    // ACTUALLY HERE, then the words the story has just printed, then the flat
+    // dictionary. `suggest` ranks its second argument above its first, so the
+    // scope pass runs against no dictionary at all and the prose pass fills
+    // whatever room is left — a player typing `lan` in Zork I's Living Room
+    // wants the lantern in front of them before the four hundred words the
+    // story also knows.
+    let mut hits = suggest(&[], &state.scope_words, &partial, SUGGESTION_LIMIT);
+    if hits.len() < SUGGESTION_LIMIT {
+        for w in suggest(&state.dict_words, &state.seen_words, &partial, SUGGESTION_LIMIT) {
+            if !hits.iter().any(|h| h.eq_ignore_ascii_case(&w)) {
+                hits.push(w);
+            }
+            if hits.len() == SUGGESTION_LIMIT {
+                break;
+            }
+        }
+    }
+    state.suggestions = hits;
 }
 
 // ── Bracketed paste (SQ-0653) ─────────────────────────────────────────────────
@@ -8616,26 +8661,6 @@ mod tests {
             .find(|(title, _)| title == "Map \u{b7} View")
             .expect("Map \u{b7} View group should exist");
         assert!(cmds.iter().any(|c| c.1 == "open-command-band"));
-    }
-
-    /// Glulx/Scott have no object tree, so the scrape survives — but only as
-    /// the demoted "seen" source, never as the Z-machine path.
-    ///
-    /// Since SQ-1116 the words are the STORY'S, so this half of it can only say
-    /// that the band's fallback and Tab completion read one list and never
-    /// re-derive it; the list itself is pinned against real stories in
-    /// `tests/suites/story_word_scrape.rs`.
-    #[test]
-    fn scraped_seen_nouns_come_from_the_seen_word_list() {
-        let mut s = AppState::default();
-        s.push_transcript("There is a small mailbox here.");
-        assert!(
-            scraped_seen_nouns(&s).is_empty(),
-            "no engine has answered yet, so nothing is claimed to be a word"
-        );
-
-        s.seen_words = vec!["mailbox".to_string()];
-        assert_eq!(scraped_seen_nouns(&s), vec!["mailbox".to_string()]);
     }
 
     /// The window both scrapers read: the tail of the transcript, and only the

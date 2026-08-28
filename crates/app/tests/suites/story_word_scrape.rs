@@ -358,11 +358,48 @@ fn completion_still_ranks_the_recent_words_first() {
 }
 
 /// The band's *here* fallback reads the same list, so the two consumers cannot
-/// drift apart — which is what the duplicated twenty-line scrape invited.
+/// drift apart — which is what the duplicated twenty-line scrape invited — and
+/// then cuts it to the words the story marks a NOUN (SQ-1042).
+///
+/// The filter is the story's own role bits and not an English list. SQ-1116
+/// removed the stop list correctly and the column then filled with `the`, `a`,
+/// `you` and `my`, which genuinely are dictionary words: only the story can say
+/// which of its words name a thing.
 #[test]
-fn the_band_fallback_and_completion_read_one_list() {
+fn the_band_fallback_is_the_scrape_cut_to_the_storys_own_nouns() {
     let session = tiny_cave();
     let mut state = state_with(&["I'm in a cave. I can see a lamp here."]);
     app::input::refresh_seen_words(&mut state, &session);
-    assert_eq!(app::input::scraped_seen_nouns(&state), state.seen_words);
+    assert!(state.seen_words.contains(&"lamp".to_string()), "{:?}", state.seen_words);
+
+    state.overlays.command_band = Some(app::state::CommandBandState::new(
+        app::render::command_band::default_verbs(),
+        app::render::command_band::default_quick(),
+    ));
+    app::render::command_band::refresh_objects(&mut state, &session);
+    let band = state.overlays.command_band.as_ref().expect("the band is open");
+    assert!(band.here_is_seen, "a Scott database has no object tree, so the column is a scrape");
+    assert!(band.here.contains(&"lamp".to_string()), "{:?}", band.here);
+
+    let vocab = session.story_vocabulary().expect("a Scott database always has a vocabulary");
+    for w in &band.here {
+        assert!(
+            state.seen_words.contains(w),
+            "`{w}` is in the column and not in the one list both consumers read"
+        );
+        assert!(
+            vocab.roles(w).is_some_and(|r| r.noun && !r.preposition),
+            "`{w}` reached the column without the story calling it a noun"
+        );
+    }
+    // The verbs the story printed stay in the scrape and out of the column: the
+    // cut is real, not a no-op that happens to pass.
+    let junk: Vec<&String> = state
+        .seen_words
+        .iter()
+        .filter(|w| vocab.roles(w).is_some_and(|r| (r.verb && !r.noun) || r.preposition))
+        .collect();
+    for v in &junk {
+        assert!(!band.here.contains(v), "`{v}` is an action or a joining word, not a thing");
+    }
 }
