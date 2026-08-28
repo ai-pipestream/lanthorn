@@ -2853,6 +2853,17 @@ pub struct AppState {
     /// `zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem)`.
     /// If empty, autocomplete draws only from room-description words.
     pub dict_words: Vec<String>,
+    /// The words of the story's own recent output that its dictionary holds —
+    /// sorted, deduped, refreshed once a turn by
+    /// [`crate::input::refresh_seen_words`] (SQ-1116).
+    ///
+    /// Cached rather than recomputed per keystroke because it is the ENGINE that
+    /// answers what a word is: the story's tokeniser splits the prose and the
+    /// story's dictionary decides what survives, and neither is reachable from a
+    /// key handler holding only `AppState`. The transcript changes once a turn
+    /// anyway, so this is also strictly less work than the per-keystroke scrape it
+    /// replaces.
+    pub seen_words: Vec<String>,
     /// Current list of completion candidates, recomputed whenever `input` changes
     /// while in Game focus. Empty means no suggestions are shown.
     pub suggestions: Vec<String>,
@@ -3165,6 +3176,7 @@ impl Default for AppState {
             pending_filename: None,
             filename_submitted: None,
             dict_words: Vec::new(),
+            seen_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
             suggestion_active: false,
