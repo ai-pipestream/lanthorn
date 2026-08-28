@@ -161,6 +161,17 @@ const INTERFACE: &[Row] = &[
             "\"gutter.assist\" in style.toml sets the mark. False for silence.",
         ],
     ),
+    d(
+        "guidance_probe",
+        "true",
+        &[
+            "Before offering a word, try it in a silent throwaway copy of the game",
+            "and keep only what actually did something — so the light recommends",
+            "rather than merely lists. Costs a few invisible turns after a command",
+            "the parser refused; nothing it does reaches the screen, your saves or",
+            "the game you are playing. False still offers, more modestly.",
+        ],
+    ),
     d("show_status_bar", "true", &["Show the status/score bar across the top of the story pane."]),
     d("show_room_numbers", "false", &["Show room numbers (#id) inside Boxes-zoom room boxes."]),
     d("split_ratio", "50", &["The story pane's share of the story/map split, as a percentage."]),

@@ -2268,6 +2268,12 @@ pub struct AppState {
     /// persisted: a restore into a fresh run is a session that has said nothing
     /// yet.
     pub vocab: crate::vocab::VocabState,
+    /// A silent, disposable copy of the live game, kept between questions
+    /// (SQ-1121). Armed at boot with the story's own bytes; the shadow inside it
+    /// is booted the first time anything asks a question and reused after that.
+    /// Session state and never persisted — an archive carries the recipe already,
+    /// in the story file it names.
+    pub probe: crate::probe::ShadowProbe,
     /// Optional per-line render-style override, parallel to `transcript`. In-memory
     /// only (not persisted). `None` = use the line's per-kind style. Kept length-
     /// synced by `push_transcript_kind`; read defensively by the renderer.
@@ -3072,6 +3078,7 @@ impl Default for AppState {
             transcript_kinds: Vec::new(),
             assist_preamble_shown: false,
             vocab: crate::vocab::VocabState::default(),
+            probe: crate::probe::ShadowProbe::default(),
             transcript_styles: Vec::new(),
             transcript_runs: Vec::new(),
             transcript_para: Vec::new(),

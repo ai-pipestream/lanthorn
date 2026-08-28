@@ -253,6 +253,40 @@ Input is engine-neutral too. A VM's `step()` returns a request —
 terminal types cross the boundary), so the same host loop drives every engine and
 the CLIs can feed input from a pipe for deterministic testing.
 
+## Asking the game a question it cannot be asked out loud
+
+`app::probe` forks the live session into a **shadow** — a second `Engine` on the
+same story, driven from a host snapshot of the live one — runs commands in it,
+reads the answer off it and throws it away. `Engine::save_state` /
+`restore_state` are engine-neutral and already in the trait, so this works on all
+three VMs; the shadow is booted lazily and reused, and the live session is never
+stepped, saved or restored (restoring under a running game is the SQ-0587/0588
+hazard — the game never learns it happened).
+
+Two things about it are load-bearing and easy to get wrong:
+
+- **How a story says no is discovered, not assumed.** Every family words its
+  refusals differently, and a table of English phrases is broken by the next
+  game. So `Refusals` is built from what the shadow prints in reply to
+  deliberate nonsense, run beside the real question — one control the parser
+  cannot have understood, plus a pair of the same command carrying two different
+  nouns, believed only when both replies reduce to the same sentence and neither
+  changed the world. `ProbeRun::did_something` combines that with `WorldPrint`,
+  which is a changed world's proof of success (an unchanged one proves nothing —
+  `examine` legitimately changes nothing).
+- **The controls belong to the ROOM, not the session.** Zork I answers `light
+  rug` with `You don't have that!` in the field and `You don't have the carpet.`
+  in the living room. A signature learned once at boot is a signature of the
+  wrong room, so controls and question run in the same `run`, off the same
+  snapshot.
+
+Isolation is explicit rather than assumed: the shadow boots with sound and
+graphics off, no Blorb, an empty `game_dir` and an empty Glk VFS, and an in-game
+`@save`/`@restore` or a Glk filename prompt inside a probe is answered *failed*
+so the VM unwinds where it stands. `app::vocab` is the first consumer (SQ-1121,
+vetting a suggestion before it is offered); SQ-1043's irreversible-move caution
+is meant to be the second, and should extend this rather than grow its own.
+
 ## Reading back the bytes we actually emit
 
 Every other harness in the repo renders into a ratatui `Buffer` and asserts on

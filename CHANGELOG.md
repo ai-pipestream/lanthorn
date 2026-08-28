@@ -79,7 +79,7 @@ carrying `enable_sound = false` could only be overridden by editing the file.
   line that is ours — the surface where the distinction has to survive a
   copy-paste.
 - **When the parser rejects a word, lanthorn offers the story's own.** Mistype
-  the lantern and the light says `this story knows — lantern`; type `smel` and it
+  the lantern and the light says `try instead — lantern`; type `smel` and it
   answers `smell · sniff`, because that is how *this* story groups the word. It
   never rewrites what you typed and never sends anything on your behalf — a wrong
   guess costs a keystroke rather than a turn.
@@ -96,9 +96,29 @@ carrying `enable_sound = false` could only be overridden by editing the file.
   - And it stays quiet far more often than it speaks: one wrong word in the
     command and no more, a single-keystroke miss and nothing weaker, once per
     word per session, and nothing at all when it has nothing good.
+- **And the suggestion is tried before you see it.** lanthorn forks your game
+  into a silent throwaway copy, types each candidate into it from exactly where
+  you are standing, keeps only the ones that did something, and throws every copy
+  away. `illuminate lamp` at Zork's front door now says nothing at all — `light
+  lamp` would not have worked there either — and the same command in the living
+  room says `try instead — light`. That is why the line recommends rather than
+  lists: the words changed with the evidence behind them.
+  - How the game says *no* is **learned from the game**, not from a table of
+    English phrases: the copy is handed deliberate nonsense alongside the real
+    question and the reply is compared with what came back. It is read in the
+    room the question was asked in, because scope is where you are standing.
+  - Nothing the copy does escapes it. Sound and graphics are off, its file store
+    is empty, and a story reaching for `@save` inside one is told the write
+    failed. Your own session is never stepped, saved or restored.
+  - It is evidence, not a promise: a game that draws on randomness can answer the
+    copy and your game differently, and a refusal the controls never provoke gets
+    through. `guidance_probe = false` (or the settings row) turns it off, and the
+    offer falls back to naming what the dictionary holds — which is also what
+    happens on a story too slow to ask inside the probe's budget.
 - **One switch for the whole set**: `--guidance on|off` for a launch,
   `/set-guidance` (bare toggles) for a session, and a `guidance` row on the
-  settings screen that persists it.
+  settings screen that persists it. `guidance_probe` sits beside it, for the
+  speculative half alone.
 - **A first-run font check sets every icon at once.** lanthorn cannot read your
   terminal's font — it writes characters, and the font belongs to the terminal —
   so on a first launch it shows two rows of glyphs and asks which one your

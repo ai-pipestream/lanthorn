@@ -4268,11 +4268,12 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         25 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
         26 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_pixel_lock = !cs.working.v6_pixel_lock; } }
         27 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.guidance = !cs.working.guidance; } }
+        28 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.guidance_probe = !cs.working.guidance_probe; } }
         // font_check (SQ-1104) — an Action row: it opens the font check OVER the
         // settings screen, which stays open behind it exactly as row 0's path
         // dialog does. Nothing in `working` changes, because the answer is a
         // glyph decision and lands in style.toml, not config.toml.
-        28 => {
+        29 => {
             state.overlays.dialog_focus = 1;
             state.overlays.font_check = true;
         }
@@ -4368,6 +4369,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         24 => config_cycle_v6_render(&mut working.v6_render, delta),
         26 => working.v6_pixel_lock = !working.v6_pixel_lock,
         27 => working.guidance = !working.guidance,
+        28 => working.guidance_probe = !working.guidance_probe,
         _ => {}
     }
 }

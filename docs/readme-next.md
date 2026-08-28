@@ -83,10 +83,12 @@ it is a thing lanthorn does for the player rather than a surface it draws:
 
 > - **A light held up while you play** — Lanthorn's Guiding Light offers the
 >   words this story's parser knows, the noun you were reaching for, and a
->   caution before a move that cannot be taken back. It says so once, then marks
->   every later line with one glyph in the margin — never in the story's own
->   voice, and never a spoiler. `--guidance off`, `/set-guidance`, or the
->   settings screen turns it off.
+>   caution before a move that cannot be taken back. When it suggests a word it
+>   has already tried it, silently, in a throwaway copy of your own game — so it
+>   recommends what works where you are standing instead of listing what the
+>   dictionary holds. It says so once, then marks every later line with one glyph
+>   in the margin — never in the story's own voice, and never a spoiler.
+>   `--guidance off`, `/set-guidance`, or the settings screen turns it off.
 >   → [customization](docs/features/customization.md)
 
 > - **It asks about your font once, and sets every icon from the answer** —

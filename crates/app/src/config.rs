@@ -1304,6 +1304,21 @@ pub struct Config {
     /// promises when it says "the settings menu".
     #[serde(default = "default_true")]
     pub guidance: bool,
+    /// Vet a vocabulary offer before it is shown, by trying each candidate in a
+    /// silent throwaway copy of the game and keeping only what actually did
+    /// something (SQ-1121).
+    ///
+    /// On by default, and a switch of its own rather than part of `guidance`,
+    /// because it is a different KIND of thing: `guidance` decides whether
+    /// lanthorn speaks, this decides whether it runs the player's game a few
+    /// extra turns in private first. Someone will want the light on and the
+    /// speculation off, and they are entitled to.
+    ///
+    /// Off, an offer still appears — it just makes the weaker claim it can
+    /// support, naming what the story's dictionary holds rather than
+    /// recommending anything (see `crate::vocab`).
+    #[serde(default = "default_true")]
+    pub guidance_probe: bool,
     /// Controls automatic background re-tidy when new rooms are discovered.
     /// Default: EveryRoom (re-tidy on each turn that finds a new room).
     #[serde(default)]
@@ -1770,6 +1785,7 @@ impl Default for Config {
             record_turn_history: false,
             hint_skip_screen_warning: true,
             guidance: true,
+            guidance_probe: true,
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
@@ -1899,6 +1915,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.record_turn_history = from_file.record_turn_history;
             cfg.hint_skip_screen_warning = from_file.hint_skip_screen_warning;
             cfg.guidance = from_file.guidance;
+            cfg.guidance_probe = from_file.guidance_probe;
             cfg.background_tidy = from_file.background_tidy;
             cfg.aux_storage = from_file.aux_storage;
             cfg.v6_render = from_file.v6_render;
@@ -2240,6 +2257,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("show_status_bar", cfg.show_status_bar.into(), cfg.show_status_bar == def.show_status_bar);
     doc.put("hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
     doc.put("guidance", cfg.guidance.into(), cfg.guidance == def.guidance);
+    doc.put("guidance_probe", cfg.guidance_probe.into(), cfg.guidance_probe == def.guidance_probe);
     doc.put("watch_style", cfg.watch_style.into(), cfg.watch_style == def.watch_style);
     doc.put("record_turn_history", cfg.record_turn_history.into(), cfg.record_turn_history == def.record_turn_history);
     // Three one-run sources reach this key and `put` skips all three the same way:
@@ -3090,6 +3108,7 @@ use_defaults = false
             record_turn_history: false,
             hint_skip_screen_warning: true,
             guidance: true,
+            guidance_probe: true,
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,

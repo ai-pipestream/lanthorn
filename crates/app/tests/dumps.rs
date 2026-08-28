@@ -21,6 +21,9 @@ mod assist_voice;
 mod vocabulary_offer;
 #[path = "suites/story_word_scrape.rs"]
 mod story_word_scrape;
+
+#[path = "suites/vocabulary_vetting.rs"]
+mod vocabulary_vetting;
 #[path = "suites/cell_dump_command.rs"]
 mod cell_dump_command;
 #[path = "suites/font_check.rs"]

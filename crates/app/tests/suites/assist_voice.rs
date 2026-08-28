@@ -218,6 +218,49 @@ fn the_caution_tone_is_styled_apart_from_the_ordinary_light() {
     assert!(help.fg.is_some() && caution.fg.is_some());
 }
 
+/// **The wording of the vocabulary offer, pinned against the register's own
+/// rules** (SQ-1041's opening, SQ-1121's).
+///
+/// Two openings, because they make two different claims and only one of them is
+/// earned by anything: naming the dictionary is a fact, recommending a command
+/// is a recommendation. Both are checked here rather than in `vocab.rs`, because
+/// what a helper may SAY is this module's rule and the next feature will copy
+/// whichever line it finds.
+///
+/// Falsify by restoring "you may want to try one of these" — the second-person
+/// check fails on `you`, and the one-item reading fails on `one of these`.
+#[test]
+fn both_openings_of_the_offer_obey_the_register() {
+    use app::vocab::{LEAD_DICTIONARY, LEAD_VETTED};
+    for lead in [LEAD_DICTIONARY, LEAD_VETTED] {
+        assert!(!lead.starts_with('['), "the parser's brackets: {lead:?}");
+        let words: Vec<&str> = lead.split_whitespace().collect();
+        assert!(
+            !words.iter().any(|w| ["you", "your", "you're", "yours"].contains(&w.to_lowercase().as_str())),
+            "the story owns the second person: {lead:?}"
+        );
+        // One line, on a pane that may be forty columns wide, with room left for
+        // the words it introduces.
+        assert!(lead.chars().count() <= 20, "the opening crowds the answer: {lead:?}");
+        assert!(lead.ends_with(' '), "the opening runs straight into the list: {lead:?}");
+    }
+    assert_ne!(LEAD_DICTIONARY, LEAD_VETTED, "one claim cannot serve for both");
+
+    // Each reads at ONE suggestion and at four — which is what rules out "try
+    // one of these", since Zork I offers exactly one for `illuminate`.
+    let mut s = AppState::default();
+    s.assist_preamble_shown = true;
+    for lead in [LEAD_DICTIONARY, LEAD_VETTED] {
+        for list in ["light", "light · turn on · burn"] {
+            let line = format!("{lead}{list}");
+            s.push_assist(&Assist::help(line.clone()));
+            assert_eq!(s.transcript.last().unwrap(), &line);
+            assert_eq!(Assist::help(line.clone()).lines().len(), 1, "{line:?} wrapped");
+        }
+    }
+    assert!(kinds_of(&s).iter().all(|k| *k == TranscriptKind::Assist));
+}
+
 // ── The guard ────────────────────────────────────────────────────────────────
 
 fn app_sources() -> Vec<(String, String)> {

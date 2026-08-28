@@ -88,6 +88,37 @@
 //! With nothing that passes, we say nothing. That is still the common answer:
 //! meaning is the source most able to find *something*, so it is held to exact
 //! lookups, to the opening word, and to verbs the story itself holds.
+//!
+//! # And then it TRIES them, before you see them (SQ-1121)
+//!
+//! Everything above establishes that the story's dictionary holds a word. That
+//! guarantee is real and weak: `light` being a word does not mean `light lamp`
+//! does anything *here*. So each surviving candidate is typed into a silent,
+//! disposable copy of this very game — [`crate::probe`] — from exactly where the
+//! player is standing, and only the ones that did something are shown. Zork I at
+//! the front door says nothing for `illuminate lamp`; five rooms later, with the
+//! lantern in sight, it says `try instead — light`.
+//!
+//! That is what earns the wording. `this story knows` is a fact about a table;
+//! `try instead` is a recommendation, and would make this feature's own failure
+//! worse if it were made without evidence. With the probe off, unavailable, or
+//! too slow for the story, the line drops back to the fact.
+//!
+//! Two consequences that were decided rather than discovered:
+//!
+//! * **Silence now carries information** — "that would not have worked". The
+//!   leak is mild and deliberate: it narrows candidates the player already
+//!   provoked by typing something, so they learn nothing about an action they
+//!   did not reach for. Contrast the command band's VERB column (SQ-1111), which
+//!   is NOT vetted and must not be: a list quietly filtered to what works here
+//!   and now is very close to solving the room, which is the hints' job, and the
+//!   hints wait to be asked. The two paths deliberately share no filter.
+//! * **A vet is evidence, not a guarantee.** A game drawing on randomness can
+//!   answer the shadow and the live session differently, and a refusal the
+//!   probe's controls never provoke — Inform's "That's not something you can
+//!   open." — reads as a success and survives. The offer is still an offer: the
+//!   command goes to the game untouched and a wrong suggestion costs a
+//!   keystroke.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -216,6 +247,18 @@ impl StoryVocabulary {
     /// Every verb, in grammar-table order.
     pub fn verbs(&self) -> &[Verb] {
         &self.verbs
+    }
+
+    /// Every dictionary word the story marks as a thing rather than an action,
+    /// in dictionary order. Used to build a control command a probe can be sure
+    /// of (SQ-1121) — a real noun the parser will reach for and fail to find.
+    pub fn nouns(&self) -> impl Iterator<Item = &str> {
+        self.words
+            .iter()
+            .filter(|(w, r)| {
+                (r.noun || r.adjective) && !self.by_word.contains_key(*w) && !self.is_preposition(w)
+            })
+            .map(|(w, _)| w.as_str())
     }
 
     /// True if the grammar writes this word literally into some line.
@@ -662,13 +705,31 @@ impl VocabState {
         self.story.as_ref()
     }
 
-    /// True the first time `word` is answered, false ever after.
-    fn first_time(&mut self, word: &str) -> bool {
-        self.offered.insert(word.to_string())
+    /// The story's vocabulary and the words already answered, in ONE borrow.
+    ///
+    /// Both are needed to decide whether to speak, and the story is borrowed out
+    /// of the same value the set lives in — so asking for them separately is a
+    /// borrow error rather than a design choice (SQ-1121).
+    fn story_and_answered(
+        &mut self,
+        engine: &dyn Engine,
+    ) -> Option<(&StoryVocabulary, &BTreeSet<String>)> {
+        self.get(engine)?;
+        Some((self.story.as_ref()?, &self.offered))
+    }
+
+    /// Record `word` as answered, so the twentieth `lanturn` is silent.
+    ///
+    /// Split from the ASKING half (SQ-1121), which
+    /// [`story_and_answered`](Self::story_and_answered) serves, because the two
+    /// no longer happen together: the question is asked before a shadow is
+    /// woken, and the answer is recorded only if a line was actually shown.
+    fn mark_offered(&mut self, word: &str) {
+        self.offered.insert(word.to_string());
     }
 }
 
-// ── The turn hook ───────────────────────────────────────────────────────────
+// ── Reading the command ─────────────────────────────────────────────────────
 
 /// Split a typed command the way a parser would: words, lowercased, with the
 /// punctuation a player sprinkles on stripped off.
@@ -681,6 +742,160 @@ fn words_of(cmd: &str) -> Vec<String> {
         .collect()
 }
 
+// ── The vetting, and the claim it earns ─────────────────────────────────────
+
+/// What the light says about words it has only LOOKED UP: this story's
+/// dictionary holds them, and nothing more is claimed.
+pub const LEAD_DICTIONARY: &str = "this story knows — ";
+
+/// What it says about words it has watched WORK, in a copy of this game, from
+/// where the player is standing (SQ-1121).
+///
+/// A recommendation rather than a fact, so it is only ever used for an offer
+/// that came back through [`crate::probe`]. `try instead`, not "you may want to
+/// try": the story owns the second person (see [`crate::assist`]), and the
+/// imperative reads at one suggestion as well as at four.
+pub const LEAD_VETTED: &str = "try instead — ";
+
+/// The nonsense a shadow types so this story will show how it says no.
+///
+/// Six characters, so a Version 3 dictionary's truncation cannot land it on a
+/// real word by accident, and three of them so a story that happens to hold one
+/// still has a spare.
+const NONSENSE: [&str; 3] = ["zqxwvj", "vprkxz", "jwqzbf"];
+
+/// Two dictionary nouns that are probably not here, for the control commands —
+/// see [`crate::probe`] for what a pair of them is worth and why one is worth
+/// nothing.
+///
+/// "Probably" is doing real work: nothing in a story file says what is in scope.
+/// A noun is disqualified if any object the player can currently SEE is named
+/// after it, and again if the story has printed it lately — an object it just
+/// described is very likely still here. That is a guess, which is exactly why
+/// the probe believes a pair only when both answer identically.
+fn absent_nouns(v: &StoryVocabulary, engine: &dyn Engine, prose: &[String], avoid: &[String]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    if let Some(intro) = engine.introspect() {
+        let player = intro.player_object();
+        if let Some(room) = engine.current_location().map(|l| l.number) {
+            seen.extend(intro.room_objects_excluding(room, player));
+        }
+        if let Some(p) = player {
+            seen.extend(intro.contents(p));
+        }
+    }
+    // The tail of the transcript, which is what the player can see on screen and
+    // therefore roughly what is around them.
+    seen.extend(prose.iter().rev().take(PROSE_LOOKBACK).cloned());
+    let seen: Vec<String> = seen.iter().map(|s| s.to_lowercase()).collect();
+
+    v.nouns()
+        .filter(|w| w.chars().count() >= 3)
+        .filter(|w| !avoid.iter().any(|a| a == w))
+        .filter(|w| {
+            let lower = w.to_lowercase();
+            !seen.iter().any(|name| name.contains(&lower))
+        })
+        .take(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// How many transcript lines back count as "what the player can see".
+const PROSE_LOOKBACK: usize = 40;
+
+/// Try each offered word where the player would have typed it, in a silent
+/// throwaway copy of the game, and keep only the ones that did something.
+///
+/// `None` means **no vetting happened** — unarmed, budget spent, or this story
+/// showed nothing believable about how it refuses. That is not "everything
+/// failed": the caller falls back to the modest claim it can still support.
+/// `Some(vec![])` means the vetting ran and nothing survived it, and then the
+/// light says nothing at all.
+///
+/// Every control runs in the SAME `run` as the question it judges, from the same
+/// snapshot and therefore the same room. See [`crate::probe`]'s module docs for
+/// why a signature learned once a session is a signature of the wrong room.
+fn vetted(
+    probe: &mut crate::probe::ShadowProbe,
+    engine: &dyn Engine,
+    v: &StoryVocabulary,
+    prose: &[String],
+    words: &[String],
+    at: usize,
+    picks: &[String],
+) -> Option<Vec<String>> {
+    if !probe.is_armed() || picks.is_empty() {
+        return None;
+    }
+    let knows = |w: &str| engine.knows_word(w).unwrap_or_else(|| v.knows(w));
+    let nonsense = NONSENSE.iter().find(|w| !knows(w))?.to_string();
+    let absent = absent_nouns(v, engine, prose, words);
+    let [absent_a, absent_b] = absent.as_slice() else { return None };
+
+    // Which word of the command the controls swap out. The player's substituted
+    // word when it is a NOUN; the command's last word when they substituted the
+    // VERB, so the control keeps the sentence's shape and only loses its object.
+    let noun_slot = if at > 0 { Some(at) } else { words.len().checked_sub(1).filter(|&i| i > 0) };
+
+    let mut cmds: Vec<String> = vec![nonsense];
+    let mut plan: Vec<(usize, Option<(usize, usize)>)> = Vec::new();
+    let mut controls: BTreeMap<String, usize> = BTreeMap::new();
+    for pick in picks {
+        let mut w = words.to_vec();
+        w[at] = pick.clone();
+        let candidate = w.join(" ");
+        let pair = noun_slot.map(|slot| {
+            let mut idx = [0usize; 2];
+            for (k, noun) in [absent_a, absent_b].into_iter().enumerate() {
+                let mut c = w.clone();
+                c[slot] = noun.clone();
+                let text = c.join(" ");
+                idx[k] = *controls.entry(text.clone()).or_insert_with(|| {
+                    cmds.push(text);
+                    cmds.len() - 1
+                });
+            }
+            (idx[0], idx[1])
+        });
+        cmds.push(candidate);
+        plan.push((cmds.len() - 1, pair));
+    }
+    if cmds.len() > crate::probe::MAX_PROBES {
+        return None;
+    }
+
+    let run = probe.run(engine, &cmds)?;
+    // A budget that ran out mid-list would leave the tail unjudged, and a
+    // partly-vetted offer cannot make the vetted claim.
+    if run.steps.len() != cmds.len() {
+        return None;
+    }
+    // The unknown word is the one control every story answers, so if even that
+    // taught nothing there is no signature to judge against.
+    let base = run.refusal_from(0);
+    if base.is_empty() {
+        return None;
+    }
+
+    Some(
+        picks
+            .iter()
+            .zip(&plan)
+            .filter(|(_, (cand, pair))| {
+                let mut refusals = base.clone();
+                if let Some((a, b)) = *pair {
+                    refusals.merge(run.refusal_from_pair(a, b));
+                }
+                run.did_something(*cand, &refusals)
+            })
+            .map(|(p, _)| p.clone())
+            .collect(),
+    )
+}
+
+// ── The turn hook ───────────────────────────────────────────────────────────
+
 /// Offer the story's own vocabulary, if there is anything worth offering, for a
 /// command holding exactly one word the story's dictionary does not have.
 ///
@@ -688,6 +903,13 @@ fn words_of(cmd: &str) -> Vec<String> {
 /// the transcript, so the offer reads underneath the refusal it answers.
 /// `printed` says whether the turn produced any output at all: a turn that
 /// printed nothing rejected nothing.
+///
+/// With `guidance_probe` on, every candidate is then tried in a silent copy of
+/// the game (SQ-1121) and only the ones that did something are shown — which is
+/// what lets the line say `try instead` rather than `this story knows`. The
+/// count can now shrink to nothing for that second reason, and then nothing is
+/// said and the word is NOT recorded as answered: the lamp may be in the next
+/// room, and the same suggestion may be right there.
 pub fn offer_vocabulary(state: &mut AppState, engine: &dyn Engine, cmd: &str, printed: bool) {
     // Asked HERE as well as at `push_assist`'s door, and only as an early exit:
     // with the light off there is no reason to read a story's grammar tables, and
@@ -706,9 +928,11 @@ pub fn offer_vocabulary(state: &mut AppState, engine: &dyn Engine, cmd: &str, pr
     // several turns later.
     let prose = std::mem::take(&mut state.transcript);
     let mut vocab = std::mem::take(&mut state.vocab);
+    let mut probe = std::mem::take(&mut state.probe);
+    let may_probe = state.config.guidance_probe;
     let offer = (|| {
         let prose = &prose;
-        let v = vocab.get(engine)?;
+        let (v, answered) = vocab.story_and_answered(engine)?;
         let knows = |w: &str| engine.knows_word(w).unwrap_or_else(|| v.knows(w));
         // EXACTLY one word wrong. Two is a sentence about things this story has
         // never heard of, or a name typed at a prompt — and speaking into a name
@@ -729,13 +953,35 @@ pub fn offer_vocabulary(state: &mut AppState, engine: &dyn Engine, cmd: &str, pr
         if picks.is_empty() {
             return None;
         }
-        vocab.first_time(word).then(|| picks.join(" · "))
+        // The vetting runs while the story's tables are still in hand; `vocab`
+        // is needed back afterwards to record the answer, which is why the
+        // one-per-session question is asked first — a word already answered is
+        // not worth a single silent turn, let alone nine.
+        if answered.contains(word) {
+            return None;
+        }
+        let vet = may_probe
+            .then(|| vetted(&mut probe, engine, v, prose, &words, at, &picks))
+            .flatten();
+        let (picks, lead) = match vet {
+            Some(kept) => (kept, LEAD_VETTED),
+            None => (picks, LEAD_DICTIONARY),
+        };
+        // Vetting can empty the list, and then there is nothing to recommend.
+        // Deliberately WITHOUT recording the word: the offer failed here, not
+        // everywhere, and the player may walk into the room where it works.
+        if picks.is_empty() {
+            return None;
+        }
+        vocab.mark_offered(word);
+        Some(format!("{lead}{}", picks.join(" · ")))
     })();
     state.vocab = vocab;
+    state.probe = probe;
     state.transcript = prose;
 
-    if let Some(list) = offer {
-        state.push_assist(&crate::assist::Assist::help(format!("this story knows — {list}")));
+    if let Some(line) = offer {
+        state.push_assist(&crate::assist::Assist::help(line));
     }
 }
 
