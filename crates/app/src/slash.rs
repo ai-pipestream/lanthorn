@@ -110,21 +110,19 @@ pub enum SlashOutcome {
     /// Toggle debug-trace sections: `None` shows current state; `Some(list)` sets
     /// the active set (comma list of screen,map,hostio / all / none). (trace feature)
     Trace(Option<String>),
-    /// Switch the v6 render mode live for this session (`Some`) or cycle to the
-    /// next mode (`None` = bare). Session-only — the config screen persists.
-    /// Handled in `slash_dispatch` (mutates `state.config.v6_render`).
-    SetV6Render(Option<crate::config::V6RenderMode>),
+    /// Switch this game's v6 render mode (SQ-1123). Applies live and is persisted
+    /// in the per-game `config.toml` sidecar, never the global one. Handled in
+    /// `slash_dispatch` (mutates `state.config.v6_render`).
+    SetV6Render(V6RenderArg),
     /// Set this game's v6 pixel-lock preference (SQ-0945). Applies live —
     /// `state.config.v6_pixel_lock` is read afresh every frame — and is persisted
     /// in the per-game `config.toml` sidecar, never the global one. Handled in
     /// `slash_dispatch`.
     SetV6PixelLock(V6PixelLockArg),
-    /// Switch Lanthorn's Guiding Light on or off for this session (`Some`), or
-    /// flip whatever is in force (`None` = bare), SQ-1045. Session-only, the way
-    /// [`SlashOutcome::SetV6Render`] is — the settings screen is the persistence
-    /// path, and the introduction line points there. Handled in `slash_dispatch`
-    /// (mutates `state.config.guidance`).
-    SetGuidance(Option<bool>),
+    /// Switch Lanthorn's Guiding Light for this game (SQ-1045, SQ-1123). Applies
+    /// live and is persisted in the per-game `config.toml` sidecar, never the
+    /// global one. Handled in `slash_dispatch` (mutates `state.config.guidance`).
+    SetGuidance(GuidanceArg),
     /// Re-run the first-run font check (SQ-1104): the two-row comparison that
     /// asks whether this terminal's font draws the Nerd Font icon glyphs. Opens
     /// the modal; the answer writes preset names into `style.toml` and reloads
@@ -152,6 +150,42 @@ pub enum V6PixelLockArg {
     Auto,
     /// Flip whatever is in force, and persist the result for this game.
     Toggle,
+}
+
+// ── GuidanceArg / V6RenderArg ─────────────────────────────────────────────────
+
+/// Argument for `set-guidance`. The same four states [`V6PixelLockArg`] carries,
+/// and for the same reason: the bare form flips the LIVE value, which is not the
+/// same request as `Auto` — clearing this game's override so the global setting
+/// decides again (SQ-1123).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuidanceArg {
+    /// Light it for this game.
+    On,
+    /// Put it out for this game.
+    Off,
+    /// Clear the per-game override: inherit the global `guidance`.
+    Auto,
+    /// Flip whatever is in force, and persist the result for this game.
+    Toggle,
+}
+
+/// Argument for `set-v6-render`. Three concrete modes, a bare CYCLE through
+/// them, and `Auto` — which clears this game's override so the global
+/// `v6_render` decides again (SQ-1123).
+///
+/// A cycle cannot walk through `Auto`: "inherit" has no glyph of its own and
+/// would be indistinguishable on screen from whichever mode it resolved to, so
+/// the border control reaches every concrete mode and the COMMAND is how you get
+/// back to inheriting. That split is uniform across all four persisted controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6RenderArg {
+    /// Use exactly this mode for this game.
+    Mode(crate::config::V6RenderMode),
+    /// Step to the next mode (hybrid → raster → extended → hybrid).
+    Cycle,
+    /// Clear the per-game override: inherit the global `v6_render`.
+    Auto,
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -256,7 +290,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "open-history", description: "open the rewind/replay history",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenHistory) },
     CommandSpec { name: "open-command-band", category: Category::Game, context: Context::Global,
-        usage: "open-command-band", description: "open the command band",
+        usage: "open-command-band", description: "open or close the command band; persisted per-game",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenCommandBand) },
     CommandSpec { name: "toggle-timed-input", category: Category::Game, context: Context::Global,
         usage: "toggle-timed-input", description: "toggle honoring the game's timed-input timers",
@@ -405,7 +439,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         dispatch: |_| SlashOutcome::Action(crate::input::Action::TogglePortalLabels) },
     // ── View ──────────────────────────────────────────────────────────────
     CommandSpec { name: "toggle-map", category: Category::View, context: Context::Global,
-        usage: "toggle-map", description: "show or hide the map panel",
+        usage: "toggle-map", description: "show or hide the map panel; persisted per-game",
         dispatch: |_a| SlashOutcome::Action(crate::input::Action::ToggleMap) },
     CommandSpec { name: "toggle-focus", category: Category::View, context: Context::Global,
         usage: "toggle-focus", description: "switch focus between panes",
@@ -461,15 +495,16 @@ pub static COMMANDS: &[CommandSpec] = &[
             _ => err("set-game-colours requires an argument: on | off | auto"),
         } },
     CommandSpec { name: "set-v6-render", category: Category::Style, context: Context::Global,
-        usage: "set-v6-render [hybrid|raster|extended]", description: "switch the v6 render mode live — bare cycles hybrid → raster → extended; session-only (the settings screen persists)",
+        usage: "set-v6-render [hybrid|raster|extended|auto]", description: "switch this game's v6 render mode — bare cycles hybrid → raster → extended, auto inherits the global setting; persisted per-game",
         dispatch: |a| {
             use crate::config::V6RenderMode;
             match a.first().copied() {
-                None => SlashOutcome::SetV6Render(None),
-                Some("hybrid")    => SlashOutcome::SetV6Render(Some(V6RenderMode::Hybrid)),
-                Some("raster")    => SlashOutcome::SetV6Render(Some(V6RenderMode::Raster)),
-                Some("extended")  => SlashOutcome::SetV6Render(Some(V6RenderMode::Extended)),
-                Some(s) => err(format!("set-v6-render: unknown mode '{s}' (hybrid | raster | extended, or bare to cycle)")),
+                None => SlashOutcome::SetV6Render(V6RenderArg::Cycle),
+                Some("hybrid")    => SlashOutcome::SetV6Render(V6RenderArg::Mode(V6RenderMode::Hybrid)),
+                Some("raster")    => SlashOutcome::SetV6Render(V6RenderArg::Mode(V6RenderMode::Raster)),
+                Some("extended")  => SlashOutcome::SetV6Render(V6RenderArg::Mode(V6RenderMode::Extended)),
+                Some("auto")      => SlashOutcome::SetV6Render(V6RenderArg::Auto),
+                Some(s) => err(format!("set-v6-render: unknown mode '{s}' (hybrid | raster | extended | auto, or bare to cycle)")),
             }
         } },
     CommandSpec { name: "set-v6-pixel-lock", category: Category::Style, context: Context::Global,
@@ -482,12 +517,13 @@ pub static COMMANDS: &[CommandSpec] = &[
             Some(s) => err(format!("set-v6-pixel-lock: unknown argument '{s}' (on | off | auto, or bare to toggle)")),
         } },
     CommandSpec { name: "set-guidance", category: Category::Style, context: Context::Global,
-        usage: "set-guidance [on|off]", description: "Lanthorn's Guiding Light: help while you play, marked in the margin — bare toggles; session-only (the settings screen persists)",
+        usage: "set-guidance [on|off|auto]", description: "Lanthorn's Guiding Light: help while you play, marked in the margin — bare toggles, auto inherits the global setting; persisted per-game",
         dispatch: |a| match a.first().copied() {
-            None        => SlashOutcome::SetGuidance(None),
-            Some("on")  => SlashOutcome::SetGuidance(Some(true)),
-            Some("off") => SlashOutcome::SetGuidance(Some(false)),
-            Some(s) => err(format!("set-guidance: unknown argument '{s}' (on | off, or bare to toggle)")),
+            None         => SlashOutcome::SetGuidance(GuidanceArg::Toggle),
+            Some("on")   => SlashOutcome::SetGuidance(GuidanceArg::On),
+            Some("off")  => SlashOutcome::SetGuidance(GuidanceArg::Off),
+            Some("auto") => SlashOutcome::SetGuidance(GuidanceArg::Auto),
+            Some(s) => err(format!("set-guidance: unknown argument '{s}' (on | off | auto, or bare to toggle)")),
         } },
     CommandSpec { name: "run-font-check", category: Category::Style, context: Context::Global,
         usage: "run-font-check", description: "ask which of two glyph rows your terminal's font draws properly, and set the map's arrow, portal and Guiding Light icons from the answer (writes style.toml)",
@@ -1154,13 +1190,14 @@ mod tests {
     #[test]
     fn set_v6_render_parses_modes_and_bare_cycles() {
         use crate::config::V6RenderMode;
-        assert!(matches!(parse("set-v6-render hybrid", '/'), SlashOutcome::SetV6Render(Some(V6RenderMode::Hybrid))));
-        assert!(matches!(parse("set-v6-render raster", '/'), SlashOutcome::SetV6Render(Some(V6RenderMode::Raster))));
-        assert!(matches!(parse("set-v6-render extended", '/'), SlashOutcome::SetV6Render(Some(V6RenderMode::Extended))));
+        assert!(matches!(parse("set-v6-render hybrid", '/'), SlashOutcome::SetV6Render(V6RenderArg::Mode(V6RenderMode::Hybrid))));
+        assert!(matches!(parse("set-v6-render raster", '/'), SlashOutcome::SetV6Render(V6RenderArg::Mode(V6RenderMode::Raster))));
+        assert!(matches!(parse("set-v6-render extended", '/'), SlashOutcome::SetV6Render(V6RenderArg::Mode(V6RenderMode::Extended))));
         // SQ-0895 removed `frameless`; it must now be rejected like any other
         // unknown token rather than silently parsing to a mode.
         assert!(matches!(parse("set-v6-render frameless", '/'), SlashOutcome::Error(_)));
-        assert!(matches!(parse("set-v6-render", '/'), SlashOutcome::SetV6Render(None)));
+        assert!(matches!(parse("set-v6-render", '/'), SlashOutcome::SetV6Render(V6RenderArg::Cycle)));
+        assert!(matches!(parse("set-v6-render auto", '/'), SlashOutcome::SetV6Render(V6RenderArg::Auto)));
         assert!(matches!(parse("set-v6-render sepia", '/'), SlashOutcome::Error(_)));
         assert_eq!(find_command("set-v6-render").expect("set-v6-render").category, Category::Style);
     }
@@ -1178,9 +1215,10 @@ mod tests {
         // SQ-1045: on/off, bare toggles, anything else is an error rather than a
         // silent no-op — the same shape, one state shorter (there is no `auto`:
         // guidance is one global setting with nothing per-game to inherit from).
-        assert!(matches!(parse("set-guidance on", '/'), SlashOutcome::SetGuidance(Some(true))));
-        assert!(matches!(parse("set-guidance off", '/'), SlashOutcome::SetGuidance(Some(false))));
-        assert!(matches!(parse("set-guidance", '/'), SlashOutcome::SetGuidance(None)));
+        assert!(matches!(parse("set-guidance on", '/'), SlashOutcome::SetGuidance(GuidanceArg::On)));
+        assert!(matches!(parse("set-guidance off", '/'), SlashOutcome::SetGuidance(GuidanceArg::Off)));
+        assert!(matches!(parse("set-guidance", '/'), SlashOutcome::SetGuidance(GuidanceArg::Toggle)));
+        assert!(matches!(parse("set-guidance auto", '/'), SlashOutcome::SetGuidance(GuidanceArg::Auto)));
         assert!(matches!(parse("set-guidance maybe", '/'), SlashOutcome::Error(_)));
         assert_eq!(find_command("set-guidance").expect("set-guidance").category, Category::Style);
         // SQ-1104: no arguments at all — the dialog is the question, so anything

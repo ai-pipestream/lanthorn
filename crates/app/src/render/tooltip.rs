@@ -13,19 +13,20 @@ use super::draw_str_clipped;
 use super::paneframe::{draw_pane_frame, BorderStyle, PaneGlyphs};
 use crate::theme::resolve::Theme;
 
-/// Draw `lines` as a floating box anchored at `(col, row)`.
+/// Which side of the anchor a tip prefers to sit on (SQ-1123).
 ///
-/// **Placement.** The preferred spot is one row BELOW the anchor and starting at
-/// its column, so the box never covers the cell the pointer is on — the thing
-/// the reader is asking about stays visible while its explanation appears.
-///
-/// **Edges.** The box is clamped inside `area`: it slides LEFT when it would
-/// overrun the right edge, and FLIPS to sit above the anchor when it would
-/// overrun the bottom; then both origins are clamped up to `area`'s own. A box
-/// that cannot fit in `area` at all is skipped rather than drawn partially, so
-/// this never panics on a small pane.
-///
-/// Returns the rect painted, or `None` when nothing was drawn.
+/// The preference is about which way is INTO the thing the anchor sits on: a
+/// control in a pane's top border wants its hint to drop into the pane, and one
+/// in the bottom border wants it to rise into the pane. Either way the box never
+/// covers the cell being pointed at, and either way it flips to the other side
+/// when the preferred one would run off `area`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TipSide {
+    Below,
+    Above,
+}
+
+/// [`draw_tip_on`] with the default preference: one row BELOW the anchor.
 pub fn draw_tip(
     buf: &mut Buffer,
     area: Rect,
@@ -33,6 +34,31 @@ pub fn draw_tip(
     row: u16,
     lines: &[String],
     theme: &Theme,
+) -> Option<Rect> {
+    draw_tip_on(buf, area, col, row, lines, theme, TipSide::Below)
+}
+
+/// Draw `lines` as a floating box anchored at `(col, row)`, on `side` of it.
+///
+/// **Placement.** One row off the anchor on the preferred side, starting at its
+/// column, so the box never covers the cell the pointer is on — the thing the
+/// reader is asking about stays visible while its explanation appears.
+///
+/// **Edges.** The box is clamped inside `area`: it slides LEFT when it would
+/// overrun the right edge, and FLIPS to the other side of the anchor when the
+/// preferred side would overrun; then every origin is clamped back inside
+/// `area`. A box that cannot fit in `area` at all is skipped rather than drawn
+/// partially, so this never panics on a small pane.
+///
+/// Returns the rect painted, or `None` when nothing was drawn.
+pub fn draw_tip_on(
+    buf: &mut Buffer,
+    area: Rect,
+    col: u16,
+    row: u16,
+    lines: &[String],
+    theme: &Theme,
+    side: TipSide,
 ) -> Option<Rect> {
     let inner = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
     let n = lines.len() as u16;
@@ -56,15 +82,26 @@ pub fn draw_tip(
     }
 
     let mut x = col;
-    let mut y = row + 1;
     if x + w > area.right() {
         x = area.right().saturating_sub(w);
     }
-    if y + h > area.bottom() {
-        y = row.saturating_sub(h);
+    let mut y = match side {
+        TipSide::Below => row + 1,
+        TipSide::Above => row.saturating_sub(h),
+    };
+    // Flip when the preferred side would run off that edge of `area`.
+    match side {
+        TipSide::Below if y + h > area.bottom() => y = row.saturating_sub(h),
+        TipSide::Above if row < area.y + h => y = row + 1,
+        _ => {}
     }
     x = x.max(area.x);
     y = y.max(area.y);
+    // Both sides can be too tight in a very short `area`; the box stays whole and
+    // inside rather than hanging out of the bottom.
+    if y + h > area.bottom() {
+        y = area.bottom().saturating_sub(h).max(area.y);
+    }
 
     let box_rect = Rect::new(x, y, w, h);
     // Reset every cell the box covers before drawing: draw_char_clipped PATCHES

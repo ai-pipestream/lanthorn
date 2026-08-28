@@ -8,8 +8,8 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 
 use super::paneframe::{
-    draw_framed, draw_header_controls, draw_header_plain, draw_top_inset, header_controls_width,
-    BorderStyle, HeaderControl, InsetCaps, InsetSegment, PaneGlyphs, PaneSides,
+    draw_border_controls, draw_framed, draw_header_plain, draw_top_inset, header_controls_width,
+    BorderStyle, ControlPlacement, HeaderControl, InsetCaps, InsetSegment, PaneGlyphs, PaneSides,
 };
 use crate::theme::resolve::{Provenance, Theme};
 
@@ -78,17 +78,38 @@ pub fn draw_panel(buf: &mut Buffer, spec: &PanelSpec, theme: &Theme) -> PanelFra
     draw_panel_with_controls(buf, spec, &[], theme).0
 }
 
-/// [`draw_panel`], plus a cluster of clickable toggle controls right-aligned in
-/// the panel's top border row (SQ-1123).
+/// [`draw_panel`], plus the pane's clickable toggle controls, placed on its
+/// border by each one's [`ControlPlacement`] (SQ-1123).
 ///
-/// The cluster's columns are taken OUT of the header rect before the title strip
-/// is drawn, so a long title is centred in what is left and can never overwrite
-/// a control — the alternative, drawing the controls over the finished strip,
-/// silently eats the end of the title on a narrow pane. When the header is too
-/// narrow to hold the cluster at all, nothing is drawn and the title keeps the
-/// whole row.
+/// Three anchors, two border rows:
+///
+/// ```text
+///   ┌─ ZORK I ──────────────────────┤ ◧ □ ├─┐   top-right  (the v6 pair)
+///   │                                       │
+///   └──────────────┤ ▲ ○ ├─────────┤ ◀ ├────┘   bottom-centre, bottom-right
+/// ```
+///
+/// **Top-right** keeps the behaviour the first pass established: its columns come
+/// OUT of the header rect before the title strip is drawn, so a long title is
+/// centred in what is left and can never overwrite a control. When the story is
+/// not v6 that group is empty, so nothing is reserved at all and the title gets
+/// the whole row back — a real widening, not merely a shorter cluster.
+///
+/// **The two bottom groups share one row, and the anchored one is placed first.**
+/// The map toggle has a fixed home at the right-hand end; the centred pair's
+/// position is defined by the space left over, so the centred pair is what gives
+/// way when the pane narrows. Each group is drawn whole or not at all — a half
+/// cluster is unclickable chrome — and the centred pair is dropped as soon as it
+/// would come within one column of the map toggle.
+///
+/// Every cluster sits INSIDE the corners (`area.x + 1 ..= area.right() - 2`), so
+/// none of them lands on the story pane's right border column — which is where
+/// the vertical splitter is dragged.
 ///
 /// Returns the panel frame and one hit-rect per control, in the order given.
+/// A control whose group did not fit gets a zero-area rect: `control_at` rejects
+/// those, so it is unclickable, and the caller can still pair rects with ids by
+/// index.
 pub fn draw_panel_with_controls(
     buf: &mut Buffer,
     spec: &PanelSpec,
@@ -110,14 +131,37 @@ pub fn draw_panel_with_controls(
 
     let caps = resolve_inset_caps(theme, border_style);
 
-    let mut control_rects = Vec::new();
+    // One slot per input control, filled in as each group is drawn; a group that
+    // does not fit leaves its slots zero-area.
+    let mut control_rects = vec![Rect::default(); controls.len()];
     let mut tab_rects = Vec::new();
+
+    let group = |p: ControlPlacement| -> Vec<usize> {
+        controls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.placement == p)
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let place = |buf: &mut Buffer, row: Rect, x: u16, idx: &[usize], rects: &mut Vec<Rect>| {
+        let sub: Vec<HeaderControl> = idx
+            .iter()
+            .map(|&i| HeaderControl { glyph: controls[i].glyph, style: controls[i].style, placement: controls[i].placement })
+            .collect();
+        for (slot, rect) in idx.iter().zip(draw_border_controls(buf, row, x, &sub, &caps, color)) {
+            rects[*slot] = rect;
+        }
+    };
+
+    // ── Top border: the title strip, with the top-right group reserved out of it
+    let top = group(ControlPlacement::TopRight);
     if let Some(hrect) = framed.header {
         // The cluster's columns come out of the strip's FIRST, so an ordinary
         // title is centred in what is left and the two never meet. One blank
         // column is held back as well, so they never abut either.
-        let want = if framed.header_bordered && !controls.is_empty() {
-            header_controls_width(controls.len())
+        let want = if framed.header_bordered && !top.is_empty() {
+            header_controls_width(top.len())
         } else {
             0
         };
@@ -141,7 +185,35 @@ pub fn draw_panel_with_controls(
         // nobody could read anyway, instead of a control that is invisible and
         // still clickable.
         if draw_controls {
-            control_rects = draw_header_controls(buf, hrect, controls, &caps, color);
+            place(buf, hrect, hrect.right() - want, &top, &mut control_rects);
+        }
+    }
+
+    // ── Bottom border: the right-anchored group, then the centred one ─────────
+    let bottom_right = group(ControlPlacement::BottomRight);
+    let bottom_centre = group(ControlPlacement::BottomCentre);
+    let bottom_bordered = border_style != BorderStyle::None
+        && spec.area.height >= 2
+        && spec.area.width >= 3;
+    if bottom_bordered && !(bottom_right.is_empty() && bottom_centre.is_empty()) {
+        // The inset: the bottom border row between its two corners.
+        let inset =
+            Rect::new(spec.area.x + 1, spec.area.bottom() - 1, spec.area.width - 2, 1);
+        // The first column the anchored group owns, or the inset's end when it
+        // was dropped — either way, the limit the centred group must clear.
+        let mut limit = inset.right();
+        let want_r = header_controls_width(bottom_right.len());
+        if want_r > 0 && inset.width > want_r + 1 {
+            limit = inset.right() - want_r;
+            place(buf, inset, limit, &bottom_right, &mut control_rects);
+        }
+        let want_c = header_controls_width(bottom_centre.len());
+        if want_c > 0 && inset.width > want_c + 1 {
+            let x = inset.x + (inset.width - want_c) / 2;
+            // One clear column between the two groups, or the centred one goes.
+            if x + want_c < limit {
+                place(buf, inset, x, &bottom_centre, &mut control_rects);
+            }
         }
     }
 

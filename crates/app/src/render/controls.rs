@@ -4,11 +4,18 @@
 //! by slash command, key or the settings screen — nothing on screen said they
 //! existed, let alone whether they were on. A player who turned guidance on and
 //! saw nothing had every reason to conclude it was broken. These are the answer:
-//! a short cluster of icons at the right-hand end of the story pane's top
-//! border, each one saying what state it is in and switching that state when
-//! clicked.
+//! icons riding the story pane's own border, each one saying what state it is in
+//! and switching that state when clicked.
 //!
-//! Three rules shape everything here.
+//! Four rules shape everything here.
+//!
+//! **A control sits where the thing it governs is, or where it would appear.**
+//! The command band opens BELOW the story pane, so its toggle rides the bottom
+//! border; the map lives to the RIGHT, so its toggle takes the bottom border's
+//! right-hand end, nearest the pane it summons; guidance has no direction of its
+//! own and joins the band as the other thing you switch; and the two v6 controls
+//! govern how the story pane ITSELF is drawn, so they keep that pane's own top
+//! border. See [`ControlPlacement`].
 //!
 //! **A click runs the command.** Each control names an existing entry in
 //! `slash::COMMANDS` and the event loop puts that command string through the
@@ -16,22 +23,35 @@
 //! including whatever the command persists. There is no second implementation of
 //! any toggle beside the one the registry already owns.
 //!
-//! **The glyph carries the state, not just the colour.** The panel toggles are
-//! arrows pointing the way the panel would move (the map lives right of the
-//! story pane, the verb panel below it), the Guiding Light is filled when lit
-//! and hollow when not, and the two v6 controls draw a distinct glyph per mode.
-//! Colour then reinforces it — `panel.control:lit` is the `alert` role, the same
-//! yellow slot `transcript_assist` lights up in, so the light and its mark are
-//! one colour.
+//! **The state is carried TWICE: by the glyph and by the colour.** The panel
+//! toggles are arrows pointing the way the panel would move (the map lives right
+//! of the story pane, the verb panel below it), the Guiding Light is filled when
+//! lit and hollow when not, and the two v6 controls draw a distinct glyph per
+//! mode — and on top of that, **every control that is ON is lit yellow**,
+//! through `panel.control:lit`, which is the `alert` role and so the same slot
+//! `transcript_assist` lights up in. The doubling is deliberate: a player who
+//! cannot tell the two colours apart still has the shape, and the shape change
+//! is legible at a glance without reading the colour.
+//!
+//! The render mode is a three-way cycle rather than a switch, so "on" needs a
+//! reading: **`hybrid` is how the game arrives and is NOT lit; `raster` and
+//! `extended` both are**, because either is a choice the player made.
 //!
 //! **The v6 pair does not exist off v6.** They are absent from the cluster
 //! entirely rather than drawn disabled, so the border of a Zork I never shows a
-//! switch that would do nothing.
+//! switch that would do nothing — and since they are the only two controls on
+//! the top border, a non-v6 story has no top cluster at all and its title strip
+//! gets the whole row back.
+//!
+//! **What a click switches, it also remembers.** Every one of these writes the
+//! per-game `config.toml` sidecar, so a preference chosen for one story stays
+//! with that story and no other. That is the commands' behaviour, not a second
+//! implementation layered under the buttons: a click IS the command.
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::paneframe::HeaderControl;
+use super::paneframe::{ControlPlacement, HeaderControl};
 use crate::config::V6RenderMode;
 use crate::state::{AppState, Layout};
 
@@ -51,6 +71,19 @@ pub enum BorderControl {
 }
 
 impl BorderControl {
+    /// Which of the pane's three border clusters this control belongs to.
+    ///
+    /// The whole placement rule, in one match: the two panel toggles point at
+    /// panels that live below and to the right, and the two v6 switches act on
+    /// the story pane itself.
+    pub fn placement(self) -> ControlPlacement {
+        match self {
+            BorderControl::Map => ControlPlacement::BottomRight,
+            BorderControl::VerbPanel | BorderControl::Guidance => ControlPlacement::BottomCentre,
+            BorderControl::V6Render | BorderControl::V6PixelLock => ControlPlacement::TopRight,
+        }
+    }
+
     /// The `slash::COMMANDS` entry a click runs, bare (every one of them toggles
     /// or cycles when given no argument).
     pub fn command(self) -> &'static str {
@@ -78,19 +111,23 @@ pub struct ControlView {
 impl ControlView {
     /// The paint-only half, for `panel::draw_panel_with_controls`.
     pub fn as_header_control(&self) -> HeaderControl {
-        HeaderControl { glyph: self.glyph, style: self.style }
+        HeaderControl { glyph: self.glyph, style: self.style, placement: self.id.placement() }
     }
 }
 
-/// Resolve the theme selector for a control's state. `hover` wins over
-/// everything, so whatever the pointer is on always reads as reachable.
-fn style_for(state: &AppState, id: BorderControl, on: bool, lit: bool) -> Style {
+/// Resolve the theme selector for a control's state: lit when it is on, quiet
+/// when it is not, and `hover` over everything — so whatever the pointer is on
+/// always reads as reachable, on or off.
+///
+/// Two selectors, not three. There was a `panel.control:active` beside `:lit`
+/// while "on" and "lit" were different states; every on-state is lit now, so
+/// nothing could ever resolve to it, and a selector a themer can set and never
+/// see is worse than one that does not exist.
+fn style_for(state: &AppState, id: BorderControl, lit: bool) -> Style {
     let sel = if state.control_hover == Some(id) {
         "panel.control:hover"
     } else if lit {
         "panel.control:lit"
-    } else if on {
-        "panel.control:active"
     } else {
         "panel.control"
     };
@@ -111,7 +148,7 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
     out.push(ControlView {
         id: BorderControl::Map,
         glyph: if map_on { g.map_hide } else { g.map_show },
-        style: style_for(state, BorderControl::Map, map_on, false),
+        style: style_for(state, BorderControl::Map, map_on),
         hint: vec![
             if map_on { "Map: shown — click to hide" } else { "Map: hidden — click to show" }
                 .to_string(),
@@ -124,8 +161,7 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
     out.push(ControlView {
         id: BorderControl::Guidance,
         glyph: if guide_on { g.guidance_on } else { g.guidance_off },
-        // `lit`, not merely `active`: the Guiding Light gets the yellow slot.
-        style: style_for(state, BorderControl::Guidance, guide_on, guide_on),
+        style: style_for(state, BorderControl::Guidance, guide_on),
         hint: vec![
             if guide_on {
                 "Guiding Light: on — click to put it out"
@@ -142,7 +178,7 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
     out.push(ControlView {
         id: BorderControl::VerbPanel,
         glyph: if band_on { g.band_hide } else { g.band_show },
-        style: style_for(state, BorderControl::VerbPanel, band_on, false),
+        style: style_for(state, BorderControl::VerbPanel, band_on),
         hint: vec![
             if band_on {
                 "Verb panel: open — click to close"
@@ -168,12 +204,12 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
         id: BorderControl::V6Render,
         glyph: mode_glyph,
         // `hybrid` is how the game arrives, so it reads as the idle state and the
-        // other two as a choice the player made.
+        // other two as a choice the player made — which is what "on" means for a
+        // cycle, and so what is lit.
         style: style_for(
             state,
             BorderControl::V6Render,
             state.config.v6_render != V6RenderMode::Hybrid,
-            false,
         ),
         hint: vec![
             format!("Render: {mode_name} — click for {next}"),
@@ -186,7 +222,7 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
     out.push(ControlView {
         id: BorderControl::V6PixelLock,
         glyph: if lock_on { g.lock_on } else { g.lock_off },
-        style: style_for(state, BorderControl::V6PixelLock, lock_on, false),
+        style: style_for(state, BorderControl::V6PixelLock, lock_on),
         hint: vec![
             if lock_on {
                 "Pixel lock: on — click to unlock"
@@ -206,10 +242,12 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
 /// `hits` are this frame's control rects (the same ones a click resolves
 /// against, so hint and click can never disagree about what is under the
 /// pointer); `state.control_hover` is what the last `Moved` event resolved.
-/// The box hangs one row BELOW the control — the controls sit in a top border,
-/// so it drops into the pane and never covers the icon being pointed at — and
-/// `tooltip::draw_tip` slides it left of the right edge and flips it above the
-/// bottom one. It paints and nothing else: no focus, no keyboard, no event.
+///
+/// The box goes INTO the pane, whichever border its control rides: down from the
+/// top one, up from the bottom one. It never covers the icon being pointed at,
+/// and `tooltip::draw_tip_on` slides it left of the right edge and flips it to
+/// the other side of the anchor rather than letting it run off. It paints and
+/// nothing else: no focus, no keyboard, no event.
 pub fn draw_control_hint(
     buf: &mut ratatui::buffer::Buffer,
     area: Rect,
@@ -225,8 +263,27 @@ pub fn draw_control_hint(
     }
     let id = state.control_hover?;
     let (_, rect) = hits.iter().find(|(i, _)| *i == id)?;
+    // A group the pane was too narrow to draw leaves a zero-area rect; there is
+    // no icon on screen to explain, so there is no hint either.
+    if rect.width == 0 || rect.height == 0 {
+        return None;
+    }
     let view = views.iter().find(|v| v.id == id)?;
-    super::tooltip::draw_tip(buf, area, rect.x, rect.y, &view.hint, &state.colors.theme)
+    let side = match id.placement() {
+        ControlPlacement::TopRight => super::tooltip::TipSide::Below,
+        ControlPlacement::BottomCentre | ControlPlacement::BottomRight => {
+            super::tooltip::TipSide::Above
+        }
+    };
+    super::tooltip::draw_tip_on(
+        buf,
+        area,
+        rect.x,
+        rect.y,
+        &view.hint,
+        &state.colors.theme,
+        side,
+    )
 }
 
 /// Resolve a pointer position against this frame's control rects.

@@ -2,9 +2,17 @@
 //!
 //! Guidance, the verb panel and the two v6 render switches had no presence on
 //! screen at all: a player who turned guidance on saw nothing and could only
-//! conclude it was broken. These assert the three things that closes the gap —
-//! the controls are THERE, they SHOW their state, and the v6-only pair appears
-//! only on a v6 story.
+//! conclude it was broken. These assert the four things that close the gap —
+//! the controls are THERE, they SHOW their state, the v6-only pair appears only
+//! on a v6 story, and each one sits where the thing it governs is.
+//!
+//! **The placement rule, because it is the part most likely to be undone by a
+//! later edit that means well.** A control rides the border nearest what it
+//! switches: the command band opens BELOW the story pane and the map lives to
+//! the RIGHT, so those toggles take the bottom border and its right-hand end;
+//! guidance has no direction of its own and joins the band; and the two v6
+//! switches govern how the story pane ITSELF is drawn, so they keep that pane's
+//! own top border. Off v6 there is no top cluster at all.
 //!
 //! Everything here renders into a buffer and reads cells back, because that is
 //! the only evidence about a screen that is worth anything.
@@ -42,7 +50,14 @@ fn draw(state: &AppState, w: u16, h: u16) -> (Buffer, Vec<(BorderControl, Rect)>
         &ctls,
         &state.colors.theme,
     );
-    let hits = views.iter().map(|v| v.id).zip(rects).collect();
+    // Exactly what `main::draw_story_panel` does: a group the pane was too narrow
+    // to hold leaves zero-area rects, and those are not on screen.
+    let hits = views
+        .iter()
+        .map(|v| v.id)
+        .zip(rects)
+        .filter(|(_, r)| r.width > 0 && r.height > 0)
+        .collect();
     (buf, hits)
 }
 
@@ -78,32 +93,69 @@ fn open_band(state: &mut AppState) {
 
 // ── The border, drawn ────────────────────────────────────────────────────────
 
-/// A non-v6 story gets three controls; a v6 story gets five. Both rows are
-/// printed so the shape is on the record and not merely asserted about.
+/// Where each control sits, printed. The bottom border carries the two switches
+/// centred and the map toggle at its right-hand end; the top border carries the
+/// v6 pair and, off v6, nothing at all.
 #[test]
-fn the_border_carries_three_controls_off_v6_and_five_on_it() {
+fn the_controls_ride_the_border_nearest_what_they_switch() {
     let plain = story(Some(3));
     let (buf, hits) = draw(&plain, 44, 6);
-    let plain_row = row(&buf, 0);
-    println!("z3   idle: {plain_row}");
+    let (top, bottom) = (row(&buf, 0), row(&buf, 5));
+    println!("z3 top:    {top}");
+    println!("z3 bottom: {bottom}");
     assert_eq!(hits.len(), 3, "off v6: map, guidance, verb panel");
-    assert!(plain_row.contains("┤◀ ○ ▲├"), "z3 border row: {plain_row:?}");
-    assert!(plain_row.contains("ZORK I"), "the title still fits: {plain_row:?}");
-    // The v6 pair is ABSENT, not disabled: none of its glyphs is anywhere.
-    for g in ['◧', '■', '▦', '▣', '□'] {
-        assert!(!plain_row.contains(g), "z3 must not draw {g:?}: {plain_row:?}");
+
+    // Bottom: `┤○ ▲├` centred, `┤◀├` anchored right, one corner clear of each.
+    assert!(bottom.contains("┤○ ▲├"), "the centred pair: {bottom:?}");
+    assert!(bottom.ends_with("┤◀├┘"), "the map toggle takes the right end: {bottom:?}");
+    // Off v6 the top border carries NO cluster — the two v6 switches are the only
+    // controls that ever live there — so nothing is reserved and the title strip
+    // is centred across the WHOLE row. (Which is a behaviour change of its own:
+    // the first pass reserved eleven columns on every story, v6 or not, and
+    // `render_overflow` clipped long titles against that. SQ-1127.)
+    assert!(top.contains("ZORK I"), "the title still fits: {top:?}");
+    for g in ['◀', '○', '▲', '◧', '□', '▶', '●', '▼', '■', '▣', '▦'] {
+        assert!(!top.contains(g), "z3 top border must carry no control, found {g:?}: {top:?}");
     }
+    let dashes = |t: &str, part: &str| t.split(part).map(|p| p.matches('─').count()).collect::<Vec<_>>();
+    let d = dashes(&top, "┤ ZORK I ├");
+    assert_eq!(d[0], d[1], "off v6 the title is centred across the whole row: {top:?}");
 
     let v6 = story(Some(6));
     let (buf, hits) = draw(&v6, 44, 6);
-    let v6_row = row(&buf, 0);
-    println!("z6   idle: {v6_row}");
+    let (top, bottom) = (row(&buf, 0), row(&buf, 5));
+    println!("z6 top:    {top}");
+    println!("z6 bottom: {bottom}");
     assert_eq!(hits.len(), 5, "on v6: the render mode and the pixel lock join");
-    assert!(v6_row.contains("┤◀ ○ ▲ ◧ □├"), "z6 border row: {v6_row:?}");
+    assert!(top.contains("┤◧ □├"), "the v6 pair keeps the top border: {top:?}");
+    // …and now that the cluster IS reserved, the title is centred in what is left
+    // of the row rather than in the row: fewer dashes on its left than its right.
+    let d = dashes(&top, "┤ ZORK I ├");
+    assert!(d[0] < d[1], "the v6 cluster's columns come out of the title's: {top:?}");
+    assert!(bottom.contains("┤○ ▲├"), "…and the bottom row is unchanged by it: {bottom:?}");
+    assert!(bottom.ends_with("┤◀├┘"), "{bottom:?}");
+}
+
+/// Nothing is ever drawn on the story pane's RIGHT border column, which is where
+/// the vertical splitter is dragged (`story.right() - 1`, two columns wide with
+/// the map pane's own left border). The map toggle is anchored one column inside
+/// it, against the corner.
+#[test]
+fn no_control_lands_on_the_splitters_column() {
+    let st = story(Some(6));
+    let (buf, hits) = draw(&st, 44, 20);
+    let right = buf.area.right() - 1;
+    for (id, r) in &hits {
+        assert!(r.right() <= right, "{id:?} at {r:?} reaches the splitter column {right}");
+    }
+    // …and the border column itself is still an unbroken run of frame.
+    for y in 1..19u16 {
+        assert_eq!(buf.cell((right, y)).unwrap().symbol(), "│", "row {y} of the right border");
+    }
 }
 
 /// Every control draws a DIFFERENT glyph in its other state — a control that
-/// looks the same on and off is half a control. Both rows are printed.
+/// looks the same on and off is half a control. Both borders are printed.
 #[test]
 fn every_control_changes_glyph_with_its_state() {
     let mut on = story(Some(6));
@@ -117,57 +169,81 @@ fn every_control_changes_glyph_with_its_state() {
 
     let (on_buf, _) = draw(&on, 44, 6);
     let (off_buf, _) = draw(&off, 44, 6);
-    let on_row = row(&on_buf, 0);
-    let off_row = row(&off_buf, 0);
-    println!("z6     on: {on_row}");
-    println!("z6    off: {off_row}");
+    for (tag, b) in [("on", &on_buf), ("off", &off_buf)] {
+        println!("z6 {tag:>3} top:    {}", row(b, 0));
+        println!("z6 {tag:>3} bottom: {}", row(b, 5));
+    }
 
     // Map shown → ▶ (click and it leaves to the right); hidden → ◀.
     // Guidance lit → ●, out → ○. Band open → ▼ (click and it drops), closed → ▲.
     // Raster → ■ / hybrid → ◧. Lock on → ▣ / off → □.
-    assert!(on_row.contains("┤▶ ● ▼ ■ ▣├"), "every-on row: {on_row:?}");
-    assert!(off_row.contains("┤◀ ○ ▲ ◧ □├"), "every-off row: {off_row:?}");
+    assert!(row(&on_buf, 5).contains("┤● ▼├"), "every-on bottom: {:?}", row(&on_buf, 5));
+    assert!(row(&on_buf, 5).ends_with("┤▶├┘"), "every-on bottom: {:?}", row(&on_buf, 5));
+    assert!(row(&on_buf, 0).contains("┤■ ▣├"), "every-on top: {:?}", row(&on_buf, 0));
+    assert!(row(&off_buf, 5).contains("┤○ ▲├"), "every-off bottom: {:?}", row(&off_buf, 5));
+    assert!(row(&off_buf, 5).ends_with("┤◀├┘"), "every-off bottom: {:?}", row(&off_buf, 5));
+    assert!(row(&off_buf, 0).contains("┤◧ □├"), "every-off top: {:?}", row(&off_buf, 0));
 
     // …and the third render mode is a third glyph, not a repeat of either.
     let mut ext = story(Some(6));
     ext.config.v6_render = app::config::V6RenderMode::Extended;
     let (ext_buf, _) = draw(&ext, 44, 6);
-    let ext_row = row(&ext_buf, 0);
-    println!("z6    ext: {ext_row}");
-    assert!(ext_row.contains("┤◀ ○ ▲ ▦ □├"), "extended row: {ext_row:?}");
+    println!("z6 ext top:    {}", row(&ext_buf, 0));
+    assert!(row(&ext_buf, 0).contains("┤▦ □├"), "extended top: {:?}", row(&ext_buf, 0));
 }
 
-/// The Guiding Light's control is YELLOW when lit, and it gets that yellow from
-/// the theme's `alert` role — the same slot `transcript_assist` uses — not from
-/// a hard-coded colour. Restyling the role must move the control with it.
+/// **Every control that is ON is lit yellow**, and it gets that yellow from the
+/// theme's `alert` role — the same slot `transcript_assist` uses — not from a
+/// hard-coded colour. Restyling the role must move all of them with it.
+///
+/// So the state is carried TWICE: by the glyph and by the colour. That is
+/// deliberate. A player who cannot tell the two colours apart still has the
+/// shape, and the shape change is legible at a glance without reading colour.
 #[test]
-fn a_lit_guidance_control_takes_the_alert_role() {
-    let mut st = story(Some(3));
-    st.config.guidance = true;
-    let (buf, hits) = draw(&st, 44, 6);
-    let (_, r) = hits.iter().find(|(id, _)| *id == BorderControl::Guidance).unwrap();
-    let lit = buf.cell((r.x, r.y)).unwrap();
-    assert_eq!(lit.symbol(), "●", "lit guidance draws the filled mark");
-    assert_eq!(
-        lit.fg,
-        st.colors.theme.get("alert").style.fg.unwrap(),
-        "a lit Guiding Light is the alert role's yellow, not a literal",
-    );
-    assert!(lit.modifier.contains(Modifier::BOLD), "…and bold, per panel.control:lit");
+fn every_on_state_is_lit_from_the_alert_role_and_every_off_state_is_muted() {
+    let alert = AppState::default().colors.theme.get("alert").style.fg.unwrap();
+    let muted = AppState::default().colors.theme.get("muted").style.fg.unwrap();
 
-    // Unlit it and the same cell falls back to the quiet `panel.control`.
-    st.config.guidance = false;
-    let (buf, _) = draw(&st, 44, 6);
-    let out = buf.cell((r.x, r.y)).unwrap();
-    assert_eq!(out.symbol(), "○");
-    assert_eq!(
-        out.fg,
-        st.colors.theme.get("muted").style.fg.unwrap(),
-        "an unlit control is muted",
-    );
+    let mut on = story(Some(6));
+    on.layout = Layout::Split;
+    on.config.guidance = true;
+    open_band(&mut on);
+    on.config.v6_render = app::config::V6RenderMode::Raster;
+    on.config.v6_pixel_lock = true;
+    let (buf, hits) = draw(&on, 44, 6);
+    println!("all on  top: {} / bottom: {}", row(&buf, 0), row(&buf, 5));
+    for (id, r) in &hits {
+        let cell = buf.cell((r.x, r.y)).unwrap();
+        assert_eq!(cell.fg, alert, "{id:?} is on and must be lit");
+        assert!(cell.modifier.contains(Modifier::BOLD), "{id:?}: panel.control:lit is bold");
+    }
+
+    // …and off, every one of them is the quiet `panel.control`.
+    let off = story(Some(6));
+    let (buf, hits) = draw(&off, 44, 6);
+    println!("all off top: {} / bottom: {}", row(&buf, 0), row(&buf, 5));
+    for (id, r) in &hits {
+        assert_eq!(buf.cell((r.x, r.y)).unwrap().fg, muted, "{id:?} is off and must be muted");
+    }
+
+    // The render mode is a CYCLE, not a switch, so "on" needs a reading: hybrid
+    // is how the game arrives and is not lit; the other two are choices the
+    // player made, and both are.
+    for (mode, want_lit) in [
+        (app::config::V6RenderMode::Hybrid, false),
+        (app::config::V6RenderMode::Raster, true),
+        (app::config::V6RenderMode::Extended, true),
+    ] {
+        let mut st = story(Some(6));
+        st.config.v6_render = mode;
+        let (buf, hits) = draw(&st, 44, 6);
+        let (_, r) = hits.iter().find(|(id, _)| *id == BorderControl::V6Render).unwrap();
+        let fg = buf.cell((r.x, r.y)).unwrap().fg;
+        assert_eq!(fg == alert, want_lit, "{mode:?} lit? expected {want_lit}");
+    }
 }
 
-/// A hovered control takes `panel.control:hover`, so whatever the pointer is on
+/// A hovered control takes `panel.control:hover`/// A hovered control takes `panel.control:hover`, so whatever the pointer is on
 /// always reads as reachable — even the ones that are otherwise idle.
 #[test]
 fn the_hovered_control_is_highlighted() {
@@ -188,10 +264,11 @@ fn the_hovered_control_is_highlighted() {
 // ── The hint ─────────────────────────────────────────────────────────────────
 
 /// The hover hint says what the control is, what a click does, and how to do the
-/// same from the keyboard — and it hangs BELOW the control, so it never covers
-/// the icon being pointed at.
+/// same from the keyboard — and it goes INTO the pane, away from the icon being
+/// pointed at. Guidance rides the BOTTOM border now, so "into the pane" is
+/// upwards: a hint that still dropped one row would land in the command band.
 #[test]
-fn the_hint_names_the_control_and_sits_below_it() {
+fn the_hint_names_the_control_and_sits_inside_the_pane() {
     let mut st = story(Some(3));
     st.config.guidance = false;
     st.control_hover = Some(BorderControl::Guidance);
@@ -221,7 +298,7 @@ fn the_hint_names_the_control_and_sits_below_it() {
     let anchor = hits.iter().find(|(id, _)| *id == BorderControl::Guidance).unwrap().1;
 
     let tip = draw_control_hint(&mut buf, area, &st, &views, &hits).expect("the hint is drawn");
-    assert!(tip.y > anchor.y, "the hint hangs below the control, never over it");
+    assert!(tip.bottom() <= anchor.y, "a bottom-border hint rises into the pane, never over it");
     assert_eq!(row(&buf, anchor.y).chars().nth(anchor.x as usize), Some('○'),
                "…and the control itself is still visible");
 
@@ -238,7 +315,11 @@ fn the_hint_names_the_control_and_sits_below_it() {
 #[test]
 fn the_hint_stays_inside_the_pane_at_both_edges() {
     let mut st = story(Some(6));
-    st.control_hover = Some(BorderControl::V6PixelLock); // the right-most control
+    // The two hardest anchors: the top border's right-most control (slides left,
+    // drops down) and the map toggle in the BOTTOM-RIGHT corner, which has to
+    // slide left AND rise, with nothing below it to fall into.
+    for anchor_id in [BorderControl::V6PixelLock, BorderControl::Map] {
+    st.control_hover = Some(anchor_id);
 
     for (w, h) in [(44u16, 8u16), (30, 4), (26, 3)] {
         let area = Rect::new(0, 0, w, h);
@@ -262,10 +343,11 @@ fn the_hint_stays_inside_the_pane_at_both_edges() {
         );
         let hits: Vec<_> = views.iter().map(|v| v.id).zip(rects).collect();
         if let Some(tip) = draw_control_hint(&mut buf, area, &st, &views, &hits) {
-            assert!(tip.right() <= area.right(), "{w}x{h}: hint ran off the right edge");
-            assert!(tip.bottom() <= area.bottom(), "{w}x{h}: hint ran off the bottom");
-            assert!(tip.x >= area.x && tip.y >= area.y, "{w}x{h}: hint ran off the top-left");
+            assert!(tip.right() <= area.right(), "{anchor_id:?} {w}x{h}: ran off the right edge");
+            assert!(tip.bottom() <= area.bottom(), "{anchor_id:?} {w}x{h}: ran off the bottom");
+            assert!(tip.x >= area.x && tip.y >= area.y, "{anchor_id:?} {w}x{h}: ran off the top-left");
         }
+    }
     }
 }
 
@@ -280,11 +362,11 @@ fn a_click_and_a_hover_resolve_to_the_same_control() {
     for (id, r) in &hits {
         assert_eq!(control_at(&st, &hits, r.x, r.y), Some(*id));
     }
-    // A cell one row down (inside the pane) is not a control.
-    let (_, first) = hits[0];
-    assert_eq!(control_at(&st, &hits, first.x, first.y + 1), None);
+    // A cell one row up from a bottom control (inside the pane) is not a control.
+    let guide = hits.iter().find(|(id, _)| *id == BorderControl::Guidance).unwrap().1;
+    assert_eq!(control_at(&st, &hits, guide.x, guide.y - 1), None);
     // …nor is the separator column between two controls.
-    assert_eq!(control_at(&st, &hits, first.x + 1, first.y), None);
+    assert_eq!(control_at(&st, &hits, guide.x + 1, guide.y), None);
 }
 
 /// Every control drives an existing `slash::COMMANDS` entry, bare. A control
@@ -310,6 +392,35 @@ fn every_control_names_a_real_bare_slash_command() {
         assert!(
             !matches!(outcome, app::slash::SlashOutcome::Error(_)),
             "bare `{name}` is an error, so a click on {id:?} would do nothing",
+        );
+    }
+}
+
+/// **What a click switches, it also remembers.** Every control's command
+/// persists its result in the per-game `config.toml` sidecar, so a preference
+/// chosen for one story stays with that story and no other.
+///
+/// This reads the registry's own description rather than the behaviour, because
+/// behaviour is what each command's own dispatch case already pins — what this
+/// catches is a SIXTH control being added later whose command does not persist,
+/// which would look identical on screen and quietly forget itself. Two commands
+/// changed semantics to make this true: `set-v6-render` and `set-guidance` were
+/// both session-only, and are now per-game like the pixel lock beside them.
+#[test]
+fn every_control_switches_something_that_is_remembered_per_game() {
+    for id in [
+        BorderControl::Map,
+        BorderControl::Guidance,
+        BorderControl::VerbPanel,
+        BorderControl::V6Render,
+        BorderControl::V6PixelLock,
+    ] {
+        let name = id.command();
+        let spec = app::slash::COMMANDS.iter().find(|c| c.name == name).unwrap();
+        assert!(
+            spec.description.contains("persisted per-game"),
+            "{id:?} runs `{name}`, whose description does not promise to remember it: {:?}",
+            spec.description,
         );
     }
 }
@@ -348,19 +459,52 @@ fn a_long_title_never_overwrites_a_control() {
     }
 }
 
-/// Below the width the cluster needs, nothing is drawn and no hit-rect is
-/// handed back — a half-cluster would be unclickable chrome.
+/// Each group is drawn WHOLE or not at all, and the groups give way in a fixed
+/// order as the pane narrows. A half cluster is unclickable chrome.
+///
+/// The map toggle is anchored and the pair is centred in what the anchor leaves,
+/// so **the centred pair is what gives way first** — and the map toggle, the one
+/// control that moves a whole pane, survives longest. The printed rows are the
+/// record of where each threshold actually falls.
 #[test]
-fn a_pane_too_narrow_for_the_cluster_draws_none_of_it() {
+fn the_groups_drop_whole_and_the_centred_pair_gives_way_first() {
     let st = story(Some(6));
-    let want = header_controls_width(5); // 2 caps + 5 glyphs + 4 gaps = 11
-    assert_eq!(want, 11);
-    for w in 4..=(want + 2) {
-        let (_, hits) = draw(&st, w, 4);
-        assert!(hits.is_empty(), "w={w}: the cluster needs {want} + a gap + two corners");
+    let has = |hits: &[(BorderControl, Rect)], id: BorderControl| {
+        hits.iter().any(|(i, _)| *i == id)
+    };
+    let mut seen: Vec<(u16, bool, bool, bool)> = Vec::new();
+    for w in 4..=24u16 {
+        let (buf, hits) = draw(&st, w, 5);
+        let map = has(&hits, BorderControl::Map);
+        let pair = has(&hits, BorderControl::Guidance);
+        let v6 = has(&hits, BorderControl::V6Render);
+        // Guidance and the verb panel are one group: never one without the other.
+        assert_eq!(pair, has(&hits, BorderControl::VerbPanel), "w={w}: half the centred pair");
+        assert_eq!(v6, has(&hits, BorderControl::V6PixelLock), "w={w}: half the v6 pair");
+        // The pair can never outlive the map toggle it has to make room for.
+        assert!(!(pair && !map), "w={w}: the centred pair survived the anchored one");
+        println!("w={w:>2} map={map:<5} pair={pair:<5} v6={v6:<5}  {} | {}", row(&buf, 0), row(&buf, 4));
+        seen.push((w, map, pair, v6));
     }
-    let (_, hits) = draw(&st, want + 4, 4);
-    assert_eq!(hits.len(), 5, "…and it appears as soon as it fits");
+    // The thresholds, pinned: 3 columns for `┤◀├` plus a spare, 5 for `┤○ ▲├`
+    // plus a clear column between them, and 5 for the v6 pair plus a spare.
+    let first = |f: fn(&(u16, bool, bool, bool)) -> bool| seen.iter().find(|r| f(r)).unwrap().0;
+    assert_eq!(first(|r| r.1), 7, "the map toggle needs a 7-column pane");
+    assert_eq!(first(|r| r.2), 14, "the centred pair needs 14");
+    assert_eq!(first(|r| r.3), 9, "the top border's v6 pair needs 9");
+}
+
+/// A pane with no bottom border row to put them on draws no bottom controls —
+/// and does not panic reaching for one.
+#[test]
+fn a_pane_with_no_room_for_a_bottom_border_draws_no_bottom_controls() {
+    let st = story(Some(6));
+    for h in 1..=3u16 {
+        let (_, hits) = draw(&st, 44, h);
+        for (id, r) in &hits {
+            assert!(r.y < h, "h={h}: {id:?} at {r:?} is off the buffer");
+        }
+    }
 }
 
 /// …and the hint follows the same rule as the click: a modal that opens while

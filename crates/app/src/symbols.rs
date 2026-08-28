@@ -512,33 +512,49 @@ impl ControlGlyphs {
     ///
     /// Presets:
     /// - "plain"    — Geometric Shapes only (default): ◀▶▲▼ ●○ ◧■▦ ▣□
-    /// - "nerdfont" — the four MDI chevrons for the panel toggles and
-    ///   `md-post_lamp` for a lit Guiding Light; everything else stays on the
-    ///   plain glyphs.
+    /// - "nerdfont" — a named icon for every one of the eleven states.
     ///
-    /// **The nerdfont arm only substitutes codepoints this crate has already
-    /// verified by NAME** against the Nerd Fonts `glyphnames.json` — the four
-    /// chevrons [`Arrows::preset`]'s own `"nerdfont"` arm uses, and the
-    /// `md-post_lamp` that `font_check_dialog::ASSIST_LAMP` pins against the
-    /// font's `post` table. SQ-0989 is what a guessed codepoint costs: a patched
-    /// face draws the wrong icon crisply and confidently, and nobody notices.
-    /// The render-mode and pixel-lock slots have no verified icon, so they keep
-    /// the Geometric Shapes glyph, which a patched face draws identically.
+    /// **Every nerdfont codepoint below was read from the font's own `post`
+    /// table**, not inferred from a name. SQ-0989 is what a guessed codepoint
+    /// costs: a patched face draws the wrong icon crisply and confidently and
+    /// nobody notices, because there is nothing on our side that can see it.
+    /// Two of the names originally proposed for this set do not exist in the
+    /// font at all (`cod-layout_panel_dock`, `md-post_map`), which is exactly
+    /// the failure the reading catches. `nerdfont_control_glyphs_are_the_names_
+    /// that_were_read_from_the_font` pins them.
+    ///
+    /// **Each control's two states come from ONE icon family** — `fa-` for the
+    /// map, `cod-` for the verb panel, `md-` for the Guiding Light, the render
+    /// mode and the pixel lock. Codicons, Font Awesome and Material Design carry
+    /// different stroke weights and cap heights, so a control whose states came
+    /// from different families appeared to JUMP on toggle, independently of the
+    /// shape change that was meant to be the signal.
     pub fn preset(name: &str) -> Option<ControlGlyphs> {
         let plain = SymbolSet::default().controls;
         Some(match name {
             "plain" => plain,
             "nerdfont" => ControlGlyphs {
-                // MDI chevron-left F0141 / chevron-right F0142 / chevron-up
-                // F0143 / chevron-down F0140 — the same four `Arrows::nerdfont`
-                // draws its cardinals with.
-                map_show: '\u{F0141}',
-                map_hide: '\u{F0142}',
-                band_show: '\u{F0143}',
-                band_hide: '\u{F0140}',
-                // md-post_lamp U+F1A60 — the Guiding Light's own mark.
+                // fa-map_location / fa-map_location_dot — the dot reads as
+                // "you are here", which is what an automap is for.
+                map_show: '\u{0EE68}',
+                map_hide: '\u{0EE69}',
+                // cod-layout_panel_off / cod-layout_panel — a purpose-built
+                // off/on pair rather than two icons pressed into service.
+                band_show: '\u{0EC01}',
+                band_hide: '\u{0EBF2}',
+                // md-post_lamp — the Guiding Light's own mark, the same glyph
+                // `font_check_dialog::ASSIST_LAMP` draws in the gutter — and
+                // md-help for the light that is out.
                 guidance_on: '\u{F1A60}',
-                ..plain
+                guidance_off: '\u{F02D6}',
+                // md-monitor / md-monitor_shimmer / md-monitor_star: one screen
+                // per way of drawing the screen.
+                render_hybrid: '\u{F0379}',
+                render_raster: '\u{F1104}',
+                render_extended: '\u{F0DDC}',
+                // md-lock / md-lock_open.
+                lock_on: '\u{F033E}',
+                lock_off: '\u{F033F}',
             },
             _ => return None,
         })
@@ -939,37 +955,73 @@ mod tests {
         assert_eq!(four.iter().collect::<std::collections::HashSet<_>>().len(), 4, "up/down/in/out must differ");
     }
 
-    /// The border controls' nerdfont arm must reuse ONLY codepoints this crate
-    /// has already resolved by name — SQ-0989 is what a guessed one costs, and
-    /// nothing here can catch a patched face drawing the wrong icon confidently.
+    /// The border controls' nerdfont set is ELEVEN named icons, each codepoint
+    /// read from the font's own `post` table rather than inferred from a name.
+    ///
+    /// This pins the numbers, because nothing else can: SQ-0989 is what a
+    /// guessed codepoint costs — a patched face draws the wrong icon crisply and
+    /// confidently, and there is no assertion on our side of the terminal that
+    /// could notice. Two of the names first proposed for this set turned out not
+    /// to exist in the font (`cod-layout_panel_dock`, `md-post_map`), which is
+    /// the same failure caught one step earlier.
     #[test]
-    fn nerdfont_control_glyphs_reuse_already_verified_codepoints() {
+    fn nerdfont_control_glyphs_are_the_names_that_were_read_from_the_font() {
         let c = ControlGlyphs::preset("nerdfont").expect("preset");
-        let a = Arrows::preset("nerdfont").expect("the arrows it borrows from");
-        assert_eq!(c.map_show, a.west, "chevron-left U+F0141");
-        assert_eq!(c.map_hide, a.east, "chevron-right U+F0142");
-        assert_eq!(c.band_show, a.north, "chevron-up U+F0143");
-        assert_eq!(c.band_hide, a.south, "chevron-down U+F0140");
-        assert_eq!(
-            c.guidance_on,
-            crate::render::font_check_dialog::ASSIST_LAMP,
-            "the Guiding Light's own md-post_lamp, not a second lamp",
-        );
-        // Everything with no verified icon stays on Geometric Shapes, which a
-        // patched face draws identically — a guess would be worse than plain.
-        let plain = ControlGlyphs::preset("plain").unwrap();
-        for (slot, ch, want) in [
-            ("guidance_off", c.guidance_off, plain.guidance_off),
-            ("render_hybrid", c.render_hybrid, plain.render_hybrid),
-            ("render_raster", c.render_raster, plain.render_raster),
-            ("render_extended", c.render_extended, plain.render_extended),
-            ("lock_on", c.lock_on, plain.lock_on),
-            ("lock_off", c.lock_off, plain.lock_off),
+        for (name, got, want) in [
+            ("fa-map_location", c.map_show, '\u{0EE68}'),
+            ("fa-map_location_dot", c.map_hide, '\u{0EE69}'),
+            ("cod-layout_panel_off", c.band_show, '\u{0EC01}'),
+            ("cod-layout_panel", c.band_hide, '\u{0EBF2}'),
+            ("md-help", c.guidance_off, '\u{F02D6}'),
+            ("md-post_lamp", c.guidance_on, '\u{F1A60}'),
+            ("md-monitor", c.render_hybrid, '\u{F0379}'),
+            ("md-monitor_shimmer", c.render_raster, '\u{F1104}'),
+            ("md-monitor_star", c.render_extended, '\u{F0DDC}'),
+            ("md-lock_open", c.lock_off, '\u{F033F}'),
+            ("md-lock", c.lock_on, '\u{F033E}'),
         ] {
-            assert_eq!(ch, want, "control.{slot} has no verified icon and must stay plain");
+            assert_eq!(got, want, "{name} moved: U+{:05X} is not U+{:05X}", got as u32, want as u32);
         }
-        for ch in [c.map_show, c.map_hide, c.band_show, c.band_hide, c.guidance_on] {
-            assert!(!is_wide_estimate(ch), "{ch:?} estimates as double-width");
+        // The Guiding Light's lit mark is the SAME glyph the gutter draws, not a
+        // second lamp that could drift away from it.
+        assert_eq!(c.guidance_on, crate::render::font_check_dialog::ASSIST_LAMP);
+        // Each toggle's two states must still differ, and each pair must stay
+        // inside ONE icon family — mixed families have different stroke weights
+        // and cap heights, so the control appears to jump on toggle.
+        for (slot, off, on) in [
+            ("map", c.map_show, c.map_hide),
+            ("band", c.band_show, c.band_hide),
+            ("guidance", c.guidance_off, c.guidance_on),
+            ("lock", c.lock_off, c.lock_on),
+        ] {
+            assert_ne!(off, on, "control.{slot}'s two states are the same glyph");
+        }
+        for (slot, a, b) in [
+            ("map", c.map_show as u32, c.map_hide as u32),
+            ("band", c.band_show as u32, c.band_hide as u32),
+            ("guidance", c.guidance_off as u32, c.guidance_on as u32),
+            ("lock", c.lock_off as u32, c.lock_on as u32),
+        ] {
+            // `fa-`/`cod-` live in the 0xE000 private-use block, `md-` above
+            // 0xF0000; a pair straddling that line is two families.
+            assert_eq!(
+                a >= 0xF_0000, b >= 0xF_0000,
+                "control.{slot}'s two states come from different icon families",
+            );
+        }
+        // …and the render mode's three are one family too.
+        for ch in [c.render_hybrid, c.render_raster, c.render_extended] {
+            assert!(ch as u32 >= 0xF_0000, "the render icons are all Material Design");
+        }
+        for (slot, ch) in [
+            ("map_show", c.map_show), ("map_hide", c.map_hide),
+            ("band_show", c.band_show), ("band_hide", c.band_hide),
+            ("guidance_on", c.guidance_on), ("guidance_off", c.guidance_off),
+            ("render_hybrid", c.render_hybrid), ("render_raster", c.render_raster),
+            ("render_extended", c.render_extended),
+            ("lock_on", c.lock_on), ("lock_off", c.lock_off),
+        ] {
+            assert!(!is_wide_estimate(ch), "control.{slot} = {ch:?} estimates as double-width");
         }
     }
 

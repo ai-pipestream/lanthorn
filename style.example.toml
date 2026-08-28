@@ -213,7 +213,6 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # terminator_left = { parent = "line", glyph = "┤" }
 # terminator_right = { parent = "line", glyph = "├" }
 # control = { parent = "muted" }
-# "control:active" = { parent = "accent", bold = true }
 # "control:lit" = { parent = "alert", bold = true }
 # "control:hover" = { parent = "accent", reversed = true }
 

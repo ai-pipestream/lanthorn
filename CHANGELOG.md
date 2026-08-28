@@ -116,9 +116,11 @@ carrying `enable_sound = false` could only be overridden by editing the file.
     offer falls back to naming what the dictionary holds — which is also what
     happens on a story too slow to ask inside the probe's budget.
 - **One switch for the whole set**: `--guidance on|off` for a launch,
-  `/set-guidance` (bare toggles) for a session, and a `guidance` row on the
-  settings screen that persists it. `guidance_probe` sits beside it, for the
-  speculative half alone.
+  `/set-guidance` (bare toggles) — or the light's own `●`/`○` control in the
+  story pane's bottom border — remembered **for that story**, and a `guidance`
+  row on the settings screen that sets the global default new games inherit.
+  `/set-guidance auto` hands a story back to that default. `guidance_probe` sits
+  beside it, for the speculative half alone.
 - **A first-run font check sets every icon at once.** lanthorn cannot read your
   terminal's font — it writes characters, and the font belongs to the terminal —
   so on a first launch it shows two rows of glyphs and asks which one your
@@ -130,6 +132,50 @@ carrying `enable_sound = false` could only be overridden by editing the file.
   again — which is what you want after changing fonts — as does
   `--font-check on`; `--font-check off` never asks, and there is a `font_check`
   row on the settings screen.
+
+### Toggle controls in the pane border
+
+- **Clickable icons on the story pane's own frame**, each showing what state it
+  is in. A control sits where the thing it governs is: the command band opens
+  below the pane, so its toggle rides the bottom border; the map lives to the
+  right, so its toggle takes that border's right-hand end; the Guiding Light
+  joins the band; and the two v6 switches — render mode and pixel lock — govern
+  how the pane itself is drawn, so they keep its top border, and appear only on
+  a graphical v6 story.
+
+  ```text
+  ┌─ ZORK I ──────────────────────┤ ◧ □ ├─┐
+  │                                       │
+  └──────────────┤ ▲ ○ ├─────────┤ ◀ ├────┘
+  ```
+
+- **The state is carried twice — by the glyph and by the colour.** The panel
+  toggles are arrows pointing the way the panel would move (`▶` = click and the
+  map leaves that way); the Guiding Light is filled when lit and hollow when
+  out; the render mode draws one glyph per mode and the lock one per state. On
+  top of that every control that is on is lit yellow, so a player who cannot
+  tell the two colours apart still has the shape. Hovering floats a hint into
+  the pane saying what a click does and which command does the same. Themeable
+  through `panel.control` (off), `panel.control:lit` (on) and
+  `panel.control:hover`.
+- **`control_icons = "nerdfont"`** gives all eleven states a named icon — a map
+  with a "you are here" dot when the map is shown, an off/on panel pair for the
+  band, a lamp for the light, a monitor per render mode, a padlock for the lock.
+  Every codepoint was read from the font's own `post` table rather than inferred
+  from a name, and each control's two states come from one icon family, so a
+  toggle changes shape without also changing stroke weight.
+- **A click is the command**, so what you switch here is remembered **for that
+  story** — in its own `config.toml` sidecar, never your global config. The
+  settings screen still sets the global default new games inherit; a command's
+  `auto` argument hands one story back to it.
+- **`/set-v6-render` and `/set-guidance` were session-only and now persist
+  per-game.** For the render mode this is a deliberate reversal rather than a
+  correction: raster began as a *fallback* — the mode you escaped to when hybrid
+  could not cope — and an escape hatch rightly did not outlive its session. It is
+  a destination now, with `extended` beside it, and a player may genuinely prefer
+  raster for one game and hybrid for another. Guidance follows by a different
+  route: wanting help is a standing preference about the story in front of you,
+  not a temporary toggle.
 
 ### The command band
 

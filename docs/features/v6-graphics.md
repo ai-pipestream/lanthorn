@@ -1131,8 +1131,20 @@ was wrong and moves nothing that was already right.
 Set `v6_render` in the config (or cycle it from the settings screen) to pick
 how a v6 story's pane is drawn on an image-capable terminal (Kitty, iTerm2, or
 Sixel). Want to compare looks mid-game? `/set-v6-render` hops to the next mode
-on the spot (or jumps straight to one: `/set-v6-render raster`) — a
-session-only switch that never touches your saved config. `--v6-render hybrid` /
+on the spot (or jumps straight to one: `/set-v6-render raster`), and the answer
+sticks **to that story** — written into its own `config.toml` sidecar, alongside
+`v6_pixel_lock`, never into your global config. `/set-v6-render auto` hands the
+game back to your global default.
+
+That is a deliberate reversal, worth saying plainly: the switch *was*
+session-only, and that was right for what it then was. Raster began as a
+**fallback** — the mode you escaped to when hybrid could not cope — and a
+temporary escape hatch should not outlive the session that needed it. Raster is
+a destination now, with `extended` beside it, and a player may genuinely prefer
+raster for one game and hybrid for another. A preference about one story's
+artwork belongs with that story.
+
+`--v6-render hybrid` /
 `--v6-render raster` says the same thing one moment earlier, before the game
 boots — so the *first* frame is already the one you meant, which is what a
 screenshot, a bug report and a headless capture all want:

@@ -16,10 +16,12 @@
 //! interrupting keypress recover instead of wedging the pointer to the splitter.
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
 use crate::layout::{
     boundary_at, dock_pct_for_rows, split_pct_for_story_width, Boundary, BoundaryZone, PaneLayout,
 };
+use crate::render::controls::{control_at, BorderControl};
 use crate::render::command_band::{MAX_BAND_ROWS, MIN_BAND_ROWS};
 use crate::state::AppState;
 
@@ -42,7 +44,7 @@ pub struct PaneDrag {
     /// The area the conversion inverts against: the story+map region for the
     /// splitter, the whole frame for the inventory dock (whose height is a
     /// percentage of it). Unused by the command band, which is sized in rows.
-    pub area: ratatui::layout::Rect,
+    pub area: Rect,
 }
 
 /// What the drag machine did with a mouse event.
@@ -61,12 +63,15 @@ pub enum DragOutcome {
 ///
 /// `pl` is the pane geometry of the last drawn frame (the drag's anchor), and
 /// `zones` its grab zones (`PaneLayout::boundary_zones`, cached per frame
-/// alongside the other hit-rects).
+/// alongside the other hit-rects). `controls` are the story pane's border
+/// toggles, which OVERLAP a grab zone and take priority inside their own cells —
+/// see [`on_mouse`]'s Down arm.
 pub fn on_mouse(
     state: &mut AppState,
     m: &MouseEvent,
     pl: &PaneLayout,
     zones: &[BoundaryZone],
+    controls: &[(BorderControl, Rect)],
 ) -> DragOutcome {
     if state.pane_drag.is_some() {
         // A live drag owns the mouse. Only continued motion with the button
@@ -98,6 +103,25 @@ pub fn on_mouse(
             if state.any_modal_overlay_open() {
                 return DragOutcome::Ignored;
             }
+            // A border control owns its own cell (SQ-1123). The bottom-border
+            // cluster shares its row with the command band's and the inventory
+            // dock's grab zone — the layout puts each band's first row directly
+            // under the story pane, so `band.y - 1` IS the pane's bottom border —
+            // and a click on a toggle has to toggle rather than start a one-row
+            // resize it would then commit unchanged, swallowing the click whole.
+            //
+            // Declining here (rather than arming a click-vs-drag gesture) is the
+            // deliberate trade: the zone is a whole pane-width row and the two
+            // clusters take about eight columns out of the middle and right of
+            // it, so the edge stays easy to grab either side of them. What is
+            // lost is a drag STARTED on a toggle, which is a gesture nobody
+            // needs when the same edge is grabbable one column over — unlike the
+            // vertical splitter, where a control at the midpoint would have made
+            // the midpoint itself undraggable. No control is placed on the
+            // splitter's columns for exactly that reason.
+            if control_at(state, controls, m.column, m.row).is_some() {
+                return DragOutcome::Ignored;
+            }
             match boundary_at(zones, m.column, m.row) {
                 Some(boundary) => {
                     state.pane_drag = Some(anchor(boundary, pl, m.column, m.row));
@@ -111,7 +135,11 @@ pub fn on_mouse(
         // (see `AppState::boundary_active`). It never claims the event — the
         // debug panel's own hover tooltips still need it.
         MouseEventKind::Moved => {
-            state.pane_hover = if state.any_modal_overlay_open() {
+            state.pane_hover = if state.any_modal_overlay_open()
+                || control_at(state, controls, m.column, m.row).is_some()
+            {
+                // Over a control the boundary must not light up either, or the
+                // pointer would advertise a drag the Down arm above declines.
                 None
             } else {
                 boundary_at(zones, m.column, m.row)
@@ -215,6 +243,10 @@ mod tests {
     use crate::state::{AppState, CommandBandState, Layout};
     use crossterm::event::KeyModifiers;
     use ratatui::layout::Rect;
+
+    /// Most cases here have no border controls on screen; the ones that do say
+    /// so explicitly (see `a_border_control_keeps_its_own_cell_out_of_the_drag`).
+    const NO_CONTROLS: &[(BorderControl, Rect)] = &[];
 
     fn ev(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }
@@ -328,13 +360,13 @@ mod tests {
         let mut s = AppState::default();
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let x = pl.story.right() - 1;
-        assert_eq!(on_mouse(&mut s, &down(x, 6), &pl, &zones), DragOutcome::Consumed);
+        assert_eq!(on_mouse(&mut s, &down(x, 6), &pl, &zones, NO_CONTROLS), DragOutcome::Consumed);
         assert!(s.pane_drag.is_some(), "the boundary is held");
         // The claimed Down never reaches the selection path, so nothing selects.
         assert!(s.selection.is_none());
         // …and every following drag stays claimed.
-        assert_eq!(on_mouse(&mut s, &drag(x + 3, 6), &pl, &zones), DragOutcome::Consumed);
-        assert_eq!(on_mouse(&mut s, &up(x + 3, 6), &pl, &zones), DragOutcome::Committed);
+        assert_eq!(on_mouse(&mut s, &drag(x + 3, 6), &pl, &zones, NO_CONTROLS), DragOutcome::Consumed);
+        assert_eq!(on_mouse(&mut s, &up(x + 3, 6), &pl, &zones, NO_CONTROLS), DragOutcome::Committed);
         assert!(s.pane_drag.is_none());
     }
 
@@ -343,15 +375,15 @@ mod tests {
         let mut s = AppState::default();
         let (pl, zones) = frame(&s, area(80, 24), 0);
         // Down well inside the story pane: the drag machine passes.
-        assert_eq!(on_mouse(&mut s, &down(4, 6), &pl, &zones), DragOutcome::Ignored);
+        assert_eq!(on_mouse(&mut s, &down(4, 6), &pl, &zones, NO_CONTROLS), DragOutcome::Ignored);
         assert!(s.pane_drag.is_none());
         // The selection then drags straight THROUGH the splitter and out the
         // other side — still ignored, so ExtendSelection keeps running.
         for x in [pl.story.right() - 1, pl.map.x, pl.map.x + 5] {
-            assert_eq!(on_mouse(&mut s, &drag(x, 6), &pl, &zones), DragOutcome::Ignored, "x={x}");
+            assert_eq!(on_mouse(&mut s, &drag(x, 6), &pl, &zones, NO_CONTROLS), DragOutcome::Ignored, "x={x}");
             assert!(s.pane_drag.is_none());
         }
-        assert_eq!(on_mouse(&mut s, &up(pl.map.x + 5, 6), &pl, &zones), DragOutcome::Ignored);
+        assert_eq!(on_mouse(&mut s, &up(pl.map.x + 5, 6), &pl, &zones, NO_CONTROLS), DragOutcome::Ignored);
     }
 
     #[test]
@@ -360,7 +392,7 @@ mod tests {
         s.overlays.hotkey_dialog = true;
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let x = pl.story.right() - 1;
-        assert_eq!(on_mouse(&mut s, &down(x, 6), &pl, &zones), DragOutcome::Ignored);
+        assert_eq!(on_mouse(&mut s, &down(x, 6), &pl, &zones, NO_CONTROLS), DragOutcome::Ignored);
         assert!(s.pane_drag.is_none());
     }
 
@@ -377,16 +409,16 @@ mod tests {
                 let (pl, zones) = frame(&s, area(w, 24), 0);
                 let start_x = pl.story.right() - 1;
                 let start_w = pl.story.width;
-                on_mouse(&mut s, &down(start_x, 6), &pl, &zones);
+                on_mouse(&mut s, &down(start_x, 6), &pl, &zones, NO_CONTROLS);
                 let to = (start_x as i32 + step) as u16;
-                on_mouse(&mut s, &drag(to, 6), &pl, &zones);
+                on_mouse(&mut s, &drag(to, 6), &pl, &zones, NO_CONTROLS);
                 let after = compute_pane_layout(area(w, 24), &s, 0);
                 assert_eq!(
                     after.story.width as i32,
                     start_w as i32 + step,
                     "width {w}: a {step}-column drag must move the splitter {step} columns"
                 );
-                on_mouse(&mut s, &up(to, 6), &pl, &zones);
+                on_mouse(&mut s, &up(to, 6), &pl, &zones, NO_CONTROLS);
             }
         }
     }
@@ -417,18 +449,85 @@ mod tests {
         // reach a split its keyboard twin cannot.
         assert_eq!((MIN_SPLIT_PCT, MAX_SPLIT_PCT), (20, 80));
         // Yank the pointer far past the left edge, then far past the right.
-        on_mouse(&mut s, &down(x, 6), &pl, &zones);
-        on_mouse(&mut s, &drag(0, 6), &pl, &zones);
+        on_mouse(&mut s, &down(x, 6), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(0, 6), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.split_ratio, 20);
-        on_mouse(&mut s, &drag(79, 6), &pl, &zones);
+        on_mouse(&mut s, &drag(79, 6), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.split_ratio, 80);
-        on_mouse(&mut s, &up(79, 6), &pl, &zones);
+        on_mouse(&mut s, &up(79, 6), &pl, &zones, NO_CONTROLS);
         // Both panes survive either extreme.
         for pct in [20u16, 80] {
             s.pane_sizes.split_ratio = pct;
             let pl = compute_pane_layout(area(80, 24), &s, 0);
             assert!(pl.story.width > 0 && pl.map.width > 0, "pct={pct}");
         }
+    }
+
+    // ── Border controls vs the grab zone (SQ-1123) ───────────────────────────
+
+    /// The story pane's bottom-border controls sit ON the command band's grab
+    /// row: the layout puts the band's first row directly under the pane, so
+    /// `band.y - 1` IS the pane's bottom border. Without a rule, a click on the
+    /// band toggle would start a one-row resize and commit it unchanged — the
+    /// click swallowed, the button dead.
+    ///
+    /// The rule is that a control owns its own cell. What that costs is a drag
+    /// STARTED on a toggle; the assertion below is that one column either side
+    /// still grabs the edge, which is what makes that cost acceptable.
+    #[test]
+    fn a_border_control_keeps_its_own_cell_out_of_the_drag() {
+        let mut s = AppState::default();
+        open_band(&mut s);
+        let (pl, zones) = frame(&s, area(80, 24), 0);
+        let y = pl.command_band.y - 1;
+        assert_eq!(y, pl.story.bottom() - 1, "the band's edge IS the pane's bottom border");
+        // Well clear of the splitter, whose own zone spans the full pane height
+        // and would otherwise answer for this row first.
+        let cx = pl.story.x + 5;
+        assert_eq!(
+            boundary_at(&zones, cx, y),
+            Some(Boundary::CommandBandTop),
+            "…and that row is a grab zone",
+        );
+
+        let ctl: &[(BorderControl, Rect)] =
+            &[(BorderControl::VerbPanel, Rect::new(cx, y, 1, 1))];
+
+        // On the control: declined, so the click path downstream gets the event.
+        assert_eq!(on_mouse(&mut s, &down(cx, y), &pl, &zones, ctl), DragOutcome::Ignored);
+        assert!(s.pane_drag.is_none(), "no drag was started under the button");
+
+        // One column either side: the edge is grabbed exactly as before.
+        for x in [cx - 1, cx + 1] {
+            assert_eq!(
+                on_mouse(&mut s, &down(x, y), &pl, &zones, ctl),
+                DragOutcome::Consumed,
+                "x={x}: the band edge is still draggable beside the control",
+            );
+            on_mouse(&mut s, &up(x, y), &pl, &zones, ctl);
+        }
+
+        // And hovering the control does not light the boundary up, so the pointer
+        // never advertises a drag the Down arm declines.
+        on_mouse(&mut s, &ev(MouseEventKind::Moved, cx, y), &pl, &zones, ctl);
+        assert_eq!(s.pane_hover, None, "the control's cell is not the boundary's");
+        on_mouse(&mut s, &ev(MouseEventKind::Moved, cx + 1, y), &pl, &zones, ctl);
+        assert_eq!(s.pane_hover, Some(Boundary::CommandBandTop));
+    }
+
+    /// A control is only ever declined where one actually IS: a zero-area rect
+    /// (a group the pane was too narrow to draw) grabs nothing, and neither does
+    /// a control with a modal over it.
+    #[test]
+    fn an_undrawn_control_does_not_shadow_the_grab_zone() {
+        let mut s = AppState::default();
+        open_band(&mut s);
+        let (pl, zones) = frame(&s, area(80, 24), 0);
+        let y = pl.command_band.y - 1;
+        let cx = pl.story.x + 5;
+        let ctl: &[(BorderControl, Rect)] = &[(BorderControl::VerbPanel, Rect::new(cx, y, 0, 0))];
+        assert_eq!(on_mouse(&mut s, &down(cx, y), &pl, &zones, ctl), DragOutcome::Consumed);
+        on_mouse(&mut s, &up(cx, y), &pl, &zones, ctl);
     }
 
     // ── Conversion: the horizontal edges ─────────────────────────────────────
@@ -440,13 +539,13 @@ mod tests {
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let y = pl.command_band.y - 1;
         let start = pl.command_band.height;
-        on_mouse(&mut s, &down(10, y), &pl, &zones);
-        on_mouse(&mut s, &drag(10, y - 2), &pl, &zones);
+        on_mouse(&mut s, &down(10, y), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(10, y - 2), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.band_height, start + 2, "up two rows grows it two rows");
         assert_eq!(compute_pane_layout(area(80, 24), &s, 0).command_band.height, start + 2);
-        on_mouse(&mut s, &drag(10, y + 1), &pl, &zones);
+        on_mouse(&mut s, &drag(10, y + 1), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.band_height, start - 1, "and back down shrinks it");
-        on_mouse(&mut s, &up(10, y + 1), &pl, &zones);
+        on_mouse(&mut s, &up(10, y + 1), &pl, &zones, NO_CONTROLS);
     }
 
     #[test]
@@ -455,12 +554,12 @@ mod tests {
         open_band(&mut s);
         let (pl, zones) = frame(&s, area(80, 40), 0);
         let y = pl.command_band.y - 1;
-        on_mouse(&mut s, &down(10, y), &pl, &zones);
-        on_mouse(&mut s, &drag(10, 0), &pl, &zones);
+        on_mouse(&mut s, &down(10, y), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(10, 0), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.band_height, MAX_BAND_ROWS);
-        on_mouse(&mut s, &drag(10, 39), &pl, &zones);
+        on_mouse(&mut s, &drag(10, 39), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.band_height, MIN_BAND_ROWS);
-        on_mouse(&mut s, &up(10, 39), &pl, &zones);
+        on_mouse(&mut s, &up(10, 39), &pl, &zones, NO_CONTROLS);
     }
 
     /// The dock's height is a percentage of the frame, so the drag inverts that
@@ -478,11 +577,11 @@ mod tests {
                 let (pl, zones) = frame(&s, area(80, h), items);
                 let start = pl.inv_dock.height;
                 let y = pl.inv_dock.y;
-                on_mouse(&mut s, &down(10, y), &pl, &zones);
-                on_mouse(&mut s, &drag(10, y - step), &pl, &zones);
+                on_mouse(&mut s, &down(10, y), &pl, &zones, NO_CONTROLS);
+                on_mouse(&mut s, &drag(10, y - step), &pl, &zones, NO_CONTROLS);
                 let after = compute_pane_layout(area(80, h), &s, items);
                 assert_eq!(after.inv_dock.height, start + step, "height {h}, up {step}");
-                on_mouse(&mut s, &up(10, y - step), &pl, &zones);
+                on_mouse(&mut s, &up(10, y - step), &pl, &zones, NO_CONTROLS);
             }
         }
     }
@@ -498,9 +597,9 @@ mod tests {
             let (pl, zones) = frame(&s, area(80, h), 20);
             let start = pl.inv_dock.height;
             let y = pl.inv_dock.y;
-            on_mouse(&mut s, &down(10, y), &pl, &zones);
-            on_mouse(&mut s, &drag(10, y), &pl, &zones);
-            on_mouse(&mut s, &up(10, y), &pl, &zones);
+            on_mouse(&mut s, &down(10, y), &pl, &zones, NO_CONTROLS);
+            on_mouse(&mut s, &drag(10, y), &pl, &zones, NO_CONTROLS);
+            on_mouse(&mut s, &up(10, y), &pl, &zones, NO_CONTROLS);
             assert_eq!(
                 compute_pane_layout(area(80, h), &s, 20).inv_dock.height,
                 start,
@@ -520,12 +619,12 @@ mod tests {
             (crate::layout::MIN_INV_DOCK_PCT, crate::layout::MAX_INV_DOCK_PCT),
             (10, 80)
         );
-        on_mouse(&mut s, &down(10, y), &pl, &zones);
-        on_mouse(&mut s, &drag(10, 0), &pl, &zones);
+        on_mouse(&mut s, &down(10, y), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(10, 0), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.inv_dock_pct, 80);
-        on_mouse(&mut s, &drag(10, 39), &pl, &zones);
+        on_mouse(&mut s, &drag(10, 39), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.inv_dock_pct, 10);
-        on_mouse(&mut s, &up(10, 39), &pl, &zones);
+        on_mouse(&mut s, &up(10, 39), &pl, &zones, NO_CONTROLS);
     }
 
     /// A drag that ends where it began leaves the layout where it began — the
@@ -535,11 +634,11 @@ mod tests {
         let mut s = AppState::default();
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let x = pl.story.right() - 1;
-        on_mouse(&mut s, &down(x, 6), &pl, &zones);
+        on_mouse(&mut s, &down(x, 6), &pl, &zones, NO_CONTROLS);
         for to in [x + 7, x + 12, x - 9, x] {
-            on_mouse(&mut s, &drag(to, 6), &pl, &zones);
+            on_mouse(&mut s, &drag(to, 6), &pl, &zones, NO_CONTROLS);
         }
-        on_mouse(&mut s, &up(x, 6), &pl, &zones);
+        on_mouse(&mut s, &up(x, 6), &pl, &zones, NO_CONTROLS);
         assert_eq!(compute_pane_layout(area(80, 24), &s, 0).story, pl.story);
     }
 
@@ -551,10 +650,10 @@ mod tests {
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let x = pl.story.right() - 1;
         assert!(!s.pending_config_write);
-        on_mouse(&mut s, &down(x, 6), &pl, &zones);
-        on_mouse(&mut s, &drag(x + 8, 6), &pl, &zones);
+        on_mouse(&mut s, &down(x, 6), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(x + 8, 6), &pl, &zones, NO_CONTROLS);
         assert!(!s.pending_config_write, "nothing is persisted mid-drag");
-        assert_eq!(on_mouse(&mut s, &up(x + 8, 6), &pl, &zones), DragOutcome::Committed);
+        assert_eq!(on_mouse(&mut s, &up(x + 8, 6), &pl, &zones, NO_CONTROLS), DragOutcome::Committed);
         assert!(s.pane_drag.is_none(), "the boundary is released");
         assert!(s.pending_config_write, "the release asks for the config write");
         assert_eq!(s.config.split_ratio, s.pane_sizes.split_ratio, "mirrored to config");
@@ -567,9 +666,9 @@ mod tests {
         open_band(&mut s);
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let y = pl.command_band.y - 1;
-        on_mouse(&mut s, &down(10, y), &pl, &zones);
-        on_mouse(&mut s, &drag(10, y - 2), &pl, &zones);
-        on_mouse(&mut s, &up(10, y - 2), &pl, &zones);
+        on_mouse(&mut s, &down(10, y), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(10, y - 2), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &up(10, y - 2), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.config.command_band.height, s.pane_sizes.band_height);
         assert!(s.pending_config_write);
 
@@ -577,9 +676,9 @@ mod tests {
         open_dock(&mut s);
         let (pl, zones) = frame(&s, area(80, 40), 20);
         let y = pl.inv_dock.y;
-        on_mouse(&mut s, &down(10, y), &pl, &zones);
-        on_mouse(&mut s, &drag(10, y - 3), &pl, &zones);
-        on_mouse(&mut s, &up(10, y - 3), &pl, &zones);
+        on_mouse(&mut s, &down(10, y), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(10, y - 3), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &up(10, y - 3), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.config.inv_dock_pct, s.pane_sizes.inv_dock_pct);
         assert!(s.pending_config_write);
     }
@@ -607,22 +706,22 @@ mod tests {
             let (pl, zones) = frame(&s, a, 0);
             let start = pl.room_dock.height;
             let y = pl.room_dock.y;
-            on_mouse(&mut s, &down(x, y), &pl, &zones);
-            on_mouse(&mut s, &drag(x, y - step), &pl, &zones);
+            on_mouse(&mut s, &down(x, y), &pl, &zones, NO_CONTROLS);
+            on_mouse(&mut s, &drag(x, y - step), &pl, &zones, NO_CONTROLS);
             assert_eq!(
                 compute_pane_layout(a, &s, 0).room_dock.height,
                 start + step,
                 "up {step}"
             );
-            on_mouse(&mut s, &up(x, y - step), &pl, &zones);
+            on_mouse(&mut s, &up(x, y - step), &pl, &zones, NO_CONTROLS);
         }
 
         // …and a drag that goes nowhere leaves it exactly where it was.
         let (pl, zones) = frame(&s, a, 0);
         let held = pl.room_dock.height;
-        on_mouse(&mut s, &down(x, pl.room_dock.y), &pl, &zones);
-        on_mouse(&mut s, &drag(x, pl.room_dock.y), &pl, &zones);
-        on_mouse(&mut s, &up(x, pl.room_dock.y), &pl, &zones);
+        on_mouse(&mut s, &down(x, pl.room_dock.y), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(x, pl.room_dock.y), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &up(x, pl.room_dock.y), &pl, &zones, NO_CONTROLS);
         assert_eq!(compute_pane_layout(a, &s, 0).room_dock.height, held);
         let _ = (start, y, zones);
     }
@@ -644,17 +743,17 @@ mod tests {
             (crate::layout::MIN_ROOM_DOCK_PCT, crate::layout::MAX_ROOM_DOCK_PCT),
             (10, 80)
         );
-        on_mouse(&mut s, &down(x, y), &pl, &zones);
-        on_mouse(&mut s, &drag(x, 0), &pl, &zones);
+        on_mouse(&mut s, &down(x, y), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(x, 0), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.room_dock_pct, 80);
         assert_eq!(
             compute_pane_layout(a, &s, 0).map.height,
             crate::render::room_dock::MIN_MAP_ROWS,
             "the map pane keeps its floor even at the maximum dock"
         );
-        on_mouse(&mut s, &drag(x, 11), &pl, &zones);
+        on_mouse(&mut s, &drag(x, 11), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_sizes.room_dock_pct, 10);
-        on_mouse(&mut s, &up(x, 11), &pl, &zones);
+        on_mouse(&mut s, &up(x, 11), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.config.room_dock_pct, s.pane_sizes.room_dock_pct, "mirrored to config");
         assert!(s.pending_config_write);
     }
@@ -667,18 +766,18 @@ mod tests {
         let mut s = AppState::default();
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let x = pl.story.right() - 1;
-        on_mouse(&mut s, &down(x, 6), &pl, &zones);
-        on_mouse(&mut s, &drag(x + 6, 6), &pl, &zones);
+        on_mouse(&mut s, &down(x, 6), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(x + 6, 6), &pl, &zones, NO_CONTROLS);
         let held = s.pane_sizes.split_ratio;
         assert_eq!(
-            on_mouse(&mut s, &ev(MouseEventKind::Moved, x + 20, 6), &pl, &zones),
+            on_mouse(&mut s, &ev(MouseEventKind::Moved, x + 20, 6), &pl, &zones, NO_CONTROLS),
             DragOutcome::Committed
         );
         assert!(s.pane_drag.is_none(), "the drag ended");
         assert_eq!(s.pane_sizes.split_ratio, held, "at the last size the pointer asked for");
         // And the mouse is free again: a later motion only sets hover.
         assert_eq!(
-            on_mouse(&mut s, &ev(MouseEventKind::Moved, 4, 6), &pl, &zones),
+            on_mouse(&mut s, &ev(MouseEventKind::Moved, 4, 6), &pl, &zones, NO_CONTROLS),
             DragOutcome::Ignored
         );
         assert_eq!(s.pane_hover, None);
@@ -690,15 +789,15 @@ mod tests {
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let x = pl.story.right() - 1;
         assert!(!interrupt(&mut s), "nothing to interrupt when idle");
-        on_mouse(&mut s, &down(x, 6), &pl, &zones);
-        on_mouse(&mut s, &drag(x + 5, 6), &pl, &zones);
+        on_mouse(&mut s, &down(x, 6), &pl, &zones, NO_CONTROLS);
+        on_mouse(&mut s, &drag(x + 5, 6), &pl, &zones, NO_CONTROLS);
         let held = s.pane_sizes.split_ratio;
         assert!(interrupt(&mut s), "a keypress mid-drag ends it");
         assert!(s.pane_drag.is_none());
         assert!(s.pending_config_write);
         assert_eq!(s.pane_sizes.split_ratio, held);
         // The mouse is free: a following Down starts a NEW gesture, not a resume.
-        assert_eq!(on_mouse(&mut s, &down(4, 6), &pl, &zones), DragOutcome::Ignored);
+        assert_eq!(on_mouse(&mut s, &down(4, 6), &pl, &zones, NO_CONTROLS), DragOutcome::Ignored);
     }
 
     // ── Affordance ───────────────────────────────────────────────────────────
@@ -709,12 +808,12 @@ mod tests {
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let x = pl.story.right() - 1;
         assert_eq!(
-            on_mouse(&mut s, &ev(MouseEventKind::Moved, x, 6), &pl, &zones),
+            on_mouse(&mut s, &ev(MouseEventKind::Moved, x, 6), &pl, &zones, NO_CONTROLS),
             DragOutcome::Ignored
         );
         assert_eq!(s.pane_hover, Some(Boundary::StoryMapSplit));
         assert!(s.boundary_active(Boundary::StoryMapSplit));
-        on_mouse(&mut s, &ev(MouseEventKind::Moved, 4, 6), &pl, &zones);
+        on_mouse(&mut s, &ev(MouseEventKind::Moved, 4, 6), &pl, &zones, NO_CONTROLS);
         assert_eq!(s.pane_hover, None);
         assert!(!s.boundary_active(Boundary::StoryMapSplit));
     }
@@ -727,12 +826,12 @@ mod tests {
         open_band(&mut s);
         let (pl, zones) = frame(&s, area(80, 24), 0);
         let y = pl.command_band.y - 1;
-        on_mouse(&mut s, &down(10, y), &pl, &zones);
+        on_mouse(&mut s, &down(10, y), &pl, &zones, NO_CONTROLS);
         assert!(s.boundary_active(Boundary::CommandBandTop));
         assert!(!s.boundary_active(Boundary::StoryMapSplit));
-        on_mouse(&mut s, &drag(pl.story.right() - 1, y - 1), &pl, &zones);
+        on_mouse(&mut s, &drag(pl.story.right() - 1, y - 1), &pl, &zones, NO_CONTROLS);
         assert!(s.boundary_active(Boundary::CommandBandTop), "still the held one");
         assert!(!s.boundary_active(Boundary::StoryMapSplit));
-        on_mouse(&mut s, &up(10, y - 1), &pl, &zones);
+        on_mouse(&mut s, &up(10, y - 1), &pl, &zones, NO_CONTROLS);
     }
 }

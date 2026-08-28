@@ -607,9 +607,19 @@ pub fn commented_template() -> String {
     out.push_str("# Colours, glyphs and borders are NOT here: they live in style.toml.\n");
     out.push_str("#\n");
     out.push_str("# PER-GAME overrides live in a second, separate config.toml inside that game's\n");
-    out.push_str("# own save directory, and hold only these three keys:\n");
+    out.push_str("# own save directory. It holds whatever a per-game control or a `set-*` command\n");
+    out.push_str("# can change for one story rather than for all of them, which today is:\n");
     out.push_str("#\n");
-    out.push_str("#   honor_game_colours   borderless_windows   show_map\n");
+    // Derived from `PerGameConfig::KEYS`, never retyped: this sentence used to
+    // name three keys in prose and had been wrong for two releases, because a
+    // list living far from the code that decides what is per-game goes stale
+    // silently. `styles::tests::write_emits_exactly_the_declared_keys` is what
+    // keeps that constant honest against the writer.
+    let w = crate::styles::PerGameConfig::KEYS.iter().map(|k| k.len()).max().unwrap_or(0);
+    for chunk in crate::styles::PerGameConfig::KEYS.chunks(3) {
+        let row: Vec<String> = chunk.iter().map(|k| format!("{k:<w$}")).collect();
+        out.push_str(&format!("#   {}\n", row.join("   ").trim_end()));
+    }
     out.push_str("#\n");
     out.push_str("# That file is a sparse override layer, not a copy of this one: it carries only\n");
     out.push_str("# the keys that differ, bare and uncommented, and is deleted once nothing is\n");
@@ -695,6 +705,7 @@ mod tests {
     #[test]
     fn template_is_valid_toml_and_a_no_op_as_written() {
         let t = commented_template();
+
         let parsed: toml::Table = toml::from_str(&t).expect("the template parses as TOML");
         // Only the managed schema stamp and the (empty) section headers are live —
         // every actual setting is commented out.

@@ -242,37 +242,82 @@ know which side you're on).
   and never touches a normal launch.
 
 ## Playing aids
-- **Toggle controls in the story pane's border** — a small cluster of clickable
-  icons at the right-hand end of the story pane's top border, each one showing
-  what state it is in: `┤◀ ○ ▲├` on an ordinary story, `┤◀ ○ ▲ ◧ □├` on a
-  graphical v6 one. Left to right they are the **map**, the **Guiding Light**
-  and the **verb panel**, plus — only when the story really is v6, otherwise
-  absent rather than greyed out — the **render mode** and the **pixel lock**.
-  Guidance, the verb panel and the two v6 switches used to be reachable only by
-  slash command, key or the settings screen, with nothing on screen saying they
-  existed, let alone whether they were on.
-  - **The icon carries the state, not just the colour.** The panel toggles are
-    arrows pointing the way the panel would move — the map lives to the right of
-    the story pane and the verb panel below it, so `▶` means "click and the map
-    leaves that way" while `◀` means "click and it comes back", and `▲`/`▼` say
-    the same for the band. The Guiding Light is a filled `●` when lit and a
-    hollow `○` when out; the render mode draws `◧` hybrid, `■` raster, `▦`
-    extended; the pixel lock `▣` locked, `□` free.
-  - **Hover for a hint.** Resting the pointer on one floats a small box just
-    *below* it — never over the icon you are pointing at — naming the control,
-    what a click would do, and the command or key that does the same thing.
-    Near the right edge it slides left; near the bottom it flips above. It takes
-    no focus and no keys: typing always wins, here as everywhere.
+- **Toggle controls in the story pane's border** — clickable icons riding the
+  pane's own frame, each one showing what state it is in and switching it when
+  clicked. Guidance, the verb panel and the two v6 switches used to be reachable
+  only by slash command, key or the settings screen, with nothing on screen
+  saying they existed, let alone whether they were on.
+
+  ```text
+  ┌─ ZORK I ──────────────────────┤ ◧ □ ├─┐   the v6 pair (v6 stories only)
+  │                                       │
+  └──────────────┤ ▲ ○ ├─────────┤ ◀ ├────┘   verb panel · Guiding Light | map
+  ```
+
+  - **A control sits where the thing it governs is, or where it would appear.**
+    The command band opens *below* the story pane, so its toggle rides the
+    bottom border; the map lives to the *right*, so its toggle takes the bottom
+    border's right-hand end, nearest the pane it summons. The Guiding Light has
+    no direction of its own and joins the band as the other thing you switch.
+    The **render mode** and the **pixel lock** govern how the story pane itself
+    is drawn, so they keep that pane's own top border — and they appear only
+    when the story really is v6, absent rather than greyed out, so an ordinary
+    story's top border carries nothing at all.
+  - **The state is carried twice: by the glyph and by the colour.** The panel
+    toggles are arrows pointing the way the panel would move, so `▶` means
+    "click and the map leaves that way" while `◀` means "click and it comes
+    back", and `▲`/`▼` say the same for the band. The Guiding Light is a filled
+    `●` when lit and a hollow `○` when out; the render mode draws `◧` hybrid,
+    `■` raster, `▦` extended; the pixel lock `▣` locked, `□` free. On top of
+    that, **every control that is on is lit yellow** — the `alert` role, the
+    same slot the Guiding Light's own margin mark uses. The doubling is
+    deliberate: a player who cannot tell the two colours apart still has the
+    shape, and the shape change is legible without reading the colour. (The
+    render mode is a cycle rather than a switch, so `hybrid` — how the game
+    arrives — is not lit, while `raster` and `extended` both are.)
+  - **Hover for a hint.** Resting the pointer on one floats a small box *into*
+    the pane — down from the top border, up from the bottom one, never over the
+    icon you are pointing at — naming the control, what a click would do, and
+    the command or key that does the same thing. Near an edge it slides or flips
+    to stay inside. It takes no focus and no keys: typing always wins, here as
+    everywhere.
   - **A click is the command.** Each control runs its own `slash::COMMANDS`
     entry, bare — `/toggle-map`, `/set-guidance`, `/open-command-band`,
     `/set-v6-render`, `/set-v6-pixel-lock` — so clicking does exactly what
-    typing does, persistence included.
-  - Every state is themeable: `panel.control` (idle), `panel.control:active`
-    (on), `panel.control:lit` (the Guiding Light's yellow — the `alert` role,
-    the same slot the assist mark uses) and `panel.control:hover`. The glyphs
-    come from the `control_icons` preset in `[map]` (`plain` | `nerdfont`) and
-    from `[map.overrides]` one slot at a time; the first-run font check picks
-    the preset along with the arrows and portal icons.
+    typing does.
+  - **And what you switch here is remembered for *this game*.** Every one of the
+    five writes the per-game `config.toml` sidecar in the story's save
+    directory, so the map you hid, the light you put out, the band you left open
+    and the render mode you chose come back with that story and no other. The
+    **settings screen** still sets the *global default* that new games inherit —
+    that split is the point. To hand a game back to the global default, use the
+    command's `auto` argument (`/set-guidance auto`, `/set-v6-render auto`,
+    `/set-v6-pixel-lock auto`), which clears the key rather than writing the
+    global value down; the buttons themselves only ever reach the concrete
+    states, because "inherit" has no look of its own to show.
+  - **Sharing a row with a drag handle.** The bottom border is also where the
+    command band's and the inventory dock's top edge is grabbed for a resize. A
+    control owns its own cell, so a click on a toggle toggles; the edge stays
+    grabbable everywhere else along the row. Nothing is ever drawn on the pane's
+    right border column, which is where the story/map splitter is dragged.
+  - **Too narrow to fit?** Each cluster is drawn whole or not at all — half a
+    cluster would be unclickable chrome. The map toggle is anchored and the pair
+    is centred in what the anchor leaves, so as the pane narrows the **centred
+    pair gives way first** and the map toggle, the one control that moves a whole
+    pane, survives longest.
+  - Every state is themeable: `panel.control` (off/idle), `panel.control:lit`
+    (on — the `alert` role) and `panel.control:hover`, which wins over both so
+    whatever the pointer is on reads as reachable.
+  - The glyphs come from the `control_icons` preset in `[map]` (`plain` |
+    `nerdfont`) and from `[map.overrides]` one slot at a time; the first-run
+    font check picks the preset along with the arrows and portal icons. The
+    `nerdfont` set gives each of the eleven states a named icon — a map with a
+    "you are here" dot when the map is shown, a purpose-built panel off/on pair
+    for the band, a lamp for the light, a monitor per render mode, a padlock for
+    the lock — and each control's states come from **one** icon family, because
+    Codicons, Font Awesome and Material Design carry different stroke weights,
+    and a control whose two states came from different families appeared to jump
+    on toggle.
 - **`[more]` paging, the way the originals did it** — whenever a turn's output
   runs past the story pane (a long description, a boot banner, a hint page,
   even a "press any key" dump), the view stops at the *first* fresh screenful

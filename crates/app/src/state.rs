@@ -2670,6 +2670,17 @@ pub struct AppState {
     /// `honor_game_colours_base` exists to survive.
     pub v6_pixel_lock_base: bool,
 
+    /// The global `guidance` default (from config.toml, before this game's own
+    /// sidecar override), captured at boot (SQ-1123). `set-guidance auto` clears
+    /// the per-game key and puts the live value back to this, for exactly the
+    /// reason `v6_pixel_lock_base` exists.
+    pub guidance_base: bool,
+
+    /// The global `v6_render` default (from config.toml, before this game's own
+    /// sidecar override), captured at boot (SQ-1123). `set-v6-render auto` clears
+    /// the per-game key and puts the live mode back to this.
+    pub v6_render_base: crate::config::V6RenderMode,
+
     /// What `--game-colours` was typed as on this launch, if it was (SQ-0855).
     ///
     /// `None` is the third answer SQ-1082 gave every one of these switches: the
@@ -3102,6 +3113,8 @@ impl Default for AppState {
             garglk_overlay: None,
             honor_game_colours_base: true,
             v6_pixel_lock_base: false,
+            guidance_base: false,
+            v6_render_base: crate::config::V6RenderMode::default(),
             game_colours_cli: None,
             artwork_declines_colours: false,
             story_zversion: None,

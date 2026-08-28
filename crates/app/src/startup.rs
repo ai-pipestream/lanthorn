@@ -1018,6 +1018,25 @@ pub(crate) fn boot_story(
         cfg.v6_pixel_lock = v;
         cfg.one_run.pin(app::config::keys::V6_PIXEL_LOCK, v);
     }
+    // SQ-1123: the border controls persist what they switch, so the two switches
+    // that were session-only until now arrive with the game as well. Same
+    // precedence and the same pin as the pixel lock above — a flag typed on this
+    // launch outranks a file, and one game's choice can never be written back
+    // into the user's global config.toml by a later settings-screen save.
+    let guidance_base = cfg.guidance;
+    if let Some(v) = app::styles::read_per_game_guidance(&game_dir).filter(|_| cli.guidance.is_none())
+    {
+        cfg.guidance = v;
+        cfg.one_run.pin(app::config::keys::GUIDANCE, v);
+    }
+    let v6_render_base = cfg.v6_render;
+    if let Some(m) = app::styles::read_per_game_v6_render(&game_dir)
+        .filter(|_| cli.v6_render.is_none())
+        .and_then(|t| app::config::v6_render_from_key(&t))
+    {
+        cfg.v6_render = m;
+        cfg.one_run.pin(app::config::keys::V6_RENDER, app::config::v6_render_key(m));
+    }
     let theme_colours = app::glk_backend::theme_style_colours(&cs);
     // ZMSD §8.3.3 (SQ-0532/A-F2): publish OUR default page + ink in header bytes
     // $2C/$2D, as the nearest §8.3.1 standard colour numbers, so a game that asks
@@ -1535,13 +1554,19 @@ pub(crate) fn boot_story(
     };
     // `[command_band] auto_open` — open the band with the story, for players who
     // want it as their default input surface rather than a thing to summon.
-    let band_auto_open = cfg.command_band.auto_open;
+    // SQ-1123: whether the band opens with this story is the band toggle's own
+    // state, so a per-game answer wins over the global `[command_band] auto_open`
+    // — absent key = inherit, as every sidecar key does.
+    let band_auto_open =
+        app::styles::read_per_game_command_band(&game_dir).unwrap_or(cfg.command_band.auto_open);
     // SQ-0318: remember the global honor base so reload_style can recompute the
     // per-game > garglk > global precedence (and `auto` can fall back here).
     state.honor_game_colours_base = honor_game_colours_base;
     // SQ-0945: and the global v6 pixel-lock default, so `set-v6-pixel-lock auto` can
     // put the live key back to it after clearing this game's sidecar override.
     state.v6_pixel_lock_base = v6_pixel_lock_base;
+    state.guidance_base = guidance_base;
+    state.v6_render_base = v6_render_base;
     // SQ-0855: and whether a flag put it there, which the base alone cannot say —
     // the post-IFID `reload_style` below re-reads both per-story sources from disk
     // and would otherwise let either of them overrule the flag.
@@ -1634,11 +1659,11 @@ pub(crate) fn boot_story(
     // slide) so the first frame is already the settled layout.
     if band_auto_open {
         let mut mapper_noop = mapper::mapper::Mapper::default();
-        app::input::apply_action(
-            app::input::Action::OpenCommandBand,
-            &mut state,
-            &mut mapper_noop,
-        );
+        // Not through `Action::OpenCommandBand`: that action PERSISTS the band's
+        // state per-game (SQ-1123), and a global `auto_open` must not pin itself
+        // to whichever story you happened to launch. The state change without the
+        // persistence is exactly what this helper is.
+        app::input::open_command_band(&mut state, &mut mapper_noop, true);
         state.band_dock.toggle_to(true, true);
     }
 
