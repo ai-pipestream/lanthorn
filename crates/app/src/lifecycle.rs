@@ -152,6 +152,8 @@ mod tests {
         fn submit(&mut self, _command: &str) -> app::session::TurnResult { unreachable!() }
         fn submit_key(&mut self, _key: app::engine::KeyInput) -> Option<app::session::TurnResult> { unreachable!() }
         fn take_transcript(&mut self) -> String { unreachable!() }
+        // No screen-clear channel: this double is not a game.
+        fn drain_screen_clear(&mut self) -> bool { false }
         fn pending_input(&self) -> app::session::InputKind { unreachable!() }
         fn resume_save(&mut self, _wrote_ok: bool) -> app::session::TurnResult { unreachable!() }
         fn resume_restore(&mut self, _data: Option<&[u8]>) -> app::session::TurnResult { unreachable!() }
@@ -186,6 +188,8 @@ mod tests {
         fn submit(&mut self, _command: &str) -> app::session::TurnResult { unreachable!() }
         fn submit_key(&mut self, _key: app::engine::KeyInput) -> Option<app::session::TurnResult> { unreachable!() }
         fn take_transcript(&mut self) -> String { unreachable!() }
+        // No screen-clear channel: this double is not a game.
+        fn drain_screen_clear(&mut self) -> bool { false }
         fn pending_input(&self) -> app::session::InputKind { unreachable!() }
         fn resume_save(&mut self, _wrote_ok: bool) -> app::session::TurnResult { unreachable!() }
         fn resume_restore(&mut self, _data: Option<&[u8]>) -> app::session::TurnResult { unreachable!() }

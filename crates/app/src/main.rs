@@ -3701,24 +3701,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 // Re-observe current location (mirror the restore path).
                                 if let Some(snap) = session.current_location() {
                                     let rid = snap.number as mapper::graph::RoomId;
-                                    let restore_result = TurnResult {
-                                        transcript: String::new(),
-                                        transcript_runs: Vec::new(),
-                                        location: Some(snap),
-                                        quit: false,
-                                        erase_lower: false,
-                                        info: None,
-                                        sounds: Vec::new(),
-                                        glulx_sound_ops: Vec::new(),
-                                        diagnostics: vec![],
-                                        fault: None,
-                                        location_method: None,
-                                        pending_io: None,
-                                        timed_out: false,
-                                        pictures: Vec::new(),
-                                        transcript_elems: Vec::new(),
-                                        prose_retired: None,
-                                    };
+                                    let restore_result = TurnResult::observation(snap);
                                     apply_turn(
                                         &mut mapper,
                                         "",
@@ -3994,24 +3977,7 @@ fn reobserve_location(
     state.death_watch = Default::default();
     let Some(snap) = session.current_location() else { return };
     let rid = snap.number as mapper::graph::RoomId;
-    let restore_result = TurnResult {
-        transcript: String::new(),
-        transcript_runs: Vec::new(),
-        location: Some(snap),
-        quit: false,
-        erase_lower: false,
-        info: None,
-        sounds: Vec::new(),
-        glulx_sound_ops: Vec::new(),
-        diagnostics: vec![],
-        fault: None,
-        location_method: None,
-        pending_io: None,
-        timed_out: false,
-        pictures: Vec::new(),
-        transcript_elems: Vec::new(),
-        prose_retired: None,
-    };
+    let restore_result = TurnResult::observation(snap);
     apply_turn(mapper, "", &restore_result, &mut state.death_watch);
     state.set_viewed_layer(None);
     state.select_room(Some(rid));
@@ -4338,6 +4304,8 @@ mod tests {
         fn submit(&mut self, _command: &str) -> app::session::TurnResult { unreachable!() }
         fn submit_key(&mut self, _key: app::engine::KeyInput) -> Option<app::session::TurnResult> { unreachable!() }
         fn take_transcript(&mut self) -> String { unreachable!() }
+        // No screen-clear channel: this double is not a game.
+        fn drain_screen_clear(&mut self) -> bool { false }
         fn pending_input(&self) -> app::session::InputKind { unreachable!() }
         fn resume_save(&mut self, _wrote_ok: bool) -> app::session::TurnResult { unreachable!() }
         fn resume_restore(&mut self, _data: Option<&[u8]>) -> app::session::TurnResult { unreachable!() }

@@ -16,6 +16,8 @@ mod fixture_paths;
 
 #[path = "suites/beyondzork_title_repaint.rs"]
 mod beyondzork_title_repaint;
+#[path = "suites/boot_screen_clear.rs"]
+mod boot_screen_clear;
 #[path = "suites/drawn_edge_honesty.rs"]
 mod drawn_edge_honesty;
 #[path = "suites/input_suggestion_border_style.rs"]

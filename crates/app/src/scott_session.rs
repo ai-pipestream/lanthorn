@@ -195,6 +195,13 @@ impl Engine for ScottSession {
         std::mem::take(&mut self.intro)
     }
 
+    fn drain_screen_clear(&mut self) -> bool {
+        // Scott Adams games have no screen-clear channel at all: the VM prints and
+        // the host scrolls. Nothing to drain, at boot or in a turn — which is why
+        // `ScottSession::turn` writes `erase_lower: false` outright.
+        false
+    }
+
     fn pending_input(&self) -> InputKind {
         InputKind::Line
     }

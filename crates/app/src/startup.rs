@@ -28,7 +28,7 @@ use app::engine::Engine;
 use app::glulx_session::GlulxSession;
 use app::hints;
 use app::ifid::compute_ifid;
-use app::session::{apply_turn, GameSession, TurnResult};
+use app::session::{apply_turn, GameSession};
 use app::state::AppState;
 use app::storage::{DiskBuild, default_state_path, game_dir as story_game_dir, story_key_for};
 
@@ -1573,27 +1573,16 @@ pub(crate) fn boot_story(
     }
 
     // Observe the starting room so it appears on the map immediately.
-    let start_loc = session.current_location();
-    if let Some(snap) = start_loc {
-        let snap_number = snap.number;
-        let seed_result = TurnResult {
-            transcript: String::new(),
-            transcript_runs: Vec::new(),
-            location: Some(snap),
-            quit: session.has_quit(),
-            erase_lower: false,
-            info: None,
-            sounds: Vec::new(),
-            glulx_sound_ops: Vec::new(),
-            diagnostics: vec![],
-            fault: None,
-            location_method: None,
-            pending_io: None,
-            timed_out: false,
-            pictures: Vec::new(),
-            transcript_elems: Vec::new(),
-            prose_retired: None,
-        };
+    //
+    // Built by [`Engine::seed_turn`] and NOT by a `TurnResult { … }` literal: the
+    // literal that used to stand here spelled `erase_lower: false` into itself, so
+    // an `erase_window` the game issued during its own boot was never drained and
+    // the first real turn took it instead — wiping the banner and the opening room
+    // description one command late (SQ-1106). Taken UNCONDITIONALLY, before the
+    // location test below, because a story whose starting room is undetectable still
+    // has a boot to drain.
+    let seed_result = session.seed_turn();
+    if let Some(snap_number) = seed_result.location.as_ref().map(|snap| snap.number) {
         apply_turn(&mut mapper, "", &seed_result, &mut state.death_watch);
         crate::turn::flush_screen_trace(&state.config.user_dir, &mut *session, state.config.trace.screen);
         crate::turn::flush_v6_trace(&state.config.user_dir, &mut *session, state.config.trace.v6);

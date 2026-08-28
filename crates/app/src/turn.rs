@@ -946,6 +946,12 @@ mod tests {
         fn take_transcript(&mut self) -> String {
             String::new()
         }
+
+        // No screen-clear channel: this double is not a game.
+        fn drain_screen_clear(&mut self) -> bool {
+            false
+        }
+
         fn pending_input(&self) -> app::session::InputKind {
             // A game-driven turn ends on a keypress read (menu navigation, "press
             // any key"), which is what `apply_game_driven_result` asks about when
