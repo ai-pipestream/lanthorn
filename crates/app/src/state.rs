@@ -173,7 +173,7 @@ pub struct DragState {
 // ── Command band state ────────────────────────────────────────────────────────
 
 use crate::render::command_band::{
-    Arity, VerbEntry, BAND_COLS, COL_CARRIED, COL_HERE, COL_SECOND, COL_VERB,
+    VerbEntry, VerbSource, VerbTable, BAND_COLS, COL_CARRIED, COL_HERE, COL_SECOND, COL_VERB,
 };
 use crossterm::event::KeyCode;
 
@@ -260,8 +260,18 @@ struct ParsedPhrase {
 /// mouse-click-only now, with `quick_hover` its one transient highlight.
 #[derive(Debug, Clone, Default)]
 pub struct CommandBandState {
-    /// The verb table in force (built-ins, or the config's replacement/extras).
+    /// The verb table in force: the running story's own grammar, the built-in
+    /// fallback, or the config's replacement — with `extra_verbs` layered on
+    /// whichever it is.
     pub verbs: Vec<VerbEntry>,
+    /// Where [`Self::verbs`] came from, so the column can label itself when it
+    /// is NOT the story's own grammar (SQ-1111).
+    pub verb_source: VerbSource,
+    /// True once this open has asked the engine for the story's grammar —
+    /// whatever the answer. The tables are static, so one read per open is all
+    /// there is; without this a story with no readable grammar would re-ask on
+    /// every tick forever. (`render::command_band::refresh_verbs`.)
+    pub verbs_read: bool,
     /// The one-click quick-action row.
     pub quick: Vec<String>,
     /// Tokens picked so far, in order.
@@ -310,8 +320,13 @@ pub struct CommandBandState {
 }
 
 impl CommandBandState {
-    pub fn new(verbs: Vec<VerbEntry>, quick: Vec<String>) -> Self {
-        CommandBandState { verbs, quick, ..Default::default() }
+    pub fn new(verbs: VerbTable, quick: Vec<String>) -> Self {
+        CommandBandState {
+            verbs: verbs.entries,
+            verb_source: verbs.source,
+            quick,
+            ..Default::default()
+        }
     }
 
     // ── Phrase ───────────────────────────────────────────────────────────────
@@ -332,21 +347,32 @@ impl CommandBandState {
         self.verb_by_word(w)
     }
 
-    /// The picked verb's arity, if a verb is picked.
+    /// The picked verb's sentence shapes, if a verb is picked.
     ///
-    /// A picked word that is not in the table is [`Arity::Solo`]. That can only
-    /// come from the quick row — every column pick is drawn from the table —
-    /// and a quick action IS the whole command (`n`, `again`), so it is complete
-    /// as it stands. Without this, a quick row holding `n` (not a table verb,
-    /// which spells it `north`) could never arm.
-    pub fn arity(&self) -> Option<Arity> {
+    /// A picked word that is NOT in the table has no known shape — an empty
+    /// list, which [`VerbEntry::accepts`] and [`VerbEntry::max_nouns`] both read
+    /// as "complete on its own". That can only come from the quick row (every
+    /// column pick is drawn from the table), and a quick action IS the whole
+    /// command (`n`, `again`), so it is complete as it stands. Without this, a
+    /// quick row holding `n` (which the story's grammar spells `north`) could
+    /// never arm.
+    fn shape(&self) -> Option<&VerbEntry> {
         let word = self.slot_text(BandSlot::Verb)?;
-        Some(self.verb_by_word(word).map_or(Arity::Solo, |v| v.arity))
+        self.verb_by_word(word)
     }
 
-    /// The preposition joining the two objects of the picked pair verb.
+    /// How many objects the picked verb can take at most — 0 when it only ever
+    /// stands alone, and 0 for a picked word with no table entry, which is what
+    /// closes the object columns behind a quick action.
+    fn max_nouns(&self) -> usize {
+        self.shape().map_or(0, VerbEntry::max_nouns)
+    }
+
+    /// The word joining the two objects of the picked verb — `unlock … WITH …`.
+    /// The first of the verb's own joiners; see [`VerbEntry::joiners`] for the
+    /// alternation that lives behind it.
     pub fn prep(&self) -> Option<&str> {
-        self.verb_entry().and_then(|v| v.prep.as_deref())
+        self.verb_entry().and_then(|v| v.joiner())
     }
 
     /// Materialize the phrase as the plain text the game will parse. Multi-word
@@ -373,14 +399,23 @@ impl CommandBandState {
     /// now sitting on the real story input line is a valid command on its
     /// own (Enter there sends it, exactly like anything typed by hand).
     pub fn complete(&self) -> bool {
-        match self.arity() {
-            None => false,
-            Some(Arity::Solo) | Some(Arity::ObjectOpt) => true,
-            Some(Arity::Object) => self.slot_text(BandSlot::Object).is_some(),
-            Some(Arity::Pair) => {
-                self.slot_text(BandSlot::Object).is_some()
-                    && self.slot_text(BandSlot::Second).is_some()
-            }
+        if self.slot_text(BandSlot::Verb).is_none() {
+            return false;
+        }
+        let mut filled = 0;
+        if self.slot_text(BandSlot::Object).is_some() {
+            filled += 1;
+        }
+        if self.slot_text(BandSlot::Second).is_some() {
+            filled += 1;
+        }
+        // ANY of the verb's lines taking exactly this many objects settles it —
+        // which is the alternation the old single-arity model could not hold:
+        // a story that accepts both `take noun` and `take noun from noun` arms
+        // at one object AND at two, instead of having to pick a shape.
+        match self.shape() {
+            Some(v) => v.accepts(filled),
+            None => filled == 0,
         }
     }
 
@@ -392,11 +427,8 @@ impl CommandBandState {
     pub fn col_reachable(&self, col: usize) -> bool {
         match col {
             COL_VERB => true,
-            COL_HERE | COL_CARRIED => !matches!(self.arity(), None | Some(Arity::Solo)),
-            COL_SECOND => {
-                matches!(self.arity(), Some(Arity::Pair))
-                    && self.slot_text(BandSlot::Object).is_some()
-            }
+            COL_HERE | COL_CARRIED => self.max_nouns() >= 1,
+            COL_SECOND => self.max_nouns() >= 2 && self.slot_text(BandSlot::Object).is_some(),
             _ => false,
         }
     }
@@ -423,7 +455,10 @@ impl CommandBandState {
     /// The column's header text.
     pub fn column_label(&self, col: usize) -> String {
         match col {
-            COL_VERB => "VERB".to_string(),
+            // Unlabelled when the words ARE the story's own grammar — see
+            // `VerbSource::column_label`, and `draw_column` for the row that
+            // header only costs when there is something to admit.
+            COL_VERB => self.verb_source.column_label().unwrap_or("VERB").to_string(),
             COL_HERE => {
                 if self.here_is_seen {
                     "WHAT — seen".to_string()
@@ -505,9 +540,10 @@ impl CommandBandState {
             return ParsedPhrase { picks: Vec::new(), expected: vec![COL_VERB] };
         };
         let entry = self.verb_by_word(toks[vi]).expect("just matched");
-        let (arity, prep) = (entry.arity, entry.prep.clone());
-        // Store the TABLE's spelling, so downstream lookups (`arity`, `prep`)
-        // and `phrase_text` are canonical regardless of how it was typed.
+        let (max_nouns, joiners) = (entry.max_nouns(), entry.joiners());
+        // Store the TABLE's spelling, so downstream lookups (`prep`,
+        // `max_nouns`) and `phrase_text` are canonical regardless of how it was
+        // typed.
         let mut picks = vec![BandPick { slot: BandSlot::Verb, text: entry.word.clone() }];
         let rest = &toks[vi + 1..];
         let push = |picks: &mut Vec<BandPick>, slot, text: String| {
@@ -515,26 +551,25 @@ impl CommandBandState {
                 picks.push(BandPick { slot, text });
             }
         };
-        let expected = match arity {
-            Arity::Solo => Vec::new(),
-            Arity::Object | Arity::ObjectOpt => {
-                push(&mut picks, BandSlot::Object, rest.join(" "));
-                vec![COL_HERE, COL_CARRIED]
-            }
-            Arity::Pair => {
-                let p = prep.unwrap_or_default();
-                match rest.iter().position(|t| t.eq_ignore_ascii_case(&p)) {
-                    Some(j) => {
-                        push(&mut picks, BandSlot::Object, rest[..j].join(" "));
-                        push(&mut picks, BandSlot::Second, rest[j + 1..].join(" "));
-                        vec![COL_SECOND]
-                    }
-                    None => {
-                        push(&mut picks, BandSlot::Object, rest.join(" "));
-                        vec![COL_HERE, COL_CARRIED]
-                    }
-                }
-            }
+        // The split point is ANY of the verb's own joiners, not one canonical
+        // preposition: a story that writes `put noun in noun` and
+        // `put noun on noun` as two lines accepts both, and reading the line
+        // back has to accept both too (SQ-1111 — `Arity` had room for one).
+        let split =
+            if max_nouns >= 2 {
+                rest.iter().position(|t| joiners.iter().any(|j| t.eq_ignore_ascii_case(j)))
+            } else {
+                None
+            };
+        let expected = if max_nouns == 0 {
+            Vec::new()
+        } else if let Some(j) = split {
+            push(&mut picks, BandSlot::Object, rest[..j].join(" "));
+            push(&mut picks, BandSlot::Second, rest[j + 1..].join(" "));
+            vec![COL_SECOND]
+        } else {
+            push(&mut picks, BandSlot::Object, rest.join(" "));
+            vec![COL_HERE, COL_CARRIED]
         };
         ParsedPhrase { picks, expected }
     }

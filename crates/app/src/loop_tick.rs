@@ -468,11 +468,17 @@ pub(crate) fn refresh_engine_input(
     redraw
 }
 
-/// Refill the command band's object columns from the engine, once per loop tick.
-/// Thin wrapper over [`app::render::command_band::refresh_objects`], which lives
-/// in the lib so the integration tests can drive it against a real story.
-pub(crate) fn refresh_command_band_objects(state: &mut AppState, session: &dyn Engine) -> bool {
-    app::render::command_band::refresh_objects(state, session)
+/// Refill the command band from the engine, once per loop tick: its object
+/// columns every tick (they are live), and its VERB column once per open, from
+/// the story's own grammar (SQ-1111).
+///
+/// Thin wrapper over `app::render::command_band`'s two refreshers, which live in
+/// the lib so the integration tests can drive them against a real story. Both
+/// run — `||` would short-circuit the objects refresh on the one tick the verbs
+/// change.
+pub(crate) fn refresh_command_band(state: &mut AppState, session: &dyn Engine) -> bool {
+    let verbs = app::render::command_band::refresh_verbs(state, session);
+    app::render::command_band::refresh_objects(state, session) || verbs
 }
 
 /// Expire a finished sound pulse and settle the command band's slide-out.

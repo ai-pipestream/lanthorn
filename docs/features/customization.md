@@ -510,16 +510,31 @@ re-seed the new template, or hand-write the new shape from
   draws no frame, so every one of them is content — clamped to 3–11 and to
   whatever the screen can spare;
   resize mode writes this key. `auto_open` (default false) opens the band with
-  the story. `verbs` REPLACES the built-in verb table and `extra_verbs` adds to
-  whichever table is in force — same entry shape either way,
-  `{ word = "unlock", arity = "pair", prep = "with" }`, where `arity` is one of
-  `solo` (complete on its own), `object` (one object, required), `object_opt`
-  (one object, optional) or `pair` (two objects joined by `prep`, which also
-  names that column). An `extra_verbs` entry whose word already exists re-shapes
-  it rather than duplicating it, so that is how you fix one built-in verb's
-  grammar. `quick` replaces the one-click quick-action row. An unrecognised
-  `arity` is reported in the transcript and that entry is skipped, never
-  silently reinterpreted.
+  the story.
+
+  The VERB column normally needs no configuring at all: it is read from the
+  running story's own grammar table. The two keys are for when you want
+  something else. `verbs` REPLACES the whole column — the story's grammar
+  included — and `extra_verbs` ADDS to whatever is in force, which is usually
+  that grammar, so it patches a real verb list rather than a constant. Same
+  entry shape either way, `{ word = "unlock", arity = "pair", prep = "with" }`,
+  where `arity` is one of `solo` (complete on its own), `object` (one object,
+  required), `object_opt` (one object, optional) or `pair` (two objects joined
+  by `prep`, which also names that column). An `extra_verbs` entry whose word
+  the story already has re-shapes that one verb rather than duplicating it. An
+  unrecognised `arity` is reported in the transcript and that entry is skipped,
+  never silently reinterpreted.
+
+  Both keys mean exactly what they meant before the column had a story behind
+  it, so a config written against the old built-in table still does what it
+  always did — `verbs` was a complete statement of what you wanted offered, and
+  folding two hundred of the story's own verbs in beside your twelve would
+  destroy the only thing the key is for. A column filled from `verbs` labels
+  itself **VERB — yours**, and the built-in fallback (for a story whose grammar
+  cannot be read) labels itself **VERB — generic**; the story's own grammar is
+  the one that goes unlabelled. `quick` replaces the one-click quick-action row,
+  which is not read from the grammar — the compass is not in the verb table on
+  the Infocom family at all.
 - **v6 story rendering** — `v6_render` selects how graphical v6 titles (*Zork Zero*,
   *Shogun*, …) draw their story pane on an image-capable terminal: `hybrid`
   (the default) keeps the story text as real terminal text inside an image

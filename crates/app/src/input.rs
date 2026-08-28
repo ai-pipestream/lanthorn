@@ -7326,7 +7326,7 @@ mod tests {
         // solo: still nothing else, and the phrase is already complete.
         // Every default solo verb lives on the quick row and is therefore
         // excluded from the VERB column (SQ-0667, direction-aware), so give
-        // the table a synthetic solo verb to exercise the arity.
+        // the table a synthetic bare verb to exercise the shape.
         s.overlays
             .command_band
             .as_mut()
@@ -7334,8 +7334,7 @@ mod tests {
             .verbs
             .push(crate::render::command_band::VerbEntry::new(
                 "pray",
-                crate::render::command_band::Arity::Solo,
-                None,
+                vec![crate::render::command_band::VerbLine::bare()],
             ));
         pick_text(&mut s, &mut mapper, COL_VERB, "pray");
         assert!(!band(&s).col_reachable(COL_HERE), "a solo verb offers no object");

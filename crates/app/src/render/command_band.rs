@@ -4,8 +4,15 @@
 //! Replaces the old left-edge verb/noun/prep token palette (SQ-0664). The
 //! differences that matter:
 //!
-//! * Every verb declares an **arity** (see [`Arity`]), so the band knows which
-//!   column comes next and can dim the ones that are not reachable yet.
+//! * Every verb carries the **sentence shapes it accepts** (see [`VerbLine`]),
+//!   so the band knows which column comes next and can dim the ones that are
+//!   not reachable yet.
+//! * Those shapes, and the verbs themselves, are the **running story's own**
+//!   (SQ-1111): `refresh_verbs` reads the game's grammar table through
+//!   `crate::vocab::StoryVocabulary`, so the column that exists to say what is
+//!   possible now says what is possible *in this game*. [`BUILTIN_VERBS`]
+//!   survives only as the fallback for a story with no readable grammar, and a
+//!   column that is not the story's own labels itself ([`VerbSource`]).
 //! * The object columns are **live**: they are refreshed from the engine's
 //!   object tree every frame (`loop_tick::refresh_command_band_objects`), not
 //!   scraped from the transcript and snapshotted at open.
@@ -64,94 +71,259 @@ use ratatui::style::Style;
 
 use crate::state::AppState;
 
-// ── Grammar: the arity table ─────────────────────────────────────────────────
+// ── Grammar: the story's own syntax, narrowed to what the band can compose ───
 
-/// How many (and which) object slots a verb takes. Progressive disclosure needs
-/// each verb to declare its shape; this is what decides which columns are
-/// reachable after the verb is picked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Arity {
-    /// `look`, `wait`, `n` — the phrase is complete with the verb alone.
-    Solo,
-    /// `take`, `open` — one object, required.
-    Object,
-    /// `search`, `push` — one object, but the verb alone is also valid.
-    ObjectOpt,
-    /// `unlock … with`, `put … in` — an object plus a prepositional second
-    /// object. [`VerbEntry::prep`] carries the preposition.
-    Pair,
+/// One sentence shape the band's four columns can compose, derived from a real
+/// [`grammar_model::SyntaxLine`].
+///
+/// This is a **view of** the story's grammar, not a second model of it
+/// (SQ-1111). The band used to carry an `Arity` enum — `Solo`/`Object`/
+/// `ObjectOpt`/`Pair` plus a `prep` string — which was the grammar table's
+/// structure rebuilt as a constant, and rebuilt *worse*: a real verb has
+/// SEVERAL syntax lines (`take noun` and `take noun from noun` are two), and
+/// one enum value per verb cannot express the alternation at all. A verb here
+/// carries a LIST of these.
+///
+/// # What it deliberately drops
+///
+/// A syntax line whose literal words sit BEFORE its first object — Zork I's
+/// `look at noun`, `stand up noun`, `carry up noun` — is not representable: the
+/// band composes `verb object`, so it would emit `look lamp`, a command the
+/// game refuses. [`VerbLine::from_syntax`] answers `None` for those, which is
+/// also why the object columns stay dimmed on Zork I's `look` — every one of its
+/// one-object lines needs a preposition first, and `look lamp` really is not a
+/// sentence that story accepts. Offering a *lead* preposition column is a
+/// feature, not a fix, and is not in this quest.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VerbLine {
+    /// Object slots the player fills: 0, 1 or 2. (Two is the most any of the
+    /// three engines' tables express, and the most the band has columns for.)
+    pub nouns: usize,
+    /// The words accepted between the first and second object, in table order —
+    /// `unlock … **with** …`, `put … **in**/**into**/**inside** …`. The first is
+    /// what the band composes with and what the second column labels itself; the
+    /// rest are recognised when the player types them. Empty unless
+    /// `nouns == 2`, and legitimately empty even then (Zork I's
+    /// `throw noun noun`).
+    pub joiners: Vec<String>,
 }
 
-impl Arity {
-    /// Parse the config spelling of an arity (`"solo"`, `"object"`,
-    /// `"object_opt"`/`"object?"`, `"pair"`). `None` for anything else, so a
-    /// typo in `config.toml` is reported rather than silently reinterpreted.
-    pub fn parse(s: &str) -> Option<Arity> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "solo" => Some(Arity::Solo),
-            "object" => Some(Arity::Object),
-            "object_opt" | "object?" | "objectopt" => Some(Arity::ObjectOpt),
-            "pair" => Some(Arity::Pair),
-            _ => None,
+impl VerbLine {
+    /// A line the verb completes on its own — `look`, `wait`, `n`.
+    pub fn bare() -> VerbLine {
+        VerbLine { nouns: 0, joiners: Vec::new() }
+    }
+
+    /// A line taking one object — `take noun`.
+    pub fn object() -> VerbLine {
+        VerbLine { nouns: 1, joiners: Vec::new() }
+    }
+
+    /// A line taking two objects joined by `joiner` — `unlock noun with noun`.
+    pub fn pair(joiner: &str) -> VerbLine {
+        VerbLine { nouns: 2, joiners: vec![joiner.to_string()] }
+    }
+
+    /// Narrow a real syntax line to what the band can compose, or `None` when it
+    /// cannot compose it at all (see the type's own doc for which shapes those
+    /// are and why dropping them is the honest answer rather than a gap).
+    pub fn from_syntax(line: &grammar_model::SyntaxLine) -> Option<VerbLine> {
+        let mut nouns = 0usize;
+        let mut joiners: Vec<String> = Vec::new();
+        let mut literal_slots_after_first_noun = 0usize;
+        for slot in &line.slots {
+            if slot.is_noun_slot() {
+                nouns += 1;
+                if nouns > 2 {
+                    return None;
+                }
+                continue;
+            }
+            // A literal before the first object, or after the second, is a word
+            // the band has nowhere to put.
+            if nouns != 1 {
+                return None;
+            }
+            literal_slots_after_first_noun += 1;
+            if literal_slots_after_first_noun > 1 {
+                return None;
+            }
+            joiners = slot
+                .alternatives
+                .iter()
+                .filter_map(grammar_model::Token::word)
+                .map(str::to_lowercase)
+                .collect();
+            if joiners.is_empty() {
+                return None;
+            }
+        }
+        // A joiner with no second object to join to (`search for noun`) is the
+        // leading-literal case wearing the other hat.
+        if nouns < 2 && !joiners.is_empty() {
+            return None;
+        }
+        Some(VerbLine { nouns, joiners })
+    }
+}
+
+/// One verb the band offers, with every sentence shape it accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerbEntry {
+    pub word: String,
+    /// The shapes, in table order. **Empty means "shape unknown"**, not "takes
+    /// nothing": a word picked off the quick row is not in the table at all, and
+    /// a verb whose every line the band cannot compose lands here too. Either
+    /// way the band treats it as complete on its own, which is what a quick
+    /// action IS.
+    pub lines: Vec<VerbLine>,
+}
+
+impl VerbEntry {
+    pub fn new(word: &str, lines: Vec<VerbLine>) -> Self {
+        VerbEntry { word: word.to_string(), lines }
+    }
+
+    /// The most objects any of this verb's lines takes — 0 for a verb that only
+    /// ever stands alone, and what decides how far right the columns open.
+    pub fn max_nouns(&self) -> usize {
+        self.lines.iter().map(|l| l.nouns).max().unwrap_or(0)
+    }
+
+    /// True when some line of this verb takes exactly `nouns` objects — the
+    /// question "is the phrase finished?". A verb with no known shape answers
+    /// true for a bare phrase, as a quick action does.
+    pub fn accepts(&self, nouns: usize) -> bool {
+        if self.lines.is_empty() {
+            return nouns == 0;
+        }
+        self.lines.iter().any(|l| l.nouns == nouns)
+    }
+
+    /// Every word this verb accepts between its two objects, in table order and
+    /// deduplicated. This is the alternation `Arity` could not hold: a verb with
+    /// `put noun in noun` and `put noun on noun` names both here, so typing
+    /// either one moves the band on to the second-object column.
+    pub fn joiners(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for line in self.lines.iter().filter(|l| l.nouns == 2) {
+            for j in &line.joiners {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(j)) {
+                    out.push(j.as_str());
+                }
+            }
+        }
+        out
+    }
+
+    /// The word the band composes a two-object phrase with, and the header the
+    /// second-object column wears. The first of [`joiners`](Self::joiners) — the
+    /// story's own table order decides, not us.
+    pub fn joiner(&self) -> Option<&str> {
+        self.joiners().first().copied()
+    }
+}
+
+/// Where the VERB column's words came from.
+///
+/// The band's whole job is to say what is possible, so a column that is NOT the
+/// running story's own grammar has to admit it rather than pass a generic list
+/// off as fact — the same rule `here_is_seen` already follows for the object
+/// columns (SQ-1111 / SQ-1117).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerbSource {
+    /// The running story's own grammar table, read through
+    /// [`crate::vocab::StoryVocabulary`]. The column is unlabelled: it is
+    /// simply the truth.
+    Story,
+    /// [`BUILTIN_VERBS`] — the story's grammar could not be read (a menu-driven
+    /// Version 6 game, one of SQ-1101's non-Inform files, a Glulx image whose
+    /// dictionary→actions→grammar chain will not close). Labelled
+    /// `VERB — generic`.
+    #[default]
+    Builtin,
+    /// The player's own `[command_band] verbs` list. Labelled `VERB — yours`:
+    /// it is not the story's grammar either, but it is not our guess.
+    Configured,
+}
+
+impl VerbSource {
+    /// The header the VERB column wears, or `None` when it needs none (and can
+    /// keep spending that row on one more verb, as it has since SQ-0675).
+    pub fn column_label(self) -> Option<&'static str> {
+        match self {
+            VerbSource::Story => None,
+            VerbSource::Builtin => Some("VERB — generic"),
+            VerbSource::Configured => Some("VERB — yours"),
         }
     }
 }
 
-/// One verb the band offers, with the grammar it implies.
+/// The verb column's words together with where they came from.
+///
+/// One value rather than two arguments: a caller that has the words without
+/// knowing whether they are the story's own will eventually label them wrong,
+/// which is exactly the defect this quest fixes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerbEntry {
-    pub word: String,
-    pub arity: Arity,
-    /// The preposition joining the two objects of an [`Arity::Pair`] verb
-    /// (`unlock … **with** …`). Ignored for every other arity.
-    pub prep: Option<String>,
+pub struct VerbTable {
+    pub entries: Vec<VerbEntry>,
+    pub source: VerbSource,
 }
 
-impl VerbEntry {
-    pub fn new(word: &str, arity: Arity, prep: Option<&str>) -> Self {
-        VerbEntry { word: word.to_string(), arity, prep: prep.map(str::to_string) }
+impl VerbTable {
+    pub fn new(entries: Vec<VerbEntry>, source: VerbSource) -> VerbTable {
+        VerbTable { entries, source }
     }
 }
 
-/// The built-in verb table: `(word, arity, prep)`. Replaced wholesale by
-/// `[command_band] verbs`, or extended by `extra_verbs`.
-const BUILTIN_VERBS: &[(&str, Arity, Option<&str>)] = &[
-    ("look", Arity::Solo, None),
-    ("inventory", Arity::Solo, None),
-    ("wait", Arity::Solo, None),
-    ("again", Arity::Solo, None),
-    ("north", Arity::Solo, None),
-    ("south", Arity::Solo, None),
-    ("east", Arity::Solo, None),
-    ("west", Arity::Solo, None),
-    ("up", Arity::Solo, None),
-    ("down", Arity::Solo, None),
-    ("in", Arity::Solo, None),
-    ("out", Arity::Solo, None),
-    ("examine", Arity::Object, None),
-    ("take", Arity::Object, None),
-    ("drop", Arity::Object, None),
-    ("open", Arity::Object, None),
-    ("close", Arity::Object, None),
-    ("read", Arity::Object, None),
-    ("eat", Arity::Object, None),
-    ("drink", Arity::Object, None),
-    ("wear", Arity::Object, None),
-    ("remove", Arity::Object, None),
-    ("turn", Arity::Object, None),
-    ("enter", Arity::Object, None),
-    ("lock", Arity::Pair, Some("with")),
-    ("search", Arity::ObjectOpt, None),
-    ("push", Arity::ObjectOpt, None),
-    ("pull", Arity::ObjectOpt, None),
-    ("climb", Arity::ObjectOpt, None),
-    ("move", Arity::ObjectOpt, None),
-    ("unlock", Arity::Pair, Some("with")),
-    ("put", Arity::Pair, Some("in")),
-    ("give", Arity::Pair, Some("to")),
-    ("show", Arity::Pair, Some("to")),
-    ("attack", Arity::Pair, Some("with")),
-    ("tie", Arity::Pair, Some("to")),
+impl Default for VerbTable {
+    fn default() -> Self {
+        VerbTable { entries: Vec::new(), source: VerbSource::Builtin }
+    }
+}
+
+/// The built-in verb table — the FALLBACK, no longer the source (SQ-1111).
+///
+/// A story whose grammar lanthorn can read drives the column itself; this is
+/// what a story that has none falls back to, so the column is never empty. It
+/// is a generic interactive-fiction verb set and says so on screen.
+const BUILTIN_VERBS: &[(&str, &[usize], Option<&str>)] = &[
+    ("look", &[0], None),
+    ("inventory", &[0], None),
+    ("wait", &[0], None),
+    ("again", &[0], None),
+    ("north", &[0], None),
+    ("south", &[0], None),
+    ("east", &[0], None),
+    ("west", &[0], None),
+    ("up", &[0], None),
+    ("down", &[0], None),
+    ("in", &[0], None),
+    ("out", &[0], None),
+    ("examine", &[1], None),
+    ("take", &[1], None),
+    ("drop", &[1], None),
+    ("open", &[1], None),
+    ("close", &[1], None),
+    ("read", &[1], None),
+    ("eat", &[1], None),
+    ("drink", &[1], None),
+    ("wear", &[1], None),
+    ("remove", &[1], None),
+    ("turn", &[1], None),
+    ("enter", &[1], None),
+    ("lock", &[2], Some("with")),
+    ("search", &[0, 1], None),
+    ("push", &[0, 1], None),
+    ("pull", &[0, 1], None),
+    ("climb", &[0, 1], None),
+    ("move", &[0, 1], None),
+    ("unlock", &[2], Some("with")),
+    ("put", &[2], Some("in")),
+    ("give", &[2], Some("to")),
+    ("show", &[2], Some("to")),
+    ("attack", &[2], Some("with")),
+    ("tie", &[2], Some("to")),
 ];
 
 /// The default one-click quick-action row.
@@ -161,14 +333,119 @@ const BUILTIN_VERBS: &[(&str, Arity, Option<&str>)] = &[
 /// cells permanently empty. A game with no diagonal vocabulary (classic Scott
 /// Adams) simply answers "I don't understand", exactly as it would to the same
 /// word typed by hand — nothing here needs gating on the engine.
+///
+/// **Deliberately NOT derived from the grammar** (SQ-1111 asked): on the
+/// Infocom family the compass is not in the verb table at all — `north` carries
+/// the dictionary's "special" bit ($04) and never reaches a syntax line, so
+/// Zork I's 134 verbs name no direction between them. The grammar cannot answer
+/// the question, and the rose's eight slots are a fixed geometry besides.
 pub const DEFAULT_QUICK: &[&str] = &[
     "n", "s", "e", "w", "ne", "nw", "se", "sw", "up", "down", "in", "out", "look", "inventory",
     "wait", "again",
 ];
 
-/// The built-in verb table as owned entries (the runtime form).
-pub fn default_verbs() -> Vec<VerbEntry> {
-    BUILTIN_VERBS.iter().map(|&(w, a, p)| VerbEntry::new(w, a, p)).collect()
+/// The built-in verb table as owned entries — the fallback, labelled as such.
+pub fn default_verbs() -> VerbTable {
+    let entries = BUILTIN_VERBS
+        .iter()
+        .map(|&(w, nouns, prep)| {
+            let lines = nouns
+                .iter()
+                .map(|&n| match (n, prep) {
+                    (2, Some(p)) => VerbLine::pair(p),
+                    (2, None) => VerbLine { nouns: 2, joiners: Vec::new() },
+                    (1, _) => VerbLine::object(),
+                    _ => VerbLine::bare(),
+                })
+                .collect();
+            VerbEntry::new(w, lines)
+        })
+        .collect();
+    VerbTable::new(entries, VerbSource::Builtin)
+}
+
+/// The story's own verb column: one row per dictionary spelling every verb of
+/// its grammar answers to, alphabetically.
+///
+/// **Every spelling, not one per verb**, and that is the whole point. Infocom's
+/// tables list a verb's synonyms in DICTIONARY order, so the first spelling is
+/// merely the alphabetically-earliest one: Zork I's take-verb is `carry`, its
+/// look-verb is `gaze`, its put-verb is `hide`, its throw-verb is `chuck`, and
+/// its wave-verb is the truncated key `brandi`. Naming one spelling per verb
+/// would hand the player a column of words no one would ever type. Listing them
+/// all needs no heuristic, has zero false positives — every word here is one the
+/// parser really accepts — and puts `take`, `look`, `put` and `throw` back where
+/// the player expects them, beside their oddities.
+///
+/// One-character spellings (`x`, `g`, `z`, `l`, `q`) are dropped: they are real
+/// vocabulary and a wasted row, the same call `vocab::StoryVocabulary`'s synonym
+/// offer already makes. Where two verbs claim one spelling the first wins, as
+/// both engines' readers do.
+pub fn verbs_from_grammar(verbs: &[grammar_model::Verb]) -> Vec<VerbEntry> {
+    let mut out: std::collections::BTreeMap<String, VerbEntry> = std::collections::BTreeMap::new();
+    for verb in verbs {
+        let mut lines: Vec<VerbLine> = Vec::new();
+        for line in &verb.lines {
+            if let Some(l) = VerbLine::from_syntax(line) {
+                if !lines.contains(&l) {
+                    lines.push(l);
+                }
+            }
+        }
+        for word in &verb.words {
+            let word = word.to_lowercase();
+            if word.chars().count() < 2 {
+                continue;
+            }
+            out.entry(word.clone()).or_insert_with(|| VerbEntry::new(&word, lines.clone()));
+        }
+    }
+    out.into_values().collect()
+}
+
+/// Refill the band's VERB column from the running story's own grammar.
+///
+/// Called from the same per-tick hook as [`refresh_objects`], and for the same
+/// reason the band opens before it can ask: `Action::OpenCommandBand` has the
+/// config but no engine, so the band is born on the fallback and swaps to the
+/// story's own words on the tick before its first frame. Read ONCE per open —
+/// the grammar table is static, so no later turn can change the answer — and
+/// never over a `[command_band] verbs` list, which is the player's own.
+///
+/// Returns `true` when the column actually changed (→ repaint).
+pub fn refresh_verbs(state: &mut AppState, session: &dyn crate::engine::Engine) -> bool {
+    let Some(band) = state.overlays.command_band.as_ref() else { return false };
+    if band.verbs_read || band.verb_source == VerbSource::Configured {
+        return false;
+    }
+    // `VocabState` is the one vocabulary seam (SQ-1117): the same snapshot the
+    // guidance offer reads, cached for the session, so this costs one grammar
+    // read whichever of the two asks first.
+    let mut vocab = std::mem::take(&mut state.vocab);
+    let story = vocab.get(session).map(|v| verbs_from_grammar(v.verbs()));
+    state.vocab = vocab;
+    let table = match story {
+        Some(entries) if !entries.is_empty() => {
+            Some(state.config.command_band.layer_extra_verbs(VerbTable::new(
+                entries,
+                VerbSource::Story,
+            )))
+        }
+        _ => None,
+    };
+    let Some(band) = state.overlays.command_band.as_mut() else { return false };
+    band.verbs_read = true;
+    match table {
+        Some(t) => {
+            if band.verbs == t.entries && band.verb_source == t.source {
+                return false;
+            }
+            band.verbs = t.entries;
+            band.verb_source = t.source;
+            true
+        }
+        None => false,
+    }
 }
 
 /// The default quick row as owned strings.
@@ -875,7 +1152,16 @@ fn draw_column(
     // therefore needs nothing special here despite having no header row —
     // its earlier top-row underline read as "this entry is underlined for
     // some reason" and was retired on user feedback (2026-08-05).
-    let header_h: u16 = if col == COL_VERB { 0 } else { 1 };
+    //
+    // SQ-1111 gives the row back for the ONE thing worth saying there: when the
+    // column is NOT the story's own grammar — the generic fallback, or the
+    // player's own `[command_band] verbs` list — it says so
+    // (`VerbSource::column_label`), the same way `here_is_seen` relabels the
+    // object column rather than passing a scrape off as the room's contents. A
+    // story whose grammar we CAN read pays nothing: no label, no header, one
+    // more verb visible, exactly as before.
+    let header_h: u16 =
+        if col == COL_VERB && band.verb_source.column_label().is_none() { 0 } else { 1 };
     if header_h > 0 {
         let header_style = base.patch(
             theme.get(if is_current { "band.column_header:active" } else { "band.column_header" }).style,
@@ -992,9 +1278,18 @@ mod tests {
     // narrower case on purpose.
     const BAND: Rect = Rect { x: 0, y: 0, width: 120, height: 8 };
 
+    /// A band as a real session has one: the built-in words, but flying the
+    /// story's own flag, which is the case every render test below is about.
+    /// The FALLBACK's extra header row is the exception and is pinned by its
+    /// own two cases (`verb_column_header_carries_no_text` and
+    /// `the_verb_column_spends_a_row_only_when_it_has_something_to_admit`).
+    fn story_table() -> VerbTable {
+        VerbTable::new(default_verbs().entries, VerbSource::Story)
+    }
+
     fn state_with_band() -> AppState {
         let mut s = AppState::default();
-        let mut band = CommandBandState::new(default_verbs(), default_quick());
+        let mut band = CommandBandState::new(story_table(), default_quick());
         band.here = vec!["iron door".to_string(), "mailbox".to_string()];
         band.carried = vec!["brass key".to_string(), "lantern".to_string()];
         s.overlays.command_band = Some(band);
@@ -1107,6 +1402,10 @@ mod tests {
 
     /// SQ-0667: the VERB column shows no header text (it's self-evident); the
     /// object columns keep theirs, since WHAT/WITH carry real information.
+    ///
+    /// SQ-1111 leaves that intact for the column that IS the story's grammar,
+    /// and only spends the row on the label when there is something to admit —
+    /// checked in the second half here.
     #[test]
     fn verb_column_header_carries_no_text() {
         let s = state_with_band();
@@ -1182,6 +1481,32 @@ mod tests {
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut hits);
         assert!(!hits.quick.is_empty(), "quick words emit hit rects");
         assert_eq!(hits.headers.len(), BAND_COLS - 1, "every column but VERB has a clickable header row");
+    }
+
+    /// SQ-1111: the label is the ONLY thing that costs VERB its reclaimed list
+    /// row, and it costs it exactly one. Falsify by making the header
+    /// unconditional — the story's own column then shows one verb fewer for no
+    /// reason.
+    #[test]
+    fn the_verb_column_spends_a_row_only_when_it_has_something_to_admit() {
+        let mut s = state_with_band();
+        let rows = |s: &AppState| -> usize {
+            let mut buf = Buffer::empty(BAND);
+            let mut hits = CommandBandHits::default();
+            draw_command_band(s, BAND, &mut buf, &mut 0, &mut hits);
+            hits.rows.iter().filter(|(c, _, _)| *c == COL_VERB).count()
+        };
+        let story = rows(&s);
+
+        for (source, label) in
+            [(VerbSource::Builtin, "VERB — generic"), (VerbSource::Configured, "VERB — yours")]
+        {
+            s.overlays.command_band.as_mut().unwrap().verb_source = source;
+            assert_eq!(rows(&s), story - 1, "{label} costs exactly the reclaimed row");
+            let mut buf = Buffer::empty(BAND);
+            draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
+            assert!(dump(&buf).contains(label), "{label} reaches the screen");
+        }
     }
 
     /// SQ-0675: too narrow for the rose+words block (plus a usable four
@@ -1567,22 +1892,120 @@ mod tests {
     }
 
     #[test]
-    fn arity_parses_the_config_spellings() {
-        assert_eq!(Arity::parse("solo"), Some(Arity::Solo));
-        assert_eq!(Arity::parse("Object"), Some(Arity::Object));
-        assert_eq!(Arity::parse("object_opt"), Some(Arity::ObjectOpt));
-        assert_eq!(Arity::parse("object?"), Some(Arity::ObjectOpt));
-        assert_eq!(Arity::parse("pair"), Some(Arity::Pair));
-        assert_eq!(Arity::parse("nonsense"), None);
-    }
-
-    #[test]
-    fn every_pair_verb_declares_a_preposition() {
-        for v in default_verbs() {
-            if v.arity == Arity::Pair {
-                assert!(v.prep.is_some(), "pair verb `{}` needs a preposition", v.word);
+    fn every_two_object_fallback_verb_declares_a_joining_word() {
+        for v in default_verbs().entries {
+            if v.max_nouns() == 2 {
+                assert!(v.joiner().is_some(), "two-object verb `{}` needs a joiner", v.word);
             }
         }
+    }
+
+    // ── The grammar view (SQ-1111) ───────────────────────────────────────────
+
+    fn noun() -> grammar_model::Slot {
+        grammar_model::Slot::one(grammar_model::Token::Noun(grammar_model::NounKind::Noun))
+    }
+
+    fn word(w: &str) -> grammar_model::Slot {
+        grammar_model::Slot::one(grammar_model::Token::Word(w.to_string()))
+    }
+
+    fn line(slots: Vec<grammar_model::Slot>) -> grammar_model::SyntaxLine {
+        grammar_model::SyntaxLine::new(1, false, slots)
+    }
+
+    /// The three shapes the band can compose, read off real syntax lines
+    /// instead of declared by hand.
+    #[test]
+    fn a_syntax_line_narrows_to_the_shape_the_columns_can_build() {
+        assert_eq!(VerbLine::from_syntax(&line(vec![])), Some(VerbLine::bare()));
+        assert_eq!(VerbLine::from_syntax(&line(vec![noun()])), Some(VerbLine::object()));
+        assert_eq!(
+            VerbLine::from_syntax(&line(vec![noun(), word("with"), noun()])),
+            Some(VerbLine::pair("with"))
+        );
+        // Two objects with nothing between them is Zork I's `throw noun noun`,
+        // and is composable — the second column simply has no word to wear.
+        assert_eq!(
+            VerbLine::from_syntax(&line(vec![noun(), noun()])),
+            Some(VerbLine { nouns: 2, joiners: Vec::new() })
+        );
+    }
+
+    /// Alternatives at one slot are one slot (`'in' / 'into' / 'inside'`), and
+    /// all of them are kept: the first composes, the rest are recognised.
+    #[test]
+    fn a_slot_s_alternatives_all_reach_the_second_column() {
+        let mut slot = word("in");
+        slot.alternatives.push(grammar_model::Token::Word("into".into()));
+        slot.alternatives.push(grammar_model::Token::Word("inside".into()));
+        let l = VerbLine::from_syntax(&line(vec![noun(), slot, noun()])).expect("composable");
+        assert_eq!(l.joiners, vec!["in", "into", "inside"]);
+        let v = VerbEntry::new("put", vec![l]);
+        assert_eq!(v.joiner(), Some("in"));
+        assert_eq!(v.joiners(), vec!["in", "into", "inside"]);
+    }
+
+    /// A literal word the band has nowhere to put is refused rather than
+    /// silently dropped — composing `look lamp` off Zork I's `look at noun`
+    /// would offer a command that story really does reject.
+    #[test]
+    fn a_line_the_band_cannot_type_back_is_refused() {
+        assert_eq!(VerbLine::from_syntax(&line(vec![word("at"), noun()])), None);
+        assert_eq!(VerbLine::from_syntax(&line(vec![word("for"), noun()])), None);
+        assert_eq!(VerbLine::from_syntax(&line(vec![noun(), word("up")])), None);
+        assert_eq!(VerbLine::from_syntax(&line(vec![noun(), noun(), noun()])), None);
+    }
+
+    /// The alternation `Arity` could not hold: one verb, two shapes, and the
+    /// phrase is finished at either.
+    #[test]
+    fn a_verb_keeps_every_shape_it_accepts() {
+        let v = VerbEntry::new("take", vec![VerbLine::object(), VerbLine::pair("from")]);
+        assert!(v.accepts(1) && v.accepts(2));
+        assert!(!v.accepts(0));
+        assert_eq!(v.max_nouns(), 2);
+        assert_eq!(v.joiner(), Some("from"));
+    }
+
+    /// Every dictionary spelling gets a row, one-letter abbreviations do not,
+    /// and the column comes out alphabetical. This is what puts `take` and
+    /// `look` in a Zork I column whose verbs are internally named `carry` and
+    /// `gaze`.
+    #[test]
+    fn the_story_s_column_is_every_spelling_alphabetically() {
+        let verbs = vec![
+            grammar_model::Verb::new(
+                255,
+                0,
+                vec!["carry".into(), "get".into(), "take".into()],
+                vec![line(vec![noun()]), line(vec![noun(), word("from"), noun()])],
+            ),
+            grammar_model::Verb::new(
+                254,
+                0,
+                vec!["gaze".into(), "l".into(), "look".into()],
+                vec![line(vec![]), line(vec![word("at"), noun()])],
+            ),
+        ];
+        let entries = verbs_from_grammar(&verbs);
+        let words: Vec<&str> = entries.iter().map(|e| e.word.as_str()).collect();
+        assert_eq!(words, vec!["carry", "gaze", "get", "look", "take"], "no `l`, alphabetical");
+        let take = entries.iter().find(|e| e.word == "take").expect("take");
+        assert_eq!(take.max_nouns(), 2, "a synonym carries the verb's own shapes");
+        assert_eq!(take.joiner(), Some("from"));
+        let look = entries.iter().find(|e| e.word == "look").expect("look");
+        assert_eq!(look.max_nouns(), 0, "`look at noun` is not `look noun`");
+        assert!(look.accepts(0));
+    }
+
+    /// The fallback labels itself and the story's own column does not — the
+    /// `here_is_seen` rule, applied to the VERB column.
+    #[test]
+    fn only_a_column_that_is_not_the_story_s_wears_a_label() {
+        assert_eq!(VerbSource::Story.column_label(), None);
+        assert_eq!(VerbSource::Builtin.column_label(), Some("VERB — generic"));
+        assert_eq!(VerbSource::Configured.column_label(), Some("VERB — yours"));
     }
 
     /// SQ-0667: the VERB column excludes anything already one click away on

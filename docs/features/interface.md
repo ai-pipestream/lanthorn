@@ -270,8 +270,38 @@ know which side you're on).
   list starts right on the row the label would have used, so it shows one
   more entry than the columns beside it), then **WHAT — here** and
   **WHAT — carried**, then a **WITH…/IN…/TO…** column for verbs that take two
-  objects. Each verb declares its shape, so only the columns that can come
-  next are offered; the rest stay dimmed until they are reachable.
+  objects. Each verb's own sentence shapes decide which columns can come next;
+  the rest stay dimmed until they are reachable.
+
+  **The verbs are the running story's own.** lanthorn reads the grammar table
+  out of the story file itself — the same table its parser consults — so the
+  column is every word that game accepts as a command, alphabetically, with the
+  shapes it accepts them in. Zork I offers 248 of them: `dig`, `count`, `pray`,
+  `plugh`, `wave` and `burn` are all in there, and `show` is not, because Zork I
+  answers `I don't know the word "show".` A verb's synonyms each get their own
+  row, which matters more than it sounds — Infocom's tables name a verb by
+  whichever of its spellings comes first alphabetically, so Zork I's take-verb
+  is internally `carry`, its look-verb `gaze`, its put-verb `hide` and its
+  throw-verb `chuck`. Listing every spelling puts the word you would actually
+  type back beside the story's own oddities, and never offers one the parser
+  would refuse.
+
+  The shapes are read the same way, from the story's syntax lines rather than
+  from a declared arity, so a verb can have several: Zork I takes both
+  `take lamp` and `take lamp from table`, and the band arms at either. It is
+  equally strict the other way — Zork I has no `look lamp`, only `look at lamp`,
+  so picking `look` opens no object column at all. (A line whose preposition
+  comes *before* its object, like that one, is not something the columns can
+  compose today; the verb is still offered, and you finish it by typing.)
+
+  A story whose grammar lanthorn cannot read — a menu-driven Version 6 game like
+  *Journey*, or a file that is not Inform or Infocom output — keeps a generic
+  interactive-fiction verb list rather than an empty column, and the column
+  **says so**: it spends its reclaimed row on a **VERB — generic** header, the
+  same way the object column relabels itself *WHAT — seen* when it is scraping
+  rather than reading. A `[command_band] verbs` list of your own reads
+  **VERB — yours** for the same reason. Only the story's own grammar goes
+  unlabelled, because only then is there nothing to admit.
 
   The object columns are **live**: they read the running story's object tree and
   refresh every turn, so taking something moves it from *here* to *carried* as
@@ -344,7 +374,13 @@ know which side you're on).
   it subsumes the inventory dock — the *carried* column IS your inventory —
   which returns when you close it.
 
-  Its height, its verb grammar and its quick list are all configurable under
+  The quick actions are deliberately *not* read from the grammar: on the Infocom
+  family the compass is not in the verb table at all — `north` is a dictionary
+  "special" word that never reaches a syntax line — so Zork I's 134 verbs name
+  no direction between them, and the rose's eight points are a fixed geometry
+  besides.
+
+  Its height, its verb list and its quick row are all configurable under
   `[command_band]` in `config.toml`; resize mode targets its height. The
   compass-rose/flat-row choice is not configurable — it is computed from the
   band's actual width every frame. A band shorter than the quick block's full
