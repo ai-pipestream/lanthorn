@@ -70,11 +70,29 @@
 //! # What an assist line looks like
 //!
 //! ```text
-//! ● this story knows — light · turn on · burn
+//! ● try instead — light · turn on · burn
 //! ```
 //!
 //! — one glyph, in the gutter, drawn by `render::transcript`; the text itself is
 //! exactly what the caller wrote.
+//!
+//! # A line may only claim what was actually established
+//!
+//! Those same three words come with two different openings, and which one is
+//! used is not a matter of taste (SQ-1041, SQ-1121):
+//!
+//! * `this story knows — light` states a **fact about the dictionary**. It is
+//!   verifiable from the story file, promises nothing about whether typing the
+//!   word will do anything, and is therefore never wrong.
+//! * `try instead — light` is a **recommendation**, and it is earned by
+//!   [`crate::vocab`] having watched that command work in a silent copy of this
+//!   game, from where the player is standing.
+//!
+//! Shipping the recommendation over an unvetted list would make the failure it
+//! exists to fix strictly worse — confidently telling a player to try three
+//! things that do not work is more frustrating than saying nothing at all. So
+//! the wording follows the evidence: with the probe off, or unavailable, the
+//! line drops back to the modest claim rather than overstating a weaker one.
 //!
 //! # What an assist line must never look like
 //!
@@ -84,8 +102,13 @@
 //!   introduction and the export marker. `tests/suites/assist_voice.rs` fails any
 //!   source file that tries.
 //! * **In the story's second person.** "You could try turning on the lamp" is the
-//!   game's voice. Say what the *story* knows and let the player decide:
-//!   `this story knows — light · turn on · burn`.
+//!   game's voice — the story owns "you" (*"You are standing in an open
+//!   field"*), and a helper borrowing it is the impersonation this register
+//!   exists to prevent. Say what the *story* knows, or instruct in the plain
+//!   imperative, and let the player decide: `this story knows — light · turn on
+//!   · burn`, `try instead — light`. Note what the imperative buys besides the
+//!   register: it reads at one suggestion as well as at four, where "try one of
+//!   these" does not.
 //! * **A boast, or an apology.** It fires mid-play, twenty times a session, and
 //!   is sometimes wrong. Read every candidate line back on the twentieth firing
 //!   and again assuming the suggestion is useless; anything that grates in either
@@ -98,7 +121,7 @@
 //! # How to emit one
 //!
 //! ```ignore
-//! state.push_assist(&Assist::help(format!("this story knows — {}", verbs.join(" · "))));
+//! state.push_assist(&Assist::help(format!("try instead — {}", verbs.join(" · "))));
 //! state.push_assist(&Assist::caution("burning the leaflet cannot be undone."));
 //! ```
 //!

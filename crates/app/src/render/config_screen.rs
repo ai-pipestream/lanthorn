@@ -50,6 +50,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("v6_arrow_keys",        ConfigRowKind::Bool, "Forward arrow keypresses to v6 stories (some bind them to movement); off = arrows drive lanthorn's scrollback and map panning instead."),
     ("v6_pixel_lock",        ConfigRowKind::Bool, "Scale v6 artwork by whole device pixels per art pixel (0.5x/1x/1.5x on a 320-wide rendition, 1x/2x/3x on the Mac mono and EGA ones) instead of stretching it to fill the pane: crisper art and seamless borders, at the cost of a wider margin. No effect under half-blocks, which draws cells rather than device pixels and has no rung to snap to."),
     ("guidance",             ConfigRowKind::Bool, "Lanthorn's Guiding Light: help offered while you play — the words the parser knows, a completed noun, a caution before a move that cannot be undone. Marked in the margin with its own glyph (style.toml's gutter.assist), never in the story's voice."),
+    ("guidance_probe",       ConfigRowKind::Bool, "Vet the Guiding Light's word suggestions before showing them: each candidate is tried in a silent throwaway copy of the game and only what actually did something is offered. Nothing it does reaches the screen, your saves, or the game you are playing. Off, the light still offers — it just names what the dictionary holds instead of recommending."),
     ("font_check",           ConfigRowKind::Action, "Enter: compare two rows of glyphs and say which your terminal's font draws properly, setting the map's arrows, portal and stairs icons and the Guiding Light's mark together. Answers land in style.toml, not here, so this row is not part of Save."),
 ];
 
@@ -261,9 +262,10 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         25 => bool_str(cfg.v6_arrow_keys),
         26 => bool_str(cfg.v6_pixel_lock),
         27 => bool_str(cfg.guidance),
+        28 => bool_str(cfg.guidance_probe),
         // SQ-1104: an Action row has no value to report, so the column says what
         // the key does. `cfg` is untouched by it — the answer goes to style.toml.
-        28 => "run…".to_string(),
+        29 => "run…".to_string(),
         _ => String::new(),
     }
 }

@@ -1918,6 +1918,23 @@ pub(crate) fn boot_story(
         let _ = execute!(stdout(), EnableMouseCapture);
     }
 
+    // The fork-and-probe seam (SQ-1121). Armed with the story's own bytes and the
+    // boot facts that change how it runs, so the shadow a vetted suggestion is
+    // tried in is the SAME game on the SAME machine — a shadow that differs in
+    // any of them answers plausibly about a game the player is not playing. The
+    // shadow itself is not booted here: most sessions never ask it anything.
+    state.probe.arm(app::probe::ShadowRecipe {
+        story_bytes: std::sync::Arc::new(story_bytes.clone()),
+        honor_game_colours: state.config.honor_game_colours,
+        interpreter_number: state.config.interpreter_number,
+        random_seed: Some(state.config.effective_random_seed()),
+        acceleration: state.config.acceleration,
+        screen: (
+            state.config.virtual_screen_cols.unwrap_or(app::config::FALLBACK_SCREEN_COLS) as u32,
+            state.config.virtual_screen_rows.unwrap_or(app::config::FALLBACK_SCREEN_ROWS) as u32,
+        ),
+    });
+
     // Every byte the backend writes is counted on the way out, so `/dump-terminal`
     // can answer "why does this feel slow?" with numbers (SQ-0994). The handle is
     // shared with `AppState`, which is the only thing that reads them; the

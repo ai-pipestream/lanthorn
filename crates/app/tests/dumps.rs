@@ -19,6 +19,9 @@ mod assist_voice;
 
 #[path = "suites/vocabulary_offer.rs"]
 mod vocabulary_offer;
+
+#[path = "suites/vocabulary_vetting.rs"]
+mod vocabulary_vetting;
 #[path = "suites/cell_dump_command.rs"]
 mod cell_dump_command;
 #[path = "suites/font_check.rs"]

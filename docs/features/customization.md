@@ -454,6 +454,21 @@ re-seed the new template, or hand-write the new shape from
   than from the game's reply, so it behaves the same on a story that words its
   refusal however it likes — and it says nothing at all unless it is confident,
   which is most turns.
+  And the offer is **tried before you see it**. `guidance_probe` (default `true`)
+  forks your game into a silent throwaway copy, types each suggestion into it
+  from exactly where you are standing, keeps only the ones that did something and
+  throws every copy away — so the line reads `try instead — light` rather than
+  `this story knows — light`, because it is a recommendation and not a lookup.
+  Nothing the copy does reaches your screen, your saves or the game you are
+  playing: sound and graphics are off in it, its file store is empty, and a
+  story that reaches for `@save` inside one is told the write failed. Turn it off
+  and the offer still appears, in the modest wording it can still support, which
+  is also what happens on a story too slow to ask (a big Glulx game will often
+  overrun the probe's budget rather than make you wait for it).
+  Two honest limits, because a vetted suggestion is evidence and not a promise:
+  a game that draws on randomness can answer the copy and your game differently,
+  and a refusal the probe's own control commands never provoke — "that's not
+  something you can open" — reads as a success and survives.
 - **A choice for one run stays a choice for one run.** `--sound off`, `--user-dir`,
   `--game-colours off` and `--interpreter` are instructions for the launch you typed
   them on,
