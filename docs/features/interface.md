@@ -387,8 +387,10 @@ know which side you're on).
   height (rose plus every word row) still draws the whole rose and simply
   clips the word rows it has no room for; resize the band taller to see them
   all.
-- **Tab autocomplete** from the story's own dictionary plus the nouns mentioned
-  in the current room, shown the way your shell shows it: the rest of the word
+- **Tab autocomplete** from the story's own dictionary plus the words the story
+  has just been using — every one of them checked against that same dictionary,
+  through the story's own tokeniser, so what you are offered is what the parser
+  will accept and nothing else. Shown the way your shell shows it: the rest of the word
   appears in dim ghost text right under the caret as you type. **Tab** cycles
   forward through the candidates, **Shift-Tab** back, and **→** at the end of the
   line takes the one on offer. (With the command band open, Tab completes from

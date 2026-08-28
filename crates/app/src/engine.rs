@@ -967,6 +967,24 @@ pub trait Engine {
         None
     }
 
+    /// Split prose the way this story's own parser splits an input line
+    /// (SQ-1116).
+    ///
+    /// The story printed the text; the story decides where one word ends. On the
+    /// Z-machine this is not an approximation of the parser but the *identical
+    /// code path* — `zvm::dictionary::tokenise`, the routine `read` itself calls
+    /// — so the dictionary's declared separator characters (§13.1) are honoured,
+    /// including a story that declares `-` or `'` and one that pointedly does not.
+    ///
+    /// `None` — the default — means "I have no tokeniser to lend"; the caller
+    /// falls back to [`crate::complete::split_prose`]. That is where Glulx and
+    /// Scott Adams sit today, and it costs them only an unusual separator set,
+    /// because whatever comes out is still filtered through the story's own
+    /// dictionary.
+    fn split_like_parser(&self, _text: &str) -> Option<Vec<String>> {
+        None
+    }
+
     // ── capabilities / escape hatch ──
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;

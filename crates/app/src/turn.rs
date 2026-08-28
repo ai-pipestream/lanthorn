@@ -425,6 +425,13 @@ fn post_turn_bookkeeping(
         }
     }
 
+    // ── The story's own words in what it has just printed (SQ-1116) ───
+    // Here rather than in the key handler that reads it, because only the engine
+    // can split prose the way the story's parser does and say which of the pieces
+    // its dictionary holds — and the transcript this reads changes once a turn,
+    // which is exactly this often.
+    app::input::refresh_seen_words(state, session);
+
     // Per-turn auto-save (when enabled). Non-fatal: failure is shown in the
     // transcript status line so the player is aware but the loop continues.
     // Engine-neutral: the save routes through Engine::save_state (Quetzal for

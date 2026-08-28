@@ -1688,6 +1688,12 @@ pub(crate) fn boot_story(
         app::state::apply_transcript_elems(&mut state, &banner_elems);
     }
 
+    // The opening room description is already on screen, so its words are already
+    // completable — waiting for the first turn would leave Tab with only the flat
+    // dictionary for exactly the move a player is most likely to want help with
+    // (SQ-1116).
+    app::input::refresh_seen_words(&mut state, &*session);
+
     // A config.toml that doesn't load — bad syntax or a value of the wrong type — is
     // ignored WHOLESALE: TOML is one document, so a single stray character costs every
     // setting in the file. Say so, with the error TOML reported, rather than letting

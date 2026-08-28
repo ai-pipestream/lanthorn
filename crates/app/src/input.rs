@@ -34,7 +34,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use mapper::direction::Direction;
 use mapper::mapper::Mapper;
 
-use crate::complete::{room_words_from_text, suggest};
+use crate::complete::suggest;
 use crate::keymap::{Context, KeySpec};
 use crate::state::{AppState, Focus, TextEntryDialog, TextEntryKind};
 
@@ -3103,37 +3103,67 @@ pub fn apply_selection_autoscroll(state: &mut AppState) {
 
 // ── Suggestion recompute ──────────────────────────────────────────────────────
 
-/// Nouns scraped from the last 20 transcript lines, deduped and sorted.
+/// The visible prose both scrapers read: the last 20 transcript lines, joined.
+///
+/// One helper because there was one block, copied verbatim at two call sites and
+/// free to drift apart (SQ-1116). Twenty lines is a window on what the story has
+/// just been talking about — a room description and the turns since — not on the
+/// session.
+fn recent_transcript_text(state: &AppState) -> String {
+    let start = state.transcript.len().saturating_sub(20);
+    state.transcript[start..].join(" ")
+}
+
+/// Recompute [`AppState::seen_words`]: the words of the story's own recent output
+/// that the story's own dictionary holds.
+///
+/// Called once a turn, and once at boot, from wherever the engine is in hand —
+/// the answer needs the engine twice over, to split the prose and to say what a
+/// word is, and neither is reachable from a key handler holding only `AppState`.
+///
+/// **Every engine is served, and each says how far it can go:**
+///
+/// | engine | splitting | "is this a word" |
+/// |---|---|---|
+/// | Z-machine | its own `dictionary::tokenise`, the routine `read` calls | its own encoder, so §13.3's six / §13.4's nine **Z-character** truncation is exact |
+/// | Glulx | [`complete::split_prose`] | the [`StoryVocabulary`] snapshot from `gvm::grammar`, cut to `DICT_WORD_SIZE` — exact, Glulx truncating by plain characters |
+/// | Scott Adams | [`complete::split_prose`] | the same snapshot, from the database's own verb/noun lists cut to its header word length |
+/// | anything with neither | [`complete::split_prose`] | nothing is known, so nothing is offered |
+///
+/// The Z-machine reaches this too, even though the command band never uses the
+/// result there (it has a live object tree): Tab completion is every engine's.
+///
+/// [`complete::split_prose`]: crate::complete::split_prose
+/// [`StoryVocabulary`]: crate::vocab::StoryVocabulary
+pub fn refresh_seen_words(state: &mut AppState, engine: &dyn crate::engine::Engine) {
+    let text = recent_transcript_text(state);
+    let tokens = engine
+        .split_like_parser(&text)
+        .unwrap_or_else(|| crate::complete::split_prose(&text));
+    let words = {
+        // The snapshot is read once a session and cached here; asking for it is
+        // free after the first turn.
+        let vocab = state.vocab.get(engine);
+        crate::complete::story_words(&tokens, |w| {
+            engine.knows_word(w).unwrap_or_else(|| vocab.is_some_and(|v| v.knows(w)))
+        })
+    };
+    state.seen_words = words;
+}
+
+/// The story's own words in its own recent output, as the command band's *here*
+/// fallback.
 ///
 /// This was the old verb menu's ONLY noun source, which is exactly what was
 /// wrong with it. It survives as the degraded fallback for engines with no
 /// `Introspect` (Glulx, Scott): the band shows it as a "WHAT — seen" group so
 /// its lower quality is visible rather than mixed in with real objects. A
 /// Z-machine story never reaches this — it has a live object tree.
+///
+/// What it no longer is, since SQ-1116, is a guess: the list is whatever the
+/// story's dictionary holds, refreshed by [`refresh_seen_words`].
 pub fn scraped_seen_nouns(state: &AppState) -> Vec<String> {
-    use std::collections::HashSet;
-
-    let room_text: String = state
-        .transcript
-        .iter()
-        .rev()
-        .take(20)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut nouns: Vec<String> = Vec::new();
-    for w in room_words_from_text(&room_text) {
-        if seen.insert(w.clone()) {
-            nouns.push(w);
-        }
-    }
-    nouns.sort_unstable();
-    nouns
+    state.seen_words.clone()
 }
 
 /// Return up to `limit` names from `names` containing `body_token` ANYWHERE (case-insensitive),
@@ -3204,8 +3234,9 @@ fn apply_completion(state: &mut AppState, completion: &str) {
     state.input.insert_str(completion);
 }
 
-/// Recompute `state.suggestions` from `state.dict_words`, the room words
-/// extracted from `state.transcript`, and the current partial word being typed.
+/// Recompute `state.suggestions` from `state.dict_words`, the story's own words
+/// in its recent output (`state.seen_words`, refreshed once a turn by
+/// [`refresh_seen_words`]), and the current partial word being typed.
 /// Called internally after every input character change in game focus.
 ///
 /// When the input starts with `state.config.command_prefix`, completes the
@@ -3237,20 +3268,9 @@ pub(crate) fn recompute_suggestions(state: &mut AppState) {
         state.suggestions.clear();
         return;
     }
-    // Extract room words from the last few transcript lines (recent context).
-    let room_text: String = state
-        .transcript
-        .iter()
-        .rev()
-        .take(20)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let room_words = room_words_from_text(&room_text);
-    state.suggestions = suggest(&state.dict_words, &room_words, &partial, SUGGESTION_LIMIT);
+    // The words the story has just used, which it also holds in its dictionary —
+    // read off the engine once a turn rather than re-scraped per keystroke.
+    state.suggestions = suggest(&state.dict_words, &state.seen_words, &partial, SUGGESTION_LIMIT);
 }
 
 // ── Bracketed paste (SQ-0653) ─────────────────────────────────────────────────
@@ -8596,17 +8616,48 @@ mod tests {
 
     /// Glulx/Scott have no object tree, so the scrape survives — but only as
     /// the demoted "seen" source, never as the Z-machine path.
+    ///
+    /// Since SQ-1116 the words are the STORY'S, so this half of it can only say
+    /// that the band's fallback and Tab completion read one list and never
+    /// re-derive it; the list itself is pinned against real stories in
+    /// `tests/suites/story_word_scrape.rs`.
     #[test]
-    fn scraped_seen_nouns_come_from_the_transcript() {
+    fn scraped_seen_nouns_come_from_the_seen_word_list() {
         let mut s = AppState::default();
         s.push_transcript("There is a small mailbox here.");
-        let nouns = scraped_seen_nouns(&s);
-        assert!(nouns.contains(&"mailbox".to_string()));
-        assert_eq!(
-            nouns.iter().filter(|n| n.as_str() == "mailbox").count(),
-            1,
-            "deduped"
+        assert!(
+            scraped_seen_nouns(&s).is_empty(),
+            "no engine has answered yet, so nothing is claimed to be a word"
         );
+
+        s.seen_words = vec!["mailbox".to_string()];
+        assert_eq!(scraped_seen_nouns(&s), vec!["mailbox".to_string()]);
+    }
+
+    /// The window both scrapers read: the tail of the transcript, and only the
+    /// tail. One helper, because it used to be one block copied at two call
+    /// sites (SQ-1116).
+    #[test]
+    fn recent_transcript_text_is_the_last_twenty_lines() {
+        let mut s = AppState::default();
+        for i in 0..30 {
+            s.push_transcript(&format!("line{i}"));
+        }
+        let text = recent_transcript_text(&s);
+        assert!(text.starts_with("line10 "), "twenty back, not thirty: {text:?}");
+        assert!(text.ends_with("line29"), "{text:?}");
+        assert!(!text.contains("line9 "), "line 9 is off the end of the window: {text:?}");
+
+        // Fewer lines than the window is not an underflow.
+        let short = state_with_two_lines();
+        assert_eq!(recent_transcript_text(&short), "one two");
+    }
+
+    fn state_with_two_lines() -> AppState {
+        let mut s = AppState::default();
+        s.push_transcript("one");
+        s.push_transcript("two");
+        s
     }
 
     // ── File-browser sub-mode key tests ───────────────────────────────────────

@@ -4983,6 +4983,64 @@ impl Engine for GameSession {
         Some(zvm::dictionary::load(mem).lookup(mem, word) != 0)
     }
 
+    /// The story's OWN tokeniser, run over prose the story itself printed
+    /// (SQ-1116) — `zvm::dictionary::tokenise`, which is the routine `read`
+    /// calls, so the dictionary's declared separators (ZMSD §13.1) are the ones
+    /// applied.
+    ///
+    /// Two adaptations, both because a text buffer is a typed LINE and this is
+    /// not one:
+    ///
+    /// - `tokenise` reads ZSCII bytes, one per character, exactly as `supply_line`
+    ///   leaves them — so the prose is mapped through `Memory::zscii_from_unicode`
+    ///   (the story's own Unicode table first, §3.8.5.4) and a parallel `Vec<char>`
+    ///   keeps the printed spelling recoverable at the same indices.
+    /// - `Token::text_pos` and `Token::len` are single BYTES, which a 255-byte
+    ///   input line can never overflow and a page of prose certainly can. The text
+    ///   is fed in chunks that end on a space, so no position is ever truncated;
+    ///   the split points are spaces, which the tokeniser would have split on
+    ///   anyway, so chunking cannot change the answer.
+    fn split_like_parser(&self, text: &str) -> Option<Vec<String>> {
+        /// Comfortably under `u8::MAX`, and never mid-word.
+        const CHUNK: usize = 200;
+
+        let mem = &self.machine.mem;
+        let dict = zvm::dictionary::load(mem);
+        let mut words: Vec<String> = Vec::new();
+        let mut chars: Vec<char> = Vec::with_capacity(CHUNK + 1);
+        let mut bytes: Vec<u8> = Vec::with_capacity(CHUNK + 1);
+
+        let flush = |chars: &mut Vec<char>, bytes: &mut Vec<u8>, out: &mut Vec<String>| {
+            for t in dict.tokenise(mem, bytes) {
+                let start = t.text_pos as usize;
+                let end = start + t.len as usize;
+                out.push(chars[start..end].iter().collect::<String>().to_lowercase());
+            }
+            chars.clear();
+            bytes.clear();
+        };
+
+        for ch in text.chars() {
+            // Every kind of gap is a space: ZSCII has a newline (13) and the
+            // tokeniser splits only on space and separators, so a line break left
+            // as itself would be glued into the word beside it.
+            let ch = if ch.is_whitespace() { ' ' } else { ch };
+            if ch == ' ' && chars.len() >= CHUNK {
+                flush(&mut chars, &mut bytes, &mut words);
+                continue;
+            }
+            chars.push(ch);
+            bytes.push(mem.zscii_from_unicode(ch));
+            // A single "word" longer than the chunk cannot be a dictionary word in
+            // any story; cut it rather than let the byte position wrap.
+            if chars.len() >= u8::MAX as usize {
+                flush(&mut chars, &mut bytes, &mut words);
+            }
+        }
+        flush(&mut chars, &mut bytes, &mut words);
+        Some(words)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

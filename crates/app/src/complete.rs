@@ -5,7 +5,9 @@
 //!
 //! Suggestion sources:
 //!   (a) The story's parser vocabulary from the Z-machine dictionary.
-//!   (b) Nouns/words parsed from the current room's visible description text.
+//!   (b) The words of the story's own recent output that its dictionary holds —
+//!       scraped by [`split_prose`] + [`story_words`], which ask the story rather
+//!       than guessing at English.
 //!
 //! Ranking (highest priority first):
 //!   1. Room words that share the prefix (most contextually relevant).
@@ -60,42 +62,60 @@ pub fn suggest(
     room_matches
 }
 
-/// Tokenise visible room-description text into candidate noun words.
+/// Split prose into words for a story whose own tokeniser we cannot borrow.
 ///
-/// Rules:
-/// - Split on whitespace and punctuation (anything not alphanumeric or `'`).
-/// - Lowercase everything.
-/// - Drop words shorter than 3 characters.
-/// - Drop common stop words that are not useful for autocomplete.
-pub fn room_words_from_text(text: &str) -> Vec<String> {
-    const STOP_WORDS: &[&str] = &[
-        "the", "and", "are", "you", "can", "not", "has", "was",
-        "for", "with", "its", "this", "that", "have", "been",
-        "from", "into", "onto", "there", "here", "some", "your",
-        "also", "very", "than", "then", "will", "would", "could",
-        "they", "them", "their", "but", "all", "any",
-    ];
+/// The last resort, for an engine with no
+/// [`split_like_parser`](crate::engine::Engine::split_like_parser): break on
+/// everything that is not alphanumeric or `'`, and lowercase. It differs from a
+/// real parser only where a story declares an unusual separator set — and a word
+/// this cuts differently from the story is a word the story's dictionary then
+/// fails to hold, so the error is a missing candidate, never a wrong one.
+pub fn split_prose(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
 
-    let mut words: Vec<String> = Vec::new();
+/// The words of `tokens` that the story's own dictionary holds, deduped and
+/// alphabetical.
+///
+/// **There is no English in here.** This used to carry ~40 stop words, a bespoke
+/// splitter and a three-character floor, all of which were guesses at what counts
+/// as a word — and all three were wrong in ways only the story could settle
+/// (SQ-1116):
+///
+/// - the floor dropped `x`, `n`, `s`, `up`, `in`, `at`, which every story holds,
+///   and cost a Scott Adams game with a three-character dictionary *everything*;
+/// - the splitter never connected a printed `lantern` to the `lanter` a Version 3
+///   dictionary stores, so the longest and most useful nouns were the ones it
+///   missed;
+/// - the stop list overruled the story: a game that genuinely implements `here`
+///   or `there` as vocabulary could not be reached through completion at all.
+///
+/// `knows` is the story's own dictionary — [`Engine::knows_word`] where the engine
+/// answers for itself (the Z-machine encodes the probe with its own encoder, so
+/// §13.3's six / §13.4's nine **Z-character** truncation is applied exactly), and
+/// the [`StoryVocabulary`] snapshot otherwise. A token is a candidate exactly when
+/// the story holds it, and that is the whole rule.
+///
+/// The one thing dropped without asking is a token with no alphanumeric character
+/// in it: a dictionary holds its own separators (`,` and `.` are words in an Inform
+/// dictionary), and offering the player a comma to complete is noise, not
+/// vocabulary. `scott_session`'s reader draws the same line for the same reason.
+///
+/// [`Engine::knows_word`]: crate::engine::Engine::knows_word
+/// [`StoryVocabulary`]: crate::vocab::StoryVocabulary
+pub fn story_words(tokens: &[String], knows: impl Fn(&str) -> bool) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for word in text.split(|c: char| !c.is_alphanumeric() && c != '\'') {
-        if word.is_empty() {
-            continue;
-        }
-        let lower = word.to_lowercase();
-        // Drop short words and stop words.
-        if lower.len() < 3 {
-            continue;
-        }
-        if STOP_WORDS.contains(&lower.as_str()) {
-            continue;
-        }
-        if seen.insert(lower.clone()) {
-            words.push(lower);
-        }
-    }
-
+    let mut words: Vec<String> = tokens
+        .iter()
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.chars().any(char::is_alphanumeric))
+        .filter(|w| seen.insert(w.clone()))
+        .filter(|w| knows(w))
+        .collect();
+    words.sort_unstable();
     words
 }
 
@@ -288,43 +308,79 @@ mod tests {
         assert!(suggest(&dict, &room, "op", 0).is_empty());
     }
 
-    // ── room_words_from_text ───────────────────────────────────────────────────
+    // ── split_prose + story_words ─────────────────────────────────────────────
 
-    #[test]
-    fn room_words_basic_tokenisation() {
-        let words = room_words_from_text("A small wooden mailbox sits here.");
-        assert!(words.contains(&"small".to_string()));
-        assert!(words.contains(&"wooden".to_string()));
-        assert!(words.contains(&"mailbox".to_string()));
-        // "A" and "sits" and short words filtered
-        assert!(!words.contains(&"a".to_string()));
+    /// A stand-in dictionary: `knows` is true for exactly these spellings, cut to
+    /// `key_len` characters the way a real dictionary cuts what it stores.
+    fn dict(words: &[&str], key_len: usize) -> impl Fn(&str) -> bool {
+        let cut = move |w: &str| -> String {
+            if key_len == 0 { w.to_string() } else { w.chars().take(key_len).collect() }
+        };
+        let keys: std::collections::HashSet<String> = words.iter().map(|w| cut(w)).collect();
+        move |w: &str| keys.contains(&cut(w))
     }
 
     #[test]
-    fn room_words_stop_words_dropped() {
-        let words = room_words_from_text("You are in the forest.");
-        assert!(!words.contains(&"you".to_string()));
-        assert!(!words.contains(&"are".to_string()));
-        assert!(!words.contains(&"the".to_string()));
-        assert!(words.contains(&"forest".to_string()));
+    fn candidates_are_the_words_the_story_holds() {
+        let words = story_words(
+            &split_prose("A small wooden mailbox sits here."),
+            dict(&["mailbox", "small", "wooden"], 0),
+        );
+        assert_eq!(words, vec!["mailbox", "small", "wooden"], "sorted, and only what it holds");
+        assert!(!words.contains(&"sits".to_string()), "a word the story has never heard of");
+    }
+
+    /// SQ-1116, bug 1. The old path had a three-character floor, so `x`, `n`, `s`,
+    /// `up`, `in` and `at` — words every story in every engine holds — could never
+    /// be offered, and a Scott Adams database with a three-character dictionary
+    /// lost its whole vocabulary. Falsify by reinstating `if lower.len() < 3`.
+    #[test]
+    fn no_length_floor_short_words_are_words() {
+        let short = ["x", "n", "s", "up", "in", "at"];
+        let words = story_words(&split_prose("x lamp. n. s. up in at."), dict(&short, 0));
+        for w in short {
+            assert!(words.contains(&w.to_string()), "{w:?} is a word this story holds: {words:?}");
+        }
+    }
+
+    /// SQ-1116, bug 2. A Version 3 dictionary stores six Z-characters, so it holds
+    /// `lanter`; the prose says `lantern`. Matching whole printed words against
+    /// stored keys never connected the two, which cost exactly the long, specific
+    /// nouns worth completing. The story's own lookup truncates the probe, so the
+    /// printed spelling is kept — and it is the printed spelling the player types.
+    #[test]
+    fn truncated_dictionary_entries_still_match_the_printed_word() {
+        let words = story_words(
+            &split_prose("The brass lantern is on the trophy case."),
+            dict(&["lanter", "trophy"], 6),
+        );
+        assert!(words.contains(&"lantern".to_string()), "`lanter` is reached by `lantern`");
+        assert!(!words.contains(&"lanter".to_string()), "and offered as the game printed it");
+    }
+
+    /// SQ-1116, bug 3. `the`, `here` and `there` were on a hand-written stop list,
+    /// so a story that genuinely implements them as vocabulary could not reach
+    /// completion at all. Nothing overrules the dictionary now.
+    #[test]
+    fn no_stop_list_the_story_decides() {
+        let holds = story_words(&split_prose("You are in the forest."), dict(&["the", "forest"], 0));
+        assert_eq!(holds, vec!["forest", "the"], "it holds `the`, so `the` is a word");
+
+        let does_not = story_words(&split_prose("You are in the forest."), dict(&["forest"], 0));
+        assert_eq!(does_not, vec!["forest"], "it does not, so it is dropped — by the story");
     }
 
     #[test]
-    fn room_words_deduplicates() {
-        let words = room_words_from_text("open the box to open it");
-        // "open" should appear only once
+    fn separator_tokens_are_not_offered() {
+        // A dictionary holds its own separators; a comma is still not a candidate.
+        let words = story_words(&["box".into(), ",".into(), ".".into()], dict(&["box", ",", "."], 0));
+        assert_eq!(words, vec!["box"]);
+    }
+
+    #[test]
+    fn words_are_deduplicated() {
+        let words = story_words(&split_prose("open the box to open it"), dict(&["open", "box"], 0));
         assert_eq!(words.iter().filter(|w| w.as_str() == "open").count(), 1);
-    }
-
-    #[test]
-    fn room_words_short_words_dropped() {
-        // "it" is 2 chars — should be dropped
-        let words = room_words_from_text("it is on a table");
-        assert!(!words.contains(&"it".to_string()));
-        assert!(!words.contains(&"is".to_string()));
-        assert!(!words.contains(&"on".to_string()));
-        assert!(!words.contains(&"a".to_string()));
-        assert!(words.contains(&"table".to_string()));
     }
 
     // ── fuzzy_match ─────────────────────────────────────────────────────────────
