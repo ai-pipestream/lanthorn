@@ -304,6 +304,25 @@ pub struct Cli {
     #[arg(long, value_enum, value_name = "ON|OFF")]
     pub guidance: Option<OnOff>,
 
+    /// Ask whether this terminal's font draws lanthorn's Nerd Font icon glyphs —
+    /// the map's arrows, the portal and stairs icons, and the mark of Lanthorn's
+    /// Guiding Light — and set every icon preset from the answer (SQ-1104).
+    ///
+    /// Three states. ABSENT asks only on a first run, when there is no
+    /// `config.toml` yet. `on` asks now regardless, which is what you want after
+    /// changing terminal fonts; `/run-font-check` says the same thing mid-game,
+    /// against the terminal you are actually looking at. `off` never asks.
+    ///
+    /// The answer is written to `style.toml` as preset NAMES in `[map]`, not to
+    /// `config.toml` — glyphs live in the style file — so this flag has no
+    /// persisted key of its own and nothing to pin for one run.
+    //
+    // Spelled `--font-check`, not `--set-font-check`: a bare noun with a value,
+    // like `--sound`, `--images`, `--accel` and `--guidance`. The `set-` belongs
+    // to the slash command, whose registry requires a verb.
+    #[arg(long = "font-check", value_enum, value_name = "ON|OFF")]
+    pub font_check: Option<OnOff>,
+
     /// Where the story pane's DEFAULT page and ink come from — the pair reported
     /// to the story in header `$2C`/`$2D` (SQ-1082).
     ///
@@ -2523,6 +2542,7 @@ mod tests {
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         }
     }
 
@@ -2610,6 +2630,7 @@ mod tests {
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
 
         let cfg = resolve(&cli);
@@ -2640,6 +2661,7 @@ mod tests {
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir.file_name().unwrap(), ".lanthorn");
@@ -2670,6 +2692,7 @@ mod tests {
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
@@ -3285,6 +3308,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.acceleration);
@@ -3313,6 +3337,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         // Absent flag: sound stays on (config default).
         assert!(resolve(&base).enable_sound);
@@ -3358,6 +3383,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         // Absent flags: the file governs, as it always did.
         let plain = resolve(&base);
@@ -3453,6 +3479,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         assert!(resolve(&base).v6_arrow_keys, "persisted true must hold");
         let absent = Cli { config: Some(dir.join("missing.toml")), ..base };
@@ -3483,6 +3510,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         cli.trace = Some("screen,map".to_string());
         let cfg = resolve(&cli);
@@ -3514,6 +3542,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.images);
@@ -3580,6 +3609,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         // The read path follows --user-dir, and the resolved config remembers it.
         assert_eq!(config_path(&cli), dir.join("config.toml"));
@@ -3639,6 +3669,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         let mut cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, data, "the key still names the data root");
@@ -3686,6 +3717,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         let cfg = resolve(&cli);
         assert!(cfg.config_error.is_some(), "the parse failure is reported");
@@ -3878,6 +3910,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         });
         assert!(cfg.honor_game_colours, "the file's value loads");
 
@@ -3936,6 +3969,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         });
         assert!(!cfg.v6_pixel_lock, "the file's value loads");
 
@@ -3992,6 +4026,7 @@ use_defaults = false
             trace: None,
             debug: false,
             guidance: None,
+            font_check: None,
         };
         // No flag: the file's Amiga (4) stands, and it is provenance-clean.
         let from_file = resolve(&base);

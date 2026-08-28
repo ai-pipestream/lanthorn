@@ -61,6 +61,7 @@ pub(crate) struct OverlayRects {
     pub dialog: Option<DialogRects>,
     pub aux_dialog: Option<AuxDialogRects>,
     pub history_prompt: Option<app::render::history_prompt::HistoryPromptRects>,
+    pub font_check: Option<app::render::font_check_dialog::FontCheckRects>,
     pub fetch_keep: Option<app::render::fetch_keep_dialog::FetchKeepRects>,
     pub reset_dialog: Option<ResetDialogRects>,
     pub game_over: Option<GameOverDialogRects>,
@@ -96,6 +97,7 @@ pub(crate) fn draw_all(
 ) -> OverlayRects {
     let mut out = OverlayRects {
         history_prompt: None,
+        font_check: None,
         fetch_keep: None,
         dialog: dialog_seed,
         aux_dialog: None,
@@ -204,6 +206,10 @@ pub(crate) fn draw_all(
 pub(crate) enum OverlayAct {
     /// Switch `record_turn_history` on and persist it (SQ-1091).
     EnableTurnHistory,
+    /// The font check was answered (SQ-1104): `true` = this terminal draws the
+    /// Nerd Font icons, so install those presets. Applying it writes `style.toml`
+    /// and reloads the live theme, which needs the run loop's context.
+    FontCheck(bool),
     /// The keep-this-download prompt was answered (SQ-1086): `Some(mode)` copies
     /// the fetched story into the library, `None` plays it where it landed and
     /// forgets it. Applying it needs the run loop's paths, so it surfaces here.
@@ -244,6 +250,7 @@ pub(crate) enum OverlayOutcome {
 #[allow(dead_code)] // introspection hook exercised only by the ladder-order test
 pub(crate) enum OverlayKind {
     HistoryPrompt,
+    FontCheck,
     FetchKeep,
     Aux,
     Reset,
@@ -282,6 +289,9 @@ pub(crate) const COMMON_DIALOGS: &[&dyn Overlay] = &[
     // Topmost: the player asked for it by running `open-history`, and it is the
     // only thing on screen when it is up.
     &HistoryPromptOverlay,
+    // Also asked for: `/run-font-check`, or the settings screen's row — which
+    // stays open behind it, exactly as the path row's text-entry dialog does.
+    &FontCheckOverlay,
     &AuxOverlay,
     &ResetOverlay,
     &GameOverOverlay,
@@ -367,6 +377,60 @@ impl Overlay for HistoryPromptOverlay {
         }
         if hp.cancel.is_some_and(|r| r.contains(pt)) || hp.close.is_some_and(|r| r.contains(pt)) {
             state.overlays.history_prompt = false;
+        }
+        OverlayOutcome::Consumed
+    }
+}
+
+// ── "Which of these two rows does your font draw?" (SQ-1104) ───────────────
+//
+// Two buttons and a close, so the whole of it is the shared ladder, the same way
+// the history prompt is. The pre-game half of this — the FIRST-run ask, before
+// any `AppState` exists — is `startup::ask_font_check`, and both drive the one
+// `render::font_check_dialog`.
+struct FontCheckOverlay;
+impl Overlay for FontCheckOverlay {
+    fn kind(&self) -> OverlayKind { OverlayKind::FontCheck }
+    fn is_open(&self, ov: &OverlayState) -> bool { ov.font_check }
+    fn draw(&self, state: &AppState, area: Rect, buf: &mut Buffer, out: &mut OverlayRects) {
+        out.font_check = app::render::font_check_dialog::draw_font_check(state, area, buf);
+    }
+    fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
+        use app::render::font_check_dialog::{font_check_key_focused, FontCheckAction};
+        match key.code {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, 1);
+                OverlayOutcome::Consumed
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, -1);
+                OverlayOutcome::Consumed
+            }
+            code => match font_check_key_focused(code, state.overlays.dialog_focus) {
+                FontCheckAction::None => OverlayOutcome::Consumed,
+                FontCheckAction::Nerd => {
+                    state.overlays.font_check = false;
+                    OverlayOutcome::Act(OverlayAct::FontCheck(true))
+                }
+                FontCheckAction::Plain => {
+                    state.overlays.font_check = false;
+                    OverlayOutcome::Act(OverlayAct::FontCheck(false))
+                }
+            },
+        }
+    }
+    fn mouse(&self, state: &mut AppState, m: &MouseEvent, panes: &PaneRects) -> OverlayOutcome {
+        let Some(pt) = left_down(m) else { return OverlayOutcome::Consumed };
+        let Some(fc) = &panes.font_check else { return OverlayOutcome::Consumed };
+        if fc.nerd.is_some_and(|r| r.contains(pt)) {
+            state.overlays.font_check = false;
+            return OverlayOutcome::Act(OverlayAct::FontCheck(true));
+        }
+        // The close box means row 2, for the same reason Esc does: a font check
+        // dismissed is a font check answered, or it comes back every launch.
+        if fc.plain.is_some_and(|r| r.contains(pt)) || fc.close.is_some_and(|r| r.contains(pt)) {
+            state.overlays.font_check = false;
+            return OverlayOutcome::Act(OverlayAct::FontCheck(false));
         }
         OverlayOutcome::Consumed
     }
@@ -1083,6 +1147,7 @@ mod tests {
         #[allow(clippy::type_complexity)]
         let cases: &[(fn(&mut OverlayState), OverlayKind)] = &[
             (|o| o.history_prompt = true, OverlayKind::HistoryPrompt),
+            (|o| o.font_check = true, OverlayKind::FontCheck),
             (|o| o.aux_prompt = true, OverlayKind::Aux),
             (|o| o.reset_dialog = true, OverlayKind::Reset),
             (|o| o.game_over = true, OverlayKind::GameOver),

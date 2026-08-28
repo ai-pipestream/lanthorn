@@ -596,6 +596,14 @@ pub(crate) fn dispatch_slash_outcome(
                 Err(e) => state.set_status(format!("set-game-borders failed: {e}")),
             }
         }
+        SlashOutcome::RunFontCheck => {
+            // SQ-1104: open the same modal the first run raises. Focus starts on
+            // the second button — the answer that changes nothing — matching the
+            // dialog's declared default, so Enter without reading is not a
+            // decision to install glyphs the font may not have.
+            state.overlays.dialog_focus = 1;
+            state.overlays.font_check = true;
+        }
         SlashOutcome::SetGuidance(opt) => {
             // SQ-1045: Lanthorn's Guiding Light, on or off for this session. Bare
             // toggles, as `set-v6-pixel-lock` does; the settings screen is the

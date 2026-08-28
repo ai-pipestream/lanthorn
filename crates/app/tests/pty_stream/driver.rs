@@ -574,6 +574,25 @@ fn count_subslices(hay: &[u8], needle: &[u8]) -> usize {
 /// Boot lanthorn under a pty, drive `spec.keys`, and return every byte it wrote.
 pub fn run(spec: Spec) -> std::io::Result<Capture> {
     std::fs::create_dir_all(&spec.user_dir)?;
+    // An EMPTY config.toml, and every harness gets one (SQ-1104).
+    //
+    // "There is no config.toml" is lanthorn's definition of a first run, and a
+    // first run raises the font check — a modal that waits for a keypress. That
+    // is the normal state of a throwaway user-dir, so without this line every pty
+    // harness would hang on a question about fonts before drawing a single frame,
+    // and a tty check would not save them: these run under a REAL pty by design.
+    //
+    // Written here rather than in each harness so a future `Spec` inherits it
+    // without its author needing to know any of this. An empty file is respected
+    // rather than reseeded (`config_template::auto_seed` skips a file that
+    // exists), so it costs nothing but the first-run flag — and a harness that
+    // wants real keys in it (`pty_flank_alpha_seam`, `examples/cast`) has already
+    // written its own by the time `run` is called, which is why this only fills
+    // in an absent one.
+    let cfg = spec.user_dir.join("config.toml");
+    if !cfg.exists() {
+        std::fs::write(&cfg, "")?;
+    }
     if spec.hide_map && spec.argv.is_none() {
         // The story pane only gets the whole frame when the map is hidden, and
         // the per-game sidecar sets that BEFORE the first frame — toggling it with

@@ -18,6 +18,8 @@ mod fixture_paths;
 mod assist_voice;
 #[path = "suites/cell_dump_command.rs"]
 mod cell_dump_command;
+#[path = "suites/font_check.rs"]
+mod font_check;
 #[path = "suites/death_turn_tried.rs"]
 mod death_turn_tried;
 #[path = "suites/window_dump_bound_key.rs"]

@@ -89,6 +89,13 @@ it is a thing lanthorn does for the player rather than a surface it draws:
 >   settings screen turns it off.
 >   → [customization](docs/features/customization.md)
 
+> - **It asks about your font once, and sets every icon from the answer** —
+>   lanthorn writes characters; the font is the terminal's, and nothing can ask
+>   it whether it has a glyph. So on a first launch it shows two rows and asks
+>   which one draws properly, then writes the answer into `style.toml` as preset
+>   names you can still edit. `/run-font-check` asks again when you change fonts.
+>   → [customization](docs/features/customization.md)
+
 ---
 
 ## Play the original disks
