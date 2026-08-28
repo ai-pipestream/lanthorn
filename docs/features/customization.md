@@ -439,6 +439,16 @@ re-seed the new template, or hand-write the new shape from
   an example, because uncommenting *that* does change behaviour. An existing
   config is never overwritten, and later edits from the settings screen preserve
   your comments.
+- **…and it keeps documenting itself.** Seeding happens once, so a config written
+  a release ago would otherwise never learn about a setting invented since — and
+  a setting you cannot see in your own file is a setting you cannot discover.
+  Lanthorn appends what is missing, commented, at the end of the section it
+  belongs to: nothing you wrote is touched, reordered or reformatted, running it
+  again adds nothing, and a commented line changes nothing until you edit it.
+  `adult_words` arrives uncommented, because that list is only a default rather
+  than an invisible filter if you can read it. A file you emptied on purpose is
+  left empty, a file that doesn't parse is left alone, and a line reading
+  `# lanthorn: no-top-up` stops it for good.
 - **A broken config file says so.** TOML is parsed as one document, so a single
   stray character — an unclosed quote, a stray bracket — costs you every setting
   in the file, not just the line it's on. The same is true of a value lanthorn
@@ -581,8 +591,10 @@ re-seed the new template, or hand-write the new shape from
   lists the lot to anyone who opens it. `hide_adult_words` keeps the words in
   `adult_words` out of any panel that enumerates a story's vocabulary unprompted.
 
-  The default list is written out in your `config.toml`, **uncommented**, and is
-  deliberately the strong end only:
+  The default list is written out in your `config.toml`, **uncommented** — in a
+  config lanthorn seeds for you, and appended to one you already had, since a
+  list you cannot read is not a default at all — and is deliberately the strong
+  end only:
 
   ```toml
   adult_words = ["fuck", "fucked", "fucking", "shit", "cunt", "cum", "wank", "bastard", "bitch", "asshole", "whore", "slut", "rape", "molest"]

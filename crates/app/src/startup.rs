@@ -125,6 +125,20 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     // which is format-preserving and keeps these comments.
     app::config_template::auto_seed(&cfg.config_file);
 
+    // The seed above only ever writes a file that is not there, so a config written
+    // by an older release never learns about a setting added since — and one of them
+    // is `adult_words`, which is a default rather than an invisible filter precisely
+    // because its owner can read it in their own file (SQ-1122). Append what is
+    // missing, commented, touching nothing already written (SQ-1129).
+    //
+    // Skipped when the file failed to load: `write_config_at` refuses to write over a
+    // config it could not read, and so do we. Nothing here can change `cfg` — every
+    // line added is either a comment or a key at the value `resolve` already assumed
+    // for its absence — so this run reads exactly as it would have.
+    if cfg.config_error.is_none() {
+        app::config_template::top_up(&cfg.config_file);
+    }
+
     // A path may be omitted; fall back to the configured default story dir.
     // With neither, there's nothing to open — tell the user how to fix it.
     let story_path = match cli.story.clone().or_else(|| cfg.default_story_dir.clone()) {

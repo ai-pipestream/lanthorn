@@ -28,15 +28,22 @@
 //!
 //! Scope: this is the GLOBAL config only (`<user_dir>/config.toml`). A game's own
 //! save directory can hold a second, unrelated `config.toml` — the sparse per-game
-//! override sidecar in [`crate::styles`], carrying at most `honor_game_colours`,
-//! `borderless_windows` and `show_map` as bare uncommented lines, and deleted when
-//! empty. It is deliberately NOT templated: there, an absent key means "inherit the
-//! global value", so seeding defaults into it would turn every one of them into a
-//! per-game override. [`auto_seed`] is only ever called with the user dir.
+//! override sidecar in [`crate::styles`], carrying whatever a per-game control or a
+//! `set-*` command can pin for one story — the list is
+//! [`crate::styles::PerGameConfig::KEYS`], never a copy of it — as bare uncommented
+//! lines, and deleted when empty. It is deliberately NOT templated: an absent key
+//! there means "inherit the global value", so seeding defaults into it would turn
+//! every one of them into a per-game override. [`auto_seed`] is only ever called
+//! with the user dir.
 //!
 //! [`auto_seed`] writes the template on first run and never overwrites an existing
 //! file, exactly like the style seed. `write_config` still owns runtime edits and
 //! stays format-preserving, so a seeded file keeps its comments as settings change.
+//!
+//! Which leaves the file a player already has: seeded once and never re-seeded, and
+//! only ever UPDATED key by key, it never gains a setting invented after they
+//! installed. [`top_up`] closes that — it appends the documented settings a file has
+//! never held, touching nothing that is already there (SQ-1129).
 
 #[cfg(test)]
 use crate::config::Config;
@@ -181,9 +188,12 @@ const INTERFACE: &[Row] = &[
         &[
             "Before offering a word, try it in a silent throwaway copy of the game",
             "and keep only what actually did something — so the light recommends",
-            "rather than merely lists. Costs a few invisible turns after a command",
-            "the parser refused; nothing it does reaches the screen, your saves or",
-            "the game you are playing. False still offers, more modestly.",
+            "rather than merely lists. The copy runs out of the way, on its own",
+            "thread: the game answers you at once and the suggestion follows a beat",
+            "later, or is dropped if you have already typed again. It may READ your",
+            "game's own stored data and never writes a byte of it, and nothing it",
+            "does reaches the screen, your saves or the game you are playing.",
+            "False still offers, more modestly.",
         ],
     ),
     d(
@@ -604,6 +614,9 @@ pub fn commented_template() -> String {
     out.push_str("# value shown is the DEFAULT unless the comment says otherwise — so uncommenting\n");
     out.push_str("# a line as-is changes nothing. Edit the value to change behaviour.\n");
     out.push_str("#\n");
+    out.push_str("# Settings added by a later release are appended, commented, so the list stays\n");
+    out.push_str("# complete. A line reading `# lanthorn: no-top-up` anywhere stops that for good.\n");
+    out.push_str("#\n");
     out.push_str("# Colours, glyphs and borders are NOT here: they live in style.toml.\n");
     out.push_str("#\n");
     out.push_str("# PER-GAME overrides live in a second, separate config.toml inside that game's\n");
@@ -632,34 +645,49 @@ pub fn commented_template() -> String {
     out.push_str(&format!("version = {CONFIG_SCHEMA_VERSION}\n"));
 
     for g in GROUPS {
-        out.push_str(&format!("\n# ── {} {}\n", g.banner, "─".repeat(72usize.saturating_sub(g.banner.len() + 6))));
+        out.push_str(&banner(g.banner));
         if let Some(t) = g.table {
             // Real, UNCOMMENTED header — exactly as style.toml does it. It also gives
             // the document structure, so a key `write_config` adds lands in the root
             // table above the sections instead of scattering.
             out.push_str(&format!("[{t}]\n"));
         }
-        for (i, row) in g.rows.iter().enumerate() {
-            if i > 0 {
-                out.push_str("#\n");
-            }
-            for line in row.doc {
-                if line.is_empty() {
-                    out.push_str("#\n");
-                } else {
-                    out.push_str(&format!("# {line}\n"));
-                }
-            }
-            if row.line == Line::Example {
-                out.push_str("# (example — the default is unset)\n");
-            }
-            // A `Live` row is real config, not documentation of it (SQ-1122).
-            let hash = if row.line == Line::Live { "" } else { "# " };
-            out.push_str(&format!("{hash}{} = {}\n", row.key, row.value));
-        }
+        push_rows(&mut out, g.rows.iter());
     }
     out.push_str(TRAILER);
     out
+}
+
+/// A group's banner line, sized to the same 72-column rule everywhere it appears.
+fn banner(text: &str) -> String {
+    format!("\n# ── {} {}\n", text, "─".repeat(72usize.saturating_sub(text.len() + 6)))
+}
+
+/// Render `rows` — doc comment, the example caveat, then the assignment — blank-comment
+/// separated, exactly as the template lays a group out.
+///
+/// [`top_up`] renders through this too rather than reimplementing it, so a settings
+/// block appended to an existing config is indistinguishable from the same block in a
+/// freshly seeded one (`a_topped_up_row_reads_exactly_as_the_template_writes_it`).
+fn push_rows<'a>(out: &mut String, rows: impl Iterator<Item = &'a Row>) {
+    for (i, row) in rows.enumerate() {
+        if i > 0 {
+            out.push_str("#\n");
+        }
+        for line in row.doc {
+            if line.is_empty() {
+                out.push_str("#\n");
+            } else {
+                out.push_str(&format!("# {line}\n"));
+            }
+        }
+        if row.line == Line::Example {
+            out.push_str("# (example — the default is unset)\n");
+        }
+        // A `Live` row is real config, not documentation of it (SQ-1122).
+        let hash = if row.line == Line::Live { "" } else { "# " };
+        out.push_str(&format!("{hash}{} = {}\n", row.key, row.value));
+    }
 }
 
 /// Write [`commented_template`] to `config_file` when it does not exist. NEVER
@@ -679,6 +707,227 @@ pub fn auto_seed(config_file: &std::path::Path) {
     // later settings save is refused by SQ-0580's guard) — a dead file the user has to
     // find and delete by hand.
     let _ = crate::storage::atomic_write(config_file, commented_template().as_bytes());
+}
+
+/// A line whose text — after any leading `#` — starts with this turns [`top_up`] off
+/// for that file, permanently. Matched at the START of a line's content so this very
+/// sentence, and the note the top-up writes, do not trip it.
+pub const NO_TOP_UP: &str = "lanthorn: no-top-up";
+
+/// Appended to a group's own banner where a top-up writes it, so an added block is
+/// never mistaken for something the player put there.
+const NEW_BANNER: &str = "new since this file was written";
+
+/// Written once, under the banner of the first block a top-up adds.
+const NEW_NOTE: &str = "\
+# Lanthorn adds settings that arrived after this file did, so it stays a complete
+# list of what lanthorn can be told to do. `adult_words` most of all: that list is
+# a default rather than a filter nobody can see only because it is written out here
+# where you can read and edit it.
+#
+# Nothing above was touched, and a commented line changes nothing until you edit it.
+# Delete whatever you do not want. To stop lanthorn ever adding to this file again,
+# give it a line reading `# lanthorn: no-top-up`.
+#
+";
+
+/// Add every documented setting an existing `config.toml` has never held (SQ-1129).
+///
+/// [`auto_seed`] writes the catalogue once and never again, and
+/// [`crate::config::write_config`] only ever updates keys the file already carries —
+/// so a config written by an older release never gains a setting added since, and its
+/// owner cannot discover from their own file that the setting exists. That is merely
+/// stale for most settings and actively wrong for one: `adult_words` is a default
+/// rather than an invisible filter BECAUSE the list ships written out where the
+/// player can read and delete it (SQ-1122), and an upgraded file has no list at all.
+///
+/// What it does, and does not do:
+///
+/// * **Only ever appends.** Nothing already in the file is edited, reordered or
+///   reformatted — values, spacing and the player's own comments come through byte
+///   for byte.
+/// * A key the file mentions **anywhere, commented or not**, is left alone. So the
+///   second run adds nothing, and a line the player uncommented and edited is never
+///   duplicated.
+/// * Each block lands at the END of the section it belongs to, so uncommenting a
+///   line puts the setting in the right table.
+/// * [`Line::Live`] rows arrive uncommented, exactly as the template ships them.
+/// * A file that does not parse is not touched (startup already tells the user about
+///   it), nor is an EMPTY one — a config stripped to nothing is a deliberate blank
+///   slate, and there is nothing there to keep complete. For a file that has content
+///   but wants no more of ours, a line reading `# lanthorn: no-top-up` is the opt-out.
+///
+/// Why the edit is textual rather than a `toml_edit` mutation, when `toml_edit` is
+/// exactly the format-preserving editor for this: what we add is mostly COMMENTS, and
+/// a comment has no existence of its own in a TOML document — it lives as decor on an
+/// item, and a block of commented-out settings has no item to hang from. `toml_edit`
+/// still does the structural half, which is the half that can be got wrong: it says
+/// where each section's body ends (so an uncommented line lands in the right table),
+/// and it re-parses the result, which is refused if it is not valid TOML.
+///
+/// Best-effort and atomic, like [`auto_seed`]. Returns the keys it added.
+pub fn top_up(config_file: &std::path::Path) -> Vec<&'static str> {
+    let Ok(text) = std::fs::read_to_string(config_file) else {
+        return Vec::new();
+    };
+    let Some((updated, added)) = topped_up(&text) else {
+        return Vec::new();
+    };
+    match crate::storage::atomic_write(config_file, updated.as_bytes()) {
+        Ok(()) => added,
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The pure half of [`top_up`]: the file's new text and the keys added, or `None`
+/// when there is nothing to add — or nothing safe to add.
+fn topped_up(text: &str) -> Option<(String, Vec<&'static str>)> {
+    if text.trim().is_empty() || opted_out(text) {
+        return None;
+    }
+    // `ImDocument`, not `DocumentMut`: the mutable form despans as it is built, and
+    // the spans are the whole reason we parse — they are how we know where a section's
+    // body ends. (`DocumentMut::span()` compiles fine and answers `None` every time.)
+    let doc = toml_edit::ImDocument::parse(text).ok()?;
+    let mentioned = keys_mentioned(text);
+    let headers = header_starts(doc.as_table());
+
+    // A file whose last line has no newline still gets its block on a line of its own.
+    // The only byte this adds is that missing terminator, which is not content.
+    let base: String = if text.ends_with('\n') { text.to_string() } else { format!("{text}\n") };
+
+    // ONE block per insertion point, not per group: every group of top-level keys
+    // ends the same root table, and a file missing five of them wants one heading,
+    // not five. Each group inside a block still carries the banner the template gives
+    // it, so the reader can see which part of the catalogue arrived.
+    let mut blocks: Vec<(usize, String)> = Vec::new();
+    let mut added: Vec<&'static str> = Vec::new();
+    for g in GROUPS {
+        let rows: Vec<&Row> = g.rows.iter().filter(|r| !mentioned.contains(r.key)).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let point = insert_point(&headers, g.table, base.len());
+        let at = point.unwrap_or(base.len());
+        let slot = blocks.iter().position(|&(a, _)| a == at).unwrap_or_else(|| {
+            blocks.push((at, String::new()));
+            blocks.len() - 1
+        });
+        let first = added.is_empty();
+        let body = &mut blocks[slot].1;
+        body.push_str(&banner(&format!("{} — {NEW_BANNER}", g.banner)));
+        if first {
+            body.push_str(NEW_NOTE);
+        }
+        if point.is_none() {
+            // The section itself is not in the file. Write its header live, as the
+            // template does, so a key under it means what it says the moment it is
+            // uncommented. An empty table is the same document as no table at all.
+            body.push_str(&format!("[{}]\n", g.table.expect("only a table can be absent")));
+        }
+        push_rows(body, rows.iter().copied());
+        added.extend(rows.iter().map(|r| r.key));
+    }
+    if blocks.is_empty() {
+        return None;
+    }
+
+    // Splice from the back, so an offset taken against the original text is still
+    // that place in the string.
+    let mut out = base;
+    blocks.sort_by_key(|&(at, _)| at);
+    for (at, block) in blocks.into_iter().rev() {
+        out.insert_str(at, &block);
+    }
+    // Whatever the file was doing that we did not anticipate — a section defined by
+    // dotted keys, say — leaving it exactly as it was is the safe answer.
+    toml_edit::ImDocument::parse(out.as_str()).ok()?;
+    Some((out, added))
+}
+
+/// The player's standing "stop adding to this file".
+fn opted_out(text: &str) -> bool {
+    text.lines().any(|l| comment_body(l).starts_with(NO_TOP_UP))
+}
+
+/// A line with its indent and any leading `#` stripped: what the line SAYS, whether
+/// it is live config or commented-out config.
+fn comment_body(line: &str) -> &str {
+    line.trim_start().trim_start_matches('#').trim_start()
+}
+
+/// Keys assigned anywhere in `text`, commented or not — `guidance = true` and
+/// `# guidance = true` both mean the file already has that setting, one as a value
+/// and one as documentation of it, and neither wants a second copy.
+///
+/// Flat rather than per-table, because a comment belongs to no table: every row key
+/// in [`GROUPS`] is unique across the whole template (`row_keys_are_unique` pins it),
+/// so there is nothing a table would disambiguate.
+fn keys_mentioned(text: &str) -> std::collections::HashSet<&str> {
+    let mut set = std::collections::HashSet::new();
+    for line in text.lines() {
+        let Some((key, _)) = comment_body(line).split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        set.insert(key);
+        // `search.key_back = "n"` is the same setting as `key_back` under `[search]`.
+        if let Some((_, leaf)) = key.rsplit_once('.') {
+            set.insert(leaf);
+        }
+    }
+    set
+}
+
+/// Every table header in the file, in document order: its dotted path, and the byte
+/// offset where the trivia leading it begins.
+///
+/// The trivia, not the `[` — a header's blank line and banner comment are part of
+/// the NEXT section as the reader sees it, so a block inserted at this offset ends
+/// the previous section rather than wedging itself under the next one's banner.
+fn header_starts(root: &toml_edit::Table) -> Vec<(String, usize)> {
+    fn at(t: &toml_edit::Table) -> Option<usize> {
+        let span = t.span()?;
+        Some(t.decor().prefix().and_then(|p| p.span()).map_or(span.start, |s| s.start))
+    }
+    fn walk(t: &toml_edit::Table, path: &str, out: &mut Vec<(String, usize)>) {
+        for (key, item) in t.iter() {
+            let p = if path.is_empty() { key.to_string() } else { format!("{path}.{key}") };
+            match item {
+                toml_edit::Item::Table(child) => {
+                    out.extend(at(child).map(|a| (p.clone(), a)));
+                    walk(child, &p, out);
+                }
+                // `[[hotkeys.group]]`: each element carries its own header.
+                toml_edit::Item::ArrayOfTables(arr) => {
+                    for child in arr.iter() {
+                        out.extend(at(child).map(|a| (p.clone(), a)));
+                        walk(child, &p, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, "", &mut out);
+    out.sort_by_key(|&(_, a)| a);
+    out
+}
+
+/// Where a line appended is still inside `table` (`None` being the root table): just
+/// before the next header. `None` means the file has no such section at all.
+fn insert_point(headers: &[(String, usize)], table: Option<&str>, eof: usize) -> Option<usize> {
+    match table {
+        None => Some(headers.first().map_or(eof, |&(_, a)| a)),
+        Some(t) => {
+            let i = headers.iter().position(|(p, _)| p == t)?;
+            Some(headers.get(i + 1).map_or(eof, |&(_, a)| a))
+        }
+    }
 }
 
 /// A `Config`'s Debug string with the schema stamp normalized. An absent `version`
@@ -911,6 +1160,275 @@ mod tests {
         // (or the user) to find, and never a half-written config.toml that exists —
         // and is therefore never re-seeded — but doesn't parse.
         assert!(crate::storage::leftover_temps(&dir).is_empty(), "no temp left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Topping up an existing config (SQ-1129) ──────────────────────────────
+
+    /// A config as a player might have it two releases ago: a few settings they set,
+    /// their own comments, spacing they typed themselves, and the sections in an
+    /// order the template never wrote.
+    const OLD_CONFIG: &str = "\
+# lanthorn config.toml
+#
+# this is the little laptop — quiet, small screen
+version = 3
+auto_load = true
+default_story_dir = \"/games/if\"
+
+# 25 is about right after midnight
+volume   =   25
+
+[animation]
+enabled = true
+easing = \"linear\"
+
+# I step matches forwards, like less
+[search]
+key_back = \"j\"
+key_forward = \"k\"
+";
+
+    /// `after` must be `before` with ONE contiguous run of new bytes spliced into it.
+    /// Returns that run. This is the byte-preservation proof: everything outside the
+    /// insertion is compared byte for byte, not line by line, so a re-indent or a
+    /// rewritten value could not slip through.
+    ///
+    /// The run it returns can be ROTATED by however many bytes the block happens to
+    /// share with what followed it — both start `\n# \u{2500}\u{2500} `, so the common prefix runs
+    /// a few characters into the block and the same few characters reappear at its
+    /// end. That costs the equality proof nothing; it only means a caller should look
+    /// for its content with `contains` rather than at a fixed offset.
+    fn sole_insertion<'a>(before: &str, after: &'a str) -> &'a str {
+        assert!(after.len() > before.len(), "nothing was added");
+        let mut pre = before.bytes().zip(after.bytes()).take_while(|(a, b)| a == b).count();
+        while !before.is_char_boundary(pre) || !after.is_char_boundary(pre) {
+            pre -= 1;
+        }
+        let mut suf = before[pre..]
+            .bytes()
+            .rev()
+            .zip(after[pre..].bytes().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !before.is_char_boundary(before.len() - suf) || !after.is_char_boundary(after.len() - suf) {
+            suf -= 1;
+        }
+        assert_eq!(
+            format!("{}{}", &after[..pre], &after[after.len() - suf..]),
+            before,
+            "the top-up must be one insertion and nothing else"
+        );
+        &after[pre..after.len() - suf]
+    }
+
+    /// Uncomment one line of `text`, the way a player would.
+    fn uncomment(text: &str, key: &str) -> String {
+        text.lines()
+            .map(|l| {
+                if comment_body(l).starts_with(&format!("{key} = ")) {
+                    format!("{}\n", comment_body(l))
+                } else {
+                    format!("{l}\n")
+                }
+            })
+            .collect()
+    }
+
+    /// The flat "does the file already mention this key" test is only sound because
+    /// no two rows share a key — otherwise a `[search]` key would be answered by a
+    /// same-named root one. Cheap to check, and the alternative (scoping a scan of
+    /// COMMENTS to a table, which comments do not belong to) is not available.
+    #[test]
+    fn row_keys_are_unique_across_the_whole_template() {
+        let mut seen: Vec<&str> = all_rows().iter().map(|(k, _, _)| *k).collect();
+        let n = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), n, "two documented rows share a key");
+    }
+
+    /// The end this quest exists for: a file written before this release gains the
+    /// settings it has never held — `adult_words` above all, which is a default
+    /// rather than an unreadable filter only because the player can see the list.
+    ///
+    /// The "old" file is the current template with those four assignments deleted,
+    /// so what is missing is exactly what a 0.3.0 seed would have lacked, and the
+    /// test cannot drift as more settings are added.
+    #[test]
+    fn a_config_from_before_this_release_gains_exactly_this_release() {
+        const NEW: [&str; 4] = ["guidance", "guidance_probe", "hide_adult_words", "adult_words"];
+        let before: String = commented_template()
+            .lines()
+            .filter(|l| !NEW.iter().any(|k| comment_body(l).starts_with(&format!("{k} = "))))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        for k in NEW {
+            assert!(!keys_mentioned(&before).contains(k), "`{k}` must be missing to start with");
+        }
+
+        let (after, mut added) = topped_up(&before).expect("four settings are missing");
+        added.sort_unstable();
+        assert_eq!(added, ["adult_words", "guidance", "guidance_probe", "hide_adult_words"]);
+
+        let block = sole_insertion(&before, &after);
+        assert!(block.contains(NEW_BANNER), "the block says where it came from:\n{block}");
+        // The list arrives LIVE — the whole point (SQ-1122). Every other row stays
+        // commented, so the file still describes the same configuration.
+        assert!(
+            block.lines().any(|l| l.starts_with("adult_words = [\"")),
+            "adult_words must arrive uncommented:\n{block}"
+        );
+        for k in ["guidance", "guidance_probe", "hide_adult_words"] {
+            assert!(block.contains(&format!("\n# {k} = ")), "`{k}` arrives commented:\n{block}");
+        }
+        // …and in the root table, not swept into the first section below it.
+        let words = after.find("\nadult_words = [").expect("live key");
+        assert!(words < after.find("\n[search]").expect("first section"), "the block ends the root table");
+
+        // A commented line changes nothing, so the only setting that moved is the
+        // one that arrived live — and it arrived at its default.
+        let old: Config = toml::from_str(&before).unwrap();
+        let new: Config = toml::from_str(&after).unwrap();
+        assert_eq!(new.adult_words, Config::default().adult_words, "the list is the default list");
+        assert_eq!(
+            shape(&Config { adult_words: old.adult_words.clone(), ..new.clone() }),
+            shape(&old),
+            "nothing but adult_words may differ after a top-up"
+        );
+    }
+
+    /// Running it again must be a no-op — including on a file where the player has
+    /// since uncommented and edited one of the lines we added.
+    #[test]
+    fn topping_up_twice_adds_nothing_the_second_time() {
+        let (once, _) = topped_up(OLD_CONFIG).expect("an old config is missing plenty");
+        assert!(topped_up(&once).is_none(), "the second run has nothing to add");
+
+        let edited = uncomment(&once, "guidance").replace("guidance = true", "guidance = false");
+        assert!(edited.contains("\nguidance = false"), "the player turned it off");
+        assert!(topped_up(&edited).is_none(), "an edited key is not re-offered");
+    }
+
+    /// The player's file comes through untouched: their values, their comments, their
+    /// spacing, their section order.
+    #[test]
+    fn every_byte_the_player_wrote_survives() {
+        let (after, _) = topped_up(OLD_CONFIG).unwrap();
+        for line in OLD_CONFIG.lines() {
+            assert!(after.contains(line), "line lost or reformatted: {line:?}");
+        }
+        assert!(after.contains("volume   =   25"), "their spacing is theirs");
+        assert!(after.contains("# 25 is about right after midnight"), "their comment stays with it");
+        // And their section order is not "corrected" to the template's.
+        assert!(
+            after.find("[animation]").unwrap() < after.find("[search]").unwrap(),
+            "sections are not reordered"
+        );
+        // Settings they had set are not offered again.
+        assert_eq!(after.matches("\nvolume").count(), 1, "volume is not duplicated:\n{after}");
+        assert_eq!(after.matches("\nenabled = ").count(), 1, "nor is [animation] enabled");
+    }
+
+    /// A block for a table's settings lands inside THAT table, so uncommenting a line
+    /// means what it says. Placing it at the end of the file instead would silently
+    /// put it in whichever section happened to be last.
+    #[test]
+    fn a_sections_settings_land_inside_that_section() {
+        let (after, _) = topped_up(OLD_CONFIG).unwrap();
+        let anim = after.find("[animation]").unwrap();
+        let search = after.find("[search]").unwrap();
+        let scroll = after.find("# scroll_ms = 120").expect("[animation] was missing scroll_ms");
+        assert!(anim < scroll && scroll < search, "it belongs between the two headers:\n{after}");
+
+        // The proof that "inside" is real and not merely visual: uncommenting it puts
+        // the value in the animation table, not at the root and not in [search].
+        let live: Config = toml::from_str(&uncomment(&after, "scroll_ms")).expect("still parses");
+        assert_eq!(live.animation.scroll_ms, 120);
+        let raw: toml::Table = toml::from_str(&uncomment(&after, "scroll_ms")).unwrap();
+        assert!(!raw.contains_key("scroll_ms"), "not at the root");
+    }
+
+    /// A file with no sections at all still gets them, header and all — otherwise its
+    /// table settings would arrive as root keys that quietly do nothing.
+    #[test]
+    fn a_missing_section_arrives_with_its_header() {
+        let flat = "version = 3\nvolume = 25\n";
+        let (after, added) = topped_up(flat).unwrap();
+        assert!(added.contains(&"key_back"), "a [search] setting is among the missing");
+        assert!(after.contains("\n[search]\n"), "the section header arrives live:\n{after}");
+        // Root keys still come before the first header, or they would land in it.
+        let words = after.find("\nadult_words = [").unwrap();
+        assert!(words < after.find("\n[search]\n").unwrap(), "root keys stay at the root");
+        // Empty sections are the same document as no sections: nothing changed but
+        // the one live list.
+        let after_cfg: Config = toml::from_str(&after).unwrap();
+        assert_eq!(shape(&after_cfg), shape(&toml::from_str::<Config>(flat).unwrap()));
+    }
+
+    /// A freshly seeded file is already complete — which is the real test that the
+    /// top-up derives what is missing from the same rows the template writes, rather
+    /// than from a list someone has to remember to update.
+    #[test]
+    fn a_freshly_seeded_config_needs_no_top_up() {
+        let seeded = commented_template();
+        assert!(topped_up(&seeded).is_none(), "the template documents everything the top-up knows");
+        // …and the sentence in it that names the opt-out must not BE the opt-out.
+        assert!(!opted_out(&seeded), "the template describes `no-top-up` without triggering it");
+    }
+
+    /// The three files the top-up must not touch, and why each is a deliberate state
+    /// rather than an oversight.
+    #[test]
+    fn an_emptied_an_opted_out_and_a_broken_config_are_left_alone() {
+        // Emptied on purpose: an empty config is a valid one (everything at its
+        // default), and there is nothing there to keep complete. Re-filling it would
+        // undo the only way a player has of saying "none of this, thank you".
+        assert!(topped_up("").is_none());
+        assert!(topped_up("\n\n   \n").is_none());
+        // Opted out: the file has content, and a standing instruction.
+        let opted = format!("{OLD_CONFIG}\n# {NO_TOP_UP}\n");
+        assert!(topped_up(&opted).is_none());
+        assert!(topped_up(&format!("# {NO_TOP_UP} — I curate this myself\n{OLD_CONFIG}")).is_none());
+        // Unreadable: the same refusal `write_config_at` makes. Startup already tells
+        // the player their config could not be loaded; appending to it would only put
+        // our text below their mistake.
+        assert!(topped_up("volume = = 25\n").is_none());
+    }
+
+    /// What a top-up writes must be what a seed would have written, because both go
+    /// through `push_rows` — otherwise the file drifts into two dialects of itself.
+    #[test]
+    fn a_topped_up_row_reads_exactly_as_the_template_writes_it() {
+        let (after, _) = topped_up("version = 3\n").unwrap();
+        let seeded = commented_template();
+        for (key, _, _) in all_rows() {
+            let mut want = String::new();
+            let row = GROUPS.iter().flat_map(|g| g.rows).find(|r| r.key == key).unwrap();
+            push_rows(&mut want, std::iter::once(row));
+            assert!(seeded.contains(&want), "the template renders `{key}` as:\n{want}");
+            assert!(after.contains(&want), "and so must the top-up:\n{want}");
+        }
+    }
+
+    /// The whole round trip on disk, atomically, exactly as startup calls it.
+    #[test]
+    fn top_up_on_disk_is_atomic_and_leaves_the_file_readable() {
+        let dir = std::env::temp_dir().join(format!("bm-cfgtopup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, OLD_CONFIG).unwrap();
+
+        let added = top_up(&path);
+        assert!(added.contains(&"adult_words"), "the list is added: {added:?}");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with("# lanthorn config.toml"), "their file, still theirs");
+        let _: Config = toml::from_str(&after).expect("and it still loads");
+        assert!(crate::storage::leftover_temps(&dir).is_empty(), "no temp left behind");
+
+        assert!(top_up(&path).is_empty(), "a second pass adds nothing");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after, "and rewrites nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

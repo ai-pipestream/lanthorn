@@ -228,6 +228,26 @@ carrying `enable_sound = false` could only be overridden by editing the file.
   sound inside the blorb and run well past the "few MiB" a story file used to be;
   the old ceiling refused real games silently.
 
+### Configuration
+
+- **Your `config.toml` gains the settings that arrived after it did.** The file
+  documents itself, but it was only ever *written* once — so a config seeded a
+  release ago never learned about anything invented since, and a setting you
+  cannot see in your own file is a setting you cannot discover. Lanthorn now
+  appends what is missing, commented, at the end of the section it belongs to.
+  - **Nothing you wrote is touched.** Your values, your comments and your spacing
+    come through byte for byte, sections are not reordered, and a key the file
+    already mentions — commented or not — is never offered twice. A commented
+    line changes nothing until you edit it, and a second launch adds nothing.
+  - **`adult_words` arrives uncommented**, like the fresh seed writes it. That
+    list is a default rather than a filter nobody can inspect only because it is
+    written out where you can read and edit it, and that was true of new installs
+    only.
+  - **Three files are left exactly as they are**: one you emptied on purpose
+    (an empty config is a valid one, and there is nothing there to complete), one
+    that does not parse (lanthorn already says so at startup and refuses to write
+    over it), and one carrying a line that reads `# lanthorn: no-top-up`.
+
 ### Version 6 rendering
 
 - **A third v6 render mode, `extended`.** `raster` draws the whole pane as one
