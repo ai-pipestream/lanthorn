@@ -472,6 +472,11 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("dialog.region_prompt.room", Section::Dialog, Kind::Style, Some("dialog.region_prompt.rooms"), Delta::EMPTY),
     row("dialog.region_prompt.option", Section::Dialog, Kind::Style, Some("dialog.background"), Delta::EMPTY),
     row("dialog.region_prompt.option:chosen", Section::Dialog, Kind::Style, Some("dialog.list_selected"), Delta::EMPTY),
+    // ── SQ-1104: the first-run font check's two sample rows. Their own selector
+    // because they are the QUESTION, not prose about it — a theme that dims the
+    // dialog body must still be able to leave the glyphs at full strength, since
+    // the whole ask is "can you see these clearly".
+    row("dialog.font_check.sample", Section::Dialog, Kind::Style, Some("dialog.background"), Delta::EMPTY),
     // ── SQ-0664: the command band (bottom dock). Its rows reuse
     // `dialog.list_selected`. SQ-0667 (2026-08-05) retired the band's own
     // frame (it draws no `panel.border` anymore — see `render/command_band.rs`)
@@ -692,6 +697,8 @@ mod tests {
         "dialog.region_prompt.room",
         "dialog.region_prompt.option",
         "dialog.region_prompt.option:chosen",
+        // SQ-1104: the font check's sample rows
+        "dialog.font_check.sample",
         // SQ-0664: the command band
         "band.column_header",
         "band.column_header:active",

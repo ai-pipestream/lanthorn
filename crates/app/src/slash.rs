@@ -125,6 +125,11 @@ pub enum SlashOutcome {
     /// path, and the introduction line points there. Handled in `slash_dispatch`
     /// (mutates `state.config.guidance`).
     SetGuidance(Option<bool>),
+    /// Re-run the first-run font check (SQ-1104): the two-row comparison that
+    /// asks whether this terminal's font draws the Nerd Font icon glyphs. Opens
+    /// the modal; the answer writes preset names into `style.toml` and reloads
+    /// the theme. Handled in `slash_dispatch`.
+    RunFontCheck,
     /// Act on the pre-game story browser. The browser has no `AppState`, so it
     /// cannot take an [`Action`]; its verbs are their own type and are applied
     /// by the picker loop. See [`crate::browser`] (SQ-0796).
@@ -484,6 +489,13 @@ pub static COMMANDS: &[CommandSpec] = &[
             Some("off") => SlashOutcome::SetGuidance(Some(false)),
             Some(s) => err(format!("set-guidance: unknown argument '{s}' (on | off, or bare to toggle)")),
         } },
+    CommandSpec { name: "run-font-check", category: Category::Style, context: Context::Global,
+        usage: "run-font-check", description: "ask which of two glyph rows your terminal's font draws properly, and set the map's arrow, portal and Guiding Light icons from the answer (writes style.toml)",
+        // A verb-noun name, per the registry convention — and `run-`, not `set-`,
+        // because the command does not set anything: it asks, and the ANSWER
+        // sets. The same question `--font-check on` asks at launch, put where
+        // someone who has just changed terminal fonts can reach it.
+        dispatch: |_| SlashOutcome::RunFontCheck },
     CommandSpec { name: "set-game-borders", category: Category::Style, context: Context::Global,
         usage: "set-game-borders on|off|auto", description: "show this game's Glk window borders (on), or render borderless/abutting (off); auto = default (on); persisted per-game",
         // on = borders shown (default) → borderless=false; off = borderless/abut
@@ -986,7 +998,7 @@ mod tests {
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
         // Total count matches the spec table (Game 12, Map 21, View 6,
-        // Transcript 3, Style 9, Export 3, Animation 4, Help 3). `open-saves`
+        // Transcript 3, Style 10, Export 3, Animation 4, Help 3). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
         // `debug` (SQ-0169) opens the Z-machine debug inspector. `open-gallery`
         // and `open-style-editor` were removed (SQ-0309): the interactive
@@ -1013,7 +1025,8 @@ mod tests {
         // and this is the browser's door to one.
         // SQ-1045 added `set-guidance`, the switch for Lanthorn's Guiding Light —
         // the assist set as a whole, not one feature of it.
-        assert_eq!(COMMANDS.len(), 81, "registry must match the spec's Full command table");
+        // SQ-1104 added `run-font-check`, the re-runnable first-run font check.
+        assert_eq!(COMMANDS.len(), 82, "registry must match the spec's Full command table");
     }
 
     /// SQ-0796: `Category::ORDER` must list every category, or a whole group of
@@ -1170,6 +1183,11 @@ mod tests {
         assert!(matches!(parse("set-guidance", '/'), SlashOutcome::SetGuidance(None)));
         assert!(matches!(parse("set-guidance maybe", '/'), SlashOutcome::Error(_)));
         assert_eq!(find_command("set-guidance").expect("set-guidance").category, Category::Style);
+        // SQ-1104: no arguments at all — the dialog is the question, so anything
+        // typed after the name is ignored rather than being a second grammar to
+        // keep in step with the two buttons.
+        assert!(matches!(parse("run-font-check", '/'), SlashOutcome::RunFontCheck));
+        assert_eq!(find_command("run-font-check").expect("run-font-check").category, Category::Style);
         assert_eq!(find_command("set-v6-pixel-lock").expect("set-v6-pixel-lock").category, Category::Style);
     }
 

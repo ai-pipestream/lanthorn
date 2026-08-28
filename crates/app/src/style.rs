@@ -860,6 +860,110 @@ pub fn personal_style_path(user_dir: &std::path::Path) -> std::path::PathBuf {
     user_dir.join("style.toml")
 }
 
+// ── The font check's answer (SQ-1104) ─────────────────────────────────────────
+
+/// The style file a setting should be WRITTEN to, resolved the same way
+/// [`load_style`] resolves the one to read.
+///
+/// `None` when the pointer names the built-in `default` style, which lives in
+/// the binary and has no file to write. An absent pointer means the personal
+/// file, which is created if it is not there yet.
+pub fn style_write_path(
+    pointer: Option<&str>,
+    user_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    match pointer {
+        None => Some(personal_style_path(user_dir)),
+        Some("default") => None,
+        Some(path_str) => Some(colors::expand_path(path_str, user_dir)),
+    }
+}
+
+/// Record the font check's answer in `path`'s `[map]` section as PRESET NAMES,
+/// format-preserving (SQ-1104).
+///
+/// Names, not expanded per-slot overrides. `arrow_set = "nerdfont"` is one line
+/// a person can read and re-decide; the forty `[map.overrides]` entries it would
+/// otherwise become freeze today's codepoints into the user's file and stop a
+/// later improvement to the preset from ever reaching them.
+///
+/// The Guiding Light's mark is the exception, and only because it has no preset
+/// of its own — it is a single glyph, so it is written as the single override it
+/// is. A "plain" answer clears that override ONLY when it still holds the lamp
+/// this function wrote; a mark the user chose themselves is not ours to remove.
+///
+/// Refuses to touch a file that does not parse, for the same reason
+/// [`crate::config::write_config_at`] does: a broken file is the text the user
+/// needs to READ to fix it, and rewriting it destroys that.
+pub fn write_font_check_answer(path: &std::path::Path, nerdfont: bool) -> std::io::Result<()> {
+    use toml_edit::{DocumentMut, Item, value};
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: DocumentMut = existing.parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{} is not valid TOML ({e}) — refusing to overwrite it. Fix the file, \
+                 or move it aside and lanthorn will seed a fresh one.",
+                path.display(),
+            ),
+        )
+    })?;
+
+    if !doc.contains_key("map") {
+        doc["map"] = Item::Table(toml_edit::Table::new());
+    }
+    let lamp = crate::render::font_check_dialog::ASSIST_LAMP;
+    let (arrows, portals) = if nerdfont {
+        (
+            crate::render::font_check_dialog::NERD_ARROWS,
+            crate::render::font_check_dialog::NERD_PORTALS,
+        )
+    } else {
+        ("filled", "ascii")
+    };
+    // Both answers are written out, not just the affirmative one: the file is
+    // then a record of what was DECIDED, and a later re-check that swings the
+    // other way lands on the same two keys instead of leaving a stale pair
+    // behind (`/run-font-check` after changing terminal fonts is the whole point
+    // of the re-check).
+    let note = if nerdfont { "  # set by the font check (patched Nerd Font)" } else { "  # set by the font check" };
+    for (key, name) in [("arrow_set", arrows), ("portal_icons", portals)] {
+        doc["map"][key] = value(name);
+        if let Some(v) = doc["map"][key].as_value_mut() {
+            v.decor_mut().set_suffix(note);
+        }
+    }
+
+    let map = doc["map"].as_table_mut().expect("[map] is a table");
+    if nerdfont {
+        if !map.contains_key("overrides") {
+            map["overrides"] = Item::Table(toml_edit::Table::new());
+        }
+        if let Some(ov) = map["overrides"].as_table_mut() {
+            ov["gutter.assist"] = value(lamp.to_string());
+            if let Some(v) = ov["gutter.assist"].as_value_mut() {
+                v.decor_mut().set_suffix("  # md-post_lamp U+F1A60 — the Guiding Light's mark");
+            }
+        }
+    } else if let Some(ov) = map.get_mut("overrides").and_then(|o| o.as_table_mut()) {
+        // Only OUR glyph is cleared. A mark the user picked by hand survives an
+        // answer about a font, because it is not an answer about their mark.
+        let ours = ov
+            .get("gutter.assist")
+            .and_then(|i| i.as_str())
+            .is_some_and(|s| s.chars().eq(std::iter::once(lamp)));
+        if ours {
+            ov.remove("gutter.assist");
+        }
+    }
+
+    std::fs::write(path, doc.to_string())
+}
+
 /// Encode a [`Color`] as a string suitable for a [`Decl`] fg/bg field.
 ///
 /// `pub(crate)`: also reused by `theme::template::commented_template` (the

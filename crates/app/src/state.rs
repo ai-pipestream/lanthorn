@@ -2127,6 +2127,13 @@ pub struct OverlayState {
     /// to replay AND the capture that would have filled it is off, which used to
     /// be a silent no-op.
     pub history_prompt: bool,
+    /// When true, the font check is open (SQ-1104): the two-row comparison that
+    /// asks whether this terminal's font draws the Nerd Font icon glyphs. Raised
+    /// by `/run-font-check` and by the settings screen's `font_check` row; the
+    /// FIRST-run ask happens before this state exists at all, in
+    /// `startup::ask_font_check`, and both drive the same
+    /// `render::font_check_dialog`.
+    pub font_check: bool,
     /// When true, the first-use aux-storage prompt is open.
     pub aux_prompt: bool,
     /// When true, the "Save state before quitting?" confirmation dialog is open.
@@ -3563,6 +3570,7 @@ impl AppState {
             || self.overlays.game_over
             || self.overlays.save_name_dialog.is_some()
             || self.overlays.history_prompt
+            || self.overlays.font_check
             || self.overlays.aux_prompt
             || self.overlays.quit_dialog
             || self.overlays.launch_dialog
@@ -3726,6 +3734,7 @@ impl AppState {
         if self.overlays.game_over { v.push("game_over"); }
         if self.overlays.save_name_dialog.is_some() { v.push("save_name_dialog"); }
         if self.overlays.history_prompt { v.push("history_prompt"); }
+        if self.overlays.font_check { v.push("font_check"); }
         if self.overlays.aux_prompt { v.push("aux_prompt"); }
         if self.overlays.quit_dialog { v.push("quit_dialog"); }
         if self.overlays.launch_dialog { v.push("launch_dialog"); }

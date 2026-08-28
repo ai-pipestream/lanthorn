@@ -23,7 +23,7 @@ use ratatui::Terminal;
 use clap::Parser;
 
 use app::archive::load_archive;
-use app::config::{config_path, resolve, Cli, Config};
+use app::config::{config_path, resolve, Cli, Config, OnOff};
 use app::engine::Engine;
 use app::glulx_session::GlulxSession;
 use app::hints;
@@ -103,6 +103,12 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
 
     let mut cfg = resolve(&cli);
 
+    // Asked BEFORE the seed below creates the file, because "there is no
+    // config.toml" is the whole definition of a first run (SQ-1104). Read after
+    // it, the answer would be "there is one" every time and the font check would
+    // never fire.
+    let first_run = !cfg.config_file.exists();
+
     // Auto-seed a fresh style.toml (SQ-0309, Task 6b) on every startup — before the
     // story picker — so browsing (even without launching a story) leaves the fully
     // commented, registry-derived template, and the picker reads the same file the
@@ -181,6 +187,46 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         match app::config::write_config_file(&cfg) {
             Ok(()) => eprintln!("lanthorn: saved default story directory ({}).", to_store.display()),
             Err(e) => eprintln!("lanthorn: could not save config: {e}"),
+        }
+    }
+
+    // ── SQ-1104: does this terminal's font draw the icon glyphs? ─────────────
+    //
+    // lanthorn cannot look. It writes characters and the font belongs to the
+    // terminal; the nearest thing to a probe — write a glyph, read the cursor
+    // back — measures WIDTH, and a missing-glyph box is exactly one cell wide.
+    // So the eye is the oracle, and one question here configures the arrows, the
+    // portal and stairs icons and the Guiding Light's mark together instead of
+    // each of them drifting apart one report at a time.
+    //
+    // Asked here rather than at the top of this function so that the two exits
+    // above it — `--machines`, and "no story given" — never raise a dialog
+    // about a session that is not going to happen.
+    //
+    // A terminal that cannot be made interactive is not asked and nothing is
+    // written; the plain glyphs are already the defaults. The config seed above
+    // means that launch is a first run only once, so a piped first launch spends
+    // it — `--font-check on` and `/run-font-check` are how it is asked for
+    // afterwards, which is the affordance the changed-font case needs anyway.
+    let ask_font = match cli.font_check {
+        Some(OnOff::Off) => false,
+        Some(OnOff::On) => true,
+        None => first_run,
+    };
+    if ask_font {
+        if let Some(nerdfont) = ask_font_check(&cfg) {
+            match app::style::style_write_path(cfg.style.as_deref(), &cfg.user_dir) {
+                Some(path) => {
+                    if let Err(e) = app::style::write_font_check_answer(&path, nerdfont) {
+                        eprintln!("lanthorn: could not save the font choice: {e}");
+                    }
+                }
+                // `style = "default"` names the built-in style, which lives in
+                // the binary; there is no file to record an answer in.
+                None => eprintln!(
+                    "lanthorn: `style = \"default\"` has no file to write the font choice to."
+                ),
+            }
         }
     }
 
@@ -443,6 +489,121 @@ fn ask_fetch_keep(
     // between the last `read()` and the disable was still on the fd when raw mode
     // ended — and went to the shell. `restore_terminal` is idempotent and every
     // step of it is a no-op for state this prompt never set.
+    crate::restore_terminal();
+    answer
+}
+
+/// Run the font check on its own, before any game exists (SQ-1104).
+///
+/// The dialog, its focus ring, its buttons and its keyboard ladder are all
+/// `render::font_check_dialog`'s — this is only the small terminal loop that
+/// stands in for the game's, since there is no game yet. Exactly the shape
+/// [`ask_fetch_keep`] has, for the same reason: two drivers, one dialog.
+/// Tab/Shift-Tab move focus, Enter activates, Esc cancels; Space is left alone
+/// (widget-reserved), as the shared chrome does everywhere else.
+///
+/// `None` when the terminal cannot be made interactive — nothing is written and
+/// the plain glyphs stand, which is the answer that works in every font.
+fn ask_font_check(cfg: &Config) -> Option<bool> {
+    use app::render::font_check_dialog::{
+        draw_font_check_always, font_check_key_focused, FontCheckAction,
+    };
+    use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+
+    // Themed the way the game and the browser are, so the question does not
+    // arrive in a palette the player has never seen — and so the sample rows are
+    // drawn in the colours the map will actually use.
+    let (base, _w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
+    let (colors, _syms, _w2) = app::style::resolve(&base, &cfg.user_dir);
+
+    let mut state = AppState::default();
+    state.colors = colors;
+    // Row 2 — the answer that changes nothing — starts focused, matching the
+    // dialog's declared default. Enter without reading is not a decision to
+    // install glyphs a font may not have.
+    state.overlays.dialog_focus = 1;
+
+    if enable_raw_mode().is_err() {
+        return None;
+    }
+    if execute!(stdout(), EnterAlternateScreen).is_err() {
+        crate::restore_terminal();
+        return None;
+    }
+    if cfg.mouse {
+        let _ = execute!(stdout(), EnableMouseCapture);
+    }
+    let mut terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
+        Ok(t) => t,
+        Err(_) => {
+            crate::restore_terminal();
+            return None;
+        }
+    };
+
+    const BUTTONS: usize = 2;
+    let answer = loop {
+        let mut rects = None;
+        if terminal
+            .draw(|f| {
+                rects = draw_font_check_always(&state, f.area(), f.buffer_mut());
+            })
+            .is_err()
+        {
+            break None;
+        }
+        // A pane too small to hold the comparison cannot ask the question, and a
+        // question nobody can read must not block the launch.
+        if rects.is_none() {
+            break None;
+        }
+        let ev = match crossterm::event::read() {
+            Ok(ev) => ev,
+            Err(_) => break None,
+        };
+        if let Event::Mouse(m) = &ev {
+            if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+                continue;
+            }
+            let Some(r) = &rects else { continue };
+            let pt = (m.column, m.row);
+            if r.nerd.is_some_and(|b| b.contains(pt.into())) {
+                break Some(true);
+            }
+            if r.plain.is_some_and(|b| b.contains(pt.into()))
+                || r.close.is_some_and(|b| b.contains(pt.into()))
+            {
+                break Some(false);
+            }
+            continue;
+        }
+        let Event::Key(key) = ev else { continue };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        // Ctrl-C is not an answer; it is a refusal, and a refusal writes nothing.
+        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c'))
+        {
+            break None;
+        }
+        match key.code {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                state.overlays.dialog_focus = (state.overlays.dialog_focus + 1) % BUTTONS;
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+                state.overlays.dialog_focus =
+                    (state.overlays.dialog_focus + BUTTONS - 1) % BUTTONS;
+            }
+            code => match font_check_key_focused(code, state.overlays.dialog_focus) {
+                FontCheckAction::None => {}
+                FontCheckAction::Nerd => break Some(true),
+                FontCheckAction::Plain => break Some(false),
+            },
+        }
+    };
+
+    // THE canonical teardown, not a copy of its steps (SQ-0998).
     crate::restore_terminal();
     answer
 }

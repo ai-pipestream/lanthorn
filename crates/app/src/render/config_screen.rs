@@ -50,14 +50,21 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("v6_arrow_keys",        ConfigRowKind::Bool, "Forward arrow keypresses to v6 stories (some bind them to movement); off = arrows drive lanthorn's scrollback and map panning instead."),
     ("v6_pixel_lock",        ConfigRowKind::Bool, "Scale v6 artwork by whole device pixels per art pixel (0.5x/1x/1.5x on a 320-wide rendition, 1x/2x/3x on the Mac mono and EGA ones) instead of stretching it to fill the pane: crisper art and seamless borders, at the cost of a wider margin. No effect under half-blocks, which draws cells rather than device pixels and has no rung to snap to."),
     ("guidance",             ConfigRowKind::Bool, "Lanthorn's Guiding Light: help offered while you play — the words the parser knows, a completed noun, a caution before a move that cannot be undone. Marked in the margin with its own glyph (style.toml's gutter.assist), never in the story's voice."),
+    ("font_check",           ConfigRowKind::Action, "Enter: compare two rows of glyphs and say which your terminal's font draws properly, setting the map's arrows, portal and stairs icons and the Guiding Light's mark together. Answers land in style.toml, not here, so this row is not part of Save."),
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigRowKind {
     Path,
     Bool,
     Enum,
     Num,
+    /// A row that DOES something rather than holding a value (SQ-1104). Enter
+    /// runs it; ← / → do nothing, because there is nothing to cycle. Its value
+    /// column says what the key does instead of what the setting is, and its
+    /// effect lands outside the working copy the Save button writes — which the
+    /// row's own description has to say, or Cancel looks like it would undo it.
+    Action,
 }
 
 /// Draw the config-screen modal centered over `area`.
@@ -254,6 +261,9 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         25 => bool_str(cfg.v6_arrow_keys),
         26 => bool_str(cfg.v6_pixel_lock),
         27 => bool_str(cfg.guidance),
+        // SQ-1104: an Action row has no value to report, so the column says what
+        // the key does. `cfg` is untouched by it — the answer goes to style.toml.
+        28 => "run…".to_string(),
         _ => String::new(),
     }
 }
@@ -292,6 +302,41 @@ mod tests {
         assert!(content.contains("auto_save"), "auto_save row should be visible");
         assert!(content.contains("background_tidy"), "background_tidy row should be visible");
         assert!(content.contains("mouse"), "mouse row should be visible");
+    }
+
+    /// SQ-1104: the `font_check` row is an ACTION, and its index must be the one
+    /// `config_toggle_or_edit` opens the dialog from — the four-way index match
+    /// this table warns about is exactly what a new row gets wrong. It also must
+    /// not touch the working copy, because its answer lands in `style.toml` and
+    /// Save/Cancel have nothing to say about it.
+    #[test]
+    fn the_font_check_row_opens_the_dialog_and_leaves_the_working_copy_alone() {
+        use crate::input::{apply_action, Action};
+        use mapper::mapper::Mapper;
+        let mut m = Mapper::default();
+
+        let mut state = state_with_config_screen();
+        let idx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "font_check").unwrap();
+        assert_eq!(CONFIG_ROWS[idx].1, ConfigRowKind::Action);
+        state.overlays.config_screen.as_mut().unwrap().scroll.selected = idx;
+        let before = format!("{:?}", state.overlays.config_screen.as_ref().unwrap().working);
+
+        apply_action(Action::ConfigToggle, &mut state, &mut m);
+        assert!(state.overlays.font_check, "the row opens the font check");
+        assert!(state.overlays.config_screen.is_some(), "and the settings screen stays open behind it");
+        assert_eq!(
+            format!("{:?}", state.overlays.config_screen.as_ref().unwrap().working),
+            before,
+            "an action row changes no setting"
+        );
+        // ← / → have nothing to cycle, and must not fall through to a neighbour.
+        state.overlays.font_check = false;
+        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
+        assert_eq!(
+            format!("{:?}", state.overlays.config_screen.as_ref().unwrap().working),
+            before,
+            "cycling an action row edits nothing"
+        );
     }
 
     #[test]

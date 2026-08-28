@@ -79,6 +79,17 @@ carrying `enable_sound = false` could only be overridden by editing the file.
 - **One switch for the whole set**: `--guidance on|off` for a launch,
   `/set-guidance` (bare toggles) for a session, and a `guidance` row on the
   settings screen that persists it.
+- **A first-run font check sets every icon at once.** lanthorn cannot read your
+  terminal's font — it writes characters, and the font belongs to the terminal —
+  so on a first launch it shows two rows of glyphs and asks which one your
+  terminal draws properly. Answer row 1 and the map takes the Nerd Font arrows,
+  the four-way stairs-and-doors portal icons and the Guiding Light's own lamp;
+  answer row 2 (or press Esc) and the plain glyphs stand. The answer is written
+  to `style.toml` as preset **names**, one line each, so it stays yours to edit
+  and a later improvement to a preset still reaches you. `/run-font-check` asks
+  again — which is what you want after changing fonts — as does
+  `--font-check on`; `--font-check off` never asks, and there is a `font_check`
+  row on the settings screen.
 
 ### Original media
 

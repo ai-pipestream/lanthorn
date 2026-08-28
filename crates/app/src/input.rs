@@ -4248,6 +4248,14 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         25 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
         26 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_pixel_lock = !cs.working.v6_pixel_lock; } }
         27 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.guidance = !cs.working.guidance; } }
+        // font_check (SQ-1104) — an Action row: it opens the font check OVER the
+        // settings screen, which stays open behind it exactly as row 0's path
+        // dialog does. Nothing in `working` changes, because the answer is a
+        // glyph decision and lands in style.toml, not config.toml.
+        28 => {
+            state.overlays.dialog_focus = 1;
+            state.overlays.font_check = true;
+        }
         _ => {}
     }
 }

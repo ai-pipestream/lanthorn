@@ -105,6 +105,18 @@ still reach in and override any single selector by name.
   fonts without Unicode 13 Legacy Computing coverage. Individual glyphs are
   overridden one slot at a time in a `[map.overrides]` table keyed by slot name
   — `"room.normal.tl" = "+"`, `"arrow.north" = "^"`, `"path.diag_ul" = "/"`.
+  On a **first launch** lanthorn asks which of two glyph rows your terminal draws
+  properly and writes the answer into this section for you — `arrow_set`,
+  `portal_icons` and the Guiding Light's `"gutter.assist"` together, since a
+  patched font supplies all three or none of them. It has to ask: lanthorn writes
+  characters and the font belongs to the terminal, and the nearest thing to a
+  probe measures a glyph's *width*, which a missing-glyph box passes. It writes
+  preset **names**, not the forty expanded overrides they stand for, so the
+  section stays readable and a later improvement to a preset still reaches you.
+  `/run-font-check` asks again — worth doing whenever you change terminal fonts —
+  and so does `--font-check on`; `--font-check off` never asks, and the settings
+  screen carries a `font_check` row that runs it. Esc means "the plain row", and
+  is recorded, so the question does not come back every launch.
 - **`[debug]`** holds the selectors particular to the debug inspector: `pc`, the
   four confidence tiers that shade how sure the disassembler is that a byte is
   really code, and `zstring`. The tier defaults read as a risk gradient —
