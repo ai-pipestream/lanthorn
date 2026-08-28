@@ -305,6 +305,9 @@ impl Grammar {
 
 /// One dictionary entry, decoded far enough to answer part-of-speech questions.
 struct DictWord {
+    /// Byte address of the entry, which is also the value a `name`/`SYNONYM`
+    /// property stores to refer to this word.
+    address: u32,
     text: String,
     roles: WordRoles,
     /// The verb number (classic formats) or verb-record address (V6), when the
@@ -368,7 +371,7 @@ fn scan_dictionary(mem: &Memory, dict: &Dictionary, format: GrammarFormat) -> Ve
             None
         };
 
-        out.push(DictWord { text, roles, verb_key });
+        out.push(DictWord { address: entry, text, roles, verb_key });
     }
 
     out
@@ -402,6 +405,42 @@ fn decode_roles(flags: u8, format: GrammarFormat) -> WordRoles {
     roles
 }
 
+// ── Dictionary words on their own ────────────────────────────────────────────
+
+/// One dictionary entry: where it is, what it says, and what parts of speech
+/// the story marks it with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictionaryWord {
+    /// Byte address of the entry. This is the value an object's parse-name
+    /// property stores, so it is the key a reverse lookup needs.
+    pub address: u32,
+    /// The decoded word, lower-cased and truncated as the story stores it.
+    pub text: String,
+    /// The flags decoded for this story's compiler family.
+    pub roles: WordRoles,
+}
+
+/// Every dictionary word with its address and roles, **without reading the
+/// grammar table**.
+///
+/// [`Grammar::load`] answers the same question but has to find and walk the
+/// syntax tables first, and refuses outright when they are malformed — which
+/// is the right answer for "what sentences does this story accept?" and the
+/// wrong one for "is this word a noun?". Journey and Scopa have no parser and
+/// no usable verb table, and still have a dictionary whose flags are perfectly
+/// readable; so does any story whose grammar version we do not recognise.
+///
+/// The format is settled from the header alone ([`detect_format`]), which is
+/// what decides where the flag byte sits and how its bits are read.
+pub fn dictionary_words(mem: &Memory) -> Vec<DictionaryWord> {
+    let dict = dictionary::load(mem);
+    let format = detect_format(mem);
+    scan_dictionary(mem, &dict, format)
+        .into_iter()
+        .map(|w| DictionaryWord { address: w.address, text: w.text, roles: w.roles })
+        .collect()
+}
+
 // ── Format detection ─────────────────────────────────────────────────────────
 
 /// Decide which family compiled this story, from the header alone.
@@ -413,7 +452,7 @@ fn decode_roles(flags: u8, format: GrammarFormat) -> WordRoles {
 /// there separates Inform 6 from Inform 1–5.
 ///
 /// GV1 versus GV2 needs the table itself and is settled in [`load_classic`].
-fn detect_format(mem: &Memory) -> GrammarFormat {
+pub fn detect_format(mem: &Memory) -> GrammarFormat {
     let s: Vec<u8> = (0x12..0x18).map(|a| mem.read_byte(a)).collect();
     let digit = |b: u8, lo: u8, hi: u8| b >= lo && b <= hi;
     let inform = digit(s[0], b'0', b'9')

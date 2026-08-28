@@ -428,6 +428,104 @@ impl WordRoles {
     }
 }
 
+/// What an object is, and what it can be **called** — one answer, never two.
+///
+/// A story tells you two different things about a thing in it. Its *printed*
+/// name is what the game writes when it mentions the object ("a
+/// battery-powered brass lantern"); its *parse* names are the dictionary words
+/// the parser will accept for it (`lamp`, `lantern`, `light`). They are not the
+/// same set and neither implies the other — Inform 7 objects routinely have an
+/// empty printed name and a full word list, and every Infocom object has words
+/// that appear nowhere in its printed name.
+///
+/// The two travel together because a caller that has one almost always needs
+/// the other: a panel offering the printed name is offering something the
+/// parser has not agreed to accept, and a panel offering `lamp` with nothing
+/// beside it cannot say which lamp. Handing them back as one value is the
+/// refactoring policy in CLAUDE.md applied at the seam where it is cheapest —
+/// there is no call that can supply half the subject.
+///
+/// Produced by `zvm::objects::ParseNames`, `gvm::objects::ParseNames` and
+/// `scott::Database::item_words`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ObjectWords {
+    /// How the engine identifies this object: the object *number* on the
+    /// Z-machine (1-based, §12.3), the object's *address* on Glulx (objects
+    /// there are heap structures with no numbering), and the item *index* in a
+    /// Scott Adams database.
+    pub id: u32,
+    /// What the game prints for this object. Empty is a real answer, not a
+    /// failure: Inform 7 gives objects no hardware short name at all and prints
+    /// them through a rule instead.
+    pub printed_name: String,
+    /// The dictionary words that refer to this object, in the order the story
+    /// stores them. Lower-cased, and truncated exactly as the story's
+    /// dictionary truncates them — `lanter` really is all Zork I holds of
+    /// "lantern", and typing the full word still matches because the parser
+    /// truncates the player's input the same way.
+    pub words: Vec<String>,
+    /// How many characters the story's dictionary keeps of a word: 6 on a v1–3
+    /// Z-machine (§13.3), 9 on v4+ (§13.4), `DICT_WORD_SIZE` on Glulx, and the
+    /// header's word length in a Scott Adams database. A stored word THIS long
+    /// may be the front of a longer one; a shorter one is complete.
+    ///
+    /// It travels with the words because a caller cannot recover it from them
+    /// and gets a wrong answer without it — matching the player's "lantern"
+    /// against Zork I's `lanter` needs this number, and so does deciding
+    /// whether it is safe to show a word to a player at all. Note that the
+    /// STORED words are not always truncated already: the Z-machine's
+    /// dictionary holds `lanter` and nothing more, while a Scott Adams noun
+    /// table holds `LAMP` in full and truncates only when it matches. `None`
+    /// where the vocabulary is not truncated.
+    pub truncated_at: Option<usize>,
+    /// Which property the words were read from, for a caller that wants to say
+    /// where the answer came from. `1` for every Inform story on either
+    /// back-end; a per-game number for Infocom's own (18 in Zork I, 17 in Zork
+    /// II, 14 in Seastalker). `None` where the engine has no properties at all,
+    /// which is Scott Adams.
+    pub property: Option<u32>,
+}
+
+impl ObjectWords {
+    /// Build one. `#[non_exhaustive]`, so this is how another crate makes one.
+    pub fn new(
+        id: u32,
+        printed_name: String,
+        words: Vec<String>,
+        property: Option<u32>,
+        truncated_at: Option<usize>,
+    ) -> ObjectWords {
+        ObjectWords { id, printed_name, words, property, truncated_at }
+    }
+
+    /// True when `word` is one of this object's parse names.
+    ///
+    /// BOTH sides are truncated the way the story's own vocabulary truncates
+    /// them ([`truncated_at`](ObjectWords::truncated_at)) before comparing, so
+    /// "lantern" matches Zork I's stored `lanter` while "lan" does not. Both
+    /// sides, because the two engines differ in which side is already short:
+    /// the Z-machine dictionary stores `lanter` truncated, and a Scott Adams
+    /// noun table stores `LAMP` in full and truncates only when matching.
+    pub fn refers_to(&self, word: &str) -> bool {
+        let key = self.truncate(&word.trim().to_lowercase());
+        self.words.iter().any(|s| self.truncate(s) == key)
+    }
+
+    fn truncate(&self, word: &str) -> String {
+        match self.truncated_at {
+            Some(n) => word.chars().take(n).collect(),
+            None => word.to_string(),
+        }
+    }
+
+    /// `printed name [word, word, …]`, for a debug inspector or a test failure.
+    pub fn describe(&self) -> String {
+        let name = if self.printed_name.is_empty() { "(unnamed)" } else { &self.printed_name };
+        format!("{name} [{}]", self.words.join(", "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,5 +627,49 @@ mod tests {
         assert_eq!(r.raw, 0x41);
         assert!(!r.verb && !r.noun && !r.adjective && !r.singular);
         assert_eq!(r, WordRoles { raw: 0x41, ..WordRoles::default() });
+    }
+
+    #[test]
+    fn an_object_s_words_answer_for_the_dictionary_s_truncated_spelling() {
+        let o = ObjectWords {
+            id: 102,
+            printed_name: "brass lantern".into(),
+            words: vec!["lamp".into(), "lanter".into(), "light".into()],
+            property: Some(18),
+            truncated_at: Some(6),
+        };
+        // Either spelling: what the story holds, and what the player types.
+        assert!(o.refers_to("lanter"));
+        assert!(o.refers_to("lantern"));
+        assert!(o.refers_to("LAMP"));
+        assert!(!o.refers_to("lan"));
+        assert!(!o.refers_to("sword"));
+        // An untruncated vocabulary compares whole words and nothing else.
+        let mut plain = o.clone();
+        plain.truncated_at = None;
+        assert!(plain.refers_to("lanter") && !plain.refers_to("lantern"));
+        // A vocabulary that stores whole words and truncates only on match —
+        // Scott Adams — is answered from the same field.
+        let scott = ObjectWords::new(9, "a brass lamp".into(), vec!["lamp".into()], None, Some(3));
+        assert!(scott.refers_to("lamp") && scott.refers_to("lamps") && scott.refers_to("lam"));
+        assert!(!scott.refers_to("la"));
+        assert_eq!(
+            ObjectWords::new(1, "x".into(), vec!["x".into()], None, None).property,
+            None
+        );
+        assert_eq!(o.describe(), "brass lantern [lamp, lanter, light]");
+    }
+
+    #[test]
+    fn an_empty_printed_name_is_an_answer_and_still_describes() {
+        let o = ObjectWords {
+            id: 7,
+            printed_name: String::new(),
+            words: vec!["pig".into()],
+            property: Some(1),
+            truncated_at: Some(9),
+        };
+        assert_eq!(o.describe(), "(unnamed) [pig]");
+        assert!(o.refers_to("pig"));
     }
 }
