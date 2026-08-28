@@ -1745,7 +1745,8 @@ impl Config {
     }
 
     /// The command band's VERB column as the band is BORN — `[command_band]`'s
-    /// own resolution with the adult list applied to whatever came out.
+    /// own resolution with [`for_display`](Self::for_display) applied to
+    /// whatever came out.
     ///
     /// This and [`layer_band_verbs`](Self::layer_band_verbs) are the only two
     /// ways a `VerbTable` reaches the screen, and they live on `Config` rather
@@ -1757,11 +1758,12 @@ impl Config {
         &self,
     ) -> (crate::render::command_band::VerbTable, Vec<String>) {
         let (table, warnings) = self.command_band.resolve_verbs();
-        (table.hiding(self.hidden_display_words()), warnings)
+        (self.for_display(table), warnings)
     }
 
     /// The same for the table the story's own grammar produces a tick later —
-    /// `[command_band] extra_verbs` layered on, then the adult list applied.
+    /// `[command_band] extra_verbs` layered on, then
+    /// [`for_display`](Self::for_display).
     ///
     /// The filter runs AFTER `extra_verbs`, so it catches a word the player's own
     /// list re-added as surely as one the story's grammar named. Somebody who
@@ -1772,7 +1774,30 @@ impl Config {
         &self,
         table: crate::render::command_band::VerbTable,
     ) -> crate::render::command_band::VerbTable {
-        self.command_band.layer_extra_verbs(table).hiding(self.hidden_display_words())
+        self.for_display(self.command_band.layer_extra_verbs(table))
+    }
+
+    /// Everything an assembled VERB column is filtered through before it
+    /// reaches a screen — the ONE place, so that the two wrappers above cannot
+    /// drift apart and a third rule has somewhere obvious to go.
+    ///
+    /// Two rules, deliberately kept apart in kind:
+    ///
+    /// * [`without_sigil_verbs`](crate::render::command_band::VerbTable::without_sigil_verbs)
+    ///   is STRUCTURE — Infocom's `#record`/`$verify` test rig is not part of
+    ///   the game in any story, needs no vocabulary, and takes no switch
+    ///   (SQ-1126).
+    /// * [`hiding`](crate::render::command_band::VerbTable::hiding) is a
+    ///   JUDGEMENT — the adult list, which is therefore shipped visibly in
+    ///   `config.toml` with two off-switches (SQ-1122).
+    ///
+    /// Both are display-only: every word either one removes still parses, and
+    /// the Guiding Light still offers it.
+    fn for_display(
+        &self,
+        table: crate::render::command_band::VerbTable,
+    ) -> crate::render::command_band::VerbTable {
+        table.without_sigil_verbs().hiding(self.hidden_display_words())
     }
 
     /// The machine's §8.3.3 default page and ink for THIS launch, or `None` when
@@ -2706,6 +2731,46 @@ mod tests {
         assert_eq!(take.len(), 1, "no duplicate entry");
         assert_eq!(take[0].lines, vec![VerbLine::pair("from")]);
         assert_eq!(take[0].joiner(), Some("from"));
+    }
+
+    /// SQ-1126: the sigil filter runs on BOTH assembly wrappers and takes no
+    /// switch — including with the adult list off, which is the trap, because
+    /// `hiding` short-circuits on an empty list and would carry a sigil word
+    /// straight through if the two rules shared one pass.
+    ///
+    /// Falsifies against putting `#`/`$` in `adult_words` instead: turning the
+    /// adult switch off would then put Infocom's test rig back on screen.
+    #[test]
+    fn sigil_verbs_are_filtered_by_both_wrappers_whatever_the_adult_switch_says() {
+        use crate::render::command_band::{VerbEntry, VerbLine, VerbSource, VerbTable};
+
+        let story = || {
+            VerbTable::new(
+                vec![
+                    VerbEntry::new("$verify", vec![VerbLine::bare()]),
+                    VerbEntry::new("#record", vec![VerbLine::bare()]),
+                    VerbEntry::new("gaze", vec![VerbLine::bare()]),
+                ],
+                VerbSource::Story,
+            )
+        };
+        for cfg in [Config::default(), Config { hide_adult_words: false, ..Config::default() }] {
+            let words: Vec<String> =
+                cfg.layer_band_verbs(story()).entries.into_iter().map(|e| e.word).collect();
+            assert_eq!(words, vec!["gaze".to_string()], "hide_adult_words = {}", cfg.hide_adult_words);
+        }
+
+        // The born-on-the-fallback wrapper too, through a `verbs` list that
+        // names one: a player cannot re-add the test rig by config either.
+        let cfg: Config = toml::from_str(
+            "hide_adult_words = false\n\
+             [command_band]\nverbs = [{ word = \"$verify\", arity = \"solo\" }, \
+             { word = \"polish\", arity = \"object\" }]\n",
+        )
+        .unwrap();
+        let (table, _) = cfg.resolve_band_verbs();
+        let words: Vec<&str> = table.entries.iter().map(|e| e.word.as_str()).collect();
+        assert_eq!(words, vec!["polish"]);
     }
 
     /// `object_opt` was the one arity the old enum needed a variant for and a

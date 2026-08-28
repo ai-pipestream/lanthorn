@@ -14,11 +14,12 @@
 //! vacuously when it is absent (the `any_v6_story_present` pattern).
 
 
+use app::config::Config;
 use app::engine::Engine;
 use app::graphics::PictSource;
 use app::render::command_band::{
-    default_quick, default_verbs, refresh_objects, refresh_verbs, VerbSource, COL_CARRIED,
-    COL_HERE, COL_SECOND, COL_VERB,
+    default_quick, default_verbs, refresh_objects, refresh_verbs, verbs_from_grammar, VerbSource,
+    VerbTable, COL_CARRIED, COL_HERE, COL_SECOND, COL_VERB,
 };
 use app::session::GameSession;
 use app::state::{AppState, CommandBandState};
@@ -524,6 +525,87 @@ fn quick_words_that_take_an_object_stay_in_zork_i_s_column() {
         );
     }
     assert!(band.verb_by_word("wait").is_some(), "…still in the TABLE, just not the column");
+}
+
+// ── SQ-1126: Infocom's own test rig is not something to try ──────────────────
+
+/// Zork I r52 ships five sigil verbs in its retail grammar, and alphabetical
+/// order put every one of them at the TOP of the column: `#command`, `#random`,
+/// `#record`, `#unrecor`, `$verif`. They are Infocom's regression rig (record a
+/// playthrough, replay it with the RNG pinned) plus the §15 checksum check —
+/// not part of the game, and the first thing a browsing player met.
+///
+/// The rule is structural, so this asks it of the production path: the story's
+/// own grammar through `Config::layer_band_verbs`, which is the one place a
+/// column is assembled. Falsify by dropping `without_sigil_verbs` from
+/// `Config::for_display` — the five words come back, in the same first five
+/// rows.
+#[test]
+fn zork_i_r52_s_column_drops_the_test_harness_verbs() {
+    let Some(session) = boot_zmachine("zork1-invclues-r52-s871125.z5") else { return };
+    let vocab = session.story_vocabulary().expect("Zork I r52's grammar reads");
+    let entries = verbs_from_grammar(vocab.verbs());
+
+    let unfiltered: Vec<String> = entries.iter().map(|e| e.word.clone()).collect();
+    for word in ["#command", "#random", "#record", "#unrecor", "$verif"] {
+        assert!(unfiltered.contains(&word.to_string()), "r52 really holds `{word}`");
+    }
+    assert_eq!(
+        unfiltered[..5],
+        ["#command", "#random", "#record", "#unrecor", "$verif"],
+        "…at the very top of an alphabetical column, which is the whole complaint"
+    );
+
+    let column = |cfg: &Config| -> Vec<String> {
+        cfg.layer_band_verbs(VerbTable::new(entries.clone(), VerbSource::Story))
+            .entries
+            .into_iter()
+            .map(|e| e.word)
+            .collect()
+    };
+
+    // With the adult list off, the sigil rule is the ONLY thing removing rows,
+    // so the delta is exactly the five — and it is not on that list, which is
+    // the point of keeping a rule and a judgement apart.
+    let sigils_only = column(&Config { hide_adult_words: false, ..Config::default() });
+    assert_eq!(
+        unfiltered.len() - sigils_only.len(),
+        5,
+        "five words out of {}: a rule, not a scrub",
+        unfiltered.len()
+    );
+
+    let filtered = column(&Config::default());
+    for shown in [&sigils_only, &filtered] {
+        assert!(
+            !shown.iter().any(|w| w.starts_with('#') || w.starts_with('$')),
+            "no sigil word survives: {:?}",
+            &shown[..8]
+        );
+        assert_eq!(shown[0], "activate", "the column now opens on a verb a player would try");
+        for kept in ["take", "look", "pray", "dig", "count"] {
+            assert!(shown.contains(&kept.to_string()), "`{kept}` is untouched");
+        }
+    }
+}
+
+/// DISPLAY ONLY, against the real parser (the SQ-1122 pin, applied to the other
+/// rule): `$verify` is a genuinely useful diagnostic — the easiest way to see
+/// which interpreter number lanthorn reports to a game without a debug build —
+/// so it must still work when typed. Filter the column, not the parser.
+#[test]
+fn typing_a_sigil_command_still_reaches_zork_i_s_parser() {
+    let Some(mut session) = boot_zmachine("zork1-invclues-r52-s871125.z5") else { return };
+    let reply = session.submit("$verify").transcript.to_lowercase();
+    assert!(!reply.is_empty(), "the turn produced a reply");
+    assert!(
+        !reply.contains("don't know the word"),
+        "the story still knows the word it always knew: {reply:?}"
+    );
+    assert!(
+        reply.contains("verif") || reply.contains("disk") || reply.contains("interpreter"),
+        "and it is the checksum check answering: {reply:?}"
+    );
 }
 
 /// The shapes come off the story's syntax lines too, not off a declared arity —

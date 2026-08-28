@@ -324,7 +324,48 @@ impl VerbTable {
             .retain(|e| !hidden.iter().any(|h| h.eq_ignore_ascii_case(&e.word)));
         self
     }
+
+    /// Drop the story's own test-harness and diagnostic verbs — every word whose
+    /// first character is one of [`SIGILS`] (SQ-1126).
+    ///
+    /// Zork I r52 shipped `#record`, `#unrecord`, `#command`, `#random` and
+    /// `$verify` in its retail grammar, and an alphabetical column put all five
+    /// at the very TOP, which is the worst place a player could meet them. They
+    /// are Infocom's regression rig — record a playthrough, replay it with the
+    /// RNG pinned, diff — plus the §15 checksum check; none is part of the game.
+    ///
+    /// **A rule, not a list**, which is the whole reason it lives here and not
+    /// in `adult_words`. That list is a judgement about words and therefore
+    /// ships visibly for the player to edit; this is structure, needs no
+    /// maintained vocabulary, and there is nothing to disagree with. Measured
+    /// over the 60 stories in `stories/` with a readable Z grammar: 39 hold at
+    /// least one such word (19 a `#`, all 39 a `$`), every one of them is a
+    /// harness or diagnostic command, and no legitimate verb in the corpus
+    /// begins with either character.
+    ///
+    /// **Display only**, exactly like [`hiding`](Self::hiding): typing `$verify`
+    /// still reaches the parser, and it is the easiest way to see which
+    /// interpreter number lanthorn reports to a game without a debug build.
+    ///
+    /// Reached through [`crate::config::Config::resolve_band_verbs`] and
+    /// [`layer_band_verbs`](crate::config::Config::layer_band_verbs), which are
+    /// the two places a table is assembled; this is `pub` only so they can.
+    pub fn without_sigil_verbs(mut self) -> VerbTable {
+        self.entries.retain(|e| !e.word.starts_with(SIGILS));
+        self
+    }
 }
+
+/// The two characters that mark a word as Infocom's rather than the player's:
+/// `#` is the test harness (`#record`, `#command`, `#random`), `$` is
+/// diagnostic (`$verify`, `$refresh`, `$credits`). See
+/// [`VerbTable::without_sigil_verbs`].
+///
+/// The corpus holds two others — `*` in *Violet* and `@new`/`@up`/`@wall` in
+/// *The Nameless* — which are author commands of the same kind but are not what
+/// SQ-1126 was asked about, and `*` is a single character the column already
+/// drops. Widening this is a decision, not an oversight.
+const SIGILS: &[char] = &['#', '$'];
 
 impl Default for VerbTable {
     fn default() -> Self {
@@ -2154,6 +2195,31 @@ mod tests {
         let wait = entries.iter().find(|e| e.word == "wait").expect("wait");
         assert!(!wait.takes_object, "one bare line and nothing else");
         assert_eq!(wait.max_nouns(), 0);
+    }
+
+    /// SQ-1126: `#` marks Infocom's test harness and `$` its diagnostics, and
+    /// neither is something to offer a player browsing for what to try. A RULE,
+    /// on the first character — no vocabulary to maintain and no switch, unlike
+    /// the adult list beside it. Falsifies against a `VerbTable` that keeps
+    /// everything the grammar named.
+    #[test]
+    fn sigil_verbs_are_dropped_from_the_column() {
+        let entries = ["#record", "$verify", "#random", "take", "dollar", "hash"]
+            .iter()
+            .map(|w| VerbEntry::new(w, vec![VerbLine::object()]))
+            .collect();
+        let table = VerbTable::new(entries, VerbSource::Story).without_sigil_verbs();
+        let words: Vec<&str> = table.entries.iter().map(|e| e.word.as_str()).collect();
+        assert_eq!(words, vec!["take", "dollar", "hash"], "the sigil is a PREFIX, not a substring");
+    }
+
+    /// The rule is the first character only, so a verb that merely contains one
+    /// is untouched — and a table with no sigil words is unchanged.
+    #[test]
+    fn a_column_without_sigils_is_left_alone() {
+        let before = default_verbs();
+        let after = before.clone().without_sigil_verbs();
+        assert_eq!(before, after, "the built-in table has nothing to drop");
     }
 
     /// The fallback labels itself and the story's own column does not — the

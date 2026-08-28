@@ -379,6 +379,18 @@ know which side you're on).
   **VERB — yours** for the same reason. Only the story's own grammar goes
   unlabelled, because only then is there nothing to admit.
 
+  **Infocom's own test rig stays out of it.** A word whose first character is
+  `#` or `$` never reaches the column: `#record`, `#unrecord`, `#command` and
+  `#random` are the regression harness Infocom shipped in the retail builds —
+  record a playthrough, replay it with the random numbers pinned, diff the two —
+  and `$verify` is the checksum check. Zork I r52 holds all five, and
+  alphabetical order used to park them in the first five rows, which is the
+  worst possible place to meet something that is not part of the game. That is a
+  rule about the sigil, not a list of words, so it needs no setting and no
+  upkeep. **Display only**, like everything else the column hides: `$verify`
+  still works when you type it, and it is the quickest way to see which
+  interpreter number lanthorn is reporting to a game.
+
   The object columns are **live**: they read the running story's object tree and
   refresh every turn, so taking something moves it from *here* to *carried* as
   you watch. (Glulx and Scott have no object tree yet, so *here* degrades to a
