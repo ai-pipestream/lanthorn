@@ -1005,6 +1005,8 @@ mod debug_dispatch_tests {
         fn submit(&mut self, _command: &str) -> TurnResult { unimplemented!() }
         fn submit_key(&mut self, _key: KeyInput) -> Option<TurnResult> { unimplemented!() }
         fn take_transcript(&mut self) -> String { unimplemented!() }
+        // No screen-clear channel: this double is not a game.
+        fn drain_screen_clear(&mut self) -> bool { false }
         fn pending_input(&self) -> InputKind { InputKind::Line }
         fn resume_save(&mut self, _wrote_ok: bool) -> TurnResult { unimplemented!() }
         fn resume_restore(&mut self, _data: Option<&[u8]>) -> TurnResult { unimplemented!() }

@@ -547,6 +547,21 @@ pub struct TurnResult {
     pub prose_retired: Option<usize>,
 }
 
+impl TurnResult {
+    /// A result that reports nothing but WHERE THE PLAYER IS: the mapper seed a
+    /// host restore / resume-to-a-past-turn feeds to [`apply_turn`]. Nothing
+    /// executed, so there is nothing else to report.
+    ///
+    /// Every other field is the type's own default rather than a hand-written
+    /// `false` / `Vec::new()`. Both call sites used to spell all sixteen out, which
+    /// is the shape that let the BOOT's seed quietly claim `erase_lower: false`
+    /// about a boot that had erased the screen (SQ-1106) — a hand-filled literal
+    /// answers a question it was never asked.
+    pub fn observation(location: ObjectSnapshot) -> TurnResult {
+        TurnResult { location: Some(location), ..TurnResult::default() }
+    }
+}
+
 /// One `erase_window`'s background fill: the screen rect it painted (0-based pixels,
 /// as the composite uses), the window background it painted with as a packed colour
 /// (0 = the window inherited the page default), and the draw-order stamp it took from
@@ -1452,6 +1467,24 @@ impl GameSession {
         if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw }
     }
 
+    /// Drain the game's pending screen clear: the per-turn `erase_window` flag
+    /// (ZMSD §8.7.3) **and** the position stamp that is the same erase seen from
+    /// the other side (SQ-0751, `CaptureSink::cleared_at`).
+    ///
+    /// One fact, taken together, because a caller that takes the flag alone leaves
+    /// the stamp behind to resurface as a mid-turn `ScreenClear` boundary in
+    /// somebody else's turn. `.1` is where in the drained text the erase fell, in
+    /// characters — `None` when nothing recorded a position.
+    ///
+    /// The only two callers are [`GameSession::drain_turn`], which needs the
+    /// position, and the boot's [`Engine::drain_screen_clear`], which does not
+    /// (SQ-1106): the boot's erase is what the game did before printing its banner,
+    /// and the host has drawn nothing for it to fall on.
+    pub fn take_screen_clear(&mut self) -> (bool, Option<usize>) {
+        let at = sink_mut(&mut self.machine).take_cleared_at();
+        (std::mem::take(&mut self.machine.screen.erase_lower_requested), at)
+    }
+
     /// Whether the game's trailing `>` read prompt is stripped from transcripts.
     pub fn strip_prompt(&self) -> bool {
         self.strip_prompt
@@ -1698,7 +1731,7 @@ impl GameSession {
                 .is_some_and(|w| w.stream_origin == Some(pen))
         });
         let win0_base = self.v6_win0_chars_seen;
-        let cleared_at = sink_mut(&mut self.machine).take_cleared_at();
+        let (erase_lower, cleared_at) = self.take_screen_clear();
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
         self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
         let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
@@ -1710,7 +1743,6 @@ impl GameSession {
         let diagnostics = std::mem::take(&mut self.machine.diagnostics);
         let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
         let sounds = std::mem::take(&mut self.machine.pending_sounds);
-        let erase_lower = std::mem::take(&mut self.machine.screen.erase_lower_requested);
         // A v6 wrap+scroll window moved out from under prose it had already
         // printed, and the engine froze that prose where it was painted (SQ-0697).
         // The stamp is in the same window-0 output-char space as an inline
@@ -4632,6 +4664,11 @@ impl Engine for GameSession {
 
     fn take_transcript(&mut self) -> String {
         self.take_transcript()
+    }
+
+    fn drain_screen_clear(&mut self) -> bool {
+        // The position stamp goes with it — see `GameSession::take_screen_clear`.
+        self.take_screen_clear().0
     }
 
     fn take_transcript_elems(&mut self) -> Vec<TranscriptElem> {

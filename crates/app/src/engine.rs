@@ -899,6 +899,46 @@ pub trait Engine {
     /// The player's current location, for the mapper.
     fn current_location(&self) -> Option<LocationInfo>;
 
+    // ── boot ──
+    /// Drain the game's pending screen clear — the fact [`TurnResult::erase_lower`]
+    /// carries, taken on its own.
+    ///
+    /// Every engine already drains this inside its own per-turn path; this is that
+    /// same drain, reachable by the BOOT, which is not a turn and does not go
+    /// through it. Deliberately **required** rather than defaulted: an engine that
+    /// answers `false` is stating it has no screen-clear channel (Scott), not
+    /// forgetting that it has one.
+    fn drain_screen_clear(&mut self) -> bool;
+
+    /// The boot's own turn: everything the game did between reset and its first
+    /// input request, as the [`TurnResult`] the host seeds the session with.
+    ///
+    /// The boot IS a turn — the player just never typed it — so it must drain the
+    /// same per-turn channels a real turn drains. `startup.rs` used to hand-build
+    /// this as a `TurnResult { … }` literal with `erase_lower: false` spelled into
+    /// it, which left an `erase_window` issued during boot sitting on the engine
+    /// until the FIRST REAL TURN's drain took it: the banner and the opening room
+    /// description were wiped one command late, on every v5 Infocom re-release that
+    /// clears the screen before printing its banner (SQ-1106 — the same omission
+    /// shape as SQ-0901 / SQ-1020 / SQ-1022, and the reason this is a constructor
+    /// rather than a literal).
+    ///
+    /// The drained clear is CARRIED, not acted on: the host seeds the map from this
+    /// result and nothing on the boot path marks a screen-clear boundary. That is
+    /// correct, and is what `zvm-cli` does with the same erase — the screen the game
+    /// cleared is the one before its banner, and the host has drawn nothing yet, so
+    /// clearing it is invisible. Marking a boundary here would anchor the screen
+    /// BELOW the banner the boot printed *after* the erase, i.e. hide it, which is
+    /// the reported bug wearing the other hat.
+    fn seed_turn(&mut self) -> TurnResult {
+        TurnResult {
+            location: self.current_location(),
+            quit: self.has_quit(),
+            erase_lower: self.drain_screen_clear(),
+            ..TurnResult::default()
+        }
+    }
+
     // ── capabilities / escape hatch ──
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
