@@ -46,6 +46,8 @@ pub mod vga16;
 pub mod wrap_cache;
 pub mod misc7x14;
 pub mod command_band;
+pub mod controls;
+pub mod tooltip;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

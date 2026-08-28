@@ -2811,6 +2811,10 @@ pub struct AppState {
     /// The pane boundary the pointer is hovering, if any. Drives the grab
     /// affordance only; `pane_drag` outranks it while a boundary is held.
     pub pane_hover: Option<crate::layout::Boundary>,
+    /// The border toggle control the pointer is on, if any (SQ-1123). Drives
+    /// the `:hover` style and the floating hint, and nothing else: it is set
+    /// from `Moved` events and never claims one, because typing always wins.
+    pub control_hover: Option<crate::render::controls::BorderControl>,
 
 
 
@@ -3174,6 +3178,7 @@ impl Default for AppState {
             resize_target: ResizeTarget::StoryMap,
             pane_drag: None,
             pane_hover: None,
+            control_hover: None,
             turns: 0,
             unsaved_progress: false,
             exit_target: ExitTarget::Exit,

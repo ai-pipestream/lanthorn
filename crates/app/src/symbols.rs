@@ -84,6 +84,44 @@ pub struct PortalGlyphs {
     pub unknown: char,
 }
 
+/// The glyphs on the pane border's clickable toggle controls (SQ-1123).
+///
+/// Every slot is a STATE, not a control: a toggle draws one of two glyphs
+/// depending on which way it would move things, so the icon says what is on
+/// before the colour does. The panel toggles are arrows pointing the way the
+/// panel would go — the map lives to the right of the story pane and the verb
+/// panel below it, so `map_hide` points right (click and the map leaves that
+/// way) and `band_show` points up (click and the band rises into view).
+///
+/// Defaults come from Geometric Shapes (U+25xx) for the same reason
+/// [`PortalGlyphs`]' do: it is the block an ordinary monospace face already has
+/// to carry for the map's ● ▲ ▼ ◀ ▶, so the controls draw on a stock terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlGlyphs {
+    /// Map hidden — click and it slides in from the right (◀).
+    pub map_show: char,
+    /// Map shown — click and it leaves to the right (▶).
+    pub map_hide: char,
+    /// Verb panel closed — click and it rises from the bottom (▲).
+    pub band_show: char,
+    /// Verb panel open — click and it drops back down (▼).
+    pub band_hide: char,
+    /// Lanthorn's Guiding Light is on (●; the lamp itself in a patched font).
+    pub guidance_on: char,
+    /// The Guiding Light is off (○).
+    pub guidance_off: char,
+    /// v6 render mode `hybrid` — half text, half art (◧).
+    pub render_hybrid: char,
+    /// v6 render mode `raster` — the whole frame is a picture (■).
+    pub render_raster: char,
+    /// v6 render mode `extended` (▦).
+    pub render_extended: char,
+    /// v6 pixel lock engaged — art pinned to whole device pixels (▣).
+    pub lock_on: char,
+    /// v6 pixel lock off (□).
+    pub lock_off: char,
+}
+
 // ── Top-level set ─────────────────────────────────────────────────────────────
 
 /// All map glyphs used by the renderer, resolved from config at startup.
@@ -100,6 +138,8 @@ pub struct SymbolSet {
     pub arrows: Arrows,
     pub path: PathGlyphs,
     pub portal: PortalGlyphs,
+    /// Glyphs for the pane border's clickable toggle controls (SQ-1123).
+    pub controls: ControlGlyphs,
     /// Gutter marker glyph for META transcript lines.
     pub meta_gutter: char,
     /// Gutter marker glyph for WARNING transcript lines.
@@ -194,6 +234,19 @@ impl Default for SymbolSet {
                 in_: '◉',
                 out: '◎',
                 unknown: '?',
+            },
+            controls: ControlGlyphs {
+                map_show: '◀',
+                map_hide: '▶',
+                band_show: '▲',
+                band_hide: '▼',
+                guidance_on: '●',
+                guidance_off: '○',
+                render_hybrid: '◧',
+                render_raster: '■',
+                render_extended: '▦',
+                lock_on: '▣',
+                lock_off: '□',
             },
             dock_following: '◇',
             dock_pinned: '◆',
@@ -449,6 +502,49 @@ impl PortalGlyphs {
     }
 }
 
+impl ControlGlyphs {
+    /// All known preset names for [`ControlGlyphs`], in display order.
+    pub fn preset_names() -> &'static [&'static str] {
+        &["plain", "nerdfont"]
+    }
+
+    /// Return a named preset, or `None` for an unknown name.
+    ///
+    /// Presets:
+    /// - "plain"    — Geometric Shapes only (default): ◀▶▲▼ ●○ ◧■▦ ▣□
+    /// - "nerdfont" — the four MDI chevrons for the panel toggles and
+    ///   `md-post_lamp` for a lit Guiding Light; everything else stays on the
+    ///   plain glyphs.
+    ///
+    /// **The nerdfont arm only substitutes codepoints this crate has already
+    /// verified by NAME** against the Nerd Fonts `glyphnames.json` — the four
+    /// chevrons [`Arrows::preset`]'s own `"nerdfont"` arm uses, and the
+    /// `md-post_lamp` that `font_check_dialog::ASSIST_LAMP` pins against the
+    /// font's `post` table. SQ-0989 is what a guessed codepoint costs: a patched
+    /// face draws the wrong icon crisply and confidently, and nobody notices.
+    /// The render-mode and pixel-lock slots have no verified icon, so they keep
+    /// the Geometric Shapes glyph, which a patched face draws identically.
+    pub fn preset(name: &str) -> Option<ControlGlyphs> {
+        let plain = SymbolSet::default().controls;
+        Some(match name {
+            "plain" => plain,
+            "nerdfont" => ControlGlyphs {
+                // MDI chevron-left F0141 / chevron-right F0142 / chevron-up
+                // F0143 / chevron-down F0140 — the same four `Arrows::nerdfont`
+                // draws its cardinals with.
+                map_show: '\u{F0141}',
+                map_hide: '\u{F0142}',
+                band_show: '\u{F0143}',
+                band_hide: '\u{F0140}',
+                // md-post_lamp U+F1A60 — the Guiding Light's own mark.
+                guidance_on: '\u{F1A60}',
+                ..plain
+            },
+            _ => return None,
+        })
+    }
+}
+
 // ── resolve ───────────────────────────────────────────────────────────────────
 
 impl SymbolSet {
@@ -472,6 +568,7 @@ impl SymbolSet {
             arrows: Arrows::preset(&cfg.arrow_set).unwrap_or_else(|| SymbolSet::default().arrows),
             path: PathGlyphs::preset(&cfg.path_style).unwrap_or_else(|| SymbolSet::default().path),
             portal: PortalGlyphs::preset(&cfg.portal_icons).unwrap_or_else(|| SymbolSet::default().portal),
+            controls: ControlGlyphs::preset(&cfg.control_icons).unwrap_or_else(|| SymbolSet::default().controls),
             meta_gutter: SymbolSet::default().meta_gutter,
             warning_gutter: SymbolSet::default().warning_gutter,
             assist_gutter: SymbolSet::default().assist_gutter,
@@ -510,6 +607,7 @@ impl SymbolSet {
             portal_icons: portal.to_owned(),
             path_style: path.to_owned(),
             portal_path_style: crate::config::default_portal_path_style(),
+            control_icons: crate::config::default_control_icons(),
             badge_zcode: crate::config::default_badge_zcode(),
             badge_glulx: crate::config::default_badge_glulx(),
             badge_blorb: crate::config::default_badge_blorb(),
@@ -624,6 +722,17 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "portal.unknown"   => s.portal.unknown = ch,
         "portal.path"      => s.portal.path = ch,
         "portal.marker"    => s.portal.marker = ch,
+        "control.map_show"       => s.controls.map_show = ch,
+        "control.map_hide"       => s.controls.map_hide = ch,
+        "control.band_show"      => s.controls.band_show = ch,
+        "control.band_hide"      => s.controls.band_hide = ch,
+        "control.guidance_on"    => s.controls.guidance_on = ch,
+        "control.guidance_off"   => s.controls.guidance_off = ch,
+        "control.render_hybrid"  => s.controls.render_hybrid = ch,
+        "control.render_raster"  => s.controls.render_raster = ch,
+        "control.render_extended" => s.controls.render_extended = ch,
+        "control.lock_on"        => s.controls.lock_on = ch,
+        "control.lock_off"       => s.controls.lock_off = ch,
         "gutter.meta"      => s.meta_gutter = ch,
         "gutter.warning"   => s.warning_gutter = ch,
         "gutter.assist"    => s.assist_gutter = ch,
@@ -769,6 +878,7 @@ mod tests {
             portal_icons: "ascii".into(),
             path_style: "light".into(),
             portal_path_style: crate::config::default_portal_path_style(),
+            control_icons: crate::config::default_control_icons(),
             badge_zcode: crate::config::default_badge_zcode(),
             badge_glulx: crate::config::default_badge_glulx(),
             badge_blorb: crate::config::default_badge_blorb(),
@@ -827,6 +937,88 @@ mod tests {
         let four = [p.up, p.down, p.in_, p.out];
         for ch in four { assert!(!is_wide_estimate(ch)); }
         assert_eq!(four.iter().collect::<std::collections::HashSet<_>>().len(), 4, "up/down/in/out must differ");
+    }
+
+    /// The border controls' nerdfont arm must reuse ONLY codepoints this crate
+    /// has already resolved by name — SQ-0989 is what a guessed one costs, and
+    /// nothing here can catch a patched face drawing the wrong icon confidently.
+    #[test]
+    fn nerdfont_control_glyphs_reuse_already_verified_codepoints() {
+        let c = ControlGlyphs::preset("nerdfont").expect("preset");
+        let a = Arrows::preset("nerdfont").expect("the arrows it borrows from");
+        assert_eq!(c.map_show, a.west, "chevron-left U+F0141");
+        assert_eq!(c.map_hide, a.east, "chevron-right U+F0142");
+        assert_eq!(c.band_show, a.north, "chevron-up U+F0143");
+        assert_eq!(c.band_hide, a.south, "chevron-down U+F0140");
+        assert_eq!(
+            c.guidance_on,
+            crate::render::font_check_dialog::ASSIST_LAMP,
+            "the Guiding Light's own md-post_lamp, not a second lamp",
+        );
+        // Everything with no verified icon stays on Geometric Shapes, which a
+        // patched face draws identically — a guess would be worse than plain.
+        let plain = ControlGlyphs::preset("plain").unwrap();
+        for (slot, ch, want) in [
+            ("guidance_off", c.guidance_off, plain.guidance_off),
+            ("render_hybrid", c.render_hybrid, plain.render_hybrid),
+            ("render_raster", c.render_raster, plain.render_raster),
+            ("render_extended", c.render_extended, plain.render_extended),
+            ("lock_on", c.lock_on, plain.lock_on),
+            ("lock_off", c.lock_off, plain.lock_off),
+        ] {
+            assert_eq!(ch, want, "control.{slot} has no verified icon and must stay plain");
+        }
+        for ch in [c.map_show, c.map_hide, c.band_show, c.band_hide, c.guidance_on] {
+            assert!(!is_wide_estimate(ch), "{ch:?} estimates as double-width");
+        }
+    }
+
+    /// The PLAIN defaults must be drawable by an ordinary monospace face, so
+    /// every one of them comes out of Geometric Shapes — the block the map
+    /// already requires (see `default_portal_in_out_come_from_geometric_shapes`).
+    /// And each toggle's two states must actually differ, or the icon says
+    /// nothing and only the colour is left carrying it.
+    #[test]
+    fn plain_control_glyphs_are_geometric_shapes_and_tell_their_states_apart() {
+        let c = ControlGlyphs::preset("plain").expect("the default preset");
+        assert_eq!(c, SymbolSet::default().controls);
+        let shapes = 0x25A0..=0x25FF;
+        for (slot, ch) in [
+            ("map_show", c.map_show), ("map_hide", c.map_hide),
+            ("band_show", c.band_show), ("band_hide", c.band_hide),
+            ("guidance_on", c.guidance_on), ("guidance_off", c.guidance_off),
+            ("render_hybrid", c.render_hybrid), ("render_raster", c.render_raster),
+            ("render_extended", c.render_extended),
+            ("lock_on", c.lock_on), ("lock_off", c.lock_off),
+        ] {
+            assert!(shapes.contains(&(ch as u32)), "control.{slot} = {ch:?} is outside Geometric Shapes");
+            assert!(!is_wide_estimate(ch), "control.{slot} = {ch:?} estimates as double-width");
+        }
+        assert_ne!(c.map_show, c.map_hide);
+        assert_ne!(c.band_show, c.band_hide);
+        assert_ne!(c.guidance_on, c.guidance_off);
+        assert_ne!(c.lock_on, c.lock_off);
+        // Three render modes, three distinct glyphs.
+        let modes = [c.render_hybrid, c.render_raster, c.render_extended];
+        assert_eq!(modes.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+    }
+
+    /// Every control slot is themeable one glyph at a time, the way every other
+    /// family is: a key `apply_override` silently ignores is a knob that does
+    /// nothing (SQ-0558).
+    #[test]
+    fn every_control_slot_accepts_an_override() {
+        let baseline = SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        for key in [
+            "control.map_show", "control.map_hide", "control.band_show", "control.band_hide",
+            "control.guidance_on", "control.guidance_off", "control.render_hybrid",
+            "control.render_raster", "control.render_extended", "control.lock_on",
+            "control.lock_off",
+        ] {
+            let mut cfg = crate::config::SymbolConfig::default();
+            cfg.overrides.insert(key.into(), "#".into());
+            assert_ne!(SymbolSet::resolve(&cfg), baseline, "override {key} changed nothing");
+        }
     }
 
     #[test]

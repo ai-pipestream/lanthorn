@@ -10,7 +10,7 @@ use crate::debug_panel::{self, DebugPanelState, HoverTip, Section};
 use crate::engine::DisasmProvenance;
 use crate::render::draw_str_clipped;
 use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
-use crate::render::paneframe::{draw_pane_frame, BorderStyle, InsetSegment, PaneGlyphs};
+use crate::render::paneframe::{BorderStyle, InsetSegment};
 use crate::state::AppState;
 
 /// Redraw the char ranges `clickable_spans` reports within `line` with the
@@ -322,61 +322,13 @@ fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
     }
 }
 
-/// Draw the floating variable-value tooltip on top of the windows. Preferred
-/// position is just below the hovered token; the box is clamped inside `area`
-/// (shifted left / flipped above as needed) and simply skipped if `area` is too
-/// small to hold it (never panics).
+/// Draw the floating variable-value tooltip on top of the windows.
+///
+/// The box itself — placement, edge clamping, opacity, the `tooltip.*` selectors
+/// — is `render::tooltip::draw_tip`, shared with the border controls' hover hint
+/// (SQ-1123). This wrapper only supplies the anchor and the lines.
 fn draw_tooltip(buf: &mut Buffer, area: Rect, tip: &HoverTip, state: &AppState) {
-    let inner = tip.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
-    let n = tip.lines.len() as u16;
-    if n == 0 { return; }
-
-    let style = state.colors.theme.get("tooltip.background").style;
-    // Optional frame (§2d): borderless by default; a themed `tooltip.border`
-    // style wraps the box in a frame (colour + glyphs from that selector).
-    let border = state.colors.theme.get("tooltip.border");
-    let box_style = border.border.unwrap_or(BorderStyle::None);
-    let bordered = !matches!(box_style, BorderStyle::None);
-
-    // Content is `inner` wide with one space of padding each side; a frame (when
-    // set) adds one more cell all around.
-    let pad_w = inner + 2;
-    let (w, h) = if bordered { (pad_w + 2, n + 2) } else { (pad_w, n) };
-    if area.width < w || area.height < h { return; }
-
-    // Preferred: just below the token; clamp into `area` (flip above if needed).
-    let mut x = tip.col;
-    let mut y = tip.row + 1;
-    if x + w > area.right() { x = area.right().saturating_sub(w); }
-    if y + h > area.bottom() { y = tip.row.saturating_sub(h); }
-    x = x.max(area.x);
-    y = y.max(area.y);
-
-    let box_rect = Rect::new(x, y, w, h);
-    // Reset every cell the box covers before drawing: draw_char_clipped PATCHES
-    // cell styles, so a modifier already on the disasm underneath (e.g. the
-    // UNDERLINED on a clickable operand) would otherwise bleed through the
-    // tooltip. A clean reset makes the box fully opaque.
-    for yy in box_rect.y..box_rect.bottom() {
-        for xx in box_rect.x..box_rect.right() {
-            if let Some(cell) = buf.cell_mut((xx, yy)) { cell.reset(); }
-        }
-    }
-    // Fill the whole box with the tooltip background.
-    let pad: String = " ".repeat(w as usize);
-    for ry in box_rect.y..box_rect.bottom() {
-        draw_str_clipped(buf, x, ry, &pad, style, box_rect);
-    }
-    // Frame in tooltip.border's colour, then position the text inside it.
-    let (tx, ty) = if bordered {
-        draw_pane_frame(buf, box_rect, box_style, &PaneGlyphs::default(), border.style);
-        (x + 1, y + 1)
-    } else {
-        (x, y)
-    };
-    for (i, line) in tip.lines.iter().enumerate() {
-        draw_str_clipped(buf, tx + 1, ty + i as u16, line, style, box_rect);
-    }
+    crate::render::tooltip::draw_tip(buf, area, tip.col, tip.row, &tip.lines, &state.colors.theme);
 }
 
 /// Draw the debug pane and return its window tab hit-rects as

@@ -242,6 +242,37 @@ know which side you're on).
   and never touches a normal launch.
 
 ## Playing aids
+- **Toggle controls in the story pane's border** — a small cluster of clickable
+  icons at the right-hand end of the story pane's top border, each one showing
+  what state it is in: `┤◀ ○ ▲├` on an ordinary story, `┤◀ ○ ▲ ◧ □├` on a
+  graphical v6 one. Left to right they are the **map**, the **Guiding Light**
+  and the **verb panel**, plus — only when the story really is v6, otherwise
+  absent rather than greyed out — the **render mode** and the **pixel lock**.
+  Guidance, the verb panel and the two v6 switches used to be reachable only by
+  slash command, key or the settings screen, with nothing on screen saying they
+  existed, let alone whether they were on.
+  - **The icon carries the state, not just the colour.** The panel toggles are
+    arrows pointing the way the panel would move — the map lives to the right of
+    the story pane and the verb panel below it, so `▶` means "click and the map
+    leaves that way" while `◀` means "click and it comes back", and `▲`/`▼` say
+    the same for the band. The Guiding Light is a filled `●` when lit and a
+    hollow `○` when out; the render mode draws `◧` hybrid, `■` raster, `▦`
+    extended; the pixel lock `▣` locked, `□` free.
+  - **Hover for a hint.** Resting the pointer on one floats a small box just
+    *below* it — never over the icon you are pointing at — naming the control,
+    what a click would do, and the command or key that does the same thing.
+    Near the right edge it slides left; near the bottom it flips above. It takes
+    no focus and no keys: typing always wins, here as everywhere.
+  - **A click is the command.** Each control runs its own `slash::COMMANDS`
+    entry, bare — `/toggle-map`, `/set-guidance`, `/open-command-band`,
+    `/set-v6-render`, `/set-v6-pixel-lock` — so clicking does exactly what
+    typing does, persistence included.
+  - Every state is themeable: `panel.control` (idle), `panel.control:active`
+    (on), `panel.control:lit` (the Guiding Light's yellow — the `alert` role,
+    the same slot the assist mark uses) and `panel.control:hover`. The glyphs
+    come from the `control_icons` preset in `[map]` (`plain` | `nerdfont`) and
+    from `[map.overrides]` one slot at a time; the first-run font check picks
+    the preset along with the arrows and portal icons.
 - **`[more]` paging, the way the originals did it** — whenever a turn's output
   runs past the story pane (a long description, a boot banner, a hint page,
   even a "press any key" dump), the view stops at the *first* fresh screenful

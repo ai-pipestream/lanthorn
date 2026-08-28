@@ -330,6 +330,78 @@ pub fn draw_pane_frame_sides(buf: &mut Buffer, area: Rect, sides: PaneSides, gly
     PaneFrame { area, content, top_inset }
 }
 
+// ── HeaderControl ─────────────────────────────────────────────────────────────
+
+/// One clickable toggle drawn at the right-hand end of a pane's top border
+/// (SQ-1123): the glyph that says what state it is in, and the style that says
+/// whether it is on.
+///
+/// Theme-agnostic on purpose — `render::controls` resolves state into a glyph
+/// and a selector, and this module only paints what it is given, exactly as
+/// [`InsetSegment`] does for the title strip.
+pub struct HeaderControl {
+    pub glyph: char,
+    pub style: Style,
+}
+
+/// The columns a cluster of `n` controls occupies: the two terminator caps plus
+/// one cell per control and one space between neighbours. Zero for no controls,
+/// so a pane with nothing to show gives its whole border row back to the title.
+pub fn header_controls_width(n: usize) -> u16 {
+    if n == 0 {
+        return 0;
+    }
+    (2 + n + (n - 1)) as u16
+}
+
+/// Draw a control cluster right-aligned in `row_rect`, bracketed by the border's
+/// own terminator caps so it reads as part of the frame rather than as text
+/// sitting on it: `┤▶ ● ▲├`.
+///
+/// Returns one 1x1 hit-rect per control, in the order given — the same rects the
+/// mouse handler hit-tests for both the click and the hover hint, so what is
+/// under the pointer can never disagree between them. An empty vec (and nothing
+/// drawn) when the row is too narrow to hold the cluster.
+pub fn draw_header_controls(
+    buf: &mut Buffer,
+    row_rect: Rect,
+    controls: &[HeaderControl],
+    caps: &InsetCaps,
+    cap_style: Style,
+) -> Vec<Rect> {
+    let w = header_controls_width(controls.len());
+    if w == 0 || row_rect.height == 0 || row_rect.width < w {
+        return Vec::new();
+    }
+    let row = row_rect.y;
+    let mut cx = row_rect.right() - w;
+
+    if let Some(c) = buf.cell_mut((cx, row)) {
+        c.set_symbol(caps.left.as_str()).set_style(cap_style);
+    }
+    cx += 1;
+
+    let mut rects = Vec::with_capacity(controls.len());
+    for (i, ctl) in controls.iter().enumerate() {
+        if i > 0 {
+            if let Some(c) = buf.cell_mut((cx, row)) {
+                c.set_symbol(" ").set_style(cap_style);
+            }
+            cx += 1;
+        }
+        if let Some(c) = buf.cell_mut((cx, row)) {
+            c.set_symbol(&ctl.glyph.to_string()).set_style(ctl.style);
+        }
+        rects.push(Rect::new(cx, row, 1, 1));
+        cx += 1;
+    }
+
+    if let Some(c) = buf.cell_mut((cx, row)) {
+        c.set_symbol(caps.right.as_str()).set_style(cap_style);
+    }
+    rects
+}
+
 // ── InsetSegment ──────────────────────────────────────────────────────────────
 
 pub struct InsetSegment<'a> {

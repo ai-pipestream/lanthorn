@@ -24,6 +24,8 @@ mod anchor_box_quote;
 mod anchor_room_detection;
 #[path = "suites/command_band.rs"]
 mod command_band;
+#[path = "suites/border_controls.rs"]
+mod border_controls;
 #[path = "suites/matrix_path_highlight.rs"]
 mod matrix_path_highlight;
 #[path = "suites/matrix_view.rs"]
