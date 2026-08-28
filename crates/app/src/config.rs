@@ -572,6 +572,13 @@ pub struct HotkeysConfig {
 /// `arity` is one of `solo`, `object`, `object_opt` (`object?` is accepted too)
 /// and `pair`; an unrecognised value is reported as a warning and the entry is
 /// skipped rather than silently reinterpreted.
+///
+/// The runtime model behind the band is no longer an arity enum but a list of
+/// sentence shapes read from the story's own grammar (SQ-1111). `arity` survives
+/// as the CONFIG SPELLING — every one of these four words still names a shape
+/// list exactly, and `object_opt` is the one that gives the game away: it was
+/// the enum straining to hold two lines at once, and now simply IS two
+/// ([`arity_lines`]).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct VerbConfig {
     pub word: String,
@@ -601,11 +608,15 @@ pub struct CommandBandConfig {
     /// Open the band as soon as the story starts.
     #[serde(default)]
     pub auto_open: bool,
-    /// REPLACES the built-in verb table when set (non-empty).
+    /// REPLACES the verb column wholesale when set (non-empty) — the story's
+    /// own grammar included. See [`CommandBandConfig::resolve_verbs_with`] for
+    /// why that is still the right reading of this key now that the column has
+    /// a real source behind it.
     #[serde(default)]
     pub verbs: Vec<VerbConfig>,
-    /// ADDITIVE form: appended to whichever table is in force. A word already
-    /// present is overridden, so this can also re-shape one built-in verb.
+    /// ADDITIVE form: appended to whichever table is in force — the story's
+    /// grammar, the built-in fallback, or a `verbs` replacement. A word already
+    /// present is overridden, so this is also how one verb's shape gets fixed.
     #[serde(default)]
     pub extra_verbs: Vec<VerbConfig>,
     /// The one-click quick-action row. Empty means the built-in row.
@@ -625,48 +636,127 @@ impl Default for CommandBandConfig {
     }
 }
 
+/// The sentence shapes a config `arity` spelling names, or `None` for a spelling
+/// that is not one of the four.
+///
+/// This is the whole of what the retired `Arity` enum did, as data: the four
+/// words each name a list of [`VerbLine`]s, and `object_opt` — the value the
+/// enum needed a separate variant for — is simply the two-line list a real
+/// grammar would have written out.
+fn arity_lines(
+    arity: &str,
+    prep: Option<&str>,
+) -> Option<Vec<crate::render::command_band::VerbLine>> {
+    use crate::render::command_band::VerbLine;
+    Some(match arity.trim().to_ascii_lowercase().as_str() {
+        "solo" => vec![VerbLine::bare()],
+        "object" => vec![VerbLine::object()],
+        "object_opt" | "object?" | "objectopt" => vec![VerbLine::bare(), VerbLine::object()],
+        "pair" => vec![VerbLine::pair(prep.unwrap_or("with"))],
+        _ => return None,
+    })
+}
+
+/// Lower one `[command_band]` verb entry, pushing a warning for an unrecognised
+/// `arity` rather than silently reinterpreting it.
+fn lower_verb(
+    v: &VerbConfig,
+    warnings: &mut Vec<String>,
+) -> Option<crate::render::command_band::VerbEntry> {
+    match arity_lines(&v.arity, v.prep.as_deref()) {
+        Some(lines) => Some(crate::render::command_band::VerbEntry::new(&v.word, lines)),
+        None => {
+            warnings.push(format!(
+                "command_band: verb '{}' has unknown arity '{}' \
+                 (expected solo, object, object_opt or pair); skipped",
+                v.word, v.arity
+            ));
+            None
+        }
+    }
+}
+
 impl CommandBandConfig {
-    /// Resolve the configured grammar into the runtime verb table:
-    /// `verbs` replaces the built-ins when non-empty, then `extra_verbs` is
-    /// layered on top (overriding an existing word, else appending).
+    /// Resolve the configured grammar with no story grammar to hand — the band
+    /// opens from `apply_action`, which has the config but no engine, so this is
+    /// what it is born on. `render::command_band::refresh_verbs` calls
+    /// [`resolve_verbs_with`](Self::resolve_verbs_with) a tick later with the
+    /// story's own words.
+    pub fn resolve_verbs(&self) -> (crate::render::command_band::VerbTable, Vec<String>) {
+        self.resolve_verbs_with(None)
+    }
+
+    /// Resolve the verb column, given whatever the running story's grammar
+    /// answered (`None` = it could not be read, or has not been asked yet).
+    ///
+    /// # What the two keys mean now the column has a real source
+    ///
+    /// The question SQ-1111 put deliberately, answered deliberately:
+    ///
+    /// * **`verbs` still REPLACES the whole column**, story grammar included. It
+    ///   is an explicit, complete statement of what a player wants offered —
+    ///   somebody who wrote out twelve verbs in their own order chose those
+    ///   twelve, and quietly folding two hundred of the story's own in beside
+    ///   them would destroy the only thing the key is for. Every existing config
+    ///   therefore keeps its exact behaviour: the key replaced the whole column
+    ///   before and replaces the whole column now.
+    /// * **`extra_verbs` EXTENDS whatever is in force**, which is now usually the
+    ///   story's own list — so it patches the grammar rather than a constant, and
+    ///   an entry naming a word the story already has re-shapes that one verb.
+    ///
+    /// The alternative readings (make `verbs` a filter, or an ordering hint)
+    /// were rejected on the same ground: both silently change what an existing
+    /// config produces, and neither is what either key's NAME says.
     ///
     /// Returns the table plus any warnings (bad `arity` spellings), which
     /// startup surfaces the same way it surfaces keymap warnings.
-    pub fn resolve_verbs(&self) -> (Vec<crate::render::command_band::VerbEntry>, Vec<String>) {
-        use crate::render::command_band::{default_verbs, Arity, VerbEntry};
+    pub fn resolve_verbs_with(
+        &self,
+        story: Option<Vec<crate::render::command_band::VerbEntry>>,
+    ) -> (crate::render::command_band::VerbTable, Vec<String>) {
+        use crate::render::command_band::{default_verbs, VerbSource, VerbTable};
         let mut warnings = Vec::new();
-        let mut lower = |v: &VerbConfig| -> Option<VerbEntry> {
-            match Arity::parse(&v.arity) {
-                Some(a) => Some(VerbEntry {
-                    word: v.word.clone(),
-                    arity: a,
-                    prep: v.prep.clone(),
-                }),
-                None => {
-                    warnings.push(format!(
-                        "command_band: verb '{}' has unknown arity '{}' \
-                         (expected solo, object, object_opt or pair); skipped",
-                        v.word, v.arity
-                    ));
-                    None
-                }
-            }
-        };
-
-        let mut table: Vec<VerbEntry> = if self.verbs.is_empty() {
-            default_verbs()
+        let base = if !self.verbs.is_empty() {
+            VerbTable::new(
+                self.verbs.iter().filter_map(|v| lower_verb(v, &mut warnings)).collect(),
+                VerbSource::Configured,
+            )
+        } else if let Some(entries) = story.filter(|e| !e.is_empty()) {
+            VerbTable::new(entries, VerbSource::Story)
         } else {
-            self.verbs.iter().filter_map(&mut lower).collect()
+            default_verbs()
         };
+        let table = self.layer_extra_verbs_into(base, &mut warnings);
+        (table, warnings)
+    }
+
+    /// Layer `extra_verbs` onto a table that is already resolved — the half of
+    /// [`resolve_verbs_with`](Self::resolve_verbs_with) that has to happen again
+    /// when the story's own grammar arrives a tick after the band opened.
+    ///
+    /// A bad `arity` here is SILENT, because the open-time resolve above already
+    /// reported that same entry and warning twice for one typo is noise.
+    pub fn layer_extra_verbs(
+        &self,
+        table: crate::render::command_band::VerbTable,
+    ) -> crate::render::command_band::VerbTable {
+        self.layer_extra_verbs_into(table, &mut Vec::new())
+    }
+
+    fn layer_extra_verbs_into(
+        &self,
+        mut table: crate::render::command_band::VerbTable,
+        warnings: &mut Vec<String>,
+    ) -> crate::render::command_band::VerbTable {
         for extra in &self.extra_verbs {
-            if let Some(e) = lower(extra) {
-                match table.iter_mut().find(|t| t.word == e.word) {
+            if let Some(e) = lower_verb(extra, warnings) {
+                match table.entries.iter_mut().find(|t| t.word == e.word) {
                     Some(slot) => *slot = e,
-                    None => table.push(e),
+                    None => table.entries.push(e),
                 }
             }
         }
-        (table, warnings)
+        table
     }
 
     /// The quick row in force: the configured one, else the built-in.
@@ -2411,10 +2501,12 @@ mod tests {
         assert_eq!(cfg.command_band.resolve_quick(), vec!["n".to_string(), "s".to_string()]);
     }
 
-    /// `verbs` REPLACES the built-in table; `extra_verbs` is additive.
+    /// `verbs` REPLACES the whole column; `extra_verbs` is additive. Both keep
+    /// their pre-SQ-1111 behaviour to the letter — that is the compatibility
+    /// promise, and the grammar-fed case is pinned alongside it below.
     #[test]
     fn command_band_verbs_replace_and_extra_verbs_add() {
-        use crate::render::command_band::Arity;
+        use crate::render::command_band::{VerbLine, VerbSource};
 
         // Replace: only what the file lists survives.
         let cfg: Config = toml::from_str(
@@ -2423,9 +2515,20 @@ mod tests {
         .unwrap();
         let (table, warn) = cfg.command_band.resolve_verbs();
         assert!(warn.is_empty(), "{warn:?}");
-        assert_eq!(table.len(), 1);
-        assert_eq!(table[0].word, "polish");
-        assert!(!table.iter().any(|v| v.word == "look"), "the built-ins are replaced");
+        assert_eq!(table.entries.len(), 1);
+        assert_eq!(table.entries[0].word, "polish");
+        assert_eq!(table.source, VerbSource::Configured, "the player's own list says so");
+        assert!(!table.entries.iter().any(|v| v.word == "look"), "the built-ins are replaced");
+
+        // …and it replaces the STORY's grammar too, not just the built-ins.
+        let story = vec![crate::render::command_band::VerbEntry::new(
+            "gaze",
+            vec![VerbLine::bare()],
+        )];
+        let (table, _) = cfg.command_band.resolve_verbs_with(Some(story.clone()));
+        assert_eq!(table.entries.len(), 1);
+        assert_eq!(table.entries[0].word, "polish");
+        assert_eq!(table.source, VerbSource::Configured);
 
         // Additive: the built-ins stay and the extra joins them.
         let cfg: Config = toml::from_str(
@@ -2434,9 +2537,17 @@ mod tests {
         .unwrap();
         let (table, warn) = cfg.command_band.resolve_verbs();
         assert!(warn.is_empty(), "{warn:?}");
-        assert!(table.iter().any(|v| v.word == "look"), "the built-ins survive");
-        let x = table.iter().find(|v| v.word == "xyzzy").expect("extra verb added");
-        assert_eq!(x.arity, Arity::Solo);
+        assert_eq!(table.source, VerbSource::Builtin, "no story asked, no story answered");
+        assert!(table.entries.iter().any(|v| v.word == "look"), "the built-ins survive");
+        let x = table.entries.iter().find(|v| v.word == "xyzzy").expect("extra verb added");
+        assert_eq!(x.lines, vec![VerbLine::bare()]);
+
+        // …and the same key extends the STORY's list when there is one, which
+        // is the whole change: `extra_verbs` now patches a real grammar.
+        let (table, _) = cfg.command_band.resolve_verbs_with(Some(story));
+        assert_eq!(table.source, VerbSource::Story, "still the story's, with one added");
+        assert!(table.entries.iter().any(|v| v.word == "gaze"));
+        assert!(table.entries.iter().any(|v| v.word == "xyzzy"));
 
         // Additive over a word that already exists RE-SHAPES it.
         let cfg: Config = toml::from_str(
@@ -2444,10 +2555,26 @@ mod tests {
         )
         .unwrap();
         let (table, _) = cfg.command_band.resolve_verbs();
-        let take: Vec<_> = table.iter().filter(|v| v.word == "take").collect();
+        let take: Vec<_> = table.entries.iter().filter(|v| v.word == "take").collect();
         assert_eq!(take.len(), 1, "no duplicate entry");
-        assert_eq!(take[0].arity, Arity::Pair);
-        assert_eq!(take[0].prep.as_deref(), Some("from"));
+        assert_eq!(take[0].lines, vec![VerbLine::pair("from")]);
+        assert_eq!(take[0].joiner(), Some("from"));
+    }
+
+    /// `object_opt` was the one arity the old enum needed a variant for and a
+    /// real grammar simply writes as two lines. Pinned because it is the case
+    /// that proves the config spelling survived the model change intact.
+    #[test]
+    fn object_opt_lowers_to_the_two_lines_it_always_meant() {
+        use crate::render::command_band::VerbLine;
+        let cfg: Config = toml::from_str(
+            "[command_band]\nverbs = [{ word = \"search\", arity = \"object?\" }]\n",
+        )
+        .unwrap();
+        let (table, warn) = cfg.command_band.resolve_verbs();
+        assert!(warn.is_empty(), "{warn:?}");
+        assert_eq!(table.entries[0].lines, vec![VerbLine::bare(), VerbLine::object()]);
+        assert!(table.entries[0].accepts(0) && table.entries[0].accepts(1));
     }
 
     /// A bad `arity` is reported and skipped — never silently reinterpreted as
@@ -2459,7 +2586,7 @@ mod tests {
         )
         .unwrap();
         let (table, warn) = cfg.command_band.resolve_verbs();
-        assert!(!table.iter().any(|v| v.word == "frob"), "the bad entry is skipped");
+        assert!(!table.entries.iter().any(|v| v.word == "frob"), "the bad entry is skipped");
         assert_eq!(warn.len(), 1);
         assert!(warn[0].contains("frob") && warn[0].contains("triple"), "{warn:?}");
     }

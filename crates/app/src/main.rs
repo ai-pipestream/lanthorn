@@ -1796,7 +1796,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // The command band's object columns are LIVE: refilled from the engine
         // every tick, so a take/drop moves an object between *here* and
         // *carried* on the very next frame (SQ-0664).
-        needs_redraw |= loop_tick::refresh_command_band_objects(&mut state, &*session);
+        needs_redraw |= loop_tick::refresh_command_band(&mut state, &*session);
         needs_redraw |= loop_tick::expire_sound_and_settle_dock(&mut state);
 
         // Draw — unless we're mid-drain of an input burst (skip_draw), in which

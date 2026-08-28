@@ -17,7 +17,8 @@
 use app::engine::Engine;
 use app::graphics::PictSource;
 use app::render::command_band::{
-    default_quick, default_verbs, refresh_objects, COL_CARRIED, COL_HERE,
+    default_quick, default_verbs, refresh_objects, refresh_verbs, VerbSource, COL_CARRIED,
+    COL_HERE, COL_SECOND, COL_VERB,
 };
 use app::session::GameSession;
 use app::state::{AppState, CommandBandState};
@@ -400,4 +401,271 @@ fn every_band_element_emits_a_hit_rect_inside_the_band() {
     }
     // The object columns are reachable now, so their rows are real pick targets.
     assert!(hits.rows.iter().any(|(c, _, _)| *c == COL_HERE));
+}
+
+// ── The VERB column is the story's own grammar (SQ-1111) ─────────────────────
+
+/// The defect, proved in BOTH directions against a real story.
+///
+/// The band's whole job is to say what is possible, and until SQ-1111 its VERB
+/// column was a hardcoded 36-verb generic set that nothing fed the running
+/// story's grammar. Zork I release 88 falsifies it either way, and both are
+/// checked here against `zvm-cli` transcripts taken by hand:
+///
+/// * `show` is in the built-in table, and Zork I answers
+///   `I don't know the word "show".` — a verb the panel offered and the game
+///   does not have;
+/// * `dig`, `count` and `pray` are Zork I verbs (`> dig` → *What do you want to
+///   dig in?*) that the built-in table never named.
+///
+/// Falsify by reverting `refresh_verbs` to a no-op: the column stays on the
+/// fallback and every assertion below flips.
+#[test]
+fn the_verb_column_is_the_running_story_s_own_grammar() {
+    let Some(session) = boot_zmachine("zork1-r88-s840726.z3") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+
+    let before = state.overlays.command_band.as_ref().unwrap().items(COL_VERB);
+    assert!(before.contains(&"show".to_string()), "the fallback offers `show`");
+    assert!(!before.contains(&"dig".to_string()), "…and never named `dig`");
+
+    assert!(refresh_verbs(&mut state, &session), "the story's grammar replaces the fallback");
+    let band = state.overlays.command_band.as_ref().unwrap();
+    assert_eq!(band.verb_source, VerbSource::Story);
+    let after = band.items(COL_VERB);
+
+    // Direction one: a verb the panel offered that this game rejects, gone.
+    assert!(!after.contains(&"show".to_string()), "Zork I has no `show` verb");
+    // Direction two: verbs this game really has, now offered.
+    for word in ["dig", "count", "pray", "plugh", "wave", "burn", "tie"] {
+        assert!(after.contains(&word.to_string()), "Zork I knows `{word}`: {}", after.len());
+    }
+    // …and the everyday spellings survive, even though Zork I's own verb
+    // records are named `carry`, `gaze`, `hide` and `chuck` (Infocom lists a
+    // verb's synonyms in dictionary order, so the first is merely the
+    // alphabetically-earliest). This is why the column is every SPELLING.
+    // Asked of the TABLE rather than the column, because `items(COL_VERB)`
+    // drops anything already one click away on the quick row — `look` is there.
+    for word in ["take", "look", "put", "throw", "open", "read", "turn"] {
+        assert!(
+            band.verb_by_word(word).is_some(),
+            "the player's own word `{word}` reaches the story's verb"
+        );
+    }
+    assert!(after.len() > 200, "the whole grammar, not a curated slice: {}", after.len());
+    let mut sorted = after.clone();
+    sorted.sort();
+    assert_eq!(after, sorted, "alphabetical — the only order a list this long can be scanned in");
+}
+
+/// The shapes come off the story's syntax lines too, not off a declared arity —
+/// including the alternation a single arity could never hold.
+#[test]
+fn the_column_s_shapes_are_the_story_s_syntax_lines() {
+    let Some(session) = boot_zmachine("zork1-r88-s840726.z3") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+    assert!(refresh_verbs(&mut state, &session));
+    let band = state.overlays.command_band.as_ref().unwrap();
+
+    // `take noun`, `take noun from noun`, `take noun off noun` — three lines,
+    // one verb. The old model had room for exactly one shape per verb.
+    let take = band.verb_by_word("take").expect("take is offered");
+    assert_eq!(take.max_nouns(), 2);
+    assert!(take.accepts(1) && take.accepts(2), "finished at one object AND at two");
+    assert!(take.joiners().contains(&"from"), "{:?}", take.joiners());
+
+    // `unlock noun with noun` and nothing else: two objects, always.
+    let unlock = band.verb_by_word("unlock").expect("unlock is offered");
+    assert_eq!(unlock.joiner(), Some("with"));
+    assert!(!unlock.accepts(1), "Zork I has no bare `unlock noun`");
+
+    // Zork I's look-verb takes NO bare object — every one of its one-object
+    // lines needs a preposition first (`look at noun`, `look in noun`), so the
+    // band must not offer `look lamp`, a command the story really refuses.
+    let look = band.verb_by_word("look").expect("look is offered");
+    assert_eq!(look.max_nouns(), 0);
+    assert!(look.accepts(0));
+}
+
+/// Picking a verb opens exactly the columns that verb's own lines reach, and
+/// ANY of its joining words moves the band to the second-object column — the
+/// alternation `Arity` could not express.
+#[test]
+fn the_columns_follow_the_story_s_own_shapes() {
+    let Some(session) = boot_zmachine("zork1-r88-s840726.z3") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+    assert!(refresh_verbs(&mut state, &session));
+
+    let band = state.overlays.command_band.as_mut().unwrap();
+    band.here = vec!["mailbox".to_string()];
+    band.carried = vec!["lamp".to_string()];
+
+    band.sync_from_input("look");
+    assert!(!band.col_reachable(COL_HERE), "Zork I's `look` takes no bare object");
+
+    band.sync_from_input("take ");
+    assert!(band.col_reachable(COL_HERE), "`take noun` opens the object columns");
+    assert!(!band.col_reachable(COL_SECOND), "…and not the second one yet");
+
+    // `from` and `off` are both Zork I take-lines; either one advances.
+    for joiner in ["from", "off"] {
+        band.sync_from_input(&format!("take lamp {joiner} "));
+        assert!(
+            band.col_reachable(COL_SECOND),
+            "`take … {joiner} …` is a real Zork I line and must open the second column"
+        );
+        assert_eq!(band.column_label(COL_SECOND), "FROM…", "the header names the FIRST joiner");
+    }
+}
+
+/// The fallback survives, and says so. A story whose grammar cannot be read
+/// keeps a usable column rather than an empty one — and the column relabels
+/// itself, the way `here_is_seen` already relabels the object column, instead
+/// of passing a generic list off as this story's own.
+#[test]
+fn a_story_with_no_readable_grammar_keeps_the_fallback_and_labels_it() {
+    // Journey is menu-driven: `zvm::grammar::Grammar::load` answers `Absent`,
+    // so there is nothing to read and nothing to offer.
+    let Some(session) = boot_zmachine("journey-r83-s890706.z6") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+    assert!(!refresh_verbs(&mut state, &session), "no grammar, no change");
+
+    let band = state.overlays.command_band.as_ref().unwrap();
+    assert_eq!(band.verb_source, VerbSource::Builtin);
+    assert!(!band.items(COL_VERB).is_empty(), "the column is never empty");
+    assert_eq!(band.column_label(COL_VERB), "VERB — generic", "it admits what it is");
+
+    // …and the label costs a header row, which the story's own column does not
+    // spend: the header is the ONE thing worth the row (SQ-0675 reclaimed it).
+    use app::render::command_band::{draw_command_band, CommandBandHits};
+    let mut buf = Buffer::empty(Rect::new(0, 0, 100, 40));
+    let mut hits = CommandBandHits::default();
+    draw_command_band(&state, Rect::new(0, 30, 100, 8), &mut buf, &mut 0, &mut hits);
+    assert!(
+        hits.headers.iter().any(|(c, _)| *c == COL_VERB),
+        "the generic label is drawn as VERB's header"
+    );
+    assert!(dump(&buf).contains("VERB — generic"), "…and reaches the screen");
+}
+
+/// Read once per open, not once per tick: the grammar table is static.
+#[test]
+fn the_grammar_is_read_once_per_open() {
+    let Some(session) = boot_zmachine("zork1-r88-s840726.z3") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+    assert!(refresh_verbs(&mut state, &session), "the first read is a change");
+    assert!(!refresh_verbs(&mut state, &session), "…and an idle tick forces no repaint");
+}
+
+/// `[command_band] verbs` still replaces the column wholesale — the story's own
+/// grammar included — and says whose list it is. Existing configs keep working.
+#[test]
+fn a_configured_verb_list_outranks_the_story_s_grammar() {
+    let Some(session) = boot_zmachine("zork1-r88-s840726.z3") else { return };
+    let mut state = AppState::default();
+    state.config.command_band.verbs = vec![app::config::VerbConfig {
+        word: "polish".to_string(),
+        arity: "object".to_string(),
+        prep: None,
+    }];
+    let (table, _) = state.config.command_band.resolve_verbs();
+    state.overlays.command_band = Some(CommandBandState::new(table, default_quick()));
+    state.band_dock.toggle_to(true, true);
+
+    assert!(!refresh_verbs(&mut state, &session), "the player's own list is never overwritten");
+    let band = state.overlays.command_band.as_ref().unwrap();
+    assert_eq!(band.verb_source, VerbSource::Configured);
+    assert_eq!(band.items(COL_VERB), vec!["polish".to_string()]);
+    assert_eq!(band.column_label(COL_VERB), "VERB — yours");
+}
+
+/// `extra_verbs` now patches the STORY's list rather than a constant.
+#[test]
+fn extra_verbs_extend_the_story_s_own_column() {
+    let Some(session) = boot_zmachine("zork1-r88-s840726.z3") else { return };
+    let mut state = AppState::default();
+    state.config.command_band.extra_verbs = vec![app::config::VerbConfig {
+        word: "frotz".to_string(),
+        arity: "object".to_string(),
+        prep: None,
+    }];
+    let (table, _) = state.config.command_band.resolve_verbs();
+    state.overlays.command_band = Some(CommandBandState::new(table, default_quick()));
+    state.band_dock.toggle_to(true, true);
+
+    assert!(refresh_verbs(&mut state, &session));
+    let band = state.overlays.command_band.as_ref().unwrap();
+    assert_eq!(band.verb_source, VerbSource::Story, "still the story's, with one added");
+    let items = band.items(COL_VERB);
+    assert!(items.contains(&"frotz".to_string()), "the extra survives the grammar arriving");
+    assert!(items.contains(&"dig".to_string()), "…and so does the story's own list");
+}
+
+/// A Scott Adams database has no grammar module and does not need one: its
+/// whole grammar is `VERB` / `VERB NOUN`, which is a fact about Scott rather
+/// than a gap. The column must still be the game's own words — and the fixture
+/// is redistributable, so this one never skips.
+#[test]
+fn scott_adams_answers_with_its_own_two_line_grammar() {
+    let bytes = include_bytes!("../../../scott/tests/tiny_cave.dat").to_vec();
+    let session = app::scott_session::ScottSession::new(bytes, None).expect("tiny_cave.dat loads");
+    let mut state = AppState::default();
+    open_band(&mut state);
+    assert!(refresh_verbs(&mut state, &session), "Scott's vocabulary drives the column too");
+
+    let band = state.overlays.command_band.as_ref().unwrap();
+    assert_eq!(band.verb_source, VerbSource::Story);
+    let items = band.items(COL_VERB);
+    assert!(!items.is_empty());
+    assert!(items.iter().any(|w| w == "take"), "a synonym gets its own row: {items:?}");
+    // Every Scott verb has exactly the two lines, so every one of them takes an
+    // object and is also complete alone — uniform, and read rather than assumed.
+    for word in &items {
+        let v = band.verb_by_word(word).expect("every listed word is in the table");
+        assert_eq!(v.max_nouns(), 1, "`{word}`: Scott's grammar is VERB NOUN");
+        assert!(v.accepts(0) && v.accepts(1), "`{word}`: the noun is optional");
+        assert!(v.joiner().is_none(), "`{word}`: a two-word parser has no prepositions");
+    }
+}
+
+/// Glulx answers the same seam — `gvm::grammar` reads Inform's tables out of a
+/// Glulx image, so the column is that story's own verbs with their own syntax
+/// lines, and nothing about the band knows which engine spoke.
+#[test]
+fn a_glulx_story_drives_the_column_through_the_same_seam() {
+    let path = fixture_path("Dr Ludwig and the Devil.gblorb");
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!("SKIP: gitignored story missing at {}", path.display());
+        return;
+    };
+    let b = blorb::Blorb::parse(bytes).expect("a gblorb parses");
+    let exec = b.executable().expect("an Exec chunk").1.to_vec();
+    let session =
+        app::glulx_session::GlulxSession::new(exec, 80, 24, true, false, false, (1, 1), Some(b), &[])
+            .expect("Dr Ludwig boots");
+
+    let mut state = AppState::default();
+    open_band(&mut state);
+    assert!(refresh_verbs(&mut state, &session), "a readable Glulx grammar drives the column");
+
+    let band = state.overlays.command_band.as_ref().unwrap();
+    assert_eq!(band.verb_source, VerbSource::Story);
+    let items = band.items(COL_VERB);
+    assert!(items.len() > 50, "a whole Inform verb table, not a slice: {}", items.len());
+    // Inform declares its verbs' first word canonically, so unlike Infocom the
+    // everyday spelling is already the leading one — both still get a row.
+    let take = band.verb_by_word("take").expect("Inform's library take");
+    assert!(take.accepts(1), "`take noun`");
+    assert!(take.joiners().contains(&"from"), "`take noun from noun`: {:?}", take.joiners());
+    let put = band.verb_by_word("put").expect("Inform's library put");
+    assert!(
+        put.joiners().contains(&"in") && put.joiners().contains(&"on"),
+        "`put … in …` and `put … on …` are two lines of one verb: {:?}",
+        put.joiners()
+    );
 }
