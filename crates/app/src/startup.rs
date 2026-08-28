@@ -1693,6 +1693,7 @@ pub(crate) fn boot_story(
     // dictionary for exactly the move a player is most likely to want help with
     // (SQ-1116).
     app::input::refresh_seen_words(&mut state, &*session);
+    app::input::refresh_scope_words(&mut state, &*session);
 
     // A config.toml that doesn't load — bad syntax or a value of the wrong type — is
     // ignored WHOLESALE: TOML is one document, so a single stray character costs every

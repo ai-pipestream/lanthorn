@@ -447,7 +447,7 @@ impl WordRoles {
 ///
 /// Produced by `zvm::objects::ParseNames`, `gvm::objects::ParseNames` and
 /// `scott::Database::item_words`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub struct ObjectWords {
     /// How the engine identifies this object: the object *number* on the
@@ -517,6 +517,26 @@ impl ObjectWords {
             Some(n) => word.chars().take(n).collect(),
             None => word.to_string(),
         }
+    }
+
+    /// What to SHOW a player for this object, or `None` when the story holds
+    /// no text for it at all.
+    ///
+    /// The printed name where there is one. Where there is not — which is the
+    /// ordinary case on Inform 7, whose objects have no hardware short name and
+    /// are printed through a rule — the parse names are the only text in the
+    /// image that identifies the thing, so they are what a panel shows: the
+    /// whole list, in the order the story stores it, because no one word in it
+    /// is more the object's name than another and picking one would be a guess.
+    ///
+    /// This is a DISPLAY answer and not a typeable one: it may name the object
+    /// with words the parser will not take together (`lamp lanter light`), and
+    /// a caller composing a command wants the words themselves.
+    pub fn display_name(&self) -> Option<String> {
+        if !self.printed_name.is_empty() {
+            return Some(self.printed_name.clone());
+        }
+        (!self.words.is_empty()).then(|| self.words.join(" "))
     }
 
     /// `printed name [word, word, …]`, for a debug inspector or a test failure.

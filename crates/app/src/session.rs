@@ -652,6 +652,17 @@ pub struct GameSession {
     /// nine sites (boot, restore, reset, …) and the model is identical at all
     /// of them, so it is derived on first use instead of nine times over.
     world: std::cell::OnceCell<zvm::world::WorldModel>,
+    /// Where this story keeps the words its parser accepts for an object, and
+    /// the dictionary those words are read through (SQ-1118). `None` inside the
+    /// cell is a real answer, not a failure to look: Journey has no parser at
+    /// all, and `advent.z8` implements its own over a table of its own, leaving
+    /// the Z-machine dictionary empty — both then answer with printed names and
+    /// no words, which is all there is to say about them.
+    ///
+    /// Cached beside [`world`](Self::world) and for the same reason: `detect`
+    /// tallies every property of every object once, and the answer describes the
+    /// compiler's layout, which no turn can change.
+    parse_names: std::cell::OnceCell<Option<zvm::objects::ParseNames>>,
     /// PC at which the disasm cache was last runtime-confirmed; the per-turn
     /// fold is skipped while the VM is parked at the same PC (nav/scroll calls).
     last_confirmed_pc: std::cell::Cell<Option<u32>>,
@@ -1064,6 +1075,7 @@ impl GameSession {
             machine, quit, pending, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -5063,6 +5075,15 @@ impl GameSession {
     pub fn world_model(&self) -> &zvm::world::WorldModel {
         self.world.get_or_init(|| zvm::world::WorldModel::discover_at_boot(&self.machine))
     }
+
+    /// The reader for the words this story's parser accepts for an object,
+    /// derived on first use. `None` for a story that keeps no such words —
+    /// see [`parse_names`](Self::parse_names) the field.
+    pub fn parse_names(&self) -> Option<&zvm::objects::ParseNames> {
+        self.parse_names
+            .get_or_init(|| zvm::objects::ParseNames::detect(&self.machine.mem))
+            .as_ref()
+    }
 }
 
 impl Introspect for GameSession {
@@ -5070,17 +5091,27 @@ impl Introspect for GameSession {
         zvm::dictionary::load(&self.machine.mem).words(&self.machine.mem)
     }
 
-    fn contents(&self, container: u16) -> Vec<String> {
-        crate::inventory::list_inventory(&self.machine.mem, container)
+    fn contents(&self, container: u16) -> Vec<crate::engine::ObjectWords> {
+        crate::inventory::list_inventory(&self.machine.mem, self.parse_names(), container)
     }
 
-    fn room_objects(&self, room: u16) -> Vec<String> {
-        crate::render::room_info::list_room_objects(self.world_model(), &self.machine.mem, room)
+    fn room_objects(&self, room: u16) -> Vec<crate::engine::ObjectWords> {
+        crate::render::room_info::list_room_objects(
+            self.world_model(),
+            self.parse_names(),
+            &self.machine.mem,
+            room,
+        )
     }
 
-    fn room_objects_excluding(&self, room: u16, exclude: Option<u16>) -> Vec<String> {
+    fn room_objects_excluding(
+        &self,
+        room: u16,
+        exclude: Option<u16>,
+    ) -> Vec<crate::engine::ObjectWords> {
         crate::render::room_info::list_room_objects_excluding(
             self.world_model(),
+            self.parse_names(),
             &self.machine.mem,
             room,
             exclude.unwrap_or(0),
@@ -7068,6 +7099,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7138,6 +7170,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7203,6 +7236,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7261,6 +7295,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7348,6 +7383,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7409,6 +7445,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7449,6 +7486,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7502,6 +7540,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7594,6 +7633,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7644,6 +7684,7 @@ mod tests {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),

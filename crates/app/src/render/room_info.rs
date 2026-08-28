@@ -351,10 +351,11 @@ pub fn draw_room_info_body(
 /// that a closed container's contents never appear here.
 pub(crate) fn list_room_objects(
     model: &zvm::world::WorldModel,
+    names: Option<&zvm::objects::ParseNames>,
     mem: &zvm::memory::Memory,
     room_id: RoomId,
-) -> Vec<String> {
-    list_room_objects_excluding(model, mem, room_id, 0)
+) -> Vec<grammar_model::ObjectWords> {
+    list_room_objects_excluding(model, names, mem, room_id, 0)
 }
 
 /// Same traversal as [`list_room_objects`], but skipping the object whose
@@ -367,10 +368,11 @@ pub(crate) fn list_room_objects(
 /// too, and their pockets are the *carried* column, never *here*.
 pub(crate) fn list_room_objects_excluding(
     model: &zvm::world::WorldModel,
+    names: Option<&zvm::objects::ParseNames>,
     mem: &zvm::memory::Memory,
     room_id: RoomId,
     exclude: u16,
-) -> Vec<String> {
+) -> Vec<grammar_model::ObjectWords> {
     // Name-only rooms have no backing object; never read the object table by a
     // synthetic id (it would be outside the table).
     if crate::roomid::is_synthetic_room(room_id) {
@@ -379,8 +381,12 @@ pub(crate) fn list_room_objects_excluding(
     model
         .visible_room_objects(mem, room_id, exclude)
         .into_iter()
-        .map(|o| zvm::objects::short_name(mem, o))
-        .filter(|n| !n.is_empty())
+        .map(|o| crate::inventory::object_words(mem, names, o))
+        // An object the story holds neither a printed name nor a parse name for
+        // is not something a panel can show or a player can type (SQ-1042); the
+        // filter was on the printed name alone, which drops every Inform 7
+        // object, whose words are the only text naming it.
+        .filter(|o| o.display_name().is_some())
         .collect()
 }
 
@@ -409,7 +415,7 @@ mod tests {
         let mem = zvm::memory::Memory::new(buf).unwrap();
         let synth = crate::roomid::SYNTHETIC_ROOM_FLAG | 0x0123;
         let model = zvm::world::WorldModel::discover(&mem);
-        assert!(list_room_objects(&model, &mem, synth).is_empty());
+        assert!(list_room_objects(&model, None, &mem, synth).is_empty());
     }
 
 

@@ -45,12 +45,21 @@ fn boot(file: &str) -> Option<GameSession> {
     Some(session)
 }
 
-/// Exactly what the command band's *here* column is fed: the current room's
-/// visible objects with the player excluded.
+/// The objects the command band's *here* column is built from: the current
+/// room's visible objects with the player excluded, named the way the game
+/// prints them. (What the column then OFFERS is the word the parser accepts for
+/// each — `crate::scope_words` pins that; every case here is about WHICH
+/// objects the walk reaches, which is a question about the tree.)
 fn here(session: &GameSession) -> Vec<String> {
     let player = session.introspect().and_then(|i| i.player_object());
     let loc = session.current_location().expect("a located room");
-    session.introspect().unwrap().room_objects_excluding(loc.number, player)
+    session
+        .introspect()
+        .unwrap()
+        .room_objects_excluding(loc.number, player)
+        .iter()
+        .filter_map(|o| o.display_name())
+        .collect()
 }
 
 fn has(list: &[String], needle: &str) -> bool {

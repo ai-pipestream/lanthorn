@@ -1,0 +1,314 @@
+//! SQ-1042: the words a thing can be CALLED, from the live object tree, through
+//! the `Introspect` seam and out into the band's object columns and completion.
+//!
+//! `Introspect` used to answer every object question with a display name, so a
+//! panel offering one was offering something the parser had never agreed to.
+//! SQ-1118 built the reader (`ObjectWords` — id, printed name, parse names, all
+//! one value) and nothing could reach it; this is the seam that carries it.
+//!
+//! # The parser is the oracle
+//!
+//! Every claim below was settled by driving the real story under `zvm-cli` and
+//! reading what its own parser said. From Zork I r88 (`stories/`), Up a Tree
+//! after `n / n / climb tree` — the printed name is on the left, and it is what
+//! the band used to put on the input line:
+//!
+//! ```text
+//!   take bird's nest            → I don't know the word "bird'".
+//!   take nest                   → Taken.
+//!   take jewel-encrusted egg    → You can't see any jewel-encrusted egg here!
+//!   take egg                    → Taken.
+//! ```
+//!
+//! Both objects in that room, refused. And in the Living Room after
+//! `n / e / open window / enter window / w`, every word this quest offers for
+//! the lantern:
+//!
+//! ```text
+//!   take lamp → Taken.   take lantern → Taken.   take light → Taken.
+//!   take brass lantern → Taken.
+//! ```
+//!
+//! # The specimens
+//!
+//! | fixture | release | turns in | what it shows |
+//! |---|---|---|---|
+//! | `crates/zvm/tests/fixtures/minizork.z3` | r34/s871124 | 0 and 4 | the whole path, in CI |
+//! | `stories/zork1-r88-s840726.z3` | r88/s840726 | 3 | the two names the parser refuses |
+//!
+//! Mini-Zork is tracked, so every case that matters runs on CI; the Zork I case
+//! skips vacuously without `stories/`.
+
+use app::engine::Engine;
+use app::session::GameSession;
+use app::state::AppState;
+
+use crate::fixture_paths::fixture_path;
+
+// ── Booting ─────────────────────────────────────────────────────────────────
+
+fn boot(bytes: Vec<u8>) -> GameSession {
+    GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, None, Some((25, 80)))
+        .expect("a Version 3 story should load and boot")
+}
+
+/// Mini-Zork I, tracked in the checkout.
+fn minizork() -> GameSession {
+    let path = fixture_path("minizork-r34-s871124.z3");
+    boot(std::fs::read(&path).unwrap_or_else(|e| panic!("tracked at {}: {e}", path.display())))
+}
+
+/// A gitignored commercial story, or `None` so the case can skip.
+fn story(name: &str) -> Option<GameSession> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(name);
+    if !path.exists() {
+        eprintln!("SKIP: {} absent", path.display());
+        return None;
+    }
+    Some(boot(std::fs::read(&path).ok()?))
+}
+
+fn drive(session: &mut GameSession, cmds: &[&str]) {
+    for c in cmds {
+        session.submit(c);
+    }
+    let _ = session.take_transcript();
+}
+
+/// The objects in scope, exactly as the app reads them: the room's visible
+/// contents with the player excluded, plus what the player carries.
+fn in_scope(session: &GameSession) -> Vec<app::engine::ObjectWords> {
+    let intro = session.introspect().expect("a Z-machine story has an object tree");
+    let player = intro.player_object();
+    let room = session.current_location().expect("a located room").number;
+    let mut out = intro.room_objects_excluding(room, player);
+    if let Some(p) = player {
+        out.extend(intro.contents(p));
+    }
+    out
+}
+
+/// What the band's object columns would offer for everything in scope.
+fn offered(session: &GameSession) -> Vec<String> {
+    let vocab = <GameSession as Engine>::story_vocabulary(session);
+    in_scope(session)
+        .iter()
+        .filter_map(|o| app::vocab::typeable_name(o, vocab.as_ref()))
+        .collect()
+}
+
+/// An `AppState` with the scope words refreshed the way `turn.rs` refreshes them.
+fn scoped(session: &GameSession) -> AppState {
+    let mut state = AppState::default();
+    app::input::refresh_scope_words(&mut state, session);
+    state
+}
+
+// ── The seam ────────────────────────────────────────────────────────────────
+
+/// Every object question now answers with the id, the printed name and the
+/// parse names as ONE value. Falsify by having `Introspect` hand back display
+/// names again: nothing below can be asked at all.
+#[test]
+fn the_seam_carries_what_a_thing_is_called_beside_what_it_is_printed_as() {
+    let session = minizork();
+    let here = in_scope(&session);
+    assert!(!here.is_empty(), "West of House holds objects");
+
+    let mailbox = here
+        .iter()
+        .find(|o| o.printed_name == "small mailbox")
+        .expect("the mailbox is on the lawn");
+    assert_eq!(mailbox.words, ["mailbo", "box"], "the words its parser accepts, as stored");
+    assert_eq!(mailbox.truncated_at, Some(6), "a Version 3 dictionary keeps six Z-characters");
+    assert!(mailbox.property.is_some(), "and the property they were read from");
+    // The identity travels with them, which is what lets the *here* column drop
+    // the player object by id rather than by name.
+    assert!(mailbox.id > 0);
+}
+
+/// A story that keeps no parse names anywhere still answers — with its printed
+/// name and an empty word list, which is the whole truth about it rather than a
+/// failure to look. (`inventory::object_words` with no reader is that story.)
+#[test]
+fn a_story_with_no_parse_names_answers_with_the_printed_name_alone() {
+    let session = minizork();
+    let obj = app::inventory::object_words(&session.machine.mem, None, 1);
+    assert!(obj.words.is_empty());
+    assert_eq!(
+        app::vocab::typeable_name(&obj, None),
+        obj.display_name(),
+        "with nothing better to say, the printed name stands — the old behaviour, kept for \
+         exactly the stories that can support nothing else"
+    );
+}
+
+// ── What a column offers ────────────────────────────────────────────────────
+
+/// The adjective survives where the story marks one. Infocom keeps adjectives in
+/// a property of their own, so `small` is nowhere in the mailbox's `SYNONYM`
+/// list — but `take small mailbox` works and two knives in one room need it.
+#[test]
+fn the_column_keeps_the_adjective_the_story_marks() {
+    let session = minizork();
+    let words = offered(&session);
+    assert!(words.contains(&"small mailbox".to_string()), "{words:?}");
+    assert!(words.contains(&"white house".to_string()), "{words:?}");
+}
+
+/// The two names Zork I's own parser refuses, and what the column offers
+/// instead. See this module's header for the `zvm-cli` transcript.
+///
+/// Falsify by reverting `refresh_objects` to the printed name: the column then
+/// offers `bird's nest`, which the story answers with `I don't know the word
+/// "bird'"`.
+#[test]
+fn a_name_the_parser_refuses_is_never_the_one_offered() {
+    let Some(mut session) = story("zork1-r88-s840726.z3") else { return };
+    drive(&mut session, &["n", "n", "climb tree"]);
+    assert_eq!(
+        session.current_location().map(|l| l.name),
+        Some("Up a Tree".to_string()),
+        "three turns in, on the branch — the frame every claim here is about"
+    );
+
+    let printed: Vec<String> = in_scope(&session).iter().map(|o| o.printed_name.clone()).collect();
+    assert!(printed.contains(&"bird's nest".to_string()), "{printed:?}");
+    assert!(printed.contains(&"jewel-encrusted egg".to_string()), "{printed:?}");
+
+    let words = offered(&session);
+    assert!(words.contains(&"nest".to_string()), "{words:?}");
+    assert!(words.contains(&"egg".to_string()), "{words:?}");
+    assert!(!words.iter().any(|w| w.contains('\'')), "no apostrophe survives tokenising: {words:?}");
+    assert!(!words.contains(&"jewel-encrusted egg".to_string()), "{words:?}");
+}
+
+/// `clove of garlic` is `garlic`: the run of qualifying words stops at the
+/// preposition, which is what keeps `of` off the input line.
+#[test]
+fn a_preposition_inside_a_printed_name_stops_the_run() {
+    let mut session = minizork();
+    drive(&mut session, &["n", "e", "open window", "west", "open sack"]);
+    let words = offered(&session);
+    assert!(words.contains(&"garlic".to_string()), "{words:?}");
+    assert!(!words.iter().any(|w| w.split_whitespace().any(|t| t == "of")), "{words:?}");
+}
+
+/// An Inform 7 object has no hardware short name at all — Counterfeit Monkey
+/// has 2,222 named objects and most of them print nothing — so the word list is
+/// the only text in the image identifying it. A display shows the whole list; a
+/// command line gets the story's own first spelling, which the parser accepts on
+/// its own.
+#[test]
+fn a_printed_nameless_object_is_named_by_the_words_it_answers_to() {
+    let o = app::engine::ObjectWords::new(
+        0x2008c,
+        String::new(),
+        vec!["monkey".to_string(), "counterfeit".to_string()],
+        Some(1),
+        Some(9),
+    );
+    assert_eq!(o.display_name().as_deref(), Some("monkey counterfeit"));
+    assert_eq!(app::vocab::typeable_name(&o, None).as_deref(), Some("monkey"));
+
+    // Nothing at all is the one case with no answer: an empty row is worse than
+    // no row.
+    let nothing = app::engine::ObjectWords::new(7, String::new(), Vec::new(), None, None);
+    assert_eq!(nothing.display_name(), None);
+    assert_eq!(app::vocab::typeable_name(&nothing, None), None);
+}
+
+// ── Completion ──────────────────────────────────────────────────────────────
+
+/// The quest's own subject: complete from the objects actually present.
+///
+/// And spell them out — a Version 3 dictionary stores `mailbo`, which is a
+/// fragment to offer a player, while the object's printed name holds `mailbox`
+/// in full. Both reach the same entry, because the parser truncates the typed
+/// word exactly as the dictionary truncated its own.
+#[test]
+fn completion_offers_the_things_that_are_here_spelled_out() {
+    let session = minizork();
+    let state = scoped(&session);
+    assert!(state.scope_words.contains(&"mailbox".to_string()), "{:?}", state.scope_words);
+    assert!(state.scope_words.contains(&"box".to_string()), "the other word it answers to");
+    assert!(
+        !state.scope_words.contains(&"mailbo".to_string()),
+        "the stored fragment is not what a player is shown: {:?}",
+        state.scope_words
+    );
+    // The adjective is completable too — a player reads "small mailbox" on the
+    // screen and may type either half.
+    assert!(state.scope_words.contains(&"small".to_string()), "{:?}", state.scope_words);
+}
+
+/// Scope outranks the recent prose and the flat dictionary: the thing in front
+/// of you comes first.
+#[test]
+fn what_is_here_is_ranked_above_the_dictionary() {
+    use app::input::{apply_action, key_to_action, Action};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let session = minizork();
+    let mut state = scoped(&session);
+    state.dict_words =
+        session.introspect().map(|i| i.vocabulary()).expect("a v3 story has a dictionary");
+    let mut mapper = mapper::mapper::Mapper::default();
+    for c in "mail".chars() {
+        let a = key_to_action(&state, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        assert_eq!(a, Action::InputChar(c));
+        apply_action(a, &mut state, &mut mapper);
+    }
+    assert_eq!(
+        state.suggestions.first().map(String::as_str),
+        Some("mailbox"),
+        "the mailbox on the lawn beats the dictionary's own `mailbo`: {:?}",
+        state.suggestions
+    );
+}
+
+/// **The line between a convenience and a puzzle solver**, and the first thing
+/// this quest asked for: a thing inside a CLOSED container must not complete.
+///
+/// Mini-Zork's Kitchen holds a shut brown sack with a lunch and a clove of
+/// garlic in it. Neither may be completable until the player opens it — and the
+/// second half of this case is the falsifier, because a filter that hid them
+/// always would pass the first half alone.
+#[test]
+fn a_closed_containers_contents_never_complete() {
+    let mut session = minizork();
+    drive(&mut session, &["n", "e", "open window", "west"]);
+    assert_eq!(session.current_location().map(|l| l.name), Some("Kitchen".to_string()));
+
+    let shut = scoped(&session);
+    assert!(shut.scope_words.contains(&"sack".to_string()), "the sack itself is here");
+    for secret in ["garlic", "clove", "lunch", "food", "sandwi"] {
+        assert!(
+            !shut.scope_words.contains(&secret.to_string()),
+            "`{secret}` is inside a shut sack and completing it would be a hint: {:?}",
+            shut.scope_words
+        );
+    }
+
+    drive(&mut session, &["open sack"]);
+    let open = scoped(&session);
+    for now_visible in ["garlic", "clove", "lunch"] {
+        assert!(
+            open.scope_words.contains(&now_visible.to_string()),
+            "an opened sack shows what the game itself now lists: {:?}",
+            open.scope_words
+        );
+    }
+}
+
+/// The player's own object never completes and never fills a column — it is
+/// structurally a child of whatever room they are in, and Zork's prints
+/// `cretin`.
+#[test]
+fn the_avatar_is_not_a_thing_in_the_room() {
+    let mut session = minizork();
+    drive(&mut session, &["look"]);
+    let state = scoped(&session);
+    assert!(!state.scope_words.contains(&"cretin".to_string()), "{:?}", state.scope_words);
+    assert!(!offered(&session).iter().any(|w| w.contains("cretin")));
+}

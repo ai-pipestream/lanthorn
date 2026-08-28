@@ -2870,6 +2870,17 @@ pub struct AppState {
     /// anyway, so this is also strictly less work than the per-keystroke scrape it
     /// replaces.
     pub seen_words: Vec<String>,
+    /// The words the parser accepts for the objects that are ACTUALLY HERE —
+    /// the room's visible contents and what the player carries — refreshed once
+    /// a turn by [`crate::input::refresh_scope_words`] (SQ-1042).
+    ///
+    /// Completion's first tier, ahead of the recent prose and the flat
+    /// dictionary, because the noun set changes every room and is where the
+    /// friction is: you can see the thing described and cannot find the word for
+    /// it. Nothing here is a secret — it names only what the game would list if
+    /// asked, and a closed container's contents never enter it (the same walk
+    /// the *here* column uses, which stops at a lid).
+    pub scope_words: Vec<String>,
     /// Current list of completion candidates, recomputed whenever `input` changes
     /// while in Game focus. Empty means no suggestions are shown.
     pub suggestions: Vec<String>,
@@ -3184,6 +3195,7 @@ impl Default for AppState {
             filename_submitted: None,
             dict_words: Vec::new(),
             seen_words: Vec::new(),
+            scope_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
             suggestion_active: false,

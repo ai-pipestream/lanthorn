@@ -587,10 +587,14 @@ fn draw_divider(buf: &mut Buffer, x: u16, area: Rect, style: Style) {
 /// once per turn), so taking an object moves it from *here* to *carried* on the
 /// very next frame. Cheap, and skipped entirely while the band is closed.
 ///
-/// Z-machine gets the real object tree through `Introspect`. Glulx and Scott
-/// have none, so `carried` falls back to the parsed-inventory snapshot and
-/// `here` to the transcript scrape, flagged `here_is_seen` so the column labels
-/// itself "seen" rather than passing a scrape off as the room's contents.
+/// Z-machine gets the real object tree through `Introspect`, and each row is the
+/// word that story's parser accepts for the object rather than the name it
+/// prints — see [`crate::vocab::typeable_name`] for why those are different sets
+/// and what happens when a game prints `bird's nest` (SQ-1042). Glulx and Scott
+/// have no tree, so `carried` falls back to the parsed-inventory snapshot and
+/// `here` to the transcript scrape cut to the story's own nouns, flagged
+/// `here_is_seen` so the column labels itself "seen" rather than passing a
+/// scrape off as the room's contents.
 ///
 /// `here` excludes the player object itself (SQ-0667) — it is structurally a
 /// child of whatever room the player is in, so without this it would show up
@@ -609,16 +613,70 @@ pub fn refresh_objects(state: &mut AppState, session: &dyn crate::engine::Engine
         .or_else(|| session.introspect().and_then(|i| i.player_object()));
     let loc = session.current_location().map(|s| s.number).unwrap_or(0);
 
-    let (here, carried, seen) = match session.introspect() {
-        Some(intro) => {
-            let here = if loc != 0 { intro.room_objects_excluding(loc, player) } else { Vec::new() };
-            let carried = match player {
-                Some(p) => intro.contents(p),
-                None => state.inventory_fallback.clone(),
-            };
-            (here, carried, false)
+    // Read the objects first, then their words: the engine borrow above and the
+    // vocabulary borrow below are separate, and the second lives on `state`.
+    let objects = session.introspect().map(|intro| {
+        let here = if loc != 0 { intro.room_objects_excluding(loc, player) } else { Vec::new() };
+        let carried = player.map(|p| intro.contents(p));
+        (here, carried)
+    });
+    let (here, carried, seen) = {
+        let vocab = state.vocab.get(session);
+        let typeable = |v: &[crate::engine::ObjectWords]| -> Vec<String> {
+            let mut out: Vec<String> = Vec::with_capacity(v.len());
+            for o in v {
+                // Two things in one room reduce to one word often enough to
+                // matter — Zork I's `wooden door` and `trap door` are both
+                // `door` — and a row repeated is a row that says nothing extra.
+                if let Some(name) = crate::vocab::typeable_name(o, vocab) {
+                    if !out.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                        out.push(name);
+                    }
+                }
+            }
+            out
+        };
+        match &objects {
+            Some((here, carried)) => (
+                typeable(here),
+                match carried {
+                    Some(c) => typeable(c),
+                    None => state.inventory_fallback.clone(),
+                },
+                false,
+            ),
+            // No object tree: the scrape of the story's own recent output, cut
+            // to the words the story marks a NOUN and does NOT write literally
+            // into a grammar line (SQ-1042). Every word here is one the
+            // dictionary holds — SQ-1116 settled that — but a dictionary holds
+            // its function words too, and they were filling the column. The
+            // story's own role bits are the filter; an English stop list is the
+            // guess this replaces.
+            //
+            // Measured on `stories/advent.blb` at the opening room, this cuts 20
+            // scraped words to 12: `at`, `in`, `of`, `to`, `down` and `out` are
+            // prepositions the grammar writes down, `don` and `release` are
+            // verbs. What it does NOT reach is Inform's `a`, `and` and `the`,
+            // which carry the noun bit and NOTHING else — flag byte $80, exactly
+            // like `brick` — so no role reading can separate them. The filter
+            // that could is the story's OWN objects: a word no object answers to
+            // is not a thing. `gvm::objects::ParseNames` can say so; reaching it
+            // wants Glulx introspection, which is still SP4.
+            None => (
+                state
+                    .seen_words
+                    .iter()
+                    .filter(|w| {
+                        vocab.is_some_and(|v| {
+                            v.roles(w).is_some_and(|r| r.noun && !r.preposition)
+                        })
+                    })
+                    .cloned()
+                    .collect(),
+                state.inventory_fallback.clone(),
+                true,
+            ),
         }
-        None => (crate::input::scraped_seen_nouns(state), state.inventory_fallback.clone(), true),
     };
 
     let Some(band) = state.overlays.command_band.as_mut() else { return false };

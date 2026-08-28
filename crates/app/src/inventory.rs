@@ -43,15 +43,42 @@ pub fn detect_player_obj(
 
 // ── list_inventory ────────────────────────────────────────────────────────────
 
-/// Return the short names of all direct children of `player_obj` in the Z-machine
-/// object tree (top-level carried items only).
-pub fn list_inventory(mem: &Memory, player_obj: u16) -> Vec<String> {
+/// What object `obj` is, and what this story's parser will accept for it.
+///
+/// The two facts travel as one value (SQ-1042) because a caller needs both and
+/// neither implies the other: Zork I prints "brass lantern" and answers to
+/// `lamp`, `lanter` and `light`, while an Inform 7 object prints nothing at all
+/// and its words are the only text naming it.
+///
+/// `names` is `None` for a story that keeps no parse names anywhere readable —
+/// Journey has no parser, `advent.z8` brings its own — and then the answer
+/// carries the printed name with an empty word list, which is the whole truth
+/// about such a story rather than a failure to look.
+pub fn object_words(
+    mem: &Memory,
+    names: Option<&zvm::objects::ParseNames>,
+    obj: u16,
+) -> grammar_model::ObjectWords {
+    names.and_then(|p| p.of(mem, obj)).unwrap_or_else(|| {
+        grammar_model::ObjectWords::new(u32::from(obj), short_name(mem, obj), Vec::new(), None, None)
+    })
+}
+
+/// Return all direct children of `player_obj` in the Z-machine object tree
+/// (top-level carried items only), each with the words the parser accepts for
+/// it. An object the story holds no text for at all is left out — there is
+/// nothing a panel could show and nothing a player could type.
+pub fn list_inventory(
+    mem: &Memory,
+    names: Option<&zvm::objects::ParseNames>,
+    player_obj: u16,
+) -> Vec<grammar_model::ObjectWords> {
     let mut result = Vec::new();
     let mut child = get_child(mem, player_obj);
     while child != 0 {
-        let name = short_name(mem, child);
-        if !name.is_empty() {
-            result.push(name);
+        let o = object_words(mem, names, child);
+        if o.display_name().is_some() {
+            result.push(o);
         }
         child = get_sibling(mem, child);
     }
@@ -298,12 +325,15 @@ mod tests {
     fn list_inventory_walks_sibling_chain() {
         let buf = build_player_story();
         let mem = Memory::new(buf).expect("Memory::new failed");
-        let items = list_inventory(&mem, 1);
+        let items = list_inventory(&mem, None, 1);
         // Both children should be listed; order is child-first (lamp, sword).
         assert_eq!(items.len(), 2, "expected 2 items, got {:?}", items);
         // Names should start with "lamp" and "swrd" (encode may add padding).
-        assert!(items[0].starts_with("lamp"), "first item: {:?}", items[0]);
-        assert!(items[1].starts_with("swrd"), "second item: {:?}", items[1]);
+        assert!(items[0].printed_name.starts_with("lamp"), "first item: {:?}", items[0]);
+        assert!(items[1].printed_name.starts_with("swrd"), "second item: {:?}", items[1]);
+        // A story with no parse-name property answers with printed names and no
+        // words at all, which is the whole truth about it (SQ-1042).
+        assert!(items.iter().all(|o| o.words.is_empty()), "{items:?}");
     }
 
     #[test]
@@ -311,7 +341,7 @@ mod tests {
         let buf = build_player_story();
         let mem = Memory::new(buf).unwrap();
         // obj2 has no children (child=0); its inventory should be empty.
-        let items = list_inventory(&mem, 2);
+        let items = list_inventory(&mem, None, 2);
         assert!(items.is_empty(), "expected empty inventory for obj2, got {:?}", items);
     }
 }

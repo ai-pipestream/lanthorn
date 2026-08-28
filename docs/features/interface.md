@@ -306,8 +306,24 @@ know which side you're on).
   The object columns are **live**: they read the running story's object tree and
   refresh every turn, so taking something moves it from *here* to *carried* as
   you watch. (Glulx and Scott have no object tree yet, so *here* degrades to a
-  clearly-labelled **WHAT — seen** list scraped from recent output.) An
-  empty *here*/*carried* column says so explicitly rather than sitting blank.
+  clearly-labelled **WHAT — seen** list scraped from recent output — cut to the
+  words that story's own dictionary marks as *nouns* and does not write into a
+  grammar line, so its verbs and its `at`/`in`/`of`/`to` stay out of a column of
+  things. Inform's `a`, `and` and `the` carry the noun bit and nothing else, so
+  they still slip through; only the story's own object words could tell them
+  apart, and reading those on Glulx waits on its object tree.) An empty *here*/*carried* column says so
+  explicitly rather than sitting blank.
+
+  **And each row is a word the parser has agreed to accept**, not the name the
+  game prints. The two are different sets: Zork I *prints* `bird's nest` and
+  `jewel-encrusted egg`, and answers `I don't know the word "bird'"` and
+  `You can't see any jewel-encrusted egg here!` when you type them back. So
+  lanthorn reads the property holding the words each object answers to and
+  composes the row from those — `nest`, `egg` — keeping the adjective wherever
+  the story marks one, because `take rusty` and `take knife` are both needed
+  when two knives are in the room. `small mailbox`, `brass lantern` and
+  `white house` survive intact; `clove of garlic` becomes `garlic`, since the
+  preposition is not part of what the parser will take.
 
   *Here* means **what you can see**, not "what the room object happens to
   contain". It includes things resting on a supporter or sitting in an open
@@ -387,10 +403,20 @@ know which side you're on).
   height (rose plus every word row) still draws the whole rose and simply
   clips the word rows it has no room for; resize the band taller to see them
   all.
-- **Tab autocomplete** from the story's own dictionary plus the words the story
-  has just been using — every one of them checked against that same dictionary,
-  through the story's own tokeniser, so what you are offered is what the parser
-  will accept and nothing else. Shown the way your shell shows it: the rest of the word
+- **Tab autocomplete** from **the things that are actually in front of you**,
+  then the words the story has just been using, then its whole dictionary —
+  every one of them checked against that dictionary, through the story's own
+  tokeniser, so what you are offered is what the parser will accept and nothing
+  else. The first tier is the one that fixes what ages these games worst: the
+  guess-the-noun tedium where you can see the thing described and cannot find
+  the word for it. Standing in Zork I's Living Room, `lan` offers `lantern` —
+  and so do `lam`, `lig` and `bra`, because the lamp answers to all four. It
+  also spells the words out: a Version 3 dictionary keeps only six characters,
+  so the story stores `lanter`, and offering a player a fragment helps nobody.
+  Nothing here is a spoiler — it names only what the game itself would list in
+  answer to `look` and `inventory`, and the walk stops at a closed container's
+  lid, so the lunch inside Zork I's brown sack is not completable until you
+  open it. Shown the way your shell shows it: the rest of the word
   appears in dim ghost text right under the caret as you type. **Tab** cycles
   forward through the candidates, **Shift-Tab** back, and **→** at the end of the
   line takes the one on offer. (With the command band open, Tab completes from

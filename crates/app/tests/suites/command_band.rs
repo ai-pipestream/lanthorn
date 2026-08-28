@@ -146,7 +146,14 @@ fn the_player_object_is_excluded_from_here() {
     let here = state.overlays.command_band.as_ref().unwrap().here.clone();
 
     let loc = session.current_location().unwrap().number;
-    let unfiltered = session.introspect().unwrap().room_objects(loc);
+    let vocab = <GameSession as Engine>::story_vocabulary(&session);
+    let unfiltered: Vec<String> = session
+        .introspect()
+        .unwrap()
+        .room_objects(loc)
+        .iter()
+        .filter_map(|o| app::vocab::typeable_name(o, vocab.as_ref()))
+        .collect();
     assert_eq!(
         unfiltered.len(),
         here.len() + 1,
