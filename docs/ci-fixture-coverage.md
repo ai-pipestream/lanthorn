@@ -66,6 +66,21 @@ established one at a time, and "freeware" is not the same as "we may vendor it".
 But the work is *verification*, which is a different and much safer activity
 than construction.
 
+**SQ-1102 added a case in exactly this shape, and it is worth naming because the
+hole is total rather than partial.** `gvm::grammar` locates and reads Inform's
+grammar tables in a Glulx image, verified against `glulxdump` across all 22
+Glulx stories in `stories/` — 6,911 grammar lines, zero differences. On CI it
+proves none of that: `glulxercise.ulx` is the only committed Glulx fixture and
+carries no grammar at all, so the single CI-visible case is a **refusal**
+(`TablesNotFound` — the dictionary was found and the chain would not close) and
+every positive case skips vacuously. The locator is the part most worth guarding
+— 889 byte offsets across the corpus pass its pointer-array precondition and
+only 22 survive the full walk — and it is precisely the part CI cannot see.
+Several of those 22 are already on the redistributable list above
+(*Kerkerkruip*, *Counterfeit Monkey*, *Cragne Manor*, *The Wizard Sniffer*), so
+this needs no new synthesis either: one file moved into `unit_tests/` turns the
+strongest case in the module from invisible to green.
+
 ## What can be synthesised, and what cannot
 
 Sorting the 155 by what the suite is really *about*:

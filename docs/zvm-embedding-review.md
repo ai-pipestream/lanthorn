@@ -394,12 +394,32 @@ consumer downstream. And every public type in it is already
 `#[non_exhaustive]`, which is item 3 below applied to a module while that is
 still free.
 
-The known gap is modern Inform 7 output: two stories in the local corpus
-(`frankenfingers_260330.z5`, `ImpossibleStairs.z8`) begin static memory with
-something other than the verb-pointer table, and both are refused. `infodump`
-declines them too, so this is a limitation of the format assumption both tools
-share — the grammar table's address is not in the header — rather than of this
-reader.
+Two stories in the local corpus are refused: `frankenfingers_260330.z5` and
+`ImpossibleStairs.z8` begin static memory with something other than the
+verb-pointer table. That was recorded here as "a limitation of the format
+assumption both tools share", and SQ-1102 falsified the framing while reading
+Inform's source for the Glulx side. Inform 6 writes `p[14]/p[15] =
+grammar_table_at` (`tables.c`), so on the Z-machine the grammar table **is**
+where this reader looks — the assumption is Inform's own layout, not a guess —
+and Inform stamps its version as `6.NN` at header bytes `$3C..$3F`, where these
+two files hold `1a01` and `0m03` instead. They are not Inform 6 output at all,
+which is why `infodump` declines them too, and why refusing is the correct
+answer rather than an incomplete one. What remains open is which compiler
+produced them (SQ-1101; Dialog is the obvious candidate) and whether it emits
+anything a reader could read.
+
+**The Glulx half now exists (SQ-1102).** `gvm::grammar` answers the same
+questions about the modern corpus, and the two readers deliberately share no
+code: the Z-machine's table address is header-named while a Glulx image records
+it nowhere, verb numbers count down from `$FF` against `$FFFF`, line headers are
+2 bytes against 3, tokens 1+2 against 1+4, and this reader carries five table
+formats against Glulx's one. A trait over "read a byte at an address" would
+abstract a handful of lines out of several hundred while making two
+zero-dependency crates share a vocabulary. What they *do* share is the shape of
+the **answer** — `Token`, `NounKind`, `Slot`, `SyntaxLine`, `Verb`, `WordRoles`
+— and SQ-1103 tracks lifting those into one small zero-dependency crate, to be
+done before SQ-1041 hardens against either spelling. Names are identical on both
+sides today so that conversion stays mechanical.
 
 ## 8. What machine knowledge is still in the wrong crate
 
