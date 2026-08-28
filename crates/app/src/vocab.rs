@@ -39,25 +39,27 @@
 //!
 //! # Where a candidate may come from
 //!
-//! Three sources today, all of them answerable from the story file alone, and
-//! [`StoryVocabulary::candidates`] simply concatenates them:
+//! Four sources, and [`StoryVocabulary::candidates`] simply concatenates them:
 //!
 //! 1. **A near miss.** `lanturn` is one keystroke from `lantern`, and a
 //!    near-miss against a word this story really holds is strong evidence.
 //! 2. **A different ending.** `lighting`, `lights` and `lighted` all stem to
 //!    `light`. The dictionary truncates (`lighti` in a Version 3 game), so the
 //!    stem has to be built rather than found by prefix.
-//! 3. **The story's own synonyms.** Once a VERB is identified,
-//!    [`grammar_model::Verb::words`] is every spelling the dictionary gives it —
-//!    free, and on all three engines.
+//! 3. **What the word MEANS.** `illuminate` → `light` is the frustration
+//!    everybody names first and the one thing a story file cannot answer: edit
+//!    distance puts it eight keystrokes away, stemming reaches nothing, and the
+//!    story's own synonym groups only ever group words it already knows. It
+//!    takes a corpus, and [`verb_synonyms`] is that corpus — the games' own verb
+//!    groupings, then WordNet — shipped as a table and read lazily on the first
+//!    rejected word (SQ-1110, SQ-1115, wired in SQ-1119).
+//! 4. **The story's own synonyms.** Once a VERB is identified, whichever source
+//!    found it, [`grammar_model::Verb::words`] is every spelling the dictionary
+//!    gives it — free, and on all three engines.
 //!
-//! What is deliberately **not** here is meaning. `illuminate` → `light` is the
-//! frustration everybody names first and the one thing a story file cannot
-//! answer: edit distance puts it eight keystrokes away, stemming reaches nothing,
-//! and the story's synonym groups only ever group words it already knows. That
-//! bridge needs a corpus and is SQ-1110's; it will arrive as one more source
-//! feeding the list below, which is why the sources are a concatenation and not a
-//! chain.
+//! The first two and the fourth are answerable from the story file alone; the
+//! third is the only one that is not, and it needed no seam of its own to arrive
+//! — which is why the sources are a concatenation and not a chain.
 //!
 //! Whatever proposes a candidate, [`StoryVocabulary::offer`] intersects it with
 //! this story's dictionary before anything is shown. **The player must never be
@@ -77,13 +79,15 @@
 //! * an unknown word in the **opening** position is answered with verbs and
 //!   nothing else, and one **inside** the command with words the dictionary marks
 //!   as things rather than actions;
-//! * the miss is a **single keystroke** or a plain change of ending — nothing
-//!   weaker, because a coincidence at distance two is how a player's name gets
-//!   answered with `march`;
+//! * the miss is a **single keystroke**, a plain change of ending, or an EXACT
+//!   hit in the meaning table — nothing weaker, because a coincidence at
+//!   distance two is how a player's name gets answered with `march`, and a fuzzy
+//!   match into the table would be a typo guess chained onto a meaning guess;
 //! * and a word is answered **once a session**.
 //!
-//! With nothing that passes, we say nothing. That is the common answer, and with
-//! no source of meaning yet it is the common answer more often than not.
+//! With nothing that passes, we say nothing. That is still the common answer:
+//! meaning is the source most able to find *something*, so it is held to exact
+//! lookups, to the opening word, and to verbs the story itself holds.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -227,14 +231,32 @@ impl StoryVocabulary {
 struct Candidate {
     /// The dictionary spelling, exactly as the story stores it.
     word: String,
-    /// 0 for a word the player nearly typed, 1 for a synonym reached through
-    /// one. A direct answer always outranks an aside.
+    /// 0 for a word the player nearly typed, 1 for one the typed word MEANS,
+    /// 2 for another spelling the story gives whatever either of those found.
+    ///
+    /// Three ranks and not two, because `order` is an index into whichever table
+    /// a source read and says nothing across sources: `doff` reaches `remove`
+    /// first in the synonym table and `carry` first in Zork's own verb entry,
+    /// both at 0, and the tie was settled alphabetically in favour of the aside.
+    /// The evidence is what separates them — the form itself, then the meaning,
+    /// then what the story calls the answer as well.
     tier: usize,
     /// How far from what was typed — the edit distance, or 0 for a stem.
     distance: usize,
     /// Where the word sits in the table it came from — the dictionary, or the
     /// verb's own list of spellings — so the story's ordering breaks a tie.
     order: usize,
+    /// True when this spelling is a WHOLE word in its own right rather than a
+    /// dictionary key that may be sitting at the truncation limit.
+    ///
+    /// `remove` is six characters and a whole word; `leafle` is six characters
+    /// and a fragment, and nothing about either string says which — only where
+    /// it came from does. Everything drawn from the story's own tables is a key
+    /// and goes through [`spell_out`](StoryVocabulary::spell_out); the synonym
+    /// table's members are English and go through nothing. Without this, `doff`
+    /// answered with `carry · catch · get`, because the one word that was right
+    /// looked like a fragment and was dropped in favour of its own asides.
+    whole: bool,
 }
 
 /// The most an offer may name. Three, and it is a limit rather than a target:
@@ -253,16 +275,26 @@ impl StoryVocabulary {
     /// Every word this story holds that the player may have meant by `typed`.
     ///
     /// The sources are CONCATENATED, not chained: each proposes independently
-    /// and the ranking in [`offer`](Self::offer) settles them. SQ-1110's
-    /// meaning-driven expansion joins the list here, as one more `extend`, and
-    /// needs to know nothing about the two below it.
+    /// and the ranking in [`offer`](Self::offer) settles them. SQ-1119's
+    /// meaning-driven source joined the list here as one more line, knowing
+    /// nothing about the ones beside it — which is what the shape was for.
     fn candidates(&self, typed: &str, position: Position) -> Vec<Candidate> {
         let mut out = Vec::new();
         self.by_near_miss(typed, position, &mut out);
         self.by_ending(typed, position, &mut out);
-        // SQ-1110: `self.by_meaning(typed, position, &mut out)` — the player-word
-        // → story-verb table harvested from the corpus. It cannot be answered
-        // from a story file, which is why it is not here yet.
+        self.by_meaning(typed, position, &mut out);
+        // Meaning speaks only where FORM reached nothing. A near miss or a
+        // changed ending is evidence about the word the player really typed; a
+        // synonym is a guess at what they meant, and with the first in hand the
+        // second is wallpaper — `opening mailbox` wants `open`, and two games in
+        // the corpus put `look` and `read` on that same verb, so the offer read
+        // `open · read · look` until this line. It sits here rather than in the
+        // ranking below because the aside source builds on whatever it finds: a
+        // proposal that is not going to be shown must not leave its asides
+        // behind, spelled by a verb nothing else reached.
+        if out.iter().any(|c| c.tier == 0) {
+            out.retain(|c| c.tier != 1);
+        }
         self.by_story_synonym(position, &mut out);
         out
     }
@@ -285,7 +317,7 @@ impl StoryVocabulary {
                 continue;
             }
             if osa(&key, &self.truncated(word)) == 1 {
-                out.push(Candidate { word: word.clone(), tier: 0, distance: 1, order });
+                out.push(Candidate { word: word.clone(), tier: 0, distance: 1, order, whole: false });
             }
         }
     }
@@ -303,15 +335,63 @@ impl StoryVocabulary {
             let word = word.clone();
             let order = self.words.keys().position(|k| *k == word).unwrap_or(0);
             if !out.iter().any(|c| c.word == word) {
-                out.push(Candidate { word, tier: 0, distance: 0, order });
+                out.push(Candidate { word, tier: 0, distance: 0, order, whole: false });
+            }
+        }
+    }
+
+    /// What the word MEANS, when nothing about its FORM can reach the story's.
+    /// `illuminate` is eight keystrokes from `light`, stems to nothing, and the
+    /// story file records no relation between the two — the bridge is
+    /// [`verb_synonyms`]'s shipped table, harvested offline from the games' own
+    /// verb groupings and from WordNet.
+    ///
+    /// Three rules the table states, all of them the caller's to keep:
+    ///
+    /// * **Lemmatise first.** Its keys are base forms, because a parser accepts
+    ///   the imperative, so `illuminating` goes through [`stems`] before it is
+    ///   looked up. Skip that and a missing morphology step here reads as a hole
+    ///   in the data.
+    /// * **Exact lookups only.** Fuzzy-matching thousands of table keys would
+    ///   chain a typo guess onto a meaning guess with nothing anchoring either;
+    ///   the near miss belongs against the story's OWN dictionary, which is
+    ///   [`by_near_miss`](Self::by_near_miss)'s job and already done.
+    /// * **Walk the groups in order and stop early.** A word is polysemous —
+    ///   `draw` is *pull*, *sketch* and *attract*, one group per sense, games'
+    ///   own groupings first — and a rare fifth sense must not crowd out the
+    ///   common first one. [`verb_synonyms::suggest`] is that walk.
+    ///
+    /// Verbs only, so the opening word only: the table says what an ACTION is
+    /// called, and that is the one place an action stands. What it proposes is
+    /// the table's own spelling rather than the key the dictionary stores —
+    /// `examine`, not the `examin` a Version 3 game keeps — because the parser
+    /// truncates it to the same entry and `examine` is the word to type.
+    fn by_meaning(&self, typed: &str, position: Position, out: &mut Vec<Candidate>) {
+        if position != Position::Opening {
+            return;
+        }
+        for lemma in std::iter::once(typed.to_string()).chain(stems(typed)) {
+            let known = |w: &str| self.stored(w).is_some_and(|(s, r)| self.fills(s, r, position));
+            for (order, word) in
+                verb_synonyms::suggest(&lemma, known, MAX_OFFERED).into_iter().enumerate()
+            {
+                if !out.iter().any(|c| c.word == word) {
+                    out.push(Candidate {
+                        word: word.to_string(),
+                        tier: 1,
+                        distance: 0,
+                        order,
+                        whole: true,
+                    });
+                }
             }
         }
     }
 
     /// What else this story calls the verbs already found. `Verb::words` is every
     /// dictionary spelling of one verb, so a story that groups `take` with `get`
-    /// and `hold` teaches the player its own vocabulary at no cost — and only
-    /// after the direct answers, because it is an aside.
+    /// and `hold` teaches the player its own vocabulary at no cost — and after
+    /// every other source, whichever one found the verb, because it is an aside.
     fn by_story_synonym(&self, position: Position, out: &mut Vec<Candidate>) {
         if position != Position::Opening {
             return;
@@ -327,7 +407,13 @@ impl StoryVocabulary {
                     continue;
                 }
                 if other != w && !out.iter().any(|c| c.word == *other) {
-                    out.push(Candidate { word: other.clone(), tier: 1, distance: 0, order });
+                    out.push(Candidate {
+                        word: other.clone(),
+                        tier: 2,
+                        distance: 0,
+                        order,
+                        whole: false,
+                    });
                 }
             }
         }
@@ -387,14 +473,21 @@ impl StoryVocabulary {
         let mut seen = BTreeSet::new();
         let mut picks = Vec::new();
         for c in found {
-            // A word still sitting at the truncation limit is a FRAGMENT — `exam`,
-            // `leafle` — and the story would accept it typed back. As the ANSWER
-            // that is worth showing; as an aside beside a word we did spell out it
-            // is only noise, so `look · exam · desc` becomes `look`.
-            let word = match (self.spell_out(&c.word, prose), c.tier) {
-                (Some(w), _) => w,
-                (None, 0) => c.word.clone(),
-                (None, _) => continue,
+            // A dictionary KEY still sitting at the truncation limit may be a
+            // fragment — `exam`, `leafle` — and the story would accept it typed
+            // back. As the ANSWER that is worth showing; as an aside beside a
+            // word we did spell out it is only noise, so `look · exam · desc`
+            // becomes `look`. A word that is whole by construction is neither:
+            // it is English, and the story's prose has no say in how it is
+            // spelled.
+            let word = if c.whole {
+                c.word.clone()
+            } else {
+                match (self.spell_out(&c.word, prose), c.tier) {
+                    (Some(w), _) => w,
+                    (None, 0) => c.word.clone(),
+                    (None, _) => continue,
+                }
             };
             if seen.insert(word.clone()) {
                 picks.push(word);
@@ -773,9 +866,125 @@ mod tests {
     fn silence_is_the_common_answer() {
         let v = pocket_zork();
         assert!(v.offer("xyzzy", Position::Opening, &["lamp"], &[]).is_empty());
-        assert!(v.offer("illuminate", Position::Opening, &["lamp"], &[]).is_empty(), "meaning is SQ-1110's");
         assert!(v.offer("cas", Position::Inside, &[], &[]).is_empty(), "three letters is not evidence");
         assert!(StoryVocabulary::default().offer("lanturn", Position::Inside, &[], &[]).is_empty());
+    }
+
+    /// A story that spells its verbs plainly and keeps whole words — a Glulx
+    /// game rather than a Version 3 one, so nothing here is about truncation.
+    /// One spelling per verb, so what an offer names came from MEANING and not
+    /// from the story's own synonym list.
+    fn a_plainly_spelled_story() -> StoryVocabulary {
+        let mut verbs = Vec::new();
+        let mut words = BTreeMap::new();
+        for (i, w) in ["light", "examine", "hide", "wear", "remove", "buy", "help"]
+            .iter()
+            .enumerate()
+        {
+            verbs.push(Verb::new(
+                200 + i as u32,
+                0,
+                vec![(*w).to_string()],
+                vec![SyntaxLine::new(i as u16, false, vec![noun()])],
+            ));
+            words.insert((*w).to_string(), roles(true, false));
+        }
+        words.insert("lamp".to_string(), roles(false, true));
+        StoryVocabulary::new(verbs, words, BTreeSet::new(), 0)
+    }
+
+    /// **The case the whole synonym effort was for** (SQ-1041 left the seam,
+    /// SQ-1110/1115 built the table, SQ-1119 ran the wire). `illuminate` is
+    /// eight keystrokes from `light` and stems to nothing, so no source that
+    /// reads FORM can reach it; the story's own grammar then throws in `burn`,
+    /// which is what makes the sources a concatenation rather than a chain.
+    ///
+    /// Falsify by dropping `by_meaning` from `candidates`: the offer vanishes,
+    /// which is exactly what this assertion said before the wire was run.
+    #[test]
+    fn a_word_the_story_never_heard_is_answered_by_what_it_means() {
+        let v = pocket_zork();
+        assert_eq!(v.offer("illuminate", Position::Opening, &["lamp"], &[]), vec!["light", "burn"]);
+    }
+
+    /// The mappings SQ-1115 pinned, each on a story that holds exactly one
+    /// spelling of the target — so the answer is the table's and nothing else's.
+    #[test]
+    fn the_canonical_meanings_reach_the_word_the_story_holds() {
+        let v = a_plainly_spelled_story();
+        for (typed, wanted) in [
+            ("illuminate", "light"),
+            ("inspect", "examine"), // the one the player reported
+            ("conceal", "hide"),
+            ("doff", "remove"),
+            ("purchase", "buy"),
+            ("hint", "help"),
+        ] {
+            assert_eq!(
+                v.offer(typed, Position::Opening, &["lamp"], &[]),
+                vec![wanted.to_string()],
+                "{typed} means {wanted}"
+            );
+        }
+        // `don` -> `wear` is in the table and out of reach here: MIN_LEN answers
+        // nothing under four characters, because at three every dictionary has a
+        // neighbour and the evidence is worthless. The gate is older than this
+        // source and is not relaxed for it.
+        assert!(v.offer("don", Position::Opening, &["lamp"], &[]).is_empty());
+    }
+
+    /// The table's keys are BASE FORMS, so an inflected word has to be reduced
+    /// before it is looked up — `illuminating` reaches nothing on its own and
+    /// `illuminate` reaches `light`. Falsify by looking up only what was typed:
+    /// the miss looks like a hole in the data rather than a missing step here.
+    #[test]
+    fn an_inflected_word_is_lemmatized_before_the_table_is_asked() {
+        let v = a_plainly_spelled_story();
+        assert_eq!(v.offer("illuminating", Position::Opening, &["lamp"], &[]), vec!["light"]);
+        assert_eq!(v.offer("purchased", Position::Opening, &["lamp"], &[]), vec!["buy"]);
+    }
+
+    /// Meaning proposes VERBS, and the opening word is the only place a verb
+    /// stands. A synonym of an action offered inside a noun phrase names nothing.
+    #[test]
+    fn meaning_never_answers_a_word_inside_a_noun_phrase() {
+        let v = a_plainly_spelled_story();
+        assert!(v.offer("illuminate", Position::Inside, &[], &[]).is_empty());
+        assert!(v.offer("purchase", Position::Inside, &[], &[]).is_empty());
+    }
+
+    /// The table is large and this story is small: a word the story cannot spell
+    /// is not offered, however well the table knows it. `enlighten` shares a
+    /// group with `illuminate`, `disrobe` with `doff` — neither is here.
+    #[test]
+    fn meaning_is_still_intersected_with_this_storys_dictionary() {
+        let v = a_plainly_spelled_story();
+        for typed in ["illuminate", "inspect", "conceal", "doff", "purchase", "hint", "xyzzy"] {
+            for w in v.offer(typed, Position::Opening, &["lamp"], &[]) {
+                assert!(v.knows(&w), "{w:?} is not in this story's dictionary");
+            }
+        }
+        assert!(
+            v.offer("scrutinize", Position::Opening, &["lamp"], &[]).is_empty(),
+            "`scrutinize` groups with `audit` and `inspect`, and this story has neither"
+        );
+    }
+
+    /// Meaning is the answer to what FORM could not reach, and never an addition
+    /// to it. `lighting` stems straight to `light`, so the offer is `light` and
+    /// the story's own `burn` — and not the four further things three thousand
+    /// groups can find to say about a lamp.
+    ///
+    /// Falsify by dropping the tier-1 filter from `candidates`: `opening
+    /// mailbox` starts reading `open · read · look` at Zork I, because two games
+    /// in the corpus declared those one verb.
+    #[test]
+    fn meaning_answers_only_where_the_word_itself_reached_nothing() {
+        let v = pocket_zork();
+        assert_eq!(v.offer("lighting", Position::Opening, &["lamp"], &[]), vec!["light", "burn"]);
+        assert_eq!(v.offer("ligth", Position::Opening, &["lamp"], &[]), vec!["light", "burn"]);
+        // …and with no near miss and no stem, it is the only thing left.
+        assert_eq!(v.offer("illuminate", Position::Opening, &["lamp"], &[]), vec!["light", "burn"]);
     }
 
     /// Only words THIS story holds, whatever proposed them. Falsified by pushing

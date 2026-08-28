@@ -27,6 +27,10 @@ scott = { path = "../scott" }
 # SQ-1041: the shape of what a story's parser accepts, produced by both grammar
 # readers, so the vocabulary offer is one piece of code for every engine.
 grammar-model = { path = "../grammar-model" }
+# SQ-1119: the one thing a story file cannot answer — that `illuminate` means
+# `light`. A shipped table, parsed lazily behind a `OnceLock` on the first
+# rejected word, so a session that never has one never reads it.
+verb-synonyms = { path = "../verb-synonyms" }
 mapper = { path = "../mapper" }
 blorb = { path = "../blorb" }
 audio = { path = "../audio" }
