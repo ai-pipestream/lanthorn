@@ -53,6 +53,11 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("guidance_probe",       ConfigRowKind::Bool, "Vet the Guiding Light's word suggestions before showing them: each candidate is tried in a silent throwaway copy of the game and only what actually did something is offered. Nothing it does reaches the screen, your saves, or the game you are playing. Off, the light still offers — it just names what the dictionary holds instead of recommending."),
     ("font_check",           ConfigRowKind::Action, "Enter: compare two rows of glyphs and say which your terminal's font draws properly, setting the map's arrows, portal and stairs icons and the Guiding Light's mark together. Answers land in style.toml, not here, so this row is not part of Save."),
     ("hide_adult_words",     ConfigRowKind::Bool, "Keep the strong language out of panels that list a story's whole vocabulary — the command band's VERB column and its like. Display only: the story still knows every word, typing one works exactly as before, and the Guiding Light still offers it. The words are the `adult_words` line in config.toml, there to be read, shortened or extended."),
+    // Appended rather than filed beside `guidance_probe`, where it reads more
+    // naturally: three tables in `input.rs` key off a row's INDEX, so inserting
+    // in the middle renumbers every row after it in four places at once. The
+    // grouping is worth less than not making that edit (SQ-0785).
+    ("return_probe",         ConfigRowKind::Bool, "After a move, look for the way BACK in a silent throwaway copy of the game, and put it on the map when it is found — closing the one-way gaps an automap is otherwise full of, without ever assuming that a passage runs both ways. Nothing is recorded unless the copy comes out in the room you left. Off by default; the footprint on the map pane's bottom border switches it for one game."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +273,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         // the key does. `cfg` is untouched by it — the answer goes to style.toml.
         29 => "run…".to_string(),
         30 => bool_str(cfg.hide_adult_words),
+        31 => bool_str(cfg.return_probe),
         _ => String::new(),
     }
 }

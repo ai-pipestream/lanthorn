@@ -120,6 +120,18 @@ pub struct ControlGlyphs {
     pub lock_on: char,
     /// v6 pixel lock off (□).
     pub lock_off: char,
+    /// The return probe (SQ-0785) — a footprint, in one state rather than two.
+    ///
+    /// **The only control here with a single glyph, and deliberately.** Every
+    /// other one names two modes and draws the mode it is in: shown/hidden,
+    /// open/closed, locked/unlocked. This one has no opposite mode — it is either
+    /// looking for the way back or it is not — and it is also the only control
+    /// whose off state is the DEFAULT, which is the state a player has to notice
+    /// in order to ever turn it on. So the mark is always the same and the colour
+    /// carries the state: muted when off, lit through `panel.control:lit` when
+    /// on. A shape that changed here would be saying "the other mode is engaged"
+    /// about a thing with no other mode.
+    pub return_probe: char,
 }
 
 // ── Top-level set ─────────────────────────────────────────────────────────────
@@ -247,6 +259,12 @@ impl Default for SymbolSet {
                 render_extended: '▦',
                 lock_on: '▣',
                 lock_off: '□',
+                // ◌ (U+25CC), the only mark in Geometric Shapes that reads as a
+                // TRACE rather than as a state — the print left by something that
+                // walked through and is not there any more, which is exactly what
+                // the shadow leaves behind. Everything else in the block is a
+                // filled/hollow pair saying which of two modes is in force.
+                return_probe: '◌',
             },
             dock_following: '◇',
             dock_pinned: '◆',
@@ -555,6 +573,9 @@ impl ControlGlyphs {
                 // md-lock / md-lock_open.
                 lock_on: '\u{F033E}',
                 lock_off: '\u{F033F}',
+                // md-shoe_print — a footprint, for the search that walks the way
+                // back and leaves nothing behind but the knowledge that it does.
+                return_probe: '\u{F0DFA}',
             },
             _ => return None,
         })
@@ -749,6 +770,7 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "control.render_extended" => s.controls.render_extended = ch,
         "control.lock_on"        => s.controls.lock_on = ch,
         "control.lock_off"       => s.controls.lock_off = ch,
+        "control.return_probe"   => s.controls.return_probe = ch,
         "gutter.meta"      => s.meta_gutter = ch,
         "gutter.warning"   => s.warning_gutter = ch,
         "gutter.assist"    => s.assist_gutter = ch,
@@ -979,6 +1001,7 @@ mod tests {
             ("md-monitor_star", c.render_extended, '\u{F0DDC}'),
             ("md-lock_open", c.lock_off, '\u{F033F}'),
             ("md-lock", c.lock_on, '\u{F033E}'),
+            ("md-shoe_print", c.return_probe, '\u{F0DFA}'),
         ] {
             assert_eq!(got, want, "{name} moved: U+{:05X} is not U+{:05X}", got as u32, want as u32);
         }
@@ -1020,9 +1043,14 @@ mod tests {
             ("render_hybrid", c.render_hybrid), ("render_raster", c.render_raster),
             ("render_extended", c.render_extended),
             ("lock_on", c.lock_on), ("lock_off", c.lock_off),
+            ("return_probe", c.return_probe),
         ] {
             assert!(!is_wide_estimate(ch), "control.{slot} = {ch:?} estimates as double-width");
         }
+        // The return probe is Material Design like the rest of the `md-` set, and
+        // it is exempt from the two-states rule above because it HAS one state:
+        // its off-reading is the muted colour, not a second glyph (SQ-0785).
+        assert!(c.return_probe as u32 >= 0xF_0000, "md-shoe_print is Material Design");
     }
 
     /// The PLAIN defaults must be drawable by an ordinary monospace face, so
@@ -1042,6 +1070,7 @@ mod tests {
             ("render_hybrid", c.render_hybrid), ("render_raster", c.render_raster),
             ("render_extended", c.render_extended),
             ("lock_on", c.lock_on), ("lock_off", c.lock_off),
+            ("return_probe", c.return_probe),
         ] {
             assert!(shapes.contains(&(ch as u32)), "control.{slot} = {ch:?} is outside Geometric Shapes");
             assert!(!is_wide_estimate(ch), "control.{slot} = {ch:?} estimates as double-width");
@@ -1053,6 +1082,14 @@ mod tests {
         // Three render modes, three distinct glyphs.
         let modes = [c.render_hybrid, c.render_raster, c.render_extended];
         assert_eq!(modes.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        // …and the return probe's single mark is not any of the others, so it is
+        // still legible as its own control on a border that draws several
+        // (SQ-0785). It has no second state by design — the colour carries that.
+        let all = [
+            c.map_show, c.map_hide, c.band_show, c.band_hide, c.guidance_on, c.guidance_off,
+            c.render_hybrid, c.render_raster, c.render_extended, c.lock_on, c.lock_off,
+        ];
+        assert!(!all.contains(&c.return_probe), "the footprint is its own mark");
     }
 
     /// Every control slot is themeable one glyph at a time, the way every other

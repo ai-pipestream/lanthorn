@@ -396,6 +396,19 @@ pub struct Answer {
     spent: Duration,
 }
 
+/// One moment in the live game, ready to be asked questions about.
+///
+/// The host snapshot and the world print that go with it — two facts about the
+/// same instant, which is why they travel as one value rather than as two
+/// arguments a caller could pair up wrongly. Taken on the caller's thread,
+/// because both are questions about the LIVE engine and it may not cross a
+/// thread; everything after them is the worker's.
+#[derive(Clone, Debug)]
+pub struct ProbeSnapshot {
+    save: crate::engine::EngineSave,
+    baseline: WorldPrint,
+}
+
 /// The worker thread's end of the seam.
 struct Worker {
     jobs: mpsc::Sender<Job>,
@@ -518,20 +531,46 @@ impl ShadowProbe {
     /// because both are questions about the LIVE engine and it may not cross a
     /// thread. Everything after them is the worker's.
     pub fn ask(&mut self, live: &dyn Engine, commands: &[String]) -> Option<u64> {
-        if !self.is_armed() || self.is_busy() || commands.is_empty() || commands.len() > MAX_PROBES
-        {
+        self.ask_from(&self.snapshot(live)?, commands)
+    }
+
+    /// Take the state a question would be asked from, without asking one.
+    ///
+    /// Split out of [`ask`](Self::ask) for a caller that asks SEVERAL questions
+    /// about one moment (SQ-0785): a return search sends one direction at a time
+    /// so that every answered attempt is durable, and re-snapshotting per attempt
+    /// would charge the player's thread for each of them. Measured on Counterfeit
+    /// Monkey in a debug build, one `save_state` is **102 ms** — twelve of those
+    /// is the kind of main-thread cost SQ-1124 exists to have removed, and one is
+    /// not.
+    ///
+    /// The state does go stale as the player keeps playing, and that is the right
+    /// trade rather than a defect to fix: a search reads a snapshot taken the
+    /// moment they arrived, and what it can then get wrong is MISSING a passage
+    /// something they did since has opened. It cannot invent one.
+    ///
+    /// `None` for a suspended VM: snapshotting one would capture it
+    /// mid-file-operation, and the shadow would resume into an I/O request
+    /// nobody can answer.
+    pub fn snapshot(&self, live: &dyn Engine) -> Option<ProbeSnapshot> {
+        if !self.is_armed() || live.is_saveload_pending() {
             return None;
         }
-        // Snapshotting a suspended VM would capture it mid-file-operation, and
-        // the shadow would resume into an I/O request nobody can answer.
-        if live.is_saveload_pending() {
+        Some(ProbeSnapshot { save: live.save_state(), baseline: WorldPrint::of(live) })
+    }
+
+    /// [`ask`](Self::ask), from a snapshot already taken. See
+    /// [`snapshot`](Self::snapshot).
+    pub fn ask_from(&mut self, from: &ProbeSnapshot, commands: &[String]) -> Option<u64> {
+        if !self.is_armed() || self.is_busy() || commands.is_empty() || commands.len() > MAX_PROBES
+        {
             return None;
         }
         let token = self.next_token.wrapping_add(1);
         let job = Job {
             token,
-            save: live.save_state(),
-            baseline: WorldPrint::of(live),
+            save: from.save.clone(),
+            baseline: from.baseline,
             commands: commands.to_vec(),
         };
         self.worker.as_ref()?.jobs.send(job).ok()?;

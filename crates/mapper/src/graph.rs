@@ -42,6 +42,24 @@ pub struct Room {
     /// at most eight long. Absent from older map files, hence `serde(default)`.
     #[serde(default)]
     pub tried: Vec<Direction>,
+    /// Directions a RETURN PROBE has already tried from this room (SQ-0785) — the shadow's
+    /// record, kept strictly apart from [`Room::tried`], which is the player's.
+    ///
+    /// The two answer different questions and must never be merged. `tried` answers "where have
+    /// I not been yet?" and drives [`MapGraph::untried`], which is what the map offers as
+    /// unexplored; a direction a silent copy of the game tried on the player's behalf has not
+    /// been explored by anyone, and folding it in would quietly steer the player away from real
+    /// content. This one answers only "is there any point probing that way again?", and its whole
+    /// job is to stop the search re-walking ground it has already covered.
+    ///
+    /// Marked one attempt at a time, as the search makes them, so an aborted search resumes where
+    /// it stopped rather than starting over. Persisted for the same reason the player's record is:
+    /// the search then converges permanently instead of once per session.
+    ///
+    /// A `Vec` for the same reason as `tried` ([`Direction`] is deliberately not `Ord`), and at
+    /// most twelve long. Absent from older map files, hence `serde(default)`.
+    #[serde(default)]
+    pub probed: Vec<Direction>,
     /// Monotonic discovery order, stamped once by [`MapGraph::upsert_room`] the first time this
     /// room is minted and never touched again (SQ-0685). This — not the room id, which for a
     /// Z-machine game is the story's own object number and has nothing to do with when the player
@@ -336,6 +354,7 @@ impl MapGraph {
                     layer: MAIN_LAYER,
                     loc_method: None,
                     tried: Vec::new(),
+                    probed: Vec::new(),
                     seq,
                 });
             }
@@ -516,6 +535,89 @@ impl MapGraph {
             return Vec::new();
         }
         crate::direction::UNTRIED_DIRS.iter().copied().filter(|d| !self.is_tried(id, *d)).collect()
+    }
+
+    /// Record that a return probe has tried `dir` out of `id` (SQ-0785). Idempotent.
+    ///
+    /// **Not [`MapGraph::mark_tried`], and never a substitute for it.** That is the PLAYER's
+    /// record and it drives [`MapGraph::untried`] — the exits the map still offers. A shadow
+    /// walking a direction on the player's behalf has not explored it, and marking it tried would
+    /// take a real unexplored exit off the map and quietly steer the player away from content.
+    ///
+    /// Called once per attempt, as the search makes it, so an aborted search resumes rather than
+    /// restarts. A no-op for an unknown room.
+    pub fn mark_probed(&mut self, id: RoomId, dir: Direction) {
+        if let Some(r) = self.rooms.get_mut(&id) {
+            if !r.probed.contains(&dir) {
+                r.probed.push(dir);
+            }
+        }
+    }
+
+    /// True when a return probe has already tried `dir` out of `id` (SQ-0785).
+    ///
+    /// Unlike [`MapGraph::is_tried`] this reads the record and nothing else: an edge out is
+    /// evidence about the WORLD, and this field is a record of what the SEARCH has done.
+    /// [`MapGraph::probe_candidates`] consults both, which is the only place they meet.
+    pub fn is_probed(&self, id: RoomId, dir: Direction) -> bool {
+        self.rooms.get(&id).is_some_and(|r| r.probed.contains(&dir))
+    }
+
+    /// Which directions are worth probing out of `room`, best first (SQ-0785).
+    ///
+    /// **The one place the two records meet.** A caller that assembled this from `tried` and
+    /// `probed` itself would be maintaining the rule about which record means what across files,
+    /// which is exactly the shape this repo's refactoring policy names — and the rule is subtle
+    /// enough (the player's record must not be written by a probe; the probe's record must not
+    /// hide an unexplored exit) that a second copy of it is a defect waiting to happen. So the
+    /// filtering AND the order live here, and callers walk the list.
+    ///
+    /// `moved` is the direction the player took to GET here, when their command named one. The
+    /// order is seeded from its opposite, because the way back is overwhelmingly the way you came
+    /// — and then widens rather than stopping there, since these games are full of passages that
+    /// do not reciprocate:
+    ///
+    /// 1. `opposite(moved)`
+    /// 2. the two directions perpendicular to it (±90°)
+    /// 3. the two diagonals adjacent to it (±45°)
+    /// 4. everything else that survives the filter
+    ///
+    /// With no direction to seed from (`climb tree`), there is no opposite and no bearing, so the
+    /// order is simply the likeliest shapes first: cardinals, diagonals, up/down, in/out.
+    /// Steps 2 and 3 are defined by BEARING rather than by a table, so they mean the same thing
+    /// for a diagonal opposite as for a cardinal one; Up/Down/In/Out have no bearing and fall
+    /// through to step 4 together.
+    ///
+    /// Starting at all twelve is deliberate — narrowing is a measurement decision, not a guess.
+    pub fn probe_candidates(&self, room: RoomId, moved: Option<Direction>) -> Vec<Direction> {
+        if !self.rooms.contains_key(&room) {
+            return Vec::new();
+        }
+        let mut order: Vec<Direction> = Vec::with_capacity(crate::direction::PROBE_DIRS.len());
+        let push = |order: &mut Vec<Direction>, d: Direction| {
+            if !order.contains(&d) {
+                order.push(d);
+            }
+        };
+        if let Some(back) = moved.map(crate::direction::opposite).filter(|d| *d != Direction::Unknown)
+        {
+            push(&mut order, back);
+            if let Some(deg) = crate::direction::bearing(back) {
+                // `[+270, +90, +315, +45]`, so the pairs come out in the order the quest names
+                // them for a southward opposite: south, EAST, WEST, then SOUTH-EAST, SOUTH-WEST.
+                // Within a pair the choice is arbitrary but it must be FIXED, or a resumed search
+                // walks a different order than the one that was interrupted.
+                for turn in [270, 90, 315, 45] {
+                    if let Some(d) = crate::direction::from_bearing((deg + turn) % 360) {
+                        push(&mut order, d);
+                    }
+                }
+            }
+        }
+        for d in crate::direction::PROBE_DIRS {
+            push(&mut order, d);
+        }
+        order.into_iter().filter(|d| !self.is_tried(room, *d) && !self.is_probed(room, *d)).collect()
     }
 
     /// Test-only: drop a room's recorded attempts, to stand in for a map file written before
@@ -957,6 +1059,7 @@ mod tests {
             layer: MAIN_LAYER,
             loc_method: None,
             tried: Vec::new(),
+            probed: Vec::new(),
             seq: ROOM_SEQ_MISSING,
         };
         let rooms = vec![mk(5), mk(2), mk(9)];
@@ -985,6 +1088,7 @@ mod tests {
             layer: MAIN_LAYER,
             loc_method: None,
             tried: Vec::new(),
+            probed: Vec::new(),
             seq,
         };
         // Array order (2, 1) deliberately disagrees with seq order (1, 0): if the backfill fired
@@ -994,5 +1098,101 @@ mod tests {
         assert_eq!(g.room(2).unwrap().seq, 1, "the real seq is untouched");
         assert_eq!(g.room(1).unwrap().seq, 0);
         assert_eq!(g.next_seq(), 2, "the persisted next_seq is honoured as-is");
+    }
+}
+
+/// The return probe's own record, and the one accessor that reads it beside the player's
+/// (SQ-0785).
+#[cfg(test)]
+mod probe_record_tests {
+    use super::*;
+    use crate::direction::Direction;
+
+    fn two_rooms() -> MapGraph {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Behind House".into());
+        g.upsert_room(2, "Kitchen".into());
+        g
+    }
+
+    /// The whole reason the field exists: a direction the SHADOW walked must not stop the map
+    /// offering it to the PLAYER. Falsify by routing `mark_probed` into `mark_tried` and this
+    /// fails on the `untried` line — which is the exact defect it guards against.
+    #[test]
+    fn a_probed_direction_is_still_an_unexplored_exit() {
+        let mut g = two_rooms();
+        g.mark_probed(2, Direction::N);
+        assert!(g.is_probed(2, Direction::N));
+        assert!(!g.is_tried(2, Direction::N), "the player's record is untouched");
+        assert!(
+            g.untried(2).contains(&Direction::N),
+            "north is still on the frontier the map offers: {:?}",
+            g.untried(2)
+        );
+        g.mark_probed(2, Direction::N);
+        assert_eq!(g.room(2).unwrap().probed.len(), 1, "idempotent");
+        g.mark_probed(404, Direction::N); // an unknown room does not panic
+    }
+
+    /// An edge out proves the world; the probed list records the search. `is_probed` reads only
+    /// the record, so a passage the player walked is not mistaken for ground the search covered.
+    #[test]
+    fn is_probed_reads_the_record_and_not_the_edges() {
+        let mut g = two_rooms();
+        g.add_edge(2, Direction::E, 1);
+        assert!(g.is_tried(2, Direction::E), "an edge out is tried by definition");
+        assert!(!g.is_probed(2, Direction::E), "but the search has not been that way");
+    }
+
+    /// The priority order, on the headline shape: the player walked NORTH into room 2, so the
+    /// search starts with SOUTH, then the perpendiculars, then the diagonals beside south.
+    #[test]
+    fn candidates_lead_with_the_way_back_then_widen_by_bearing() {
+        let g = two_rooms();
+        let c = g.probe_candidates(2, Some(Direction::N));
+        assert_eq!(c.len(), 12, "all twelve to begin with: {c:?}");
+        assert_eq!(c[0], Direction::S, "the opposite of the move");
+        assert_eq!(
+            c[..5],
+            [Direction::S, Direction::E, Direction::W, Direction::SE, Direction::SW],
+            "the way back, its two perpendiculars, then the two diagonals beside it: {c:?}"
+        );
+        // The bearing arithmetic must mean the same thing for a diagonal opposite.
+        let d = g.probe_candidates(2, Some(Direction::NW));
+        assert_eq!(
+            d[..5],
+            [Direction::SE, Direction::NE, Direction::SW, Direction::E, Direction::S],
+            "±90° then ±45° of southeast, by the same arithmetic: {d:?}"
+        );
+    }
+
+    /// `enter window` parses as In, so its opposite is Out and it is treated as directional.
+    /// A command that names no direction at all has no bearing to seed from and falls back to
+    /// cardinals → diagonals → up/down → in/out.
+    #[test]
+    fn a_move_with_no_direction_falls_back_to_the_plain_order() {
+        let g = two_rooms();
+        assert_eq!(g.probe_candidates(2, Some(Direction::In))[0], Direction::Out);
+        let c = g.probe_candidates(2, None);
+        assert_eq!(c, crate::direction::PROBE_DIRS.to_vec());
+        assert_eq!(c[..4], [Direction::N, Direction::E, Direction::S, Direction::W]);
+        assert_eq!(c[8..], [Direction::Up, Direction::Down, Direction::In, Direction::Out]);
+    }
+
+    /// Both records filter, and the order survives the filtering. An unknown room offers
+    /// nothing rather than twelve directions into the void.
+    #[test]
+    fn candidates_are_filtered_by_both_records() {
+        let mut g = two_rooms();
+        g.mark_tried(2, Direction::S); // the player walked into a wall going back
+        g.mark_probed(2, Direction::E); // the search has already tried east
+        g.add_edge(2, Direction::W, 1); // and west is a known passage
+        let c = g.probe_candidates(2, Some(Direction::N));
+        for gone in [Direction::S, Direction::E, Direction::W] {
+            assert!(!c.contains(&gone), "{gone:?} should be filtered out of {c:?}");
+        }
+        assert_eq!(c.len(), 9);
+        assert_eq!(c[0], Direction::SE, "the surviving head of the priority order");
+        assert!(g.probe_candidates(404, None).is_empty());
     }
 }

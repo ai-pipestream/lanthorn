@@ -1248,6 +1248,23 @@ pub fn poll_vocabulary_offer(state: &mut AppState) -> bool {
     deliver(state, answer)
 }
 
+/// True when `token` answers a question THIS consumer asked.
+///
+/// The shadow is shared — [`crate::return_probe`] asks it too (SQ-0785) — and it
+/// hands back one answer at a time with no idea who wanted it. So the event
+/// loop's single collector routes by token
+/// (`loop_tick::poll_shadow_answers`) rather than letting each consumer
+/// poll in turn: a consumer that polls and finds an answer it does not own has
+/// already taken it off the channel, and the one that did want it never sees it.
+pub fn owns(state: &AppState, token: u64) -> bool {
+    state.vocab_pending.as_ref().is_some_and(|p| p.token == token)
+}
+
+/// [`deliver`] for the router, which has already matched the token.
+pub fn deliver_answer(state: &mut AppState, answer: crate::probe::Answer) -> bool {
+    deliver(state, answer)
+}
+
 // The wrap cache, and why the late insert does not defer to a keystroke gap.
 //
 // An insert above the prompt moves a line the cache has already wrapped, so it

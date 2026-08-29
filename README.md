@@ -133,6 +133,10 @@ itself.**
   C bindings. → [interpreter](docs/features/interpreter.md)
 - **A map that draws itself** — rooms placed, routed and de-overlapped as you
   explore, across switchable layers. Click a room and it shows you the way there.
+  *Coming next release:* switch on the return probe and it will go and **find
+  the way back** for you, in a silent throwaway copy of your game — closing the
+  one-way gaps an automap is otherwise full of, and never once assuming that a
+  passage runs both ways.
   → [mapping](docs/features/mapping.md)
 - **The original disks, as the original machines** — hand it an Amiga, Macintosh,
   Apple II, Atari ST, PC or Commodore floppy and it plays the build on that disk,

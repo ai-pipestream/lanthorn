@@ -303,7 +303,49 @@ graphics off, no Blorb, a read-only store it may never write, and an in-game
 `@save`/`@restore` or a Glk filename prompt inside a probe is answered *failed*
 so the VM unwinds where it stands. `app::vocab` is the first consumer (SQ-1121,
 vetting a suggestion before it is offered); SQ-1043's irreversible-move caution
-is meant to be the second, and should extend this rather than grow its own.
+is meant to be the third, and should extend this rather than grow its own.
+
+### The second consumer: the return probe (SQ-0785)
+
+`app::return_probe` asks the shadow a structurally different question — *am I
+back where I started?* — and everything that differs between the two consumers
+follows from that.
+
+- **It reads a room number, not prose.** Success is `step.location == origin`,
+  the same `snap.number` `session::apply_turn` keys rooms by, so none of the
+  `Refusals` machinery above applies. Landing *somewhere* is not landing back: a
+  probe that comes out in a third room records the attempt and nothing else — no
+  edge, no room, no trace it was seen — because an invented edge is worse than
+  the gap it replaced.
+- **Its answers are never stale.** SQ-1124 drops an answer whose `turn_epoch`
+  has moved, because a vocabulary suggestion is about *this* turn. "South from
+  here returns to A" is about the *map*, so it is recorded whenever it lands. A
+  new **move** does end the search — the move may itself be the walk back — and
+  that is a different rule from staleness.
+- **One snapshot serves the whole search.** Attempts go out one at a time so each
+  answer is durable (`MapGraph::mark_probed`, one direction per answer, so an
+  aborted search resumes rather than restarts), and `ShadowProbe::snapshot` is
+  split out of `ask` so the player's thread pays for one host snapshot per search
+  instead of one per attempt — 102 ms each on Counterfeit Monkey in a debug
+  build, and twelve of those is exactly the main-thread cost SQ-1124 removed.
+- **The edge goes in through the mapper's own door.** `Mapper::mint_passage` is
+  the extracted body of `observe_inner`'s minting branch, and both a walked
+  crossing and `Mapper::record_probed_passage` call it — one path, so the two
+  cannot drift in shape, in `?`-stub hygiene, or in placement. What the probe
+  path skips is everything about the *player*: the current pointer, `arrived_via`
+  and the layer suggestion. `ProbedPassage` carries the three facts as one value
+  and deliberately cannot name the outbound passage, which is how reciprocity is
+  made unwriteable rather than merely unwritten.
+- **Two consumers, one channel, one collector.** `ShadowProbe::poll` takes
+  whatever has arrived without knowing who wanted it, so a consumer polling for
+  itself would sometimes take the other's answer off the channel and drop it.
+  `loop_tick::poll_shadow_answers` collects once and routes by token.
+
+Measured per attempt, worker time, debug build: Zork I **0.7 ms**, Coloratura
+**4.3 ms**, Counterfeit Monkey **343 ms**. In play the priority order usually
+stops at the first success — Zork I's North of House takes three commands
+(2.7 ms), Counterfeit Monkey's Back Alley one (407 ms). `cargo run -p app
+--example return_probe_cost` is the instrument.
 
 ## Reading back the bytes we actually emit
 

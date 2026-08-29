@@ -27,6 +27,33 @@ pub struct Mapper {
     pub(crate) pending_suggestion: Option<LayerSuggestion>,
 }
 
+/// One passage a return probe walked: out of `from`, heading `dir`, arriving in `to` (SQ-0785).
+///
+/// Three facts that are only meaningful together, so they travel together rather than as three
+/// arguments — and the shape of the value is itself the guarantee the feature rests on.
+///
+/// **It cannot express reciprocity.** A search launched after `enter window` discovers that EAST
+/// takes you back; the two facts that produces are a TRAVERSAL — the way in is still `enter
+/// window`, the command the player actually typed — and a GEOMETRY, that the room they are in
+/// sits west of the one they left. Both are carried by this one value and neither can be
+/// mistaken for the other, because it names only the passage that was walked: `Kitchen --E-->
+/// Behind House`. There is no field in which "and therefore WEST works from Behind House" could
+/// be written, which is exactly the invention this feature exists not to make. The geometry
+/// follows from the edge, through the ordinary layout the edge is fed to.
+///
+/// Plain data — three `Copy` scalars — because it crosses a thread boundary: the search runs on
+/// the shadow's worker and the graph does not, so what comes back is what was DISCOVERED and
+/// never a graph mutation to replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbedPassage {
+    /// The room the shadow started in — the room the player is standing in.
+    pub from: RoomId,
+    /// The direction it walked out of `from`.
+    pub dir: Direction,
+    /// The room it arrived in — the room the player had just left.
+    pub to: RoomId,
+}
+
 impl Mapper {
     /// A mapper around a graph loaded from a save. Both of the fields beside the graph describe the
     /// CURRENT session — the passage just walked, and what the map made of it — and a restore has
@@ -89,12 +116,7 @@ impl Mapper {
                 if location != prev_id {
                     let edge_dir = via.unwrap_or(Direction::Unknown);
                     self.arrived_via = via.map(|d| (prev_id, d));
-                    self.graph.add_edge(prev_id, edge_dir, location);
-                    // Drop a now-redundant `?` stub: fires whether the Unknown came first and a
-                    // directional move just followed, or a directional edge already existed and
-                    // this move was Unknown. Edge hygiene is independent of layout mode. (SQ-0220)
-                    self.graph.collapse_unknown_edges();
-                    place_incremental(&mut self.graph, prev_id, location, edge_dir);
+                    self.mint_passage(prev_id, edge_dir, location);
                     // Only now, with the passage minted and both rooms placed, does the map have
                     // enough to judge the crossing by (SQ-0439).
                     self.pending_suggestion = crate::suggest::on_arrival(
@@ -117,6 +139,64 @@ impl Mapper {
         self.graph.set_current(location);
         // Re-evaluate distortion over the whole graph (cheap); no relayout.
         mark_distorted(&mut self.graph, &BTreeSet::new());
+    }
+
+    /// Mint one passage and lay its far end out: the whole of what recording a crossing does to
+    /// the GRAPH, and the only place any of it happens.
+    ///
+    /// Extracted so that a passage a RETURN PROBE discovered (SQ-0785) and a passage the player
+    /// walked cannot differ — not in the edge, not in the `?`-stub hygiene that follows it, and
+    /// not in the placement. Two code paths that both "record an edge" are two paths that drift;
+    /// after the fact there is no such thing as a probed passage anyway, only a passage, because
+    /// the map's claim is "this way leads there" and not "this is how we found out".
+    ///
+    /// What is NOT here is everything that is about the PLAYER rather than the map: who is
+    /// standing where ([`MapGraph::set_current`]), which passage they just walked
+    /// (`arrived_via`), and whether the crossing was worth remarking on (`pending_suggestion`).
+    /// A probe moves nobody and crosses nothing, so it wants exactly this and none of that.
+    fn mint_passage(&mut self, from: RoomId, dir: Direction, to: RoomId) {
+        self.graph.add_edge(from, dir, to);
+        // Drop a now-redundant `?` stub: fires whether the Unknown came first and a
+        // directional move just followed, or a directional edge already existed and
+        // this move was Unknown. Edge hygiene is independent of layout mode. (SQ-0220)
+        self.graph.collapse_unknown_edges();
+        place_incremental(&mut self.graph, from, to, dir);
+    }
+
+    /// Record a passage a return probe found: `dir` out of `from` leads to `to` (SQ-0785).
+    ///
+    /// Goes through [`Mapper::mint_passage`], the same call a walked crossing makes, so the edge
+    /// is indistinguishable from one the player walked — which is what it is. It persists,
+    /// routes, lays out and draws as one, and a save/restore brings it back as one.
+    ///
+    /// Three things it deliberately does NOT do, each of which would be a lie:
+    ///
+    /// * it does not move [`MapGraph::set_current`] — the player is still standing in `from`;
+    /// * it does not touch `arrived_via` — nobody walked anything;
+    /// * it does not mark `dir` TRIED in `from`. The player has not tried it. The SEARCH has, and
+    ///   that is [`MapGraph::mark_probed`]'s record, written by the caller per attempt.
+    ///
+    /// Returns false — recording nothing — when either room is unknown to the map, when `dir` is
+    /// [`Direction::Unknown`] (a probe always walks a named direction), or when a passage already
+    /// leaves `from` that way. **That last one is the race**: the player may have walked the way
+    /// back themselves while the search was running, and a real traversal is the better authority
+    /// on its own passage, so the probe's answer stands down rather than overwriting or
+    /// duplicating it.
+    pub fn record_probed_passage(&mut self, passage: ProbedPassage) -> bool {
+        let ProbedPassage { from, dir, to } = passage;
+        if dir == Direction::Unknown
+            || from == to
+            || self.graph.room(from).is_none()
+            || self.graph.room(to).is_none()
+            || self.graph.connections().iter().any(|c| c.origin == from && c.dir == dir)
+        {
+            return false;
+        }
+        self.mint_passage(from, dir, to);
+        // The same whole-graph distortion pass `observe_inner` ends on. A new edge can make an
+        // existing placement inconsistent, and the drawn map reads `distorted` per connection.
+        mark_distorted(&mut self.graph, &BTreeSet::new());
+        true
     }
 
     /// The passage the player last walked to reach the current room — `(room left,
@@ -560,5 +640,126 @@ mod untried_tests {
         m.observe(2, "Cave", Some(Direction::N));
         m.graph.room_mut_tried_clear_for_test(1);
         assert!(!m.graph.untried(1).contains(&Direction::N), "the N edge out of #1 says it was walked");
+    }
+}
+
+/// A passage a return probe discovered goes in through the same door a walked one does
+/// (SQ-0785), and stays out of everything that is about the player rather than the map.
+#[cfg(test)]
+mod probed_passage_tests {
+    use super::*;
+
+    /// Behind House, `enter window`, Kitchen — then the shadow finds that EAST comes back.
+    ///
+    /// The map gains `Kitchen --E--> Behind House` and nothing else: the outbound passage keeps
+    /// the traversal the player actually used, and nothing anywhere claims that WEST works from
+    /// Behind House. That claim is reciprocity in a new costume, and the value the crossing
+    /// carries cannot express it — `record_probed_passage` names only the passage it walked.
+    #[test]
+    fn a_discovered_return_leaves_the_outbound_traversal_alone() {
+        let mut m = Mapper::default();
+        m.observe(1, "Behind House", None);
+        m.observe(2, "Kitchen", Some(Direction::In)); // `enter window` parses as In
+        assert_eq!(m.graph.current(), Some(2));
+
+        assert!(m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::E, to: 1 }));
+        assert!(
+            m.graph.connections().iter().any(|c| c.origin == 2 && c.dir == Direction::E && c.dest == 1),
+            "the way back is on the map: {:?}",
+            m.graph.connections()
+        );
+        assert!(
+            !m.graph.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::W),
+            "and west out of Behind House was NOT invented: {:?}",
+            m.graph.connections()
+        );
+        assert!(
+            m.graph.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::In && c.dest == 2),
+            "the outbound passage is still the one the player used"
+        );
+    }
+
+    /// A probe moves nobody and crosses nothing, so none of the player-facing state moves with
+    /// the edge — and in particular the direction is not marked TRIED, which would take a real
+    /// unexplored exit off the map.
+    #[test]
+    fn recording_a_probed_passage_moves_neither_the_player_nor_the_frontier() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        let arrived = m.arrived_via();
+        let _ = m.take_suggestion();
+
+        assert!(m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::S, to: 1 }));
+        assert_eq!(m.graph.current(), Some(2), "the player is still in the room they are in");
+        assert_eq!(m.arrived_via(), arrived, "nobody walked anything");
+        assert!(m.take_suggestion().is_none(), "and there was no crossing to remark on");
+        assert!(
+            !m.graph.room(2).unwrap().tried.contains(&Direction::S),
+            "the PLAYER's record is untouched"
+        );
+    }
+
+    /// The race the search has to lose: the player may walk the way back themselves while it is
+    /// running. A real traversal is the better authority on its own passage, so the answer that
+    /// lands afterwards is a no-op — not an overwrite, not a duplicate.
+    #[test]
+    fn a_passage_the_player_already_walked_wins_the_race() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        m.observe(1, "Hall", Some(Direction::S)); // the player walked back themselves
+        let before = m.graph.connections().to_vec();
+
+        assert!(!m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::S, to: 1 }), "the probe stands down");
+        assert_eq!(m.graph.connections(), before.as_slice(), "and changed nothing at all");
+
+        // Even when the probe's answer DISAGREES about where south goes, the walked edge stands.
+        m.graph.upsert_room(3, "Attic".into());
+        assert!(!m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::S, to: 3 }));
+        assert_eq!(m.graph.connections(), before.as_slice());
+    }
+
+    /// The refusals that are not about the race: an unknown room, a self-passage, and the
+    /// `?` bucket — a probe always walks a direction it named.
+    #[test]
+    fn a_probed_passage_refuses_what_it_cannot_honestly_record() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        assert!(!m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::Unknown, to: 1 }));
+        assert!(!m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::S, to: 2 }));
+        assert!(!m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::S, to: 404 }));
+        assert!(!m.record_probed_passage(ProbedPassage { from: 404, dir: Direction::S, to: 1 }));
+        assert_eq!(m.graph.connections().len(), 1, "still only the walked edge");
+    }
+
+    /// After the fact there is no such thing as a probed passage, only a passage — so it must
+    /// survive the archive exactly as a walked one does, through the same save path, and come
+    /// back indistinguishable from it.
+    #[test]
+    fn a_discovered_passage_round_trips_the_archive_as_an_ordinary_one() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        m.graph.mark_probed(2, Direction::E); // an attempt that failed, on the record
+        assert!(m.record_probed_passage(ProbedPassage { from: 2, dir: Direction::S, to: 1 }));
+
+        let back = crate::persist::from_json(&crate::persist::to_json(&m)).expect("round trip");
+        let g = back.graph;
+        let walked: Vec<_> =
+            g.connections().iter().filter(|c| c.origin == 1 && c.dir == Direction::N).collect();
+        let found: Vec<_> =
+            g.connections().iter().filter(|c| c.origin == 2 && c.dir == Direction::S).collect();
+        assert_eq!(walked.len(), 1);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].dest, 1);
+        assert_eq!(
+            (found[0].distorted, found[0].dir == Direction::S),
+            (walked[0].distorted, true),
+            "nothing on the connection says how it was found"
+        );
+        assert!(g.is_probed(2, Direction::E), "and the search's own progress came back with it");
+        assert!(!g.is_probed(2, Direction::W));
     }
 }

@@ -510,3 +510,45 @@ pub(crate) fn expire_sound_and_settle_dock(state: &mut AppState) -> bool {
 
     redraw
 }
+
+/// Collect one answer from the shared shadow and give it to whoever asked for it,
+/// then let the return search hand out its next question (SQ-0785).
+///
+/// **One collector, because there is one channel.** [`app::probe::ShadowProbe`]
+/// serves two consumers — the vocabulary offer and the return search — and
+/// [`app::probe::ShadowProbe::poll`] takes whatever has arrived without knowing
+/// who wanted it. Two consumers each polling for themselves would mean the first
+/// one to look takes the other's answer off the channel and drops it, silently
+/// and only sometimes. So the answer is collected here, once, and routed by the
+/// token it carries.
+///
+/// The pump runs after the route, so a search whose attempt has just come back
+/// asks its next question on the same pass rather than idling a frame per
+/// direction.
+pub(crate) fn poll_shadow_answers(
+    state: &mut AppState,
+    mapper: &mut Mapper,
+    bg_tidy_counter: &mut u32,
+) -> bool {
+    let mut changed = false;
+    if let Some(answer) = state.probe.poll() {
+        if app::vocab::owns(state, answer.token) {
+            changed |= app::vocab::deliver_answer(state, answer);
+        } else if app::return_probe::owns(state, answer.token)
+            && app::return_probe::deliver(state, mapper, &answer).is_some()
+        {
+            // A new passage is a geometry change, so it gets everything a walked
+            // one gets: the render memo invalidated, the layout rescheduled, and
+            // a redraw. An edge nobody lays out or draws is a discovery the
+            // player never sees.
+            state.graph_gen = state.graph_gen.wrapping_add(1);
+            crate::turn::schedule_map_maintenance(state, mapper, false, true, bg_tidy_counter);
+            changed = true;
+        }
+        // An answer nobody owns is one whose asker has moved on — an aborted
+        // search, or a vocabulary offer the player typed past. Dropping it is the
+        // silence discipline both consumers already have.
+    }
+    app::return_probe::pump_return_search(state);
+    changed
+}

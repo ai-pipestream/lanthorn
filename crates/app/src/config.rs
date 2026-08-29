@@ -1146,6 +1146,7 @@ pub mod keys {
     pub const INTERPRETER_NUMBER: &str = "interpreter_number";
     pub const V6_PIXEL_LOCK: &str = "v6_pixel_lock";
     pub const GUIDANCE: &str = "guidance";
+    pub const RETURN_PROBE: &str = "return_probe";
     pub const V6_RENDER: &str = "v6_render";
     pub const SYSTEM_FONT_DISK: &str = "system_font_disk";
     pub const SYSTEM_COLOURS: &str = "system_colours";
@@ -1376,6 +1377,25 @@ pub struct Config {
     /// recommending anything (see `crate::vocab`).
     #[serde(default = "default_true")]
     pub guidance_probe: bool,
+    /// After a move, discover the way BACK in a silent copy of the game, so the
+    /// automap closes one-way gaps without inventing reciprocity (SQ-0785).
+    ///
+    /// **Off by default** — the first switch here that is. It runs the player's
+    /// game a few extra turns in private after every move that opens a gap, and
+    /// that is a thing to opt into rather than to discover having happened. The
+    /// map-pane control is drawn whether it is on or off (muted when off) for
+    /// exactly that reason: a feature nobody has seen lit is a feature nobody
+    /// turns on.
+    ///
+    /// Not part of [`guidance`](Self::guidance), and not part of
+    /// [`guidance_probe`](Self::guidance_probe) either: neither of those speaks to
+    /// the player, and this one does not speak at all. It edits the MAP.
+    ///
+    /// `/set-return-probe` says it mid-game and persists it per-game, which is
+    /// where a preference about how much work a particular story is worth
+    /// belongs.
+    #[serde(default)]
+    pub return_probe: bool,
     /// Keep [`adult_words`](Self::adult_words) out of any panel that ENUMERATES
     /// a story's vocabulary unprompted (SQ-1122). Default true.
     ///
@@ -1926,6 +1946,7 @@ impl Default for Config {
             hint_skip_screen_warning: true,
             guidance: true,
             guidance_probe: true,
+            return_probe: false,
             hide_adult_words: true,
             adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::EveryRoom,
@@ -2058,6 +2079,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.hint_skip_screen_warning = from_file.hint_skip_screen_warning;
             cfg.guidance = from_file.guidance;
             cfg.guidance_probe = from_file.guidance_probe;
+            cfg.return_probe = from_file.return_probe;
             cfg.hide_adult_words = from_file.hide_adult_words;
             cfg.adult_words = from_file.adult_words;
             cfg.background_tidy = from_file.background_tidy;
@@ -2402,6 +2424,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
     doc.put("guidance", cfg.guidance.into(), cfg.guidance == def.guidance);
     doc.put("guidance_probe", cfg.guidance_probe.into(), cfg.guidance_probe == def.guidance_probe);
+    doc.put("return_probe", cfg.return_probe.into(), cfg.return_probe == def.return_probe);
     doc.put("hide_adult_words", cfg.hide_adult_words.into(), cfg.hide_adult_words == def.hide_adult_words);
     // The LIST is the one setting lanthorn seeds LIVE rather than commented
     // (SQ-1122), so `put`'s "always update a key the file already has" half keeps
@@ -3303,6 +3326,7 @@ use_defaults = false
             hint_skip_screen_warning: true,
             guidance: true,
             guidance_probe: true,
+            return_probe: false,
             hide_adult_words: true,
             adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::OnOverlap,

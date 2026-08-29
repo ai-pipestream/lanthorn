@@ -123,6 +123,7 @@ pub enum SlashOutcome {
     /// live and is persisted in the per-game `config.toml` sidecar, never the
     /// global one. Handled in `slash_dispatch` (mutates `state.config.guidance`).
     SetGuidance(GuidanceArg),
+    SetReturnProbe(ReturnProbeArg),
     /// Re-run the first-run font check (SQ-1104): the two-row comparison that
     /// asks whether this terminal's font draws the Nerd Font icon glyphs. Opens
     /// the modal; the answer writes preset names into `style.toml` and reloads
@@ -165,6 +166,22 @@ pub enum GuidanceArg {
     /// Put it out for this game.
     Off,
     /// Clear the per-game override: inherit the global `guidance`.
+    Auto,
+    /// Flip whatever is in force, and persist the result for this game.
+    Toggle,
+}
+
+/// Argument for `set-return-probe`. The same four states [`GuidanceArg`] carries,
+/// and for the same reason: the bare form flips the LIVE value, which is not the
+/// same request as `Auto` — clearing this game's override so the global setting
+/// decides again (SQ-0785).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReturnProbeArg {
+    /// Look for the way back, for this game.
+    On,
+    /// Stop looking, for this game.
+    Off,
+    /// Clear the per-game override: inherit the global `return_probe`.
     Auto,
     /// Flip whatever is in force, and persist the result for this game.
     Toggle,
@@ -524,6 +541,15 @@ pub static COMMANDS: &[CommandSpec] = &[
             Some("off")  => SlashOutcome::SetGuidance(GuidanceArg::Off),
             Some("auto") => SlashOutcome::SetGuidance(GuidanceArg::Auto),
             Some(s) => err(format!("set-guidance: unknown argument '{s}' (on | off | auto, or bare to toggle)")),
+        } },
+    CommandSpec { name: "set-return-probe", category: Category::Style, context: Context::Global,
+        usage: "set-return-probe [on|off|auto]", description: "after a move, look for the way back in a silent copy of the game and put it on the map — bare toggles, auto inherits the global setting; persisted per-game",
+        dispatch: |a| match a.first().copied() {
+            None         => SlashOutcome::SetReturnProbe(ReturnProbeArg::Toggle),
+            Some("on")   => SlashOutcome::SetReturnProbe(ReturnProbeArg::On),
+            Some("off")  => SlashOutcome::SetReturnProbe(ReturnProbeArg::Off),
+            Some("auto") => SlashOutcome::SetReturnProbe(ReturnProbeArg::Auto),
+            Some(s) => err(format!("set-return-probe: unknown argument '{s}' (on | off | auto, or bare to toggle)")),
         } },
     CommandSpec { name: "run-font-check", category: Category::Style, context: Context::Global,
         usage: "run-font-check", description: "ask which of two glyph rows your terminal's font draws properly, and set the map's arrow, portal and Guiding Light icons from the answer (writes style.toml)",
@@ -1062,7 +1088,9 @@ mod tests {
         // SQ-1045 added `set-guidance`, the switch for Lanthorn's Guiding Light —
         // the assist set as a whole, not one feature of it.
         // SQ-1104 added `run-font-check`, the re-runnable first-run font check.
-        assert_eq!(COMMANDS.len(), 82, "registry must match the spec's Full command table");
+        // SQ-0785 added `set-return-probe`, the switch for the automap's search
+        // for the way back — the sixth border control and the first off-by-default.
+        assert_eq!(COMMANDS.len(), 83, "registry must match the spec's Full command table");
     }
 
     /// SQ-0796: `Category::ORDER` must list every category, or a whole group of

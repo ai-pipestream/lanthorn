@@ -26,6 +26,8 @@ mod anchor_room_detection;
 mod command_band;
 #[path = "suites/border_controls.rs"]
 mod border_controls;
+#[path = "suites/return_probe.rs"]
+mod return_probe;
 #[path = "suites/matrix_path_highlight.rs"]
 mod matrix_path_highlight;
 #[path = "suites/matrix_view.rs"]
