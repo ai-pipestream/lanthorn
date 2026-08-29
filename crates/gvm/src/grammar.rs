@@ -48,6 +48,36 @@
 //                     short    verb number
 //                     short    unused
 //
+// ── The verb number is inverted, and from *which* base is a version fact ─────
+//
+// A dictionary record does not hold a verb's grammar-table index; it holds that
+// index subtracted from a base, so that verbs count DOWN from the top of the
+// field (`text.c`: "The verb number is inverted (we count down from $FF/$FFFF)
+// and stored in #dict_par2"). On the Z-machine the base has always been $FF,
+// because the field is one byte. Glulx widened the field to two bytes — but for
+// its first decade the compiler kept writing the Z-machine's $FF into it, so
+// only the low half was ever used and no Glulx story could hold more than 255
+// verbs. `Inform6/verbs.c` through **v6.31**:
+//
+//     dictionary_add(English_verbs_given[i], …, 0xff-Inform_verb, 0);
+//     dictionary_set_verb_number(token_text, 0xff-no_Inform_verbs);
+//
+// **Inform 6.32 widened it**, and the same line reads:
+//
+//     (glulx_mode)?(0xffff-Inform_verb):(0xff-Inform_verb), 0);
+//
+// which is where it still is on master, moved into
+// `text.c::dictionary_set_verb_number`:
+//
+//     int flag2 = ((glulx_mode)?(0xffff-infverb):(0xff-infverb));
+//
+// So a Glulx dictionary uses one of exactly two bases, and which one is a
+// property of the compiler that built the file rather than of the format. See
+// [`verb_number_base`] for how this module decides between them — by checking
+// both against the grammar table's own verb count, which is decidable rather
+// than guessed, instead of trusting the "6.21"/"6.33" string Inform stamps into
+// its header block.
+//
 // Plotkin: "This is nearly identical to the grammar version 2 format in
 // Z-machine Inform. The only differences are that the token data is 4 bytes
 // long, and the switch flag is no longer stuck in the action number." Token
@@ -136,6 +166,13 @@ const DICT_STRIDE_RANGE: std::ops::RangeInclusive<u32> = 8..=80;
 const MAX_VERBS: u32 = 20_000;
 const MAX_ACTIONS: u32 = 8_000;
 
+/// The base a Glulx dictionary's verb numbers count down from, since Inform
+/// 6.32 (`Inform6/text.c::dictionary_set_verb_number`).
+const VERB_BASE_WIDE: u32 = 0xFFFF;
+/// The base Inform used in Glulx mode through v6.31 — the Z-machine's, written
+/// into the low half of the two-byte field (`Inform6/verbs.c`).
+const VERB_BASE_NARROW: u32 = 0xFF;
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 /// Why a Glulx story's grammar could not be read.
@@ -206,6 +243,7 @@ pub struct Grammar {
     prepositions: Vec<String>,
     roles: BTreeMap<String, WordRoles>,
     action_routines: Vec<u32>,
+    verb_base: u32,
 }
 
 impl Grammar {
@@ -214,12 +252,17 @@ impl Grammar {
         let tables = locate(mem)?;
         let words = read_dictionary(mem, &tables)?;
 
+        let verb_base = verb_number_base(&words, tables.verb_count);
+
         let mut roles = BTreeMap::new();
         let mut spellings: BTreeMap<u32, Vec<String>> = BTreeMap::new();
         for w in &words {
             roles.insert(w.text.clone(), w.roles);
             if w.roles.verb {
-                spellings.entry(w.verb_number).or_default().push(w.text.clone());
+                let Some(n) = verb_base.checked_sub(w.verb_field) else {
+                    continue;
+                };
+                spellings.entry(n).or_default().push(w.text.clone());
             }
         }
 
@@ -251,7 +294,16 @@ impl Grammar {
             action_routines.push(read32(mem, tables.actions + 4 + i * 4)?);
         }
 
-        Ok(Grammar { tables, verbs, by_word, prepositions, roles, action_routines })
+        Ok(Grammar { tables, verbs, by_word, prepositions, roles, action_routines, verb_base })
+    }
+
+    /// The base this story's dictionary counts verb numbers down from — $FFFF
+    /// for Inform 6.32 and later, $FF for anything earlier. Not a table
+    /// address, so it is not part of [`Tables`]; it is a reading of the
+    /// dictionary's contents, and worth quoting in a finding because a story
+    /// read with the wrong one has verbs and no verb WORDS.
+    pub fn verb_number_base(&self) -> u32 {
+        self.verb_base
     }
 
     /// Where the tables were found. Also reachable without reading them, via
@@ -475,7 +527,41 @@ struct DictWord {
     address: u32,
     text: String,
     roles: WordRoles,
-    verb_number: u32,
+    /// `#dict_par2` exactly as stored — the verb's grammar-table index
+    /// subtracted from a base this record cannot name. See
+    /// [`verb_number_base`].
+    verb_field: u32,
+}
+
+/// Which base this file's verb numbers count down from — [`VERB_BASE_WIDE`] or
+/// [`VERB_BASE_NARROW`]; see the module header for why there are two.
+///
+/// Decided from the file rather than from the compiler-version string Inform
+/// stamps into its header block, because it is *decidable*: the grammar table
+/// states how many verbs it holds, so a base is right only if every
+/// verb-flagged dictionary record names one of them. The two acceptance windows
+/// cannot overlap — [`MAX_VERBS`] is far below `VERB_BASE_WIDE -
+/// VERB_BASE_NARROW` — so at most one base can pass, and the answer is a check
+/// rather than a preference.
+///
+/// A file where neither passes falls back to the modern base, which is what
+/// this module read before it knew about the other one: those records then name
+/// no verb and attach no spelling, exactly as they did. Refusing outright would
+/// turn a story whose dictionary merely holds one odd record into a story with
+/// no grammar at all, and the tables here have already been verified end to end
+/// by [`locate`] — an unreadable verb number falsifies nothing about them.
+fn verb_number_base(words: &[DictWord], verb_count: u32) -> u32 {
+    let fits = |base: u32| {
+        words
+            .iter()
+            .filter(|w| w.roles.verb)
+            .all(|w| base.checked_sub(w.verb_field).is_some_and(|n| n < verb_count))
+    };
+    if fits(VERB_BASE_WIDE) || !fits(VERB_BASE_NARROW) {
+        VERB_BASE_WIDE
+    } else {
+        VERB_BASE_NARROW
+    }
 }
 
 fn read_dictionary(mem: &Memory, t: &Tables) -> Result<Vec<DictWord>, GrammarError> {
@@ -510,16 +596,16 @@ fn read_dictionary(mem: &Memory, t: &Tables) -> Result<Vec<DictWord>, GrammarErr
         roles.singular = flags & SING_DFLAG != 0;
         roles.truncated = flags & TRUNC_DFLAG != 0;
         roles.noun = flags & NOUN_DFLAG != 0;
-        // The stored verb number is INVERTED: Inform counts down from $FFFF in
-        // Glulx (and from $FF on the Z-machine), so the grammar table's index
-        // for this verb is $FFFF minus what the record holds
-        // (`Inform6/src/text.c::dictionary_set_verb_number`).
-        let verb_number = 0xFFFF - read16(mem, entry + 3 + w)? as u32;
+        // Stored INVERTED, and from a base this record cannot state; the
+        // subtraction happens in `load`, once the whole dictionary is in hand
+        // and `verb_number_base` can decide which base this file was built
+        // with.
+        let verb_field = read16(mem, entry + 3 + w)? as u32;
         out.push(DictWord {
             address: entry,
             text,
             roles,
-            verb_number,
+            verb_field,
         });
     }
     Ok(out)
@@ -671,8 +757,10 @@ mod tests {
         }
 
         /// Write a byte-valued dictionary of `(word, flags, verb_index)` at
-        /// `at`, with nine characters per record (Inform's default).
-        fn dictionary(&mut self, at: u32, entries: &[(&str, u16, u32)]) {
+        /// `at`, with nine characters per record (Inform's default). Verb
+        /// numbers are inverted against `verb_base`, the way the compiler
+        /// inverts them.
+        fn dictionary(&mut self, at: u32, entries: &[(&str, u16, u32)], verb_base: u32) {
             self.w32(at, entries.len() as u32);
             for (i, (word, flags, verb)) in entries.iter().enumerate() {
                 let e = at + 4 + i as u32 * 16;
@@ -681,7 +769,7 @@ mod tests {
                     self.b(e + 1 + j as u32, c);
                 }
                 self.w16(e + 10, *flags);
-                self.w16(e + 12, (0xFFFF - *verb) as u16);
+                self.w16(e + 12, (verb_base - *verb) as u16);
             }
         }
 
@@ -704,6 +792,14 @@ mod tests {
     /// Layout is computed rather than hard-coded, because the locator's whole
     /// contract is that the three tables abut exactly.
     fn story() -> Story {
+        story_numbered(VERB_BASE_WIDE)
+    }
+
+    /// The same story, with its dictionary's verb numbers counted down from
+    /// `verb_base` — $FFFF the way Inform 6.32 and later write a Glulx
+    /// dictionary, $FF the way every release before it did. See the module
+    /// header; the two are otherwise byte-identical files.
+    fn story_numbered(verb_base: u32) -> Story {
         let mut s = Story::new();
         let g = RAM; // grammar table
         let verbs = 2u32;
@@ -737,7 +833,7 @@ mod tests {
         ] {
             words.push((filler, NOUN_DFLAG, 0));
         }
-        s.dictionary(dict, &words);
+        s.dictionary(dict, &words, verb_base);
         let in_addr = dict + 4 + 16;
         let into_addr = dict + 4 + 2 * 16;
 
@@ -880,6 +976,49 @@ mod tests {
         assert!(g.roles("take").is_some_and(|r| r.verb));
         assert_eq!(g.action_routines().len(), 12);
         assert_eq!(g.verbs_accepting(2, &["in"]).len(), 1);
+    }
+
+    // ── The two verb numberings ──────────────────────────────────────────────
+
+    #[test]
+    fn reads_the_pre_6_32_verb_numbering() {
+        // Inform in Glulx mode wrote the Z-machine's one-byte inversion into
+        // the two-byte field until v6.32 widened it, so a story built by
+        // anything earlier holds $FF minus the verb index. Read against $FFFF
+        // it names verb 65,427 — no verb at all — and the story comes back with
+        // a full grammar table and not one verb WORD, which is the whole of
+        // SQ-1114.
+        let s = story_numbered(VERB_BASE_NARROW);
+        let g = s.grammar().expect("synthetic story has a grammar");
+        assert_eq!(g.verb_number_base(), VERB_BASE_NARROW);
+        assert_eq!(g.verbs().len(), 2);
+        let take = g.verb_for_word("take").expect("knows 'take'");
+        assert_eq!(take.number, 0);
+        assert_eq!(take.words, vec!["hold".to_string(), "take".to_string()]);
+        assert_eq!(g.verb_for_word("look").map(|v| v.number), Some(1));
+        assert_eq!(g.verb_words().count(), 3);
+    }
+
+    #[test]
+    fn the_modern_verb_numbering_is_still_read_as_before() {
+        let g = story().grammar().expect("synthetic story has a grammar");
+        assert_eq!(g.verb_number_base(), VERB_BASE_WIDE);
+        assert_eq!(g.verb_words().count(), 3);
+    }
+
+    #[test]
+    fn a_verb_number_matching_neither_base_names_no_verb() {
+        // The base is chosen by checking both against the grammar table's own
+        // verb count, so a record that fits neither cannot drag the file onto
+        // the wrong one: the modern base stands and that one word simply names
+        // nothing, exactly as it did before this reader knew there were two.
+        let mut s = story();
+        let t = locate(&s.mem()).unwrap();
+        s.w16(t.dictionary + 4 + 5 * 16 + 12, 0x8000); // "take"
+        let g = s.grammar().expect("synthetic story has a grammar");
+        assert_eq!(g.verb_number_base(), VERB_BASE_WIDE);
+        assert!(!g.is_verb("take"));
+        assert_eq!(g.verb_for_word("hold").map(|v| v.number), Some(0));
     }
 
     // ── Falsification ────────────────────────────────────────────────────────
