@@ -282,7 +282,7 @@ fn every_on_state_is_lit_from_the_alert_role_and_every_off_state_is_muted() {
     }
 }
 
-/// A hovered control takes `panel.control:hover`/// A hovered control takes `panel.control:hover`, so whatever the pointer is on
+/// A hovered control takes `panel.control:hover`, so whatever the pointer is on
 /// always reads as reachable — even the ones that are otherwise idle.
 #[test]
 fn the_hovered_control_is_highlighted() {
