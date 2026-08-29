@@ -134,16 +134,31 @@ what a zip carries):
 switches are the visible half of the same idea:
 
 > The story pane's frame carries a few clickable switches, each showing what
-> state it is in. The map and the command band get an arrow pointing the way the
-> panel would move — `◀` on the bottom-right corner means "click and the map
-> comes back" — and the Guiding Light is a filled `●` when lit, hollow when out.
-> A graphical v6 story adds two more on the top border, for the render mode and
-> the pixel lock. Hover one for a line saying what a click does and which command
-> does the same, because a click *is* that command.
+> state it is in — the command band and the Guiding Light along the bottom, the
+> map and its return probe at the right, and on a graphical v6 story the render
+> mode and the pixel lock up on the top border. Each is drawn twice over: a
+> different glyph for each state, and lit when it is on, so you can read them at
+> a glance without relying on colour. Hover one for a line saying what a click
+> does and which command does the same, because a click *is* that command.
+>
+> If you told the font check you have a patched font, they are proper icons — a
+> map, a docked panel, a lamp, a padlock. If you did not, they are plain shapes
+> that say the same thing.
 >
 > What you switch there is remembered for **that story**, not for every story: a
 > map you hid, a light you put out, a render mode you preferred. The settings
 > screen still sets the default new games inherit.
+
+**Add** to the **A map that draws itself** bullet under *What it does*, or as its
+own sentence there:
+
+> - …and it can go and look. Switch on the **return probe** and, after a move
+>   that leaves the map with no way back, lanthorn plays a silent throwaway copy
+>   of your game to find one — trying the reverse first, then the ways a passage
+>   might curve. What it learns is drawn like anything you walked yourself; what
+>   it fails to find is left as the honest gap it is, because one-way passages
+>   are real and the map should not pretend otherwise. Off by default, per story,
+>   and it never shows you a room you have not been to.
 
 ---
 
