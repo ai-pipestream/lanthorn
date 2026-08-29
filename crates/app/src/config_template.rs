@@ -197,6 +197,23 @@ const INTERFACE: &[Row] = &[
         ],
     ),
     d(
+        "return_probe",
+        "false",
+        &[
+            "After a move, look for the way BACK in a silent throwaway copy of the",
+            "game, and put it on the map when it is found. Automaps otherwise learn",
+            "passages one direction at a time, and the honest alternative — assuming",
+            "the way back is the way you came — is wrong often enough in these games",
+            "to be worse than the gap. Nothing is recorded unless the copy actually",
+            "comes out in the room you left: a probe that lands somewhere else",
+            "records nothing at all, and neither does one that finds no way back.",
+            "",
+            "OFF by default: it runs your game a few extra turns in private after",
+            "every move that opens a gap. The control on the map pane's bottom",
+            "border switches it, and \"/set-return-probe\" persists it per-game.",
+        ],
+    ),
+    d(
         "hide_adult_words",
         "true",
         &[

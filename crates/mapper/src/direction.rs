@@ -71,6 +71,63 @@ pub const UNTRIED_DIRS: [Direction; 10] = [
     Direction::Down,
 ];
 
+/// The directions a RETURN PROBE may try, in the order it falls back to when it has no
+/// direction to seed from (SQ-0785): cardinals, then diagonals, then up/down, then in/out.
+///
+/// All twelve real passages — wider than [`UNTRIED_DIRS`], which deliberately omits In/Out
+/// because they are not part of the compass rose a player scans. A probe is not scanning a rose;
+/// it is looking for the way back, and `out` is very often exactly that.
+pub const PROBE_DIRS: [Direction; 12] = [
+    Direction::N,
+    Direction::E,
+    Direction::S,
+    Direction::W,
+    Direction::NE,
+    Direction::SE,
+    Direction::SW,
+    Direction::NW,
+    Direction::Up,
+    Direction::Down,
+    Direction::In,
+    Direction::Out,
+];
+
+/// A compass direction's bearing in degrees, north being 0 and east 90.
+///
+/// `None` for everything that is not on the rose — Up, Down, In, Out and Unknown. That is the
+/// point of it: it lets "the two perpendiculars" and "the two adjacent diagonals" be arithmetic
+/// (±90°, ±45°) rather than a hand-written table with eight rows and a comment promising it
+/// matches [`opposite`].
+pub fn bearing(d: Direction) -> Option<u16> {
+    Some(match d {
+        Direction::N => 0,
+        Direction::NE => 45,
+        Direction::E => 90,
+        Direction::SE => 135,
+        Direction::S => 180,
+        Direction::SW => 225,
+        Direction::W => 270,
+        Direction::NW => 315,
+        _ => return None,
+    })
+}
+
+/// The inverse of [`bearing`]: the compass direction at `deg`, or `None` for anything off the
+/// eight points.
+pub fn from_bearing(deg: u16) -> Option<Direction> {
+    Some(match deg % 360 {
+        0 => Direction::N,
+        45 => Direction::NE,
+        90 => Direction::E,
+        135 => Direction::SE,
+        180 => Direction::S,
+        225 => Direction::SW,
+        270 => Direction::W,
+        315 => Direction::NW,
+        _ => return None,
+    })
+}
+
 /// A direction's short tag, lower case: `n`, `ne`, `u`, `d`, `i`, `o` (SQ-0666). Uppercased it is
 /// the matrix view's column header; as-is it is the `⇠w` return suffix inside a cell.
 pub fn short_label(d: Direction) -> &'static str {

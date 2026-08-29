@@ -4345,6 +4345,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
             state.overlays.font_check = true;
         }
         30 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hide_adult_words = !cs.working.hide_adult_words; } }
+        31 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.return_probe = !cs.working.return_probe; } }
         _ => {}
     }
 }
@@ -4394,6 +4395,9 @@ fn one_run_key_for_row(row: usize) -> Option<&'static str> {
         // SQ-1045: `--guidance off` pins the key for the launch; editing the row
         // is the user overruling their own flag, so it ends the hold and persists.
         27 => Some(keys::GUIDANCE),
+        // SQ-0785: this game's sidecar pins the key at boot, exactly as the pixel
+        // lock's does; editing the row is the user speaking about every game.
+        31 => Some(keys::RETURN_PROBE),
         _ => None,
     }
 }
@@ -4439,6 +4443,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         27 => working.guidance = !working.guidance,
         28 => working.guidance_probe = !working.guidance_probe,
         30 => working.hide_adult_words = !working.hide_adult_words,
+        31 => working.return_probe = !working.return_probe,
         _ => {}
     }
 }

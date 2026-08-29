@@ -1043,6 +1043,14 @@ pub(crate) fn boot_story(
         cfg.guidance = v;
         cfg.one_run.pin(app::config::keys::GUIDANCE, v);
     }
+    // SQ-0785: the return probe is off by default and per-game before it is
+    // global, for the reason the pixel lock is — how much silent work a story is
+    // worth is a fact about the story.
+    let return_probe_base = cfg.return_probe;
+    if let Some(v) = app::styles::read_per_game_return_probe(&game_dir) {
+        cfg.return_probe = v;
+        cfg.one_run.pin(app::config::keys::RETURN_PROBE, v);
+    }
     let v6_render_base = cfg.v6_render;
     if let Some(m) = app::styles::read_per_game_v6_render(&game_dir)
         .filter(|_| cli.v6_render.is_none())
@@ -1580,6 +1588,7 @@ pub(crate) fn boot_story(
     // put the live key back to it after clearing this game's sidecar override.
     state.v6_pixel_lock_base = v6_pixel_lock_base;
     state.guidance_base = guidance_base;
+    state.return_probe_base = return_probe_base;
     state.v6_render_base = v6_render_base;
     // SQ-0855: and whether a flag put it there, which the base alone cannot say —
     // the post-IFID `reload_style` below re-reads both per-story sources from disk

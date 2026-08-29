@@ -456,6 +456,60 @@ badge on the room box, never as a line looping out and back: a loop has no
 geometry, and a drawn one would need its own lane to say less than three characters
 do.
 
+## Finding the way back, without guessing it
+
+A map built from your moves learns a passage one direction at a time. Walk north
+into a clearing and the map knows how you got there and nothing about how you
+leave; half the rooms on a map you have walked through once hang off a single
+arrow. The tempting fix is to assume passages run both ways, and it is wrong
+often enough to be worse than the gap — these games are full of one-way drops,
+doors that open from one side, and mazes whose entire design is that the way back
+is not the way you came. A guessed arrow is the map asserting something false,
+and nothing on screen tells you which arrows were walked and which were assumed.
+
+So the **return probe** finds out instead. Switch it on, and after a move that
+leaves a gap lanthorn forks the story into a silent throwaway copy — the same
+shadow the Guiding Light vets its word suggestions in — stands it exactly where
+you are standing, and walks one direction. If it comes out in the room you just
+left, that passage is real and joins the map. If it comes out anywhere else,
+**nothing at all is recorded**: not the edge, not the room it wandered into, not
+that the room exists. The map stays a record of what *you* have seen.
+
+It leads with the way you came and widens from there — the opposite of your move,
+then the two directions perpendicular to it, then the two diagonals beside it,
+then everything else, twelve in all. Zork I's North of House is the case worth
+knowing: south is boarded up and east is somewhere else entirely, and it is
+**west** that takes you home. The search walks past the refusal and past the
+wrong room to find it, and Behind House — which it really did walk into — never
+appears on your map.
+
+Three things it is careful about:
+
+- **It never marks a direction as tried.** That record is yours, and it is what
+  the matrix view's `·` frontier is drawn from. A direction a shadow walked on
+  your behalf is still a direction you have never explored, and the map goes on
+  offering it.
+- **It never claims the reverse.** Climbing through the kitchen window in Zork I
+  is still `enter window` on the map, whatever direction brings you back out. The
+  return passage is recorded as its own edge, and the geometry that follows from
+  it — the kitchen sitting west of Behind House — is the layout's business, not a
+  second passage.
+- **It gives way to you.** Walk the way back yourself while a search is running
+  and the search stops: what you actually did is the better evidence, and it is
+  already on the map.
+
+The work happens on a worker thread, so the story answers you at once and the map
+catches up a beat later. Every direction it tries is remembered *permanently*, so
+a room is searched once in the life of a map rather than once per visit, and a
+search you interrupt by walking on resumes where it stopped.
+
+It is **off by default** — it does run your game a few extra turns in private —
+and the footprint on the map pane's bottom border is how you turn it on: muted
+when off, lit when on, and never hidden, because a switch you have never seen lit
+is a switch you never find. `/set-return-probe` does the same from the keyboard,
+and both remember the answer for *that story*, so you can afford it on a small
+Z-machine game and decline it on a large Glulx one.
+
 ## Making it yours
 
 Every glyph the map draws is a themeable preset in the `[map]` section of

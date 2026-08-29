@@ -2294,6 +2294,14 @@ pub struct AppState {
     /// Session state and never persisted — an archive carries the recipe already,
     /// in the story file it names.
     pub probe: crate::probe::ShadowProbe,
+    /// The search for the way back that is running right now, if any (SQ-0785).
+    ///
+    /// Session state, never persisted: what it LEARNS is persisted, in the
+    /// graph's own `tried` and `probed` records, so a restore starts with no
+    /// search running and picks up wherever the last one left off. At most one —
+    /// a new move ends whatever was in flight, because the move may itself be the
+    /// walk back. See [`crate::return_probe`].
+    pub return_search: Option<crate::return_probe::ReturnSearch>,
     /// A vocabulary offer that has been asked of the shadow and not yet answered
     /// (SQ-1124). At most one: a second question while this is outstanding is not
     /// asked at all, and that offer falls back to what it can say unvetted.
@@ -2710,6 +2718,13 @@ pub struct AppState {
     /// the per-game key and puts the live value back to this, for exactly the
     /// reason `v6_pixel_lock_base` exists.
     pub guidance_base: bool,
+
+    /// The global `return_probe` default (from config.toml, before this game's
+    /// own sidecar override), captured at boot (SQ-0785). `set-return-probe auto`
+    /// clears the per-game key and puts the live value back to this — which is a
+    /// meaningful thing to do here rather than a synonym for `off`, since the
+    /// global default is off and a user who set it globally ON wants that back.
+    pub return_probe_base: bool,
 
     /// The global `v6_render` default (from config.toml, before this game's own
     /// sidecar override), captured at boot (SQ-1123). `set-v6-render auto` clears
@@ -3140,6 +3155,7 @@ impl Default for AppState {
             assist_preamble_shown: false,
             vocab: crate::vocab::VocabState::default(),
             probe: crate::probe::ShadowProbe::default(),
+            return_search: None,
             vocab_pending: None,
             turn_epoch: 0,
             transcript_styles: Vec::new(),
@@ -3151,6 +3167,7 @@ impl Default for AppState {
             honor_game_colours_base: true,
             v6_pixel_lock_base: false,
             guidance_base: false,
+            return_probe_base: false,
             v6_render_base: crate::config::V6RenderMode::default(),
             game_colours_cli: None,
             artwork_declines_colours: false,

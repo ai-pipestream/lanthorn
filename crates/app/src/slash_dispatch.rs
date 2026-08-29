@@ -648,6 +648,48 @@ pub(crate) fn dispatch_slash_outcome(
                 Err(e) => state.set_status(format!("set-guidance failed: {e}")),
             }
         }
+        SlashOutcome::SetReturnProbe(arg) => {
+            // The same four-state shape every persisted control has (SQ-1123):
+            // bare flips the LIVE value, `auto` clears the override so the global
+            // setting decides again. Off by default globally, which makes `auto`
+            // meaningfully different from `off` here rather than a synonym for it.
+            use app::slash::ReturnProbeArg;
+            let want = match arg {
+                ReturnProbeArg::On => Some(true),
+                ReturnProbeArg::Off => Some(false),
+                ReturnProbeArg::Auto => None,
+                ReturnProbeArg::Toggle => Some(!state.config.return_probe),
+            };
+            match app::styles::write_per_game_return_probe(game_dir, want) {
+                Ok(()) => {
+                    state.config.return_probe = want.unwrap_or(state.return_probe_base);
+                    match want {
+                        Some(v) => state.config.one_run.pin(app::config::keys::RETURN_PROBE, v),
+                        None => state.config.one_run.release(app::config::keys::RETURN_PROBE),
+                    }
+                    // Switching it off ends whatever is in flight. The shadow's
+                    // answer would still be true, but a player who has just turned
+                    // the feature off is entitled to it stopping now rather than
+                    // one edge later.
+                    if !state.config.return_probe {
+                        state.return_search = None;
+                    }
+                    let label = match want {
+                        Some(true) => "on",
+                        Some(false) => "off",
+                        None => "auto",
+                    };
+                    state.push_transcript_internal(
+                        &format!(
+                            "return probe: {label} (for this game — return_probe = {})",
+                            state.config.return_probe
+                        ),
+                        TranscriptKind::Meta,
+                    );
+                }
+                Err(e) => state.set_status(format!("set-return-probe failed: {e}")),
+            }
+        }
         SlashOutcome::SetV6Render(arg) => {
             // Session-only until SQ-1123, and that was the right design for what
             // this once was: raster began as a FALLBACK — the mode you escaped to

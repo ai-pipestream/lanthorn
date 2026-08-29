@@ -308,13 +308,23 @@ know which side you're on).
   - Every state is themeable: `panel.control` (off/idle), `panel.control:lit`
     (on — the `alert` role) and `panel.control:hover`, which wins over both so
     whatever the pointer is on reads as reachable.
+  - **And one control rides the MAP pane's border**, centred on its bottom edge,
+    mirroring the story pane's arrangement: the **return probe** (`◌` plain,
+    `md-shoe_print` patched), which looks for the way back after a move and puts
+    it on the map. It sits there because the map is the whole of what it changes.
+    It is the only one of the six that is **off by default**, and so the only one
+    with a single glyph rather than a pair: there is no opposite mode to draw, so
+    the mark stays put and the colour carries the state — muted when off, lit
+    when on, and never hidden, because a switch you have never seen lit is a
+    switch you never find. `/set-return-probe` is the command behind it, and like
+    the other five it remembers the answer for that story.
   - The glyphs come from the `control_icons` preset in `[map]` (`plain` |
     `nerdfont`) and from `[map.overrides]` one slot at a time; the first-run
     font check picks the preset along with the arrows and portal icons. The
-    `nerdfont` set gives each of the eleven states a named icon — a map with a
+    `nerdfont` set gives each of the twelve states a named icon — a map with a
     "you are here" dot when the map is shown, a purpose-built panel off/on pair
     for the band, a lamp for the light, a monitor per render mode, a padlock for
-    the lock — and each control's states come from **one** icon family, because
+    the lock, a footprint for the return probe — and each control's states come from **one** icon family, because
     Codicons, Font Awesome and Material Design carry different stroke weights,
     and a control whose two states came from different families appeared to jump
     on toggle.

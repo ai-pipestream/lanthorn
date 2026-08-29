@@ -68,6 +68,9 @@ pub enum BorderControl {
     V6Render,
     /// The v6 pixel lock. v6 only.
     V6PixelLock,
+    /// The return probe (SQ-0785) — the one control on the MAP pane's border,
+    /// because the map is the only thing it changes.
+    ReturnProbe,
 }
 
 impl BorderControl {
@@ -81,6 +84,11 @@ impl BorderControl {
             BorderControl::Map => ControlPlacement::BottomRight,
             BorderControl::VerbPanel | BorderControl::Guidance => ControlPlacement::BottomCentre,
             BorderControl::V6Render | BorderControl::V6PixelLock => ControlPlacement::TopRight,
+            // Centred on its own pane's bottom border, mirroring the story
+            // pane's arrangement. The rule at the top of this file — a control
+            // sits where the thing it governs is — puts it on the MAP, since the
+            // map is the whole of what it changes (SQ-0785).
+            BorderControl::ReturnProbe => ControlPlacement::BottomCentre,
         }
     }
 
@@ -93,6 +101,7 @@ impl BorderControl {
             BorderControl::VerbPanel => "open-command-band",
             BorderControl::V6Render => "set-v6-render",
             BorderControl::V6PixelLock => "set-v6-pixel-lock",
+            BorderControl::ReturnProbe => "set-return-probe",
         }
     }
 }
@@ -234,6 +243,50 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
         ],
     });
 
+    out
+}
+
+/// The controls to draw in the MAP pane's border (SQ-0785).
+///
+/// One, so far. It is a separate list rather than a flag on
+/// [`controls_for`] because the two panes are drawn by two different calls with
+/// two different `PanelSpec`s, and a single list would have to be filtered at
+/// each of them by which pane it was — which is one more place for the question
+/// "does this control belong here?" to be answered differently.
+///
+/// **Drawn in both states, never hidden.** Every other control here governs
+/// something already on by default or already visible, so it is discovered by
+/// being used. This one is off out of the box, and a switch nobody has ever seen
+/// lit is a switch nobody finds: muted through the plain `panel.control` when
+/// off, lit yellow through `panel.control:lit` when on, same glyph either way
+/// (see [`crate::symbols::ControlGlyphs::return_probe`]).
+pub fn map_controls_for(state: &AppState) -> Vec<ControlView> {
+    let on = state.config.return_probe;
+    vec![ControlView {
+        id: BorderControl::ReturnProbe,
+        glyph: state.symbols.controls.return_probe,
+        style: style_for(state, BorderControl::ReturnProbe, on),
+        hint: vec![
+            if on {
+                "Return probe: on — click to stop looking for the way back"
+            } else {
+                "Return probe: off — click to look for the way back after a move"
+            }
+            .to_string(),
+            "/set-return-probe".to_string(),
+        ],
+    }]
+}
+
+/// Every control on screen this frame, whichever pane it rides.
+///
+/// The hover hint resolves a [`BorderControl`] the event loop already matched
+/// against a rect, so it needs the view for that id and does not care which pane
+/// drew it — and a lookup that consulted only the story pane's list would leave
+/// the map's control silently hintless.
+pub fn all_controls_for(state: &AppState) -> Vec<ControlView> {
+    let mut out = controls_for(state);
+    out.extend(map_controls_for(state));
     out
 }
 

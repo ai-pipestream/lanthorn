@@ -179,6 +179,9 @@ pub(crate) fn finish_command_turn(
     // What `apply_turn` is about to record as tried, captured while the room typed in is still
     // the current one — the rollback below needs to know which record is this turn's (SQ-0671).
     let attempted = app::session::tried_record_for(mapper, cmd);
+    // …and the room they are LEAVING, which is only knowable here for the same reason and which
+    // the return probe needs as the room a way back has to lead to (SQ-0785).
+    let room_before = mapper.graph.current();
 
     apply_turn(mapper, cmd, &result, &mut state.death_watch);
 
@@ -199,6 +202,10 @@ pub(crate) fn finish_command_turn(
     if let Some(here) = mapper.graph.current() {
         state.push_trail(here);
     }
+
+    // Look for the way back, in a silent copy of the game (SQ-0785). Off by default; arms only
+    // for a crossing the map has no return path for, and ends any search a move has outrun.
+    app::return_probe::arm_return_search(state, mapper, &*session, cmd, room_before);
 
     // Bump the graph generation ONLY when the turn actually changed the map's
     // routed geometry (a room or connection added/removed). This invalidates the
@@ -256,45 +263,7 @@ pub(crate) fn finish_command_turn(
     // still coalesces — see `spawn_render_job` — to avoid a per-frame thread storm.)
     let new_room = mapper.graph.rooms().count() > rooms_before;
     let new_conn = mapper.graph.connections().len() > conns_before;
-    let changed = new_room || new_conn;
-    // A maze layer's geometry is frozen (SQ-0671): no job is scheduled for it at all, rather
-    // than one spawned and thrown away. The layer keeps growing — the new room this turn was
-    // already dead-reckoned into place by `apply_turn` above — but nothing re-derives where the
-    // rooms already there sit. See `tidy::layer_is_frozen`.
-    if app::tidy::should_schedule_tidy(&mapper.graph, state.active_layer(&mapper.graph), changed) {
-        let active_layer = state.active_layer(&mapper.graph);
-        // Overlap/distortion signal → decides FULL relayout vs. cleanup-only.
-        let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
-        let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
-        let has_overlap = cells.len() < total_rooms;
-        let has_distorted = mapper.graph.connections().iter().any(|c| {
-            c.distorted
-                && mapper.graph.layer_of(c.origin) == active_layer
-                && mapper.graph.layer_of(c.dest) == active_layer
-        });
-        let overlap = has_overlap || has_distorted;
-        let full = should_bg_tidy(
-            state.config.background_tidy, new_room, overlap, changed, bg_tidy_counter,
-        );
-        let kind = if full { TidyKind::Full } else { TidyKind::Cleanup };
-        let graph_clone = mapper.graph.clone();
-        let gen = state.graph_gen;
-        let handle = std::thread::spawn(move || {
-            let mut g = graph_clone;
-            match kind {
-                TidyKind::Full => tidy_layer_silent(&mut g, active_layer),
-                TidyKind::Cleanup => cleanup_overlaps_layer_silent(&mut g, active_layer),
-            }
-            g
-        });
-        state.tidy_job = Some(TidyJob {
-            handle,
-            layer: active_layer,
-            gen,
-            started: std::time::Instant::now(),
-            kind,
-        });
-    }
+    schedule_map_maintenance(state, mapper, new_room, new_conn, bg_tidy_counter);
 
     // Clear any manual layer browse override so the view follows the player.
     state.set_viewed_layer(None);
@@ -341,6 +310,58 @@ pub(crate) fn finish_command_turn(
 /// the app (`should_exit`) AND the engine is Scott, open the game-over dialog and
 /// keep the app alive (return `false`). For every other case return `should_exit`
 /// unchanged, so Z-machine/Glulx keep exiting on a clean `@quit`/`glk_exit`.
+/// Schedule whatever background map work a graph change has earned (SQ-0379).
+///
+/// Extracted from the turn path so that a passage the RETURN PROBE discovered
+/// (SQ-0785) reaches the same relayout the player's own moves do. An edge that
+/// is recorded but never laid out or redrawn is a discovery nobody sees, which
+/// is indistinguishable from not making it — and two copies of this block would
+/// be two places for "does the map need re-laying out?" to be answered
+/// differently.
+///
+/// A maze layer's geometry is frozen (SQ-0671): no job is scheduled for it at
+/// all, rather than one spawned and thrown away. The layer keeps growing — a new
+/// room was already dead-reckoned into place by `apply_turn` — but nothing
+/// re-derives where the rooms already there sit. See `tidy::layer_is_frozen`.
+pub(crate) fn schedule_map_maintenance(
+    state: &mut AppState,
+    mapper: &Mapper,
+    new_room: bool,
+    new_conn: bool,
+    bg_tidy_counter: &mut u32,
+) {
+    let changed = new_room || new_conn;
+    if !app::tidy::should_schedule_tidy(&mapper.graph, state.active_layer(&mapper.graph), changed) {
+        return;
+    }
+    let active_layer = state.active_layer(&mapper.graph);
+    // Overlap/distortion signal → decides FULL relayout vs. cleanup-only.
+    let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
+    let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
+    let has_overlap = cells.len() < total_rooms;
+    let has_distorted = mapper.graph.connections().iter().any(|c| {
+        c.distorted
+            && mapper.graph.layer_of(c.origin) == active_layer
+            && mapper.graph.layer_of(c.dest) == active_layer
+    });
+    let overlap = has_overlap || has_distorted;
+    let full =
+        should_bg_tidy(state.config.background_tidy, new_room, overlap, changed, bg_tidy_counter);
+    let kind = if full { TidyKind::Full } else { TidyKind::Cleanup };
+    let graph_clone = mapper.graph.clone();
+    let gen = state.graph_gen;
+    let handle = std::thread::spawn(move || {
+        let mut g = graph_clone;
+        match kind {
+            TidyKind::Full => tidy_layer_silent(&mut g, active_layer),
+            TidyKind::Cleanup => cleanup_overlaps_layer_silent(&mut g, active_layer),
+        }
+        g
+    });
+    state.tidy_job =
+        Some(TidyJob { handle, layer: active_layer, gen, started: std::time::Instant::now(), kind });
+}
+
 fn intercept_scott_game_over(should_exit: bool, is_scott: bool, state: &mut AppState) -> bool {
     if should_exit && is_scott {
         state.overlays.game_over = true;
@@ -560,6 +581,7 @@ pub(crate) fn finish_resumed_turn(
     // Capture graph sizes before apply_turn so bookkeeping can detect a change.
     let rooms_before = mapper.graph.rooms().count();
     let conns_before = mapper.graph.connections().len();
+    let room_before = mapper.graph.current();
     apply_turn(mapper, "", &result, &mut state.death_watch);
     // The resumed half of a turn can be where the death lands; it names no direction of its own,
     // so only the move still held from the submit path can be rolled back. (SQ-0671)
@@ -570,6 +592,9 @@ pub(crate) fn finish_resumed_turn(
         app::session::turn_reports_death(&result.transcript),
     );
     state.graph_gen = state.graph_gen.wrapping_add(1);
+    // The resumed half of a turn can be a crossing too, and it is certainly a place a search
+    // can be outrun (SQ-0785). It names no direction, so the fallback order applies.
+    app::return_probe::arm_return_search(state, mapper, session, "", room_before);
     state.set_viewed_layer(None);
     if let Some(snap) = &result.location {
         let rid = snap.number as mapper::graph::RoomId;
@@ -813,6 +838,7 @@ pub(crate) fn apply_game_driven_result(
     // parse), but we still observe any location change so the map stays in sync.
     let rooms_before = mapper.graph.rooms().count();
     let conns_before = mapper.graph.connections().len();
+    let room_before = mapper.graph.current();
     apply_turn(mapper, "", result, &mut state.death_watch);
     // A keypress can be the turn a death is finally admitted on ("press any key" after the
     // banner). It names no direction of its own, so the rollback can only be for the move the
@@ -853,6 +879,9 @@ pub(crate) fn apply_game_driven_result(
     {
         state.graph_gen = state.graph_gen.wrapping_add(1);
     }
+    // A game-driven turn can move the player too — a timer, a menu selection, a teleport — so it
+    // both arms a search and ends one that has been outrun (SQ-0785).
+    app::return_probe::arm_return_search(state, mapper, session, "", room_before);
     // Select and recenter on the current room if it changed.
     if let Some(snap) = &result.location {
         let rid = snap.number as mapper::graph::RoomId;

@@ -16,7 +16,7 @@ pub fn per_game_style_path(game_dir: &Path) -> PathBuf {
 /// story file. Holds per-game overrides that are not part of the style schema
 /// (`honor_game_colours`, `borderless_windows`, `show_map`, `pictures`,
 /// `interpreter_number`, `v6_pixel_lock`, `guidance`, `v6_render`,
-/// `command_band`), kept separate from `style.toml` so the style parser/writer
+/// `command_band`, `return_probe`), kept separate from `style.toml` so the style parser/writer
 /// stays a pure style document.
 ///
 /// Bare lines, never templated: an absent key means "inherit the global config",
@@ -53,6 +53,8 @@ pub struct PerGameConfig {
     pub v6_render: Option<String>,
     /// Whether the command band opens with this story (SQ-1123).
     pub command_band: Option<bool>,
+    /// Whether the return probe runs for this story (SQ-0785).
+    pub return_probe: Option<bool>,
 }
 
 impl PerGameConfig {
@@ -74,6 +76,7 @@ impl PerGameConfig {
         "v6_pixel_lock",
         "guidance",
         "command_band",
+        "return_probe",
         "pictures",
         "v6_render",
         "interpreter_number",
@@ -106,6 +109,7 @@ impl PerGameConfig {
             guidance: b("guidance"),
             v6_render: s("v6_render"),
             command_band: b("command_band"),
+            return_probe: b("return_probe"),
         }
     }
 
@@ -126,6 +130,7 @@ impl PerGameConfig {
         put_bool("v6_pixel_lock", self.v6_pixel_lock);
         put_bool("guidance", self.guidance);
         put_bool("command_band", self.command_band);
+        put_bool("return_probe", self.return_probe);
         if let Some(v) = &self.pictures {
             body.push_str(&format!("pictures = {}\n", toml::Value::String(v.clone())));
         }
@@ -234,6 +239,23 @@ pub fn read_per_game_v6_render(game_dir: &Path) -> Option<String> {
 /// story.
 pub fn read_per_game_command_band(game_dir: &Path) -> Option<bool> {
     PerGameConfig::read(game_dir).command_band
+}
+
+/// Read the per-game `return_probe` override (SQ-0785). `None` = no override, so
+/// the global `return_probe` decides.
+///
+/// Per-game before it is global for the same reason the pixel lock is: how much
+/// silent work a particular story is worth is a fact about that story. A small
+/// Z-machine game answers a probe in milliseconds; a large Glulx one takes long
+/// enough that a player may want it on for the first and off for the second.
+pub fn read_per_game_return_probe(game_dir: &Path) -> Option<bool> {
+    PerGameConfig::read(game_dir).return_probe
+}
+
+/// Persist (or clear) the per-game `return_probe` override, preserving every
+/// sibling key (SQ-0785).
+pub fn write_per_game_return_probe(game_dir: &Path, value: Option<bool>) -> std::io::Result<()> {
+    edit(game_dir, |c| c.return_probe = value)
 }
 
 /// Persist (or clear) the per-game `honor_game_colours` override, preserving
@@ -376,6 +398,7 @@ mod tests {
             guidance: Some(true),
             v6_render: Some("raster".into()),
             command_band: Some(true),
+            return_probe: Some(true),
         };
         every.write(&dir).unwrap();
         let text = std::fs::read_to_string(per_game_config_path(&dir)).unwrap();
