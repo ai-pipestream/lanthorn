@@ -101,6 +101,56 @@ impl Play {
         Some(p)
     }
 
+    /// The InvisiClues release, which is a **v5** — and version is what decides
+    /// this: `detect_location` reads global 0 on v1-v3 and the STATUS LINE from
+    /// v4 on, so the defect below cannot exist on the z3 the other cases use.
+    ///
+    /// It opens on a title card, so the drive answers whichever input the game is
+    /// actually waiting on; a line typed at a char prompt is swallowed and the
+    /// harness maps a screen with no room on it.
+    fn zork1_z5() -> Option<Play> {
+        let bytes = story("zork1-invclues-r52-s871125.z5")?;
+        let inner = match app::hints::extract_story(bytes.clone()).ok()? {
+            app::hints::LoadedStory::ZCode(b) => b,
+            _ => return None,
+        };
+        let mut s = app::session::GameSession::new_with_trace(
+            inner.clone(),
+            true,
+            false,
+            None,
+            false,
+            Vec::new(),
+            None,
+            None,
+            Some((25, 80)),
+        )
+        .expect("zork1-invclues-r52-s871125.z5 boots without a ZError");
+        s.set_strip_prompt(false);
+        let mut state = AppState::default();
+        state.config.return_probe = true;
+        state.probe.arm(recipe(&inner));
+        let mut p = Play {
+            state,
+            mapper: Mapper::default(),
+            session: Box::new(s),
+            death: app::session::DeathWatch::default(),
+        };
+        for _ in 0..4 {
+            let r = match p.session.pending_input() {
+                app::session::InputKind::Char => p
+                    .session
+                    .submit_key(app::engine::KeyInput::Char(' '))
+                    .unwrap_or_else(|| p.session.submit("")),
+                _ => p.session.submit(""),
+            };
+            app::session::apply_turn(&mut p.mapper, "", &r, &mut p.death);
+        }
+        let r = p.session.submit("look");
+        app::session::apply_turn(&mut p.mapper, "look", &r, &mut p.death);
+        Some(p)
+    }
+
     /// One turn, then let any search it armed run to the end.
     fn turn(&mut self, cmd: &str) -> Option<ProbedPassage> {
         let r = self.session.submit(cmd);
@@ -548,5 +598,149 @@ fn the_control_names_a_real_slash_command() {
     assert!(
         app::slash::COMMANDS.iter().any(|c| c.name == "set-return-probe"),
         "and the registry holds it"
+    );
+}
+
+/// **A probe restored into a room inherits the last probe's status line, and on
+/// v4+ that is where the room's IDENTITY comes from** (SQ-0785).
+///
+/// Quetzal archives no screen, so `restore_state` brings memory alone. The story
+/// then repaints only as many columns as its new room name needs, and the tail of
+/// the longer name it was painted over survives past the end of it. Zork I's
+/// shadow read `Forest Pathse`, which matches no object; `detect_location` fell
+/// off `PlayerParent` onto the text rung, and `resolve_room_object` prefix-matched
+/// **object 1 — the scenery object whose short name is `forest`** (ties on
+/// normalized length go to the lowest object number). The comparison `1 == 247`
+/// then discarded a return path that is real, on the FIRST candidate the priority
+/// order offers.
+///
+/// The three rooms below are the three the defect was reported from, all of them
+/// beside Zork's several `Forest` rooms. Each is a one-attempt case: the way back
+/// IS the way it came, so anything but `probes == 1` per crossing means the search
+/// walked past a working answer.
+///
+/// Falsify by dropping the `blank()` in `GameSession::restore_state`: every one of
+/// these reports `None`.
+///
+/// (Fixture: `zork1-invclues-r52-s871125.z5` — release 52, serial 871125, a **v5**;
+/// the z3 the other cases drive reads global 0 and cannot show this. Five turns in.)
+#[test]
+fn zork1_z5_finds_the_way_back_past_a_scenery_object_of_the_same_name() {
+    let Some(mut p) = Play::zork1_z5() else { return };
+
+    p.turn("north"); // North of House
+    p.turn("north"); // Forest Path
+    let path = p.mapper.graph.current().expect("Forest Path");
+    assert_eq!(
+        p.mapper.graph.room(path).map(|r| r.name.as_str()),
+        Some("Forest Path"),
+        "non-vacuity: the room whose name object 1 shadows"
+    );
+
+    let before = p.state.probe.probes;
+    let found = p.turn("north").expect("south returns to Forest Path");
+    let clearing = p.mapper.graph.current().expect("Clearing");
+    assert_eq!(
+        found,
+        ProbedPassage { from: clearing, dir: Direction::S, to: path },
+        "the way back is the way it came, and it is Forest Path — not object 1"
+    );
+    assert_eq!(p.edge(clearing, Direction::S), Some(path), "and it is on the map");
+    assert_eq!(p.state.probe.probes - before, 1, "found on the first candidate");
+
+    // The same shape one room over: east into Forest, west back out.
+    let before = p.state.probe.probes;
+    p.turn("south"); // back to Forest Path along the edge just discovered
+    let found = p.turn("east").expect("west returns to Forest Path");
+    let forest = p.mapper.graph.current().expect("Forest");
+    assert_eq!(found, ProbedPassage { from: forest, dir: Direction::W, to: path });
+    assert_eq!(
+        p.state.probe.probes - before,
+        1,
+        "the walk back south had a known return path and asked nothing; east asked once"
+    );
+}
+
+/// **A landing on a room the map already holds is recorded, even though it is not
+/// the room the search was asking about** — and that is what stops a diagonal
+/// being drawn where a cardinal is known (SQ-0785).
+///
+/// The reported walk is `N, E, S, E, N, W, S` from West of House, and it reaches
+/// South of House TWICE: first from Behind House, then from West of House. Under
+/// the old rule the first visit asked "how do I get back to Behind House?", ran
+/// `N` (boarded), then `W` — which reached West of House, the wrong room *for that
+/// question*, and was thrown away — then `E`, which succeeded. `W` was left on the
+/// probed record, and `probe_candidates` filters on `tried ∪ probed`, so the second
+/// visit found `W` gone and recorded the first survivor: the diagonal `NW`.
+///
+/// `probed` says "this direction was walked from here". The answer it stood for was
+/// "…and it did not reach THAT origin". Recording every landing on a KNOWN room
+/// closes the gap on the first visit, so the second has nothing left to ask.
+///
+/// Falsify by narrowing `deliver` back to `landed == origin`: the west edge is
+/// absent after the first visit, and the second visit mints `NW`.
+///
+/// (Fixture: `zork1-invclues-r52-s871125.z5`, the release the defect was reported
+/// on; eleven turns in.)
+#[test]
+fn a_landing_on_a_known_room_is_recorded_even_when_it_is_not_the_room_asked_about() {
+    let Some(mut p) = Play::zork1_z5() else { return };
+    let west = p.mapper.graph.current().expect("West of House");
+
+    p.turn("north"); // North of House
+    p.turn("east"); // Behind House
+    let behind = p.mapper.graph.current().expect("Behind House");
+
+    // FIRST arrival at South of House, asking the way back to Behind House.
+    let found = p.turn("south").expect("east returns to Behind House");
+    let south = p.mapper.graph.current().expect("South of House");
+    assert_eq!(
+        p.mapper.graph.room(south).map(|r| r.name.as_str()),
+        Some("South of House"),
+        "non-vacuity: the room the defect is about"
+    );
+    assert_eq!(
+        found,
+        ProbedPassage { from: south, dir: Direction::E, to: behind },
+        "the search's own answer is still the way back to where it came from"
+    );
+
+    // THE NEW RULE. `W` reached West of House on the way past — a room the player
+    // has stood in — so the passage is on the map instead of being discarded.
+    assert_eq!(
+        p.edge(south, Direction::W),
+        Some(west),
+        "the westward landing was kept, though the search was asking about Behind House"
+    );
+
+    // …and nothing unseen arrived with it. Four rooms, all walked by the player.
+    let rooms: Vec<_> = p.mapper.graph.rooms().map(|r| (r.id, r.name.clone())).collect();
+    assert_eq!(rooms.len(), 4, "only the rooms the PLAYER has stood in: {rooms:?}");
+
+    // SECOND arrival, now from West of House. The gate has a return path already
+    // and asks nothing at all, so the diagonal is never reached.
+    let before = p.state.probe.probes;
+    p.turn("east"); // Behind House
+    p.turn("north"); // North of House
+    p.turn("west"); // West of House
+    p.turn("south"); // South of House again
+    assert_eq!(
+        p.mapper.graph.current(),
+        Some(south),
+        "the walk came back to the same room"
+    );
+    assert_eq!(
+        p.edge(south, Direction::W),
+        Some(west),
+        "the way back is the cardinal it always was"
+    );
+    assert!(
+        p.edge(south, Direction::NW).is_none(),
+        "and no diagonal was minted alongside it"
+    );
+    assert_eq!(
+        p.state.probe.probes,
+        before,
+        "no gap left to close on the return leg, so the shadow was asked nothing"
     );
 }

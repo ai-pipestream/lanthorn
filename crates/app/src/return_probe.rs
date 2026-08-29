@@ -25,18 +25,28 @@
 //!
 //! So the way back is **discovered**, in a copy of the game that costs nothing:
 //! [`crate::probe`]'s shadow is restored to exactly where the player is standing
-//! and asked to walk one direction. If it comes out in the room the player just
-//! left, that passage is real and goes on the map. If it comes out anywhere
+//! and asked to walk one direction. If it comes out in a room the map already
+//! holds, that passage is real and goes on the map. If it comes out anywhere
 //! else, nothing at all is recorded.
 //!
 //! # Success is room identity, not a room
 //!
-//! **Landing somewhere is not landing back.** A probe that walks into some third
-//! room C and is counted as a success draws an edge that does not exist — which
-//! is the exact failure the whole design is arranged around. So the test is
-//! `step.location == Some(origin)`: the mapper's own location detection, the same
-//! `snap.number` [`crate::session::apply_turn`] keys rooms by, compared against
-//! the room the player came from.
+//! **Landing somewhere is not landing back.** The test is `step.location`: the
+//! mapper's own location detection, the same `snap.number`
+//! [`crate::session::apply_turn`] keys rooms by. The search ENDS when that number
+//! is the room the player came from; a landing anywhere else is a different
+//! question's answer and leaves the search running.
+//!
+//! **A v4+ story tells the interpreter where it is through the STATUS LINE**, and
+//! Quetzal archives no screen — so a shadow restored into the player's moment
+//! used to inherit the previous probe's status line, and a story that repaints
+//! only as many columns as its new room name needs left the tail of the longer
+//! one behind. Zork I's shadow read `Forest Pathse`, which matches no object; the
+//! ladder fell off `PlayerParent` onto the text rung and `resolve_room_object`
+//! prefix-matched object 1 — the scenery object named `forest` — so a real return
+//! path was discarded as a landing in the wrong room. `restore_state` now blanks
+//! the upper window, because memory restored without a screen must not be read
+//! against another moment's screen (SQ-0785).
 //!
 //! That is also why this consumer needs none of the probe seam's
 //! [`crate::probe::Refusals`] machinery. A vocabulary offer has to read the
@@ -44,13 +54,28 @@
 //! do something" is only answerable in words. "Am I back where I started" is
 //! answerable in a room number.
 //!
-//! **And a probe that lands in the wrong room records the ATTEMPT and nothing
-//! else.** Not room C, not the edge to it, not its existence. The map is a record
-//! of what the PLAYER has seen, and keeping C "known but hidden" would leak
-//! straight back out through the layout, the pathfinder and click-to-route.
+//! **A probe that lands in a room the map does NOT hold records the ATTEMPT and
+//! nothing else.** Not room C, not the edge to it, not its existence. The map is
+//! a record of what the PLAYER has seen, and keeping C "known but hidden" would
+//! leak straight back out through the layout, the pathfinder and click-to-route.
 //! Total failure likewise says nothing about the map: it proves only that these
 //! directions did not work from here, this time. A door may need opening, and a
 //! one-way passage is a real and beloved part of these games.
+//!
+//! **But a room the map ALREADY HOLDS is a room the player has stood in**, and a
+//! passage between two such rooms reveals nothing unseen — so it is recorded even
+//! though it is not the answer the search was after, and the search carries on
+//! looking for the one that is. That is not a bonus, it is the fix for a defect
+//! the narrower rule caused (SQ-0785): [`mapper::graph::Room::probed`] says "this
+//! direction was walked from here", but the answer it stood for was "…and it did
+//! not reach THAT origin". Reused against a different origin it SUPPRESSED the
+//! right answer. Zork I's South of House was probed westward while the search was
+//! asking about Behind House, reached West of House, and threw that away; on a
+//! later visit — with the player now arriving FROM West of House — `W` was
+//! already on the probed record, so the first surviving candidate was the
+//! diagonal `NW`, and the map recorded a diagonal where a cardinal was known.
+//! Recording every landing on a known room closes the gap on the first visit, so
+//! the second one has no gap left to ask about.
 //!
 //! # Two records, and why they must never merge
 //!
@@ -269,16 +294,22 @@ pub fn owns(state: &AppState, token: u64) -> bool {
 /// Returns true when the map changed, which is what tells the event loop to
 /// bump the graph generation and redraw.
 ///
-/// Three outcomes, in the order they are decided:
+/// Four outcomes, in the order they are decided:
 ///
 /// 1. **The attempt is recorded as probed, whatever it found.** First, and
 ///    unconditionally, so an abort a moment later still leaves the search one
 ///    step further along than it was.
-/// 2. **It came out in the room the player left** — the passage is real, and
+/// 2. **It came out in a room the map already holds** — the passage is real, and
 ///    goes on the map through the same call a walked crossing makes.
-/// 3. **Anything else** — a different room, nowhere at all, a death, a story
-///    that ended, an engine that cannot say where it is — and nothing is
-///    recorded but the attempt. The search moves on to the next direction.
+///    [`Mapper::record_probed_passage`] is what enforces the no-leak rule: it
+///    refuses a room the map does not have, so an unvisited room cannot arrive
+///    this way however the probe lands.
+/// 3. **…and if that room is the one the player LEFT, the search is over.**
+///    Otherwise it keeps going: the gap it was opened to close is still open, and
+///    what it just recorded is a different question's answer (SQ-0785).
+/// 4. **Anything else** — an unknown room, nowhere at all, a death, a story that
+///    ended, an engine that cannot say where it is — and nothing is recorded but
+///    the attempt. The search moves on to the next direction.
 pub fn deliver(
     state: &mut AppState,
     mapper: &mut Mapper,
@@ -292,26 +323,36 @@ pub fn deliver(
     // (1) The attempt is durable before anything is judged.
     mapper.graph.mark_probed(here, attempt.dir);
 
-    // (2) Did it land back where the player came from? Room identity, and
-    // nothing else — a step that ended the story or reached for a file answers
-    // nothing about the map, whatever `location` happens to hold.
-    let landed_home = answer.run.as_ref().is_some_and(|run| {
-        run.steps
-            .first()
-            .is_some_and(|s| !s.quit && !s.escaped && s.location == Some(origin))
+    // (2) WHERE did it come out? Room identity and nothing else — a step that
+    // ended the story or reached for a file answers nothing about the map,
+    // whatever `location` happens to hold.
+    let landed = answer.run.as_ref().and_then(|run| {
+        run.steps.first().filter(|s| !s.quit && !s.escaped).and_then(|s| s.location)
     });
-    if !landed_home {
-        // (3) Wrong room, or no room. Nothing about C is recorded: not the room,
-        // not the edge, not that it exists.
-        return None;
-    }
+    let Some(landed) = landed else {
+        return None; // no room. Nothing about it is recorded, not even that it exists.
+    };
 
-    let passage = ProbedPassage { from: here, dir: attempt.dir, to: origin };
-    // The search is over whether or not the graph takes the edge — a passage the
-    // player walked back themselves while this was in flight is the better
-    // authority, and there is no gap left to close either way.
-    state.return_search = None;
-    mapper.record_probed_passage(passage).then_some(passage)
+    // (3) A room the map already holds is a room the PLAYER has stood in, so the
+    // passage to it can be drawn without revealing anything unseen — whether or
+    // not it is the room this search was asking about. `record_probed_passage`
+    // refuses an unknown room itself, so the no-leak rule lives in one place
+    // rather than being restated here. It also refuses `from == to` (a refused
+    // move, where the player never left) and a direction already leaving `from`
+    // (the player walked it back while this was in flight, and a real traversal
+    // is the better authority on its own passage).
+    let passage = ProbedPassage { from: here, dir: attempt.dir, to: landed };
+    let recorded = mapper.record_probed_passage(passage);
+
+    // (4) …but the SEARCH ends only on the room it was opened to find, and it
+    // ends whether or not the graph took the edge — with the player back there
+    // by their own move there is no gap left to close either way. A landing
+    // anywhere else leaves it running: what was just recorded is a different
+    // question's answer, and this question is still open.
+    if landed == origin {
+        state.return_search = None;
+    }
+    recorded.then_some(passage)
 }
 
 /// Run a search to its end, waiting for each answer instead of collecting one
@@ -321,10 +362,12 @@ pub fn deliver(
 /// harness need: the answer without racing the thread, and the shadow's own
 /// `probes`/`spent` counters left holding the cost of the whole search.
 ///
-/// Returns the passage if one was found. Bounded by the candidate list, so it
-/// terminates whatever the story does; a shadow that will not answer at all ends
-/// it by breaking the seam, which [`crate::probe::ShadowProbe::settle`] reports
-/// as `None`.
+/// Returns the passage back to the ORIGIN if one was found. Edges to other rooms
+/// the map already holds are recorded as they turn up and do not end the search,
+/// so a caller wanting every change the run made should read the graph rather
+/// than this value. Bounded by the candidate list, so it terminates whatever the
+/// story does; a shadow that will not answer at all ends it by breaking the seam,
+/// which [`crate::probe::ShadowProbe::settle`] reports as `None`.
 pub fn settle_return_search(state: &mut AppState, mapper: &mut Mapper) -> Option<ProbedPassage> {
     while state.return_search.is_some() {
         if !pump_return_search(state) {
@@ -342,8 +385,14 @@ pub fn settle_return_search(state: &mut AppState, mapper: &mut Mapper) -> Option
         if !owns(state, answer.token) {
             continue; // somebody else's, and nobody is here to want it
         }
-        if let Some(passage) = deliver(state, mapper, &answer) {
-            return Some(passage);
+        let passage = deliver(state, mapper, &answer);
+        // `deliver` clears the search only on the room it was asking about, so an
+        // empty `return_search` here IS the end — and the passage has to be
+        // carried out of the loop rather than left to the `while`, which would
+        // drop it. A landing on some OTHER known room records its edge and leaves
+        // the search running, which is the whole point (SQ-0785).
+        if state.return_search.is_none() {
+            return passage;
         }
     }
     None

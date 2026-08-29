@@ -129,6 +129,17 @@ impl UpperWindow {
         self.cols = cols;
         self.cells = vec![Cell::default(); rows as usize * cols as usize];
     }
+    /// Blank every cell, keeping the grid's size.
+    ///
+    /// For a restore that brings game memory WITHOUT a screen to go with it
+    /// (Quetzal archives none by design). The story repaints its own status line
+    /// on the next turn; until it does, an empty grid is the only honest thing to
+    /// show, because what is there belongs to a different moment. Size is kept
+    /// because the restored game's field columns were baked at that width — see
+    /// `resize_preserving`'s note and SQ-0681.
+    pub fn blank(&mut self) {
+        self.cells.iter_mut().for_each(|c| *c = Cell::default());
+    }
     /// Resize the grid **preserving** whatever cells survive the new extent
     /// (growing adds blank rows/cols, shrinking truncates).
     ///

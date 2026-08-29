@@ -4829,6 +4829,25 @@ impl Engine for GameSession {
         self.machine
             .restore_file(&save.bytes)
             .map_err(|e| EngineError::BadSave(format!("{e:?}")))?;
+        // The restored memory brings NO screen with it — Quetzal archives none by
+        // design — so whatever is in the upper window belongs to the moment we
+        // just left, not to the one we just restored. Leaving it there lets a
+        // v4+ status line read as a mix of two rooms: the story repaints only as
+        // many columns as its new room name needs, and the tail of the longer
+        // previous name survives past the end of it. `detect_location` reads that
+        // grid, so the mixed string matches no object, the ladder falls off
+        // `PlayerParent` onto the text rung, and a *plausible wrong room number*
+        // comes back. That is how a return probe restored into Zork I's Clearing
+        // read `Forest Pathse` and reported object 1 — the scenery object named
+        // `forest` — instead of Forest Path, and discarded a real return path
+        // (SQ-0785).
+        //
+        // Blanked rather than resized: the restored game's status fields were
+        // baked at the saving session's width (SQ-0681), and that width is still
+        // the right frame of reference. A caller with a real screen to restore
+        // (`restore_screen`, the `.lanthorn` archive path) replaces the whole
+        // `ScreenState` immediately after this and never sees the blank.
+        self.machine.screen.upper.blank();
         // A Save State is snapshotted at an input prompt; its PC points AT the
         // read/read_char instruction (save_pc rewinds it), so run forward to
         // re-execute that read — re-arming the pending input on the freshly
@@ -6944,6 +6963,43 @@ mod tests {
         assert!(engine.is_saveload_pending(), "the game's @restore is suspended");
         let _ = engine.resume_restore(None);
         assert!(!engine.is_saveload_pending(), "cleared once the restore is cancelled");
+    }
+
+    #[test]
+    fn a_host_restore_blanks_the_upper_window_it_brings_no_screen_for() {
+        // SQ-0785. Quetzal archives no screen, so the grid left over from the
+        // moment being REPLACED is some other room's status line. On v4+ that
+        // grid is where `detect_location` reads the room name, and a story
+        // repaints only as many columns as its new name needs — so the tail of a
+        // longer previous name survives past the end of the new one. Zork I's
+        // return probe read `Forest Pathse` that way and resolved it to object 1,
+        // the scenery object named `forest`, instead of Forest Path.
+        //
+        // Falsify by dropping the `blank()` in `restore_state`: the painted name
+        // below survives the restore, and the real-game case
+        // `zork1_z5_finds_the_way_back_past_a_scenery_object_of_the_same_name`
+        // fails with the symptom as reported.
+        let mut sess = GameSession::new(read_char_then_save_v4(), true, false, None).expect("new");
+        let snapshot = sess.save_state();
+
+        // A previous moment's status line, at a width the saving session baked.
+        sess.machine.screen.upper.resize(1, 20);
+        for (i, ch) in "North of House".chars().enumerate() {
+            sess.machine.screen.upper.cells[i].ch = ch;
+        }
+
+        sess.restore_state(&snapshot).expect("host Save State restore");
+        let upper = &sess.machine.screen.upper;
+        // `blank()` keeps the grid's extent; the settling drive that re-arms the
+        // read may then refit the WIDTH to the host screen, which is a separate
+        // and long-standing behaviour (`refit_upper_window_width`). What this
+        // case pins is that no character survives either way.
+        assert_eq!(upper.rows, 1, "the split the saving session made is still there");
+        assert!(
+            upper.cells.iter().all(|c| c.ch == ' '),
+            "no character of the replaced moment survives: {:?}",
+            upper.cells.iter().map(|c| c.ch).collect::<String>()
+        );
     }
 
     #[test]
