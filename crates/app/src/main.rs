@@ -29,7 +29,7 @@ use app::render::hints_panel::{hint_input_action, hint_key_routes, HintInputAct,
 use app::render::command_band::draw_command_band;
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
 use app::render::paneframe::{build_layer_segments, InsetSegment};
-use app::render::panel::{draw_panel_with_controls, PanelFrame, PanelSpec, PanelStrip};
+use app::render::panel::{draw_panel, draw_panel_with_controls, PanelFrame, PanelSpec, PanelStrip};
 use app::render::controls::BorderControl;
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
@@ -655,44 +655,6 @@ fn draw_story_panel(
     (frame, hits)
 }
 
-/// Draw the map pane with its own border toggle control (SQ-0785), returning the
-/// panel frame and the control's hit-rect.
-///
-/// The twin of [`draw_story_panel`], and separate for the same reason the two
-/// control lists are: the panes are two draws with two `PanelSpec`s, and a single
-/// helper would have to be told which pane it was drawing.
-///
-/// **It only exists in the split layout, and that is a real conflict, reported
-/// rather than resolved** (SQ-0785). The control is specified as always visible —
-/// muted when off, never hidden, because it is the only off-by-default control
-/// and a switch nobody has seen lit is a switch nobody finds — and it is
-/// specified to live on the map pane's border. When `show_map` is false the map
-/// pane does not exist, so both cannot hold: the control is gone until the map
-/// comes back.
-///
-/// That is arguably the right reading anyway — a control that edits the map, on
-/// a screen with no map — and the map toggle sits on the story pane's own bottom
-/// border, so the way back to it is one click away and always present. But it IS
-/// a hole in "always visible", and relocating the control to the story pane on
-/// the quiet would be answering a question nobody asked. Whoever decides that
-/// should decide it deliberately.
-fn draw_map_panel(
-    buf: &mut ratatui::buffer::Buffer,
-    spec: &PanelSpec,
-    state: &AppState,
-) -> (PanelFrame, Vec<(BorderControl, Rect)>) {
-    let views = app::render::controls::map_controls_for(state);
-    let ctls: Vec<_> = views.iter().map(|v| v.as_header_control()).collect();
-    let (frame, rects) = draw_panel_with_controls(buf, spec, &ctls, &state.colors.theme);
-    let hits = views
-        .iter()
-        .map(|v| v.id)
-        .zip(rects)
-        .filter(|(_, r)| r.width > 0 && r.height > 0)
-        .collect();
-    (frame, hits)
-}
-
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
@@ -940,7 +902,12 @@ fn draw_frame(
                     let owned_segs = build_layer_segments(&layer_ids, active_layer,
                         |id| app::render::map::layer_tab_title(graph, id));
                     let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
-                    let (map_fp, map_ctls) = draw_map_panel(buf, &PanelSpec {
+                    // Plain `draw_panel`: the map pane carries no controls of its
+                    // own since SQ-1107 moved the return probe to the story pane's
+                    // border. See `render::controls` for why a pane that can be
+                    // hidden cannot hold the only switch for something that keeps
+                    // running when it is.
+                    let map_fp = draw_panel(buf, &PanelSpec {
                         area: pane_layout.map,
                         border_selector: if map_focused { "panel.border:active" } else { "panel.border" },
                         border_color: Some(map_border_color),
@@ -953,8 +920,7 @@ fn draw_frame(
                             active: state.colors.theme.get("panel.tab:active").style,
                         }),
                         body_fill: None,
-                    }, state);
-                    border_controls_out.extend(map_ctls);
+                    }, &state.colors.theme);
                     layer_tabs_out = layer_ids.into_iter().zip(map_fp.tab_rects).collect();
 
                     map_hits = Some(render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf));
@@ -1177,7 +1143,7 @@ fn draw_frame(
         // hover is only ever SET while no modal overlay is open, so this can
         // never sit under one. It paints and returns — no focus, no keyboard.
         if state.control_hover.is_some() && !border_controls_out.is_empty() {
-            let views = app::render::controls::all_controls_for(state);
+            let views = app::render::controls::controls_for(state);
             app::render::controls::draw_control_hint(buf, full, state, &views, &border_controls_out);
         }
 
@@ -2139,6 +2105,16 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // Biasing to over-draw here is deliberate: a swallowed key costs one extra
         // frame; a missed redraw is a visible bug. (SQ-0305)
         needs_redraw = true;
+
+        // A reveal is momentary, and the next keystroke is what ends it (SQ-1107).
+        // Ahead of every dispatch arm, so it is out before whatever that key does
+        // — including the reveal's OWN key, which clears here and lights again
+        // when the command runs a few lines later. Key presses only: moving the
+        // pointer is not an answer to the question the reveal asked, and putting
+        // the light out because the mouse drifted would be.
+        if matches!(&event, Event::Key(k) if k.kind == KeyEventKind::Press) {
+            app::reveal::clear(&mut state);
+        }
 
         // The player outranks paced output (SQ-0708): a keypress collapses an
         // in-flight v6 picture sequence to its settled composite at once, and a

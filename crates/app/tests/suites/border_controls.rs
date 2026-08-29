@@ -10,9 +10,13 @@
 //! later edit that means well.** A control rides the border nearest what it
 //! switches: the command band opens BELOW the story pane and the map lives to
 //! the RIGHT, so those toggles take the bottom border and its right-hand end;
-//! guidance has no direction of its own and joins the band; and the two v6
-//! switches govern how the story pane ITSELF is drawn, so they keep that pane's
-//! own top border. Off v6 there is no top cluster at all.
+//! guidance and the word reveal have no direction of their own and join the
+//! band; and the two v6 switches govern how the story pane ITSELF is drawn, so
+//! they keep that pane's own top border. Off v6 there is no top cluster at all.
+//!
+//! The return probe joins the map toggle in the anchored group (SQ-1107) — see
+//! `return_probe.rs` for why the map pane could not keep it, and for the order
+//! inside that pair.
 //!
 //! Everything here renders into a buffer and reads cells back, because that is
 //! the only evidence about a screen that is worth anything.
@@ -61,6 +65,19 @@ fn draw(state: &AppState, w: u16, h: u16) -> (Buffer, Vec<(BorderControl, Rect)>
     (buf, hits)
 }
 
+/// Every control there is. A list rather than a match on the enum because the
+/// enum has no iterator; a control added without a line here escapes the two
+/// registry guards below, which is the only way those guards can go stale.
+const EVERY_CONTROL: [BorderControl; 7] = [
+    BorderControl::Map,
+    BorderControl::Guidance,
+    BorderControl::VerbPanel,
+    BorderControl::V6Render,
+    BorderControl::V6PixelLock,
+    BorderControl::ReturnProbe,
+    BorderControl::Reveal,
+];
+
 /// One buffer row as a string.
 fn row(buf: &Buffer, y: u16) -> String {
     (buf.area.x..buf.area.right())
@@ -83,6 +100,17 @@ fn story(zversion: Option<u8>) -> AppState {
     st
 }
 
+/// Light a word reveal, the way a press of the reveal control does — without an
+/// engine, since nothing here is running a story. The trigger's control lights
+/// for exactly as long as this is up (SQ-1107).
+fn light_reveal(state: &mut AppState) {
+    state.reveal = Some(app::reveal::Reveal {
+        words: ["lantern".to_string()].into_iter().collect(),
+        tier: app::reveal::RevealTier::Scope,
+        until: std::time::Instant::now() + app::reveal::REVEAL_HOLD,
+    });
+}
+
 fn open_band(state: &mut AppState) {
     state.overlays.command_band = Some(CommandBandState::new(
         app::render::command_band::default_verbs(),
@@ -103,18 +131,18 @@ fn the_controls_ride_the_border_nearest_what_they_switch() {
     let (top, bottom) = (row(&buf, 0), row(&buf, 5));
     println!("z3 top:    {top}");
     println!("z3 bottom: {bottom}");
-    assert_eq!(hits.len(), 3, "off v6: map, guidance, verb panel");
+    assert_eq!(hits.len(), 5, "off v6: map, probe, guidance, verb panel, reveal");
 
-    // Bottom: `┤○ ▲├` centred, `┤◀├` anchored right, one corner clear of each.
-    assert!(bottom.contains("┤○ ▲├"), "the centred pair: {bottom:?}");
-    assert!(bottom.ends_with("┤◀├┘"), "the map toggle takes the right end: {bottom:?}");
+    // Bottom: `┤○ ▲ ◈├` centred, `┤◌ ◀├` anchored right, one corner clear of each.
+    assert!(bottom.contains("┤○ ▲ ◈├"), "the centred group: {bottom:?}");
+    assert!(bottom.ends_with("┤◌ ◀├┘"), "the anchored pair takes the right end, map at the corner: {bottom:?}");
     // Off v6 the top border carries NO cluster — the two v6 switches are the only
     // controls that ever live there — so nothing is reserved and the title strip
     // is centred across the WHOLE row. (Which is a behaviour change of its own:
     // the first pass reserved eleven columns on every story, v6 or not, and
     // `render_overflow` clipped long titles against that. SQ-1127.)
     assert!(top.contains("ZORK I"), "the title still fits: {top:?}");
-    for g in ['◀', '○', '▲', '◧', '□', '▶', '●', '▼', '■', '▣', '▦'] {
+    for g in ['◀', '○', '▲', '◈', '◌', '◧', '□', '▶', '●', '▼', '■', '▣', '▦'] {
         assert!(!top.contains(g), "z3 top border must carry no control, found {g:?}: {top:?}");
     }
     let dashes = |t: &str, part: &str| t.split(part).map(|p| p.matches('─').count()).collect::<Vec<_>>();
@@ -126,14 +154,14 @@ fn the_controls_ride_the_border_nearest_what_they_switch() {
     let (top, bottom) = (row(&buf, 0), row(&buf, 5));
     println!("z6 top:    {top}");
     println!("z6 bottom: {bottom}");
-    assert_eq!(hits.len(), 5, "on v6: the render mode and the pixel lock join");
+    assert_eq!(hits.len(), 7, "on v6: the render mode and the pixel lock join");
     assert!(top.contains("┤◧ □├"), "the v6 pair keeps the top border: {top:?}");
     // …and now that the cluster IS reserved, the title is centred in what is left
     // of the row rather than in the row: fewer dashes on its left than its right.
     let d = dashes(&top, "┤ ZORK I ├");
     assert!(d[0] < d[1], "the v6 cluster's columns come out of the title's: {top:?}");
-    assert!(bottom.contains("┤○ ▲├"), "…and the bottom row is unchanged by it: {bottom:?}");
-    assert!(bottom.ends_with("┤◀├┘"), "{bottom:?}");
+    assert!(bottom.contains("┤○ ▲ ◈├"), "…and the bottom row is unchanged by it: {bottom:?}");
+    assert!(bottom.ends_with("┤◌ ◀├┘"), "{bottom:?}");
 }
 
 /// Nothing is ever drawn on the story pane's RIGHT border column, which is where
@@ -164,6 +192,11 @@ fn every_control_changes_glyph_with_its_state() {
     open_band(&mut on);
     on.config.v6_render = app::config::V6RenderMode::Raster;
     on.config.v6_pixel_lock = true;
+    // The reveal has no second GLYPH — it is a trigger, so its state is carried
+    // by colour alone (see the case below). Lit here so the row is the every-on
+    // row it claims to be.
+    light_reveal(&mut on);
+    on.config.return_probe = true;
 
     let off = story(Some(6));
 
@@ -177,11 +210,13 @@ fn every_control_changes_glyph_with_its_state() {
     // Map shown → ▶ (click and it leaves to the right); hidden → ◀.
     // Guidance lit → ●, out → ○. Band open → ▼ (click and it drops), closed → ▲.
     // Raster → ■ / hybrid → ◧. Lock on → ▣ / off → □.
-    assert!(row(&on_buf, 5).contains("┤● ▼├"), "every-on bottom: {:?}", row(&on_buf, 5));
-    assert!(row(&on_buf, 5).ends_with("┤▶├┘"), "every-on bottom: {:?}", row(&on_buf, 5));
+    // The reveal is ◈ and the return probe ◌ in both rows: a trigger has no other
+    // mode to draw, and the probe has no other mode at all.
+    assert!(row(&on_buf, 5).contains("┤● ▼ ◈├"), "every-on bottom: {:?}", row(&on_buf, 5));
+    assert!(row(&on_buf, 5).ends_with("┤◌ ▶├┘"), "every-on bottom: {:?}", row(&on_buf, 5));
     assert!(row(&on_buf, 0).contains("┤■ ▣├"), "every-on top: {:?}", row(&on_buf, 0));
-    assert!(row(&off_buf, 5).contains("┤○ ▲├"), "every-off bottom: {:?}", row(&off_buf, 5));
-    assert!(row(&off_buf, 5).ends_with("┤◀├┘"), "every-off bottom: {:?}", row(&off_buf, 5));
+    assert!(row(&off_buf, 5).contains("┤○ ▲ ◈├"), "every-off bottom: {:?}", row(&off_buf, 5));
+    assert!(row(&off_buf, 5).ends_with("┤◌ ◀├┘"), "every-off bottom: {:?}", row(&off_buf, 5));
     assert!(row(&off_buf, 0).contains("┤◧ □├"), "every-off top: {:?}", row(&off_buf, 0));
 
     // …and the third render mode is a third glyph, not a repeat of either.
@@ -210,6 +245,10 @@ fn every_on_state_is_lit_from_the_alert_role_and_every_off_state_is_muted() {
     open_band(&mut on);
     on.config.v6_render = app::config::V6RenderMode::Raster;
     on.config.v6_pixel_lock = true;
+    // The trigger has no on STATE; it lights while its reveal is up, which is the
+    // click's own acknowledgement rather than a state report (SQ-1107).
+    light_reveal(&mut on);
+    on.config.return_probe = true;
     let (buf, hits) = draw(&on, 44, 6);
     println!("all on  top: {} / bottom: {}", row(&buf, 0), row(&buf, 5));
     for (id, r) in &hits {
@@ -374,13 +413,7 @@ fn a_click_and_a_hover_resolve_to_the_same_control() {
 /// this is the guard, because nothing structural stops the string drifting.
 #[test]
 fn every_control_names_a_real_bare_slash_command() {
-    for id in [
-        BorderControl::Map,
-        BorderControl::Guidance,
-        BorderControl::VerbPanel,
-        BorderControl::V6Render,
-        BorderControl::V6PixelLock,
-    ] {
+    for id in EVERY_CONTROL {
         let name = id.command();
         let spec = app::slash::COMMANDS
             .iter()
@@ -402,27 +435,72 @@ fn every_control_names_a_real_bare_slash_command() {
 ///
 /// This reads the registry's own description rather than the behaviour, because
 /// behaviour is what each command's own dispatch case already pins — what this
-/// catches is a SIXTH control being added later whose command does not persist,
-/// which would look identical on screen and quietly forget itself. Two commands
-/// changed semantics to make this true: `set-v6-render` and `set-guidance` were
-/// both session-only, and are now per-game like the pixel lock beside them.
+/// catches is a control being added later whose command does not persist, which
+/// would look identical on screen and quietly forget itself. Two commands changed
+/// semantics to make this true: `set-v6-render` and `set-guidance` were both
+/// session-only, and are now per-game like the pixel lock beside them.
+///
+/// **The reveal is the one exception, and it is stated rather than skipped**
+/// (SQ-1107). It is a TRIGGER: there is nothing to remember about a light that
+/// was on for four seconds, and `BorderControl::persists` is where that is
+/// declared — so a future control added without a thought about persistence
+/// still fails here, and only a control whose author wrote `persists() == false`
+/// is exempt.
 #[test]
 fn every_control_switches_something_that_is_remembered_per_game() {
-    for id in [
-        BorderControl::Map,
-        BorderControl::Guidance,
-        BorderControl::VerbPanel,
-        BorderControl::V6Render,
-        BorderControl::V6PixelLock,
-    ] {
+    for id in EVERY_CONTROL {
         let name = id.command();
         let spec = app::slash::COMMANDS.iter().find(|c| c.name == name).unwrap();
+        if !id.persists() {
+            assert!(
+                !spec.description.contains("persisted per-game"),
+                "{id:?} says it persists nothing, but `{name}` promises to remember: {:?}",
+                spec.description,
+            );
+            continue;
+        }
         assert!(
             spec.description.contains("persisted per-game"),
             "{id:?} runs `{name}`, whose description does not promise to remember it: {:?}",
             spec.description,
         );
     }
+}
+
+/// The trigger is not a switch, and the difference is worth pinning: it names a
+/// command that takes no argument and stores nothing, it has ONE glyph in every
+/// state, and its hint has to say what a press DOES because the glyph cannot.
+#[test]
+fn the_reveal_is_a_trigger_and_says_so() {
+    assert!(!BorderControl::Reveal.persists(), "a trigger has nothing to remember");
+    assert!(
+        EVERY_CONTROL.iter().filter(|c| !c.persists()).count() == 1,
+        "the reveal is still the only trigger; a second one wants its own thinking",
+    );
+
+    // Every other control's hint is two lines — a state and its opposite, then
+    // the command. This one needs three: the glyph says nothing about WHAT it
+    // lights, so the hint has to.
+    let st = story(Some(3));
+    let views = controls_for(&st);
+    let reveal = views.iter().find(|v| v.id == BorderControl::Reveal).expect("drawn");
+    let text = reveal.hint.join(" / ");
+    println!("reveal hint: {text}");
+    assert!(text.contains("light the words on screen"), "it says what it does: {text:?}");
+    assert!(text.contains("/reveal-words"), "…and how to do it from the keyboard: {text:?}");
+    // Guidance is out in `story()`, and a press would then do nothing at all —
+    // which the hint has to say, or the player concludes the button is broken.
+    assert!(text.contains("Guiding Light"), "…and why a press will do nothing: {text:?}");
+
+    let mut lit = story(Some(3));
+    lit.config.guidance = true;
+    let on = controls_for(&lit);
+    let reveal = on.iter().find(|v| v.id == BorderControl::Reveal).unwrap();
+    assert!(
+        !reveal.hint.join(" / ").contains("Guiding Light"),
+        "with the light on there is nothing to warn about: {:?}",
+        reveal.hint,
+    );
 }
 
 /// A modal overlay owns the screen: while one is open the border controls are
@@ -478,19 +556,26 @@ fn the_groups_drop_whole_and_the_centred_pair_gives_way_first() {
         let map = has(&hits, BorderControl::Map);
         let pair = has(&hits, BorderControl::Guidance);
         let v6 = has(&hits, BorderControl::V6Render);
-        // Guidance and the verb panel are one group: never one without the other.
-        assert_eq!(pair, has(&hits, BorderControl::VerbPanel), "w={w}: half the centred pair");
+        // Guidance, the verb panel and the reveal are one group: never one of
+        // them without the others.
+        assert_eq!(pair, has(&hits, BorderControl::VerbPanel), "w={w}: half the centred group");
+        assert_eq!(pair, has(&hits, BorderControl::Reveal), "w={w}: half the centred group");
         assert_eq!(v6, has(&hits, BorderControl::V6PixelLock), "w={w}: half the v6 pair");
         // The pair can never outlive the map toggle it has to make room for.
         assert!(!(pair && !map), "w={w}: the centred pair survived the anchored one");
         println!("w={w:>2} map={map:<5} pair={pair:<5} v6={v6:<5}  {} | {}", row(&buf, 0), row(&buf, 4));
         seen.push((w, map, pair, v6));
     }
-    // The thresholds, pinned: 3 columns for `┤◀├` plus a spare, 5 for `┤○ ▲├`
-    // plus a clear column between them, and 5 for the v6 pair plus a spare.
+    // The thresholds, pinned: 3 columns for the map toggle alone plus a spare, 7
+    // for `┤○ ▲ ◈├` plus a clear column past the anchored pair, and 5 for the v6
+    // pair plus a spare. The centred group cost two more columns when the reveal
+    // joined it and two more again when the probe joined the anchored pair it has
+    // to clear (SQ-1107) — the price of a group being drawn whole or not at all.
+    // Where the ANCHORED pair sheds its own inboard member is
+    // `return_probe.rs::the_map_toggle_outlives_the_probe_as_the_pane_narrows`.
     let first = |f: fn(&(u16, bool, bool, bool)) -> bool| seen.iter().find(|r| f(r)).unwrap().0;
-    assert_eq!(first(|r| r.1), 7, "the map toggle needs a 7-column pane");
-    assert_eq!(first(|r| r.2), 14, "the centred pair needs 14");
+    assert_eq!(first(|r| r.1), 7, "the map toggle alone needs a 7-column pane");
+    assert_eq!(first(|r| r.2), 20, "the centred group needs 20");
     assert_eq!(first(|r| r.3), 9, "the top border's v6 pair needs 9");
 }
 

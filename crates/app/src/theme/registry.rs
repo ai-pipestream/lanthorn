@@ -241,6 +241,13 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
         Some("alert"),
         Delta { glyph: Some("●".to_string()), ..mods(true, false, false, false) },
     ),
+    // SQ-1107: the momentary reveal's lit words. `accent` and UNDERLINED, not the
+    // assist's yellow — this is ink laid over the STORY's own prose for a few
+    // seconds, so it has to read against whatever colour the game already painted
+    // those words, and an underline survives a ground a foreground cannot. The
+    // `alert` slot belongs to the Guiding Light's own lines and its gutter mark,
+    // and a reveal is not one of those lines.
+    row("transcript_reveal", Section::Elements, Kind::Style, Some("accent"), mods(false, false, true, false)),
     // ── §2a/§2b panel.* (shared panel chrome) ────────────────────────────────
     // Transparent by default (no parent/bg) so panels show the terminal
     // background out of the box; set a bg here to give panels a solid surface.
@@ -568,6 +575,7 @@ mod tests {
         "transcript_crash",
         "transcript_assist",
         "transcript_assist_caution",
+        "transcript_reveal",
         // §2a/§2b panel.*
         "panel.background",
         "panel.border",

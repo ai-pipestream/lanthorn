@@ -2457,6 +2457,12 @@ fn render_middle(
         let text_x = body_area.x + text_origin_col(wr.kind);
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
         draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, crate::render::TextInk::of(state));
+        // …and, while a reveal is lit, re-style the words on this row that the
+        // parser would accept (SQ-1107). A pass OVER the drawn cells, after the
+        // text and its runs: the reveal is a property of the moment, not of the
+        // text, and folding it into `wr.runs` would write a decoration into the
+        // game's own output — which is what gets persisted in the archive.
+        crate::reveal::paint_row(buf, text_x, row_y, &wr.text, body_area, state);
 
         // Record cell→link for every linked span on this row. `run.start/end` are
         // CHAR offsets within `wr.text` (re-based by `rebase_runs`), while the
@@ -2803,64 +2809,99 @@ mod tests {
     /// inline-prompt mode does it, which is every `/help`, every save banner and
     /// every assist. What SQ-1124 changed is WHEN: a vocabulary offer that used
     /// to land inside the turn the player was waiting on can now land a beat
-    /// later, while they are typing. So the question is not whether the rebuild
-    /// is free (it is not) but whether it is small enough to disappear into a
-    /// keystroke, at the width where wrapping is worst.
+    /// later, while they are typing.
     ///
-    /// Measured here at 40 columns, which is a narrow pane, over transcripts up
-    /// to the scrollback lengths a long session reaches. The case prints the
-    /// table and holds the ceiling; a regression that made the rebuild
-    /// super-linear would blow through it long before a player noticed.
+    /// # The measurement, and why it is a comment and not an assertion
+    ///
+    /// Taken at 40 columns — a narrow pane, where wrapping is worst — on a
+    /// 12-core machine in a **debug** build: 200 lines rebuilt in 0.8 ms, 1,000
+    /// in 3.7 ms, 5,000 in 18.1 ms and 20,000 in 71.8 ms. Linear in scrollback,
+    /// and it does not need deferring: the event loop coalesces an input burst,
+    /// so the rebuild is paid once per FRAME rather than once per keystroke, and
+    /// the shipped release binary is several times quicker than any of those.
+    ///
+    /// That conclusion is worth keeping. The ceiling that used to enforce it was
+    /// not: a wall-clock bound in a debug build is a flake by construction, and
+    /// it failed on all three CI platforms — 3-4 shared cores against the twelve
+    /// it was measured on — while passing locally every time. Raising the number
+    /// only moves the flake further away. So the case keeps its subject and
+    /// asserts what is true on any hardware instead.
+    ///
+    /// # What is asserted
+    ///
+    /// The shape of the work rather than its duration: the insert lands ABOVE the
+    /// prompt (which is what makes it a rewrite), the frame after it owes exactly
+    /// ONE rebuild, the frame after THAT owes nothing at all, and the wrap it
+    /// produced is correct — the assist is in the rows, the prompt is still last,
+    /// and no source line was disturbed. A regression that rebuilt per line, or
+    /// per frame forever, fails on the plan; a regression that wrapped the wrong
+    /// thing fails on the rows.
     #[test]
-    fn a_late_insert_above_the_prompt_rebuilds_the_wrap_within_a_keystroke() {
+    fn a_late_insert_above_the_prompt_rebuilds_the_wrap_exactly_once() {
+        use crate::render::wrap_cache::WrapPlan;
+
         let cols = 40u16;
         let area = Rect::new(0, 0, cols, 24);
-        let mut worst = std::time::Duration::ZERO;
-        let mut table = String::new();
-        for lines in [200usize, 1_000, 5_000, 20_000] {
-            let mut state = AppState::default();
-            state.colors = crate::colors::ColorScheme::terminal_default();
-            state.assist_preamble_shown = true;
-            for i in 0..lines {
-                state.push_transcript_kind(
-                    &format!(
-                        "{i} You are standing in an open field west of a white house, with a \
-                         boarded front door. There is a small mailbox here."
-                    ),
-                    TranscriptKind::Story,
-                );
-            }
-            // Warm the cache the way a frame does.
-            let mut buf = Buffer::empty(area);
-            let normal = state.colors.theme.get("story_text").style;
-            render_middle(&state, &mut buf, area, normal, None);
-            let t = std::time::Instant::now();
-            render_middle(&state, &mut buf, area, normal, None);
-            let cached = t.elapsed();
-
-            // The late arrival: exactly what `push_assist` does in inline-prompt
-            // mode — an insert ABOVE the trailing story prompt, hence a Rewrote.
-            let style = state.colors.theme.get("assist_help").style;
-            state.push_transcript_internal_styled(
-                "try instead — light",
-                TranscriptKind::Assist,
-                style,
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.assist_preamble_shown = true;
+        for i in 0..200usize {
+            state.push_transcript_kind(
+                &format!(
+                    "{i} You are standing in an open field west of a white house, with a \
+                     boarded front door. There is a small mailbox here."
+                ),
+                TranscriptKind::Story,
             );
-            let t = std::time::Instant::now();
-            render_middle(&state, &mut buf, area, normal, None);
-            let rebuilt = t.elapsed();
-
-            worst = worst.max(rebuilt);
-            table.push_str(&format!(
-                "\n  {lines:>6} lines: cached frame {cached:>12?}, frame after a late insert {rebuilt:>12?}"
-            ));
         }
-        eprintln!("Wrap rebuild after an insert-above-prompt, {cols} columns:{table}");
-        // A keystroke's worth of headroom on the longest transcript measured.
-        // Debug build, so the shipped binary is several times quicker than this.
+        let prompt = state.transcript.last().cloned().expect("a trailing story line");
+
+        // The plan this frame owes against the product the cache is holding. The
+        // width is the cache's own — the renderer wraps to the BODY area, which is
+        // narrower than the pane by whatever gutter it reserved, and asking with
+        // the pane's width would report a rebuild that is really a mismatch here.
+        let plan = |state: &AppState| -> WrapPlan {
+            let cache = state.transcript_wrap.borrow();
+            let key = &cache.as_ref().expect("cache populated by a render").key;
+            key.plan(state, key.shape.width)
+        };
+
+        let mut buf = Buffer::empty(area);
+        let normal = state.colors.theme.get("story_text").style;
+        // Two, because the first frame is what SETTLES the layout facts the key is
+        // taken over (the v6 page cells are filled in as the pane is drawn); the
+        // second is the steady state a player's idle frame is in.
+        render_middle(&state, &mut buf, area, normal, None);
+        render_middle(&state, &mut buf, area, normal, None);
+        assert_eq!(plan(&state), WrapPlan::Reuse, "a warm cache on an unchanged transcript");
+
+        // The late arrival: exactly what `push_assist` does in inline-prompt mode
+        // — an insert ABOVE the trailing story prompt, hence a Rewrote.
+        let style = state.colors.theme.get("assist_help").style;
+        state.push_transcript_internal_styled("try instead — light", TranscriptKind::Assist, style);
+        assert_eq!(
+            state.transcript.last().map(String::as_str),
+            Some(prompt.as_str()),
+            "the assist went above the prompt, not after it — otherwise this is an append \
+             and the case is measuring nothing",
+        );
+        assert_eq!(plan(&state), WrapPlan::Rebuild, "a line already wrapped moved");
+
+        render_middle(&state, &mut buf, area, normal, None);
+        assert_eq!(plan(&state), WrapPlan::Reuse, "the rebuild is paid ONCE, not every frame");
+
+        // …and the wrap it rebuilt is the right one.
+        let cache = state.transcript_wrap.borrow();
+        let rows = &cache.as_ref().expect("cache").rows;
         assert!(
-            worst < std::time::Duration::from_millis(120),
-            "a late offer would hitch the typing it lands in the middle of: {worst:?}"
+            rows.iter().any(|r| r.text.contains("try instead") && r.kind == TranscriptKind::Assist),
+            "the assist is in the wrapped product",
+        );
+        let last = rows.last().expect("rows");
+        assert!(
+            prompt.contains(last.text.trim_end()) && last.kind == TranscriptKind::Story,
+            "the prompt is still the last thing wrapped: {:?}",
+            last.text,
         );
     }
 

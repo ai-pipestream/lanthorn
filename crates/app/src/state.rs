@@ -2288,6 +2288,13 @@ pub struct AppState {
     /// persisted: a restore into a fresh run is a session that has said nothing
     /// yet.
     pub vocab: crate::vocab::VocabState,
+    /// The momentary word reveal that is lit right now, if any (SQ-1107).
+    ///
+    /// Session state of the most fleeting kind — it goes out on the next
+    /// keystroke, the next turn or a four-second hold — so nothing persists it
+    /// and nothing needs to: a restore that brought a reveal back would be
+    /// restoring a keypress.
+    pub reveal: Option<crate::reveal::Reveal>,
     /// A silent, disposable copy of the live game, kept between questions
     /// (SQ-1121). Armed at boot with the story's own bytes; the shadow inside it
     /// is booted the first time anything asks a question and reused after that.
@@ -3154,6 +3161,7 @@ impl Default for AppState {
             transcript_kinds: Vec::new(),
             assist_preamble_shown: false,
             vocab: crate::vocab::VocabState::default(),
+            reveal: None,
             probe: crate::probe::ShadowProbe::default(),
             return_search: None,
             vocab_pending: None,
@@ -4541,6 +4549,12 @@ impl AppState {
     /// a suggestion against the wrong command.
     pub fn begin_turn(&mut self) {
         self.turn_epoch = self.turn_epoch.wrapping_add(1);
+        // A reveal is an answer about one moment, and the turn has just ended it
+        // (SQ-1107). The keystroke path clears it too, so this is the exit for a
+        // turn nobody typed — a timed read firing, a game-driven redraw — where
+        // the words on screen would otherwise stay lit against a world that had
+        // moved on.
+        self.reveal = None;
     }
 
     pub fn push_assist(&mut self, assist: &crate::assist::Assist) {

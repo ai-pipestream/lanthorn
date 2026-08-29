@@ -26,6 +26,8 @@ mod scope_completion;
 
 #[path = "suites/vocabulary_vetting.rs"]
 mod vocabulary_vetting;
+#[path = "suites/word_reveal.rs"]
+mod word_reveal;
 #[path = "suites/cell_dump_command.rs"]
 mod cell_dump_command;
 #[path = "suites/font_check.rs"]

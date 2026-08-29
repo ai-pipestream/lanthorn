@@ -263,7 +263,7 @@ pub fn caret_over_text(look: &PeriodLook) -> Option<Style> {
 /// lanthorn means (this line is yours, this one is not the story's) and no
 /// machine has an opinion about it, but leaving their ground alone would punch
 /// the theme's page through the machine's in the middle of the transcript.
-fn painted(look: &PeriodLook) -> [(&'static str, &'static str, Style); 10] {
+fn painted(look: &PeriodLook) -> [(&'static str, &'static str, Style); 11] {
     let body = body_style(look);
     let page = Style::new().bg(rgb(look.page));
     [
@@ -288,6 +288,10 @@ fn painted(look: &PeriodLook) -> [(&'static str, &'static str, Style); 10] {
         // named here is the same one twice.
         ("transcript_assist", "alert", page),
         ("transcript_assist_caution", "alert", page),
+        // SQ-1107: the reveal paints over the STORY's own rows, so it has to take
+        // the machine's page with them — otherwise a lit word is the one spot on a
+        // machine's screen still wearing the host theme's ground.
+        ("transcript_reveal", "accent", page),
     ]
 }
 

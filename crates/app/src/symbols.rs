@@ -122,16 +122,27 @@ pub struct ControlGlyphs {
     pub lock_off: char,
     /// The return probe (SQ-0785) — a footprint, in one state rather than two.
     ///
-    /// **The only control here with a single glyph, and deliberately.** Every
-    /// other one names two modes and draws the mode it is in: shown/hidden,
+    /// **One of two controls here with a single glyph, and deliberately.** Most
+    /// of them name two modes and draw the mode they are in: shown/hidden,
     /// open/closed, locked/unlocked. This one has no opposite mode — it is either
-    /// looking for the way back or it is not — and it is also the only control
+    /// looking for the way back or it is not — and it is also the only SWITCH
     /// whose off state is the DEFAULT, which is the state a player has to notice
     /// in order to ever turn it on. So the mark is always the same and the colour
     /// carries the state: muted when off, lit through `panel.control:lit` when
     /// on. A shape that changed here would be saying "the other mode is engaged"
     /// about a thing with no other mode.
     pub return_probe: char,
+    /// The momentary word reveal (SQ-1107) — a light, in one state.
+    ///
+    /// **The only TRIGGER in the set.** Every other control reports a state and
+    /// flips it; this one has no state at all — it makes something happen
+    /// elsewhere on the screen and is over a few seconds later. So one glyph,
+    /// like the probe above it, lit for exactly as long as the reveal is up. That
+    /// lighting is not a state report: it is so that a click visibly DID
+    /// something, because a click that happens to light no words would otherwise
+    /// look broken. The tooltip carries the rest, and carries more weight here
+    /// than on its neighbours, since the glyph alone cannot say what a press does.
+    pub reveal: char,
 }
 
 // ── Top-level set ─────────────────────────────────────────────────────────────
@@ -265,6 +276,13 @@ impl Default for SymbolSet {
                 // the shadow leaves behind. Everything else in the block is a
                 // filled/hollow pair saying which of two modes is in force.
                 return_probe: '◌',
+                // ◈ (U+25C8), chosen the way `return_probe` chose ◌: the one mark
+                // in Geometric Shapes that reads as a light SOURCE rather than as
+                // a state — a bright point inside its own halo, which is what a
+                // reveal casts over the prose. Deliberately not another circle:
+                // the Guiding Light sits one column away as ●/○, and a third disc
+                // beside that pair would read as a third state of the same lamp.
+                reveal: '◈',
             },
             dock_following: '◇',
             dock_pinned: '◆',
@@ -576,6 +594,10 @@ impl ControlGlyphs {
                 // md-shoe_print — a footprint, for the search that walks the way
                 // back and leaves nothing behind but the knowledge that it does.
                 return_probe: '\u{F0DFA}',
+                // md-flashlight — a lamp you point at one thing for a moment,
+                // which is the whole feature. Read from the font's own `post`
+                // table, like every codepoint here; do not substitute a name.
+                reveal: '\u{F0244}',
             },
             _ => return None,
         })
@@ -771,6 +793,7 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "control.lock_on"        => s.controls.lock_on = ch,
         "control.lock_off"       => s.controls.lock_off = ch,
         "control.return_probe"   => s.controls.return_probe = ch,
+        "control.reveal"         => s.controls.reveal = ch,
         "gutter.meta"      => s.meta_gutter = ch,
         "gutter.warning"   => s.warning_gutter = ch,
         "gutter.assist"    => s.assist_gutter = ch,
@@ -977,7 +1000,7 @@ mod tests {
         assert_eq!(four.iter().collect::<std::collections::HashSet<_>>().len(), 4, "up/down/in/out must differ");
     }
 
-    /// The border controls' nerdfont set is ELEVEN named icons, each codepoint
+    /// The border controls' nerdfont set is TWELVE named icons, each codepoint
     /// read from the font's own `post` table rather than inferred from a name.
     ///
     /// This pins the numbers, because nothing else can: SQ-0989 is what a
@@ -1002,6 +1025,7 @@ mod tests {
             ("md-lock_open", c.lock_off, '\u{F033F}'),
             ("md-lock", c.lock_on, '\u{F033E}'),
             ("md-shoe_print", c.return_probe, '\u{F0DFA}'),
+            ("md-flashlight", c.reveal, '\u{F0244}'),
         ] {
             assert_eq!(got, want, "{name} moved: U+{:05X} is not U+{:05X}", got as u32, want as u32);
         }

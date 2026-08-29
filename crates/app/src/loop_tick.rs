@@ -500,6 +500,14 @@ pub(crate) fn expire_sound_and_settle_dock(state: &mut AppState) -> bool {
         redraw = true;
     }
 
+    // Put out a word reveal whose hold is up (SQ-1107). Here rather than at the
+    // draw, because the hold is a WALL CLOCK: a player who presses the key and
+    // then does nothing at all must still watch it go out, and nothing else in an
+    // otherwise idle loop would notice the deadline pass.
+    if app::reveal::expire(state) {
+        redraw = true;
+    }
+
     // Clear the command band's content once its slide-out has fully settled
     // (drawer pattern: content persists during the close animation).
     let had_band = state.overlays.command_band.is_some();

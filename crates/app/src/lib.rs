@@ -333,6 +333,7 @@ pub mod query_sweep;
 pub mod reload;
 pub mod render;
 pub mod return_probe;
+pub mod reveal;
 pub mod roomid;
 pub mod scott_debug;
 pub mod scott_session;

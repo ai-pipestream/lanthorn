@@ -310,6 +310,17 @@ impl Default for KeyMap {
         // keyboard path deserved to be more than leader-only too.
         bind!(plain(F(3)), "resize-panes", Context::Global);
 
+        // F4 lights the momentary word reveal (SQ-1107), and it has to be a KEY
+        // rather than only a click: the reveal answers "of the words I can see,
+        // which work right now?", which is asked mid-sentence with both hands on
+        // the keyboard — reaching for the mouse to ask it is most of the reason
+        // nobody would. F4 was free (the note above stops at F5 because it was
+        // written before this existed; `open-history` was never on it, and the
+        // case that says so asserts what it means rather than that the key is
+        // reserved forever). The row now reads as the story pane's own: F2 opens
+        // the verbs, F3 moves the walls, F4 lights the nouns.
+        bind!(plain(F(4)), "reveal-words", Context::Global);
+
         bind!(ctrl(Char('s')), "save-state", Context::Global);
         bind!(ctrl(Char('r')), "restore-state", Context::Global);
 
@@ -1071,10 +1082,18 @@ mod tests {
     /// still opens the modal once recording is on.
     #[test]
     fn open_history_is_a_command_but_not_a_panel_row() {
-        // Leader-only since SQ-0202; F4 has no default binding either.
+        // Leader-only since SQ-0202, so no key reaches it. This used to assert
+        // that F4 was unbound, which was never the point — F4 was merely where
+        // `open-history` did not live, and SQ-1107 put the word reveal there.
+        // What matters is that no default binding reaches `open-history` at all.
         let km = KeyMap::default();
         let f4 = KeySpec { code: KeyCode::F(4), ctrl: false, shift: false, alt: false };
-        assert_eq!(km.lookup(&f4, Context::Global), None);
+        assert_ne!(km.lookup(&f4, Context::Global), Some("open-history"));
+        assert_eq!(
+            km.primary_key("open-history"),
+            None,
+            "open-history is leader-only: no default key may reach it",
+        );
         let layout = HotkeyLayout::default();
         assert!(
             !layout.groups.iter().any(|(_, cmds)| cmds.iter().any(|c| c.1 == "open-history")),
