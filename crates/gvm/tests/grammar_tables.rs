@@ -121,6 +121,56 @@ fn eat_me_resolves_verb_synonyms_through_the_inverted_numbering() {
 }
 
 #[test]
+fn pre_6_32_glulx_stories_number_their_verbs_from_ff() {
+    // SQ-1114. Inform in Glulx mode wrote the Z-machine's one-byte inversion
+    // into the two-byte `#dict_par2` field until v6.32 widened it to $FFFF
+    // (`Inform6/verbs.c`: `0xff-Inform_verb` through v6.31,
+    // `(glulx_mode)?(0xffff-Inform_verb):(0xff-Inform_verb)` from v6.32). Four
+    // stories in the corpus are older than that, and every one of them read as
+    // a full grammar table with not one verb WORD attached to it: the counts
+    // below were the tell, since a verb the parser can never be given is not a
+    // verb the story has.
+    //
+    // Adventure is the case that cannot be argued with — `xyzzy` and `plugh`
+    // are its own, and no reading that misses them is right.
+    let Some(mem) = story("advent.blb") else { return };
+    let g = Grammar::load(&mem).expect("Adventure has a grammar table");
+    assert_eq!(g.verb_number_base(), 0xFF);
+    assert_eq!(g.tables().verb_count, 109);
+    assert_eq!(g.tables().action_count, 119);
+    assert_eq!(g.tables().word_count, 717);
+    let lines: usize = g.verbs().iter().map(|v| v.lines.len()).sum();
+    assert_eq!(lines, 192);
+
+    // Non-vacuity, and the assertion the defect failed: every verb the table
+    // holds is named by at least one dictionary word.
+    assert_eq!(g.verbs().iter().filter(|v| v.word().is_some()).count(), 109);
+    assert_eq!(g.verb_words().count(), 225);
+
+    let take = g.verb_for_word("take").expect("knows 'take'");
+    assert_eq!(take.number, 17);
+    assert_eq!(take.words, ["carry", "hold", "take"]);
+    let go = g.verb_for_word("go").expect("knows 'go'");
+    assert_eq!(go.words, ["go", "run", "walk"]);
+    assert!(g.is_verb("xyzzy") && g.is_verb("plugh"));
+
+    // The other three, pinned by the same shape rather than by their contents:
+    // each names every verb it has, which is what the wrong base destroys.
+    for (name, verbs, words) in
+        [("narco.blorb", 103, 216), ("sensory.blorb", 105, 212), ("photo201.blb", 85, 176)]
+    {
+        let Some(mem) = story(name) else { continue };
+        let g = Grammar::load(&mem).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!(g.verb_number_base(), 0xFF, "{name}");
+        assert_eq!(g.tables().verb_count, verbs, "{name}");
+        let named = g.verbs().iter().filter(|v| v.word().is_some()).count();
+        assert_eq!(named, verbs as usize, "{name}");
+        assert_eq!(g.verb_words().count(), words, "{name}");
+        assert!(g.is_verb("take") && g.is_verb("drop"), "{name}");
+    }
+}
+
+#[test]
 fn cragne_manor_is_the_largest_table_in_the_corpus() {
     let Some(mem) = story("cragne.gblorb") else { return };
     let g = Grammar::load(&mem).expect("Cragne Manor has a grammar table");
@@ -179,7 +229,14 @@ fn every_glulx_story_either_reads_or_refuses() {
     for entry in entries.flatten() {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !(name.ends_with(".gblorb") || name.ends_with(".gblorb.blorb") || name.ends_with(".ulx"))
+        // `.blb` and `.blorb` are in the list because that is where all four
+        // pre-6.32 stories live, and a sweep that only knew the Glulx-flavoured
+        // extensions could not see them (SQ-1114). Most files with those
+        // extensions are Z-machine blorbs; `glulx_image` returns `None` for
+        // those and they fall out below.
+        if !["gblorb", "gblorb.blorb", "ulx", "blb", "blorb"]
+            .iter()
+            .any(|ext| name.ends_with(&format!(".{ext}")))
         {
             continue;
         }
@@ -197,6 +254,23 @@ fn every_glulx_story_either_reads_or_refuses() {
             for w in &verb.words {
                 assert!(g.is_verb(w), "{name}: {w} unreachable");
             }
+        }
+        // And in the other direction: every word the DICTIONARY flags as a verb
+        // reaches one. Inform writes a verb number into a record precisely
+        // because it names a grammar entry, so a flagged word that reaches
+        // nothing means the number was read against the wrong base — which is
+        // what happened to four stories here, all 225 of Adventure's flagged
+        // words included, and what nothing in this sweep could see (SQ-1114).
+        //
+        // Not the converse: a verb entry with no word at all is ordinary
+        // Inform, since `Extend only … replace` moves a word off its entry and
+        // leaves it orphaned. Six stories in the corpus have between one and
+        // four of them.
+        let flagged: Vec<&str> =
+            g.words().filter(|w| g.roles(w).is_some_and(|r| r.verb)).collect();
+        assert!(!flagged.is_empty(), "{name}: a grammar table and no verb words");
+        for w in flagged {
+            assert!(g.is_verb(w), "{name}: {w} is flagged a verb and reaches none");
         }
         // Every elementary token decoded to a slot the parser actually has.
         assert!(g
