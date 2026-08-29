@@ -150,8 +150,7 @@ fn decide(file: &str) -> Option<Decision> {
         eprintln!("SKIP: gitignored DOS press missing at {}", path.display());
         return None;
     }
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq956-decide-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = app::scratch_dir("sq956-decide");
     // No `--pictures`: the reported launch named no archive, and the medium is
     // what serves the plate.
     let over = PictureOverride::resolve_with_session(&path, &dir, None);
@@ -238,8 +237,7 @@ fn frame_after(file: &str, card: Card, turns: usize) -> Option<Frame> {
     assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), RELEASE, "this press carries r{RELEASE}");
     assert_eq!(&bytes[0x12..0x18], SERIAL);
 
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq956-frame-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = app::scratch_dir("sq956-frame");
     let over = PictureOverride::resolve_with_session(&path, &dir, None);
     let named_art_std_window = over.std_window();
     let (profile, source) = InterpreterProfile::resolve_with_source(&path, None, over.flavour(), None);

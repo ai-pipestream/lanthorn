@@ -80,9 +80,9 @@ fn boot_colour_decision(story: &str, pictures: Option<&str>) -> Option<Boot> {
     if let Some(p) = pictures {
         fixture(p)?;
     }
-    let dir = std::env::temp_dir()
-        .join(format!("lanthorn-sq860-boot-{}-{}", std::process::id(), story.len()));
-    let _ = std::fs::create_dir_all(&dir);
+    // Six of this helper's nine callers pass `PC_STORY`, so the story's length is
+    // no more a discriminator between them than the pid is (SQ-1131).
+    let dir = app::scratch_dir("sq860-boot");
     let over = PictureOverride::resolve_with_session(&path, &dir, pictures);
     // `startup.rs`'s order: the named archive's flavour, then the medium — and,
     // since SQ-0928, WHERE that answer came from, because only a medium licenses a
