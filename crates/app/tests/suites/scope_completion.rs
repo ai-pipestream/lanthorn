@@ -312,3 +312,81 @@ fn the_avatar_is_not_a_thing_in_the_room() {
     assert!(!state.scope_words.contains(&"cretin".to_string()), "{:?}", state.scope_words);
     assert!(!offered(&session).iter().any(|w| w.contains("cretin")));
 }
+
+/// SQ-1133: **the carried half of scope nests too, and stops at the same lid.**
+///
+/// The room half has descended into open holders since SQ-0678 — the shut sack
+/// on Mini-Zork's kitchen table is the case above — while the carried half read
+/// the player's DIRECT children and nothing else. So the very same sack hid its
+/// lunch the instant you picked it up, and the two surfaces whose job is to say
+/// what is real disagreed about one object depending on whose hands it was in.
+///
+/// | fixture | release | turns in | what it shows |
+/// |---|---|---|---|
+/// | `crates/zvm/tests/fixtures/minizork.z3` | r34/s871124 | 5 then 6 | shut, then opened, in the player's hands |
+///
+/// The parser is the oracle, and it was asked: driven to the Kitchen and
+/// `take sack` / `open sack`, Mini-Zork answers `i` with
+/// "The brown sack contains: A clove of garlic / A lunch" and
+/// `examine lunch` with "There is nothing special about the lunch."
+///
+/// **Measured depth: one.** Zork I r88 and Mini-Zork r34 both put the lunch and
+/// the garlic exactly one level below the opened sack, and an unbounded,
+/// openness-respecting walk of the corpus in `stories/` finds nothing at all
+/// below the player at boot (62 stories booted; every one 0 deep, because the
+/// openness attribute is identified in only 4 of them and nobody is carrying an
+/// opened container on turn 0). The cap taken is `MAX_NEST_DEPTH`, shared with
+/// the room walk rather than chosen again here.
+///
+/// Falsify by putting `Introspect::contents` back in `vocab::scope_split`: the
+/// second half fails with the garlic and the lunch missing — the reported
+/// symptom — while the first half still passes, which is exactly why the first
+/// half alone proves nothing.
+#[test]
+fn a_carried_container_shows_its_contents_only_once_it_is_opened() {
+    let mut session = minizork();
+    drive(&mut session, &["n", "e", "open window", "west", "take sack"]);
+    assert_eq!(session.current_location().map(|l| l.name), Some("Kitchen".to_string()));
+
+    let shut = scoped(&session);
+    assert!(shut.scope_words.contains(&"sack".to_string()), "the sack is in hand");
+    for secret in ["garlic", "clove", "lunch", "food"] {
+        assert!(
+            !shut.scope_words.contains(&secret.to_string()),
+            "`{secret}` is inside a shut sack — carrying it does not open it: {:?}",
+            shut.scope_words
+        );
+    }
+
+    drive(&mut session, &["open sack"]);
+    let open = scoped(&session);
+    for now_visible in ["garlic", "clove", "lunch"] {
+        assert!(
+            open.scope_words.contains(&now_visible.to_string()),
+            "an opened sack in your hands reads exactly like one on the table: {:?}",
+            open.scope_words
+        );
+    }
+}
+
+/// The same pair on the commercial release the report came from, skipping
+/// vacuously without `stories/`: Zork I r88/s840726, Kitchen, 6 turns in
+/// (`n`, `e`, `open window`, `enter window`, `take sack`, `open sack`).
+#[test]
+fn zork1s_carried_sack_reads_the_same_way() {
+    let Some(mut session) = story("zork1-r88-s840726.z3") else { return };
+    drive(&mut session, &["n", "e", "open window", "enter window", "take sack"]);
+    let shut = scoped(&session);
+    assert!(
+        shut.scope_words.contains(&"sack".to_string()),
+        "non-vacuity: the sack really is in hand at this turn count: {:?}",
+        shut.scope_words
+    );
+    assert!(!shut.scope_words.contains(&"lunch".to_string()), "{:?}", shut.scope_words);
+
+    drive(&mut session, &["open sack"]);
+    let open = scoped(&session);
+    for w in ["lunch", "garlic"] {
+        assert!(open.scope_words.contains(&w.to_string()), "{:?}", open.scope_words);
+    }
+}

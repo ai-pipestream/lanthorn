@@ -481,9 +481,11 @@ fn the_verb_column_is_the_running_story_s_own_grammar() {
 /// The same argument returns two more Zork I words nobody noticed missing:
 /// `enter` and `exit`, excluded as direction-equivalents of the quick row's
 /// `in`/`out` and both really `enter OBJ` / `exit OBJ` here. Across the corpus
-/// it also returns `bow` — `mapper::direction::parse_direction` calls it north,
-/// because a ship's bow points forward — in the twelve stories that have it
-/// (Sherlock, Trinity, Plundered Hearts, …); Zork I is not one of them.
+/// it also returns `bow`, which the band read as north because the MAPPER's
+/// parser does, in the twelve stories that have it (Sherlock, Trinity,
+/// Plundered Hearts, …); Zork I is not one of them. SQ-1130 took the reuse out
+/// from under all three — `enter`, `exit` and `bow` are ordinary words to the
+/// band now, and pass this rule on their own merits.
 ///
 /// Falsify by reverting `items(COL_VERB)` to the flat quick exclusion: every
 /// word in the first loop disappears from the column with the reported symptom.
@@ -816,5 +818,42 @@ fn a_glulx_story_drives_the_column_through_the_same_seam() {
         put.joiners().contains(&"in") && put.joiners().contains(&"on"),
         "`put … in …` and `put … on …` are two lines of one verb: {:?}",
         put.joiners()
+    );
+}
+
+/// SQ-1133: the CARRIED column reads the same nesting walk the *here* column
+/// does, so an opened sack in your hands offers its lunch and a shut one does
+/// not.
+///
+/// Mini-Zork r34/s871124, Kitchen, 5 then 6 turns in. The band's carried column
+/// used to be `Introspect::contents` — the inventory dock's flat list of what is
+/// in your hands — which is a different question, and answering it here meant
+/// the word for a thing the parser accepts had no row anywhere.
+///
+/// Falsify by restoring `intro.contents(p)` in `refresh_objects`: the second
+/// half fails with `lunch` absent from the column.
+#[test]
+fn the_carried_column_reaches_into_an_opened_container() {
+    let Some(mut session) = boot_zmachine("minizork-r34-s871124.z3") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+    for c in ["n", "e", "open window", "west", "take sack"] {
+        session.submit(c);
+    }
+    seed_player_obj(&mut state, &session);
+    refresh_objects(&mut state, &session);
+    // The column carries the name the band would TYPE — Mini-Zork prints
+    // "brown sack" — so match on the noun inside it rather than on equality.
+    let holds = |col: &[String], w: &str| col.iter().any(|c| c.to_lowercase().contains(w));
+    let shut = state.overlays.command_band.as_ref().unwrap().items(COL_CARRIED);
+    assert!(holds(&shut, "sack"), "non-vacuity: {shut:?}");
+    assert!(!holds(&shut, "lunch"), "a shut sack's lunch is not a word the band may offer: {shut:?}");
+
+    session.submit("open sack");
+    refresh_objects(&mut state, &session);
+    let open = state.overlays.command_band.as_ref().unwrap().items(COL_CARRIED);
+    assert!(
+        holds(&open, "lunch"),
+        "an opened sack's lunch is one the parser takes, so the column offers it: {open:?}"
     );
 }

@@ -1460,9 +1460,17 @@ fn band_pick_row(state: &mut AppState, col: usize, idx: usize) {
 /// `n s e w` for compactness, but Scott Adams vocabularies hold only the
 /// spelled-out `NORTH`/`SOUTH`/…, so sending the abbreviation fails there
 /// while the full word works in every engine.
+///
+/// Which words count as abbreviations is
+/// [`compass_spelling`](crate::render::command_band::compass_spelling), the
+/// band's own table, not `mapper::direction::parse_direction` (SQ-1130). Asked
+/// of the parser, a quick row holding `bow` submitted **`north`** — the word
+/// the player put on the row replaced by a movement the mapper reads it as, on
+/// a story where `bow` is a verb that takes an object. Expanding `n` to `north`
+/// is one word spelled two ways; rewriting `bow` is a different word.
 pub fn band_quick_pick_command(state: &AppState, idx: usize) -> Option<String> {
     let word = state.overlays.command_band.as_ref()?.quick.get(idx)?;
-    Some(match mapper::direction::parse_direction(word) {
+    Some(match crate::render::command_band::compass_spelling(word) {
         Some(d) => full_direction_word(d).unwrap_or(word).to_string(),
         None => word.clone(),
     })
@@ -3192,18 +3200,11 @@ pub fn refresh_seen_words(state: &mut AppState, engine: &dyn crate::engine::Engi
 /// Empty for an engine with no introspection (Glulx, Scott) — completion there
 /// still has the recent-prose scrape and the flat dictionary.
 pub fn refresh_scope_words(state: &mut AppState, engine: &dyn crate::engine::Engine) {
-    let Some(intro) = engine.introspect() else {
+    let Some((mut objects, carried)) = crate::vocab::scope_split(engine, state.player_obj) else {
         state.scope_words.clear();
         return;
     };
-    let player = state.player_obj.or_else(|| intro.player_object());
-    let mut objects = match engine.current_location().map(|l| l.number) {
-        Some(room) if room != 0 => intro.room_objects_excluding(room, player),
-        _ => Vec::new(),
-    };
-    if let Some(p) = player {
-        objects.extend(intro.contents(p));
-    }
+    objects.extend(carried);
     let vocab = state.vocab.get(engine);
     let mut words: Vec<String> = Vec::new();
     for o in &objects {
@@ -7609,6 +7610,35 @@ mod tests {
 
         s.overlays.command_band = None;
         assert_eq!(band_quick_pick_command(&s, n), None, "nothing to resolve once the band is closed");
+    }
+
+    /// SQ-1130, the sharpest edge of the same reuse: the expansion that turns
+    /// the displayed `n` into `north` was asked of
+    /// `mapper::direction::parse_direction`, so a quick row holding `bow`
+    /// submitted **`north`** — the player's own word replaced by a heading the
+    /// mapper reads it as, on a story where `bow` is a verb.
+    ///
+    /// Falsify by putting `parse_direction` back: `bow` comes out `north` and
+    /// `port` comes out `west`.
+    #[test]
+    fn a_quick_pick_submits_the_word_on_the_row_not_the_heading_it_resembles() {
+        let mut s = AppState::default();
+        open_band(&mut s);
+        let band_mut = s.overlays.command_band.as_mut().unwrap();
+        band_mut.quick = ["bow", "port", "starboard", "n"].iter().map(|w| w.to_string()).collect();
+
+        for (idx, word) in [(0, "bow"), (1, "port"), (2, "starboard")] {
+            assert_eq!(
+                band_quick_pick_command(&s, idx),
+                Some(word.to_string()),
+                "`{word}` is the command the button dispatches"
+            );
+        }
+        assert_eq!(
+            band_quick_pick_command(&s, 3),
+            Some("north".to_string()),
+            "…and a real abbreviation still spells itself out for Scott vocabularies"
+        );
     }
 
     /// A quick pick is an interjection, not a composition step (SQ-0667's
