@@ -520,10 +520,19 @@ know which side you're on).
   keeps one it cannot. `look` stays in the column even though it sits on the
   quick row, because *look at*, *look under*, *look behind* and *look in* are
   sentences no button can reach; so do `enter` and `exit`, which really take an
-  object in most Infocom games despite being the rose's `in`/`out` under another
-  name. The test is the story's own grammar rather than a list, so Deadline —
-  where `wait for the coroner` is a real syntax line — keeps `wait` in the
-  column, and Zork I, whose `wait` is bare and nothing else, does not.
+  object in most Infocom games. The test is the story's own grammar rather than
+  a list, so Deadline — where `wait for the coroner` is a real syntax line —
+  keeps `wait` in the column, and Zork I, whose `wait` is bare and nothing
+  else, does not.
+
+  "Already on the quick row" is asked by SPELLING, in the band's own small
+  table: `n` and `north` are one word, and so are `in` and `inside`. The
+  automap's direction parser knows more than that — on a ship it has to read
+  *bow* as north and *port* as west — but those are facts about sailing, not
+  about vocabulary, and `bow` is a verb you can perform in a dozen Infocom
+  games. The band keeps its own answer, so `bow` stays in the column, `port`
+  flows as an ordinary quick word instead of filling the rose's W cell, and a
+  quick button always submits the word written on it.
 
   The quick actions are deliberately *not* read from the grammar: on the Infocom
   family the compass is not in the verb table at all — `north` is a dictionary

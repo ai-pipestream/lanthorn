@@ -494,21 +494,28 @@ impl CommandBandState {
     /// Measured over the corpus, that returns `look` (49 of 60 stories with a
     /// readable grammar), `enter` (49) and `exit` (47) — excluded as
     /// direction-equivalents of `in`/`out` — Deadline's `wait` (29), and `bow`
-    /// (12), which `parse_direction` calls north because a ship's bow points
-    /// forward. `inventory` and `again` take an object in no story in the
-    /// corpus and stay out of the column everywhere.
+    /// (12). `inventory` and `again` take an object in no story in the corpus
+    /// and stay out of the column everywhere.
     ///
     /// The exclusion still follows `self.quick` — the *effective* list (the
     /// user's configured `quick` when set, else the built-in row) — so removing
     /// a word from a custom `quick` puts it back here. Direction words still
     /// compare by the direction they name, not by spelling, so the quick row's
     /// `n` excludes the table's `north`.
+    ///
+    /// That comparison is the band's OWN ([`crate::render::command_band::compass_spelling`],
+    /// SQ-1130), not `mapper::direction::parse_direction`. The parser answers a
+    /// question about movement, where `bow` is north because a ship's bow points
+    /// forward; this one asks whether two words are the same word, where `bow` is
+    /// a verb twelve stories take an object with. The rule above already returns
+    /// `bow` on its own merits — the reuse is what is fixed here, before the next
+    /// story spells a verb `port`.
     pub fn items(&self, col: usize) -> Vec<String> {
-        use mapper::direction::parse_direction;
+        use crate::render::command_band::compass_spelling;
         let same_word = |q: &str, w: &str| {
             q.eq_ignore_ascii_case(w)
                 || matches!(
-                    (parse_direction(q), parse_direction(w)),
+                    (compass_spelling(q), compass_spelling(w)),
                     (Some(a), Some(b)) if a == b
                 )
         };

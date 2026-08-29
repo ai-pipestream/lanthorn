@@ -481,9 +481,11 @@ fn the_verb_column_is_the_running_story_s_own_grammar() {
 /// The same argument returns two more Zork I words nobody noticed missing:
 /// `enter` and `exit`, excluded as direction-equivalents of the quick row's
 /// `in`/`out` and both really `enter OBJ` / `exit OBJ` here. Across the corpus
-/// it also returns `bow` — `mapper::direction::parse_direction` calls it north,
-/// because a ship's bow points forward — in the twelve stories that have it
-/// (Sherlock, Trinity, Plundered Hearts, …); Zork I is not one of them.
+/// it also returns `bow`, which the band read as north because the MAPPER's
+/// parser does, in the twelve stories that have it (Sherlock, Trinity,
+/// Plundered Hearts, …); Zork I is not one of them. SQ-1130 took the reuse out
+/// from under all three — `enter`, `exit` and `bow` are ordinary words to the
+/// band now, and pass this rule on their own merits.
 ///
 /// Falsify by reverting `items(COL_VERB)` to the flat quick exclusion: every
 /// word in the first loop disappears from the column with the reported symptom.

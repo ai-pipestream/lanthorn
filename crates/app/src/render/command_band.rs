@@ -968,7 +968,7 @@ pub fn draw_command_band(
 //  wait again
 // ```
 //
-// The 8 compass points (matched by MEANING via `parse_direction`, not
+// The 8 compass points (matched by MEANING via `compass_spelling`, not
 // spelling — same rule the VERB column's quick exclusion uses) form a 3×3
 // rose with an always-inert centre; everything else in the effective quick
 // list (up/down/in/out are directions too, but not compass POINTS, so they
@@ -1055,21 +1055,74 @@ struct QuickBlockLayout {
     height: u16,
 }
 
+/// The compass direction `word` is another SPELLING of — the band's own
+/// question, and **not** `mapper::direction::parse_direction`'s (SQ-1130).
+///
+/// The two look alike and are not the same. A direction parser answers a
+/// question about MOVEMENT: a mapper watching a ship has to read `GO BOW` as
+/// north, because a bow points forward, and `PORT` as west. Those aliases are
+/// facts about navigation. The band is asking something narrower — *is this
+/// word already one click away on the quick row?* — which is a question about
+/// vocabulary, and there `bow` is a verb.
+///
+/// Borrowing the parser for it hid `bow` from the VERB column in the twelve
+/// corpus stories that have it (Sherlock, Trinity, Plundered Hearts, Beyond
+/// Zork, Arthur, Shogun, Moonmist, Wishbringer ×2, Leather Goddesses ×2,
+/// Bureaucracy), and routed a quick row spelling `port` into the rose's W
+/// slot — drawn `W`, dispatching `port`. SQ-1128's rule (a quick word only
+/// leaves the column when it cannot take an object) cured the first symptom
+/// without touching the reuse that caused it; `stern`, `port` and `starboard`
+/// are verbs in no story of the corpus **today**, which is the whole of why
+/// this was latent rather than urgent.
+///
+/// `enter` and `exit` are gone for the same reason. The parser reads them as
+/// in/out because a mapper must; `enter the boat` is a verb taking an object,
+/// not another way to spell `in`.
+///
+/// What is left is one word per direction with the abbreviation the quick row
+/// usually carries — two spellings of one thing, which is the whole of what
+/// the band needs to know. The `go` prefix stays: `go north` is a spelling of
+/// north, not an alias for something else.
+pub(crate) fn compass_spelling(word: &str) -> Option<mapper::direction::Direction> {
+    use mapper::direction::Direction as D;
+    let lower = word.trim().to_lowercase();
+    let mut tokens = lower.split_whitespace();
+    let first = tokens.next()?;
+    let w = if first == "go" { tokens.next()? } else { first };
+    if tokens.next().is_some() {
+        return None;
+    }
+    Some(match w {
+        "n" | "north" => D::N,
+        "s" | "south" => D::S,
+        "e" | "east" => D::E,
+        "w" | "west" => D::W,
+        "ne" | "northeast" => D::NE,
+        "nw" | "northwest" => D::NW,
+        "se" | "southeast" => D::SE,
+        "sw" | "southwest" => D::SW,
+        "u" | "up" => D::Up,
+        "d" | "down" => D::Down,
+        "in" | "inside" => D::In,
+        "out" | "outside" => D::Out,
+        _ => return None,
+    })
+}
+
 /// Split the effective quick list into the 8 compass-rose slots (by index, so
 /// a click can resolve through the same `band.quick.get(idx)` every other
 /// pick does) and everything else, in original list order. A word is routed
-/// to the rose by the DIRECTION it names (`parse_direction`), not its
+/// to the rose by the DIRECTION it names ([`compass_spelling`]), not its
 /// spelling, so a custom quick row spelling out `"north"` still lands in the
 /// rose's N slot rather than the word flow — the same rule
 /// `CommandBandState::items`'s VERB exclusion already uses. `up`/`down`/`in`/
 /// `out` are directions too but not compass POINTS, so `ROSE_ORDER` excludes
 /// them on purpose — they flow as ordinary words instead, per the design.
 fn split_quick_rose(quick: &[String]) -> ([Option<usize>; 8], Vec<usize>) {
-    use mapper::direction::parse_direction;
     let mut rose: [Option<usize>; 8] = [None; 8];
     let mut words = Vec::new();
     for (i, w) in quick.iter().enumerate() {
-        let slot = parse_direction(w).and_then(|d| ROSE_ORDER.iter().position(|&r| r == d));
+        let slot = compass_spelling(w).and_then(|d| ROSE_ORDER.iter().position(|&r| r == d));
         match slot {
             Some(s) => rose[s] = Some(i),
             None => words.push(i),
@@ -2307,6 +2360,90 @@ mod tests {
     fn a_custom_quick_list_still_cannot_hide_an_object_verb() {
         let band = CommandBandState::new(default_verbs(), vec!["take".to_string()]);
         assert!(band.items(COL_VERB).contains(&"take".to_string()), "one click cannot finish `take`");
+    }
+
+    // ── SQ-1130: the band's own word equivalence ──────────────────────────────
+
+    /// A direction PARSER's aliases are facts about movement. The band is
+    /// asking whether two words are the same word, and there they are not.
+    ///
+    /// Falsify by pointing `compass_spelling` at
+    /// `mapper::direction::parse_direction`: every nautical line below flips.
+    #[test]
+    fn a_nautical_alias_is_not_another_spelling_of_a_compass_point() {
+        use mapper::direction::{parse_direction, Direction as D};
+        for (word, sailing) in
+            [("bow", D::N), ("fore", D::N), ("aft", D::S), ("stern", D::S), ("port", D::W), ("starboard", D::E)]
+        {
+            assert_eq!(
+                parse_direction(word),
+                Some(sailing),
+                "the MAPPER still reads `{word}` as a heading — that is its job"
+            );
+            assert_eq!(
+                compass_spelling(word),
+                None,
+                "`{word}` is a word of its own to the band, not a spelling of {sailing:?}"
+            );
+        }
+        // `enter`/`exit` are verbs that take an object, not spellings of in/out.
+        assert_eq!(compass_spelling("enter"), None);
+        assert_eq!(compass_spelling("exit"), None);
+        // …and the real spellings still pair up, which is the whole point of
+        // having a table at all.
+        for (short, long) in [
+            ("n", "north"),
+            ("s", "south"),
+            ("e", "east"),
+            ("w", "west"),
+            ("ne", "northeast"),
+            ("nw", "northwest"),
+            ("se", "southeast"),
+            ("sw", "southwest"),
+            ("u", "up"),
+            ("d", "down"),
+            ("in", "inside"),
+            ("out", "outside"),
+        ] {
+            assert!(compass_spelling(short).is_some(), "`{short}` is a direction");
+            assert_eq!(compass_spelling(short), compass_spelling(long), "{short}/{long}");
+        }
+        assert_eq!(compass_spelling("go north"), compass_spelling("n"), "the `go` prefix survives");
+        assert_eq!(compass_spelling("look under"), None, "two words that are not a heading");
+    }
+
+    /// SQ-1130's reported symptom: `bow` is a verb in twelve stories of the
+    /// corpus and was excluded from the VERB column because the quick row has
+    /// `n`. SQ-1128's rule returns it whenever it takes an object; this pins
+    /// the case that rule cannot reach — a `bow` with no object at all.
+    ///
+    /// Falsify by restoring `parse_direction` in `items`: `bow` vanishes.
+    #[test]
+    fn a_verb_the_mapper_would_call_north_is_not_excluded_by_the_quick_row() {
+        let mut verbs = default_verbs();
+        verbs.entries.push(VerbEntry::new("bow", vec![VerbLine::bare()]));
+        verbs.entries.push(VerbEntry::new("port", vec![VerbLine::bare()]));
+        let band = CommandBandState::new(verbs, default_quick());
+        let items = band.items(COL_VERB);
+        assert!(items.contains(&"bow".to_string()), "`bow` is not `n`: {items:?}");
+        assert!(items.contains(&"port".to_string()), "`port` is not `w`: {items:?}");
+        // The compass is still excluded — this must not become "no exclusion".
+        for dir in ["north", "south", "east", "west", "up", "down", "in", "out"] {
+            assert!(!items.contains(&dir.to_string()), "`{dir}` is still one click away");
+        }
+    }
+
+    /// The same fact reaches the ROSE: a quick row holding `port` used to fill
+    /// the W slot, drawn `W`, firing `port`. It is an ordinary word now.
+    #[test]
+    fn a_nautical_alias_flows_as_a_word_instead_of_filling_a_rose_slot() {
+        let quick: Vec<String> =
+            ["port", "bow", "north", "e"].iter().map(|s| s.to_string()).collect();
+        let (rose, words) = split_quick_rose(&quick);
+        assert_eq!(rose[ROSE_LABELS.iter().position(|l| *l == "W").unwrap()], None, "`port` is not W");
+        assert_eq!(rose[ROSE_LABELS.iter().position(|l| *l == "N").unwrap()], Some(2), "`north` is N");
+        assert_eq!(rose[ROSE_LABELS.iter().position(|l| *l == "E").unwrap()], Some(3), "`e` is E");
+        assert_eq!(words, vec![0, 1], "`port` and `bow` flow as words");
     }
 
     // ── SQ-0677: stacked quick block, dividers, current-column hint ────────────
