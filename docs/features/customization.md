@@ -679,7 +679,10 @@ re-seed the new template, or hand-write the new shape from
   *Shogun*, …) draw their story pane on an image-capable terminal: `hybrid`
   (the default) keeps the story text as real terminal text inside an image
   chrome ring; `raster` bakes the whole pane — frame, status, and story text —
-  into one scaled pixel image instead. (A third mode, `frameless`, was removed —
+  into one scaled pixel image instead; `extended` is raster at a whole
+  magnification with the frame grown downward, so the pane's surplus height
+  becomes extra rows of prose rather than empty margin. (A fourth mode,
+  `frameless`, was removed —
   a config still naming it silently reads as `hybrid`.) It also cycles
   in the settings screen, and `/set-v6-render` switches modes live mid-game —
   remembered *for that story*, not for every story, so you can keep one game on

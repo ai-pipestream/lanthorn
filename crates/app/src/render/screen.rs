@@ -3953,55 +3953,6 @@ pub fn build_v6_raster_frame(
     let game_page = v6_game_page(layout.story, state);
     let page = game_page.unwrap_or(default_bg);
     let ink = game_ink.unwrap_or(default_fg);
-    // Raster has no cells to draw text with, so it needs every run imaged: the
-    // empty set is not a default here, it is this path's answer (SQ-0903).
-    let mut canvas =
-        v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::All, &state.v6_text);
-    // …and the lines of any SECONDARY prose window (SQ-0729), which the chrome
-    // canvas does not draw. The story page below spares them like any chrome text.
-    // …and the live input line into whichever of them the player is typing into
-    // (SQ-0746), on the same "only when the view is at the bottom" rule
-    // `build_main_text` applies to the transcript's own live line.
-    let panel_input =
-        (state.effective_transcript_scroll() == 0).then_some(state.input.value.as_str());
-    v6::draw_secondary_prose(&mut canvas, &layout.chrome, ink, honor, &state.colors, panel_input, &state.v6_text);
-    // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
-    // pixels before the story is stamped — the story box itself is skipped (see
-    // `fill_window_pages`). This runs on the COMPOSITE only: the clear-interior
-    // probe below reads the art canvas, which no ground ever touches (SQ-1056).
-    // The game's own painted ground — erase_window fills (SQ-0706) — goes UNDER
-    // the art and glyphs already on the canvas and BEFORE the window pages claim
-    // what is left, because a fill is the oldest thing on the screen: the game
-    // filled its rectangle, then printed the label on top of it.
-    let grounds = |c: &mut image::RgbaImage| {
-        v6::blit_paint_ground(c, state.v6_paint.borrow().as_deref(), v6::TextLayer::All, state.v6_text.cell());
-        if honor {
-            v6::fill_window_pages(
-                c,
-                &layout.chrome,
-                layout.story,
-                &state.colors,
-                v6::TextLayer::All,
-                state.v6_text.cell(),
-            );
-        } else {
-            // SQ-0716: colours declined, but a window the game has PAINTED INTO still
-            // gets its page — scopa's felt table is a full-screen `erase_window` in
-            // explicit green that `drain_erase_fills` drops as a screen clear, so
-            // window 1's background is the only surviving record of that drawing.
-            // Gating it left a black table under the game's own green stripes and
-            // cards. See `fill_painted_window_pages`.
-            v6::fill_painted_window_pages(
-                c,
-                &layout.chrome,
-                layout.story,
-                &state.colors,
-                state.v6_paint.borrow().as_deref(),
-                state.v6_text.cell(),
-            );
-        }
-    };
-    grounds(&mut canvas);
     // What the story box is measured against (SQ-0728): the same layers, MINUS the
     // chrome text. `story_clear_native` shrinks the story window edge by edge until
     // no edge touches an opaque pixel, and its purpose is to seat the prose inside
@@ -4077,11 +4028,16 @@ pub fn build_v6_raster_frame(
     // the game's own frame. They are the same questions, in the same order, that the
     // composite asks itself further down — asked here so the frame cannot grow down a
     // path that then declines to draw into it.
-    let extension = 'ext: {
+    //
+    // The answer is ONE value (SQ-1132): `None` declines, and `Some(windows)` extends
+    // by `want.extension()` and names the chrome windows that travel down with the
+    // frame's bottom edge — usually none. The two are one decision, because a band
+    // that cannot be moved is a frame that cannot grow.
+    let anchored = 'ext: {
         if want.extension() == 0 {
-            break 'ext 0;
+            break 'ext None;
         }
-        let Some(story) = layout.story else { break 'ext 0 };
+        let Some(story) = layout.story else { break 'ext None };
         // A text-only command strip under the story window — Journey. Hybrid meets
         // this case by BOTTOM-ANCHORING the strip and letting the story fill between
         // (`BottomPlan::Menu`), and this mode cannot: the composite is one image
@@ -4091,48 +4047,159 @@ pub fn build_v6_raster_frame(
         // extending here would strand the menu mid-canvas over an unextended flank.
         // Declining leaves Journey exactly as `Raster` draws it.
         if menu_strip_below_story(story, &obstruction, &chrome_runs, native, cell) {
-            break 'ext 0;
+            break 'ext None;
         }
         // …and ANY chrome the game put below its story window, which the test above
         // does not see. `menu_strip_below_story` answers false as soon as the story
         // reaches within one native text row of the screen bottom — and that is
         // exactly when Arthur spends the row it forgives. Measured on
-        // `Arthur - The Quest for Excalibur.adf` (release 54 / serial 890606),
-        // fourteen taps in, answering `hint` in play: window 0 is (28, 208) 584x176
-        // so its bottom is 384, window 3 is laid across native (28, 384, 584, 16) —
-        // the LAST text row of a 640x400 screen — and prints *"If only you had a
-        // crystal ball...."* into it. `native.1 (400) <= 384 + 16` holds, so the menu
-        // test returns false before it looks, and the extension would grow the prose
-        // box from 384 down to 880 straight through the game's own box, leaving it
-        // stranded mid-scrollback instead of pinned to the frame's bottom edge.
+        // `arthur-r74-s890714.z6` (release 74) and reproduced on
+        // `Arthur - The Quest for Excalibur.adf` (release 54 / serial 890606): window
+        // 0 is (28, 208) 584x176 so its bottom is 384, window 3 is laid across native
+        // (28, 384, 584, 16) — the LAST text row of a 640x400 screen — and prints
+        // *"You don't need to use the word …"* or *"If only you had a crystal
+        // ball…."* into it. `native.1 (400) <= 384 + 16` holds, so the menu test
+        // returns false before it looks.
         //
-        // This is SQ-1008 exactly, and it is answered with SQ-1008's own instrument
-        // rather than a second opinion: hybrid deducts those rows and bottom-anchors
-        // them. The composite cannot bottom-anchor anything — the same reason Journey
-        // declines — so it declines here too, and the frame is `raster`'s to the byte.
-        if menu_band_rows(&menu_band_runs(&chrome_runs, story), cell) > 0 {
-            break 'ext 0;
-        }
+        // **The frame does not decline; the band travels with it** (SQ-1132). It used
+        // to decline, on the reading that the composite cannot bottom-anchor anything
+        // — and Arthur then made the whole screen change SIZE every time the parser
+        // failed, because that band is TRANSIENT: window 0 is 584x**192** and window 3
+        // empty on a turn the game understood, 584x176 with one run in window 3 on a
+        // turn it did not. A frame height that depends on whether the last command
+        // parsed is not a rendering decision anyone made.
+        //
+        // Bottom-anchoring one window IS available to the composite, because the
+        // arithmetic already leaves room for it: the prose box grows to
+        // `story_bottom + extension`, which is `canvas_h` minus exactly the native
+        // rows between the story window's bottom and the game's screen bottom — the
+        // band's own height. So a band moved down by the extension lands in the gap
+        // the extension opened, at the same distance from the frame's bottom edge the
+        // game put it at from the screen's. That is what hybrid's `BottomPlan::Menu`
+        // does, reached by moving a window rather than by re-composing the image.
+        //
+        // Journey is untouched: it declines one test earlier, on `menu_strip_below_
+        // story`, and the flank extension declines the identical frame (SQ-0819), so
+        // a Journey frame would grow a menu over an unextended flank. This arm is for
+        // a band the flanks tile straight past.
+        let anchored = if menu_band_rows(&menu_band_runs(&chrome_runs, story), cell) > 0 {
+            // The band has to move as WHOLE WINDOWS — page, cell grid and runs
+            // together — and the canvas it moves onto has to be expressible as a
+            // screen height. Anything else is unrecognised, and unrecognised declines
+            // exactly as it did before (CLAUDE.md: skip rather than guess).
+            match bottom_anchored_chrome(&layout.chrome, story, native) {
+                Some(ws) if u16::try_from(want.canvas_h).is_ok() => ws,
+                _ => break 'ext None,
+            }
+        } else {
+            Vec::new()
+        };
         // A story window enclosed by its own art is a CANVAS, not a page (SQ-0729):
         // fmvpoker gets no transcript at all, so there is no prose to grow.
         if story_window_is_a_canvas(layout, native) {
-            break 'ext 0;
+            break 'ext None;
         }
         // A `Grid` in the story slot contributes its rect and nothing else
         // (SQ-1026) — again no transcript. scopa and Amiga Shogun's InvisiClues.
         if !matches!(&story.node, WinNode::Buffer(_)) {
-            break 'ext 0;
+            break 'ext None;
         }
         // The picture owns the screen (SQ-0578), or an absolutely-placed plate is
         // drawn INSTEAD of prose (SQ-0707). Arthur's intro plate is the second.
-        let Some(clear) = story_clear else { break 'ext 0 };
+        let Some(clear) = story_clear else { break 'ext None };
         if v6::story_prose_box(clear, layout.story_gfx, cell).is_none() {
-            break 'ext 0;
+            break 'ext None;
         }
-        want.extension()
+        Some(anchored)
     };
+    let extension = if anchored.is_some() { want.extension() } else { 0 };
     let frame = if extension == 0 { v6::RasterFrame::native(native) } else { want };
-    if extension > 0 {
+    // SQ-1132: the chrome the COMPOSITE draws. It is the game's own chrome on every
+    // frame but one — the frame that extends past a band the game anchored below its
+    // story window, where that band's windows are re-seated `extension` native rows
+    // lower so they keep their distance from the frame's BOTTOM EDGE. Every consumer
+    // below reads this list rather than `layout.chrome`, so the band's page, its cell
+    // grid, its runs and the rects the prose spares cannot disagree about where it is.
+    //
+    // `layout.chrome` still answers every question stated in the GAME's screen — the
+    // art canvas, the menu tests above, the flank extension — because those are about
+    // the screen the game laid out, which the extension never changes.
+    //
+    // One consequence, stated rather than discovered: a moved band is drawn in rows
+    // the game's screen does not have, so `V6ClickMap` — which bounds a click by
+    // `screen` and drops anything below it — will not report a click on it. Arthur's
+    // parser error is output and nothing else; a CLICKABLE band under a story window
+    // is Journey's, and Journey declines the extension one test earlier.
+    let moved: Vec<crate::engine::PositionedWindow> = match &anchored {
+        Some(ws) if extension > 0 => {
+            ws.iter().map(|&i| bottom_anchor(layout.chrome[i], extension, cell)).collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut chrome: Vec<&crate::engine::PositionedWindow> = layout.chrome.clone();
+    if let Some(ws) = &anchored {
+        for (k, &i) in ws.iter().enumerate().take(moved.len()) {
+            chrome[i] = &moved[k];
+        }
+    }
+    // A window drawn below the game's own screen needs a canvas that reaches it, so a
+    // frame carrying one is built at the FRAME's height instead of being grown into it
+    // afterwards. `native` is the chrome canvas's SIZE and nothing else, and the fit
+    // in `u16` was settled with the decision above.
+    let canvas_native =
+        if moved.is_empty() { native } else { (native.0, frame.canvas_h as u16) };
+    // Raster has no cells to draw text with, so it needs every run imaged: the
+    // empty set is not a default here, it is this path's answer (SQ-0903).
+    let mut canvas =
+        v6::build_chrome_canvas(&chrome, canvas_native, default_fg, default_bg, &state.colors, v6::TextLayer::All, &state.v6_text);
+    // …and the lines of any SECONDARY prose window (SQ-0729), which the chrome
+    // canvas does not draw. The story page below spares them like any chrome text.
+    // …and the live input line into whichever of them the player is typing into
+    // (SQ-0746), on the same "only when the view is at the bottom" rule
+    // `build_main_text` applies to the transcript's own live line.
+    let panel_input =
+        (state.effective_transcript_scroll() == 0).then_some(state.input.value.as_str());
+    v6::draw_secondary_prose(&mut canvas, &chrome, ink, honor, &state.colors, panel_input, &state.v6_text);
+    // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
+    // pixels before the story is stamped — the story box itself is skipped (see
+    // `fill_window_pages`). This runs on the COMPOSITE only: the clear-interior
+    // probe below reads the art canvas, which no ground ever touches (SQ-1056).
+    // The game's own painted ground — erase_window fills (SQ-0706) — goes UNDER
+    // the art and glyphs already on the canvas and BEFORE the window pages claim
+    // what is left, because a fill is the oldest thing on the screen: the game
+    // filled its rectangle, then printed the label on top of it.
+    let grounds = |c: &mut image::RgbaImage| {
+        v6::blit_paint_ground(c, state.v6_paint.borrow().as_deref(), v6::TextLayer::All, state.v6_text.cell());
+        if honor {
+            v6::fill_window_pages(
+                c,
+                &chrome,
+                layout.story,
+                &state.colors,
+                v6::TextLayer::All,
+                state.v6_text.cell(),
+            );
+        } else {
+            // SQ-0716: colours declined, but a window the game has PAINTED INTO still
+            // gets its page — scopa's felt table is a full-screen `erase_window` in
+            // explicit green that `drain_erase_fills` drops as a screen clear, so
+            // window 1's background is the only surviving record of that drawing.
+            // Gating it left a black table under the game's own green stripes and
+            // cards. See `fill_painted_window_pages`.
+            v6::fill_painted_window_pages(
+                c,
+                &chrome,
+                layout.story,
+                &state.colors,
+                state.v6_paint.borrow().as_deref(),
+                state.v6_text.cell(),
+            );
+        }
+    };
+    grounds(&mut canvas);
+    // …unless it was already built at the frame's height, because a bottom-anchored
+    // band had to be drawn into rows the game's own screen does not have.
+    if extension > 0 && moved.is_empty() {
         canvas = grow_canvas_rows(canvas, frame.canvas_h);
     }
     extend_raster_flanks(&mut canvas, &obstruction, layout.story, &chrome_runs, frame, cell);
@@ -4151,7 +4218,7 @@ pub fn build_v6_raster_frame(
             &mut canvas,
             (sx, sy, sw, sh),
             page,
-            &layout.chrome,
+            &chrome,
             state.v6_paint.borrow().as_deref(),
             &state.v6_text,
         );
@@ -4242,7 +4309,7 @@ pub fn build_v6_raster_frame(
             cols,
             rows,
             ink,
-            &v6::chrome_text_rects(&layout.chrome, &state.v6_text),
+            &v6::chrome_text_rects(&chrome, &state.v6_text),
             &state.v6_text,
         );
         // [more] pager indicator (SQ-0455): when a single turn's output
@@ -6423,6 +6490,82 @@ fn edge_glyph_col(
     } else {
         None
     }
+}
+
+/// The chrome windows an extended raster frame carries DOWN with its bottom edge,
+/// as indices into `chrome` (SQ-1132).
+///
+/// A window qualifies when the game put it wholly below the story window and inside
+/// the screen, and every run it carries is down there with it — which is what makes
+/// it safe to move as a unit: its page, its cell grid, its runs and the rects the
+/// prose spares all travel together, so nothing downstream can hold two opinions
+/// about where it is.
+///
+/// `None` when some run below the story window belongs to a window that does NOT
+/// qualify — one straddling the story's bottom edge, one reaching past the screen,
+/// one with a size sentinel. That frame declines the extension exactly as it did
+/// before this existed: an unrecognised shape is skipped, never guessed at.
+///
+/// Arthur is the frame it was written for. `arthur-r74-s890714.z6` publishes window
+/// 3 across native (28, 384) 584x16 — the last text row of a 640x400 screen — and
+/// prints one line into it whenever the parser fails, shrinking window 0 from
+/// 584x192 to 584x176 to make room. Both windows are `Grid`s below the story; only
+/// window 3 has runs below its bottom, so only window 3 moves.
+fn bottom_anchored_chrome(
+    chrome: &[&crate::engine::PositionedWindow],
+    story: &crate::engine::PositionedWindow,
+    native: (u16, u16),
+) -> Option<Vec<usize>> {
+    let story_bottom = i32::from(story.y_px) + i32::from(story.h_px);
+    let mut out = Vec::new();
+    for (i, w) in chrome.iter().enumerate() {
+        let WinNode::Grid(g) = &w.node else { continue };
+        // The run's own native TOP, spelled as `menu_band_runs` spells it, so the two
+        // cannot disagree about which runs are the band.
+        let top_of = |t: &crate::engine::PxText| i32::from(t.y.max(1)) - 1;
+        let below = g.px_texts.iter().filter(|t| top_of(t) >= story_bottom).count();
+        if below == 0 {
+            continue;
+        }
+        // Every run of the window, and the window's own rect, on the far side of the
+        // story window's bottom edge and inside the screen.
+        let top = i32::from(w.y_px);
+        if below != g.px_texts.len()
+            || (w.h_px as i16) < 0
+            || top < story_bottom
+            || top + i32::from(w.h_px) > i32::from(native.1)
+        {
+            return None;
+        }
+        out.push(i);
+    }
+    Some(out)
+}
+
+/// One such window, re-seated `rows` native pixels lower.
+///
+/// Its runs carry SCREEN-absolute 1-based coordinates stamped at paint time, so they
+/// move with the rect rather than following it; `grow` is the same row counted in
+/// cells, and moves with them. The extension is a whole multiple of `cell.h` by
+/// construction ([`crate::render::v6_layout::RasterFrame::extended`]), so the cell
+/// counts stay whole.
+fn bottom_anchor(
+    w: &crate::engine::PositionedWindow,
+    rows: u32,
+    cell: zvm::screen::V6Cell,
+) -> crate::engine::PositionedWindow {
+    let px = u16::try_from(rows).unwrap_or(u16::MAX);
+    let cells = u16::try_from(rows / u32::from(cell.h.max(1))).unwrap_or(u16::MAX);
+    let mut out = w.clone();
+    out.y_px = out.y_px.saturating_add(px);
+    out.y = out.y.saturating_add(cells);
+    if let WinNode::Grid(g) = &mut out.node {
+        for t in &mut g.px_texts {
+            t.y = t.y.saturating_add(px);
+            t.grow = t.grow.saturating_add(cells);
+        }
+    }
+    out
 }
 
 /// Every paint run the game put BELOW its story window — the content of the

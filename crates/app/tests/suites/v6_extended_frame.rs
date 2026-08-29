@@ -68,10 +68,14 @@ struct Specimen {
     keys: u8,
     taps: usize,
     release: u16,
-    /// Commands issued after the taps. Arthur needs one: he answers a blank line in
-    /// a boxed window 3 across the screen's LAST text row, and a frame with the
-    /// game's own chrome below its story window declines (SQ-1008). One real command
-    /// clears the box, which is also what a player does next.
+    /// Commands issued after the taps. Arthur takes one: he answers a blank line in
+    /// a boxed window 3 across the screen's LAST text row, and one real command
+    /// clears the box, which is also what a player does next. It used to be REQUIRED
+    /// — a frame with the game's own chrome below its story window declined the
+    /// extension (SQ-1008) — and since SQ-1132 that band travels down with the frame
+    /// instead, so this now merely pins which of Arthur's two frames the corpus
+    /// measures. `a_parser_error_does_not_resize_arthurs_extended_frame` measures the
+    /// other one.
     then: &'static [&'static str],
     /// Does this frame EXTEND? False is the Journey case — a text-only command strip
     /// below the story window, which the composite cannot bottom-anchor.
@@ -610,10 +614,11 @@ const SHAPES: &[Shape] = &[
             why: "clue page" },
     Shape { file: "Arthur - The Quest for Excalibur.adf", pictures: None, release: 54, reach: Reach::ArthurHintPage, extends: false,
             why: "the crystal ball's text-only menu" },
-    Shape { file: "Arthur - The Quest for Excalibur.adf", pictures: None, release: 54, reach: Reach::ArthurHintBox, extends: false,
+    Shape { file: "Arthur - The Quest for Excalibur.adf", pictures: None, release: 54, reach: Reach::ArthurHintBox, extends: true,
             why: "window 3 across native (28,384) 584x16 — the screen's LAST text row, BELOW \
-                  window 0, which `menu_strip_below_story` cannot see (SQ-1008). Extending \
-                  would strand the game's own answer box mid-scrollback." },
+                  window 0, which `menu_strip_below_story` cannot see (SQ-1008). It used to \
+                  decline; the box now TRAVELS with the frame's bottom edge (SQ-1132), because \
+                  a band that comes and goes with the turn was resizing the whole screen." },
 ];
 
 /// What `classify_windows` made of this frame's story slot — the fact every decline
@@ -776,6 +781,148 @@ fn splash_cards_and_hint_screens_reach_the_verdict_their_row_pins() {
     if any_present {
         assert!(seen > 0, "a present fixture must have been measured, not skipped");
     }
+}
+
+// ── 6b. The frame does not change size with the turn ─────────────────────────
+
+/// The extended composite for the frame the session is parked on, with `transcript`
+/// as the host's scrollback.
+///
+/// `""` leaves the prose region blank, so every inked pixel below the status bar is
+/// the GAME's own chrome and two frames can be compared without the transcript — a
+/// thing that legitimately differs between them — drowning the comparison.
+fn extended_with(
+    b: &mut Booted,
+    transcript: &str,
+    pane: (u16, u16),
+) -> (image::RgbaImage, Option<app::render::screen::RasterMetrics>, v6::RasterFrame) {
+    let st = state_for(app::config::V6RenderMode::Extended, transcript, b);
+    let model = b.session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+    let native = v6::native_extent(items, &st.v6_text);
+    let layout = v6::classify_windows(items, st.v6_text.cell());
+    let want = v6::RasterFrame::extended(native, pane_dev(pane), st.v6_text.cell(), Some(2.0));
+    app::render::screen::build_v6_raster_frame(&layout, want, &st)
+}
+
+/// Whatever the game has printed BELOW its story window on this frame, joined — the
+/// band the whole case turns on, read straight off the model so a frame that stops
+/// producing one fails as a vacuous case rather than passing silently.
+fn band_text(b: &mut Booted) -> String {
+    let cell = b.face.cell();
+    let model = b.session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+    let layout = v6::classify_windows(items, cell);
+    let Some(story) = layout.story else { return String::new() };
+    let bottom = i32::from(story.y_px) + i32::from(story.h_px);
+    let mut out = String::new();
+    for w in &layout.chrome {
+        let WinNode::Grid(g) = &w.node else { continue };
+        for t in &g.px_texts {
+            if i32::from(t.y.max(1)) > bottom {
+                out.push_str(&t.text);
+            }
+        }
+    }
+    out
+}
+
+/// **A turn the parser rejects must not change the size of the frame** (SQ-1132).
+///
+/// Reported from play: in `extended`, typing something Arthur does not understand
+/// collapsed the screen back to the plain letterbox, and typing something he did
+/// understand grew it again — a frame height that tracked whether the last command
+/// parsed.
+///
+/// The mechanism is entirely the game's own bookkeeping. Arthur prints his parser
+/// errors into window 3, laid across native (28, 384) 584x16 — the LAST text row of a
+/// 640x400 screen — and shrinks window 0 from 584x192 to 584x176 to make room for it.
+/// So a rejected turn is a frame with the game's own chrome below its story window,
+/// which `build_v6_raster_frame` used to answer by declining the extension outright
+/// (SQ-1008's reading: the composite cannot bottom-anchor anything). The band now
+/// travels DOWN with the frame's bottom edge, which is where the extension's own
+/// arithmetic already leaves room for it.
+///
+/// Fixture: `arthur-r74-s890714.z6`, release 74, twelve taps answering `n` to the
+/// restore question, then `look` (the clean frame) and `frobozzle the grue` (the
+/// rejected one). Checked against `machine-screenshots/amiga-arthur.png`, where the
+/// prose runs to the bottom edge of the frame with no band under it — which is what
+/// the clean turn must go on looking like.
+///
+/// FALSIFY by restoring the `break 'ext None` under `menu_band_rows(…) > 0` in
+/// `build_v6_raster_frame`: the rejected turn comes back as a 640x400 canvas against
+/// the 640x896 `look` builds, which is the collapse as reported.
+#[test]
+fn a_parser_error_does_not_resize_arthurs_extended_frame() {
+    let _g = app::v6_palette_at_boot();
+    let spec = Specimen {
+        file: "arthur-r74-s890714.z6",
+        pictures: None,
+        keys: b'n',
+        taps: 12,
+        release: 74,
+        then: &["look"],
+        extends: true,
+    };
+    let Some(mut b) = boot(&spec) else { return };
+    let cell = u32::from(b.face.cell().h);
+
+    // The clean turn: `look` parsed, window 3 is empty, and the frame extends.
+    let clean_band = band_text(&mut b);
+    let (clean, cm, cf) = extended_with(&mut b, "", TALL);
+    assert!(cf.extension() > 0, "the clean frame is supposed to extend");
+    assert!(
+        clean_band.trim().is_empty(),
+        "a turn Arthur understood must leave nothing below window 0, not {clean_band:?}"
+    );
+
+    // …then a word he does not know.
+    let r = b.session.submit("frobozzle the grue");
+    assert!(r.fault.is_none(), "the rejected command faulted: {:?}", r.fault);
+    let error_band = band_text(&mut b);
+    let (error, em, ef) = extended_with(&mut b, "", TALL);
+    eprintln!(
+        "clean {}x{} ({} viewport rows) → rejected {}x{} ({} viewport rows), band {error_band:?}",
+        clean.width(),
+        clean.height(),
+        cm.map_or(0, |m| m.viewport_rows),
+        error.width(),
+        error.height(),
+        em.map_or(0, |m| m.viewport_rows),
+    );
+
+    // Non-vacuity: this case is only about a frame the game printed a parser error
+    // onto, BELOW its story window. Without this it passes on a frame that never
+    // produced one.
+    assert!(
+        error_band.contains("frobozzle"),
+        "the rejected turn must put Arthur's parser error below window 0 — got {error_band:?}"
+    );
+
+    // The report itself: same frame, same size.
+    assert_eq!(
+        error.dimensions(),
+        clean.dimensions(),
+        "a rejected command must not resize the frame"
+    );
+    assert_eq!(ef.extension(), cf.extension(), "…nor change what the extension is");
+
+    // And the message is at the frame's BOTTOM EDGE, not stranded in the middle of
+    // the prose where the game's own screen ends. With no transcript the two
+    // composites are the same picture apart from that one row, so the rows that
+    // differ ARE the message — and there must be some.
+    let h = clean.height();
+    let differs: Vec<u32> = (0..h)
+        .filter(|&y| (0..clean.width()).any(|x| clean.get_pixel(x, y) != error.get_pixel(x, y)))
+        .collect();
+    assert!(!differs.is_empty(), "the parser error has to reach the composite at all");
+    assert!(
+        differs.iter().all(|&y| y >= h.saturating_sub(cell)),
+        "the parser error belongs on the frame's last text row ({}..{h}), not at {differs:?} — \
+         the game's own screen ends at native {}",
+        h.saturating_sub(cell),
+        ef.native.1,
+    );
 }
 
 // ── 7. The click map ─────────────────────────────────────────────────────────

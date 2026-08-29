@@ -1788,6 +1788,25 @@ screenshot, a bug report and a headless capture all want:
   foreground/background at startup (OSC 10/11) and paints in those, so raster
   text stays readable on a light-background terminal instead of forcing a
   fixed light-grey-on-black.
+- **`extended`** — raster, pinned to a **whole** magnification, spending the
+  height that buys on *content* rather than on empty margin: the canvas grows
+  downward and the surplus becomes whole extra text rows of prose in the game's
+  own bitmap face. The game is told nothing — it lays its windows out on exactly
+  the screen it always had, which is now the top of a taller picture. A frame
+  with nowhere to put the rows (a title card, a picture that owns the screen, a
+  hint menu) declines and draws exactly as `raster` does.
+  - **Anything the game anchored below its story window keeps its distance from
+    the frame's bottom edge.** Arthur prints his parser errors into a boxed
+    window across the last text row of the screen, shrinking the story window by
+    a row to make space — so that band appears and vanishes with the turn. It
+    travels down with the frame instead of shortening it, which is what the
+    extension's own arithmetic leaves room for, and the message lands on the
+    bottom line of the taller frame exactly as it lands on the bottom line of the
+    game's screen. (It used to make the whole screen shrink back to plain raster
+    size for one turn and grow again on the next command the parser understood.)
+    Journey is the exception, and declines: its command menu sits under the story
+    with frame art beside it that cannot be carried down past it, so that title
+    stays on the `raster` picture.
 - **Cell fallback** — without an image protocol (a remote or text-only terminal),
   while a menu or dialog is open over the story pane, or on a painted menu
   takeover, everything — graphics windows, status grids, and story text —
