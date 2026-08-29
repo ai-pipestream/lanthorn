@@ -209,8 +209,10 @@ const INTERFACE: &[Row] = &[
             "records nothing at all, and neither does one that finds no way back.",
             "",
             "OFF by default: it runs your game a few extra turns in private after",
-            "every move that opens a gap. The control on the map pane's bottom",
-            "border switches it, and \"/set-return-probe\" persists it per-game.",
+            "every move that opens a gap. The footprint on the STORY pane's bottom",
+            "border switches it — beside the map toggle, since the search keeps",
+            "running with the map hidden — and \"/set-return-probe\" persists it",
+            "per-game.",
         ],
     ),
     d(

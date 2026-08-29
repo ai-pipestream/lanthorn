@@ -96,11 +96,20 @@ pub fn draw_panel(buf: &mut Buffer, spec: &PanelSpec, theme: &Theme) -> PanelFra
 /// the whole row back — a real widening, not merely a shorter cluster.
 ///
 /// **The two bottom groups share one row, and the anchored one is placed first.**
-/// The map toggle has a fixed home at the right-hand end; the centred pair's
-/// position is defined by the space left over, so the centred pair is what gives
-/// way when the pane narrows. Each group is drawn whole or not at all — a half
-/// cluster is unclickable chrome — and the centred pair is dropped as soon as it
-/// would come within one column of the map toggle.
+/// The right-hand group has a fixed home at the border's end; the centred group's
+/// position is defined by the space left over, so the centred group is what gives
+/// way first when the pane narrows. A group that is drawn is drawn whole — both
+/// caps and every glyph between them, because a half cluster is unclickable
+/// chrome — and the centred group is dropped as soon as it would come within one
+/// column of the anchored one.
+///
+/// **Within the anchored group, members are shed from the LEFT** (SQ-1107). It
+/// used to vanish entire, which was right while it held one control; with two it
+/// would have taken the map toggle down with the return probe, and the map toggle
+/// is the only way back to a hidden map. So the group tries its full width, then
+/// its full width less the leftmost member, and so on — the control nearest the
+/// corner survives longest, and `render::controls` decides which one that is by
+/// the order it lists them in.
 ///
 /// Every cluster sits INSIDE the corners (`area.x + 1 ..= area.right() - 2`), so
 /// none of them lands on the story pane's right border column — which is where
@@ -202,10 +211,22 @@ pub fn draw_panel_with_controls(
         // The first column the anchored group owns, or the inset's end when it
         // was dropped — either way, the limit the centred group must clear.
         let mut limit = inset.right();
-        let want_r = header_controls_width(bottom_right.len());
-        if want_r > 0 && inset.width > want_r + 1 {
-            limit = inset.right() - want_r;
-            place(buf, inset, limit, &bottom_right, &mut control_rects);
+        // The anchored group SHEDS from its left rather than vanishing whole:
+        // drop inboard members one at a time until what is left fits (SQ-1107).
+        // Its members are ordered by `controls_for`, so the one nearest the
+        // corner is the last to go — which is the map toggle, the only way back
+        // to a hidden map, and so the control that must survive longest. "Whole
+        // or not at all" still holds for what is drawn: every group that appears
+        // has both its caps and every glyph between them.
+        let mut kept: &[usize] = &bottom_right;
+        while !kept.is_empty() {
+            let want = header_controls_width(kept.len());
+            if inset.width > want + 1 {
+                limit = inset.right() - want;
+                place(buf, inset, limit, kept, &mut control_rects);
+                break;
+            }
+            kept = &kept[1..];
         }
         let want_c = header_controls_width(bottom_centre.len());
         if want_c > 0 && inset.width > want_c + 1 {

@@ -251,7 +251,7 @@ know which side you're on).
   ```text
   ┌─ ZORK I ──────────────────────┤ ◧ □ ├─┐   the v6 pair (v6 stories only)
   │                                       │
-  └───────────┤ ▲ ○ ◈ ├───────────┤ ◀ ├────┘   band · light · reveal | map
+  └──────────┤ ○ ▲ ◈ ├──────────┤ ◌ ◀ ├────┘   band · light · reveal | probe · map
   ```
 
   - **A control sits where the thing it governs is, or where it would appear.**
@@ -314,24 +314,34 @@ know which side you're on).
     control owns its own cell, so a click on a toggle toggles; the edge stays
     grabbable everywhere else along the row. Nothing is ever drawn on the pane's
     right border column, which is where the story/map splitter is dragged.
-  - **Too narrow to fit?** Each cluster is drawn whole or not at all — half a
-    cluster would be unclickable chrome. The map toggle is anchored and the pair
-    is centred in what the anchor leaves, so as the pane narrows the **centred
-    group gives way first** and the map toggle, the one control that moves a whole
-    pane, survives longest.
+  - **Too narrow to fit?** Whatever is drawn is drawn whole — both end caps and
+    every glyph between them, because half a cluster would be unclickable chrome.
+    The right-hand pair is anchored and the centred group sits in what the anchor
+    leaves, so as the pane narrows the **centred group gives way first**; then the
+    anchored pair sheds from *its* left, dropping the return probe and keeping the
+    map toggle. Measured on a 5-row pane: the map toggle alone appears at 7
+    columns, the probe joins it at 9, and the centred trio needs 20.
   - Every state is themeable: `panel.control` (off/idle), `panel.control:lit`
     (on — the `alert` role) and `panel.control:hover`, which wins over both so
     whatever the pointer is on reads as reachable.
-  - **And one control rides the MAP pane's border**, centred on its bottom edge,
-    mirroring the story pane's arrangement: the **return probe** (`◌` plain,
-    `md-shoe_print` patched), which looks for the way back after a move and puts
-    it on the map. It sits there because the map is the whole of what it changes.
-    It is the only one of the six that is **off by default**, and so the only one
-    with a single glyph rather than a pair: there is no opposite mode to draw, so
-    the mark stays put and the colour carries the state — muted when off, lit
-    when on, and never hidden, because a switch you have never seen lit is a
-    switch you never find. `/set-return-probe` is the command behind it, and like
-    the other five it remembers the answer for that story.
+  - **The return probe rides that same right-hand end**, immediately inboard of
+    the map toggle: `◌` plain, `md-shoe_print` patched, the switch for the search
+    that looks for the way back after a move and puts it on the map. It sat on
+    the *map* pane's border at first, on the reasoning that a control belongs
+    where the thing it governs is — and that was the rule applied to the wrong
+    half of the feature. The search keeps running while the map is hidden,
+    because hiding a view must not degrade the data behind it, so its only switch
+    cannot live on a pane that disappears: you could not turn off something that
+    was still going. Now every control lanthorn draws is on one border of one
+    pane. Within that pair the **probe gives way first** as the pane narrows —
+    the map toggle moves a whole pane and is the only way back to a hidden map,
+    so it is the last control standing. The probe is the only *switch* that is
+    **off by default**, and so the only one with a single glyph rather than a
+    pair: there is no opposite mode to draw, so the mark stays put and the colour
+    carries the state — muted when off, lit when on, and never hidden, because a
+    switch you have never seen lit is a switch you never find.
+    `/set-return-probe` is the command behind it, and like every other switch it
+    remembers the answer for that story.
   - The glyphs come from the `control_icons` preset in `[map]` (`plain` |
     `nerdfont`) and from `[map.overrides]` one slot at a time; the first-run
     font check picks the preset along with the arrows and portal icons. The

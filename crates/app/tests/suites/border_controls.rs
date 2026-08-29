@@ -10,9 +10,13 @@
 //! later edit that means well.** A control rides the border nearest what it
 //! switches: the command band opens BELOW the story pane and the map lives to
 //! the RIGHT, so those toggles take the bottom border and its right-hand end;
-//! guidance has no direction of its own and joins the band; and the two v6
-//! switches govern how the story pane ITSELF is drawn, so they keep that pane's
-//! own top border. Off v6 there is no top cluster at all.
+//! guidance and the word reveal have no direction of their own and join the
+//! band; and the two v6 switches govern how the story pane ITSELF is drawn, so
+//! they keep that pane's own top border. Off v6 there is no top cluster at all.
+//!
+//! The return probe joins the map toggle in the anchored group (SQ-1107) — see
+//! `return_probe.rs` for why the map pane could not keep it, and for the order
+//! inside that pair.
 //!
 //! Everything here renders into a buffer and reads cells back, because that is
 //! the only evidence about a screen that is worth anything.
@@ -127,18 +131,18 @@ fn the_controls_ride_the_border_nearest_what_they_switch() {
     let (top, bottom) = (row(&buf, 0), row(&buf, 5));
     println!("z3 top:    {top}");
     println!("z3 bottom: {bottom}");
-    assert_eq!(hits.len(), 4, "off v6: map, guidance, verb panel, reveal");
+    assert_eq!(hits.len(), 5, "off v6: map, probe, guidance, verb panel, reveal");
 
-    // Bottom: `┤○ ▲ ◈├` centred, `┤◀├` anchored right, one corner clear of each.
+    // Bottom: `┤○ ▲ ◈├` centred, `┤◌ ◀├` anchored right, one corner clear of each.
     assert!(bottom.contains("┤○ ▲ ◈├"), "the centred group: {bottom:?}");
-    assert!(bottom.ends_with("┤◀├┘"), "the map toggle takes the right end: {bottom:?}");
+    assert!(bottom.ends_with("┤◌ ◀├┘"), "the anchored pair takes the right end, map at the corner: {bottom:?}");
     // Off v6 the top border carries NO cluster — the two v6 switches are the only
     // controls that ever live there — so nothing is reserved and the title strip
     // is centred across the WHOLE row. (Which is a behaviour change of its own:
     // the first pass reserved eleven columns on every story, v6 or not, and
     // `render_overflow` clipped long titles against that. SQ-1127.)
     assert!(top.contains("ZORK I"), "the title still fits: {top:?}");
-    for g in ['◀', '○', '▲', '◈', '◧', '□', '▶', '●', '▼', '■', '▣', '▦'] {
+    for g in ['◀', '○', '▲', '◈', '◌', '◧', '□', '▶', '●', '▼', '■', '▣', '▦'] {
         assert!(!top.contains(g), "z3 top border must carry no control, found {g:?}: {top:?}");
     }
     let dashes = |t: &str, part: &str| t.split(part).map(|p| p.matches('─').count()).collect::<Vec<_>>();
@@ -150,14 +154,14 @@ fn the_controls_ride_the_border_nearest_what_they_switch() {
     let (top, bottom) = (row(&buf, 0), row(&buf, 5));
     println!("z6 top:    {top}");
     println!("z6 bottom: {bottom}");
-    assert_eq!(hits.len(), 6, "on v6: the render mode and the pixel lock join");
+    assert_eq!(hits.len(), 7, "on v6: the render mode and the pixel lock join");
     assert!(top.contains("┤◧ □├"), "the v6 pair keeps the top border: {top:?}");
     // …and now that the cluster IS reserved, the title is centred in what is left
     // of the row rather than in the row: fewer dashes on its left than its right.
     let d = dashes(&top, "┤ ZORK I ├");
     assert!(d[0] < d[1], "the v6 cluster's columns come out of the title's: {top:?}");
     assert!(bottom.contains("┤○ ▲ ◈├"), "…and the bottom row is unchanged by it: {bottom:?}");
-    assert!(bottom.ends_with("┤◀├┘"), "{bottom:?}");
+    assert!(bottom.ends_with("┤◌ ◀├┘"), "{bottom:?}");
 }
 
 /// Nothing is ever drawn on the story pane's RIGHT border column, which is where
@@ -192,6 +196,7 @@ fn every_control_changes_glyph_with_its_state() {
     // by colour alone (see the case below). Lit here so the row is the every-on
     // row it claims to be.
     light_reveal(&mut on);
+    on.config.return_probe = true;
 
     let off = story(Some(6));
 
@@ -205,12 +210,13 @@ fn every_control_changes_glyph_with_its_state() {
     // Map shown → ▶ (click and it leaves to the right); hidden → ◀.
     // Guidance lit → ●, out → ○. Band open → ▼ (click and it drops), closed → ▲.
     // Raster → ■ / hybrid → ◧. Lock on → ▣ / off → □.
-    // The reveal is ◈ in both rows: a trigger has no other mode to draw.
+    // The reveal is ◈ and the return probe ◌ in both rows: a trigger has no other
+    // mode to draw, and the probe has no other mode at all.
     assert!(row(&on_buf, 5).contains("┤● ▼ ◈├"), "every-on bottom: {:?}", row(&on_buf, 5));
-    assert!(row(&on_buf, 5).ends_with("┤▶├┘"), "every-on bottom: {:?}", row(&on_buf, 5));
+    assert!(row(&on_buf, 5).ends_with("┤◌ ▶├┘"), "every-on bottom: {:?}", row(&on_buf, 5));
     assert!(row(&on_buf, 0).contains("┤■ ▣├"), "every-on top: {:?}", row(&on_buf, 0));
     assert!(row(&off_buf, 5).contains("┤○ ▲ ◈├"), "every-off bottom: {:?}", row(&off_buf, 5));
-    assert!(row(&off_buf, 5).ends_with("┤◀├┘"), "every-off bottom: {:?}", row(&off_buf, 5));
+    assert!(row(&off_buf, 5).ends_with("┤◌ ◀├┘"), "every-off bottom: {:?}", row(&off_buf, 5));
     assert!(row(&off_buf, 0).contains("┤◧ □├"), "every-off top: {:?}", row(&off_buf, 0));
 
     // …and the third render mode is a third glyph, not a repeat of either.
@@ -242,6 +248,7 @@ fn every_on_state_is_lit_from_the_alert_role_and_every_off_state_is_muted() {
     // The trigger has no on STATE; it lights while its reveal is up, which is the
     // click's own acknowledgement rather than a state report (SQ-1107).
     light_reveal(&mut on);
+    on.config.return_probe = true;
     let (buf, hits) = draw(&on, 44, 6);
     println!("all on  top: {} / bottom: {}", row(&buf, 0), row(&buf, 5));
     for (id, r) in &hits {
@@ -559,14 +566,16 @@ fn the_groups_drop_whole_and_the_centred_pair_gives_way_first() {
         println!("w={w:>2} map={map:<5} pair={pair:<5} v6={v6:<5}  {} | {}", row(&buf, 0), row(&buf, 4));
         seen.push((w, map, pair, v6));
     }
-    // The thresholds, pinned: 3 columns for `┤◀├` plus a spare, 7 for `┤○ ▲ ◈├`
-    // plus a clear column between them, and 5 for the v6 pair plus a spare. The
-    // centred group cost two more columns when the reveal joined it (SQ-1107),
-    // which is two more columns of pane before it appears — the price of the
-    // group being drawn whole or not at all.
+    // The thresholds, pinned: 3 columns for the map toggle alone plus a spare, 7
+    // for `┤○ ▲ ◈├` plus a clear column past the anchored pair, and 5 for the v6
+    // pair plus a spare. The centred group cost two more columns when the reveal
+    // joined it and two more again when the probe joined the anchored pair it has
+    // to clear (SQ-1107) — the price of a group being drawn whole or not at all.
+    // Where the ANCHORED pair sheds its own inboard member is
+    // `return_probe.rs::the_map_toggle_outlives_the_probe_as_the_pane_narrows`.
     let first = |f: fn(&(u16, bool, bool, bool)) -> bool| seen.iter().find(|r| f(r)).unwrap().0;
-    assert_eq!(first(|r| r.1), 7, "the map toggle needs a 7-column pane");
-    assert_eq!(first(|r| r.2), 16, "the centred group needs 16");
+    assert_eq!(first(|r| r.1), 7, "the map toggle alone needs a 7-column pane");
+    assert_eq!(first(|r| r.2), 20, "the centred group needs 20");
     assert_eq!(first(|r| r.3), 9, "the top border's v6 pair needs 9");
 }
 

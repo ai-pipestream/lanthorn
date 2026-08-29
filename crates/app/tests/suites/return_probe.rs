@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use app::engine::Engine;
 use app::probe::ShadowRecipe;
-use app::render::controls::{control_at, map_controls_for, BorderControl};
+use app::render::controls::{control_at, controls_for, BorderControl};
 use app::render::panel::{draw_panel_with_controls, PanelSpec, PanelStrip};
 use app::render::paneframe::{InsetSegment, PaneGlyphs};
 use app::state::AppState;
@@ -402,16 +402,17 @@ fn a_search_that_finds_nothing_leaves_the_map_as_it_was() {
     assert_eq!(m.graph.connections(), conns.as_slice());
 }
 
-// ── The control on the map border ───────────────────────────────────────────
+// ── The control on the story pane's bottom border ───────────────────────────
 
-/// Draw the map panel the way `main::draw_map_panel` does, into a fresh buffer.
-fn draw_map(state: &AppState, w: u16, h: u16) -> (Buffer, Vec<(BorderControl, Rect)>) {
+/// Draw the story panel the way `main::draw_story_panel` does, into a fresh
+/// buffer.
+fn draw_story(state: &AppState, w: u16, h: u16) -> (Buffer, Vec<(BorderControl, Rect)>) {
     let area = Rect::new(0, 0, w, h);
     let mut buf = Buffer::empty(area);
-    let views = map_controls_for(state);
+    let views = controls_for(state);
     let ctls: Vec<_> = views.iter().map(|v| v.as_header_control()).collect();
     let tab = state.colors.theme.get("panel.tab").style;
-    let segs = [InsetSegment { text: "MAP", active: true }];
+    let segs = [InsetSegment { text: "ZORK I", active: true }];
     let (_, rects) = draw_panel_with_controls(
         &mut buf,
         &PanelSpec {
@@ -440,51 +441,103 @@ fn row(buf: &Buffer, y: u16) -> String {
     (buf.area.x..buf.area.right()).map(|x| buf.cell((x, y)).unwrap().symbol().to_owned()).collect()
 }
 
-/// The footprint is on the map pane's bottom border in BOTH states, centred, and
-/// the colour is what changes.
+/// **The footprint rides the STORY pane's bottom border, immediately inboard of
+/// the map toggle** — in both states, with the colour carrying the state.
 ///
-/// **Never hidden when off** is the load-bearing half. Every other control here
+/// It was on the MAP pane's border until SQ-1107, and that was wrong for a
+/// reason the placement rule hides: the search keeps running when the map is
+/// hidden, because hiding a view must not degrade the data behind it — so its
+/// only switch cannot live on a pane that disappears. You could not turn off
+/// something that was still running. `the_switch_survives_hiding_the_map` below
+/// is the case that pins it.
+///
+/// **Never hidden when off** is the other load-bearing half. Every other control
 /// governs something on by default, so it is discovered by being used; this one
 /// is off out of the box, and a control nobody has seen lit is the only way an
 /// off-by-default feature ever gets found.
 #[test]
-fn the_footprint_rides_the_map_border_lit_or_muted_but_always_there() {
+fn the_footprint_rides_the_story_border_inboard_of_the_map_toggle() {
     let mut st = AppState::default();
+    st.story_zversion = Some(3);
     let mark = st.symbols.controls.return_probe;
 
     for on in [false, true] {
         st.config.return_probe = on;
-        let (buf, hits) = draw_map(&st, 40, 10);
+        let (buf, hits) = draw_story(&st, 44, 10);
         let bottom = row(&buf, 9);
         assert!(
             bottom.contains(mark.to_string().as_str()),
             "the footprint is on the bottom border with return_probe = {on}: {bottom:?}"
         );
-        eprintln!("map border, return_probe = {on:<5}: {bottom}");
-        let (_, rect) = hits.iter().find(|(id, _)| *id == BorderControl::ReturnProbe).unwrap();
-        assert_eq!(rect.y, 9, "on the bottom border, not the top");
-        // Centred, like the story pane's own bottom cluster: the icon's column is
-        // within a cell of the pane's middle.
+        eprintln!("story border, return_probe = {on:<5}: {bottom}");
+        let (_, probe) = hits.iter().find(|(id, _)| *id == BorderControl::ReturnProbe).unwrap();
+        let (_, map) = hits.iter().find(|(id, _)| *id == BorderControl::Map).unwrap();
+        assert_eq!(probe.y, 9, "on the bottom border, not the top");
+        // The pair, in order: the probe inboard, the map toggle at the corner.
+        assert!(probe.x < map.x, "the probe sits inboard of the map toggle: {bottom:?}");
+        assert_eq!(probe.x + 2, map.x, "…and they are one group, one space apart");
         assert!(
-            (i32::from(rect.x) - 20).abs() <= 2,
-            "centred on a 40-wide pane, got x={} ({bottom:?})",
-            rect.x
+            map.right() + 1 >= 44 - 2,
+            "the map toggle still keeps the corner anchor: {bottom:?}"
         );
         assert_eq!(
-            control_at(&st, &hits, rect.x, rect.y),
+            control_at(&st, &hits, probe.x, probe.y),
             Some(BorderControl::ReturnProbe),
             "and a click on it resolves to the control"
         );
     }
 
     // The state is carried by the COLOUR, since the mark has only one shape.
+    let view = |st: &AppState| {
+        controls_for(st).into_iter().find(|v| v.id == BorderControl::ReturnProbe).unwrap().style
+    };
     st.config.return_probe = false;
-    let off = map_controls_for(&st)[0].style;
+    let off = view(&st);
     st.config.return_probe = true;
-    let lit = map_controls_for(&st)[0].style;
+    let lit = view(&st);
     assert_ne!(off, lit, "muted when off, lit when on");
     assert_eq!(lit, st.colors.theme.get("panel.control:lit").style, "lit is the `alert` role");
     assert_eq!(off, st.colors.theme.get("panel.control").style);
+}
+
+/// **The switch outlives the map**, which is the whole reason it moved. The
+/// search runs whether or not the map pane is on screen, so its control has to
+/// be reachable either way — and on the map's own border it was not.
+#[test]
+fn the_switch_survives_hiding_the_map() {
+    let mut st = AppState::default();
+    st.story_zversion = Some(3);
+    for layout in [app::state::Layout::Split, app::state::Layout::TranscriptFull] {
+        st.layout = layout;
+        let (buf, hits) = draw_story(&st, 44, 10);
+        eprintln!("{layout:?}: {}", row(&buf, 9));
+        assert!(
+            hits.iter().any(|(id, _)| *id == BorderControl::ReturnProbe),
+            "{layout:?}: the probe's switch must be on screen with the map hidden too",
+        );
+    }
+}
+
+/// **The probe gives way first as the pane narrows.** Both live in the anchored
+/// right-hand group, and the group sheds from its left — so the map toggle, the
+/// only way back to a hidden map, is the last control standing. The printed rows
+/// are the record of where each threshold falls.
+#[test]
+fn the_map_toggle_outlives_the_probe_as_the_pane_narrows() {
+    let mut st = AppState::default();
+    st.story_zversion = Some(3);
+    let mut seen: Vec<(u16, bool, bool)> = Vec::new();
+    for w in 4..=20u16 {
+        let (buf, hits) = draw_story(&st, w, 6);
+        let has = |id: BorderControl| hits.iter().any(|(i, _)| *i == id);
+        let (map, probe) = (has(BorderControl::Map), has(BorderControl::ReturnProbe));
+        eprintln!("w={w:>2} map={map:<5} probe={probe:<5}  {}", row(&buf, 5));
+        assert!(!(probe && !map), "w={w}: the probe outlived the map toggle");
+        seen.push((w, map, probe));
+    }
+    let first = |f: fn(&(u16, bool, bool)) -> bool| seen.iter().find(|r| f(r)).unwrap().0;
+    assert_eq!(first(|r| r.1), 7, "the map toggle alone needs a 7-column pane");
+    assert_eq!(first(|r| r.2), 9, "the pair needs 9 — two more columns for the probe");
 }
 
 /// A click runs the registry command, exactly as every other border control

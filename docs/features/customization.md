@@ -104,10 +104,9 @@ still reach in and override any single selector by name.
   set), `path_style` for cardinal (N/S/E/W) connectors, and a separate
   `portal_path_style` for vertical/portal (up/down/in/out) connectors so they
   can render distinctly (dotted by default). `control_icons` (plain | nerdfont)
-  picks the glyphs for the pane borders' toggle controls — the map and
-  verb-panel toggles, the Guiding Light's mark, the word reveal's lamp, the two
-  v6 render switches, and the return probe's footprint on the map pane's own
-  bottom border.
+  picks the glyphs for the story pane's border toggle controls — the map and
+  verb-panel toggles, the Guiding Light's mark, the word reveal's lamp, the
+  return probe's footprint and the two v6 render switches.
   `plain` is shape-based Geometric Shapes; `nerdfont` gives all thirteen states a
   named icon, every codepoint read from the font's own `post` table rather than
   guessed from a name, with each control's states drawn from a single icon
@@ -385,8 +384,8 @@ its own `config.toml` — a separate, deliberately tiny sidecar carrying at most
 toggle one of those for a story (`/set-game-colours`, `/set-game-borders`,
 `/set-v6-pixel-lock`, `/set-guidance`, `/set-v6-render`, `/set-return-probe`,
 hiding the map, opening
-the command band — or clicking any of the toggle controls on the story or map
-pane's border, which run exactly those commands), and it is a *sparse override layer*,
+the command band — or clicking any of the toggle controls on the story pane's
+border, which run exactly those commands), and it is a *sparse override layer*,
 not a copy of your global config:
 bare uncommented lines, only the keys that differ, and the file is deleted once
 nothing is overridden. An absent key means "inherit the global value" — which is
@@ -549,8 +548,10 @@ re-seed the new template, or hand-write the new shape from
   full of, without ever assuming a passage runs both ways. A probe that lands
   anywhere else records nothing at all, not even that the room exists. It is off
   by default because it runs your game a few extra turns in private; the
-  footprint on the map pane's bottom border turns it on, `/set-return-probe`
-  does it from the keyboard, and both remember the answer for that story. See
+  footprint on the story pane's bottom border — beside the map toggle, where it
+  stays reachable with the map hidden, because the search keeps running either
+  way — turns it on, `/set-return-probe` does it from the keyboard, and both
+  remember the answer for that story. See
   [mapping](mapping.md) for what it does to the map.
 - **A choice for one run stays a choice for one run.** `--sound off`, `--user-dir`,
   `--game-colours off` and `--interpreter` are instructions for the launch you typed

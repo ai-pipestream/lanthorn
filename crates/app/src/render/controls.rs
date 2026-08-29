@@ -23,6 +23,14 @@
 //! govern how the story pane ITSELF is drawn, so they keep that pane's own top
 //! border. See [`ControlPlacement`].
 //!
+//! **The one place that rule was wrong was the return probe** (SQ-0785), which
+//! rode the MAP pane's border because the map is what it changes. But the search
+//! keeps running when the map is hidden — hiding a view must not degrade the data
+//! behind it — and a pane that disappears cannot carry the only switch for
+//! something that does not: you could not turn off a feature that was still going.
+//! So it sits on the story pane beside the map toggle, immediately inboard of it,
+//! and every control lanthorn draws is now on one border of one pane (SQ-1107).
+//!
 //! **A click runs the command.** Each control names an existing entry in
 //! `slash::COMMANDS` and the event loop puts that command string through the
 //! ordinary slash pipeline, so clicking is byte-for-byte what typing it does —
@@ -110,11 +118,14 @@ impl BorderControl {
                 ControlPlacement::BottomCentre
             }
             BorderControl::V6Render | BorderControl::V6PixelLock => ControlPlacement::TopRight,
-            // Centred on its own pane's bottom border, mirroring the story
-            // pane's arrangement. The rule at the top of this file — a control
-            // sits where the thing it governs is — puts it on the MAP, since the
-            // map is the whole of what it changes (SQ-0785).
-            BorderControl::ReturnProbe => ControlPlacement::BottomCentre,
+            // Beside the map toggle, on the STORY pane, immediately inboard of
+            // it. It rode the map pane's own bottom border until SQ-1107, which
+            // was the placement rule applied to the wrong half of the feature:
+            // the search keeps running when the map is hidden — hiding a view
+            // must not degrade the data behind it — so its only switch cannot
+            // live on a pane that disappears. You could not turn off something
+            // that was still running.
+            BorderControl::ReturnProbe => ControlPlacement::BottomRight,
         }
     }
 
@@ -184,12 +195,45 @@ fn style_for(state: &AppState, id: BorderControl, lit: bool) -> Style {
 
 /// The controls to draw in the story pane's border, left to right.
 ///
-/// Always the three that apply to every story; the two v6 ones only when the
+/// Always the five that apply to every story; the two v6 ones only when the
 /// story really is v6 (header version 6, as `startup` recorded it), so they
 /// appear and vanish with the game rather than being greyed out.
+///
+/// **Order is placement, within a group.** The groups are filtered out of this
+/// one list in index order, so the probe standing ahead of the map toggle is what
+/// puts it inboard — and what makes it the one that goes first when the pane
+/// narrows, since an anchored group sheds from its left.
 pub fn controls_for(state: &AppState) -> Vec<ControlView> {
     let g = &state.symbols.controls;
-    let mut out = Vec::with_capacity(5);
+    let mut out = Vec::with_capacity(7);
+
+    // ── Return probe ─────────────────────────────────────────────────────────
+    // First, so it takes the INBOARD slot of the right-hand pair and the map
+    // toggle keeps the corner. Within that pair the probe gives way first as the
+    // pane narrows: the map toggle moves a whole pane and is the only way back to
+    // a hidden map, so it survives longest (SQ-1107).
+    //
+    // **Drawn in both states, never hidden.** Every other switch here governs
+    // something already on by default or already visible, so it is discovered by
+    // being used. This one is off out of the box, and a switch nobody has ever
+    // seen lit is a switch nobody finds: muted through the plain `panel.control`
+    // when off, lit yellow when on, same glyph either way (see
+    // [`crate::symbols::ControlGlyphs::return_probe`]).
+    let probe_on = state.config.return_probe;
+    out.push(ControlView {
+        id: BorderControl::ReturnProbe,
+        glyph: g.return_probe,
+        style: style_for(state, BorderControl::ReturnProbe, probe_on),
+        hint: vec![
+            if probe_on {
+                "Return probe: on — click to stop looking for the way back"
+            } else {
+                "Return probe: off — click to look for the way back after a move"
+            }
+            .to_string(),
+            "/set-return-probe".to_string(),
+        ],
+    });
 
     // ── Map ──────────────────────────────────────────────────────────────────
     let map_on = state.layout == Layout::Split;
@@ -312,50 +356,6 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
         ],
     });
 
-    out
-}
-
-/// The controls to draw in the MAP pane's border (SQ-0785).
-///
-/// One, so far. It is a separate list rather than a flag on
-/// [`controls_for`] because the two panes are drawn by two different calls with
-/// two different `PanelSpec`s, and a single list would have to be filtered at
-/// each of them by which pane it was — which is one more place for the question
-/// "does this control belong here?" to be answered differently.
-///
-/// **Drawn in both states, never hidden.** Every other control here governs
-/// something already on by default or already visible, so it is discovered by
-/// being used. This one is off out of the box, and a switch nobody has ever seen
-/// lit is a switch nobody finds: muted through the plain `panel.control` when
-/// off, lit yellow through `panel.control:lit` when on, same glyph either way
-/// (see [`crate::symbols::ControlGlyphs::return_probe`]).
-pub fn map_controls_for(state: &AppState) -> Vec<ControlView> {
-    let on = state.config.return_probe;
-    vec![ControlView {
-        id: BorderControl::ReturnProbe,
-        glyph: state.symbols.controls.return_probe,
-        style: style_for(state, BorderControl::ReturnProbe, on),
-        hint: vec![
-            if on {
-                "Return probe: on — click to stop looking for the way back"
-            } else {
-                "Return probe: off — click to look for the way back after a move"
-            }
-            .to_string(),
-            "/set-return-probe".to_string(),
-        ],
-    }]
-}
-
-/// Every control on screen this frame, whichever pane it rides.
-///
-/// The hover hint resolves a [`BorderControl`] the event loop already matched
-/// against a rect, so it needs the view for that id and does not care which pane
-/// drew it — and a lookup that consulted only the story pane's list would leave
-/// the map's control silently hintless.
-pub fn all_controls_for(state: &AppState) -> Vec<ControlView> {
-    let mut out = controls_for(state);
-    out.extend(map_controls_for(state));
     out
 }
 

@@ -504,9 +504,12 @@ a room is searched once in the life of a map rather than once per visit, and a
 search you interrupt by walking on resumes where it stopped.
 
 It is **off by default** — it does run your game a few extra turns in private —
-and the footprint on the map pane's bottom border is how you turn it on: muted
-when off, lit when on, and never hidden, because a switch you have never seen lit
-is a switch you never find. `/set-return-probe` does the same from the keyboard,
+and the footprint on the **story** pane's bottom border, immediately inboard of
+the map toggle, is how you turn it on: muted when off, lit when on, and never
+hidden, because a switch you have never seen lit is a switch you never find. It
+lives there rather than on the map's own border for a reason worth stating: the
+search keeps running while the map is hidden — hiding a view must not degrade the
+data behind it — so its only switch cannot sit on a pane that disappears. `/set-return-probe` does the same from the keyboard,
 and both remember the answer for *that story*, so you can afford it on a small
 Z-machine game and decline it on a large Glulx one.
 
