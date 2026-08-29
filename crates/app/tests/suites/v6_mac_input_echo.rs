@@ -77,12 +77,9 @@ fn mac_at_prompt(pictures: Option<&str>, honor_game_colours: bool) -> Option<AtP
     assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), MAC_RELEASE, "this disk carries r{MAC_RELEASE}");
     assert_eq!(&bytes[0x12..0x18], MAC_SERIAL, "…and that release's serial");
 
-    let dir = std::env::temp_dir().join(format!(
-        "lanthorn-mac-echo-{}-{}",
-        std::process::id(),
-        pictures.unwrap_or("default")
-    ));
-    let _ = std::fs::create_dir_all(&dir);
+    // Four of this helper's five callers pass the same `pictures`, so the archive
+    // name is no more a discriminator than the pid is (SQ-1131).
+    let dir = app::scratch_dir(&format!("mac-echo-{}", pictures.unwrap_or("default")));
     let over = match pictures {
         Some(name) => PictureOverride::resolve_with_session(&path, &dir, Some(name)),
         None => PictureOverride::Unset,

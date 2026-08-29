@@ -481,9 +481,10 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("lanthorn-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // `lanthorn-test-<pid>` was ALSO `turn.rs`'s name for its own scratch, and
+        // under `cargo test` the two tests share a process — so each was deleting
+        // the other's directory at the end of its case (SQ-1131).
+        let dir = crate::scratch_dir("map-round-trip");
         let path = dir.join("ZCODE-1-x-0.map.json");
         let mut m = Mapper::default();
         m.observe(1, "West of House", None);

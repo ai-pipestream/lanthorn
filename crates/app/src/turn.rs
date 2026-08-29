@@ -1556,8 +1556,9 @@ mod tests {
 
     #[test]
     fn apply_turn_events_halts_and_logs_on_fault() {
-        let tmp = std::env::temp_dir().join(format!("lanthorn-test-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).expect("create temp user_dir");
+        // The other half of the `lanthorn-test-<pid>` collision — see
+        // `persist_files::tests::save_then_load_round_trips` (SQ-1131).
+        let tmp = app::scratch_dir("turn-fault-log");
         let mut state = app::state::AppState::default();
         state.config.user_dir = tmp.clone();
 

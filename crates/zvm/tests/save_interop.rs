@@ -163,7 +163,13 @@ fn lanthorn_save_at_p() -> std::path::PathBuf {
     };
     machine.complete_save(true);
 
-    let path = std::env::temp_dir().join(format!("lanthorn-158b-{}.qzl", std::process::id()));
+    // A counter beside the pid: under `cargo test` one binary's tests share a
+    // process, so the pid alone would hand every caller the same file (SQ-1131).
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NTH: AtomicUsize = AtomicUsize::new(0);
+    let nth = NTH.fetch_add(1, Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("lanthorn-158b-{}-{nth}.qzl", std::process::id()));
     std::fs::write(&path, &bytes).expect("write lanthorn's save to a temp file");
     path
 }

@@ -176,8 +176,7 @@ fn boot_raw(file: &str, want_release: u16, pictures: Option<&str>) -> Option<Boo
     // profile and its own picture space is a screen-size link, so both have to be
     // settled before the engine is built (`startup.rs`, and
     // `v6_macintosh_profile::launch`).
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq1032-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = app::scratch_dir("sq1032");
     let over = match pictures {
         Some(name) => app::graphics::PictureOverride::resolve_with_session(&path, &dir, Some(name)),
         None => app::graphics::PictureOverride::Unset,

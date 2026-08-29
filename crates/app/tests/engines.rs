@@ -85,6 +85,8 @@ mod wizard_sniffer;
 
 #[path = "suites/palette_lock_discipline.rs"]
 mod palette_lock_discipline;
+#[path = "suites/scratch_path_discipline.rs"]
+mod scratch_path_discipline;
 #[path = "suites/terminal_restore_order.rs"]
 mod terminal_restore_order;
 #[path = "suites/release_enumeration.rs"]

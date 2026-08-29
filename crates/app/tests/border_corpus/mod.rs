@@ -62,8 +62,14 @@ pub fn stories() -> PathBuf {
 /// A scratch directory for the per-game sidecar `resolve_with_session` looks
 /// for. Nothing is ever written to it — the session name outranks the key — but
 /// the door takes a directory and this is an honest one.
+///
+/// Keyed on a counter as well as the pid: the pid is the same for every caller
+/// under `cargo test`, which gives one binary's tests one process (SQ-1131).
 pub fn scratch() -> PathBuf {
-    std::env::temp_dir().join(format!("lanthorn-archive-sweep-{}", std::process::id()))
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NTH: AtomicUsize = AtomicUsize::new(0);
+    let nth = NTH.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("lanthorn-archive-sweep-{}-{nth}", std::process::id()))
 }
 
 // ── The corpus ───────────────────────────────────────────────────────────────

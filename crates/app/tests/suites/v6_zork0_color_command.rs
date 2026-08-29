@@ -205,8 +205,7 @@ fn boot(file: &str, user_honours: bool) -> Option<Booted> {
     assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), RELEASE, "this press carries r{RELEASE}");
     assert_eq!(&bytes[0x12..0x18], SERIAL);
 
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq957-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = app::scratch_dir("sq957");
     let over = PictureOverride::resolve_with_session(&path, &dir, None);
     let named_art_std_window = over.std_window();
     let (profile, source) =

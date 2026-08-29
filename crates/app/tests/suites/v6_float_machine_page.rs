@@ -109,8 +109,7 @@ fn frame_at(file: &str, pictures: Option<&str>, honor: bool, pane: Rect) -> Opti
             return None;
         }
     };
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq848-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = app::scratch_dir("sq848");
     let over = match pictures {
         Some(name) => PictureOverride::resolve_with_session(&path, &dir, Some(name)),
         None => PictureOverride::Unset,
