@@ -7,13 +7,19 @@
 //! icons riding the story pane's own border, each one saying what state it is in
 //! and switching that state when clicked.
 //!
+//! Four rules shape everything here — and one exception, which arrived last and
+//! is stated where it applies: [`BorderControl::Reveal`] is a TRIGGER, not a
+//! switch. It has no state to report, remembers nothing, and lights only while
+//! the thing it started is still happening.
+//!
 //! Four rules shape everything here.
 //!
 //! **A control sits where the thing it governs is, or where it would appear.**
 //! The command band opens BELOW the story pane, so its toggle rides the bottom
 //! border; the map lives to the RIGHT, so its toggle takes the bottom border's
-//! right-hand end, nearest the pane it summons; guidance has no direction of its
-//! own and joins the band as the other thing you switch; and the two v6 controls
+//! right-hand end, nearest the pane it summons; guidance and the word reveal have
+//! no direction of their own — the reveal acts on the story pane's own prose,
+//! right there — so they join the band in the centred group; and the two v6 controls
 //! govern how the story pane ITSELF is drawn, so they keep that pane's own top
 //! border. See [`ControlPlacement`].
 //!
@@ -43,10 +49,14 @@
 //! the top border, a non-v6 story has no top cluster at all and its title strip
 //! gets the whole row back.
 //!
-//! **What a click switches, it also remembers.** Every one of these writes the
+//! **What a click switches, it also remembers.** Every SWITCH here writes the
 //! per-game `config.toml` sidecar, so a preference chosen for one story stays
 //! with that story and no other. That is the commands' behaviour, not a second
-//! implementation layered under the buttons: a click IS the command.
+//! implementation layered under the buttons: a click IS the command. The reveal
+//! is exempt and says so through [`BorderControl::persists`], because a light
+//! that was on for four seconds has nothing to remember — the `border_controls`
+//! suite reads that method rather than a list, so the next control added without
+//! a thought about persistence still fails the guard.
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -68,9 +78,20 @@ pub enum BorderControl {
     V6Render,
     /// The v6 pixel lock. v6 only.
     V6PixelLock,
-    /// The return probe (SQ-0785) — the one control on the MAP pane's border,
-    /// because the map is the only thing it changes.
+    /// The return probe (SQ-0785).
     ReturnProbe,
+    /// The momentary word reveal (SQ-1107).
+    ///
+    /// **The first TRIGGER in this cluster, and the only one.** Every other
+    /// control here reports a state you can read off it at a glance and flips
+    /// that state when clicked. This one has no state to report: it makes
+    /// something happen on the story pane and is over a few seconds later. Two
+    /// consequences, both deliberate — its tooltip carries more weight than its
+    /// neighbours', since the glyph alone cannot say what a press does; and it
+    /// still LIGHTS for the duration of the reveal, not to report a state but so
+    /// that a click visibly did something, because a press that happened to light
+    /// no words would otherwise be indistinguishable from a broken button.
+    Reveal,
 }
 
 impl BorderControl {
@@ -82,7 +103,12 @@ impl BorderControl {
     pub fn placement(self) -> ControlPlacement {
         match self {
             BorderControl::Map => ControlPlacement::BottomRight,
-            BorderControl::VerbPanel | BorderControl::Guidance => ControlPlacement::BottomCentre,
+            // Guidance, the verb panel and the reveal have no direction of their
+            // own — the reveal acts on the story pane's own prose, right there —
+            // so they ride the bottom border together, centred.
+            BorderControl::VerbPanel | BorderControl::Guidance | BorderControl::Reveal => {
+                ControlPlacement::BottomCentre
+            }
             BorderControl::V6Render | BorderControl::V6PixelLock => ControlPlacement::TopRight,
             // Centred on its own pane's bottom border, mirroring the story
             // pane's arrangement. The rule at the top of this file — a control
@@ -92,8 +118,9 @@ impl BorderControl {
         }
     }
 
-    /// The `slash::COMMANDS` entry a click runs, bare (every one of them toggles
-    /// or cycles when given no argument).
+    /// The `slash::COMMANDS` entry a click runs, bare — which toggles or cycles
+    /// for every switch here, and simply HAPPENS for [`BorderControl::Reveal`],
+    /// the one trigger.
     pub fn command(self) -> &'static str {
         match self {
             BorderControl::Map => "toggle-map",
@@ -102,7 +129,19 @@ impl BorderControl {
             BorderControl::V6Render => "set-v6-render",
             BorderControl::V6PixelLock => "set-v6-pixel-lock",
             BorderControl::ReturnProbe => "set-return-probe",
+            BorderControl::Reveal => "reveal-words",
         }
+    }
+
+    /// Does this control REMEMBER what it switched, in the per-game sidecar?
+    ///
+    /// True of every switch here and false of the one trigger, which has nothing
+    /// to remember. Stated rather than inferred, because the property it exists
+    /// to guard is exactly "a control whose command does not persist" — see the
+    /// `border_controls` suite, which walks this and asserts the registry's own
+    /// description matches.
+    pub fn persists(self) -> bool {
+        !matches!(self, BorderControl::Reveal)
     }
 }
 
@@ -196,6 +235,36 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
             }
             .to_string(),
             "F2".to_string(),
+        ],
+    });
+
+    // ── The reveal (a trigger, not a switch) ─────────────────────────────────
+    // Lit while a reveal is up — which is not a state report, since there is no
+    // state: it is the click's own acknowledgement, so a press that lights no
+    // words still reads as a press that worked.
+    //
+    // Its hint does more work than the others'. Theirs need only name a state and
+    // its opposite, because the glyph has already said which one is in force; a
+    // lamp on a border says nothing at all about WHAT it lights, so this one has
+    // to say it — and, when the Guiding Light is out, has to say why a press will
+    // do nothing rather than leaving the player to conclude it is broken.
+    let lit = state.reveal.as_ref().is_some_and(|r| r.is_lit());
+    out.push(ControlView {
+        id: BorderControl::Reveal,
+        glyph: g.reveal,
+        style: style_for(state, BorderControl::Reveal, lit),
+        hint: vec![
+            "Reveal: light the words on screen the parser knows".to_string(),
+            if state.config.guidance {
+                "click for a moment — it goes out on your next key"
+            } else {
+                "needs the Guiding Light, which is out — the lamp beside this one"
+            }
+            .to_string(),
+            // Both, unlike its neighbours: F2's toggle can be found by clicking
+            // the control it names, and this one cannot be found at all without
+            // being told the key.
+            "F4 · /reveal-words".to_string(),
         ],
     });
 

@@ -251,14 +251,16 @@ know which side you're on).
   ```text
   ┌─ ZORK I ──────────────────────┤ ◧ □ ├─┐   the v6 pair (v6 stories only)
   │                                       │
-  └──────────────┤ ▲ ○ ├─────────┤ ◀ ├────┘   verb panel · Guiding Light | map
+  └───────────┤ ▲ ○ ◈ ├───────────┤ ◀ ├────┘   band · light · reveal | map
   ```
 
   - **A control sits where the thing it governs is, or where it would appear.**
     The command band opens *below* the story pane, so its toggle rides the
     bottom border; the map lives to the *right*, so its toggle takes the bottom
     border's right-hand end, nearest the pane it summons. The Guiding Light has
-    no direction of its own and joins the band as the other thing you switch.
+    no direction of its own and joins the band as the other thing you switch,
+    and the **reveal** joins them both — it acts on the story pane's own prose,
+    right there.
     The **render mode** and the **pixel lock** govern how the story pane itself
     is drawn, so they keep that pane's own top border — and they appear only
     when the story really is v6, absent rather than greyed out, so an ordinary
@@ -275,6 +277,16 @@ know which side you're on).
     shape, and the shape change is legible without reading the colour. (The
     render mode is a cycle rather than a switch, so `hybrid` — how the game
     arrives — is not lit, while `raster` and `extended` both are.)
+  - **One of them is a trigger, not a switch.** The **reveal** (`◈` plain,
+    `md-flashlight` patched, **F4** from the keyboard) has no state to report:
+    press it and the words on screen that this story's parser would accept light
+    up for a few seconds. So
+    it has one glyph rather than a pair, and it still lights while the reveal is
+    up — not to say "on", but so a press visibly *did* something, because a
+    press that happened to light no words would otherwise look like a broken
+    button. Its hover hint carries more weight than its neighbours' for the same
+    reason: a lamp on a border cannot say what it lights, so the hint does — and,
+    when the Guiding Light is out, says why a press will do nothing.
   - **Hover for a hint.** Resting the pointer on one floats a small box *into*
     the pane — down from the top border, up from the bottom one, never over the
     icon you are pointing at — naming the control, what a click would do, and
@@ -283,10 +295,10 @@ know which side you're on).
     everywhere.
   - **A click is the command.** Each control runs its own `slash::COMMANDS`
     entry, bare — `/toggle-map`, `/set-guidance`, `/open-command-band`,
-    `/set-v6-render`, `/set-v6-pixel-lock` — so clicking does exactly what
-    typing does.
-  - **And what you switch here is remembered for *this game*.** Every one of the
-    five writes the per-game `config.toml` sidecar in the story's save
+    `/reveal-words`, `/set-v6-render`, `/set-v6-pixel-lock` — so clicking does
+    exactly what typing does.
+  - **And what you switch here is remembered for *this game*.** Every *switch*
+    writes the per-game `config.toml` sidecar in the story's save
     directory, so the map you hid, the light you put out, the band you left open
     and the render mode you chose come back with that story and no other. The
     **settings screen** still sets the *global default* that new games inherit —
@@ -294,7 +306,9 @@ know which side you're on).
     command's `auto` argument (`/set-guidance auto`, `/set-v6-render auto`,
     `/set-v6-pixel-lock auto`), which clears the key rather than writing the
     global value down; the buttons themselves only ever reach the concrete
-    states, because "inherit" has no look of its own to show.
+    states, because "inherit" has no look of its own to show. The reveal is the
+    exception and needs none: a light that was on for four seconds has nothing
+    to remember.
   - **Sharing a row with a drag handle.** The bottom border is also where the
     command band's and the inventory dock's top edge is grabbed for a resize. A
     control owns its own cell, so a click on a toggle toggles; the edge stays
@@ -303,7 +317,7 @@ know which side you're on).
   - **Too narrow to fit?** Each cluster is drawn whole or not at all — half a
     cluster would be unclickable chrome. The map toggle is anchored and the pair
     is centred in what the anchor leaves, so as the pane narrows the **centred
-    pair gives way first** and the map toggle, the one control that moves a whole
+    group gives way first** and the map toggle, the one control that moves a whole
     pane, survives longest.
   - Every state is themeable: `panel.control` (off/idle), `panel.control:lit`
     (on — the `alert` role) and `panel.control:hover`, which wins over both so
@@ -321,10 +335,10 @@ know which side you're on).
   - The glyphs come from the `control_icons` preset in `[map]` (`plain` |
     `nerdfont`) and from `[map.overrides]` one slot at a time; the first-run
     font check picks the preset along with the arrows and portal icons. The
-    `nerdfont` set gives each of the twelve states a named icon — a map with a
+    `nerdfont` set gives each of the thirteen states a named icon — a map with a
     "you are here" dot when the map is shown, a purpose-built panel off/on pair
-    for the band, a lamp for the light, a monitor per render mode, a padlock for
-    the lock, a footprint for the return probe — and each control's states come from **one** icon family, because
+    for the band, a lamp for the light, a flashlight for the reveal, a monitor
+    per render mode, a padlock for the lock, a footprint for the return probe — and each control's states come from **one** icon family, because
     Codicons, Font Awesome and Material Design carry different stroke weights,
     and a control whose two states came from different families appeared to jump
     on toggle.

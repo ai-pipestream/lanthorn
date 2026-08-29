@@ -912,6 +912,43 @@ pub const LEAD_VETTED: &str = "try instead — ";
 /// still has a spare.
 const NONSENSE: [&str; 3] = ["zqxwvj", "vprkxz", "jwqzbf"];
 
+/// Everything the player can reach right now, as [`ObjectWords`]: what is in
+/// the room, and what they are carrying.
+///
+/// The room's contents come through `room_objects_excluding`, which drops the
+/// player object — structurally a child of whatever room they are standing in,
+/// so without that every room of every game would contain the adventurer
+/// (SQ-0667).
+///
+/// **`None` is not the same answer as an empty list, and the difference decides
+/// what a caller may claim.** `None` means the question could not be ASKED —
+/// the engine has no [`Introspect`](crate::engine::Introspect) at all (Glulx
+/// and Scott Adams today), or it has one that cannot say where the player is or
+/// who they are. An empty `Some` means it was asked and the answer is nothing:
+/// an empty room, carrying nothing. A caller that flattens the two reports "no
+/// objects are in scope" about a story it never managed to read, which is the
+/// sort of confident wrong answer this crate keeps having to un-tell (see
+/// [`crate::reveal::RevealTier`], which turns exactly this distinction into
+/// what it is allowed to say on screen).
+pub fn objects_in_scope(engine: &dyn Engine) -> Option<Vec<crate::engine::ObjectWords>> {
+    let intro = engine.introspect()?;
+    let player = intro.player_object();
+    let room = engine.current_location().map(|l| l.number);
+    // Neither half readable: the seam exists but this story is not answering, so
+    // the question was not really asked.
+    if player.is_none() && room.is_none() {
+        return None;
+    }
+    let mut out: Vec<crate::engine::ObjectWords> = Vec::new();
+    if let Some(r) = room {
+        out.extend(intro.room_objects_excluding(r, player));
+    }
+    if let Some(p) = player {
+        out.extend(intro.contents(p));
+    }
+    Some(out)
+}
+
 /// Two dictionary nouns that are not here, for the control commands — see
 /// [`crate::probe`] for what a pair of them is worth and why one is worth
 /// nothing.
@@ -941,17 +978,16 @@ const NONSENSE: [&str; 3] = ["zqxwvj", "vprkxz", "jwqzbf"];
 ///
 /// The remaining guess is exactly why the probe believes a pair only when both
 /// answer identically.
+///
+/// # Two callers, one spelling of "here"
+///
+/// [`objects_in_scope`] is the reader; this asks it the negative question and
+/// [`crate::reveal`] asks it the positive one. One function because "what can
+/// the player see?" answered two ways in two files is the hand-maintained
+/// invariant CLAUDE.md's refactoring policy names — and the two answers would
+/// diverge silently, since each looks entirely reasonable on its own.
 fn absent_nouns(v: &StoryVocabulary, engine: &dyn Engine, prose: &[String], avoid: &[String]) -> Vec<String> {
-    let mut in_scope: Vec<crate::engine::ObjectWords> = Vec::new();
-    if let Some(intro) = engine.introspect() {
-        let player = intro.player_object();
-        if let Some(room) = engine.current_location().map(|l| l.number) {
-            in_scope.extend(intro.room_objects_excluding(room, player));
-        }
-        if let Some(p) = player {
-            in_scope.extend(intro.contents(p));
-        }
-    }
+    let in_scope = objects_in_scope(engine).unwrap_or_default();
     // The tail of the transcript, split into words, which is what the player can
     // see on screen and therefore roughly what is around them.
     let mentioned: BTreeSet<String> = prose

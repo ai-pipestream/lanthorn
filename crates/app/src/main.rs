@@ -2140,6 +2140,16 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // frame; a missed redraw is a visible bug. (SQ-0305)
         needs_redraw = true;
 
+        // A reveal is momentary, and the next keystroke is what ends it (SQ-1107).
+        // Ahead of every dispatch arm, so it is out before whatever that key does
+        // — including the reveal's OWN key, which clears here and lights again
+        // when the command runs a few lines later. Key presses only: moving the
+        // pointer is not an answer to the question the reveal asked, and putting
+        // the light out because the mouse drifted would be.
+        if matches!(&event, Event::Key(k) if k.kind == KeyEventKind::Press) {
+            app::reveal::clear(&mut state);
+        }
+
         // The player outranks paced output (SQ-0708): a keypress collapses an
         // in-flight v6 picture sequence to its settled composite at once, and a
         // resize settles it rather than replaying frames measured against the old

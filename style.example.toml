@@ -55,6 +55,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # transcript_crash = { parent = "alert", bold = true }
 # transcript_assist = { parent = "alert", glyph = "●" }
 # transcript_assist_caution = { parent = "alert", bold = true, glyph = "●" }
+# transcript_reveal = { parent = "accent", underline = true }
 # more_prompt = { parent = "chrome", reversed = true }
 # tidy_progress = { parent = "accent" }
 # meta_marker = { parent = "muted" }

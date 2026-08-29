@@ -690,6 +690,36 @@ pub(crate) fn dispatch_slash_outcome(
                 Err(e) => state.set_status(format!("set-return-probe failed: {e}")),
             }
         }
+        SlashOutcome::RevealWords => {
+            // A trigger: nothing to write, nothing to inherit, no transcript line.
+            // A META line here would be worse than useless — it is an insert above
+            // the prompt, so it would scroll the very screenful the reveal was
+            // asked about, and the words would light on text that had moved.
+            //
+            // The only thing said out loud is what the reveal could NOT do, and
+            // through a toast, which floats over the pane without touching it.
+            // `Armed::Lit` at the Scope tier says nothing at all: the highlight IS
+            // the answer, and a narration of it would be an assist that assists
+            // nobody.
+            use app::reveal::Armed;
+            match app::reveal::arm(state, &*session) {
+                Armed::Lit { tier, .. } => {
+                    // The weak tier has to admit what it cannot tell apart — the
+                    // same rule the command band's `here_is_seen` column follows
+                    // rather than passing a scrape off as the room's contents.
+                    if let Some(caveat) = tier.caveat() {
+                        state.set_status(format!("[{caveat}]"));
+                    }
+                }
+                Armed::Nothing => {
+                    state.set_status("[nothing on screen is a word this story takes]")
+                }
+                Armed::NoText => state.set_status("[no story text on screen to read]"),
+                Armed::GuidanceOff => state.set_status(
+                    "[the Guiding Light is out — /set-guidance on to use the reveal]",
+                ),
+            }
+        }
         SlashOutcome::SetV6Render(arg) => {
             // Session-only until SQ-1123, and that was the right design for what
             // this once was: raster began as a FALLBACK — the mode you escaped to

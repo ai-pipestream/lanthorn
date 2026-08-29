@@ -124,6 +124,17 @@ pub enum SlashOutcome {
     /// global one. Handled in `slash_dispatch` (mutates `state.config.guidance`).
     SetGuidance(GuidanceArg),
     SetReturnProbe(ReturnProbeArg),
+    /// Light the words on screen this story's parser would accept, for a moment
+    /// (SQ-1107).
+    ///
+    /// **The one outcome in this family that is not a setting.** Everything
+    /// beside it — the guidance switch, the probe, the render mode — reports a
+    /// state you can read at a glance and flips it when asked. This one takes no
+    /// argument, has no on state to inherit, persists nothing, and makes
+    /// something happen elsewhere on the screen. Handled in `slash_dispatch`,
+    /// which is where the engine is, because the story is what decides which
+    /// words light.
+    RevealWords,
     /// Re-run the first-run font check (SQ-1104): the two-row comparison that
     /// asks whether this terminal's font draws the Nerd Font icon glyphs. Opens
     /// the modal; the answer writes preset names into `style.toml` and reloads
@@ -551,6 +562,12 @@ pub static COMMANDS: &[CommandSpec] = &[
             Some("auto") => SlashOutcome::SetReturnProbe(ReturnProbeArg::Auto),
             Some(s) => err(format!("set-return-probe: unknown argument '{s}' (on | off | auto, or bare to toggle)")),
         } },
+    // A TRIGGER, not a setting — hence `reveal-`, not `set-`, and no argument to
+    // take. It is the first of its kind among the border controls; see
+    // `SlashOutcome::RevealWords` and `crate::reveal`.
+    CommandSpec { name: "reveal-words", category: Category::Style, context: Context::Global,
+        usage: "reveal-words", description: "light the words on screen this story's parser would accept, for a few seconds — under the Guiding Light's switch",
+        dispatch: |_| SlashOutcome::RevealWords },
     CommandSpec { name: "run-font-check", category: Category::Style, context: Context::Global,
         usage: "run-font-check", description: "ask which of two glyph rows your terminal's font draws properly, and set the map's arrow, portal and Guiding Light icons from the answer (writes style.toml)",
         // A verb-noun name, per the registry convention — and `run-`, not `set-`,
@@ -1090,7 +1107,10 @@ mod tests {
         // SQ-1104 added `run-font-check`, the re-runnable first-run font check.
         // SQ-0785 added `set-return-probe`, the switch for the automap's search
         // for the way back — the sixth border control and the first off-by-default.
-        assert_eq!(COMMANDS.len(), 83, "registry must match the spec's Full command table");
+        // SQ-1107 added `reveal-words`, the momentary word reveal — the seventh
+        // border control and the first that is a TRIGGER rather than a switch:
+        // nothing to read off it, nothing persisted, it just happens.
+        assert_eq!(COMMANDS.len(), 84, "registry must match the spec's Full command table");
     }
 
     /// SQ-0796: `Category::ORDER` must list every category, or a whole group of

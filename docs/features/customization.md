@@ -105,9 +105,10 @@ still reach in and override any single selector by name.
   `portal_path_style` for vertical/portal (up/down/in/out) connectors so they
   can render distinctly (dotted by default). `control_icons` (plain | nerdfont)
   picks the glyphs for the pane borders' toggle controls — the map and
-  verb-panel toggles, the Guiding Light's mark, the two v6 render switches, and
-  the return probe's footprint on the map pane's own bottom border.
-  `plain` is shape-based Geometric Shapes; `nerdfont` gives all twelve states a
+  verb-panel toggles, the Guiding Light's mark, the word reveal's lamp, the two
+  v6 render switches, and the return probe's footprint on the map pane's own
+  bottom border.
+  `plain` is shape-based Geometric Shapes; `nerdfont` gives all thirteen states a
   named icon, every codepoint read from the font's own `post` table rather than
   guessed from a name, with each control's states drawn from a single icon
   family so a toggle changes shape without changing weight. `diagonal_corners = false` turns
@@ -230,11 +231,15 @@ switches that make lanthorn feel like yours without opening the whole registry.
   attribute directly on `transcript_meta` / `transcript_warning` (e.g.
   `transcript_meta = { parent = "muted", glyph = "▏" }`) rather than a separate
   symbol override.
-  **Lanthorn's Guiding Light** — the help offered while you play — has two
-  selectors of its own: `transcript_assist` and `transcript_assist_caution`,
-  both parented on `alert` (your terminal's yellow slot, so it stays legible on
+  **Lanthorn's Guiding Light** — the help offered while you play — has three
+  selectors of its own. `transcript_assist` and `transcript_assist_caution` are
+  the two it speaks in, both parented on `alert` (your terminal's yellow slot, so it stays legible on
   a light page as well as a dark one) and separated by weight, the caution tone
-  bold. What identifies those lines on screen is not their words but the **mark**
+  bold; `transcript_reveal` is the ink the **word reveal** lays over the story's
+  own prose, parented on `accent` and underlined — underlined because it has to
+  read against whatever colour the game already painted those words, and a
+  foreground alone cannot promise that.
+  What identifies an assist line on screen is not its words but the **mark**
   in their margin, `●` by default; the glyph is yours, under `[map.overrides]`:
   `"gutter.assist" = "●"`. Point it at a patched font's own lamp — U+F1A60,
   Nerd Fonts' `md-post_lamp` — if you have one installed. (Not `*`: Infocom
@@ -506,6 +511,37 @@ re-seed the new template, or hand-write the new shape from
   a game that draws on randomness can answer the copy and your game differently,
   and a refusal the probe's own control commands never provoke — "that's not
   something you can open" — reads as a success and survives.
+  The **word reveal** is the same light pointed the other way. The offer can only
+  help once the parser has already said no; press **F4** (or the `◈` on the story
+  pane's bottom border, or `/reveal-words`) and every word *already on screen*
+  that the parser would accept lights up for a few seconds, over the story's own
+  prose, without moving a line of it. It goes out on your next keystroke, on your
+  next turn, or on its own — one press, one look, and you are back in the game.
+  It answers the oldest frustration in the genre: a room description names a
+  dozen nouns and two of them are implemented, and until now the only way to find
+  out which was to type at all twelve. Mini-Zork's opening screen names five —
+  `field`, `house`, `door`, `mailbox`, `window` — and lights three: the story has
+  never heard the word `field` at all, and `window` is a real word for a window
+  somewhere else in the game.
+  That last distinction is the whole feature, and it needs the story's **object
+  tree**, not its dictionary — so on the Z-machine a word lights because
+  something you can actually see answers to it, and the judgement is made in the
+  present tense: a lamp described fifty turns ago and still in your hands lights
+  in that old sentence; one since taken away does not. Where the object tree
+  cannot be read — Glulx and Scott Adams today — it falls back to the dictionary,
+  filtered to the words that *name* things, and says so in the corner rather than
+  passing the weaker claim off as the stronger. That fallback inherits whatever
+  the story's dictionary thinks a word is, which is the other half of why it is
+  labelled: Mini-Zork files `west` with the same bit it gives `white`, so a
+  fallback reveal lights the compass and nothing can tell it not to. Verbs never
+  light in either case: the verb panel already answers "what can I do", and this
+  answers "what is real here".
+  One honest limit, and it is the parser's own: a Version 3 dictionary keeps six
+  characters of a word, so `candle` and `candlesticks` are the same entry, and a
+  room holding a candle lights both. That is not a mistake on lanthorn's part —
+  `take candlesticks` really does take the candle — it is the game's own
+  behaviour, shown. (The reveal reads the ordinary text screen, so it has nothing
+  to light in v6 **raster** mode, where the story's text is a picture.)
 - **And the map can go looking for the way back.** `return_probe` (default
   `false`) forks the same silent copy after a move that leaves a gap in the map,
   walks one direction in it, and records the passage only if the copy comes out

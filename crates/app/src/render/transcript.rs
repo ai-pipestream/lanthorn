@@ -2457,6 +2457,12 @@ fn render_middle(
         let text_x = body_area.x + text_origin_col(wr.kind);
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
         draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, crate::render::TextInk::of(state));
+        // …and, while a reveal is lit, re-style the words on this row that the
+        // parser would accept (SQ-1107). A pass OVER the drawn cells, after the
+        // text and its runs: the reveal is a property of the moment, not of the
+        // text, and folding it into `wr.runs` would write a decoration into the
+        // game's own output — which is what gets persisted in the archive.
+        crate::reveal::paint_row(buf, text_x, row_y, &wr.text, body_area, state);
 
         // Record cell→link for every linked span on this row. `run.start/end` are
         // CHAR offsets within `wr.text` (re-based by `rebase_runs`), while the
