@@ -85,6 +85,30 @@ pub fn list_inventory(
     result
 }
 
+/// Everything the player can SEE among `holder`'s contents: its direct
+/// children, plus the contents of any child whose contents are visible, to the
+/// object model's own depth cap (SQ-1133).
+///
+/// The nesting half of [`list_inventory`], and the carried half of scope. The
+/// two differ on purpose: the inventory DOCK lists what you are carrying, which
+/// is the top level and nothing else, while scope is what you can name, and an
+/// opened sack's lunch is nameable. `model.visible_contents` is the same walk
+/// [`crate::render::room_info::list_room_objects_excluding`] uses for a room,
+/// so a shut container's contents cannot reach either list.
+pub fn list_visible_contents(
+    model: &zvm::world::WorldModel,
+    names: Option<&zvm::objects::ParseNames>,
+    mem: &Memory,
+    holder: u16,
+) -> Vec<grammar_model::ObjectWords> {
+    model
+        .visible_contents(mem, holder, 0)
+        .into_iter()
+        .map(|o| object_words(mem, names, o))
+        .filter(|o| o.display_name().is_some())
+        .collect()
+}
+
 // ── parse_inventory_output ────────────────────────────────────────────────────
 
 /// Parse the text output of an inventory command into a list of item names.

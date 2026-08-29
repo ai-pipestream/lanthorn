@@ -920,6 +920,15 @@ const NONSENSE: [&str; 3] = ["zqxwvj", "vprkxz", "jwqzbf"];
 /// so without that every room of every game would contain the adventurer
 /// (SQ-0667).
 ///
+/// **Both halves nest and neither opens a shut container** (SQ-1133). The
+/// carried half was the player's DIRECT children for as long as the room half
+/// had been descending into open holders, so the same brown sack listed its
+/// lunch on Zork I's kitchen table and hid it the moment you picked the sack up.
+/// One walk answers both now — see
+/// [`crate::engine::Introspect::visible_contents`] — and its guarantee is the
+/// old one: a container the player has not opened contributes nothing, at any
+/// depth.
+///
 /// **`None` is not the same answer as an empty list, and the difference decides
 /// what a caller may claim.** `None` means the question could not be ASKED —
 /// the engine has no [`Introspect`](crate::engine::Introspect) at all (Glulx
@@ -931,22 +940,58 @@ const NONSENSE: [&str; 3] = ["zqxwvj", "vprkxz", "jwqzbf"];
 /// [`crate::reveal::RevealTier`], which turns exactly this distinction into
 /// what it is allowed to say on screen).
 pub fn objects_in_scope(engine: &dyn Engine) -> Option<Vec<crate::engine::ObjectWords>> {
+    let (mut here, carried) = scope_split(engine, None)?;
+    here.extend(carried);
+    Some(here)
+}
+
+/// [`objects_in_scope`] with the two halves still apart: what is HERE, and what
+/// is CARRIED, in that order.
+///
+/// The command band draws them as two columns and needs them separately; every
+/// other caller wants them concatenated. **One function either way** — this used
+/// to be written out four times (here, `command_band::refresh_objects`,
+/// `input::refresh_scope_words`, and the vetting harness), and the four spellings
+/// were the hand-maintained invariant CLAUDE.md's refactoring policy names: each
+/// looked entirely reasonable alone, and SQ-1133 found the carried half reading
+/// direct children in all of them while the room half had nested since SQ-0678.
+///
+/// **Both halves nest, and neither opens a shut container.** The room's contents
+/// come through `room_objects_excluding` and the player's through
+/// [`crate::engine::Introspect::visible_contents`]; those are the same walk, so
+/// Zork I's brown sack lists its lunch on the kitchen table and in your hands
+/// under exactly one rule, and lists it in neither place while it is shut.
+///
+/// `player_hint` is the app's own locked-in player object
+/// ([`crate::state::AppState::player_obj`]) where the caller has one: for a
+/// story whose player object is not NAMED, that id came from watching what moved
+/// between rooms and is the only answer there is — `player_object()` returns
+/// `None` there and the carried half would come back empty. Pass `None` to ask
+/// the engine.
+///
+/// `None` (returned) carries the same meaning it does for
+/// [`objects_in_scope`].
+pub fn scope_split(
+    engine: &dyn Engine,
+    player_hint: Option<u16>,
+) -> Option<(Vec<crate::engine::ObjectWords>, Vec<crate::engine::ObjectWords>)> {
     let intro = engine.introspect()?;
-    let player = intro.player_object();
+    let player = player_hint.or_else(|| intro.player_object());
     let room = engine.current_location().map(|l| l.number);
     // Neither half readable: the seam exists but this story is not answering, so
     // the question was not really asked.
     if player.is_none() && room.is_none() {
         return None;
     }
-    let mut out: Vec<crate::engine::ObjectWords> = Vec::new();
-    if let Some(r) = room {
-        out.extend(intro.room_objects_excluding(r, player));
-    }
-    if let Some(p) = player {
-        out.extend(intro.contents(p));
-    }
-    Some(out)
+    let here = match room {
+        Some(r) => intro.room_objects_excluding(r, player),
+        None => Vec::new(),
+    };
+    let carried = match player {
+        Some(p) => intro.visible_contents(p),
+        None => Vec::new(),
+    };
+    Some((here, carried))
 }
 
 /// Two dictionary nouns that are not here, for the control commands — see

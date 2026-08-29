@@ -461,7 +461,8 @@ pub trait Introspect {
     /// The parser vocabulary (used to seed autocomplete at startup).
     fn vocabulary(&self) -> Vec<String>;
     /// The direct children of `container` (the inventory strip passes the
-    /// player object here).
+    /// player object here). One level, always — see
+    /// [`Self::visible_contents`] for the question SCOPE asks.
     fn contents(&self, container: u16) -> Vec<ObjectWords>;
     /// The objects located directly in `room`.
     fn room_objects(&self, room: u16) -> Vec<ObjectWords>;
@@ -472,6 +473,22 @@ pub trait Introspect {
     /// by id, deliberately not by name (a scenery object could coincidentally
     /// share the player's printed name).
     fn room_objects_excluding(&self, room: u16, exclude: Option<u16>) -> Vec<ObjectWords>;
+    /// The contents of `container` the player can SEE: its direct children,
+    /// plus the contents of any child whose contents are visible, as deep as
+    /// the engine's own containment model will vouch for (SQ-1133).
+    ///
+    /// [`Self::contents`] answers a different question — what is in your hands
+    /// *right now*, which is the inventory dock's list and is one level by
+    /// definition. This one is the carried half of SCOPE: `open sack` puts the
+    /// lunch inside it within reach, and a panel that offers the word for it is
+    /// offering something the parser will accept. A shut container never
+    /// contributes; that is the engine's guarantee, not the caller's check.
+    ///
+    /// The default is the direct children, which is the whole truth for an
+    /// engine with no notion of an open container.
+    fn visible_contents(&self, container: u16) -> Vec<ObjectWords> {
+        self.contents(container)
+    }
     /// The object handles whose parent is `parent` (drives inventory tracking).
     fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16>;
     /// The player object, if it can be identified.

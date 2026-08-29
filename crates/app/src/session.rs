@@ -5137,6 +5137,15 @@ impl Introspect for GameSession {
         )
     }
 
+    fn visible_contents(&self, container: u16) -> Vec<crate::engine::ObjectWords> {
+        crate::inventory::list_visible_contents(
+            self.world_model(),
+            self.parse_names(),
+            &self.machine.mem,
+            container,
+        )
+    }
+
     fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16> {
         let max_obj = zvm::object_tree_view(&self.machine)
             .into_iter()

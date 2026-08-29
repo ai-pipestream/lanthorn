@@ -451,7 +451,10 @@ know which side you're on).
   contain". It includes things resting on a supporter or sitting in an open
   container — Zork I's kitchen lists the sack and the bottle on the table, both
   of which are children of the *table* — and the shared scenery a room names but
-  does not own, like the window Behind House. It never lists the contents of a
+  does not own, like the window Behind House. **And *carried* reads the same
+  way**: pick that sack up and open it, and the lunch and the garlic are still
+  there to click, because a holder is a holder wherever it is standing. It never
+  lists the contents of a
   closed container: the lunch and the garlic inside the brown sack stay hidden
   until you open it, and the leaflet stays in the mailbox until you do. The
   Z-machine gives attributes no fixed meaning, so which attribute means "open"

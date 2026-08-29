@@ -3192,18 +3192,11 @@ pub fn refresh_seen_words(state: &mut AppState, engine: &dyn crate::engine::Engi
 /// Empty for an engine with no introspection (Glulx, Scott) — completion there
 /// still has the recent-prose scrape and the flat dictionary.
 pub fn refresh_scope_words(state: &mut AppState, engine: &dyn crate::engine::Engine) {
-    let Some(intro) = engine.introspect() else {
+    let Some((mut objects, carried)) = crate::vocab::scope_split(engine, state.player_obj) else {
         state.scope_words.clear();
         return;
     };
-    let player = state.player_obj.or_else(|| intro.player_object());
-    let mut objects = match engine.current_location().map(|l| l.number) {
-        Some(room) if room != 0 => intro.room_objects_excluding(room, player),
-        _ => Vec::new(),
-    };
-    if let Some(p) = player {
-        objects.extend(intro.contents(p));
-    }
+    objects.extend(carried);
     let vocab = state.vocab.get(engine);
     let mut words: Vec<String> = Vec::new();
     for o in &objects {

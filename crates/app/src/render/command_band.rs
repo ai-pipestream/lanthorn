@@ -710,7 +710,12 @@ pub fn refresh_objects(state: &mut AppState, session: &dyn crate::engine::Engine
     // vocabulary borrow below are separate, and the second lives on `state`.
     let objects = session.introspect().map(|intro| {
         let here = if loc != 0 { intro.room_objects_excluding(loc, player) } else { Vec::new() };
-        let carried = player.map(|p| intro.contents(p));
+        // The NESTING read (SQ-1133), the same one `vocab::scope_split` gives
+        // the reveal and completion: an opened sack's lunch is a word the parser
+        // takes, so the column offers it, while a shut one's is not and the walk
+        // stops at the lid. `contents` — the inventory DOCK's flat list of what
+        // is in your hands — is a different question and was the wrong one here.
+        let carried = player.map(|p| intro.visible_contents(p));
         (here, carried)
     });
     let (here, carried, seen) = {

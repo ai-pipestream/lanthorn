@@ -198,11 +198,10 @@ impl WorldModel {
     /// behaviour), or the bit is known and a closed container is skipped. There
     /// is no path on which an unopened container's contents reach this list.
     pub fn visible_room_objects(&self, mem: &Memory, room: u16, exclude: u16) -> Vec<u16> {
-        let mut out = Vec::new();
         if room == 0 || room > self.max_object {
-            return out;
+            return Vec::new();
         }
-        self.walk(mem, room, exclude, 0, &mut out);
+        let mut out = self.visible_contents(mem, room, exclude);
         for g in self.local_globals(mem, room) {
             if out.len() >= MAX_ITEMS {
                 break;
@@ -211,6 +210,31 @@ impl WorldModel {
                 out.push(g);
             }
         }
+        out
+    }
+
+    /// Everything the player can see inside `holder`, as object numbers, in the
+    /// same reading order and under the same leak guard as
+    /// [`Self::visible_room_objects`] — minus the shared-scenery pass, which is
+    /// a room's property and nothing a holder has.
+    ///
+    /// This is the CARRIED half of scope (SQ-1133). It used to be the holder's
+    /// direct children and nothing more, so a room and a rucksack were read by
+    /// two different rules: the sack on Zork I's kitchen table listed its lunch
+    /// once opened, and the same sack in the player's hands did not. One walk
+    /// answers both, so the two cannot drift apart again.
+    ///
+    /// The depth cap is [`MAX_NEST_DEPTH`], shared with the room walk for the
+    /// same reason. Measured need on the carried side is **one** level — Zork I
+    /// r88 and Mini-Zork r34 both put the lunch and the garlic one below an
+    /// opened sack — and every level past that costs nothing while a holder
+    /// stays shut.
+    pub fn visible_contents(&self, mem: &Memory, holder: u16, exclude: u16) -> Vec<u16> {
+        let mut out = Vec::new();
+        if holder == 0 || holder > self.max_object {
+            return out;
+        }
+        self.walk(mem, holder, exclude, 0, &mut out);
         out
     }
 
@@ -762,6 +786,54 @@ mod tests {
         assert!(!here.contains(&"lunch".to_string()), "a shut container must not leak: {here:?}");
         assert!(!here.contains(&"garlic".to_string()), "a shut container must not leak: {here:?}");
         assert!(!here.contains(&"player".to_string()), "the player is the CARRIED column");
+    }
+
+    /// SQ-1133: a holder is read by the same rule wherever it is standing. Put
+    /// the sack in the player's hands and `visible_contents` answers exactly as
+    /// `visible_room_objects` did with it on the table — nothing while it is
+    /// shut, the lunch and the garlic once it is open.
+    ///
+    /// Falsify by walking the player's direct children instead: the second
+    /// assertion loses both, which is the reported symptom.
+    #[test]
+    fn a_holder_in_the_players_hands_reads_like_one_on_the_table() {
+        let mut mem = build();
+        crate::objects::set_parent(&mut mem, SACK, PLAYER);
+        crate::objects::set_child(&mut mem, PLAYER, SACK);
+        crate::objects::set_sibling(&mut mem, SACK, 0);
+        let m = WorldModel::discover(&mem);
+
+        assert_eq!(
+            names(&mem, &m.visible_contents(&mem, PLAYER, 0)),
+            ["sack"],
+            "a shut sack in hand is one word, not three"
+        );
+
+        crate::objects::set_attr(&mut mem, SACK, OPEN);
+        assert_eq!(
+            names(&mem, &m.visible_contents(&mem, PLAYER, 0)),
+            ["sack", "lunch", "garlic"],
+            "opened, in hand"
+        );
+
+        crate::objects::clear_attr(&mut mem, SACK, OPEN);
+        assert_eq!(names(&mem, &m.visible_contents(&mem, PLAYER, 0)), ["sack"], "shut again");
+    }
+
+    /// `visible_contents` never runs the shared-scenery pass: a holder has no
+    /// `GLOBAL` property, and reading one off whatever byte sits there would be
+    /// a room's answer given to a rucksack.
+    #[test]
+    fn a_holder_gets_no_shared_scenery() {
+        let mem = build();
+        let m = WorldModel::discover(&mem);
+        let here = names(&mem, &m.visible_room_objects(&mem, KITCHEN, PLAYER));
+        assert!(here.contains(&"window".to_string()), "the ROOM sees its shared scenery");
+        assert_eq!(
+            names(&mem, &m.visible_contents(&mem, KITCHEN, PLAYER)),
+            ["table", "sack", "bottle"],
+            "the same walk without the globals pass"
+        );
     }
 
     #[test]
