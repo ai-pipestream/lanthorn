@@ -8,8 +8,27 @@
 use crate::build::{build, GameGroup, IfVerb, Params, Report};
 use crate::sources::{Frequency, WordNet};
 
+/// A directory this CALL alone owns.
+///
+/// Keyed on a counter as well as the pid, and that is the whole point: under
+/// `cargo nextest run` every test is its own process, so a pid alone is already
+/// unique and the bug below cannot happen. Under `cargo test` — which is what CI
+/// runs — one binary's tests share a process and run on threads, so a pid-only
+/// key gave every caller of [`wordnet_fixture`] the SAME directory. `fs::write`
+/// truncates, so one thread read `index.verb` while another was rewriting it,
+/// `WordNet::load` came back empty, `build` returned no groups, and the
+/// assertion failed on a fixture that was correct.
+///
+/// Invisible to the local gate by construction — nextest's process-per-test
+/// makes a shared-state race structurally unobservable, and only `cargo test`
+/// can see it.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("verbsyn-test-{name}-{}", std::process::id()));
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NTH: AtomicUsize = AtomicUsize::new(0);
+    let nth = NTH.fetch_add(1, Ordering::Relaxed);
+    let d = std::env::temp_dir()
+        .join(format!("verbsyn-test-{name}-{}-{nth}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).expect("temp dir");
     d
 }
