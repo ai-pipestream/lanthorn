@@ -63,6 +63,77 @@ pub struct PathGlyphs {
     pub diag_lr: char,
 }
 
+/// The two cells a tooltip's pointer is drawn from, per direction (SQ-1139).
+///
+/// **Always two cells, in both presets.** A one-cell pointer sounds tidier and
+/// is worse on both counts available: `▲` (U+25B2) is an *inset* outline — 62..538
+/// of a 0..600 cell in SauceCodePro NFM — so it floats visibly clear of the box
+/// it is meant to be part of, and no single glyph in a guaranteed range makes an
+/// apex that meets a flat edge. Two cells buys a real wedge and keeps the
+/// geometry one shape for both presets.
+///
+/// The pointer is drawn in the tooltip's BACKGROUND colour, so it reads as the
+/// box growing a spur rather than as a character sitting next to one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TipGlyphs {
+    /// Pointing UP — the box is BELOW the anchor, and these meet its top edge.
+    pub up_left: char,
+    pub up_right: char,
+    /// Pointing DOWN — the box is ABOVE the anchor, meeting its bottom edge.
+    pub down_left: char,
+    pub down_right: char,
+}
+
+impl TipGlyphs {
+    /// The two glyphs for a wedge on `side`, left cell first.
+    pub fn wedge(&self, up: bool) -> (char, char) {
+        if up {
+            (self.up_left, self.up_right)
+        } else {
+            (self.down_left, self.down_right)
+        }
+    }
+
+    /// Return a named preset, or `None` for an unknown name. Shares
+    /// [`ControlGlyphs`]'s names, because it shares its `control_icons` key.
+    ///
+    /// - "plain"    — half blocks (U+2584/2580). Not an arrow: a flat tab. But it
+    ///   is flush with the box by construction and present in every font measured
+    ///   (43 of 43 installed faces on the machine this was chosen on), which is
+    ///   what the unpatched answer has to be.
+    /// - "nerdfont" — the Powerline Extra corner triangles, which make a real
+    ///   wedge with an apex.
+    ///
+    /// **Every codepoint below was read from the font's own `cmap` and `post`
+    /// tables** (SQ-1045's rule, and SQ-1141's method). The obvious choice —
+    /// quadrant triangles U+25E2/25E3 — is NOT used and cannot be: they are BASE
+    /// typeface coverage, absent from SauceCodePro NFM, JetBrains, 0xProto,
+    /// ProggyClean **and from Symbols Nerd Font Mono**, so patching guarantees
+    /// nothing. Only 3 of 9 installed Nerd Fonts had them. The Powerline Extra
+    /// set is part of the patch and was in all nine.
+    ///
+    /// And these overlap the cell on purpose: `ple-lower_right_triangle` spans
+    /// xMin 1 to xMax 630 against a 600 advance, its neighbour -30 to 599. That
+    /// 40-unit bleed each way is why the two halves meet with no hairline down
+    /// the middle, which a pointer colour-matched to its box cannot hide.
+    pub fn preset(name: &str) -> Option<TipGlyphs> {
+        Some(match name {
+            "plain" => SymbolSet::default().tip,
+            "nerdfont" => TipGlyphs {
+                // ple-lower_right_triangle + ple-lower_left_triangle: each has a
+                // full bottom edge meeting the box, rising to the shared apex.
+                up_left: '\u{E0BA}',
+                up_right: '\u{E0B8}',
+                // ple-upper_right_triangle + ple-upper_left_triangle, mirrored:
+                // full TOP edge, falling to the apex below.
+                down_left: '\u{E0BE}',
+                down_right: '\u{E0BC}',
+            },
+            _ => return None,
+        })
+    }
+}
+
 /// Portal icon glyphs: directional markers + connector path char.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortalGlyphs {
@@ -163,6 +234,11 @@ pub struct SymbolSet {
     pub portal: PortalGlyphs,
     /// Glyphs for the pane border's clickable toggle controls (SQ-1123).
     pub controls: ControlGlyphs,
+    /// The tooltip's pointer — the spur that aims a hint at the icon it explains
+    /// (SQ-1139). Chrome, like [`Self::controls`], and resolved from the same
+    /// `control_icons` preset rather than a key of its own: a patched font draws
+    /// both or neither, and one question already settled which.
+    pub tip: TipGlyphs,
     /// Gutter marker glyph for META transcript lines.
     pub meta_gutter: char,
     /// Gutter marker glyph for WARNING transcript lines.
@@ -283,6 +359,14 @@ impl Default for SymbolSet {
                 // the Guiding Light sits one column away as ●/○, and a third disc
                 // beside that pair would read as a third state of the same lamp.
                 reveal: '◈',
+            },
+            // The unpatched pointer: a flat two-cell tab in half blocks. Flush
+            // with the box by construction, and in every font (SQ-1139).
+            tip: TipGlyphs {
+                up_left: '▄',
+                up_right: '▄',
+                down_left: '▀',
+                down_right: '▀',
             },
             dock_following: '◇',
             dock_pinned: '◆',
@@ -638,6 +722,7 @@ impl SymbolSet {
             path: PathGlyphs::preset(&cfg.path_style).unwrap_or_else(|| SymbolSet::default().path),
             portal: PortalGlyphs::preset(&cfg.portal_icons).unwrap_or_else(|| SymbolSet::default().portal),
             controls: ControlGlyphs::preset(&cfg.control_icons).unwrap_or_else(|| SymbolSet::default().controls),
+            tip: TipGlyphs::preset(&cfg.control_icons).unwrap_or_else(|| SymbolSet::default().tip),
             meta_gutter: SymbolSet::default().meta_gutter,
             warning_gutter: SymbolSet::default().warning_gutter,
             assist_gutter: SymbolSet::default().assist_gutter,
@@ -804,6 +889,10 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "control.lock_off"       => s.controls.lock_off = ch,
         "control.return_probe"   => s.controls.return_probe = ch,
         "control.reveal"         => s.controls.reveal = ch,
+        "tip.up_left"      => s.tip.up_left = ch,
+        "tip.up_right"     => s.tip.up_right = ch,
+        "tip.down_left"    => s.tip.down_left = ch,
+        "tip.down_right"   => s.tip.down_right = ch,
         "gutter.meta"      => s.meta_gutter = ch,
         "gutter.warning"   => s.warning_gutter = ch,
         "gutter.assist"    => s.assist_gutter = ch,

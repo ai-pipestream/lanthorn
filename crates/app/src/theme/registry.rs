@@ -374,7 +374,31 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // dialog.shadow: the one explicit-colour row — keeps a distinctive dark-gray bg.
     row("dialog.shadow", Section::Dialog, Kind::Style, Some("muted"), Delta { bg: Some(Color::DarkGray), ..Delta::EMPTY }),
     // ── §2d tooltip.* (hover-tooltip surface: background + optional frame) ─────
-    row("tooltip.background", Section::Tooltip, Kind::Style, Some("chrome"), Delta::EMPTY),
+    // A tooltip has to be a SURFACE, and `chrome` is not one: it resolves to the
+    // page's own fg/bg, so a borderless tip was painted in exactly the colours it
+    // floated over and was invisible except for its text (SQ-1139). It reported as
+    // "blends into the background" because it *was* the background.
+    //
+    // So this is a literal pair rather than a role derivation — the same licence
+    // `sound_beep_high` and `dialog.shadow` take, and for the same reason: nothing
+    // in a seven-role palette means "a card lying on top of the page", and deriving
+    // one from `chrome` is what produced the defect. Warm dark, chosen by eye from
+    // four candidates rendered in a real terminal. FG and BG together, never bg
+    // alone: `chrome`'s foreground is dark on a light theme, and a dark ink left on
+    // this dark card would be a tooltip nobody could read.
+    //
+    // One line in `style.toml` replaces it, which is the point of it being a row.
+    row(
+        "tooltip.background",
+        Section::Tooltip,
+        Kind::Style,
+        Some("chrome"),
+        Delta {
+            fg: Some(Color::Rgb(238, 230, 214)),
+            bg: Some(Color::Rgb(62, 54, 46)),
+            ..Delta::EMPTY
+        },
+    ),
     // Borderless by default (style = "none"); set a style to frame the tooltip.
     row("tooltip.border", Section::Tooltip, Kind::BorderGlyphs, Some("line"), border("none")),
     // ── §2 elements (expansion, Task 5.0): every remaining ColorScheme field ──

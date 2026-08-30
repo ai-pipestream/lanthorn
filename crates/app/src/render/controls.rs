@@ -404,6 +404,7 @@ pub fn draw_control_hint(
         rect.y,
         &view.hint,
         &state.colors.theme,
+        &state.symbols,
         side,
     )
 }

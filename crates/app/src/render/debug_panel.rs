@@ -328,7 +328,7 @@ fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
 /// — is `render::tooltip::draw_tip`, shared with the border controls' hover hint
 /// (SQ-1123). This wrapper only supplies the anchor and the lines.
 fn draw_tooltip(buf: &mut Buffer, area: Rect, tip: &HoverTip, state: &AppState) {
-    crate::render::tooltip::draw_tip(buf, area, tip.col, tip.row, &tip.lines, &state.colors.theme);
+    crate::render::tooltip::draw_tip(buf, area, tip.col, tip.row, &tip.lines, &state.colors.theme, &state.symbols);
 }
 
 /// Draw the debug pane and return its window tab hit-rects as
@@ -1026,9 +1026,31 @@ mod tests {
         }
         draw_debug_panel(&state, area, &mut buf);
 
-        // The tooltip anchors at (5,5) → box at (5,6); its first text cell (6,6)
-        // is the 'g' of "g0f = …" and must not carry a bled-through underline.
-        let cell = buf.cell((6, 6)).expect("cell in bounds");
+        // FIND the text rather than pinning where it lands: the box is centred on
+        // its anchor and sits clear of the pointer row (SQ-1139), so a hard-coded
+        // cell here only tests that the geometry has not changed — which is not
+        // what this case is about. What it IS about is that whatever cell the 'g'
+        // of "g0f = …" ends up in carries no underline bled through from beneath.
+        // Matched on "g0f = " and not on "g0f": the DISASM line under the tooltip
+        // is `loadw g0f -> sp`, which contains the operand too and is underlined
+        // exactly as this case arranged. A three-character probe finds that one
+        // first and then asserts the bleed it was looking for — a test that fails
+        // for the right-sounding reason on the wrong cell.
+        let needle: Vec<char> = "g0f = ".chars().collect();
+        let (gx, gy) = (0..area.height)
+            .find_map(|y| {
+                (0..area.width.saturating_sub(needle.len() as u16)).find_map(|x| {
+                    needle
+                        .iter()
+                        .enumerate()
+                        .all(|(i, want)| {
+                            buf.cell((x + i as u16, y)).map(|c| c.symbol()) == Some(&want.to_string())
+                        })
+                        .then_some((x, y))
+                })
+            })
+            .expect("the tooltip's value text is painted somewhere");
+        let cell = buf.cell((gx, gy)).expect("cell in bounds");
         assert_eq!(cell.symbol(), "g", "tooltip text painted here");
         assert!(!cell.style().add_modifier.contains(Modifier::UNDERLINED),
             "underline underneath must not bleed through the tooltip");

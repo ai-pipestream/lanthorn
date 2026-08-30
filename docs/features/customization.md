@@ -168,7 +168,19 @@ still reach in and override any single selector by name.
   sections — a background + optional frame + the text on them — separate from
   `[panel]`. `[dialog]` styles the modal surface (`background`, its own `border`
   frame, `title`, `button` / `button:active`, `shadow`); `[tooltip]` styles every
-  hover tooltip (`background` + an optional `border`, borderless by default). Keys
+  hover tooltip (`background` + an optional `border`, borderless by default).
+  A tooltip is a **card lying on the page**, so unlike almost everything else its
+  `background` ships as a literal warm-dark pair rather than a role derivation —
+  deriving it from `chrome` painted the tip in the page's own colours, which is
+  the same thing as not drawing it. Set `background = { parent = "chrome" }` to
+  get the old invisible behaviour back, or any `fg`/`bg` pair you prefer. The tip
+  also grows a **pointer** aimed at the icon it explains, drawn in the box's own
+  background so the two read as one shape; the box is centred on that icon so the
+  pointer sits near its middle, sliding off-centre only when a pane edge shoves
+  the box along. The pointer's glyphs follow `map`'s `control_icons` — a wedge on
+  a patched font, a flat half-block tab otherwise — and each of its four cells is
+  overridable under `[map.overrides]` as `"tip.up_left"`, `"tip.up_right"`,
+  `"tip.down_left"`, `"tip.down_right"`. Keys
   in these sections are bare (`title = { parent = "accent" }`), like `[panel]`
   keys. The story picker's **IFDB search** modal (`/`) reuses this `[dialog]`
   chrome and adds five `[elements]` selectors for its contents: `ifdb_result` (a
