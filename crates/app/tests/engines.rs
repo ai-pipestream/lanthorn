@@ -107,3 +107,6 @@ mod v6_dump_windows_face;
 mod system_face_cascade;
 #[path = "suites/native_disk_sound.rs"]
 mod native_disk_sound;
+#[path = "suites/dialog_story_degradation.rs"]
+mod dialog_story_degradation;
+

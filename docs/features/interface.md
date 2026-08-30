@@ -404,14 +404,24 @@ know which side you're on).
   comes *before* its object, like that one, is not something the columns can
   compose today; the verb is still offered, and you finish it by typing.)
 
-  A story whose grammar lanthorn cannot read — a menu-driven Version 6 game like
-  *Journey*, or a file that is not Inform or Infocom output — keeps a generic
-  interactive-fiction verb list rather than an empty column, and the column
-  **says so**: it spends its reclaimed row on a **VERB — generic** header, the
-  same way the object column relabels itself *WHAT — seen* when it is scraping
+  A story whose grammar lanthorn cannot read keeps a generic interactive-fiction
+  verb list rather than an empty column, and the column **says so**: it spends
+  its reclaimed row on a **VERB — generic** header, the same way the object
+  column relabels itself *WHAT — seen* when it is scraping
   rather than reading. A `[command_band] verbs` list of your own reads
   **VERB — yours** for the same reason. Only the story's own grammar goes
   unlabelled, because only then is there nothing to admit.
+
+  Two kinds of story land there. A menu-driven Version 6 game like *Journey*
+  has a parser only in the loosest sense and marks no verbs at all. And a story
+  built by a compiler that keeps no such table has none to read: **Dialog** —
+  Linus Åkesson's language, behind *The Impossible Bottle*, *The Impossible
+  Stairs* and *Frankenfingers* — compiles a predicate language in which the
+  parser is ordinary library code, so its grammar is spread through the story
+  the way any other rule is rather than gathered into a table a reader could
+  point at. That is a fact about Dialog and not a gap in lanthorn: those games
+  play exactly as they should, and it is only the offered word list that falls
+  back to the generic one and admits it.
 
   **Infocom's own test rig stays out of it.** A word whose first character is
   `#` or `$` never reaches the column: `#record`, `#unrecord`, `#command` and

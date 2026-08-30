@@ -660,9 +660,13 @@ impl ParseNames {
     /// arrays; `stories/advent.z8` — the 1993 port of the original Adventure,
     /// which boots and plays fine — implements its own tokeniser over its own
     /// word table and leaves the Z-machine dictionary declaring **zero
-    /// entries**; `stories/ImpossibleStairs.z8` was built by a compiler that is
-    /// neither Inform nor ZIL (no `name` property, no dictionary flag bytes,
-    /// and `UUID` where Inform writes its version string).
+    /// entries**; `stories/ImpossibleStairs.z8` was built by **Dialog** (SQ-1101
+    /// settled it from the `Dia` signature at header $39..$3B), which keeps its
+    /// per-object data in arrays of its own rather than Z-machine properties —
+    /// so there is no `name` property and no dictionary flag bytes to find. The
+    /// Inform branch below is the one it takes, and refusing is what that branch
+    /// then does: `MIN_AGREEING_OBJECTS` is why it does not adopt whatever
+    /// property 1 happens to hold.
     pub fn detect(mem: &Memory) -> Option<ParseNames> {
         let index = Self::dictionary_index(mem);
         if index.by_address.is_empty() {
