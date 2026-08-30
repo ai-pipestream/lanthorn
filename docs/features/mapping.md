@@ -522,8 +522,13 @@ touching a line of code:
 - `box_style` — room outlines: `rounded` (default), `thick`, `double`, `solid`,
   `super-thick`, `ascii`, or `borderless`.
 - `arrow_set` — connector arrowheads: `filled` (default), `line`, or a family of
-  Nerd Font sets (`nerdfont`, `nf-bold`, `nf-box`, `nf-circle`, `nf-outline`) for
-  patched fonts.
+  Nerd Font sets (`nerdfont`, `nf-bold`, `nf-box`, `nf-chevron`, `nf-circle`,
+  `nf-outline`) for patched fonts. `nerdfont` — what the font check installs when
+  you tell it your terminal draws row 1 — is the boxed set, the same glyphs as
+  `nf-box`: an arrowhead sits *on* a line of path glyphs, and a box gives it an
+  edge of its own where a bare chevron reads as one more bend in the path. All
+  eight directions come from one icon family, diagonals included. `nf-chevron`
+  keeps the older bare chevrons for anyone who preferred them.
 - `path_style` — the line-art that draws the cardinal (N/S/E/W) connectors:
   `light` (default), `heavy`, or `dotted`.
 - `portal_path_style` — the same three presets, applied on their own to the

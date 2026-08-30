@@ -330,7 +330,7 @@ impl BoxStyle {
 impl Arrows {
     /// All known preset names for Arrows, in display order.
     pub fn preset_names() -> &'static [&'static str] {
-        &["filled", "line", "nerdfont", "nf-bold", "nf-box", "nf-circle", "nf-outline"]
+        &["filled", "line", "nerdfont", "nf-bold", "nf-box", "nf-chevron", "nf-circle", "nf-outline"]
     }
 
     /// Return a named preset, or `None` for an unknown name.
@@ -338,9 +338,16 @@ impl Arrows {
     /// Presets:
     /// - "filled"     — filled triangle glyphs ▲▼▶◀ + diagonal arrows ↗↖↘↙ (default)
     /// - "line"       — thin Unicode arrows ↑↓→← + diagonal ↗↖↘↙
-    /// - "nerdfont"   — Nerd Font single-width chevron codepoints (requires patched font)
-    ///   Cardinal: chevron-up (U+F0143) chevron-down (U+F0140)
-    ///   chevron-right (U+F0142) chevron-left (U+F0141)
+    /// - "nerdfont"   — MDI bold-box arrows, the same set as "nf-box" (requires a
+    ///   patched font). This is what the font check installs, so it is the set
+    ///   most players see. It is boxed rather than bare because a connector
+    ///   arrowhead sits ON a line of path glyphs: a box gives the head an edge of
+    ///   its own, where a chevron reads as one more bend in the path.
+    ///   Diagonal: native MDI bold-box diagonals — one family for all eight,
+    ///   which is the same rule `ControlGlyphs` states for its own pairs.
+    /// - "nf-chevron" — the MDI chevrons "nerdfont" used to be
+    ///   (U+F0143/F0140/F0142/F0141), kept reachable by name so a player who
+    ///   preferred them keeps them with one line of config.
     ///   Diagonal: same as "line" (↗↖↘↙)
     /// - "nf-bold"    — MDI arrow-{up,down,left,right}-bold (F0737/F072E/F0731/F0734)
     ///   Diagonal: Unicode fallback ↖↗↙↘ (no native MDI bold diagonals)
@@ -360,7 +367,7 @@ impl Arrows {
                 north: '↑', south: '↓', east: '→', west: '←',
                 ne: '↗', nw: '↖', se: '↘', sw: '↙',
             },
-            "nerdfont" => Arrows {
+            "nf-chevron" => Arrows {
                 // MDI chevron glyphs (single-width in patched fonts):
                 // chevron-up F0143, chevron-down F0140, chevron-right F0142, chevron-left F0141.
                 north: '\u{F0143}', south: '\u{F0140}',
@@ -375,7 +382,10 @@ impl Arrows {
                 // No native MDI plain-bold diagonal arrows; use Unicode fallback
                 ne: '↗', nw: '↖', se: '↘', sw: '↙',
             },
-            "nf-box" => Arrows {
+            // One arm, two names: "nerdfont" is what the font check writes and
+            // "nf-box" is what it IS. Spelling the glyphs once means the set the
+            // check installs and the set that name promises cannot drift apart.
+            "nerdfont" | "nf-box" => Arrows {
                 // MDI arrow-up-bold-box F0738, arrow-down-bold-box F072F,
                 // arrow-left-bold-box F0732, arrow-right-bold-box F0735
                 north: '\u{F0738}', south: '\u{F072F}',

@@ -121,7 +121,12 @@ still reach in and override any single selector by name.
   together, since a
   patched font supplies all three or none of them. It has to ask: lanthorn writes
   characters and the font belongs to the terminal, and the nearest thing to a
-  probe measures a glyph's *width*, which a missing-glyph box passes. It writes
+  probe measures a glyph's *width*, which a missing-glyph box passes.
+  Both rows also end with the four diagonal corner stubs, identically — those are
+  Unicode 13 Legacy Computing rather than Nerd Font, so no answer here changes
+  them and neither row can be the one that "fixes" them. They are shown so you
+  can see whether your terminal draws them at all; if they come up as empty
+  boxes, `diagonal_corners = false` is the one-line answer. It writes
   preset **names**, not the forty expanded overrides they stand for, so the
   section stays readable and a later improvement to a preset still reaches you.
   `/run-font-check` asks again — worth doing whenever you change terminal fonts —

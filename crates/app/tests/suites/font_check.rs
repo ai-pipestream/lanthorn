@@ -190,28 +190,39 @@ fn the_rows_the_prompt_shows_are_the_glyphs_the_answers_install() {
     let dir = seeded_home("rows-match");
     let path = style_write_path(None, &dir).unwrap();
 
-    write_font_check_answer(&path, true).unwrap();
-    let set = glyphs(&dir);
-    for ch in sample_row(true).chars().filter(|c| !c.is_whitespace()) {
-        let on_the_map = [
+    // What the map draws after an answer. The last four are the diagonal corner
+    // stubs, and they are here because SQ-1140 put them in both rows: they are
+    // Unicode 13 Legacy Computing, spelled identically by every `PathGlyphs`
+    // preset, so no answer to this prompt installs or changes them. The invariant
+    // this case defends is still exactly the one it always did — every glyph the
+    // prompt SHOWS is a glyph the map DRAWS — and the stubs satisfy it whichever
+    // row you pick, which is the whole reason they can be shown in both.
+    let on_the_map = |set: &app::symbols::SymbolSet| {
+        [
             set.arrows.north, set.arrows.south, set.arrows.east, set.arrows.west,
             set.portal.marker, set.portal.up, set.portal.down,
             set.portal.in_, set.portal.out, set.portal.unknown,
             set.assist_gutter,
-        ];
-        assert!(on_the_map.contains(&ch), "row 1 showed {ch:?}, which the yes answer does not install");
+            set.path.diag_ul, set.path.diag_ur, set.path.diag_ll, set.path.diag_lr,
+        ]
+    };
+
+    write_font_check_answer(&path, true).unwrap();
+    let set = glyphs(&dir);
+    for ch in sample_row(true).chars().filter(|c| !c.is_whitespace()) {
+        assert!(
+            on_the_map(&set).contains(&ch),
+            "row 1 showed {ch:?}, which the yes answer does not put on the map"
+        );
     }
 
     write_font_check_answer(&path, false).unwrap();
     let set = glyphs(&dir);
     for ch in sample_row(false).chars().filter(|c| !c.is_whitespace()) {
-        let on_the_map = [
-            set.arrows.north, set.arrows.south, set.arrows.east, set.arrows.west,
-            set.portal.marker, set.portal.up, set.portal.down,
-            set.portal.in_, set.portal.out, set.portal.unknown,
-            set.assist_gutter,
-        ];
-        assert!(on_the_map.contains(&ch), "row 2 showed {ch:?}, which the no answer does not install");
+        assert!(
+            on_the_map(&set).contains(&ch),
+            "row 2 showed {ch:?}, which the no answer does not put on the map"
+        );
     }
 }
 

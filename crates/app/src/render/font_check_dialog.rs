@@ -84,11 +84,24 @@ pub enum FontCheckAction {
 
 /// The glyphs one answer would put on the map, in a fixed slot order:
 /// the four cardinal arrows, then the portal marker, up, down, in, out and
-/// unknown, then the Guiding Light's mark.
+/// unknown, then the Guiding Light's mark, then the diagonal corner stubs.
 ///
 /// Built from the [`SymbolSet`] each answer actually installs, so a later
 /// improvement to a preset changes what the prompt shows rather than leaving it
 /// advertising glyphs the map no longer draws.
+///
+/// **The last four slots are the same in both rows, and that is deliberate**
+/// (SQ-1140). The diagonal corner stubs are `PathGlyphs`' `diag_*` — Unicode 13
+/// Legacy Computing (U+1FBA0–1FBA3), which every preset spells identically
+/// because they are not a patched-font question: they are BASE typeface
+/// coverage, so a Nerd Font patch supplies none of them and answering this
+/// prompt either way cannot help. Measured on one machine's 43 installed faces,
+/// six carried them — all six Iosevka, and not Symbols Nerd Font Mono.
+///
+/// So they are here to be SEEN, not to be chosen between. The prompt asks which
+/// row draws properly; these four sit in both rows and answer a different
+/// question the player can now at least ask — and `map.diagonal_corners = false`
+/// in `style.toml` is the one-line answer if they are tofu.
 fn sample_glyphs(nerdfont: bool) -> Vec<char> {
     let (set, mark) = if nerdfont {
         (SymbolSet::from_preset_names("rounded", NERD_ARROWS, NERD_PORTALS, "light"), ASSIST_LAMP)
@@ -102,6 +115,7 @@ fn sample_glyphs(nerdfont: bool) -> Vec<char> {
         set.portal.marker, set.portal.up, set.portal.down,
         set.portal.in_, set.portal.out, set.portal.unknown,
         mark,
+        set.path.diag_ul, set.path.diag_ur, set.path.diag_ll, set.path.diag_lr,
     ]
 }
 
@@ -111,7 +125,13 @@ fn sample_glyphs(nerdfont: bool) -> Vec<char> {
 pub fn sample_row(nerdfont: bool) -> String {
     let g = sample_glyphs(nerdfont);
     let join = |r: &[char]| r.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-    format!("{}   {}   {}", join(&g[0..4]), join(&g[4..10]), join(&g[10..11]))
+    format!(
+        "{}   {}   {}   {}",
+        join(&g[0..4]),
+        join(&g[4..10]),
+        join(&g[10..11]),
+        join(&g[11..15]),
+    )
 }
 
 /// Draw the font check centred over `area`, or `None` when it is closed or the
@@ -243,7 +263,7 @@ mod tests {
     #[test]
     fn the_nerd_row_spans_every_family_the_answer_installs() {
         let g = sample_glyphs(true);
-        assert!(g.contains(&'\u{F0143}'), "MDI chevron-up, from Arrows::nerdfont");
+        assert!(g.contains(&'\u{F0738}'), "MDI arrow-up-bold-box, from Arrows::nerdfont");
         assert!(g.contains(&'\u{F111}'), "Font Awesome circle, from PortalGlyphs::nerdfont-stairs");
         assert!(g.contains(&'\u{F12BD}'), "MDI stairs-up, from PortalGlyphs::nerdfont-stairs");
         assert!(g.contains(&ASSIST_LAMP), "md-post_lamp, the Guiding Light's mark");
@@ -254,6 +274,31 @@ mod tests {
                 && !('\u{F0000}'..='\u{FFFFD}').contains(c)),
             "the plain row must not need a patched font"
         );
+    }
+
+    /// SQ-1140: the diagonal corner stubs appear, and appear in BOTH rows.
+    ///
+    /// Not a preset choice and never was — `PathGlyphs` spells U+1FBA0–1FBA3 the
+    /// same in every preset, so no answer to this prompt changes them. Showing
+    /// them is the only thing the dialog can usefully do, and showing them in one
+    /// row only would falsely imply the other row avoids them.
+    #[test]
+    fn both_rows_show_the_diagonal_stubs_because_no_answer_changes_them() {
+        let (nerd, plain) = (sample_glyphs(true), sample_glyphs(false));
+        let stubs = ['\u{1FBA0}', '\u{1FBA1}', '\u{1FBA2}', '\u{1FBA3}'];
+        for s in stubs {
+            assert!(nerd.contains(&s), "U+{:04X} missing from the patched row", s as u32);
+            assert!(plain.contains(&s), "U+{:04X} missing from the plain row", s as u32);
+        }
+        assert_eq!(
+            nerd[11..15],
+            plain[11..15],
+            "the stub slots are identical in both rows — they are not the question being asked"
+        );
+        // And they are NOT private-use, which is the whole point: a patched font
+        // supplies none of them, so the assertion above about the plain row being
+        // free of the PUA must keep passing with these in it.
+        assert!(stubs.iter().all(|c| !('\u{F0000}'..='\u{FFFFD}').contains(c)));
     }
 
     /// Esc is an answer, not a deferral (see `font_check_key_focused`).
