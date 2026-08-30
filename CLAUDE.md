@@ -57,8 +57,21 @@ processes is slower AND puts a crate the size of `app` near the memory ceiling.
 - **While iterating**, run the suites that cover what you touched — by NAME under
   nextest (`cargo nextest run -p app v6_arthur_status`), never by `--test`, since the
   module path still carries the old filename.
-- **Before you PUSH**, run the full gate below. Before the push that makes commits
-  public, not before every commit.
+- **Before you PUSH**, run `cargo check --all-targets` on the tree you are about to
+  push — **not** the full gate. CI is the backstop (see below), and a merged-tree
+  `cargo check` is what catches the one thing CI would catch too late and nothing
+  else local can see: a SEMANTIC merge conflict between parallel lanes, textually
+  clean and non-compiling. It costs under a minute where the gate costs many.
+- **Never put the full gate in a parallel lane's brief.** A three-lane wave that
+  gates each lane AND the combination pays four full builds — plus four clippy
+  builds, which share no fingerprints with them — for one merge. Lanes run
+  `cargo check --all-targets` and the suites covering what they touched; the
+  integrator runs one `cargo check` on the merged tree. Measured 2026-08-30: this
+  was the single largest source of waste in a wave, and it came from a shared brief
+  contradicting the line directly above this one.
+- **Keep ONE integration worktree warm across waves.** Creating a fresh worktree per
+  merge throws away a whole `target/` and pays a cold build to compile code that was
+  already compiled in the lanes.
 - **A change that compiles nothing needs no gate.** README prose, a doc under
   `docs/`, a committed PNG, a `gallery.toml` key spec — none of it is Rust, and
   the only question worth asking is whether the one suite that READS it still
@@ -95,12 +108,25 @@ floor, not the ceiling:
 | anything touching the PALETTE | the gate **and** `cargo test --workspace` |
 | a test that WRITES TO DISK | the gate **and** `cargo test --workspace`, twice |
 
-**Two things have justified the full gate**, so do not let the loop above replace it
-before a push: a SEMANTIC merge conflict between two parallel lanes that was textually
-clean (one lane calling a signature the other had replaced), and the shared-process
-palette races of SQ-0904. Nothing narrower sees either.
+**Two things have justified the full gate**: a SEMANTIC merge conflict between two
+parallel lanes that was textually clean (one lane calling a signature the other had
+replaced), and the shared-process palette races of SQ-0904. Note what each actually
+needs — the first is a COMPILE failure, so `cargo check --all-targets` on the merged
+tree catches it in under a minute; the second is invisible to nextest by
+construction and only `cargo test` sees it, which CI runs anyway. Neither is an
+argument for running the full test gate locally before a push.
 
-**Full test gate** (run before any push):
+**So the full gate below is CI's job, not the inner loop's** (user decision,
+2026-08-30: "no need for full local gate, we catch that with the CI later. we just
+need to keep an eye for CI failures"). Run it locally when you actually want it —
+a release, a change you distrust, a palette or on-disk change per the table above —
+not as a reflex before every push.
+
+**The duty that replaces it: WATCH THE CI RUN.** Trading the local gate for CI makes
+an unwatched red run the new failure mode. After a push, check GitHub Actions and
+report a failure promptly rather than waiting to be asked.
+
+**Full test gate** (CI runs this; run it locally only when you mean to):
 
 ```sh
 cargo nextest run --workspace 2>&1 | grep -acE "^error(\[|:)| [1-9][0-9]* failed"
@@ -126,8 +152,12 @@ Three consequences of nextest's model worth knowing: it runs **each test in its 
 
 **Every writer now does, and there is no other way to write** (SQ-0987). Three locks on one route, and you only ever meet the first one that catches you: the shared lock is **private to `app`**, so a suite cannot take it raw — that is a compile error, not a convention; `app::v6_set_palette` is the only reachable setter and **panics** unless the calling thread holds a guard; and `palette_lock_discipline` fails any file under `tests/suites/` that reaches `zvm::screen::set_palette` directly, which is the one spelling the other two cannot see. So the two ways in are `let _g = app::v6_palette(p);` when the case can name its table at the lock site, and `let _g = app::v6_palette_at_boot();` when it cannot — thirty harnesses resolve an `InterpreterProfile` from a medium deep inside their own `boot()` and set `profile.palette()` there, several rows below where the lock is taken. `v6_palette_at_boot` is exactly `v6_palette(Standard)` with permission to name another table later: it still installs a known palette rather than leaving whatever was there, because "leave whatever was there" is how SQ-0958 happened. **Do not add a "lock now, set later" helper that skips that** — the pairing is the rule. The invariant this buys is that the palette outside the lock is always `Standard`, so the table a case inherits under `cargo test` is the one nextest's fresh process would have given it.
 
-**Clippy gate** (before any push, alongside the test gate):
-`cargo clippy --workspace --all-targets -- -D warnings` must be clean. It costs ~149s the first time after a test build (separate fingerprints, so it shares nothing) and ~0.3s when already warm — cheap to re-run once warm, so re-run it rather than assuming.
+**Clippy gate** — CI's, not the inner loop's, for the same reason as the test gate:
+`cargo clippy --workspace --all-targets -- -D warnings` must be clean, and CI runs
+exactly that on every push. It costs ~149s the first time after a test build
+(separate fingerprints, so it shares NOTHING with it — running the test gate and
+then clippy is two complete builds of the same code) and ~0.3s when already warm.
+Locally, narrow it to the crate you edited if you run it at all.
 
 **But do NOT reach for the workspace sweep in the inner loop — narrow it to what you touched.** CI runs exactly `cargo clippy --workspace --all-targets -- -D warnings` on every push (`.github/workflows/test.yml`, Linux only, because clippy's result does not vary meaningfully by OS), so the full sweep already has a backstop and running it locally per iteration buys very little for minutes a time.
 
