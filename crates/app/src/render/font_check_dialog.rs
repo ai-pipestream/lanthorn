@@ -56,20 +56,50 @@ pub const ASSIST_LAMP: char = '\u{F1A60}';
 pub const NERD_ARROWS: &str = "nerdfont";
 pub const NERD_PORTALS: &str = "nerdfont-stairs";
 
-/// …and the third: the pane-border toggle controls (SQ-1123). Its `"nerdfont"`
-/// arm draws the four MDI chevrons and the Guiding Light's lamp, all of which
-/// the sample row above already samples — a patched face that draws the row
-/// draws the controls.
+/// …and the third: the pane-border toggle controls (SQ-1123).
 pub const NERD_CONTROLS: &str = "nerdfont";
 
-/// …and the fourth: the story picker's row badges (SQ-1159). Its `"nerdfont"`
-/// arm is six Material Design icons — two boxed letters for the story TYPE, a
-/// package, a floppy and a lightbulb pair for the artifacts — and the sample
-/// row above needs no slot of its own for them, on the same argument the
-/// controls make: the row already samples MDI, and a face that draws MDI draws
-/// these. `symbols::StoryBadges::preset` carries the codepoints and how each was
-/// read out of the font.
+/// …and the fourth: the story picker's row badges (SQ-1159). Six Material
+/// Design icons — two boxed letters for the story TYPE, a package, a floppy and
+/// a lightbulb pair for the artifacts.
 pub const NERD_BADGES: &str = "nerdfont";
+
+/// …and the fifth: the MAP pane's own control cluster (SQ-1148) — room numbers,
+/// recentre, the two zooms and the two views. Shares `control_icons` with
+/// [`NERD_CONTROLS`], so a "yes" reaches it by the same write;
+/// `font_check::a_yes_reaches_the_map_controls_too` walks that end to end.
+pub const NERD_MAP_CONTROLS: &str = "nerdfont";
+
+// **THE RULE, because it has already drifted once.** Any glyph the app can draw
+// out of a patched font belongs in the sample row, or the check is asking about
+// a subset and applying the answer to the whole.
+//
+// Two clusters were admitted here on an argument instead of a slot — the border
+// controls and the picker badges, both excused as "the row already samples MDI,
+// and a face that draws MDI draws these". SQ-1148 tested that argument rather
+// than inheriting it, and the finding is worth writing down because it is only
+// half wrong: across the forty-four patched faces installed on the machine this
+// was measured on, NOT ONE draws the whole sample row and misses any of the new
+// map glyphs. As a claim about `cmap` coverage — about tofu — it holds up.
+//
+// It answers the wrong question. This dialog exists because tofu is not the only
+// failure, and the module note above says so: the other is the terminal's font
+// FALLBACK drawing a codepoint out of an unrelated face at the wrong metrics,
+// which is a "yes" that yields a subtly crooked map for ever. Fallback is
+// resolved by the terminal PER CODEPOINT, not per range, so a face's coverage of
+// U+F1A60 predicts nothing about how U+F02C1 will be drawn — and nothing on our
+// side can see the difference. Only the eye in front of the screen can, and only
+// if the glyph is on the screen.
+//
+// So the map cluster gets a slot. Range reasoning cannot answer a metrics
+// question, and an argument in a comment is not a thing the player can look at.
+
+/// The map cluster's six patched marks, in the sample row's slot order. Sampled
+/// from the preset the "yes" installs rather than written out here, for the same
+/// reason as every other slot — see [`sample_glyphs`].
+fn map_control_slots(set: &crate::symbols::MapControlGlyphs) -> [char; 6] {
+    [set.room_numbers, set.centre, set.zoom_out, set.zoom_in, set.view_matrix, set.view_drawn]
+}
 
 pub struct FontCheckRects {
     pub area: Rect,
@@ -93,7 +123,8 @@ pub enum FontCheckAction {
 
 /// The glyphs one answer would put on the map, in a fixed slot order:
 /// the four cardinal arrows, then the portal marker, up, down, in, out and
-/// unknown, then the Guiding Light's mark, then the diagonal corner stubs.
+/// unknown, then the Guiding Light's mark, then the map pane's six control
+/// marks, then the diagonal corner stubs.
 ///
 /// Built from the [`SymbolSet`] each answer actually installs, so a later
 /// improvement to a preset changes what the prompt shows rather than leaving it
@@ -112,34 +143,52 @@ pub enum FontCheckAction {
 /// question the player can now at least ask — and `map.diagonal_corners = false`
 /// in `style.toml` is the one-line answer if they are tofu.
 fn sample_glyphs(nerdfont: bool) -> Vec<char> {
-    let (set, mark) = if nerdfont {
-        (SymbolSet::from_preset_names("rounded", NERD_ARROWS, NERD_PORTALS, "light"), ASSIST_LAMP)
+    // **`from_preset_names` does NOT carry `control_icons`** — it takes the box,
+    // arrow, portal and path presets and leaves every other category at its
+    // default. So the map cluster has to be resolved by name here rather than
+    // read off `set`, which would have silently sampled the PLAIN marks in the
+    // patched row: six slots showing `# ¤ − + ╬ ┼` in both rows, identical,
+    // inviting a "yes" on the strength of glyphs the answer does not install.
+    // The case below caught exactly that, which is the argument for having it.
+    let (set, mark, map_controls) = if nerdfont {
+        (
+            SymbolSet::from_preset_names("rounded", NERD_ARROWS, NERD_PORTALS, "light"),
+            ASSIST_LAMP,
+            crate::symbols::MapControlGlyphs::preset(NERD_MAP_CONTROLS)
+                .unwrap_or_else(|| SymbolSet::default().map_controls),
+        )
     } else {
         let d = SymbolSet::default();
-        let mark = d.assist_gutter;
-        (d, mark)
+        let (mark, mc) = (d.assist_gutter, d.map_controls);
+        (d, mark, mc)
     };
     vec![
         set.arrows.north, set.arrows.south, set.arrows.east, set.arrows.west,
         set.portal.marker, set.portal.up, set.portal.down,
         set.portal.in_, set.portal.out, set.portal.unknown,
         mark,
-        set.path.diag_ul, set.path.diag_ur, set.path.diag_ll, set.path.diag_lr,
     ]
+    .into_iter()
+    .chain(map_control_slots(&map_controls))
+    .chain([set.path.diag_ul, set.path.diag_ur, set.path.diag_ll, set.path.diag_lr])
+    .collect()
 }
 
-/// One sample row as it is drawn: the slots space-separated, in three groups
-/// (arrows · portals · the Guiding Light's mark) so a fallback glyph's wrong
-/// advance shows up as a group that does not line up with the row above it.
+/// One sample row as it is drawn: the slots space-separated, in five groups
+/// (arrows · portals · the Guiding Light's mark · the map cluster · the diagonal
+/// stubs) so a fallback glyph's wrong advance shows up as a group that does not
+/// line up with the row above it. Two spaces between groups rather than three,
+/// which is what keeps twenty-one slots inside `DIALOG_W`.
 pub fn sample_row(nerdfont: bool) -> String {
     let g = sample_glyphs(nerdfont);
     let join = |r: &[char]| r.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
     format!(
-        "{}   {}   {}   {}",
+        "{}  {}  {}  {}  {}",
         join(&g[0..4]),
         join(&g[4..10]),
         join(&g[10..11]),
-        join(&g[11..15]),
+        join(&g[11..17]),
+        join(&g[17..21]),
     )
 }
 
@@ -276,6 +325,7 @@ mod tests {
         assert!(g.contains(&'\u{F111}'), "Font Awesome circle, from PortalGlyphs::nerdfont-stairs");
         assert!(g.contains(&'\u{F12BD}'), "MDI stairs-up, from PortalGlyphs::nerdfont-stairs");
         assert!(g.contains(&ASSIST_LAMP), "md-post_lamp, the Guiding Light's mark");
+        assert!(g.contains(&'\u{F02C1}'), "md-grid, from MapControlGlyphs::nerdfont");
         // And the plain row must be free of the private-use area entirely, or it
         // is not the answer that works everywhere.
         assert!(
@@ -283,6 +333,77 @@ mod tests {
                 && !('\u{F0000}'..='\u{FFFFD}').contains(c)),
             "the plain row must not need a patched font"
         );
+    }
+
+    /// **SQ-1148: every glyph a "yes" installs is IN the row the player judges.**
+    ///
+    /// This is the guard for the rule stated at the top of the module, and it is
+    /// written against the presets rather than against a list of codepoints, so a
+    /// cluster added later fails here until it is sampled — which is the only way
+    /// this can keep up. Two clusters were admitted on an argument once already
+    /// (the border controls and the picker badges, both excused because the row
+    /// "already samples MDI"); the map cluster was very nearly the third.
+    ///
+    /// The border controls and the badges are deliberately NOT required here.
+    /// They are chrome the player meets after the prompt, not map glyphs, and
+    /// bringing them in would put twenty more slots in a sixty-six-column dialog
+    /// — but the map cluster IS on the map, which is what the row is a picture
+    /// of.
+    #[test]
+    fn every_map_glyph_a_yes_installs_appears_in_the_row_the_player_judges() {
+        let g = sample_glyphs(true);
+        let set = SymbolSet::from_preset_names("rounded", NERD_ARROWS, NERD_PORTALS, "light");
+        let want = crate::symbols::MapControlGlyphs::preset(NERD_MAP_CONTROLS)
+            .expect("the preset the answer names");
+
+        for (slot, c) in [
+            ("room_numbers", want.room_numbers),
+            ("centre", want.centre),
+            ("zoom_out", want.zoom_out),
+            ("zoom_in", want.zoom_in),
+            ("view_matrix", want.view_matrix),
+            ("view_drawn", want.view_drawn),
+        ] {
+            assert!(g.contains(&c), "{slot} (U+{:05X}) is installed but never shown", c as u32);
+        }
+
+        // …and the arrows and portals the row has always carried, restated the
+        // same way so that a preset change moves the assertion with it rather
+        // than leaving it pinned to a codepoint that is no longer installed.
+        for c in [set.arrows.north, set.arrows.south, set.arrows.east, set.arrows.west] {
+            assert!(g.contains(&c), "an installed arrow is not in the row");
+        }
+        for c in [set.portal.marker, set.portal.up, set.portal.down, set.portal.in_, set.portal.out] {
+            assert!(g.contains(&c), "an installed portal icon is not in the row");
+        }
+    }
+
+    /// The plain row shows the same five slots, so the comparison is a
+    /// comparison: `#` against md-numeric, `¤` against md-crosshairs, and so on.
+    /// A patched-only slot would be a blank in row 2 and would read as row 2
+    /// failing.
+    #[test]
+    fn the_plain_row_shows_the_map_cluster_too() {
+        let g = sample_glyphs(false);
+        let want = SymbolSet::default().map_controls;
+        for c in [want.room_numbers, want.centre, want.zoom_out, want.zoom_in, want.view_matrix] {
+            assert!(g.contains(&c), "U+{:04X} missing from the plain row", c as u32);
+        }
+        // `#` is the room-numbers mark in BOTH of ITS states (SQ-1148), so it
+        // occupies exactly ONE slot here — the row samples glyphs, not states.
+        assert_eq!(g.iter().filter(|&&c| c == '#').count(), 1, "one slot, not a pair");
+    }
+
+    /// Both rows still fit the dialog. Twenty-one slots at two spaces between
+    /// groups is the reason the separator narrowed from three; if a later slot
+    /// pushes past this, narrow the groups again or drop a slot — do not widen
+    /// the dialog past what a 80x24 terminal can centre.
+    #[test]
+    fn the_row_still_fits_the_dialog() {
+        for nerd in [true, false] {
+            let w = sample_row(nerd).chars().count() + "  1.  ".chars().count();
+            assert!(w <= DIALOG_W as usize - 4, "row (nerd={nerd}) is {w} wide, dialog is {DIALOG_W}");
+        }
     }
 
     /// SQ-1140: the diagonal corner stubs appear, and appear in BOTH rows.
@@ -300,8 +421,8 @@ mod tests {
             assert!(plain.contains(&s), "U+{:04X} missing from the plain row", s as u32);
         }
         assert_eq!(
-            nerd[11..15],
-            plain[11..15],
+            nerd[17..21],
+            plain[17..21],
             "the stub slots are identical in both rows — they are not the question being asked"
         );
         // And they are NOT private-use, which is the whole point: a patched font

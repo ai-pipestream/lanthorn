@@ -252,6 +252,52 @@ pub struct StoryBadges {
 
 // ── Top-level set ─────────────────────────────────────────────────────────────
 
+/// Glyphs for the MAP pane's own control cluster (SQ-1148) — five slots on its
+/// border, the way [`ControlGlyphs`] is the story pane's.
+///
+/// Resolved from the same `control_icons` preset as [`ControlGlyphs`] and
+/// [`TipGlyphs`], not a key of its own, for the reason given on
+/// [`SymbolSet::tip`]: a patched font draws all of them or none of them, and one
+/// question has already settled which.
+///
+/// **Room numbers is ONE field, not a pair, and that is the departure worth
+/// knowing about.** Every other two-mode control in [`ControlGlyphs`] changes
+/// SHAPE between its states — `●`/`○`, `▣`/`□`, `◧`/`■`/`▦` — and the two
+/// single-glyph ones there (`return_probe`, `reveal`) are single only because
+/// they have no opposite mode to draw. Room numbers DOES have one, and still
+/// draws the same mark in both: `#` lit for on, `#` muted for off. It was
+/// chosen for coverage — `#` is ASCII and therefore drawable in every face by
+/// construction, where every plain mark that says "number" by shape reaches at
+/// most fourteen of the sixteen faces surveyed and the ones inside Geometric
+/// Shapes as few as five.
+///
+/// What makes state-by-colour survivable is that it is not colour alone:
+/// `panel.control:lit` is the `alert` role PLUS BOLD, so a colour-blind player
+/// or a low-contrast theme still reads a WEIGHT change, and the default pair
+/// (`muted` DarkGray against `alert` Yellow) separates by brightness rather than
+/// by hue. `border_controls`'s
+/// `every_on_state_is_lit_from_the_alert_role_and_every_off_state_is_muted`
+/// asserts that BOLD, and is what keeps this legible.
+///
+/// The patched preset follows the plain one to a single glyph for the same slot.
+/// A patched set that kept an on/off PAIR while the plain set had one mark would
+/// make the two presets disagree about what the control *is*, which is a worse
+/// outcome than an unused codepoint — `md-numeric_off` (U+F19D3) was verified
+/// and then deliberately dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapControlGlyphs {
+    /// Room numbers, in BOTH states — colour says which. See the note above.
+    pub room_numbers: char,
+    /// Recentre the map on the current room.
+    pub centre: char,
+    pub zoom_out: char,
+    pub zoom_in: char,
+    /// The two map views, which ARE a shape change: one junction against a
+    /// lattice of them.
+    pub view_matrix: char,
+    pub view_drawn: char,
+}
+
 /// All map glyphs used by the renderer, resolved from config at startup.
 ///
 /// `Default` returns the exact set of glyphs that were hardcoded before this
@@ -273,6 +319,9 @@ pub struct SymbolSet {
     /// `control_icons` preset rather than a key of its own: a patched font draws
     /// both or neither, and one question already settled which.
     pub tip: TipGlyphs,
+    /// Glyphs for the MAP pane's own control cluster (SQ-1148). Shares
+    /// `control_icons` with [`Self::controls`] and [`Self::tip`].
+    pub map_controls: MapControlGlyphs,
     /// Gutter marker glyph for META transcript lines.
     pub meta_gutter: char,
     /// Gutter marker glyph for WARNING transcript lines.
@@ -401,6 +450,22 @@ impl Default for SymbolSet {
                 up_right: '▄',
                 down_left: '▀',
                 down_right: '▀',
+            },
+            map_controls: MapControlGlyphs {
+                // `#` in BOTH states; colour delineates on from off.
+                room_numbers: '#',
+                // ¤ is a reticle — a ring with four spokes — which is what
+                // "centre the map here" looks like, and 15/16 faces draw it.
+                centre: '¤',
+                // The true MINUS SIGN, not a hyphen: it sits at the same optical
+                // height as the `+` beside it, which a hyphen does not.
+                zoom_out: '−',
+                zoom_in: '+',
+                // One junction against a lattice of them — a SHAPE change, and
+                // the same box-drawing family, so the stroke weight is the only
+                // thing that moves.
+                view_matrix: '╬',
+                view_drawn: '┼',
             },
             dock_following: '◇',
             dock_pinned: '◆',
@@ -732,6 +797,50 @@ impl ControlGlyphs {
     }
 }
 
+impl MapControlGlyphs {
+    /// All known preset names, in display order — [`ControlGlyphs`]'s, because
+    /// it shares its `control_icons` key.
+    pub fn preset_names() -> &'static [&'static str] {
+        ControlGlyphs::preset_names()
+    }
+
+    /// Return a named preset, or `None` for an unknown name.
+    ///
+    /// **Every nerdfont codepoint below was read from the font's own `post`
+    /// table**, the rule SQ-0989 bought and SQ-1141 refined: name resolved to a
+    /// codepoint, codepoint resolved back to a unique name, and the outline
+    /// confirmed non-empty so a blank glyph cannot pass for a drawn one.
+    /// `nerdfont_map_control_glyphs_are_the_names_that_were_read_from_the_font`
+    /// pins them.
+    ///
+    /// All six are Material Design, the family the border controls already draw
+    /// from, so the two clusters cannot disagree about stroke weight or cap
+    /// height the way mixed families did before SQ-0989.
+    pub fn preset(name: &str) -> Option<MapControlGlyphs> {
+        let plain = SymbolSet::default().map_controls;
+        Some(match name {
+            "plain" => plain,
+            "nerdfont" => MapControlGlyphs {
+                // md-numeric. ONE glyph for both states — see the type's note;
+                // md-numeric_off exists and is deliberately not used.
+                room_numbers: '\u{F03A0}',
+                // md-crosshairs — the reticle `¤` gestures at, drawn properly.
+                centre: '\u{F01A3}',
+                // md-magnify_minus / md-magnify_plus: one family, one shape, the
+                // sign being the only thing that differs.
+                zoom_out: '\u{F034A}',
+                zoom_in: '\u{F034B}',
+                // md-grid / md-grid_off — a lattice and a lattice struck
+                // through, which is the same on/off shape change the plain
+                // ╬/┼ pair makes.
+                view_matrix: '\u{F02C1}',
+                view_drawn: '\u{F02C2}',
+            },
+            _ => return None,
+        })
+    }
+}
+
 impl StoryBadges {
     /// The plain answer, and the letters the picker has drawn since it landed:
     /// `Z G B S H h`. Also the source of the `config::default_badge_*` values, so
@@ -830,6 +939,8 @@ impl SymbolSet {
             portal: PortalGlyphs::preset(&cfg.portal_icons).unwrap_or_else(|| SymbolSet::default().portal),
             controls: ControlGlyphs::preset(&cfg.control_icons).unwrap_or_else(|| SymbolSet::default().controls),
             tip: TipGlyphs::preset(&cfg.control_icons).unwrap_or_else(|| SymbolSet::default().tip),
+            map_controls: MapControlGlyphs::preset(&cfg.control_icons)
+                .unwrap_or_else(|| SymbolSet::default().map_controls),
             meta_gutter: SymbolSet::default().meta_gutter,
             warning_gutter: SymbolSet::default().warning_gutter,
             assist_gutter: SymbolSet::default().assist_gutter,
@@ -1204,6 +1315,105 @@ mod tests {
         let four = [p.up, p.down, p.in_, p.out];
         for ch in four { assert!(!is_wide_estimate(ch)); }
         assert_eq!(four.iter().collect::<std::collections::HashSet<_>>().len(), 4, "up/down/in/out must differ");
+    }
+
+    /// The map cluster's nerdfont set is SIX named icons, each codepoint read
+    /// from the font's own `post` table (SQ-1148) by the SQ-1141 method: name to
+    /// codepoint, codepoint back to a unique name, and a non-empty outline so a
+    /// blank glyph cannot pass for a drawn one.
+    ///
+    /// **Six, not seven.** `md-numeric_off` (U+F19D3) was verified alongside
+    /// these and is deliberately absent: room numbers draw ONE mark in both
+    /// states and let colour say which, so the patched preset has one slot for
+    /// them exactly as the plain preset does. Keeping the off-glyph would give
+    /// the two presets a different idea of what the control is. If a later change
+    /// restores an off-state SHAPE, that codepoint is the one to reach for.
+    #[test]
+    fn nerdfont_map_control_glyphs_are_the_names_that_were_read_from_the_font() {
+        let m = MapControlGlyphs::preset("nerdfont").expect("preset");
+        for (name, got, want) in [
+            ("md-numeric", m.room_numbers, '\u{F03A0}'),
+            ("md-crosshairs", m.centre, '\u{F01A3}'),
+            ("md-magnify_minus", m.zoom_out, '\u{F034A}'),
+            ("md-magnify_plus", m.zoom_in, '\u{F034B}'),
+            ("md-grid", m.view_matrix, '\u{F02C1}'),
+            ("md-grid_off", m.view_drawn, '\u{F02C2}'),
+        ] {
+            assert_eq!(got, want, "{name} moved: U+{:05X} is not U+{:05X}", got as u32, want as u32);
+        }
+
+        // All six from ONE family, which is what keeps the cluster from appearing
+        // to jump between weights — the lesson SQ-0989 paid for on the border
+        // controls, restated here because a new cluster is where it recurs.
+        assert!(
+            [m.room_numbers, m.centre, m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn]
+                .iter()
+                .all(|c| ('\u{F0001}'..='\u{F1AF0}').contains(c)),
+            "every map control glyph must be Material Design"
+        );
+
+        // The two VIEW states differ, because that pair is a real shape change…
+        assert_ne!(m.view_matrix, m.view_drawn, "the two views must be tellable apart");
+        // …and every slot is a distinct mark, so no two controls read alike.
+        let all = [m.room_numbers, m.centre, m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b, "two map controls draw the same glyph U+{:05X}", *a as u32);
+            }
+        }
+
+        // And md-numeric_off is NOT in the set — pinned so that restoring it is a
+        // deliberate edit here rather than a quiet one somewhere else.
+        assert!(!all.contains(&'\u{F19D3}'), "md-numeric_off was dropped on purpose (SQ-1148)");
+    }
+
+    /// The plain map cluster is drawable everywhere, which is the whole reason
+    /// these particular marks were chosen over prettier ones.
+    ///
+    /// `#` especially: it is the one slot whose two states are told apart by
+    /// COLOUR rather than by shape, so if it ever failed to draw there would be
+    /// no fallback reading left at all — where a `╬` that tofus still leaves
+    /// `┼` recognisable beside it. ASCII is what makes that safe, and this
+    /// asserts it rather than trusting the choice to survive an edit.
+    #[test]
+    fn the_plain_map_cluster_needs_no_patched_font() {
+        let m = SymbolSet::default().map_controls;
+        assert!(m.room_numbers.is_ascii(), "room numbers must be ASCII — colour is its only other channel");
+        assert_eq!(m.room_numbers, '#');
+        for c in [m.room_numbers, m.centre, m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn] {
+            assert!(
+                !('\u{E000}'..='\u{F8FF}').contains(&c) && !('\u{F0000}'..='\u{FFFFD}').contains(&c),
+                "U+{:04X} is private-use — the plain preset must not need a patch",
+                c as u32
+            );
+        }
+    }
+
+    /// `control_icons` drives the map cluster, the border controls and the
+    /// tooltip pointer from ONE answer (SQ-1148). Not three keys that happen to
+    /// agree: a patched font draws all of them or none of them, and asking twice
+    /// would let a config end up half-patched with no way for the player to tell
+    /// which half.
+    #[test]
+    fn control_icons_resolves_the_map_cluster_as_well_as_the_border_controls() {
+        for name in ["plain", "nerdfont"] {
+            let cfg = crate::config::SymbolConfig { control_icons: name.into(), ..Default::default() };
+            let set = SymbolSet::resolve(&cfg);
+            assert_eq!(
+                set.map_controls,
+                MapControlGlyphs::preset(name).unwrap(),
+                "control_icons = {name:?} must reach the map cluster"
+            );
+            assert_eq!(set.controls, ControlGlyphs::preset(name).unwrap());
+            assert_eq!(set.tip, TipGlyphs::preset(name).unwrap());
+        }
+        // An unknown name falls back to plain for all three, the way every other
+        // category treats one.
+        let cfg = crate::config::SymbolConfig {
+            control_icons: "no-such-preset".into(),
+            ..Default::default()
+        };
+        assert_eq!(SymbolSet::resolve(&cfg).map_controls, SymbolSet::default().map_controls);
     }
 
     /// The border controls' nerdfont set is TWELVE named icons, each codepoint
