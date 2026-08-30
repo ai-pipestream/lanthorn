@@ -233,6 +233,28 @@ fn every_control_changes_glyph_with_its_state() {
 /// So the state is carried TWICE: by the glyph and by the colour. That is
 /// deliberate. A player who cannot tell the two colours apart still has the
 /// shape, and the shape change is legible at a glance without reading colour.
+///
+/// **One control coming will break the first half of that, and it was decided
+/// with the trade in view** (SQ-1148). The map pane's room-numbers toggle draws
+/// `#` in BOTH states and lets colour alone say which one is in force — the
+/// first TWO-MODE control here that does not change shape. The two single-glyph
+/// controls beside it, `return_probe` and `reveal`, are exempt because they have
+/// no opposite mode to draw; room numbers do have one, so this is a real
+/// departure and not their rationale inherited. It was taken for coverage and
+/// legibility: `#` is ASCII and so cannot tofu in any face, where every plain
+/// mark that says "number" by shape is carried by at most fourteen of the
+/// sixteen terminal faces surveyed, and the ones inside Geometric Shapes by as
+/// few as five.
+///
+/// **What makes colour-only survivable here is that it is not colour-only**, and
+/// this case is what holds that: `panel.control:lit` adds BOLD on top of the
+/// `alert` hue, asserted below, so a colour-blind player or a low-contrast theme
+/// still gets a WEIGHT change rather than nothing. The default pair is a
+/// brightness step too — `muted` is DarkGray and `alert` is Yellow, which
+/// separate by luminance in every standard ANSI palette, not merely by hue. If a
+/// later edit ever drops that BOLD, room numbers become genuinely unreadable to
+/// those players, which is why the assertion is worth keeping even though it
+/// looks redundant beside the colour check.
 #[test]
 fn every_on_state_is_lit_from_the_alert_role_and_every_off_state_is_muted() {
     let alert = AppState::default().colors.theme.get("alert").style.fg.unwrap();
