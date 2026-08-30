@@ -386,6 +386,7 @@ fn the_band_values_sit_on_its_last_column_and_nothing_paints_below_it() {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         app::native_font::resolve(&app::native_font::FaceRequest {
             story_path: &path,
             entry: None,

@@ -67,6 +67,7 @@ fn fmvpoker_ega_dealt() -> Option<GameSession> {
         None,
         None,
         None,
+        true,
         app::native_font::FaceSet::none(),
     );
     // The archive's own 640x200 picture space; with an art scale of (1, 2) that is

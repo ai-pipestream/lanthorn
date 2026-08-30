@@ -539,6 +539,7 @@ fn zork_zeros_ega_rendition_boots_the_geometry_its_mcga_one_does() {
             std_window,
             None,
             None,
+            true,
             app::native_font::FaceSet::none(),
         );
         if let Some(forced) = scale {

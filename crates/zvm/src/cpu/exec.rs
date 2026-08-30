@@ -244,6 +244,32 @@ pub struct Machine {
     /// — §8.8.3.1.1 as written — until one does, which is what every unit test in
     /// this crate expects.
     pub v6_wrap_regime: crate::interpreter::V6WrapRegime,
+    /// May this launch present its machine's SCREEN RULES at all? (SQ-1154)
+    ///
+    /// The fourth term of [`crate::screen::machine_rule`], and the only one that
+    /// is not read back out of the header. Every per-machine Version 6 screen
+    /// rule — the Amiga's shared pens, the Amiga's and the Macintosh's screen
+    /// page — asks it alongside the three header terms.
+    ///
+    /// **Why it is carried rather than read.** The other three terms are facts a
+    /// STORY can change, so reading them back out of the header is what makes
+    /// them survive an `@restart`, a Quetzal `@restore` and a host Save State
+    /// without anybody carrying them. This one is LAUNCH policy the story can
+    /// never touch, and it survives all three the same way for the same reason
+    /// inverted: it lives on the `Machine` rather than on
+    /// [`crate::screen::ScreenState`], so `@restart`'s fresh screen and a host
+    /// restore's `machine.screen = …` both leave it exactly as the launch set it.
+    ///
+    /// **Default `true`, which is ZMSD as written.** §8.3's own escape hatch for
+    /// an interpreter that does not want the Amiga rule is to "avoid using the
+    /// Amiga interpreter number", so on a bare embedding advertising the number
+    /// IS the opt-in and there is nothing further to license. A host with a
+    /// colour policy of its own says so: lanthorn's `--colour theme|terminal`
+    /// declines to present the machine at all, and a rule left live under that
+    /// regime makes the header pair BE the screen — which can only be a colour
+    /// NUMBER, so the host's true RGB is snapped on the way in and painted back
+    /// out as the snapped value (a `#1A1B26` ground came out pure black).
+    pub machine_colours_licensed: bool,
     /// Output stream routing: streams 1/2/3/4 state.
     pub streams: StreamState,
     /// Snapshot of the original dynamic memory (bytes 0..static_mem_base) taken
@@ -556,6 +582,7 @@ impl Machine {
             screen,
             v6_metric: crate::screen::V6Metric::fixed(V6Cell::DEFAULT),
             v6_wrap_regime: crate::interpreter::V6WrapRegime::Attributes,
+            machine_colours_licensed: true,
             streams: StreamState::new(),
             original_dynamic,
             undo_stack: Vec::new(),
@@ -1481,7 +1508,7 @@ impl Machine {
                 // screen. The whole of it lives in `screen.rs` — see
                 // `amiga_global_colour_pair` and `set_amiga_colour_pair`; the
                 // per-window model below is every other machine, unchanged.
-                if crate::screen::amiga_global_colour_pair(&self.mem) && self.screen.v6.is_some() {
+                if crate::screen::amiga_global_colour_pair(self) && self.screen.v6.is_some() {
                     let win = {
                         let v6 = self.screen.v6.as_ref().expect("checked above");
                         ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current)

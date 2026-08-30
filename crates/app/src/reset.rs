@@ -166,6 +166,10 @@ pub(crate) fn reset_game(
                 named_art_std_window,
                 state.config.advertised_interpreter_number(),
                 host_default_colours,
+                // SQ-1154: re-asked, not carried — `--colour` is a flag of this
+                // run and `@restart` re-boots under the same one. This is the site
+                // the required parameter exists to enumerate.
+                state.config.machine_colours_licensed(),
                 faces,
             );
             // Republish the render's copy for the same reason `v6_art_scale` is
@@ -404,6 +408,7 @@ mod tests {
             None,
             advertised,
             None,
+            state.config.machine_colours_licensed(),
             app::native_font::FaceSet::none(),
         );
         let s = app::session::GameSession::new_for_machine(
@@ -461,6 +466,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
                 app::native_font::FaceSet::none(),
             );
             let seeded = app::session::GameSession::new_for_machine(

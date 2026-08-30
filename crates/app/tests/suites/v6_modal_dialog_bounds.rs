@@ -102,6 +102,7 @@ fn boot(file: &str, release: Option<(u16, &str)>) -> Option<(GameSession, Machin
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         app::native_font::FaceSet::none(),
     );
     eprintln!(

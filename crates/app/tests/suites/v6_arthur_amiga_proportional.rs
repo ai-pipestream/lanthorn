@@ -104,6 +104,7 @@ fn boot() -> Option<(GameSession, app::machine_boot::MachineBoot)> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         faces,
     );
     let mut s =

@@ -111,6 +111,7 @@ fn main() {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         face,
     );
     let art_scale = boot.art_scale;

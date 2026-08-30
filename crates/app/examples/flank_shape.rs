@@ -160,6 +160,7 @@ fn shape(path: &str, entry: Option<&str>, keys: &str, archive: Option<&str>, tap
         None,
         profile_.interpreter_number(),
         profile_.default_colours(),
+        true,
         app::native_font::FaceSet::none(),
     );
     let std_win = boot.screen_px;

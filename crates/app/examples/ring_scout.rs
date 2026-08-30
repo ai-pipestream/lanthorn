@@ -294,6 +294,7 @@ fn scout(
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         // SQ-1009: and the release's own typeface, which the DECLARED cell now
         // follows — omit it and Arthur's Amiga floppy is measured on a 16-row line
         // where the app gives it 20. The third omission this instrument would have

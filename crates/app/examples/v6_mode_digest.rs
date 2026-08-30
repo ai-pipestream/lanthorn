@@ -116,6 +116,7 @@ fn main() {
             None,
             profile.interpreter_number(),
             profile.default_colours(),
+            true,
             app::native_font::FaceSet::none(),
         );
         let art_scale = boot.art_scale.unwrap_or((2, 2));

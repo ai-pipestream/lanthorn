@@ -1240,6 +1240,21 @@ Amiga floppy or anywhere else.
   unless you turn `--game-colours off`; it simply resolves through the table the
   regime names.
 
+  **A regime withholds the machine's screen RULES, not only its colour values.**
+  Two machines treat their `$2C`/`$2D` pair as the screen itself rather than as
+  advice about one — the Amiga, whose two "pens" are shared by every window
+  (§8.3), and the Macintosh, whose white page under black ink is what a Mac window
+  *was*. Leave those rules live under a host regime and the pair becomes the
+  ground, and a pair can only be a colour *number*: your terminal's `#1A1B26`
+  snaps to the nearest standard one, which is pure black, and that is what gets
+  painted. So a host regime turns the rules off with the values, and the pane
+  keeps your terminal's real background — exactly as it does on the Atari ST and
+  the IBM PC, which claim no screen page of their own and never had this problem.
+  A host Save State does not carry a regime across, either: restore a
+  `--colour machine` save under `--colour terminal` and the page and ink are the
+  regime *this* run was launched in, because `--colour` is a flag of the run doing
+  the showing.
+
   **And the card it is showing is not the machine.** The IBM PC's blue belongs to
   a full-colour screen; put a CGA plate in front of it and the display is two
   states, black under light grey — the exact inverse of what *Zork Zero* asks for,

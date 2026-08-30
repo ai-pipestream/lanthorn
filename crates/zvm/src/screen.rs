@@ -1305,16 +1305,17 @@ impl Default for ScreenState {
 /// is the player asking for an Amiga, which is the standard's own framing: the
 /// escape hatch it offers is to "avoid using the Amiga interpreter number", so
 /// choosing it *is* the opt-in.
-pub fn amiga_global_colour_pair(mem: &Memory) -> bool {
-    machine_rule(mem, |m| m.global_colour_pens)
+pub fn amiga_global_colour_pair(m: &crate::cpu::exec::Machine) -> bool {
+    machine_rule(m, |p| p.global_colour_pens)
 }
 
 /// The shared shape of every per-machine v6 screen rule: Version 6, colours
-/// available, and the machine header `$1E` names claims the rule (SQ-0872).
+/// available, the machine header `$1E` names claims the rule, and the LAUNCH is
+/// licensed to present that machine at all (SQ-0872, SQ-1154).
 ///
-/// Each term is read back out of the HEADER rather than held as a field, which
-/// is what makes the rules survive a `@restart`, a Quetzal `@restore` and a host
-/// Save State without anybody carrying them:
+/// Three of the four terms are read back out of the HEADER rather than held as a
+/// field, which is what makes the rules survive a `@restart`, a Quetzal
+/// `@restore` and a host Save State without anybody carrying them:
 ///
 /// - **Version 6** — every rule here is scoped to a Version 6 screen, and below
 ///   v6 there is one screen pair anyway.
@@ -1325,10 +1326,30 @@ pub fn amiga_global_colour_pair(mem: &Memory) -> bool {
 /// - **Colours available** (Flags 1 bit 0, §8.3.2/§8.3.3) — with
 ///   `honor_game_colours` off lanthorn declares itself colourless, the host theme
 ///   owns the screen, and there is no pair for the windows to share.
-fn machine_rule(mem: &Memory, claims: fn(&crate::interpreter::MachineProfile) -> bool) -> bool {
-    mem.version() == 6
-        && mem.read_byte(0x01) & 0x01 != 0
-        && crate::interpreter::machine_of(mem).is_some_and(claims)
+///
+/// The fourth is [`crate::cpu::exec::Machine::machine_colours_licensed`], and it
+/// is a field precisely because it is not a fact about the story: it is the
+/// host's colour REGIME for this run, which no story can reach, so carrying it on
+/// the `Machine` is what makes it survive all three of those the same way. See
+/// that field for the whole argument.
+///
+/// **The fourth term belongs HERE and not at a call site** (SQ-1154). The
+/// symptom was reported on the Amiga's shared pens, and gating
+/// [`amiga_global_colour_pair`] would have fixed the Amiga and left the
+/// Macintosh's screen page — the other caller — broken and undiscovered, because
+/// no Macintosh case asserts a GROUND. They assert pairs, and under a host regime
+/// the pair is already correct: it is the snapped host pair. Measured on
+/// `arthur-r74-s890714.z6`, `--interpreter 3`, `--colour terminal`: a pure black
+/// ground where the terminal asked for `#1A1B26`, by a different rule and the
+/// same route.
+fn machine_rule(
+    m: &crate::cpu::exec::Machine,
+    claims: fn(&crate::interpreter::MachineProfile) -> bool,
+) -> bool {
+    m.machine_colours_licensed
+        && m.mem.version() == 6
+        && m.mem.read_byte(0x01) & 0x01 != 0
+        && crate::interpreter::machine_of(&m.mem).is_some_and(claims)
 }
 
 /// ZMSD §11.1.3's interpreter number for the Amiga, from the machine table.
@@ -1357,8 +1378,8 @@ pub use crate::interpreter::AMIGA_INTERPRETER_NUMBER;
 /// A window-0 `set_colour` still wins over this wherever the game made one — it
 /// moves the pens, and the model carries the moved pair on the window itself
 /// (Zork Zero's black-on-light-grey page). This is the ground beneath that.
-pub fn amiga_screen_pair(mem: &Memory) -> Option<(ZColour, ZColour)> {
-    amiga_global_colour_pair(mem).then(|| crate::interpreter::header_pair(mem))
+pub fn amiga_screen_pair(m: &crate::cpu::exec::Machine) -> Option<(ZColour, ZColour)> {
+    amiga_global_colour_pair(m).then(|| crate::interpreter::header_pair(&m.mem))
 }
 
 /// The MACHINE's own screen pair for a Version 6 frame, `(foreground,
@@ -1401,8 +1422,8 @@ pub fn amiga_screen_pair(mem: &Memory) -> Option<(ZColour, ZColour)> {
 /// `honor_game_colours = false` a no-op here: a colourless interpreter is never
 /// given the machine's pair to publish, and the header then carries zvm's own
 /// §8.3.2 seed, which is nobody's machine.
-pub fn machine_screen_pair(mem: &Memory) -> Option<(ZColour, ZColour)> {
-    machine_rule(mem, |m| m.v6_screen_page).then(|| crate::interpreter::header_pair(mem))
+pub fn machine_screen_pair(m: &crate::cpu::exec::Machine) -> Option<(ZColour, ZColour)> {
+    machine_rule(m, |p| p.v6_screen_page).then(|| crate::interpreter::header_pair(&m.mem))
 }
 
 impl ScreenState {
@@ -4286,11 +4307,11 @@ mod tests {
 
     /// A story header describing `version` on interpreter `interp`, with colour
     /// either advertised or withdrawn (Flags 1 bit 0, §8.3.2/§8.3.3).
-    fn header_for(version: u8, interp: u8, colour: bool) -> Memory {
-        let mut mem = Memory::new(sample_story(version)).unwrap();
-        mem.write_byte(0x1E, interp);
-        advertise_colour(&mut mem, colour);
-        mem
+    fn header_for(version: u8, interp: u8, colour: bool) -> crate::cpu::exec::Machine {
+        let mut m = crate::cpu::exec::Machine::new(Memory::new(sample_story(version)).unwrap());
+        m.mem.write_byte(0x1E, interp);
+        advertise_colour(&mut m.mem, colour);
+        m
     }
 
     #[test]
@@ -4329,7 +4350,7 @@ mod tests {
         // What `InterpreterProfile::Amiga` publishes: `DEF_BACK 12` (dark grey)
         // and `DEF_FORE 9` (white), read out of the release floppies' own Amiga
         // interpreters (SQ-0822).
-        write_default_colours(&mut mem, 12, 9);
+        write_default_colours(&mut mem.mem, 12, 9);
         assert_eq!(
             amiga_screen_pair(&mem),
             Some((ZColour::Standard(9), ZColour::Standard(12))),
@@ -4338,12 +4359,27 @@ mod tests {
         // Every machine that is not an Amiga has no such thing — each window
         // carries its own pair and the host theme owns everything else.
         let mut ibm = header_for(6, 6, true);
-        write_default_colours(&mut ibm, 12, 9);
+        write_default_colours(&mut ibm.mem, 12, 9);
         assert_eq!(amiga_screen_pair(&ibm), None, "interpreter 6 publishes no screen pair");
         // …and neither does a colourless interpreter, Amiga or not.
         let mut off = header_for(6, 4, false);
-        write_default_colours(&mut off, 12, 9);
+        write_default_colours(&mut off.mem, 12, 9);
         assert_eq!(amiga_screen_pair(&off), None, "colours withdrawn: nothing to paint with");
+        // …and neither does a launch that declines to present its machine at all
+        // (SQ-1154): the fourth term of `machine_rule`, and the only one a story
+        // cannot reach. This is `--colour theme|terminal` on Amiga media.
+        let mut unlicensed = header_for(6, 4, true);
+        write_default_colours(&mut unlicensed.mem, 12, 9);
+        unlicensed.machine_colours_licensed = false;
+        assert_eq!(
+            amiga_screen_pair(&unlicensed),
+            None,
+            "an unlicensed launch presents no machine, so there is no screen pair to paint",
+        );
+        assert!(
+            !amiga_global_colour_pair(&unlicensed),
+            "…and the pens rule is off with it, so a set_colour stays on its own window",
+        );
     }
 
     /// A v6 screen with something already drawn on it: window 1 holds a grid cell

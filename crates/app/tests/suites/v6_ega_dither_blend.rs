@@ -99,6 +99,7 @@ fn boot(archive: &str, honor_game_colours: bool) -> Option<GameSession> {
         None,
         None,
         None,
+        true,
         app::native_font::FaceSet::none(),
     );
     // SQ-0811: no pinned random seed — this suite measures colour, not chance.

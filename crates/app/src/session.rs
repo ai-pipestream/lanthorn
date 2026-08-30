@@ -935,6 +935,25 @@ impl GameSession {
         // own default, §8.8.3.1.1 as written, which is what a story file with no
         // medium to name a machine should get.
         s.machine.v6_wrap_regime = boot.wrap_regime;
+        // SQ-1154, and set here for the same reason. This is the fourth term of
+        // `zvm::screen::machine_rule` — whether this launch presents its machine's
+        // per-machine SCREEN RULES at all — and it is the only one not read back
+        // out of the header, because it is LAUNCH policy (`--colour`) that no story
+        // can reach.
+        //
+        // It lives on the `Machine` rather than on `ScreenState` deliberately, and
+        // that is not a stylistic choice: `Machine::restart` rebuilds a fresh
+        // `ScreenState` for `@restart`, and `session::restore_screen` assigns a
+        // whole one over the live machine for a host Save State. A licence held
+        // there would be silently reset to `ScreenState::default()`'s by BOTH —
+        // `restore_screen`'s own `..Default::default()` in `archive::ScreenDto` is
+        // exactly that hole. On the `Machine` all three survivals are free: an
+        // `@restart` re-boots through `reset.rs`'s `MachineBoot::resolve` (which the
+        // compiler forces to re-ask), a Quetzal `@restore` touches memory and not
+        // screen state, and a host Save State keeps the licence THIS run was
+        // launched with — which is right, because `--colour` is a flag of this run
+        // and not a property of the saved game.
+        s.machine.machine_colours_licensed = boot.machine_colours_licensed;
         Ok(s)
     }
 
@@ -3516,7 +3535,7 @@ impl GameSession {
         // SQ-0846: the Macintosh is the second machine of that kind, and it was
         // found the same way — by the profile being invisible on screen. See
         // [`machine_screen_pair`].
-        let (fg, bg) = machine_screen_pair(&self.machine.mem)
+        let (fg, bg) = machine_screen_pair(&self.machine)
             .unwrap_or((zvm::screen::ZColour::Default, zvm::screen::ZColour::Default));
         ScreenModel {
             root: WinNode::Layered(graphics_entries),
@@ -3637,8 +3656,8 @@ fn v6_face_lines(face: Option<&crate::native_font::TextFace>) -> Vec<String> {
 /// Kept as a named wrapper because the call site above is a paragraph of prose
 /// about what `ScreenModel.bg`/`fg` mean, and it reads better pointing at a local
 /// name than at a path.
-fn machine_screen_pair(mem: &Memory) -> Option<(ZColour, ZColour)> {
-    zvm::screen::machine_screen_pair(mem)
+fn machine_screen_pair(machine: &Machine) -> Option<(ZColour, ZColour)> {
+    zvm::screen::machine_screen_pair(machine)
 }
 
 /// Convert a detected `Location` into the `ObjectSnapshot` used as a room id.

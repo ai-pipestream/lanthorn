@@ -127,6 +127,7 @@ fn boot() -> Option<Booted> {
         None,
         profile.interpreter_number(),
         honoured.then(|| profile.default_colours()).flatten(),
+        true,
         faces.clone(),
     );
     let art_scale = boot.art_scale;

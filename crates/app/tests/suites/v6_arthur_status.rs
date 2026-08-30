@@ -669,6 +669,7 @@ fn mac_arthur_at_status(honor: bool) -> Option<(app::session::GameSession, app::
         None,
         profile.interpreter_number(),
         honoured.then(|| profile.default_colours()).flatten(),
+        true,
         faces,
     );
     assert_eq!(boot.cell, zvm::interpreter::MACINTOSH_V6_CELL, "the Macintosh's 7x15 cell");

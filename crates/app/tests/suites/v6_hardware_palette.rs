@@ -88,6 +88,7 @@ fn boot(archive: &str, honor_game_colours: bool) -> Option<GameSession> {
         None,
         None,
         None,
+        true,
         app::native_font::FaceSet::none(),
     );
     let mut session = GameSession::new_for_machine(
@@ -386,6 +387,7 @@ fn boot_named(
         None,
         interpreter.or_else(|| profile.interpreter_number()),
         honoured.then(|| profile.default_colours()).flatten(),
+        true,
         app::native_font::FaceSet::none(),
     );
     let mut session = GameSession::new_for_machine(

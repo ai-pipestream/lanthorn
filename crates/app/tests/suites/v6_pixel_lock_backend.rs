@@ -140,6 +140,7 @@ fn boot(s: &Specimen) -> Option<(GameSession, (u32, u32))> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         app::native_font::FaceSet::none(),
     );
     let std_win = boot.screen_px;

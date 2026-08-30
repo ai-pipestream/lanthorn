@@ -82,6 +82,7 @@ fn boot(fixture: &str, release: u16, serial: &str) -> Option<GameSession> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         app::native_font::resolve(&app::native_font::FaceRequest {
             story_path: &path,
             entry: None,

@@ -214,6 +214,7 @@ fn boot_raw(file: &str, want_release: u16, pictures: Option<&str>) -> Option<Boo
         named_art_std_window,
         profile.interpreter_number(),
         honoured.then(|| profile.default_colours()).flatten(),
+        true,
         faces.clone(),
     );
     let art_scale = boot.art_scale;

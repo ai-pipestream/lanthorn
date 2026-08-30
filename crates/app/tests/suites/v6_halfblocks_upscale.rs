@@ -121,7 +121,7 @@ fn boot(spec: &Specimen) -> Option<GameSession> {
     // `native_std_window` is what booted a 560x384 press at 640x400 and fabricated a
     // frame a whole quest was fixed against — and a hand-copied chain is exactly how
     // that keeps happening. Named `machine` because `boot` is a function here.
-    let machine = app::machine_boot::MachineBoot::resolve(profile, &picts, None, None, None, app::native_font::FaceSet::none());
+    let machine = app::machine_boot::MachineBoot::resolve(profile, &picts, None, None, None, true, app::native_font::FaceSet::none());
     eprintln!(
         "{}: v{} release {release} serial {serial}, profile {profile:?}, unit screen {:?}, art_scale {:?}",
         spec.title, bytes[0], machine.screen_px, machine.art_scale,

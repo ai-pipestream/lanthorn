@@ -80,6 +80,7 @@ fn amiga_arthur() -> Option<(GameSession, TextFace)> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         faces,
     );
     let face = boot.text_face();
@@ -130,6 +131,7 @@ fn mac_arthur() -> Option<(GameSession, TextFace)> {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         faces,
     );
     let face = boot.text_face();

@@ -135,6 +135,7 @@ fn frame_driven(file: &str, honor: bool, drive: bool) -> Option<Frame> {
         None,
         profile.interpreter_number(),
         honoured.then(|| profile.default_colours()).flatten(),
+        true,
         app::native_font::FaceSet::none(),
     );
     let mut session = GameSession::new_for_machine(bytes, honoured, false, false, picture_dims, None, None, &boot)

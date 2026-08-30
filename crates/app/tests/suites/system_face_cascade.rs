@@ -621,6 +621,7 @@ fn the_macintosh_press_takes_the_system_face_for_its_body_and_keeps_monaco_for_i
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         faces,
     );
 
@@ -684,6 +685,7 @@ fn zork_zero_marks_its_status_bar_with_font_four() {
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         faces,
     );
     let mut s =

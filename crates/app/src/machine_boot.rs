@@ -81,6 +81,21 @@ pub struct MachineBoot {
     pub art_scale: Option<(u32, u32)>,
     /// §8.3.3's pair, where the machine or the card states one.
     pub default_colours: Option<(u8, u8)>,
+    /// May this launch present its machine's per-machine SCREEN RULES?
+    /// [`crate::config::Config::machine_colours_licensed`] (SQ-1154).
+    ///
+    /// A field of its own rather than `default_colours.is_some()`. That proxy
+    /// happens to agree today and would break the moment a machine claims a rule
+    /// without stating a pair — the Atari ST and the IBM PC already claim no
+    /// screen page at all, so the two facts are plainly independent.
+    ///
+    /// It rides HERE, in the value [`Self::resolve`] hands to
+    /// [`crate::session::GameSession::new_for_machine`], for the reason this whole
+    /// module exists: a re-seeding site that forgets it is a screen the player
+    /// never sees. `resolve` takes it as a required parameter so the compiler
+    /// enumerates those sites — `startup.rs` and `reset.rs` — instead of somebody
+    /// remembering (SQ-1022).
+    pub machine_colours_licensed: bool,
     /// The Version 6 character cell this machine declares (SQ-0917) — 7x15 on a
     /// Macintosh, 8x16 everywhere else. The machine table's, since SQ-1013, and
     /// the admitted FACE's where the release shipped a proportional one
@@ -126,12 +141,14 @@ impl MachineBoot {
         named_art_std_window: Option<(u16, u16)>,
         interpreter_number: Option<u8>,
         default_colours: Option<(u8, u8)>,
+        machine_colours_licensed: bool,
         faces: crate::native_font::FaceSet,
     ) -> MachineBoot {
         let art_scale = picts.art_scale();
         MachineBoot {
             profile,
             interpreter_number,
+            machine_colours_licensed,
             wrap_regime: profile.v6_wrap_regime(),
             screen_px: picts
                 .std_window()
@@ -172,6 +189,12 @@ impl MachineBoot {
             screen_px: None,
             art_scale: None,
             default_colours: None,
+            // No medium named a machine, so this launch presents none — which is
+            // also what every per-machine screen rule asks. Inert either way here,
+            // since `interpreter_number: None` leaves `$1E` at zvm's own default
+            // (6 for Version 6) and no rule claims that number; stated rather than
+            // left to that coincidence.
+            machine_colours_licensed: false,
             cell: InterpreterProfile::IbmPc.v6_font_cell(),
             wrap_regime: InterpreterProfile::IbmPc.v6_wrap_regime(),
             faces: crate::native_font::FaceSet::none(),
@@ -198,6 +221,7 @@ mod tests {
                 None,
                 None,
                 None,
+                true,
                 crate::native_font::FaceSet::none(),
             );
             assert_eq!(
@@ -214,6 +238,7 @@ mod tests {
                 None,
                 None,
                 None,
+                true,
                 crate::native_font::FaceSet::none(),
             )
             .cell,
@@ -233,6 +258,7 @@ mod tests {
             None,
             None,
             None,
+            true,
             crate::native_font::FaceSet::none(),
         );
         assert_eq!(
@@ -246,6 +272,7 @@ mod tests {
             Some((560, 384)),
             None,
             None,
+            true,
             crate::native_font::FaceSet::none(),
         );
         assert_eq!(

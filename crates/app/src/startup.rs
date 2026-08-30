@@ -1357,6 +1357,12 @@ pub(crate) fn boot_story(
                 // names the IBM PC rather than falling through to zvm's default.
                 cfg.advertised_interpreter_number(),
                 host_default_colours,
+                // SQ-1154: and whether this launch presents its machine at all,
+                // which governs the per-machine screen RULES as well as the values
+                // above. Under `--colour theme|terminal` it does not, so the
+                // Amiga's shared pens and the Macintosh's screen page stay off and
+                // the host's own ground is painted un-snapped.
+                cfg.machine_colours_licensed(),
                 launch_faces,
             );
             // SQ-0790: how DENSE that art is, which only a native archive knows.

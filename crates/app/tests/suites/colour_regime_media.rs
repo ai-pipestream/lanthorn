@@ -34,10 +34,22 @@
 //! | `Journey - The Quest Begins.adf` | Amiga floppy | Amiga | a medium whose table is NOT §8.3.1 |
 //! | Zork Zero DOS 360K Disk 1 | `.ima` | IBM PC + CGA card | the two-colour card, which no bare file can reach |
 //! | `journey-r83-s890706.z6` | none | asked for | the `--colour machine` direction, unchanged |
+//! | `arthur-r74-s890714.z6` | none | `--interpreter 3`/`4` | the GROUND, on both machines with a screen page |
+//! | `Arthur - The Quest for Excalibur.adf` | Amiga floppy | Amiga | the reported launch, off its own medium |
 //!
-//! **Turn count: zero.** Every question here is settled before the first
-//! prompt — the palette is installed and the pair is handed to the constructor,
-//! so driving keys would only add ways for a frame to differ.
+//! **Turn count: zero for the PAIR cases, twelve taps for the GROUND cases.**
+//! Everything a pair case asks is settled before the first prompt — the palette is
+//! installed and the pair is handed to the constructor — so driving keys would only
+//! add ways for a frame to differ. The ground is a frame, so those cases are a
+//! fixture with a turn count: see [`drive_arthur_intro`].
+//!
+//! # The pair is not the ground, and that is why this file has two halves
+//!
+//! The first half of this suite shipped, and every case in it was green while the
+//! screen was wrong (SQ-1154 was reopened on it). Withholding the machine's colour
+//! VALUES left the per-machine screen RULES live, and those rules make the header
+//! pair BE the screen — so the pair was correct and the ground was pure black. Any
+//! case added here should say which of the two it is asserting.
 //!
 //! Both `honor_game_colours` modes throughout, per the project's colour
 //! convention. `false` is not a formality here: it short-circuits
@@ -54,7 +66,8 @@ use std::path::PathBuf;
 use app::config::{ColourSource, Config};
 use app::graphics::{PictSource, PictureOverride};
 use app::interpreter::{InterpreterProfile, ProfileSource};
-use app::session::GameSession;
+use app::engine::Engine;
+use app::session::{GameSession, InputKind};
 
 use ratatui::style::Style;
 use zvm::screen::Palette;
@@ -180,6 +193,10 @@ fn launch(
         named_art_std_window,
         cfg.advertised_interpreter_number(),
         reported,
+        // SQ-1154: the licence rides in the boot value now, because it governs the
+        // per-machine screen RULES as well as the values above. `startup.rs` passes
+        // exactly this call.
+        cfg.machine_colours_licensed(),
         app::native_font::FaceSet::none(),
     );
     let mut session = GameSession::new_for_machine(
@@ -445,4 +462,326 @@ fn the_presses_were_actually_read() {
         return;
     }
     eprintln!("SQ-1154 specimens read: {found:?}");
+}
+
+// ── The GROUND, which is not the pair (SQ-1154, reopened) ────────────────────
+//
+// Everything above this line asserts a PAIR — what `$2C`/`$2D` carry, and what
+// table the numbers in them resolve through — and every one of those cases was
+// green while the screen was wrong. That is why the quest was reopened: the
+// licence as first shipped withheld the machine's colour VALUES and left the
+// per-machine screen RULES live, and a rule that makes the header pair BE the
+// screen discards the host's true RGB whichever pair it is handed. The host's
+// `#1A1B26` can only be expressed as a colour NUMBER, snaps to §8.3.1's 2, and 2
+// is pure black.
+//
+// So these cases assert the GROUND: `ScreenModel.bg`/`fg`, which is what
+// `render_story_pane` floods the pane with. `0` is `ZColour::Default` — no
+// machine claimed the page, so the host paints its own RGB un-snapped, which is
+// the correct outcome under a host regime and is exactly what the Atari ST and
+// the IBM PC do already, having no screen page to claim.
+
+/// Arthur as a bare story file. The controlled specimen: no medium, no archive
+/// table, nothing but `--interpreter` — which is how the user isolated this,
+/// after a floppy-against-floppy comparison that had crossed two RELEASES
+/// (r54/890606 against r74/890714).
+const ARTHUR_BARE: &str = "arthur-r74-s890714.z6";
+/// And the Amiga floppy the defect was reported on, for the medium route.
+const ARTHUR_FLOPPY: &str = "Arthur - The Quest for Excalibur.adf";
+
+/// ZMSD §11.1.3. The two machines whose §8.3.3 pair is not advice about a
+/// terminal but the screen itself — the Amiga through `global_colour_pens`
+/// (§8.3's shared pens) and the Macintosh through `v6_screen_page`
+/// (`mac/xzip.lst`: "Mac defaults: white under black"). They reach the ground by
+/// two different rules and both rules go through `zvm::screen::machine_rule`.
+const AMIGA: u8 = 4;
+const MACINTOSH: u8 = 3;
+
+/// **Turn count: 12 taps, and it matters.** A frame is a fixture: asserting at
+/// boot is asserting before the story has laid a single window out, and a repaint
+/// defect shows one action later, not immediately. Twelve taps answering `n` to
+/// "restore a saved position?" is `v6_arthur_status`'s own route to Arthur's
+/// first playable frame, reused so the two harnesses cannot disagree about where
+/// that is.
+fn drive_arthur_intro(l: &mut Launch) {
+    let _ = l.session.take_transcript();
+    for _ in 0..12 {
+        let r = match l.session.pending_input() {
+            InputKind::Line => l.session.submit(""),
+            InputKind::Char => l.session.submit_char(13),
+            InputKind::Event => l.session.submit(""),
+        };
+        if r.transcript.to_lowercase().contains("y or n") {
+            let _ = l.session.submit_char(b'n');
+        }
+    }
+}
+
+/// The pane's own page as the renderer receives it, `(bg, fg)` packed by
+/// `state::pack_zcolour`. `0` is `ZColour::Default`: no machine claimed the page,
+/// so the host paints the terminal's real RGB.
+fn pane_ground(l: &Launch) -> (u32, u32) {
+    let m = l.session.screen();
+    (m.bg, m.fg)
+}
+
+/// **The reopened defect, on BOTH machines.** A launch under `--colour theme` or
+/// `--colour terminal` leaves the pane's page at `ZColour::Default`, so the host
+/// paints its own background; under `--colour machine` the machine claims it.
+///
+/// Both machines, because the symptom was reported on the Amiga and the fix is at
+/// `zvm::screen::machine_rule` rather than at `amiga_global_colour_pair`. Gating
+/// the call site would have fixed the Amiga and left the Macintosh — measured at
+/// `--interpreter 3`, `--colour terminal`, grounding at pure black exactly as the
+/// Amiga does, by the other rule.
+///
+/// Both `honor_game_colours` modes, and `false` is not a formality: it withdraws
+/// Flags 1 bit 0, which `machine_rule` also requires, so the ground must be the
+/// host's in every regime. That is the discriminator the quest named — turning
+/// game colours off cleared the black — and it is a symptom-level workaround, not
+/// the fix, so it is pinned as a floor rather than as the answer.
+///
+/// FALSIFY by dropping `m.machine_colours_licensed` from `machine_rule`: both
+/// host-regime rows come back claiming a page — §8.3.1 pure black under white,
+/// the reported ground — while every pair asserted above stays correct.
+#[test]
+fn a_machines_screen_page_is_withheld_with_its_colours_under_a_host_regime() {
+    let _g = app::v6_palette_at_boot();
+    if !present(ARTHUR_BARE) {
+        eprintln!("SKIP: {ARTHUR_BARE} absent");
+        return;
+    }
+    for interp in [AMIGA, MACINTOSH] {
+        // The non-vacuity guard: this machine must actually claim a page under
+        // the regime that licenses it, or the rows below prove nothing.
+        let mut owned = launch(ARTHUR_BARE, ColourSource::Machine, true, Some(interp))
+            .expect("checked present");
+        drive_arthur_intro(&mut owned);
+        assert_ne!(
+            pane_ground(&owned),
+            (0, 0),
+            "interpreter {interp}: the machine claims the page when it is licensed to",
+        );
+        assert!(
+            zvm::screen::machine_screen_pair(&owned.session.machine).is_some(),
+            "interpreter {interp}: …by the rule this quest is about",
+        );
+
+        for colour in [ColourSource::Terminal, ColourSource::Theme] {
+            let mut l =
+                launch(ARTHUR_BARE, colour, true, Some(interp)).expect("checked present");
+            drive_arthur_intro(&mut l);
+            assert_eq!(
+                pane_ground(&l),
+                (0, 0),
+                "interpreter {interp} under {colour:?}: the host paints its own ground, \
+                 un-snapped — this came back pure black",
+            );
+            assert_eq!(
+                zvm::screen::machine_screen_pair(&l.session.machine),
+                None,
+                "interpreter {interp} under {colour:?}: no machine is presented, so none \
+                 claims the page",
+            );
+        }
+
+        // Flags 1 bit 0 withdrawn: `machine_rule`'s colour term fails, so no
+        // regime can claim the page.
+        for colour in [ColourSource::Machine, ColourSource::Terminal, ColourSource::Theme] {
+            let mut l =
+                launch(ARTHUR_BARE, colour, false, Some(interp)).expect("checked present");
+            drive_arthur_intro(&mut l);
+            assert_eq!(
+                pane_ground(&l),
+                (0, 0),
+                "interpreter {interp} under {colour:?}, game colours off: §8.3.2 declares \
+                 the interpreter colourless and the host theme owns the screen",
+            );
+        }
+    }
+}
+
+/// **The Amiga's shared pens are a BEHAVIOUR, and the licence reaches it too.**
+///
+/// §8.3: a Version 6 interpreter under interpreter number 4 uses one pair of
+/// colours for ALL windows, and changing either repaints every window to match.
+/// Withholding the machine's pair does not withhold that — which is why the first
+/// fix on this quest looked complete and was not. The rule itself has to be off,
+/// or the story's own `set_colour` is globalised over a ground the host never
+/// chose.
+#[test]
+fn the_amiga_pens_are_off_under_a_host_regime() {
+    let _g = app::v6_palette_at_boot();
+    if !present(ARTHUR_BARE) {
+        eprintln!("SKIP: {ARTHUR_BARE} absent");
+        return;
+    }
+    let mut owned =
+        launch(ARTHUR_BARE, ColourSource::Machine, true, Some(AMIGA)).expect("checked present");
+    drive_arthur_intro(&mut owned);
+    assert!(
+        zvm::screen::amiga_global_colour_pair(&owned.session.machine),
+        "the licensed Amiga keeps §8.3's shared pens",
+    );
+    for colour in [ColourSource::Terminal, ColourSource::Theme] {
+        let mut l = launch(ARTHUR_BARE, colour, true, Some(AMIGA)).expect("checked present");
+        drive_arthur_intro(&mut l);
+        assert!(
+            !zvm::screen::amiga_global_colour_pair(&l.session.machine),
+            "{colour:?}: a launch that presents no machine has no pens to share",
+        );
+    }
+}
+
+/// The same thing off the MEDIUM the user reported it on, rather than off
+/// `--interpreter`. `Arthur - The Quest for Excalibur.adf` is release 54 / serial
+/// 890606 — a different release from the bare file above, which is exactly why
+/// the bare file is the controlled specimen and this is the corroboration.
+#[test]
+fn the_reported_floppy_grounds_on_the_host_under_a_host_regime() {
+    let _g = app::v6_palette_at_boot();
+    if !present(ARTHUR_FLOPPY) {
+        eprintln!("SKIP: {ARTHUR_FLOPPY} absent");
+        return;
+    }
+    let mut owned =
+        launch(ARTHUR_FLOPPY, ColourSource::Machine, true, None).expect("checked present");
+    assert_eq!(owned.profile, InterpreterProfile::Amiga, "the floppy names its machine");
+    assert_eq!(owned.source, ProfileSource::Medium, "and the MEDIUM is what named it");
+    drive_arthur_intro(&mut owned);
+    assert_ne!(pane_ground(&owned), (0, 0), "--colour machine keeps the Amiga's page");
+
+    for colour in [ColourSource::Terminal, ColourSource::Theme] {
+        let mut l = launch(ARTHUR_FLOPPY, colour, true, None).expect("checked present");
+        drive_arthur_intro(&mut l);
+        assert_eq!(
+            pane_ground(&l),
+            (0, 0),
+            "{colour:?}: the reported launch — a black ground where the terminal asked \
+             for its own",
+        );
+    }
+}
+
+// ── A host Save State does not carry a regime across ─────────────────────────
+
+/// **A restore adopts THIS run's colour regime, and measurement says it already
+/// does.**
+///
+/// The concern, reasoned off `archive.rs` while this quest was being fixed: a host
+/// Save State stores colour as NUMBERS (`ZColourDto`, and the v6 window table is
+/// the source of truth for a Version 6 story), a number means nothing without a
+/// palette, and `--colour` now chooses the palette. So saving under `--colour
+/// machine` and restoring under `--colour terminal` looked capable of resolving
+/// every stored number through a table the save never saw — SQ-0958's rule
+/// arriving at runtime instead of in a suite.
+///
+/// **Measured, both directions, and it is not real.** The restoring run's regime
+/// decides the default page and ink outright and nothing from the saving run's
+/// survives: the pair in `$2C`/`$2D` is the one THIS launch published, and the
+/// pane's ground is this launch's licence answering. That is the right answer
+/// rather than a lucky one — `--colour` is a flag of the run doing the showing,
+/// not a property of the saved game, and the licence lives on the `Machine` the
+/// restoring run built (see `session::new_for_machine`), where neither
+/// `restore_screen`'s whole-`ScreenState` assignment nor `Machine::restart`'s
+/// fresh one can reach it.
+///
+/// The residue is a game's own `set_colour`, whose number resolves through
+/// whatever table the showing run named. That is the regime read consistently and
+/// is what this quest already settled for a fresh launch: on the raw path
+/// `set_colour(4)` IS §8.3.1 red. Storing the number rather than a resolved RGB
+/// is the archive's backend-neutral rule working, not a hole in it.
+///
+/// Restore, then MAKE A MOVE, then assert — a restore bug surfaces on the next
+/// repaint, and the frame immediately after a restore is when everything still
+/// looks correct.
+#[test]
+fn a_host_save_state_does_not_carry_a_colour_regime_across() {
+    let _g = app::v6_palette_at_boot();
+    if !present(ARTHUR_BARE) {
+        eprintln!("SKIP: {ARTHUR_BARE} absent");
+        return;
+    }
+    let round = |saving: ColourSource, restoring: ColourSource| {
+        let mut src = launch(ARTHUR_BARE, saving, true, Some(AMIGA)).expect("checked present");
+        drive_arthur_intro(&mut src);
+        let _ = src.session.submit("look");
+        let _ = src.session.take_transcript();
+
+        let mapper = mapper::mapper::Mapper::default();
+        let es = Engine::save_state(&src.session);
+        // `app::scratch_dir` is unique per CALL, which is what keeps two cases in
+        // one binary off each other's files (SQ-1131).
+        let dir = app::scratch_dir("sq1154-regime-restore");
+        let path = dir.join("cross-regime.lanthorn");
+        app::archive::save_archive_meta_pics(
+            &path,
+            &mapper,
+            &es,
+            Some(&src.session.machine.screen),
+            &src.session.machine.aux_data,
+            app::archive::Meta {
+                format_version: app::archive::CURRENT_FORMAT_VERSION,
+                ifid: None,
+                name: None,
+                turns: 0,
+                saved_at: String::new(),
+                location: None,
+                score: None,
+                trigger: app::archive::SaveTrigger::HostState,
+            },
+            &app::archive::SessionRecord::empty(),
+            &src.session.pictures_png(),
+            None,
+            None,
+        )
+        .expect("save archive");
+        let ac = app::archive::load_archive(&path).expect("load archive");
+
+        // A fresh launch under the OTHER regime, and what it looks like before the
+        // restore — the baseline the restore must not move.
+        let mut dst = launch(ARTHUR_BARE, restoring, true, Some(AMIGA)).expect("checked present");
+        drive_arthur_intro(&mut dst);
+        let want_header = header_pair(&dst);
+        let want_ground = pane_ground(&dst);
+
+        Engine::restore_state(&mut dst.session, &ac.engine_save()).expect("restore");
+        app::session::restore_screen(&mut dst.session, ac.screen.clone().expect("screen"));
+        dst.session.load_pictures_png(&ac.pictures);
+        // The perturbation. Everything still looks right in the frame before it.
+        let _ = dst.session.submit("look");
+        let _ = dst.session.take_transcript();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            header_pair(&dst),
+            want_header,
+            "{saving:?} -> {restoring:?}: the story is told THIS run's pair, not the save's",
+        );
+        assert_eq!(
+            pane_ground(&dst),
+            want_ground,
+            "{saving:?} -> {restoring:?}: and the pane's ground is this run's licence \
+             answering, one move after the restore",
+        );
+    };
+    // Not symmetric, so both: one direction loses a machine's table, the other
+    // acquires one the save never saw.
+    round(ColourSource::Machine, ColourSource::Terminal);
+    round(ColourSource::Terminal, ColourSource::Machine);
+
+    // …and the experiment is only worth running because the two regimes genuinely
+    // differ on this story: an Amiga grounds on `DEF_BACK 12`, a host regime on
+    // nothing at all.
+    let mut amiga =
+        launch(ARTHUR_BARE, ColourSource::Machine, true, Some(AMIGA)).expect("checked present");
+    drive_arthur_intro(&mut amiga);
+    let mut host =
+        launch(ARTHUR_BARE, ColourSource::Terminal, true, Some(AMIGA)).expect("checked present");
+    drive_arthur_intro(&mut host);
+    assert_ne!(
+        (header_pair(&amiga), pane_ground(&amiga)),
+        (header_pair(&host), pane_ground(&host)),
+        "the two regimes must differ, or the restore assertions above are vacuous",
+    );
 }

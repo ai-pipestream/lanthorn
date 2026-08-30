@@ -130,6 +130,7 @@ fn launch(pictures: Option<&str>, honor_game_colours: bool, explicit: Option<u8>
         named_art_std_window,
         explicit.or_else(|| profile.interpreter_number()),
         default_colours,
+        true,
         app::native_font::FaceSet::none(),
     );
     let mut session =

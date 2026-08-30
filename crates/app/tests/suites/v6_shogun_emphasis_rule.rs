@@ -126,6 +126,7 @@ fn boot(file: &str, release: u16, serial: &str) -> Option<(GameSession, app::mac
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         face,
     );
     eprintln!(

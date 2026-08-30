@@ -239,7 +239,7 @@ fn a_colour_set_outside_window_0_never_lands_on_an_amiga() {
     // $2D/$2C, which under this profile is Infocom's `DEF_FORE 9` over
     // `DEF_BACK 12` — white on dark grey (SQ-0822).
     assert_eq!(
-        zvm::screen::amiga_screen_pair(&s.machine.mem),
+        zvm::screen::amiga_screen_pair(&s.machine),
         Some((ZColour::Standard(9), ZColour::Standard(12))),
         "{who}: the pair the whole screen is painted with (the floppies' DEF_FORE/DEF_BACK)",
     );
@@ -535,7 +535,7 @@ fn with_game_colours_off_the_amiga_page_never_reaches_the_cells() {
     let who = ctx(&JOURNEY, InterpreterProfile::Amiga, false);
     let (_, grey) = amiga_pair_rgb();
     assert_eq!(
-        zvm::screen::amiga_screen_pair(&s.machine.mem),
+        zvm::screen::amiga_screen_pair(&s.machine),
         None,
         "{who}: a colourless interpreter has no pair to paint with",
     );
@@ -682,7 +682,7 @@ fn arthurs_notices_are_the_machines_white_on_the_machines_dark_grey() {
 
     // The machine publishes its pair at all, straight off $2D/$2C.
     assert_eq!(
-        zvm::screen::amiga_screen_pair(&s.machine.mem),
+        zvm::screen::amiga_screen_pair(&s.machine),
         Some((ZColour::Standard(9), ZColour::Standard(12))),
         "{who}: DEF_FORE 9 over DEF_BACK 12",
     );
@@ -726,7 +726,7 @@ fn with_game_colours_off_arthurs_notice_keeps_the_themes_own_system_style() {
     let (area, buf) = render_with_transcript(&s, &lines, false);
 
     assert_eq!(
-        zvm::screen::amiga_screen_pair(&s.machine.mem),
+        zvm::screen::amiga_screen_pair(&s.machine),
         None,
         "{who}: a colourless interpreter has no pair to paint with",
     );

@@ -500,6 +500,7 @@ fn an_amiga_release_with_no_face_of_its_own_boots_on_topaz() {
             None,
             profile.interpreter_number(),
             profile.default_colours(),
+            true,
             faces,
         );
         // The picture-space window, which the art scale turns into the 640x400 unit

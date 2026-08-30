@@ -274,6 +274,7 @@ fn frame_after(file: &str, card: Card, turns: usize) -> Option<Frame> {
         named_art_std_window,
         cfg.advertised_interpreter_number(),
         honoured.then_some(reported).flatten(),
+        true,
         app::native_font::FaceSet::none(),
     );
     let mut session =

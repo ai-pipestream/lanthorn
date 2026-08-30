@@ -95,6 +95,7 @@ fn boot(press: (&str, u16, &str)) -> Option<(GameSession, Vec<TranscriptElem>)> 
         None,
         profile.interpreter_number(),
         profile.default_colours(),
+        true,
         app::native_font::FaceSet::none(),
     );
     let mut s = GameSession::new_for_machine(bytes, true, false, false, picture_dims, None, None, &boot)
