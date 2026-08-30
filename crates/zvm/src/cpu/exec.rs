@@ -672,6 +672,12 @@ impl Machine {
         let preserved_flags2 = self.mem.read_word(0x10) & 0b11;
         let rows = self.mem.read_byte(0x20);
         let cols = self.mem.read_byte(0x21);
+        // …and for Version 6 the screen in PIXELS, which is the unit it was
+        // reported in (SQ-0917). The grid above is a derivation, and reconstituting
+        // pixels from it loses whatever the cell does not divide — a Macintosh
+        // 640x400 comes back as 637x390 on its 7x15 cell, which is a different
+        // screen from the one the launch laid the game out on. SQ-1156.
+        let screen_px = (self.mem.read_word(0x22), self.mem.read_word(0x24));
 
         // Reload dynamic memory to its pristine boot image.
         for (i, &b) in self.original_dynamic.iter().enumerate() {
@@ -704,7 +710,23 @@ impl Machine {
         self.init_caps();
         let f2 = (self.mem.read_word(0x10) & !0b11) | preserved_flags2;
         self.mem.write_word(0x10, f2);
-        if rows > 0 && cols > 0 {
+        // Re-DECLARE the text metric the host set (SQ-1156). `self.v6_metric` is a
+        // field on the machine and survives, but two of the three places
+        // `set_v6_text` writes it do not: the fresh `ScreenState` above seeds every
+        // window's `font_size` (property 13) from the pristine header, and the
+        // header itself was just reloaded. Stories read prop 13 for their layout
+        // math — see `boot_state_and_screen`'s own note — so leaving it at the
+        // story's own default told Arthur's Amiga floppy an 8x16 line where its
+        // launch declared 8x20, and he laid his score bar out on a grid the host
+        // was not drawing on: the runs stopped landing on a cell boundary and the
+        // hybrid renderer, which draws a strip with glyphs only when the game's own
+        // runs explain it, rasterized the bar. It is stated before the screen below
+        // because the screen is measured in cells.
+        let metric = self.v6_metric.clone();
+        self.set_v6_text(metric);
+        if self.mem.version() == 6 && screen_px.0 > 0 && screen_px.1 > 0 {
+            self.set_v6_screen_px(screen_px.0, screen_px.1);
+        } else if rows > 0 && cols > 0 {
             self.set_screen_dims(rows, cols);
         }
 
@@ -5618,6 +5640,63 @@ pub(crate) mod tests {
             "the v6 window model is re-seeded to boot defaults",
         );
         assert!(m.just_restarted, "restart signals the host to drop app-side chrome");
+    }
+
+    /// SQ-1156: `@restart` re-declares the host's Version 6 text metric and gives
+    /// the screen back in PIXELS.
+    ///
+    /// Both facts are host declarations that the reboot's own two steps destroy:
+    /// the fresh `ScreenState` seeds every window's `font_size` (property 13) from
+    /// the header, and the header is reloaded to the story's pristine image. The
+    /// metric itself lives on the machine and survives, so afterwards the machine,
+    /// the header and the windows disagreed — a story asking `@get_wind_prop 13`
+    /// for its layout math was told 8x16 where its launch declared 8x20.
+    ///
+    /// The screen is asserted at a cell that does NOT divide it, which is the only
+    /// arrangement that can see the second half: preserving `$20`/`$21` and
+    /// multiplying back up is exact while the cell divides, and on a Macintosh's
+    /// 7x15 it turns 640x400 into 637x390 (SQ-0917).
+    ///
+    /// FALSIFY by removing the `set_v6_text` call from `Machine::restart`: the
+    /// window's `font_size` comes back `0x1008` on both cells.
+    #[test]
+    fn v6_restart_redeclares_the_hosts_cell_and_keeps_the_screen_in_pixels() {
+        for (cell, want_font_size) in [
+            // Arthur's Amiga floppy, whose release face declares a 20-row line
+            // (SQ-1009) — the press the defect was reported on.
+            (V6Cell { w: 8, h: 20 }, 0x1408u16),
+            // …and a Macintosh, where the cell also divides neither axis.
+            (V6Cell { w: 7, h: 15 }, 0x0F07u16),
+        ] {
+            let mut m = Machine::new(Memory::new(v6_boot_story(&[0xB0])).unwrap());
+            m.set_v6_cell(cell);
+            m.set_v6_screen_px(640, 400);
+            assert_eq!(
+                m.screen.v6.as_ref().unwrap().windows[0].font_size,
+                want_font_size,
+                "{cell:?}: the launch declares the cell on every window",
+            );
+
+            m.restart();
+
+            assert_eq!(m.v6_cell(), cell, "{cell:?}: the metric is the machine's and survives");
+            assert_eq!(
+                (m.mem.read_byte(0x27), m.mem.read_byte(0x26)),
+                (cell.w as u8, cell.h as u8),
+                "{cell:?}: …and the header still states it",
+            );
+            assert_eq!(
+                m.screen.v6.as_ref().unwrap().windows[0].font_size,
+                want_font_size,
+                "{cell:?}: …and so does property 13, which is what a story lays itself out on",
+            );
+            assert_eq!(
+                (m.mem.read_word(0x22), m.mem.read_word(0x24)),
+                (640, 400),
+                "{cell:?}: the screen comes back in the pixels it was reported in, not \
+                 reconstituted from the character grid",
+            );
+        }
     }
 
     #[test]

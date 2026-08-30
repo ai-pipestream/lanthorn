@@ -1385,3 +1385,104 @@ fn the_raster_inventory_page_keeps_its_rules_and_loses_the_flood() {
         assert_eq!(ink(r), rules, "row {r} of the inventory page must be the same two rules");
     }
 }
+
+/// SQ-1156: the declared cell is a HOST DECLARATION, and an in-game `@restart`
+/// must re-state it.
+///
+/// The reported symptom is this suite's own subject seen from the other end. The
+/// floppy's release face declares an 8x20 line (case 1 at the top of this file),
+/// and Arthur lays his score bar out on the line he is TOLD — property 13, which
+/// he reads for exactly that. `@restart` builds a fresh `ScreenState`, whose
+/// windows take their `font_size` from the header, and reloads the header to the
+/// story's pristine image; the metric itself is a field on `Machine` and survives.
+/// So after a restart the machine said 8x20 and the windows said 8x16, and Arthur
+/// laid the bar out on a 16-row line the host was not drawing on.
+///
+/// What the player sees is the bar coming back as PIXELS. Hybrid draws a strip
+/// with glyphs only while the game's own runs explain it (CLAUDE.md: "never
+/// rasterise what the game printed as a character"), and runs placed off the cell
+/// boundary no longer do — so the classifier fell through to the ring and the
+/// score bar returned as half-blocks. The measured frame at 80x25, before the fix:
+/// row 13 went from `     Churchyard          St Anne's Day, Compline` to
+/// `   ▄▄▄▀▀▀▀▀▀▀▀▀▄▀▄▄▄▄▄…`, and window 0 grew from 584x180 to 584x192.
+///
+/// Turn count: fifteen intro taps and a `look` — [`in_the_churchyard`]'s route —
+/// then `restart`, `y`, and the same route again.
+///
+/// FALSIFY by removing the `set_v6_text` call from `zvm`'s `Machine::restart`:
+/// the post-restart frame carries no `Churchyard` cell text at all.
+#[test]
+fn the_score_bar_comes_back_as_cells_after_an_in_game_restart() {
+    let _g = app::v6_palette_at_boot();
+    let Some((mut session, machine)) = boot() else { return };
+    let mut state = raster_state(&machine);
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+
+    // Non-vacuity: this case can only see the defect on a press whose declared
+    // cell is NOT the 8x16 the pristine header carries. The floppy's face is what
+    // makes it 8x20, and if that ever stops being true the assertions below would
+    // pass while saying nothing.
+    assert_eq!(
+        machine.text_face().cell(),
+        zvm::screen::V6Cell { w: 8, h: 20 },
+        "{FIXTURE}: the release face declares a 20-row line, which is what a restart \
+         has to restate",
+    );
+
+    let walk = |s: &mut GameSession| {
+        for _ in 0..15 {
+            let r = match s.pending_input() {
+                app::session::InputKind::Line => s.submit(""),
+                app::session::InputKind::Char => s.submit_char(13),
+                app::session::InputKind::Event => s.submit(""),
+            };
+            if r.transcript.to_lowercase().contains("y or n") {
+                let _ = s.submit_char(b'n');
+            }
+        }
+        let _ = s.submit("look");
+    };
+    // The bar as terminal CELLS: the row carrying both fields as real buffer text.
+    let bar_row = |s: &GameSession| -> Option<(u16, String)> {
+        let model = Engine::screen(s);
+        let area = ratatui::layout::Rect::new(0, 0, 80, 25);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+        (0..area.height)
+            .map(|y| {
+                let t: String = (0..area.width)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' '))
+                    .collect();
+                (y, t)
+            })
+            .find(|(_, t)| t.contains("Churchyard") && t.contains("St Anne's Day"))
+    };
+
+    walk(&mut session);
+    let before = bar_row(&session).unwrap_or_else(|| {
+        panic!("{FIXTURE}: the launch draws the score bar as terminal cells")
+    });
+
+    let r = session.submit("restart");
+    assert!(
+        r.transcript.to_lowercase().contains("y or n"),
+        "{FIXTURE}: `restart` reaches Arthur's own confirmation: {:?}",
+        r.transcript
+    );
+    let _ = session.submit_char(b'y');
+    assert!(!session.quit, "{FIXTURE}: the restart re-booted rather than quitting");
+    walk(&mut session);
+
+    let after = bar_row(&session).unwrap_or_else(|| {
+        panic!(
+            "{FIXTURE}: the score bar must come back as terminal cells after an in-game \
+             @restart, not as ring art"
+        )
+    });
+    assert_eq!(
+        before, after,
+        "{FIXTURE}: the rebooted frame is the launch frame — same row, same text — \
+         because a restart re-runs the same story on the same declared cell",
+    );
+}

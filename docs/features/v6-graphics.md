@@ -3388,6 +3388,17 @@ Each window then reports the font properties the *game* can read back — §8.8.
 properties 12 and 13 — against that declared cell, so a window a story re-sized for
 itself stands out from seven that never touched theirs.
 
+And the declared cell is a launch fact that outlives a reboot. `@restart` reloads
+dynamic memory to the story's pristine image and builds a fresh window model, both
+of which carry the story's own idea of the cell rather than the host's — so the
+reboot re-states the metric it was launched with, and hands the screen back in the
+pixels it was reported in rather than reconstituting them from the character grid
+(which is lossy on any cell that does not divide the screen: a Macintosh 640×400
+comes back 637×390 on a 7×15 cell). Without the first, Arthur's Amiga floppy laid
+its score bar out on a 16-row line after a restart where its launch declared 20,
+and hybrid — which draws a strip with glyphs only while the game's own runs explain
+it — rasterized the bar (SQ-1156).
+
 ## Not yet there
 - **Proportional fonts, one machine so far.** Arthur's Amiga floppy carries a
   real proportional typeface, and lanthorn draws it at the face's own per-glyph
