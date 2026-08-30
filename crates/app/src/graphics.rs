@@ -501,10 +501,12 @@ impl PictSource {
     ///
     /// - the ARCHIVE is a video card's two colours ([`Self::two_colour_card`],
     ///   read off the container — a `.CG1` and not a Macintosh `Pic.data`);
-    /// - the LAUNCH may present its machine (`ProfileSource`'s licence, SQ-0928:
-    ///   a medium always, an asked-for machine on request, a bare story file
-    ///   never), which is also what stops a `.cg1` opened beside a plain `.z6`
-    ///   from reaching here — that launch keeps SQ-0806's decline;
+    /// - the LAUNCH may present its machine ([`Config::machine_colours_licensed`](crate::config::Config::machine_colours_licensed),
+    ///   SQ-0928: a medium always, an asked-for machine on request, a bare story
+    ///   file never — and SQ-1154: never at all under `--colour theme|terminal`,
+    ///   whatever the medium, because that regime is the raw path), which is also
+    ///   what stops a `.cg1` opened beside a plain `.z6` from reaching here —
+    ///   that launch keeps SQ-0806's decline;
     /// - the PLAYER has not declined game colours, since a card that cannot be
     ///   told to the story has nothing to say.
     pub fn two_colour_card_screen(

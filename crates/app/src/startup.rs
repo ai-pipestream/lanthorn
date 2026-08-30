@@ -907,28 +907,17 @@ pub(crate) fn boot_story(
     // SQ-0939: the palette, asked ONCE and asked HERE — before the session
     // constructor runs the story, and before the host resolves a single colour.
     //
-    // It is version-aware because Infocom shipped two IBM interpreters whose
-    // colour-number tables differ (XZIP's white is EGA 7, YZIP's is 15); see
-    // `zvm::interpreter::palette_for`. And it is LICENSED, because the IBM PC row
-    // is two answers wearing one name — the machine a DOS medium names, and what
-    // every story with no medium falls through to. Only the first may present the
-    // machine's colours (SQ-0928's rule), so an unlicensed launch resolves through
-    // §8.3.1's own table exactly as it always did.
+    // Which table, and why the story's Version is part of the question, lives on
+    // `Config::machine_text_palette` — with the licence, because an unlicensed
+    // launch resolves through §8.3.1's own table (SQ-0928's rule, and SQ-1154's
+    // `--colour theme|terminal`, which withholds the licence on original media).
+    // The suites that measure a booted frame call the same function.
     //
     // Every consumer reads this one global: the VM's own `true_value` for window
     // properties 17/18, the ColorScheme's standard-colour seed, the v6 pixel path
     // and the CLI's SGR path. Setting it late, or per-path, is how one colour
     // number comes to look like two colours on one screen.
-    let machine_palette =
-        zvm::interpreter::palette_for(cfg.interpreter_profile.row_number(), story_bytes.first().copied());
-    zvm::screen::set_palette(match machine_palette {
-        zvm::screen::Palette::IbmXzip | zvm::screen::Palette::IbmYzip
-            if !cfg.machine_colours_licensed() =>
-        {
-            zvm::screen::Palette::Standard
-        }
-        p => p,
-    });
+    zvm::screen::set_palette(cfg.machine_text_palette(story_bytes.first().copied()));
     // SQ-0885: an experiment knob for header `$1F`, set beside the palette
     // because it is the same kind of fact — one machine per run — and because
     // the session constructor runs the story, so it has to be in force before
@@ -1315,14 +1304,16 @@ pub(crate) fn boot_story(
                 zvm::screen::set_palette(palette);
                 // …and the pair §8.3.3 reports is the card's, not the machine's:
                 // black 2 rather than blue 6, with the ink unmoved at white 9.
-                // A card is the machine's own display, so `--colour theme` and
-                // `--colour terminal` decline it with the rest of that source
-                // (SQ-1082); the palette is set either way, being a table the
-                // artwork's colour numbers resolve through rather than a claim
-                // about the default page.
-                if cfg.colour_source == app::config::ColourSource::Machine {
-                    host_default_colours = Some(pair);
-                }
+                //
+                // SQ-1154: unconditionally, now. `--colour theme|terminal` used to
+                // decline the card here, one arm below the palette that had already
+                // been installed — so the regime reached the reported pair and not
+                // the table it is read back through. It is withheld one layer up
+                // instead: those two arms are unlicensed, so
+                // `two_colour_card_screen` answers `None` and neither line runs.
+                // Whatever reaches this scope IS the card, palette and pair
+                // together, which is the point of resolving them in one call.
+                host_default_colours = Some(pair);
             }
             // SQ-0837/SQ-0838: then the archive the MEDIUM supplied, and only
             // then the machine. The archive comes first because Infocom's own

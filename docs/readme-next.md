@@ -220,4 +220,9 @@ listed above, but any written between now and then need the same treatment.
 
 Worth a line somewhere if there is a natural home: `--colour
 terminal|theme|machine` is new, and picks which of the three sources the story's
-default page and ink come from.
+default page and ink come from. It selects a *regime*, not merely a first
+preference: `--colour machine` gets a bare story file the machine's own screen
+(what `--system-colours` did), and `--colour terminal` or `--colour theme` gets a
+release floppy the plain one — your colours, resolved through the standard
+table, exactly as the same story looks opened as a file. The artwork is the
+disk's either way.

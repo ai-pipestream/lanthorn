@@ -516,6 +516,16 @@ impl From<OnOff> for bool {
 /// A DIFFERENT axis from `honor_game_colours`, which is whether the story's own
 /// `set_colour` requests are obeyed. The two were conflated because one branch
 /// answered both at once; see `colors::host_default_colours` for where they part.
+///
+/// **It selects a REGIME, not merely the first rung of a chain** (SQ-1154), and
+/// the two halves of that are symmetrical: `machine` on a bare story file is the
+/// media path applied to a raw file, and `theme`/`terminal` on original media is
+/// the raw path applied to a medium. Both are one predicate —
+/// [`Config::machine_colours_licensed`], which those two arms withhold outright.
+/// So a floppy launched under `--colour terminal` resolves its colour numbers
+/// through §8.3.1's table, is told the host's own pair, and shows no period look
+/// or two-colour card, exactly as the same story does as a bare file. Its
+/// ARTWORK is unmoved: pictures resolve through the archive's own palette.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
 #[clap(rename_all = "lowercase")]
 pub enum ColourSource {
@@ -1906,14 +1916,66 @@ impl Config {
         self.interpreter_profile.interpreter_number()
     }
 
-    /// May this launch present its machine at all? (SQ-0928)    /// May this launch present its machine at all? (SQ-0928)
+    /// May this launch present its machine at all? (SQ-0928)
     ///
     /// The medium named the machine, or the player named it and opted in. Both
     /// [`Self::machine_default_colours`] and `crate::period::resolve` ask this —
     /// a `$2C`/`$2D` pair and a period look are the same kind of claim about the
     /// same machine, and it would be incoherent to license one and not the other.
+    ///
+    /// **And `--colour` decides the REGIME before the medium is asked** (SQ-1154).
+    /// [`ColourSource`] names which of the three sources this launch draws its
+    /// default page and ink from, and the user's rule is symmetrical: `machine`
+    /// on a bare story file is the media path applied to a raw file — SQ-0928's
+    /// opt-in, which is what `system_colours` still carries — and
+    /// `theme`/`terminal` on original media is the raw path applied to a medium.
+    /// So those two arms answer **no** here however the profile was arrived at:
+    /// this launch does not present its machine, exactly as a bare `.z6` does
+    /// not.
+    ///
+    /// Withholding the licence is the WHOLE of that change, because every
+    /// machine-colour question already hangs off this one predicate — the
+    /// `$2C`/`$2D` pair, the two-colour card's pair (and with it
+    /// [`crate::graphics::PictSource::two_colour_card_screen`], so
+    /// `Palette::IbmCga` is never installed), the machine's colour-number table
+    /// in `startup.rs`, and the period look. The artwork is untouched: pictures
+    /// resolve through `graphics`'s own per-picture palette, read from the
+    /// archive, and never through `zvm::screen`'s.
+    ///
+    /// A story's own `set_colour` then resolves through §8.3.1's table rather
+    /// than the machine's, which is what it does on the raw path and is the
+    /// regime being read consistently, not a colour lost: `honor_game_colours`
+    /// is the axis that decides whether those requests are obeyed at all.
     pub fn machine_colours_licensed(&self) -> bool {
-        self.interpreter_source.licenses_machine_colours(self.system_colours)
+        match self.colour_source {
+            // Named on the command line, `Machine` additionally sets
+            // `system_colours` for the run — see `resolve`.
+            ColourSource::Machine => {
+                self.interpreter_source.licenses_machine_colours(self.system_colours)
+            }
+            ColourSource::Theme | ColourSource::Terminal => false,
+        }
+    }
+
+    /// The table this launch's colour NUMBERS resolve through — the machine's
+    /// when it is licensed to present one, and §8.3.1's when it is not
+    /// (SQ-0939, SQ-1154).
+    ///
+    /// `zversion` is the story's header byte 0, because Infocom shipped two IBM
+    /// interpreters whose tables differ (XZIP's white is EGA 7, YZIP's is 15) —
+    /// see [`zvm::interpreter::palette_for`], which is the machine's own answer
+    /// and the only thing this adds the licence to.
+    ///
+    /// One function because two callers must not drift: `startup.rs` installs it
+    /// process-wide before the session constructor runs the story, and the suites
+    /// that measure a booted frame have to boot under the same table. A harness
+    /// that re-derived this would keep passing while the shipped path regressed.
+    pub fn machine_text_palette(&self, zversion: Option<u8>) -> zvm::screen::Palette {
+        if self.machine_colours_licensed() {
+            zvm::interpreter::palette_for(self.interpreter_profile.row_number(), zversion)
+        } else {
+            zvm::screen::Palette::Standard
+        }
     }
 
     pub fn machine_default_colours(&self) -> Option<(u8, u8)> {
@@ -4915,6 +4977,51 @@ use_defaults = false
             assert!(!cfg.system_colours, "{src:?} asks for a source, not for a machine");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1154: and the narrowing arms decline a machine the MEDIUM named, too —
+    /// which is the half that was missing, since `system_colours` was never what
+    /// licensed a floppy in the first place.
+    ///
+    /// The CI-safe half of `tests/suites/colour_regime_media.rs`: that suite
+    /// drives real presses and skips vacuously wherever the gitignored media are
+    /// absent, which is every CI run. This one asks the same predicate of a
+    /// `ProfileSource` set by hand, so the rule cannot quietly stop being tested
+    /// on the machine that runs it most.
+    #[test]
+    fn the_host_colour_regimes_withhold_the_machine_however_it_was_named() {
+        use crate::interpreter::{InterpreterProfile, ProfileSource};
+        let cfg = |source, colour| Config {
+            interpreter_profile: InterpreterProfile::Amiga,
+            interpreter_source: source,
+            colour_source: colour,
+            system_colours: colour == ColourSource::Machine,
+            ..Default::default()
+        };
+        for source in [ProfileSource::Medium, ProfileSource::Asked, ProfileSource::Fallback] {
+            for colour in [ColourSource::Theme, ColourSource::Terminal] {
+                let c = cfg(source, colour);
+                assert!(!c.machine_colours_licensed(), "{source:?} under {colour:?}");
+                assert_eq!(c.machine_default_colours(), None, "so it states no §8.3.3 pair");
+                assert_eq!(c.machine_two_colour_colours(), None, "and no two-colour card");
+                assert_eq!(
+                    c.machine_text_palette(Some(6)),
+                    zvm::screen::Palette::Standard,
+                    "and its numbers resolve through §8.3.1"
+                );
+            }
+        }
+        // …while `machine` is the chain that already ran, medium and opt-in alike.
+        let medium = cfg(ProfileSource::Medium, ColourSource::Machine);
+        assert!(medium.machine_colours_licensed(), "a floppy is its own licence");
+        assert_eq!(medium.machine_text_palette(Some(6)), zvm::screen::Palette::Amiga);
+        assert_eq!(medium.machine_default_colours(), InterpreterProfile::Amiga.default_colours());
+        let asked = cfg(ProfileSource::Asked, ColourSource::Machine);
+        assert!(asked.machine_colours_licensed(), "--interpreter 4 plus the opt-in, SQ-0928");
+        assert!(
+            !cfg(ProfileSource::Fallback, ColourSource::Machine).machine_colours_licensed(),
+            "and nothing rescues a fallback"
+        );
     }
 
     /// SQ-0646: "default" in the settings panel is `None`, and `None` has to REMOVE

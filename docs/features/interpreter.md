@@ -1223,6 +1223,23 @@ Amiga floppy or anywhere else.
   and is also what every story with no medium falls through to; without the
   distinction, opening any modern Inform game would paint it blue.
 
+  **And the flag runs the other way too** (SQ-1154). `--colour` names which
+  *regime* a launch is in rather than which rung of a chain it starts at, and the
+  two halves are mirror images: `--colour machine` gives a bare story file the
+  media path, and `--colour theme` or `--colour terminal` gives a release floppy
+  the raw one. Ask for your terminal's colours off an Amiga disk and the launch
+  simply does not present its machine — no §8.3.3 pair, no two-colour card, and
+  colour numbers resolving through §8.3.1's own table rather than the Amiga's,
+  which is the whole of what a bare file does. It has to be all of those together:
+  snapping your terminal's grey to the nearest *standard* number and then reading
+  that number back through the *machine's* palette reports a colour that is not
+  your terminal's, which is exactly what the flag was asked for. What does not
+  move is the ARTWORK — a plate resolves through the palette stored beside it in
+  the archive, so the disk's pictures look like the disk's pictures whichever
+  regime you are in — and the story's own `set_colour`, which is still obeyed
+  unless you turn `--game-colours off`; it simply resolves through the table the
+  regime names.
+
   **And the card it is showing is not the machine.** The IBM PC's blue belongs to
   a full-colour screen; put a CGA plate in front of it and the display is two
   states, black under light grey — the exact inverse of what *Zork Zero* asks for,

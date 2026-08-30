@@ -20,6 +20,8 @@ mod adf_disk_image;
 mod apple_disk_set_release;
 #[path = "suites/art_build_pairing.rs"]
 mod art_build_pairing;
+#[path = "suites/colour_regime_media.rs"]
+mod colour_regime_media;
 #[path = "suites/cover_frontispiece.rs"]
 mod cover_frontispiece;
 #[path = "suites/disk_set_rows.rs"]
