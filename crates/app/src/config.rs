@@ -56,12 +56,19 @@ pub(crate) fn default_box_style() -> String { "rounded".into() }
 pub(crate) fn default_arrow_set() -> String { "filled".into() }
 pub(crate) fn default_portal_icons() -> String { "ascii".into() }
 pub(crate) fn default_path_style() -> String { "light".into() }
-pub(crate) fn default_badge_zcode() -> String { "Z".into() }
-pub(crate) fn default_badge_glulx() -> String { "G".into() }
-pub(crate) fn default_badge_blorb() -> String { "B".into() }
-pub(crate) fn default_badge_save() -> String { "S".into() }
-pub(crate) fn default_badge_hint() -> String { "H".into() }
-pub(crate) fn default_badge_hint_available() -> String { "h".into() }
+/// The badge preset a style file with no `badge_icons` key gets: the letters.
+pub(crate) fn default_badge_icons() -> String { "plain".into() }
+// …and the six per-badge defaults, taken FROM that preset rather than spelled a
+// second time beside it (SQ-1159). An absent `badge_*` key means "whatever the
+// preset says", so `[elements] badge_icons = "nerdfont"` moves all six at once.
+pub(crate) fn default_badge_zcode() -> String { crate::symbols::StoryBadges::PLAIN.zcode.to_string() }
+pub(crate) fn default_badge_glulx() -> String { crate::symbols::StoryBadges::PLAIN.glulx.to_string() }
+pub(crate) fn default_badge_blorb() -> String { crate::symbols::StoryBadges::PLAIN.blorb.to_string() }
+pub(crate) fn default_badge_save() -> String { crate::symbols::StoryBadges::PLAIN.save.to_string() }
+pub(crate) fn default_badge_hint() -> String { crate::symbols::StoryBadges::PLAIN.hint.to_string() }
+pub(crate) fn default_badge_hint_available() -> String {
+    crate::symbols::StoryBadges::PLAIN.hint_available.to_string()
+}
 pub(crate) fn default_diagonal_corners() -> bool { true }
 pub(crate) fn default_portal_path_style() -> String { "dotted".into() }
 pub(crate) fn default_control_icons() -> String { "plain".into() }
