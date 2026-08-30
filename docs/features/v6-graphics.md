@@ -1788,7 +1788,7 @@ screenshot, a bug report and a headless capture all want:
   foreground/background at startup (OSC 10/11) and paints in those, so raster
   text stays readable on a light-background terminal instead of forcing a
   fixed light-grey-on-black.
-  - **The word reveal lights here too.** Pressing it (`◈`, **F4**,
+  - **The word reveal lights here too.** Pressing it (`◈`, or
     `/reveal-words`) underlines the words on screen the story's own parser would
     accept, and it was dark on every graphical v6 title for as long as it read
     the *cell* wrap cache — which raster never fills, because raster's text is

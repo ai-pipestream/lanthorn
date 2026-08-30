@@ -153,9 +153,10 @@ itself.**
 - **A real terminal UI** — mouse, resizable panes, a story picker with IFDB
   search, command palette, in-game InvisiClues, transcript search, a debug
   disassembler, and a theme every part of which you can restyle.
-  *Coming next release:* press **F4** and every word already on screen that this
-  story's parser would accept **lights up** for a moment — the answer to a room
-  description that names a dozen nouns and implements two.
+  *Coming next release:* click the `◈` on the story pane's border and every
+  word already on screen that this story's parser would accept **lights up** for
+  a moment — the answer to a room description that names a dozen nouns and
+  implements two.
   → [interface](docs/features/interface.md)
 
 There is a great deal more than this — proportional fonts off a Kickstart ROM,

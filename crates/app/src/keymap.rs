@@ -294,32 +294,30 @@ impl Default for KeyMap {
         // this entry lets the keymap advertise it for hints/help).
         bind!(plain(Tab), "toggle-focus", Context::Global);
 
-        // F2 opens the command band directly (SQ-0664). The leader binding
-        // (Ctrl+P v) and the slash command stay, but leader-only is precisely
-        // why nobody found the old verb menu.
-        bind!(plain(F(2)), "open-command-band", Context::Global);
-
-        // F3 enters pane-resize mode (SQ-0669). Picked over the alternatives:
-        // Ctrl+Arrows are the natural "resize" chord elsewhere, but terminals
-        // and window managers eat them (and they are the tidy-animation stage
-        // jump here); Alt combos are unreliable across terminals; and every
-        // free letter is a typed character at the story prompt. F3 is the next
-        // unclaimed F-key after F2's command band — F1 stays free for a help
-        // binding, F5 is deliberately unbound (reset-game is leader-only), and
-        // F6-F9 are pinned unbound. Now the mouse can drag the boundaries, the
-        // keyboard path deserved to be more than leader-only too.
-        bind!(plain(F(3)), "resize-panes", Context::Global);
-
-        // F4 lights the momentary word reveal (SQ-1107), and it has to be a KEY
-        // rather than only a click: the reveal answers "of the words I can see,
-        // which work right now?", which is asked mid-sentence with both hands on
-        // the keyboard — reaching for the mouse to ask it is most of the reason
-        // nobody would. F4 was free (the note above stops at F5 because it was
-        // written before this existed; `open-history` was never on it, and the
-        // case that says so asserts what it means rather than that the key is
-        // reserved forever). The row now reads as the story pane's own: F2 opens
-        // the verbs, F3 moves the walls, F4 lights the nouns.
-        bind!(plain(F(4)), "reveal-words", Context::Global);
+        // NO F-KEY HAS A DEFAULT BINDING, and that is the whole rule (SQ-1142).
+        //
+        // F2 opened the command band (SQ-0664), F3 entered pane-resize mode
+        // (SQ-0669) and F4 lit the word reveal (SQ-1107). All three are gone as
+        // DEFAULTS because they were never ours to claim: a v4+ story may
+        // declare a terminating-characters table at header $2E, and Infocom's
+        // V6 titles use it — Arthur lists F1-F6, so pressing F2 for its map is
+        // a read the STORY handles. A host that intercepts the key eats input
+        // the game explicitly asked for, and the player sees a command band
+        // instead of the map they asked their game for.
+        //
+        // What this does NOT do: `KeySpec` still parses "f1".."f12", so a player
+        // who wants one of these keys may bind it in their own config and
+        // accept the trade knowingly. The three commands are untouched in
+        // `slash::COMMANDS` — `open-command-band`, `resize-panes` and
+        // `reveal-words` are all still reachable by name, by the Ctrl+P leader
+        // panel where one has a letter, and by the pane-border controls that
+        // click them (SQ-1123). Only the default keymap gave them up.
+        //
+        // Two alternatives were weighed and rejected: letting the story win only
+        // while it is READING, keyed off $2E — the highest-fidelity answer, the
+        // most machinery, and it makes one keystroke mean different things in
+        // different stories; and rebinding the three to other keys, which keeps
+        // a default shortcut and spends three more keys on it.
 
         bind!(ctrl(Char('s')), "save-state", Context::Global);
         bind!(ctrl(Char('r')), "restore-state", Context::Global);
@@ -1345,25 +1343,51 @@ mod tests {
         assert_eq!(layout.leader_command('1'), None);
     }
 
-    /// SQ-0669: resize mode was reachable only through the palette / a leader
-    /// letter that no longer exists. F3 is its direct default — the next
-    /// unclaimed F-key after F2's command band.
+    /// SQ-1142: lanthorn claims NO function key by default, in any context.
+    ///
+    /// A v4+ story may declare a terminating-characters table at header $2E and
+    /// Infocom's V6 titles do — Arthur lists F1-F6 — so a default binding on an
+    /// F-key eats a read the story explicitly asked for. F2/F3/F4 carried
+    /// `open-command-band`/`resize-panes`/`reveal-words` until this; they are
+    /// leader-, palette- and border-control-reachable now, and only the default
+    /// keymap gave them up.
+    ///
+    /// This is deliberately the WHOLE range rather than the three that were
+    /// bound: the next person reaching for a free key must not find one here.
     #[test]
-    fn f3_enters_resize_mode_by_default() {
+    fn no_function_key_carries_a_default_binding() {
         let km = KeyMap::default();
-        let f3 = KeySpec { code: KeyCode::F(3), ctrl: false, shift: false, alt: false };
-        assert_eq!(km.lookup(&f3, Context::Global), Some("resize-panes"));
-        // It must not collide with the other direct F-key defaults.
-        let f2 = KeySpec { code: KeyCode::F(2), ctrl: false, shift: false, alt: false };
-        assert_eq!(km.lookup(&f2, Context::Global), Some("open-command-band"));
-        // …and it resolves through the real key path from the story prompt,
-        // where every plain letter is typing instead.
+        for n in 1..=12u8 {
+            let spec = KeySpec { code: KeyCode::F(n), ctrl: false, shift: false, alt: false };
+            for ctx in [Context::Global, Context::Map, Context::Anim, Context::Browser] {
+                assert_eq!(
+                    km.lookup(&spec, ctx),
+                    None,
+                    "F{n} carries a default binding in {ctx:?}: the story may have asked \
+                     for that key through its own $2E terminating-characters table",
+                );
+            }
+        }
+        // …and the real key path from the story prompt agrees: nothing resolves.
         let s = crate::state::AppState::default();
-        let ev = crossterm::event::KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE);
-        assert!(matches!(
-            crate::input::key_to_command(&s, ev),
-            crate::input::KeyResolve::Command(ref c, Context::Global) if c == "resize-panes"
-        ));
+        for n in [2u8, 3, 4] {
+            let ev = crossterm::event::KeyEvent::new(KeyCode::F(n), KeyModifiers::NONE);
+            assert!(
+                matches!(crate::input::key_to_command(&s, ev), crate::input::KeyResolve::None),
+                "F{n} still resolves to a command",
+            );
+        }
+    }
+
+    /// The unbind is not a removal of the SPEC: a player who wants an F-key may
+    /// still write one in their own `[keymap]`, and the parser has to keep
+    /// accepting the token for that to be true.
+    #[test]
+    fn f_key_specs_still_parse_so_a_player_can_bind_one_by_hand() {
+        for n in 1..=12u8 {
+            let spec: KeySpec = format!("f{n}").parse().unwrap_or_else(|e| panic!("f{n}: {e}"));
+            assert_eq!(spec.code, KeyCode::F(n));
+        }
     }
 
     #[test]

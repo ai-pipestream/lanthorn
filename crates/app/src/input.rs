@@ -8822,16 +8822,21 @@ mod tests {
         assert!(command_band_intercept(ctrl(KeyCode::Char('s')), &s).is_none());
     }
 
-    /// F2 is the direct default binding (leader-only is why nobody found the
-    /// old verb menu).
+    /// F2 was the direct default binding until SQ-1142 unbound every F-key: a
+    /// v4+ story may claim them through its own $2E terminating-characters
+    /// table, and Arthur does. The band's ways in are the leader panel's `v`,
+    /// the `/open-command-band` command, and the `≡` control on the pane
+    /// border — the palette row here is what this case pins.
     #[test]
-    fn f2_opens_the_command_band_by_default() {
+    fn f2_no_longer_opens_the_command_band_by_default() {
         use crate::keymap::{KeyMap, KeySpec};
         let km = KeyMap::default();
         let spec = KeySpec { code: KeyCode::F(2), ctrl: false, shift: false, alt: false };
+        assert_eq!(km.lookup(&spec, crate::keymap::Context::Global), None);
         assert_eq!(
-            km.lookup(&spec, crate::keymap::Context::Global),
-            Some("open-command-band")
+            km.primary_key("open-command-band"),
+            None,
+            "open-command-band is leader-, command- and click-reachable: no default key",
         );
     }
 

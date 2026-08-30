@@ -53,9 +53,9 @@ inspecting the machine, and firing commands — without ever leaving the story.
   live, and the new size is written to `config.toml` when you let go. What you
   press the button on decides what the drag means: a drag that starts on a
   boundary only resizes, and a text selection that starts in the transcript keeps
-  selecting even when it crosses one. For the keyboard, **F3** (or
-  `/resize-panes`) enters resize mode — **Tab** cycles which boundary is live,
-  the arrows move it, `0` resets, **Esc** leaves.
+  selecting even when it crosses one. For the keyboard, `/resize-panes` enters
+  resize mode — **Tab** cycles which boundary is live, the arrows move it, `0`
+  resets, **Esc** leaves.
 - **The room dock** — one panel at the bottom of the map pane describing one
   room, opened with `k` from the leader panel or `/toggle-room-dock`. It has two
   bodies:
@@ -278,7 +278,7 @@ know which side you're on).
     render mode is a cycle rather than a switch, so `hybrid` — how the game
     arrives — is not lit, while `raster` and `extended` both are.)
   - **One of them is a trigger, not a switch.** The **reveal** (`◈` plain,
-    `md-flashlight` patched, **F4** from the keyboard) has no state to report:
+    `md-flashlight` patched, or `/reveal-words`) has no state to report:
     press it and the words on screen that this story's parser would accept light
     up for a few seconds. So
     it has one glyph rather than a pair, and it still lights while the reveal is
@@ -371,7 +371,8 @@ know which side you're on).
   prompt, wait for a key, and then print the page *after* that prompt, on that
   row — so it is part of the new page, and the pause shows it rather than
   scrolling its heading away (SQ-0823).
-- **The command band** (**F2**, or `/open-command-band`) — a Journey-style
+- **The command band** (the `≡` control on the pane border, `v` from the
+  leader panel, or `/open-command-band`) — a Journey-style
   bottom dock that builds a command by pointing, and suggests one as you type
   (it never takes the keyboard from the prompt — see "typing always wins"
   below). It is a
@@ -539,7 +540,7 @@ know which side you're on).
   that row and advances, exactly like a click. **Shift-Tab** always just
   moves, even with something highlighted. **←**/**→** are the ordinary caret
   keys on the prompt; the band doesn't claim them. **Esc** clears an armed
-  **↑**/**↓** highlight first, then closes the band — and **F2**/
+  **↑**/**↓** highlight first, then closes the band — and
   `open-command-band` is a toggle, so it always closes the band too, Esc ladder
   or not.
 

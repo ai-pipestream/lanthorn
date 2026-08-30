@@ -539,8 +539,8 @@ re-seed the new template, or hand-write the new shape from
   and a refusal the probe's own control commands never provoke — "that's not
   something you can open" — reads as a success and survives.
   The **word reveal** is the same light pointed the other way. The offer can only
-  help once the parser has already said no; press **F4** (or the `◈` on the story
-  pane's bottom border, or `/reveal-words`) and every word *already on screen*
+  help once the parser has already said no; click the `◈` on the story pane's
+  bottom border (or run `/reveal-words`) and every word *already on screen*
   that the parser would accept lights up for a few seconds, over the story's own
   prose, without moving a line of it. It goes out on your next keystroke, on your
   next turn, or on its own — one press, one look, and you are back in the game.
