@@ -455,8 +455,25 @@ struct Candidate {
 /// to scan is a list the player reads instead of playing.
 pub const MAX_OFFERED: usize = 3;
 
-/// The shortest word worth answering. Below this every dictionary has a neighbour
-/// one keystroke away and the evidence is worthless.
+/// The shortest word a DISTANCE can be evidence about. Below this every
+/// dictionary has a neighbour one keystroke away and the evidence is worthless:
+/// `cas` is one edit from `case`, `cat`, `car`, `cap` and `gas`, and a rule that
+/// answers it is answering the alphabet.
+///
+/// **It belongs to [`by_near_miss`](StoryVocabulary::by_near_miss) alone**, and
+/// SQ-1144 moved it there from the top of [`offer`](StoryVocabulary::offer),
+/// where it had been gating every source. The reasoning above is about edit
+/// distance and holds nowhere else: an exact hit in WordNet's exception list is
+/// not a weak guess that gets weaker as the word shortens — `lit` → `light` is a
+/// morphological FACT, and so is `don` → `wear` in the synonym table. Applied to
+/// those, length was silencing `lit`, `ate`, `saw`, `won` and `got` on the
+/// strength of an argument that was never about them (SQ-1113 found it; the case
+/// it left behind is now inverted in `vocabulary_offer.rs`).
+///
+/// What still protects the exact sources is what always protected them: they
+/// look their answer up rather than guessing it, and `offer` then intersects
+/// whatever they propose with this story's own dictionary. The table proposes;
+/// the story disposes — at three letters exactly as at eight.
 const MIN_LEN: usize = 4;
 
 /// Words the parser ignores and a shape count must ignore with it.
@@ -501,8 +518,18 @@ impl StoryVocabulary {
     /// parser would have matched — and a rule about keystrokes has to be read in
     /// the space the keystrokes are judged in, or the commonest near miss in the
     /// commonest games is out of reach.
+    ///
+    /// And this is the ONE source [`MIN_LEN`] governs, on both sides of the
+    /// comparison: a dictionary word shorter than it is not worth proposing, and
+    /// a TYPED word shorter than it is not worth answering, because at three
+    /// characters the whole dictionary is one keystroke away. That second half
+    /// used to sit at the top of [`offer`](Self::offer) and gate the exact
+    /// sources with it; it is here now because the argument is here (SQ-1144).
     fn by_near_miss(&self, typed: &str, position: Position, out: &mut Vec<Candidate>) {
         let key = self.truncated(typed);
+        if key.chars().count() < MIN_LEN {
+            return;
+        }
         for (order, (word, roles)) in self.words.iter().enumerate() {
             if !self.fills(word, *roles, position) || word.chars().count() < MIN_LEN {
                 continue;
@@ -636,7 +663,13 @@ impl StoryVocabulary {
         prose: &[String],
     ) -> Vec<String> {
         let typed = typed.to_lowercase();
-        if self.truncated(&typed).chars().count() < MIN_LEN || self.is_empty() {
+        // No length gate here. It lived at this line until SQ-1144 and refused
+        // every word under four characters before a single source ran — which
+        // meant an argument about EDIT DISTANCE was deciding the fate of two
+        // sources that measure no distance at all. It now sits inside
+        // [`by_near_miss`](Self::by_near_miss), which is the only source it was
+        // ever reasoning about; see [`MIN_LEN`].
+        if self.is_empty() {
             return Vec::new();
         }
         let mut found = self.candidates(&typed, position);
@@ -1552,7 +1585,11 @@ mod tests {
     fn silence_is_the_common_answer() {
         let v = pocket_zork();
         assert!(v.offer("xyzzy", Position::Opening, &["lamp"], &[]).is_empty());
-        assert!(v.offer("cas", Position::Inside, &[], &[]).is_empty(), "three letters is not evidence");
+        assert!(
+            v.offer("cas", Position::Inside, &[], &[]).is_empty(),
+            "three letters is no evidence of a DISTANCE — `cas` is one keystroke from `case`, \
+             and from `car`, `cat`, `cap` and `gas` besides"
+        );
         assert!(StoryVocabulary::default().offer("lanturn", Position::Inside, &[], &[]).is_empty());
     }
 
@@ -1612,11 +1649,37 @@ mod tests {
                 "{typed} means {wanted}"
             );
         }
-        // `don` -> `wear` is in the table and out of reach here: MIN_LEN answers
-        // nothing under four characters, because at three every dictionary has a
-        // neighbour and the evidence is worthless. The gate is older than this
-        // source and is not relaxed for it.
-        assert!(v.offer("don", Position::Opening, &["lamp"], &[]).is_empty());
+        // `don` -> `wear` is three characters, and answered (SQ-1144). It was
+        // pinned as REFUSED here until then, on `MIN_LEN`'s reasoning that at
+        // three letters every dictionary has a neighbour one keystroke away —
+        // true, and about a neighbour. This is a LOOKUP: nothing measured a
+        // distance, `don` means `wear` in the table whatever its length, and the
+        // story is asked whether it holds the answer exactly as it is at eight
+        // characters. The gate is now `by_near_miss`'s alone.
+        assert_eq!(v.offer("don", Position::Opening, &["lamp"], &[]), vec!["wear"]);
+    }
+
+    /// And the silences that still hold at three letters, which is the half
+    /// SQ-1144 could most easily have lost. The exact sources were let through;
+    /// nothing else was.
+    ///
+    /// Falsify by deleting the `MIN_LEN` guard from `by_near_miss`: `lam` starts
+    /// answering `lamp`, which is the wallpaper the constant exists to prevent —
+    /// `lam` is equally one keystroke from `jam`, `ram`, `lab` and `am`.
+    #[test]
+    fn three_letters_is_still_no_evidence_of_a_near_miss() {
+        let v = a_plainly_spelled_story();
+        // One keystroke from `lamp`, and from a dozen words this story does not
+        // happen to hold. A distance is not evidence at this length.
+        assert!(v.offer("lam", Position::Inside, &[], &[]).is_empty());
+        // In no table at all, and near nothing: the ordinary answer.
+        assert!(v.offer("zug", Position::Opening, &["lamp"], &[]).is_empty());
+        // The table PROPOSES and the story DISPOSES, at three letters as at
+        // eight: `ate` reaches `eat` in WordNet's exception list, and this story
+        // has no `eat` for it to reach.
+        assert_eq!(verb_synonyms::irregular_bases("ate"), ["eat"], "the table does reach it");
+        assert!(!v.knows("eat"), "and this story does not hold what it reaches");
+        assert!(v.offer("ate", Position::Opening, &["lamp"], &[]).is_empty());
     }
 
     /// The table's keys are BASE FORMS, so an inflected word has to be reduced

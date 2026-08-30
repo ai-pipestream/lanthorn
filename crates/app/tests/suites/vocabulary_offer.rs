@@ -451,25 +451,91 @@ fn zork1_answers_an_irregular_inflection_with_the_verb_it_knows() {
     );
 }
 
-/// And `lit lamp` — the line the quest was NAMED for — is still silent, for a
-/// reason that has nothing to do with the table: `lit` is three letters and
-/// `MIN_LEN` answers nothing under four.
+/// And `lit lamp` — the line the quest was NAMED for (SQ-1144).
 ///
-/// That gate is older than both word sources and is refused to both alike: `don`
-/// means `wear`, which Zork knows, and is unanswered in the case below for
-/// exactly the same reason. Pinned here so the silence reads as the policy it is
-/// rather than as a hole in the data — the two assertions after it show the
-/// table reaching `light` and the story holding it, with only the length between
-/// them.
+/// This case is the INVERSION of the one SQ-1113 left here, which pinned the
+/// same command as silent. Nothing about the table changed: `irregular_bases`
+/// reached `light` then and reaches it now, and Zork has always held the word.
+/// What stood between them was `MIN_LEN`, applied at the top of `offer` to every
+/// source alike — an argument about EDIT DISTANCE (at three letters every
+/// dictionary has a neighbour one keystroke away) deciding the fate of a lookup
+/// that measures no distance at all. `lit` → `light` is a morphological fact
+/// from WordNet's own exception list, and it is exactly as much a fact at three
+/// letters as `caught` → `catch` is at six.
+///
+/// The gate now lives in `by_near_miss`, which is the only source it was ever
+/// reasoning about; the silence half of that move is pinned three cases below.
+///
+/// Falsify by putting the length test back at the top of `StoryVocabulary::offer`:
+/// this falls silent again, which is precisely the state SQ-1113 recorded.
 #[test]
-fn zork1_stays_quiet_on_a_three_letter_irregular() {
+fn zork1_answers_a_three_letter_irregular_now_that_length_gates_only_the_near_miss() {
     let Some(mut s) = zork1() else { return };
     let (_state, lines) = play(&mut s, &["lit lamp"]);
+    assert_eq!(lines, vec!["this story knows — light"]);
+
+    assert_eq!(verb_synonyms::irregular_bases("lit"), ["light"], "the table reaches it");
+    let v = <app::session::GameSession as Engine>::story_vocabulary(&s).expect("zork1 has one");
+    assert!(v.knows("light"), "and the story holds the word it reaches");
+}
+
+/// The other three-letter irregulars the quest was filed on, on the same story:
+/// `ate`, `saw`, `won`, `got`. One command each, because the offer speaks once
+/// per word per session and a second `ate` would be swallowed by that rule
+/// rather than by anything this quest touched.
+///
+/// Each is a form no suffix rule can produce and the near miss cannot reach —
+/// `saw` is two keystrokes from `see`, `won` two from `win` — so every line here
+/// is WordNet's exception list and the story's own dictionary, and nothing else.
+#[test]
+fn zork1_answers_the_rest_of_the_three_letter_irregulars() {
+    let Some(mut s) = zork1() else { return };
+    let (_state, lines) = play(&mut s, &["ate lamp", "saw lamp", "won lamp", "got lamp"]);
+    assert_eq!(
+        lines,
+        vec![
+            "this story knows — eat · bite · taste",
+            "this story knows — see · find · seek",
+            "this story knows — win",
+            "this story knows — get · carry · catch",
+        ]
+    );
+}
+
+/// **The silence half, and the half that mattered more.** Three letters is where
+/// noise is cheapest to generate, so SQ-1144 had to show what stayed quiet as
+/// well as what started speaking.
+///
+/// * `take lam` — `lam` is one keystroke from the `lamp` this story holds, and
+///   equally from `jam`, `ram`, `lab` and `am`. That is what `MIN_LEN` is *for*,
+///   and it is untouched: the near miss still refuses anything under four.
+/// * `oaf lamp` — a word in no table at all, near nothing. The ordinary answer.
+/// * `sum lamp` — the table PROPOSES (`sum up`, `summarize`, `tally`) and the
+///   story DISPOSES: Zork holds none of them. That rule is not relaxed at three
+///   letters either, which is the whole reason no censorship of the table is
+///   needed.
+///
+/// Falsify the first by deleting the `MIN_LEN` guard from `by_near_miss`: `take
+/// lam` starts answering `lamp`, and every three-letter word in the game becomes
+/// a suggestion.
+#[test]
+fn zork1_stays_quiet_at_three_letters_where_the_evidence_is_a_distance_or_absent() {
+    let Some(mut s) = zork1() else { return };
+    let (_state, lines) = play(&mut s, &["take lam", "oaf lamp", "sum lamp"]);
     assert!(lines.is_empty(), "{lines:?}");
 
-    assert_eq!(verb_synonyms::irregular_bases("lit"), ["light"], "the table does reach it");
     let v = <app::session::GameSession as Engine>::story_vocabulary(&s).expect("zork1 has one");
-    assert!(v.knows("light"), "and the story does hold the word it reaches");
+    assert!(v.knows("lamp"), "the near miss `lam` is one keystroke from a word right here");
+    assert!(verb_synonyms::suggest("oaf", |_| true, 3).is_empty(), "`oaf` is in no group");
+    assert_eq!(
+        verb_synonyms::suggest("sum", |_| true, 3),
+        ["sum up", "summarize", "tally"],
+        "`sum` IS in a group"
+    );
+    assert!(
+        !v.knows("summarize") && !v.knows("tally"),
+        "and Zork holds nothing that group proposes"
+    );
 }
 
 /// And the silences the meaning source must keep, on the same story — the ones
@@ -479,18 +545,38 @@ fn zork1_stays_quiet_on_a_three_letter_irregular() {
 /// `purchase` and `hint` are in the table and answered by nothing, because Zork
 /// I's dictionary holds neither `buy` nor `help`: the intersection in `offer` is
 /// what makes the feature honest, and it is the whole reason no censorship of
-/// the table is needed. `don` means `wear`, which Zork DOES know, and is still
-/// unanswered — `MIN_LEN` refuses anything under four characters and is older
-/// than this source. `marcus` is a name and reaches the table not at all.
+/// the table is needed. `marcus` is a name and reaches the table not at all.
+///
+/// `don sword` stood in this list until SQ-1144 and has moved to the case below,
+/// because it never belonged with these: `don` means `wear` and Zork DOES hold
+/// `wear`. It was silent on LENGTH, not on evidence — the one refusal here that
+/// was not the story disposing of what the table proposed.
 #[test]
 fn zork1_stays_quiet_where_meaning_reaches_nothing_the_story_implements() {
     let Some(mut s) = zork1() else { return };
-    let (_state, lines) = play(&mut s, &["purchase lamp", "hint", "don sword", "marcus"]);
+    let (_state, lines) = play(&mut s, &["purchase lamp", "hint", "marcus"]);
     assert!(lines.is_empty(), "{lines:?}");
 
     let v = <app::session::GameSession as Engine>::story_vocabulary(&s).expect("zork1 has one");
     assert!(!v.knows("buy") && !v.knows("help"), "the two the table proposes and Zork lacks");
-    assert!(v.knows("wear"), "and the one it has, which `don` is too short to reach");
+}
+
+/// And `don sword` is answered (SQ-1144), on the same reasoning as `lit`: an
+/// exact hit in the synonym table is a lookup, and a lookup does not get weaker
+/// as the word gets shorter. Zork holds `wear`; the table says `don` means it;
+/// there was never anything between them but the length gate.
+///
+/// Its unit-test twin — `the_canonical_meanings_reach_the_word_the_story_holds`
+/// in `vocab.rs` — pinned the same refusal on a synthetic story and is inverted
+/// with it.
+#[test]
+fn zork1_answers_a_three_letter_synonym_the_story_holds() {
+    let Some(mut s) = zork1() else { return };
+    let (_state, lines) = play(&mut s, &["don sword"]);
+    assert_eq!(lines, vec!["this story knows — wear"]);
+
+    let v = <app::session::GameSession as Engine>::story_vocabulary(&s).expect("zork1 has one");
+    assert!(v.knows("wear"), "the word the table reaches, and Zork's own");
 }
 
 /// **The case the whole detection design is for.** Dr Ludwig and the Devil
