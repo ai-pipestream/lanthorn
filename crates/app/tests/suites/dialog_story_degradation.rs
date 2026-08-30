@@ -154,12 +154,18 @@ fn the_offer_stays_silent_rather_than_leading_with_nothing() {
 /// dictionary carries no Inform or ZIL flag bytes. Whatever tier it lands in,
 /// it must arm without panicking and never leave a stale reveal behind.
 ///
-/// **Both specimens reach `Armed::Nothing` today, and its status line is the one
-/// dishonest thing this lane found**: "nothing on screen is a word this story
-/// takes" is a claim about the ROOM, and here the truth is that we cannot read
-/// the story's words at all. Filed as **SQ-1150** — the fix is a fourth `Armed`
-/// variant, and this case is deliberately written to accept either answer so it
-/// does not have to change twice. Tighten it to demand the new variant then.
+/// **Both specimens reached `Armed::Nothing`, and its status line was the one
+/// dishonest thing the SQ-1101 lane found**: "nothing on screen is a word this
+/// story takes" is a claim about the ROOM, and here the truth is that we cannot
+/// read the story's words at all. SQ-1150 gave that its own variant, and this
+/// case now demands it — the honest answer is the ONLY answer either specimen
+/// may give, and `Nothing` here would be the reported symptom returning.
+///
+/// Re-measured after SQ-1153 (which fixed how Infocom's V6 flag byte is decoded,
+/// and could in principle have changed which tier a story lands in): both
+/// specimens still answer `None` to `all_object_words` and `None` to the
+/// vocabulary snapshot, so the second tier is what they reach and it has nothing
+/// to work with.
 #[test]
 fn the_reveal_arms_without_a_grammar_and_lights_nothing_false() {
     for name in DIALOG_STORIES {
@@ -182,17 +188,22 @@ fn the_reveal_arms_without_a_grammar_and_lights_nothing_false() {
             None,
         );
 
+        // Non-vacuity, checked before arming: both tiers really are unavailable,
+        // so this case is measuring the door it means to measure and not one of
+        // `arm`'s two early ones.
+        assert!(
+            session.introspect().and_then(|i| i.all_object_words()).is_none(),
+            "{name}: Dialog keeps its object data in its own arrays — no parse names to ask"
+        );
+        assert!(state.vocab.get(&session).is_none(), "{name}: and no dictionary snapshot either");
+
         let armed = app::reveal::arm(&mut state, &session);
-        // Non-vacuity: `arm` really read the drawn text and really consulted the
-        // story, rather than bailing at one of its two early doors.
-        assert_ne!(armed, app::reveal::Armed::GuidanceOff, "{name}: the light is on");
-        assert_ne!(armed, app::reveal::Armed::NoText, "{name}: the story printed a room");
-        match armed {
-            app::reveal::Armed::Lit { words, .. } => {
-                assert!(words > 0, "{name}: `Lit` must mean something is lit");
-                assert!(state.reveal.is_some(), "{name}: a lit reveal is held in state");
-            }
-            _ => assert!(state.reveal.is_none(), "{name}: nothing lit leaves nothing behind"),
-        }
+        assert_eq!(
+            armed,
+            app::reveal::Armed::NoVocabulary,
+            "{name}: the reveal says it cannot read this story's words, \
+             not that the room holds none (SQ-1150)"
+        );
+        assert!(state.reveal.is_none(), "{name}: nothing lit leaves nothing behind");
     }
 }
