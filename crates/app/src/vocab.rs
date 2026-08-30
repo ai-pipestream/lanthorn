@@ -471,6 +471,31 @@ struct Candidate {
     whole: bool,
 }
 
+/// One word an offer line will name, and how it was arrived at.
+///
+/// [`Candidate`] is this module's private working note; a `Pick` is what leaves,
+/// and it carries the one fact about a word that outlives the ranking: whether
+/// the player REACHED for it or lanthorn PROPOSED it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pick {
+    /// The word to show, spelled the way the player should type it.
+    pub word: String,
+    /// True when nothing about the typed WORD reached this one — the meaning
+    /// table proposed it from what the typed word means, so it is a different
+    /// word the player never typed and never nearly typed
+    /// ([`by_meaning`](StoryVocabulary::by_meaning), tier 1).
+    ///
+    /// False for a near miss and for a changed ending, which are evidence about
+    /// the word actually typed, and for the story's own other spellings of a
+    /// verb one of those found — an aside on a word already reached.
+    ///
+    /// The distinction is not cosmetic. `molst` → `molest` is a correction and
+    /// belongs to the player; `sod` → `fuck` is lanthorn saying a word of its
+    /// own, and the two cannot be told apart downstream once the line is a list
+    /// of strings (SQ-1145).
+    pub proposed: bool,
+}
+
 /// The most an offer may name. Three, and it is a limit rather than a target:
 /// the whole verb list is useless (Zork I knows hundreds) and a list long enough
 /// to scan is a list the player reads instead of playing.
@@ -683,6 +708,24 @@ impl StoryVocabulary {
         rest: &[&str],
         prose: &[String],
     ) -> Vec<String> {
+        self.offer_picks(typed, position, rest, prose).into_iter().map(|p| p.word).collect()
+    }
+
+    /// [`offer`](Self::offer), with each pick's provenance still attached.
+    ///
+    /// The words are identical and in the same order; all this adds is
+    /// [`Pick::proposed`], because *where* a word came from is the whole of what
+    /// separates a correction from a proposal — and that distinction is gone the
+    /// moment the line is a `Vec<String>`. Nothing here consults it: what a
+    /// caller does with a proposal is the caller's judgement, and this file
+    /// deliberately holds none (SQ-1145).
+    pub fn offer_picks(
+        &self,
+        typed: &str,
+        position: Position,
+        rest: &[&str],
+        prose: &[String],
+    ) -> Vec<Pick> {
         let typed = typed.to_lowercase();
         // No length gate here. It lived at this line until SQ-1144 and refused
         // every word under four characters before a single source ran — which
@@ -735,7 +778,7 @@ impl StoryVocabulary {
                 }
             };
             if seen.insert(word.clone()) {
-                picks.push(word);
+                picks.push(Pick { word, proposed: c.tier == 1 });
             }
             if picks.len() == MAX_OFFERED {
                 break;
@@ -1314,6 +1357,11 @@ pub fn offer_vocabulary(state: &mut AppState, engine: &dyn Engine, cmd: &str, pr
     let mut probe = std::mem::take(&mut state.probe);
     let may_probe = state.config.guidance_probe;
     let epoch = state.turn_epoch;
+    // The one thing the offer takes from configuration, and it is taken HERE
+    // rather than inside [`StoryVocabulary`] (SQ-1145). The tables know which
+    // picks lanthorn PROPOSED rather than corrected; what may be said out loud is
+    // the config's judgement, and `Config::spoken_offer` is where the two meet.
+    let config = &state.config;
     let outcome = (|| {
         let prose = &prose;
         let (v, answered) = vocab.story_and_answered(engine)?;
@@ -1333,7 +1381,10 @@ pub fn offer_vocabulary(state: &mut AppState, engine: &dyn Engine, cmd: &str, pr
         }
         let position = if at == 0 { Position::Opening } else { Position::Inside };
         let rest: Vec<&str> = words[at + 1..].iter().map(String::as_str).collect();
-        let picks = v.offer(word, position, &rest, prose);
+        let picks = config.spoken_offer(v.offer_picks(word, position, &rest, prose));
+        // Empty because nothing was confident enough, or because everything that
+        // was got filtered — one answer either way, and it is silence. The word
+        // is NOT recorded as answered: nothing was said, so nothing was spent.
         if picks.is_empty() {
             return None;
         }

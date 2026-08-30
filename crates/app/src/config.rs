@@ -1789,8 +1789,9 @@ impl Config {
     /// ways a `VerbTable` reaches the screen, and they live on `Config` rather
     /// than on `CommandBandConfig` because the list is a top-level key: the band
     /// section cannot see it, and a filter applied by each call site in turn is
-    /// a filter the next call site forgets. `adult_words_filter_every_assembly`
-    /// in `tests/suites/adult_words.rs` fails if `src/` grows a third one.
+    /// a filter the next call site forgets.
+    /// `every_verb_table_in_src_is_assembled_through_config` in
+    /// `tests/suites/adult_words.rs` fails if `src/` grows a third one.
     pub fn resolve_band_verbs(
         &self,
     ) -> (crate::render::command_band::VerbTable, Vec<String>) {
@@ -1814,6 +1815,33 @@ impl Config {
         self.for_display(self.command_band.layer_extra_verbs(table))
     }
 
+    /// The Guiding Light's offer line, minus any word lanthorn would be saying
+    /// in its OWN voice against this config (SQ-1145).
+    ///
+    /// The offer answers a word the player reached for, and SQ-1115 rules that
+    /// half: a correction is never censored, so `molst` → `molest` survives
+    /// every setting here. But not every pick is a correction. The meaning table
+    /// proposes a DIFFERENT word from what the typed one means — `sod` → `fuck`
+    /// on Zork I — and that is lanthorn choosing the word, not the player. It is
+    /// nearer the band's unprompted enumeration than the near miss it sits
+    /// beside, so it answers to the same list.
+    ///
+    /// [`Pick::proposed`](crate::vocab::Pick::proposed) is the whole test, which
+    /// is why the filter lives here and the provenance travels: `vocab.rs` holds
+    /// no judgement about words and reads no configuration, and a source-level
+    /// case in `tests/suites/adult_words.rs` fails it if it ever starts.
+    ///
+    /// A line emptied by this says nothing at all, which is the caller's
+    /// existing answer to an empty offer and needs no new rule.
+    pub fn spoken_offer(&self, picks: Vec<crate::vocab::Pick>) -> Vec<String> {
+        let hidden = self.hidden_display_words();
+        picks
+            .into_iter()
+            .filter(|p| !p.proposed || !hidden.iter().any(|h| h.eq_ignore_ascii_case(&p.word)))
+            .map(|p| p.word)
+            .collect()
+    }
+
     /// Everything an assembled VERB column is filtered through before it
     /// reaches a screen — the ONE place, so that the two wrappers above cannot
     /// drift apart and a third rule has somewhere obvious to go.
@@ -1829,7 +1857,9 @@ impl Config {
     ///   `config.toml` with two off-switches (SQ-1122).
     ///
     /// Both are display-only: every word either one removes still parses, and
-    /// the Guiding Light still offers it.
+    /// the Guiding Light still offers it when the player REACHED for it — see
+    /// [`spoken_offer`](Self::spoken_offer) for the one half that now answers to
+    /// the adult list as well, which is lanthorn proposing a word of its own.
     fn for_display(
         &self,
         table: crate::render::command_band::VerbTable,

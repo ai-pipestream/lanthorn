@@ -36,6 +36,7 @@ use app::engine::Engine;
 use app::graphics::PictSource;
 use app::render::command_band::{verbs_from_grammar, VerbSource, VerbTable};
 use app::session::GameSession;
+use app::state::{AppState, TranscriptKind};
 use app::vocab::{Position, StoryVocabulary};
 use grammar_model::{NounKind, Slot, SyntaxLine, Token, Verb, WordRoles};
 
@@ -171,6 +172,101 @@ fn the_suggestion_path_never_reads_the_adult_list() {
              the player REACHED FOR, and SQ-1115 rules that half. Filter the panel, not the offer."
         );
     }
+}
+
+// ── The one half of the offer that is lanthorn's own voice (SQ-1145) ─────────
+
+/// The same word, refused as a PROPOSAL and offered as a CORRECTION.
+///
+/// This is the whole of SQ-1145 in one case, and it is one case on purpose:
+/// either half read alone is the opposite decision. The pair is the rule.
+///
+/// * `molst` → `molest` is a **correction**. The player typed those letters; the
+///   story holds that word; naming it is answering a question they asked. The
+///   case above rules it, SQ-1115 rules it, and nothing here touches it.
+/// * `assault` → `molest` is a **proposal**. `assault` is a word this story has
+///   never heard, and the meaning table answers it with a DIFFERENT word the
+///   player never typed and never nearly typed. That is lanthorn choosing the
+///   word — the same act as the band enumerating a column — so it answers to the
+///   same list.
+///
+/// The two are separated by [`app::vocab::Pick::proposed`] and by nothing else,
+/// which is why the provenance has to leave `vocab.rs` for the judgement to be
+/// made anywhere.
+///
+/// Falsified both ways. Drop the filter from `Config::spoken_offer` and the
+/// proposal half fails with the symptom the quest was filed on; have it ignore
+/// `proposed` and filter every pick, and the correction half fails instead.
+/// (Only this half — the case above reads `StoryVocabulary::offer` directly and
+/// cannot see a `Config` at all, which is the point of where the filter sits.)
+#[test]
+fn a_proposed_word_answers_to_the_list_and_a_corrected_one_never_does() {
+    let cfg = Config::default();
+    let vocab = pocket_vocabulary();
+    assert!(
+        cfg.adult_words.iter().any(|w| w == "molest"),
+        "the one word both halves turn on is on the shipped list"
+    );
+
+    // The proposal: a word the player never typed, and lanthorn does not say it.
+    let proposed = vocab.offer_picks("assault", Position::Opening, &["lantern"], &[]);
+    assert!(
+        proposed.iter().any(|p| p.word == "molest" && p.proposed),
+        "the meaning table reaches it, and says so: {proposed:?}"
+    );
+    assert!(
+        !cfg.spoken_offer(proposed).contains(&"molest".to_string()),
+        "…and it is not in lanthorn's own voice"
+    );
+
+    // The correction: the SAME word, reached for, and untouched by any of this.
+    let reached = vocab.offer_picks("molst", Position::Opening, &["lantern"], &[]);
+    assert!(
+        reached.iter().any(|p| p.word == "molest" && !p.proposed),
+        "one keystroke wrong is evidence about the word TYPED: {reached:?}"
+    );
+    assert!(
+        cfg.spoken_offer(reached).contains(&"molest".to_string()),
+        "…so it is still offered, on the default config"
+    );
+}
+
+/// Both off-switches reach the offer too, the same way they reach the column —
+/// one question (`hidden_display_words`), asked once, honoured everywhere.
+#[test]
+fn either_off_switch_restores_the_proposal() {
+    let vocab = pocket_vocabulary();
+    let picks = || vocab.offer_picks("assault", Position::Opening, &["lantern"], &[]);
+    assert!(
+        !Config::default().spoken_offer(picks()).contains(&"molest".to_string()),
+        "the default hides it — the baseline this case is measured against"
+    );
+    for cfg in [
+        Config { hide_adult_words: false, ..Config::default() },
+        Config { adult_words: Vec::new(), ..Config::default() },
+    ] {
+        assert!(
+            cfg.spoken_offer(picks()).contains(&"molest".to_string()),
+            "switch off or list empty, the proposal comes back: {:?}",
+            cfg.hidden_display_words()
+        );
+    }
+}
+
+/// And an innocent proposal is never touched, which is what keeps this a
+/// four-word default rather than a mute button on the meaning table.
+#[test]
+fn a_proposal_of_a_word_not_on_the_list_is_said_as_it_always_was() {
+    let cfg = Config::default();
+    let vocab = pocket_vocabulary();
+    // `shift` means `move`, and `move` is `molest`'s innocent sibling spelling —
+    // the same verb entry, the same story, and nothing on the list.
+    let picks = vocab.offer_picks("shift", Position::Opening, &["lantern"], &[]);
+    assert!(
+        picks.iter().any(|p| p.word == "move" && p.proposed),
+        "a proposal, and an entirely ordinary one: {picks:?}"
+    );
+    assert!(cfg.spoken_offer(picks).contains(&"move".to_string()));
 }
 
 // ── Both off-switches ────────────────────────────────────────────────────────
@@ -332,6 +428,90 @@ fn typing_a_hidden_word_still_reaches_zork_i_s_parser() {
     assert!(
         !reply.contains("don't know the word"),
         "the story still knows the word it always knew: {reply:?}"
+    );
+}
+
+/// Drive the story through the same two steps `finish_command_turn` takes — the
+/// game's reply into the transcript, then the offer — under `cfg`, and hand back
+/// every assist line it produced. The production route, so the filter is
+/// measured where the player would meet it and not at the seam it lives on.
+fn offered(session: &mut GameSession, cfg: Config, commands: &[&str]) -> Vec<String> {
+    let mut state = AppState::default();
+    state.config = cfg;
+    state.assist_preamble_shown = true;
+    let _ = session.take_transcript();
+    for cmd in commands {
+        let r = session.submit(cmd);
+        state.push_transcript_kind(&format!("> {cmd}"), TranscriptKind::Input);
+        state.push_transcript_kind(r.transcript.trim_end_matches('\n'), TranscriptKind::Story);
+        let printed = !r.transcript.trim().is_empty();
+        app::vocab::offer_vocabulary(&mut state, &*session, cmd, printed);
+    }
+    state
+        .transcript
+        .iter()
+        .zip(&state.transcript_kinds)
+        .filter(|(_, k)| **k == TranscriptKind::Assist)
+        .map(|(l, _)| l.clone())
+        .collect()
+}
+
+/// The three words the SQ-1144 lane measured when the three-letter band opened,
+/// on the story it measured them on, through the app's own turn hook.
+///
+/// | typed | proposed, in full | offered |
+/// |---|---|---|
+/// | `sod` | `fuck · shit · damn` | `damn` |
+/// | `bed` | `fuck · set · curse` | `set · curse` |
+/// | `don` | `wear` | `wear` |
+///
+/// The first two rows are the quest, and they are better than silence: the group
+/// `sod` belongs to holds Infocom's own `damn` beside the two words on the list,
+/// so the answer narrows rather than vanishing. The `don` row is the
+/// load-bearing one — same source, same shape, same turn hook, nothing on the
+/// list — and a filter that silenced the meaning TABLE rather than four WORDS
+/// would pass the first two and fail it.
+///
+/// Three turns, one session, one command each — the offer speaks once per word
+/// per session, so a repeat would be swallowed by that rule rather than by
+/// anything here.
+#[test]
+fn zork_i_stops_proposing_a_hidden_word_and_keeps_every_other_proposal() {
+    let Some(mut session) = boot_zork1() else { return };
+    let vocab = session.story_vocabulary().expect("Zork I's grammar reads");
+    for held in ["fuck", "set", "curse", "wear"] {
+        assert!(vocab.knows(held), "Zork I holds `{held}` — the offer only names its own");
+    }
+    for typed in ["sod", "bed", "don"] {
+        assert!(!vocab.knows(typed), "`{typed}` is a word Zork I never heard, which is the setup");
+    }
+
+    let hidden = offered(&mut session, Config::default(), &["sod", "bed", "don sword"]);
+    assert_eq!(
+        hidden,
+        vec![
+            "this story knows — damn",
+            "this story knows — set · curse",
+            "this story knows — wear",
+        ]
+    );
+
+    // The same three turns with the switch off, on a fresh session because the
+    // offer speaks once per word per session.
+    let Some(mut session) = boot_zork1() else { return };
+    let shown = offered(
+        &mut session,
+        Config { hide_adult_words: false, ..Config::default() },
+        &["sod", "bed", "don sword"],
+    );
+    assert_eq!(
+        shown,
+        vec![
+            "this story knows — fuck · shit · damn",
+            "this story knows — fuck · set · curse",
+            "this story knows — wear",
+        ],
+        "the unfiltered lines the SQ-1144 lane measured, which the switch restores whole"
     );
 }
 
