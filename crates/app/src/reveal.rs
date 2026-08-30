@@ -160,7 +160,22 @@ pub enum Armed {
     Lit { words: usize },
     /// Nothing on screen is a word this story would accept. A real answer — a
     /// room of pure scenery gives it — and said plainly rather than silently.
+    ///
+    /// It is a claim about the ROOM, so only the tier that actually asked the
+    /// story may make it. When neither tier can be asked at all the answer is
+    /// [`NoVocabulary`](Self::NoVocabulary), not this (SQ-1150).
     Nothing,
+    /// The story's words could not be read AT ALL — its object tree will not
+    /// answer and it has no dictionary snapshot to fall back on, so there was
+    /// nothing to test the prose against (SQ-1150).
+    ///
+    /// Deliberately not [`Nothing`](Self::Nothing), which this used to be: a
+    /// Dialog story (`stories/ImpossibleStairs.z8`,
+    /// `stories/frankenfingers_260330.z5`) and `stories/advent.z8`, whose
+    /// dictionary declares zero entries, take plenty of the words on screen —
+    /// we simply cannot say which, and "nothing on screen is a word this story
+    /// takes" is a claim about the STORY that the app is in no position to make.
+    NoVocabulary,
     /// There is no drawn text to read — no frame has been rendered yet, or the
     /// one that was carries no prose. Not a statement about the SURFACE: both the
     /// cell path and the v6 raster path answer [`visible_text`] (SQ-1138).
@@ -198,24 +213,6 @@ pub fn arm(state: &mut AppState, engine: &dyn Engine) -> Armed {
         .split_like_parser(&visible)
         .unwrap_or_else(|| crate::complete::split_prose(&visible));
 
-    // The dictionary, filtered to the words that NAME things — nouns and
-    // adjectives, minus the buzzword bit ($04), which is `the`, `a`, `please`
-    // and their kin.
-    //
-    // A word carrying both the noun and the VERB bit — `light` in most of
-    // Infocom's catalogue — does light, because the claim being made about it
-    // here is the noun one.
-    //
-    // **And it inherits whatever the dictionary thinks a word is.** Mini-Zork
-    // files `west` with the DESC bit, exactly as it files `white` and `boarded`,
-    // so no part-of-speech filter can tell the compass from a colour; `north`
-    // and `south` carry neither bit and do not light at all. There is no
-    // rescuing that from here — the flags are the story's answer — so
-    // [`CAVEAT`] says what the reveal is rather than pretending otherwise.
-    let Some(v) = state.vocab.get(engine) else {
-        state.reveal = None;
-        return Armed::Nothing;
-    };
     // ASK THE OBJECTS FIRST, and fall back to the flag byte only where they
     // cannot answer (SQ-1153).
     //
@@ -238,17 +235,43 @@ pub fn arm(state: &mut AppState, engine: &dyn Engine) -> Armed {
     //
     // `None` means the question could not be ASKED — Glulx and Scott today — and
     // is NOT the same as a story with no parse names. Only the first falls back.
+    //
+    // The dictionary is fetched INSIDE that fallback and not above the match
+    // (SQ-1150): it is the second tier's input, so a story whose objects answer
+    // must not be turned away for want of one, and the `NoVocabulary` below then
+    // means exactly what it says — neither tier could be asked.
     let words = match engine.introspect().and_then(|i| i.all_object_words()) {
         Some(objs) => tokens
             .iter()
             .filter(|t| objs.iter().any(|o| o.refers_to(t)))
             .cloned()
             .collect::<BTreeSet<String>>(),
-        None => tokens
-            .iter()
-            .filter(|t| v.roles(t).is_some_and(|r| (r.noun || r.adjective) && !r.special))
-            .cloned()
-            .collect::<BTreeSet<String>>(),
+        None => {
+            // The dictionary, filtered to the words that NAME things — nouns and
+            // adjectives, minus the buzzword bit ($04), which is `the`, `a`,
+            // `please` and their kin.
+            //
+            // A word carrying both the noun and the VERB bit — `light` in most of
+            // Infocom's catalogue — does light, because the claim being made
+            // about it here is the noun one.
+            //
+            // **And it inherits whatever the dictionary thinks a word is.**
+            // Mini-Zork files `west` with the DESC bit, exactly as it files
+            // `white` and `boarded`, so no part-of-speech filter can tell the
+            // compass from a colour; `north` and `south` carry neither bit and do
+            // not light at all. There is no rescuing that from here — the flags
+            // are the story's answer — so [`CAVEAT`] says what the reveal is
+            // rather than pretending otherwise.
+            let Some(v) = state.vocab.get(engine) else {
+                state.reveal = None;
+                return Armed::NoVocabulary;
+            };
+            tokens
+                .iter()
+                .filter(|t| v.roles(t).is_some_and(|r| (r.noun || r.adjective) && !r.special))
+                .cloned()
+                .collect::<BTreeSet<String>>()
+        }
     };
 
     if words.is_empty() {

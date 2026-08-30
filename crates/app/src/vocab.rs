@@ -224,6 +224,75 @@ impl StoryVocabulary {
         StoryVocabulary { verbs, by_word, words, by_trunc, prepositions, key_len }
     }
 
+    /// Drop every dictionary word this story's own tokeniser would never hand
+    /// its parser as one token — a word no sequence of keystrokes can reach
+    /// (SQ-1151).
+    ///
+    /// Arthur's dictionary holds both `be` and `be?`, two genuinely distinct
+    /// verbs in the game's own data ($c7 and $f7), and `?` is one of the six
+    /// input separators Arthur declares in its dictionary header. So the
+    /// tokeniser splits `be?` into `be` and `?` before the parser looks anything
+    /// up: the entry exists, and **no player can type it**. Infocom used that
+    /// deliberately — a separator inside a word makes a slot the game's own code
+    /// can reference without a player stumbling into it. Offering it in the verb
+    /// column wastes a slot and misleads, and clicking it composes a line the
+    /// parser will split.
+    ///
+    /// **The story is asked where a word ends, not told.**
+    /// [`Engine::split_like_parser`] is `zvm::dictionary::tokenise`, the routine
+    /// `read` itself calls, so the separator set is the one THIS story declares
+    /// at its dictionary header (§13.1) rather than a set assumed here. An engine
+    /// that lends no tokeniser answers `None` and nothing is dropped, which is
+    /// the right answer: without the story's own splitter there is no authority
+    /// to drop a word on.
+    ///
+    /// A word that IS a separator survives, because it tokenises to itself: the
+    /// bare `?` Arthur also files is a real parser token, and a word that
+    /// *contains* a separator is not the same thing as a word that *is* one.
+    ///
+    /// Measured over every story in `stories/` with a readable dictionary,
+    /// twelve hold at least one such word and none of them is a word a player
+    /// would ever want offered:
+    ///
+    /// | story | dropped |
+    /// |---|---|
+    /// | `arthur-r74-s890714.z6` | `be?` `don't` `end.of.` `int.num` `int.tim` `l.g` `no.word` |
+    /// | `shogun-r322-s890706.z6` | `be?` `end.of.in` `int.num` `int.tim` `l.g` `no.word` |
+    /// | `zork0-r393-s890714.z6` | `end.of.` `int.num` `int.tim` `no.word` |
+    /// | `moonmist-r9-s861022.z3` | 19 possessives — `dee's`, `iris'`, `jack'`, … |
+    /// | `trinity-r12-s860926.z4` | `p.a.` |
+    /// | `enchanter-r29-s860820.z3` | one entry that decodes with spaces in it |
+    /// | five Inform stories | `comma,` (and `LostPig.z8` four more of its kind) |
+    ///
+    /// The two shapes are worth telling apart. Infocom's V6 titles keep private
+    /// slots (`int.num`, `no.word`) whose names are unreachable ON PURPOSE, which
+    /// is the same trick as `be?`. **Moonmist is the one that proves the set has
+    /// to come from the story**: it declares `'` a separator and Enchanter does
+    /// not, so `dee's` is one word in Enchanter's parser and three in Moonmist's,
+    /// and no fixed table could have got both right.
+    ///
+    /// Applied at [`VocabState::get`], the one vocabulary seam (SQ-1117), so
+    /// every surface reading the snapshot — the verb column, the guidance offer,
+    /// the word reveal, completion — is spared it for the same reason.
+    pub fn without_untypeable_words(self, engine: &dyn Engine) -> StoryVocabulary {
+        // The story's answer, or no answer: one token out means the parser can
+        // be handed this word whole.
+        let typeable = |w: &str| engine.split_like_parser(w).is_none_or(|toks| toks.len() == 1);
+
+        if self.words.keys().all(|w| typeable(w)) {
+            return self;
+        }
+        let StoryVocabulary { mut verbs, words, prepositions, key_len, .. } = self;
+        for v in &mut verbs {
+            v.words.retain(|w| typeable(w));
+        }
+        let words: BTreeMap<String, WordRoles> =
+            words.into_iter().filter(|(w, _)| typeable(w)).collect();
+        let prepositions: BTreeSet<String> =
+            prepositions.into_iter().filter(|w| typeable(w)).collect();
+        StoryVocabulary::new(verbs, words, prepositions, key_len)
+    }
+
     /// True when there is nothing here worth consulting. A menu-driven Version 6
     /// game has no grammar at all, and an empty dictionary can answer nothing.
     pub fn is_empty(&self) -> bool {
@@ -960,10 +1029,17 @@ impl VocabState {
     /// The story's vocabulary, read from the engine the first time it is asked
     /// for. `None` for a story with no readable dictionary — a menu-driven
     /// Version 6 game, or an engine that has none to give.
+    ///
+    /// The words no player can type are dropped here, once, for every surface at
+    /// the same time — see
+    /// [`StoryVocabulary::without_untypeable_words`] (SQ-1151).
     pub fn get(&mut self, engine: &dyn Engine) -> Option<&StoryVocabulary> {
         if !self.loaded {
             self.loaded = true;
-            self.story = engine.story_vocabulary().filter(|v| !v.is_empty());
+            self.story = engine
+                .story_vocabulary()
+                .map(|v| v.without_untypeable_words(engine))
+                .filter(|v| !v.is_empty());
         }
         self.story.as_ref()
     }

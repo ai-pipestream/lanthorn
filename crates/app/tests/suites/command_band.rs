@@ -1071,3 +1071,79 @@ fn the_v6_noun_bit_and_the_objects_name_the_same_things() {
         "the one object that answers to `was` is the password, mid-puzzle",
     );
 }
+
+/// SQ-1151: the column offers no word a player cannot type.
+///
+/// **The reported defect**, seen in Arthur's verb panel: it listed both `be` and
+/// `be?`. The `?` is genuinely in the dictionary entry rather than a ZSCII
+/// fallback — `be` and `be?` differ in their second word (`0x14a5` against
+/// `0x54a5`, Z-char 21 being a literal `?` in alphabet A2) and hold different
+/// verb numbers, `$c7` and `$f7`. But `?` is one of the six input separators
+/// Arthur declares at its dictionary header, so the tokeniser splits `be?` into
+/// `be` and `?` before the parser looks anything up. **No sequence of keystrokes
+/// reaches that entry**, and clicking it composes a line the parser will split.
+/// Infocom used the trick deliberately: a separator inside a word makes a slot
+/// the game's own code can name without a player stumbling into it, which is
+/// what Arthur's `int.num`, `int.tim`, `l.g` and `no.word` are too.
+///
+/// [`VerbTable::without_sigil_verbs`] cannot catch this — it tests the FIRST
+/// character against two fixed sigils, and here the offending character is last
+/// and comes from this story's own separator table. The rule that does is the
+/// same shape sourced from the story:
+/// `StoryVocabulary::without_untypeable_words`, applied at the one vocabulary
+/// seam so the offer and the reveal are spared it too.
+///
+/// | fixture | release / serial | turns |
+/// |---|---|---|
+/// | `stories/arthur-r74-s890714.z6` | 74 / 890714 | 0 — the grammar is static |
+/// | `stories/shogun-r322-s890706.z6` | 322 / 890706 | 0 — the grammar is static |
+///
+/// Falsify by lifting the filter out of `VocabState::get`: the raw dictionary
+/// still holds `be?` (asserted below, so this case cannot go vacuous), and the
+/// column shows it again.
+///
+/// [`VerbTable::without_sigil_verbs`]: app::render::command_band::VerbTable::without_sigil_verbs
+#[test]
+fn the_verb_column_drops_a_word_the_storys_own_tokeniser_would_split() {
+    for (file, release, serial) in [
+        ("arthur-r74-s890714.z6", 74, "890714"),
+        ("shogun-r322-s890706.z6", 322, "890706"),
+    ] {
+        let Some(session) = boot_v6(file, release, serial) else { continue };
+
+        // Non-vacuity, and the whole premise in two assertions: the entry is
+        // real, and the story's own tokeniser will not hand it over whole.
+        let raw = <GameSession as Engine>::story_vocabulary(&session)
+            .expect("a readable Version 6 dictionary");
+        assert!(
+            raw.verbs().iter().any(|v| v.words.iter().any(|w| w == "be?")),
+            "{file}: `be?` is a real verb spelling in the story's own grammar"
+        );
+        assert_eq!(
+            session.split_like_parser("be?"),
+            Some(vec!["be".to_string(), "?".to_string()]),
+            "{file}: `?` is one of this story's declared input separators"
+        );
+
+        let mut state = AppState::default();
+        state.overlays.command_band =
+            Some(CommandBandState::new(default_verbs(), default_quick()));
+        state.band_dock.toggle_to(true, true);
+        assert!(refresh_verbs(&mut state, &session), "{file}: the story drives its own column");
+
+        let band = state.overlays.command_band.as_ref().unwrap();
+        assert_eq!(band.verb_source, VerbSource::Story, "{file}");
+        let items = band.items(COL_VERB);
+        let offered: Vec<&str> = items.iter().map(String::as_str).collect();
+        assert!(!offered.contains(&"be?"), "{file}: the column offers no word that splits");
+        assert!(
+            offered.contains(&"be"),
+            "{file}: and the reachable verb of the pair is still there"
+        );
+        // The rest of the column is untouched — this is a rule about structure,
+        // not a list of words, and it must not have eaten anything else.
+        for kept in ["look", "take", "open"] {
+            assert!(offered.contains(&kept), "{file}: {kept} is unaffected");
+        }
+    }
+}

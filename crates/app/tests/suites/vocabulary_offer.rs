@@ -632,3 +632,100 @@ fn a_scott_story_answers_a_mistyped_verb() {
         "a fragment (`exam`, `desc`) is fit to be the answer and not fit to be an aside"
     );
 }
+
+// ── Words no player can type (SQ-1151) ──────────────────────────────────────
+
+/// The seam drops nothing when the engine lends no tokeniser, which is the whole
+/// safety property of the rule: without the story's own splitter there is no
+/// authority to drop a word on, so `PocketStory` — which answers `None` to
+/// `split_like_parser`, as Glulx and Scott Adams do — keeps every word it had.
+///
+/// This is the CI-safe half. The half that shows a word actually going is below,
+/// on the two stories that hold one.
+#[test]
+fn a_story_that_lends_no_tokeniser_keeps_every_word() {
+    assert!(
+        PocketStory.split_like_parser("anything").is_none(),
+        "the premise: this double has no tokeniser to lend"
+    );
+    let kept = pocket_vocabulary().without_untypeable_words(&PocketStory);
+    for w in ["light", "burn", "take", "get", "lanter", "lamp", "the"] {
+        assert!(kept.roles(w).is_some(), "{w} survives an engine with no opinion");
+    }
+    let spellings: Vec<&str> =
+        kept.verbs().iter().flat_map(|v| v.words.iter().map(String::as_str)).collect();
+    assert_eq!(spellings, vec!["light", "burn", "take", "get"], "and so does every verb");
+}
+
+/// **Moonmist release 9 / serial 861022 is the case that proves the separator set
+/// has to come from the story.** It declares `'` an input separator, so its own
+/// tokeniser cuts `dee's` into `dee`, `'`, `s` before the parser looks anything
+/// up — nineteen possessive entries in its dictionary that no sequence of
+/// keystrokes can reach.
+///
+/// Enchanter release 29 / serial 860820 is the control: a Version 3 story of the
+/// same vintage that does NOT declare `'`, where `dee's` would be one word. A
+/// fixed table of separators gets one of these two wrong whichever way it is
+/// written, which is why the rule asks [`Engine::split_like_parser`] — the code
+/// path `read` itself calls — instead.
+///
+/// Falsify by dropping `without_untypeable_words` from `VocabState::get`: the
+/// raw snapshot below still holds every one of these, and the assertion on the
+/// seam is what fails.
+#[test]
+fn moonmist_declares_the_apostrophe_a_separator_so_its_possessives_never_reach_a_player() {
+    let Some(bytes) = story("moonmist-r9-s861022.z3") else { return };
+    let session = app::session::GameSession::new_with_trace(
+        bytes, true, false, None, false, Vec::new(), None, None, Some((25, 80)),
+    )
+    .expect("moonmist-r9-s861022.z3 boots without a ZError");
+
+    // The story's own answer, first — this is the fact the rule is reading.
+    assert_eq!(
+        session.split_like_parser("dee's"),
+        Some(vec!["dee".to_string(), "'".to_string(), "s".to_string()]),
+        "Moonmist's dictionary header declares `'` a separator"
+    );
+    // Non-vacuity: the entries really are in the dictionary, un-filtered.
+    let raw = <app::session::GameSession as Engine>::story_vocabulary(&session)
+        .expect("a readable Version 3 dictionary");
+    for w in ["dee's", "iris'", "b's"] {
+        assert!(raw.roles(w).is_some(), "{w:?} is a real entry in Moonmist's dictionary");
+    }
+
+    // …and the seam every surface reads has none of them.
+    let mut state = AppState::default();
+    let seam = state.vocab.get(&session).expect("the seam still has a vocabulary");
+    for w in ["dee's", "iris'", "b's"] {
+        assert!(seam.roles(w).is_none(), "{w:?} cannot be typed, so it is never offered");
+    }
+    // The rule is CONTAINS, not IS: a word that is itself a separator tokenises
+    // to itself and stays. Moonmist files the bare apostrophe as a real token.
+    assert_eq!(session.split_like_parser("'"), Some(vec!["'".to_string()]));
+    assert_eq!(
+        raw.roles("'").is_some(),
+        seam.roles("'").is_some(),
+        "a word that IS a separator is not a word that CONTAINS one"
+    );
+    // And an ordinary word is untouched, so this is not a filter that ate the
+    // dictionary.
+    for w in ["lamp", "north", "tamara"] {
+        assert_eq!(raw.roles(w).is_some(), seam.roles(w).is_some(), "{w:?} is unaffected");
+    }
+}
+
+/// Enchanter, the control for the case above: the SAME spelling is one word here,
+/// because this story declares no `'`. Nothing is dropped on its account.
+#[test]
+fn enchanter_does_not_declare_the_apostrophe_and_keeps_the_same_spellings() {
+    let Some(bytes) = story("enchanter-r29-s860820.z3") else { return };
+    let session = app::session::GameSession::new_with_trace(
+        bytes, true, false, None, false, Vec::new(), None, None, Some((25, 80)),
+    )
+    .expect("enchanter-r29-s860820.z3 boots without a ZError");
+    assert_eq!(
+        session.split_like_parser("dee's"),
+        Some(vec!["dee's".to_string()]),
+        "release 29 declares no apostrophe, so the same spelling is one token"
+    );
+}

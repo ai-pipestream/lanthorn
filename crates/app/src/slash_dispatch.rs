@@ -712,6 +712,11 @@ pub(crate) fn dispatch_slash_outcome(
                 Armed::Nothing => {
                     state.set_status("[nothing on screen is a word this story takes]")
                 }
+                // A different sentence, because it is a different claim: the one
+                // above is about the ROOM, and this one is about US (SQ-1150).
+                Armed::NoVocabulary => {
+                    state.set_status("[lanthorn cannot read this story's words]")
+                }
                 Armed::NoText => state.set_status("[no story text on screen to read]"),
                 Armed::GuidanceOff => state.set_status(
                     "[the Guiding Light is out — /set-guidance on to use the reveal]",

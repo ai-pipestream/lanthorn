@@ -435,6 +435,22 @@ know which side you're on).
   still works when you type it, and it is the quickest way to see which
   interpreter number lanthorn is reporting to a game.
 
+  **And nor does a word you could not type if you wanted to.** Every story
+  declares its own *input separators* — the characters its parser breaks a line
+  on — and a few of them then file dictionary words containing one. Arthur lists
+  both `be` and `be?`, two genuinely different verbs in the game's own data; `?`
+  is one of Arthur's six separators, so typing `be?` reaches the parser as `be`
+  and `?` and the second entry can never be matched. Infocom did that on purpose,
+  to give the game's own code a name no player could stumble into — the same
+  trick as its `int.num`, `l.g` and `no.word`. The column asks the running story
+  where its words end, so it drops those and keeps everything else: the same
+  question makes Moonmist's `dee's` unreachable (it declares `'` a separator) and
+  Enchanter's perfectly typable (it does not). A word that *is* a separator, like
+  the bare `?` some games answer to, stays. As with the sigil, this is structure
+  rather than a list, so there is nothing to configure and nothing to keep up to
+  date — and it clears the offered word list and the word reveal at the same
+  time, for the same reason.
+
   The object columns are **live**: they read the running story's object tree and
   refresh every turn, so taking something moves it from *here* to *carried* as
   you watch. An empty *here*/*carried* column says so explicitly rather than

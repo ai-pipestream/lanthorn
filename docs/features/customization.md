@@ -569,6 +569,13 @@ re-seed the new template, or hand-write the new shape from
   `take candlesticks` really does take the candle — it is the game's own
   behaviour, shown. (The reveal reads the ordinary text screen, so it has nothing
   to light in v6 **raster** mode, where the story's text is a picture.)
+  And when it cannot read a story's words at all it says *that*, rather than
+  something it does not know: a game whose object names and dictionary flags are
+  both out of reach — Dialog's output, or a story whose dictionary declares no
+  entries — answers **lanthorn cannot read this story's words**. It used to
+  answer "nothing on screen is a word this story takes", which is a claim about
+  your room, and in that case a wrong one: the story takes plenty of the words in
+  front of you and lanthorn simply cannot say which.
 - **And the map can go looking for the way back.** `return_probe` (default
   `false`) forks the same silent copy after a move that leaves a gap in the map,
   walks one direction in it, and records the passage only if the copy comes out
