@@ -29,7 +29,7 @@ use app::render::hints_panel::{hint_input_action, hint_key_routes, HintInputAct,
 use app::render::command_band::draw_command_band;
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
 use app::render::paneframe::{build_layer_segments, InsetSegment};
-use app::render::panel::{draw_panel, draw_panel_with_controls, PanelFrame, PanelSpec, PanelStrip};
+use app::render::panel::{PanelFrame, PanelSpec, PanelStrip};
 use app::render::controls::BorderControl;
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
@@ -642,17 +642,7 @@ fn draw_story_panel(
     state: &AppState,
 ) -> (PanelFrame, Vec<(BorderControl, Rect)>) {
     let views = app::render::controls::controls_for(state);
-    let ctls: Vec<_> = views.iter().map(|v| v.as_header_control()).collect();
-    let (frame, rects) = draw_panel_with_controls(buf, spec, &ctls, &state.colors.theme);
-    // A group the pane was too narrow to hold leaves zero-area rects behind; drop
-    // them here so `border_controls` carries only what is actually on screen.
-    let hits = views
-        .iter()
-        .map(|v| v.id)
-        .zip(rects)
-        .filter(|(_, r)| r.width > 0 && r.height > 0)
-        .collect();
-    (frame, hits)
+    app::render::controls::draw_pane_with_controls(buf, spec, &state.colors.theme, &views)
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -672,6 +662,11 @@ fn draw_frame(
     let mut map_hits: Option<Vec<(RoomId, Rect)>> = None;
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
     let mut border_controls_out: Vec<(BorderControl, Rect)> = Vec::new();
+    // The view the map pane's cluster is drawn against, captured where the pane
+    // is drawn so the hover hint below resolves the SAME control the frame did
+    // (SQ-1148). `Drawn` until a map pane exists, which is also when the cluster
+    // does not.
+    let mut map_control_view = mapper::layer::MapView::Drawn;
     let mut room_dock_tabs_out: Vec<(app::state::RoomDockView, Rect)> = Vec::new();
     let mut debug_tabs_out: Vec<(usize, usize, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
@@ -902,12 +897,16 @@ fn draw_frame(
                     let owned_segs = build_layer_segments(&layer_ids, active_layer,
                         |id| app::render::map::layer_tab_title(graph, id));
                     let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
-                    // Plain `draw_panel`: the map pane carries no controls of its
-                    // own since SQ-1107 moved the return probe to the story pane's
-                    // border. See `render::controls` for why a pane that can be
-                    // hidden cannot hold the only switch for something that keeps
-                    // running when it is.
-                    let map_fp = draw_panel(buf, &PanelSpec {
+                    // The map pane's OWN cluster, on its bottom border (SQ-1148):
+                    // room numbers, centre, zoom out, zoom in, view. Same enum,
+                    // same dispatch and the same hit-rect vec as the story pane's
+                    // — `BorderControl::pane` is what keeps the two apart. Every
+                    // one of them acts on a map that is on screen, which is why
+                    // they can live on a pane that disappears where the return
+                    // probe could not (SQ-1107).
+                    map_control_view = graph.layer_view(active_layer);
+                    let map_views = app::render::controls::map_controls_for(state, map_control_view);
+                    let (map_fp, map_ctls) = app::render::controls::draw_pane_with_controls(buf, &PanelSpec {
                         area: pane_layout.map,
                         border_selector: if map_focused { "panel.border:active" } else { "panel.border" },
                         border_color: Some(map_border_color),
@@ -920,7 +919,8 @@ fn draw_frame(
                             active: state.colors.theme.get("panel.tab:active").style,
                         }),
                         body_fill: None,
-                    }, &state.colors.theme);
+                    }, &state.colors.theme, &map_views);
+                    border_controls_out.extend(map_ctls);
                     layer_tabs_out = layer_ids.into_iter().zip(map_fp.tab_rects).collect();
 
                     map_hits = Some(render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf));
@@ -1143,7 +1143,10 @@ fn draw_frame(
         // hover is only ever SET while no modal overlay is open, so this can
         // never sit under one. It paints and returns — no focus, no keyboard.
         if state.control_hover.is_some() && !border_controls_out.is_empty() {
-            let views = app::render::controls::controls_for(state);
+            // Both clusters, because `border_controls_out` carries both and a
+            // hint the pointer can reach must be findable in this list (SQ-1148).
+            let mut views = app::render::controls::controls_for(state);
+            views.extend(app::render::controls::map_controls_for(state, map_control_view));
             app::render::controls::draw_control_hint(buf, full, state, &views, &border_controls_out);
         }
 
@@ -3275,13 +3278,18 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         // The command's OWN context, looked up in the registry
                         // rather than assumed: a control must parse exactly the
                         // way the palette parses the same command.
+                        let cmd = ctl.command();
                         let ctx = slash::COMMANDS
                             .iter()
-                            .find(|c| c.name == ctl.command())
+                            .find(|c| c.name == cmd.name)
                             .map(|c| c.context)
                             .unwrap_or(Context::Global);
-                        let outcome =
-                            slash::parse_in_context(ctl.command(), state.config.command_prefix, ctx);
+                        // The whole LINE, argument and all: `zoom-map` bare is an
+                        // error, and the two zoom controls are one entry with two
+                        // arguments (SQ-1148).
+                        let outcome = slash::parse_in_context(
+                            &cmd.to_string(), state.config.command_prefix, ctx,
+                        );
                         let should_break = dispatch_slash_outcome(
                             outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
                             &game_dir, &ifid, &arc_file, &story_bytes, &story_path,

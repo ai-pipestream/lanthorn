@@ -441,6 +441,17 @@ impl KeyMap {
             .map(|(spec, _, _)| *spec)
     }
 
+    /// The first `KeySpec` bound to this WHOLE entry, argument and all (SQ-1148).
+    ///
+    /// [`Keymap::primary_key`] matches on the command's name, which is what a
+    /// caller asking "is `zoom-map` reachable at all" wants and is a wrong answer
+    /// for a caller asking "what key runs `zoom-map out`" — `+` is bound to
+    /// `zoom-map in` and comes first, so the name-matching lookup answers `+` for
+    /// both directions. A border control that supplies an argument asks this one.
+    pub fn primary_key_exact(&self, entry: &str) -> Option<KeySpec> {
+        self.bindings.iter().find(|(_, s, _)| s == entry).map(|(spec, _, _)| *spec)
+    }
+
     /// Iterate all `(KeySpec, &str)` pairs that belong to `ctx`
     /// (for the help screen's per-context listing).
     pub fn for_context(&self, ctx: Context) -> impl Iterator<Item = (&KeySpec, &str)> {

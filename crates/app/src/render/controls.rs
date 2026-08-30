@@ -65,10 +65,29 @@
 //! that was on for four seconds has nothing to remember — the `border_controls`
 //! suite reads that method rather than a list, so the next control added without
 //! a thought about persistence still fails the guard.
+//!
+//! **There are TWO clusters and one mechanism** (SQ-1148). The map pane carries
+//! its own five — room numbers, centre, zoom out, zoom in, view — on its bottom
+//! border, and they are the same [`BorderControl`] enum, the same
+//! `slash::COMMANDS` dispatch, the same `panel.control{,:lit,:hover}` styles and
+//! the same hit-rects as the story pane's. A second enum with its own dispatch
+//! would be two places to add the next control, two hint mechanisms and two
+//! chances for a hint to advertise a key nothing is bound to. What the pane
+//! changes is only which controls are in the list and which pane's border they
+//! are placed against: [`BorderControl::pane`] says which, so a control cannot
+//! be placed by whichever list it happens to have been put in.
+//!
+//! **The map cluster CAN live on the map pane, where the return probe could
+//! not.** The probe kept running when the map was hidden, so its only switch had
+//! to survive the pane; every one of these five acts on a map that is on screen,
+//! and there is nothing to switch when there is no map to switch it on.
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
+use mapper::layer::MapView;
+
+use super::panel::{draw_panel_with_controls, PanelFrame, PanelSpec};
 use super::paneframe::{ControlPlacement, HeaderControl};
 use crate::config::V6RenderMode;
 use crate::state::{AppState, Layout};
@@ -100,6 +119,81 @@ pub enum BorderControl {
     /// that a click visibly did something, because a press that happened to light
     /// no words would otherwise be indistinguishable from a broken button.
     Reveal,
+
+    // ── The MAP pane's cluster (SQ-1148) ─────────────────────────────────────
+    // Same enum, same dispatch, same styles — a different pane, which
+    // [`BorderControl::pane`] states rather than leaving to be inferred from
+    // whichever list a control was put in.
+    /// Room-number labels inside the map's room boxes: a boolean.
+    RoomNumbers,
+    /// Re-centre the map on the selected room, or the current one: a one-shot.
+    Centre,
+    /// Zoom the map out one step: a one-shot.
+    ///
+    /// Zoom is the cluster's first SCALAR and is spelled as two adjacent
+    /// triggers rather than as one state report, because a single cycling
+    /// control has no way back except all the way round and its glyph cannot say
+    /// which level you are on. Being two triggers is also what forced
+    /// [`BorderControl::command`] to widen: `zoom-map` takes an ARGUMENT, and
+    /// `in` and `out` are one registry entry with two of them.
+    ZoomOut,
+    /// Zoom the map in one step: a one-shot. See [`BorderControl::ZoomOut`].
+    ZoomIn,
+    /// How the active layer draws — the drawn map or the direction matrix: a
+    /// MODE, following the three-state `render` control's precedent that a mode
+    /// change reads as a shape change out of one icon family.
+    ///
+    /// A click writes the PER-LAYER override (`mapper::layer::LayerMeta::view`,
+    /// SQ-0666), so the choice sticks for that layer and rides the save. It
+    /// never resolves the unruled `None` into a value it merely inherited: a
+    /// click always states a view, and only a click does.
+    ViewMode,
+}
+
+/// Which pane's border a control rides (SQ-1148).
+///
+/// [`ControlPlacement`] is an anchor on a frame and says nothing about WHICH
+/// frame; with one cluster that was unambiguous, and with two it is not — a map
+/// control and a story control both asking for `BottomCentre` would compete for
+/// one anchor, and the failure would be a layout oddity rather than an error.
+/// So the pane is a property of the control, read from the control, not implied
+/// by the list it was found in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlPane {
+    /// The story pane, whose cluster arrived first (SQ-1123).
+    Story,
+    /// The map pane (SQ-1148).
+    Map,
+}
+
+/// The `slash::COMMANDS` entry a click runs: the registry's own name for it, and
+/// the argument the control supplies when the command needs one (SQ-1148).
+///
+/// **Both halves are needed and neither can be recovered from the other.** The
+/// registry is keyed by `name` alone, so the lookup that resolves a command's
+/// `Context` must have it unqualified; and `zoom-map` bare is an ERROR — the two
+/// zoom controls are one entry with two arguments, so what a click actually puts
+/// through the slash pipeline is the whole line. Returning one string and
+/// splitting it at the call site was the alternative, and it puts the same
+/// `split_whitespace().next()` in every caller with nothing to fail if one
+/// forgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlCommand {
+    /// The registry entry's own name — `"zoom-map"`, never `"zoom-map in"`.
+    pub name: &'static str,
+    /// The argument this control supplies, when it names one.
+    pub arg: Option<&'static str>,
+}
+
+impl std::fmt::Display for ControlCommand {
+    /// The command LINE a click runs, which is what goes through the slash
+    /// pipeline and what a hint should print after its `/`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.arg {
+            Some(a) => write!(f, "{} {a}", self.name),
+            None => f.write_str(self.name),
+        }
+    }
 }
 
 impl BorderControl {
@@ -126,21 +220,70 @@ impl BorderControl {
             // live on a pane that disappears. You could not turn off something
             // that was still running.
             BorderControl::ReturnProbe => ControlPlacement::BottomRight,
+            // The map cluster is one centred group on the MAP pane's bottom
+            // border (SQ-1148). Centred rather than anchored because none of the
+            // five points anywhere — they all act on the pane they are drawn on,
+            // which is the same reason guidance and the reveal are centred on the
+            // story pane's — and one group so the five read as one cluster and
+            // stand or fall together rather than half a cluster surviving a
+            // narrowing.
+            BorderControl::RoomNumbers
+            | BorderControl::Centre
+            | BorderControl::ZoomOut
+            | BorderControl::ZoomIn
+            | BorderControl::ViewMode => ControlPlacement::BottomCentre,
         }
     }
 
-    /// The `slash::COMMANDS` entry a click runs, bare — which toggles or cycles
-    /// for every switch here, and simply HAPPENS for [`BorderControl::Reveal`],
-    /// the one trigger.
-    pub fn command(self) -> &'static str {
+    /// Which PANE's border this control rides (SQ-1148).
+    ///
+    /// Read from the control rather than from the list it was found in, so the
+    /// two clusters cannot compete for one anchor: `BottomCentre` on the story
+    /// pane and `BottomCentre` on the map pane are different rows of different
+    /// frames, and only this says which.
+    pub fn pane(self) -> ControlPane {
         match self {
-            BorderControl::Map => "toggle-map",
-            BorderControl::Guidance => "set-guidance",
-            BorderControl::VerbPanel => "open-command-band",
-            BorderControl::V6Render => "set-v6-render",
-            BorderControl::V6PixelLock => "set-v6-pixel-lock",
-            BorderControl::ReturnProbe => "set-return-probe",
-            BorderControl::Reveal => "reveal-words",
+            BorderControl::Map
+            | BorderControl::Guidance
+            | BorderControl::VerbPanel
+            | BorderControl::V6Render
+            | BorderControl::V6PixelLock
+            | BorderControl::ReturnProbe
+            | BorderControl::Reveal => ControlPane::Story,
+            BorderControl::RoomNumbers
+            | BorderControl::Centre
+            | BorderControl::ZoomOut
+            | BorderControl::ZoomIn
+            | BorderControl::ViewMode => ControlPane::Map,
+        }
+    }
+
+    /// The `slash::COMMANDS` entry a click runs — which toggles or cycles for
+    /// every switch here, and simply HAPPENS for the triggers.
+    ///
+    /// **Not a bare string** (SQ-1148). It was one while every control's command
+    /// took no argument; `zoom-map` takes `in|out|reset|<n>` and errors without
+    /// one, so the two zoom controls are a single registry entry with two
+    /// different arguments. See [`ControlCommand`] for why the name and the
+    /// argument stay apart rather than being one line the callers re-split.
+    pub fn command(self) -> ControlCommand {
+        let bare = |name| ControlCommand { name, arg: None };
+        match self {
+            BorderControl::Map => bare("toggle-map"),
+            BorderControl::Guidance => bare("set-guidance"),
+            BorderControl::VerbPanel => bare("open-command-band"),
+            BorderControl::V6Render => bare("set-v6-render"),
+            BorderControl::V6PixelLock => bare("set-v6-pixel-lock"),
+            BorderControl::ReturnProbe => bare("set-return-probe"),
+            BorderControl::Reveal => bare("reveal-words"),
+            BorderControl::RoomNumbers => bare("toggle-room-numbers"),
+            BorderControl::Centre => bare("center-map"),
+            BorderControl::ZoomOut => ControlCommand { name: "zoom-map", arg: Some("out") },
+            BorderControl::ZoomIn => ControlCommand { name: "zoom-map", arg: Some("in") },
+            // Bare, which CYCLES between the drawn map and the matrix — the same
+            // reading a bare `/view-map` gives, and the one that keeps a click
+            // identical to typing it.
+            BorderControl::ViewMode => bare("view-map"),
         }
     }
 
@@ -152,7 +295,24 @@ impl BorderControl {
     /// `border_controls` suite, which walks this and asserts the registry's own
     /// description matches.
     pub fn persists(self) -> bool {
-        !matches!(self, BorderControl::Reveal)
+        !matches!(
+            self,
+            BorderControl::Reveal
+                // None of the map cluster writes the per-game sidecar, and each
+                // for its own reason rather than as a group (SQ-1148). Centre and
+                // the two zooms are one-shots: a viewport is not a preference.
+                // Room numbers is a session flag seeded from the global
+                // `show_room_numbers` at startup, which the settings screen owns.
+                // The view switch DOES remember — in the map archive, per layer
+                // (`LayerMeta::view`), which is a different store with a
+                // different lifetime, so answering `true` here would point the
+                // guard below at a sidecar that will never hold it.
+                | BorderControl::RoomNumbers
+                | BorderControl::Centre
+                | BorderControl::ZoomOut
+                | BorderControl::ZoomIn
+                | BorderControl::ViewMode
+        )
     }
 }
 
@@ -187,27 +347,40 @@ impl ControlView {
 /// panel became. `no_hint_advertises_a_key_that_is_not_bound` in the
 /// `border_controls` suite fails the hand-written form, because a substring
 /// check on the command half is satisfied by a lie about the key half.
-fn key_route(state: &AppState, command: &str) -> String {
-    if let Some(k) = state.keymap.primary_key(command) {
-        return format!("{} · /{command}", k.label());
+fn key_route(state: &AppState, cmd: ControlCommand) -> String {
+    // An ARGUMENT-bearing control must match the whole line (SQ-1148): `+` is
+    // bound to `zoom-map in` and `-` to `zoom-map out`, and a lookup by name
+    // alone answers `+` for both — which is precisely the hint that names a key
+    // that does not reach the control, the defect SQ-1142 fixed.
+    if let Some(k) = match cmd.arg {
+        Some(_) => state.keymap.primary_key_exact(&cmd.to_string()),
+        None => state.keymap.primary_key(cmd.name),
+    } {
+        return format!("{} · /{cmd}", k.label());
     }
-    if let Some(letter) = leader_letter(state, command) {
-        return format!("{} {letter} · /{command}", state.hotkeys.prefix.label());
+    if let Some(letter) = leader_letter(state, cmd) {
+        return format!("{} {letter} · /{cmd}", state.hotkeys.prefix.label());
     }
-    format!("/{command}")
+    format!("/{cmd}")
 }
 
 /// The leader-panel letter that reaches `command`, if the panel offers one.
 ///
-/// Matched on the command NAME rather than the whole entry, so a panel row that
-/// carries an argument (`"zoom-map in"`) still answers for `zoom-map`.
-fn leader_letter(state: &AppState, command: &str) -> Option<char> {
+/// Matched on the command NAME for a control that supplies no argument, so a
+/// panel row that carries one (`"zoom-map in"`) still answers for `zoom-map` —
+/// and on the WHOLE line for a control that does, so the zoom-out control cannot
+/// be handed the zoom-in row's letter (SQ-1148).
+fn leader_letter(state: &AppState, cmd: ControlCommand) -> Option<char> {
+    let line = cmd.to_string();
     state
         .hotkeys
         .groups
         .iter()
         .flat_map(|(_, entries)| entries.iter())
-        .find(|(_, cmd, _)| cmd.split_whitespace().next() == Some(command))
+        .find(|(_, entry, _)| match cmd.arg {
+            Some(_) => *entry == line,
+            None => entry.split_whitespace().next() == Some(cmd.name),
+        })
         .map(|(letter, _, _)| *letter)
 }
 
@@ -230,7 +403,8 @@ fn style_for(state: &AppState, id: BorderControl, lit: bool) -> Style {
     state.colors.theme.get(sel).style
 }
 
-/// The controls to draw in the story pane's border, left to right.
+/// The controls to draw in the STORY pane's border, left to right. The map
+/// pane's own five are [`map_controls_for`].
 ///
 /// Always the five that apply to every story; the two v6 ones only when the
 /// story really is v6 (header version 6, as `startup` recorded it), so they
@@ -396,6 +570,132 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
     });
 
     out
+}
+
+/// The controls to draw in the MAP pane's border, left to right: room numbers,
+/// centre, zoom out, zoom in, view (SQ-1148).
+///
+/// `view` is the view the ACTIVE LAYER actually draws in
+/// (`MapGraph::layer_view`, i.e. `LayerMeta::effective_view`), which is the one
+/// fact this cluster needs and the one `AppState` cannot answer on its own — the
+/// map's per-layer state lives on the graph. Passed in rather than looked up so
+/// this stays a pure function of what is on screen, exactly as `controls_for` is.
+///
+/// **`None` versus `Some(the derived value)` is not this function's business.**
+/// It draws what the layer resolves to; a click runs `/view-map`, which is the
+/// only thing that ever writes the override, and it always writes `Some(_)`. So
+/// the unruled/ruled distinction cannot be flattened by looking at the map.
+pub fn map_controls_for(state: &AppState, view: MapView) -> Vec<ControlView> {
+    let g = &state.symbols.map_controls;
+    let mut out = Vec::with_capacity(5);
+
+    // ── Room numbers ─────────────────────────────────────────────────────────
+    // The one control in either cluster whose PLAIN glyph is the same in both
+    // states (`#`), leaving colour to say which — a degradation forced by ASCII
+    // having no off-shape for a `#`, not a new house pattern. The patched preset
+    // obeys the shape rule outright. See [`crate::symbols::MapControlGlyphs`].
+    let numbers_on = state.show_room_numbers;
+    out.push(ControlView {
+        id: BorderControl::RoomNumbers,
+        glyph: if numbers_on { g.room_numbers_on } else { g.room_numbers_off },
+        style: style_for(state, BorderControl::RoomNumbers, numbers_on),
+        hint: vec![
+            if numbers_on {
+                "Room numbers: shown — click to hide"
+            } else {
+                "Room numbers: hidden — click to show"
+            }
+            .to_string(),
+            key_route(state, BorderControl::RoomNumbers.command()),
+        ],
+    });
+
+    // ── Centre (a one-shot) ──────────────────────────────────────────────────
+    // No state to report, so never lit and its hint says what a press DOES —
+    // the reveal's rule, for the same reason.
+    out.push(ControlView {
+        id: BorderControl::Centre,
+        glyph: g.centre,
+        style: style_for(state, BorderControl::Centre, false),
+        hint: vec![
+            "Centre the map on the selected room, or the current one".to_string(),
+            key_route(state, BorderControl::Centre.command()),
+        ],
+    });
+
+    // ── Zoom, as two one-shots ───────────────────────────────────────────────
+    // The set's first SCALAR, and it reports no level: a single cycling control
+    // has no way back except all the way round, and no glyph can say which rung
+    // you are on. Two adjacent triggers are directly manipulable and reversible.
+    out.push(ControlView {
+        id: BorderControl::ZoomOut,
+        glyph: g.zoom_out,
+        style: style_for(state, BorderControl::ZoomOut, false),
+        hint: vec![
+            "Zoom out — more of the map, drawn smaller".to_string(),
+            key_route(state, BorderControl::ZoomOut.command()),
+        ],
+    });
+    out.push(ControlView {
+        id: BorderControl::ZoomIn,
+        glyph: g.zoom_in,
+        style: style_for(state, BorderControl::ZoomIn, false),
+        hint: vec![
+            "Zoom in — less of the map, drawn larger".to_string(),
+            key_route(state, BorderControl::ZoomIn.command()),
+        ],
+    });
+
+    // ── View (a mode) ────────────────────────────────────────────────────────
+    // Lit on the matrix, which is the view a player chooses; the drawn map is
+    // how a layer arrives, so it reads as the idle state — the same reading the
+    // v6 render cycle's `hybrid` gets.
+    let matrix = view == MapView::Matrix;
+    out.push(ControlView {
+        id: BorderControl::ViewMode,
+        glyph: if matrix { g.view_matrix } else { g.view_drawn },
+        style: style_for(state, BorderControl::ViewMode, matrix),
+        hint: vec![
+            if matrix {
+                "View: matrix — click for the drawn map"
+            } else {
+                "View: drawn — click for the direction matrix"
+            }
+            .to_string(),
+            key_route(state, BorderControl::ViewMode.command()),
+        ],
+    });
+
+    out
+}
+
+/// Draw a pane with its control cluster, and hand back the frame plus the
+/// hit-rects that are actually ON SCREEN (SQ-1148).
+///
+/// **The one seam both clusters go through.** It was inlined in `main` while
+/// there was one cluster; with two, a pane that resolved its own would be a
+/// second place for the zero-area filter to be forgotten, and — the reason it
+/// is here rather than there — a cluster drawn only from `main` is a cluster no
+/// test can render, which is exactly how a quest shipped this feature's whole
+/// vocabulary and none of its controls.
+///
+/// A group the pane was too narrow to hold leaves zero-area rects behind; they
+/// are dropped here, so what comes back is only what a pointer can reach.
+pub fn draw_pane_with_controls(
+    buf: &mut ratatui::buffer::Buffer,
+    spec: &PanelSpec,
+    theme: &crate::theme::resolve::Theme,
+    views: &[ControlView],
+) -> (PanelFrame, Vec<(BorderControl, Rect)>) {
+    let ctls: Vec<_> = views.iter().map(|v| v.as_header_control()).collect();
+    let (frame, rects) = draw_panel_with_controls(buf, spec, &ctls, theme);
+    let hits = views
+        .iter()
+        .map(|v| v.id)
+        .zip(rects)
+        .filter(|(_, r)| r.width > 0 && r.height > 0)
+        .collect();
+    (frame, hits)
 }
 
 /// Draw the hover hint for whichever control the pointer is on, if any.

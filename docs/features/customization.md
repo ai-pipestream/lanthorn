@@ -104,11 +104,14 @@ still reach in and override any single selector by name.
   set), `path_style` for cardinal (N/S/E/W) connectors, and a separate
   `portal_path_style` for vertical/portal (up/down/in/out) connectors so they
   can render distinctly (dotted by default). `control_icons` (plain | nerdfont)
-  picks the glyphs for the story pane's border toggle controls — the map and
-  verb-panel toggles, the Guiding Light's mark, the word reveal's lamp, the
-  return probe's footprint and the two v6 render switches.
-  `plain` is shape-based Geometric Shapes; `nerdfont` gives all thirteen states a
-  named icon, every codepoint read from the font's own `post` table rather than
+  picks the glyphs for **every** border control — the story pane's cluster (the
+  map and verb-panel toggles, the Guiding Light's mark, the word reveal's lamp,
+  the return probe's footprint and the two v6 render switches), the map pane's
+  own five (room numbers, centre, zoom out, zoom in, view) and the tooltip
+  pointer, all off one key so a single answer dresses the whole interface.
+  `plain` is shape-based — Geometric Shapes for the story pane, and marks an
+  ASCII face is certain to carry for the map's (`#`, `¤`, `−`, `+`, `M`);
+  `nerdfont` gives every state a named icon, every codepoint read from the font's own `post` table rather than
   guessed from a name, with each control's states drawn from a single icon
   family so a toggle changes shape without changing weight. `diagonal_corners = false` turns
   the half-diagonal corner stubs (🮠🮡🮢🮣) back into plain orthogonal exits, for

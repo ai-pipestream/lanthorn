@@ -242,11 +242,13 @@ know which side you're on).
   and never touches a normal launch.
 
 ## Playing aids
-- **Toggle controls in the story pane's border** — clickable icons riding the
-  pane's own frame, each one showing what state it is in and switching it when
-  clicked. Guidance, the verb panel and the two v6 switches used to be reachable
-  only by slash command, key or the settings screen, with nothing on screen
-  saying they existed, let alone whether they were on.
+- **Toggle controls in the pane borders** — clickable icons riding a pane's
+  own frame, each one showing what state it is in and switching it when
+  clicked. There are two clusters — the story pane's, described first, and the
+  **map pane's own five** further down — and one mechanism behind both.
+  Guidance, the verb panel and the two v6 switches used to be reachable only by
+  slash command, key or the settings screen, with nothing on screen saying they
+  existed, let alone whether they were on.
 
   ```text
   ┌─ ZORK I ──────────────────────┤ ◧ □ ├─┐   the v6 pair (v6 stories only)
@@ -352,6 +354,42 @@ know which side you're on).
     Codicons, Font Awesome and Material Design carry different stroke weights,
     and a control whose two states came from different families appeared to jump
     on toggle.
+- **The map pane has a cluster of its own.** Five controls ride *its* bottom
+  border — room numbers, centre, zoom out, zoom in, view — built on the same
+  mechanism as the story pane's, so everything above is true of them too: a
+  click is the command, the glyph and the colour both carry the state, hovering
+  floats the same hint, and `panel.control{,:lit,:hover}` styles them.
+
+  ```text
+  ┌─┤ Main ├──────────────┐
+  │                       │
+  └──────┤ # ¤ − + M ├────┘   numbers · centre · out · in · view
+  ```
+
+  - **Room numbers** (`#`, `/toggle-room-numbers`) prints each room's internal
+    `#id` inside its box at the Boxes zoom — the one route to it besides typing
+    the command, since it has no key of its own.
+  - **Centre** (`¤`, `/center-map`) puts the view back on the selected room, or
+    the one you are standing in. **Zoom out** and **zoom in** (`−` `+`,
+    `/zoom-map out|in`) are two adjacent triggers rather than one cycling
+    control, so the way back is always the button beside the one you just
+    pressed.
+  - **View** (`M`, `/view-map`) switches the active layer between the drawn map
+    and the direction matrix, and the choice **sticks to that layer** and rides
+    into your save. Marking a layer a maze still *defaults* it to the matrix;
+    once you have ruled on a layer by hand, that ruling is what draws it.
+  - **These five may live on a pane that disappears, where the return probe
+    could not.** Every one of them acts on a map that is on screen — hide the
+    map and there is nothing left to switch — which is exactly the test the
+    probe failed, since its search keeps running with the pane shut.
+  - **Two of them change colour rather than shape**, and that is a concession to
+    the plain preset's alphabet rather than a new habit: ASCII has no "off"
+    shape for a `#` or an `M`, so those two are drawn the same either way and
+    lit when on. `panel.control:lit` is bold as well as yellow, so the state
+    survives a colour-blind eye or a low-contrast theme. The `nerdfont` preset
+    has real off-shapes and keeps the shape rule outright — a struck-through
+    numeral and a struck-through lattice — and either preset can be overridden
+    one slot at a time through `[map.overrides]`'s `map_control.*` keys.
 - **`[more]` paging, the way the originals did it** — whenever a turn's output
   runs past the story pane (a long description, a boot banner, a hint page,
   even a "press any key" dump), the view stops at the *first* fresh screenful

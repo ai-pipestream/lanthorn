@@ -594,7 +594,8 @@ fn the_map_toggle_outlives_the_probe_as_the_pane_narrows() {
 /// does — there is no second implementation of the switch under the icon.
 #[test]
 fn the_control_names_a_real_slash_command() {
-    assert_eq!(BorderControl::ReturnProbe.command(), "set-return-probe");
+    assert_eq!(BorderControl::ReturnProbe.command().name, "set-return-probe");
+    assert_eq!(BorderControl::ReturnProbe.command().arg, None);
     assert!(
         app::slash::COMMANDS.iter().any(|c| c.name == "set-return-probe"),
         "and the registry holds it"
