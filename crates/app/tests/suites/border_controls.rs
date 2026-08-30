@@ -233,6 +233,28 @@ fn every_control_changes_glyph_with_its_state() {
 /// So the state is carried TWICE: by the glyph and by the colour. That is
 /// deliberate. A player who cannot tell the two colours apart still has the
 /// shape, and the shape change is legible at a glance without reading colour.
+///
+/// **One control coming will break the first half of that, and it was decided
+/// with the trade in view** (SQ-1148). The map pane's room-numbers toggle draws
+/// `#` in BOTH states and lets colour alone say which one is in force — the
+/// first TWO-MODE control here that does not change shape. The two single-glyph
+/// controls beside it, `return_probe` and `reveal`, are exempt because they have
+/// no opposite mode to draw; room numbers do have one, so this is a real
+/// departure and not their rationale inherited. It was taken for coverage and
+/// legibility: `#` is ASCII and so cannot tofu in any face, where every plain
+/// mark that says "number" by shape is carried by at most fourteen of the
+/// sixteen terminal faces surveyed, and the ones inside Geometric Shapes by as
+/// few as five.
+///
+/// **What makes colour-only survivable here is that it is not colour-only**, and
+/// this case is what holds that: `panel.control:lit` adds BOLD on top of the
+/// `alert` hue, asserted below, so a colour-blind player or a low-contrast theme
+/// still gets a WEIGHT change rather than nothing. The default pair is a
+/// brightness step too — `muted` is DarkGray and `alert` is Yellow, which
+/// separate by luminance in every standard ANSI palette, not merely by hue. If a
+/// later edit ever drops that BOLD, room numbers become genuinely unreadable to
+/// those players, which is why the assertion is worth keeping even though it
+/// looks redundant beside the colour check.
 #[test]
 fn every_on_state_is_lit_from_the_alert_role_and_every_off_state_is_muted() {
     let alert = AppState::default().colors.theme.get("alert").style.fg.unwrap();
@@ -500,6 +522,89 @@ fn the_reveal_is_a_trigger_and_says_so() {
         "with the light on there is nothing to warn about: {:?}",
         reveal.hint,
     );
+}
+
+/// **Every key and every command a hint names must actually reach that control.**
+///
+/// This case exists because the one beside it could not see the defect that
+/// produced it (SQ-1142). `the_reveal_is_a_trigger_and_says_so` asserts
+/// `text.contains("/reveal-words")`, and the hint `"F4 · /reveal-words"`
+/// satisfies that perfectly — so when SQ-1142 unbound F2, F3 and F4, the reveal
+/// went on advertising a dead key and the suite stayed green; the verb panel's
+/// hint was the bare string `"F2"` and was not checked for a command at all. A
+/// substring check on the half that is right cannot fail on the half that is
+/// wrong.
+///
+/// So the hints are checked against the KEYMAP and the REGISTRY rather than
+/// against literals: a token that looks like a key must be a route the keymap or
+/// the leader panel really binds to this control's own command, and a token that
+/// looks like a slash command must be in `slash::COMMANDS` and be this control's
+/// command. Unbinding a key now fails the hint that advertises it, which is the
+/// whole point — the next person to remove a binding has no reason to know which
+/// tooltips recite it.
+#[test]
+fn no_hint_advertises_a_key_that_is_not_bound() {
+    // A token is a key label if it carries a modifier or is Fn — the two shapes
+    // a hint has ever used. Anything else is prose and is not checked.
+    fn looks_like_a_key(tok: &str) -> bool {
+        tok.starts_with("Ctrl+")
+            || tok.starts_with("Alt+")
+            || tok.starts_with("Shift+")
+            || (tok.len() >= 2
+                && tok.starts_with('F')
+                && tok[1..].chars().all(|c| c.is_ascii_digit()))
+    }
+
+    let st = story(Some(6));
+    let views = controls_for(&st);
+    assert_eq!(views.len(), EVERY_CONTROL.len(), "a v6 story draws every control");
+
+    for view in &views {
+        let cmd = view.id.command();
+
+        // The routes that genuinely reach this control from the keyboard: its
+        // direct binding, and its leader-panel letter behind the prefix.
+        let mut routes: Vec<String> = Vec::new();
+        if let Some(k) = st.keymap.primary_key(cmd) {
+            routes.push(k.label());
+        }
+        if let Some((letter, _, _)) = st
+            .hotkeys
+            .groups
+            .iter()
+            .flat_map(|(_, entries)| entries.iter())
+            .find(|(_, c, _)| c.split_whitespace().next() == Some(cmd))
+        {
+            routes.push(format!("{} {letter}", st.hotkeys.prefix.label()));
+        }
+
+        for line in &view.hint {
+            for tok in line.split_whitespace() {
+                if looks_like_a_key(tok) {
+                    assert!(
+                        routes.iter().any(|r| r == tok || r.starts_with(&format!("{tok} "))),
+                        "{:?}'s hint advertises the key {tok:?}, which does not reach \
+                         `{cmd}`. Routes that do: {routes:?}. Hint: {:?}",
+                        view.id,
+                        view.hint,
+                    );
+                }
+                if let Some(name) = tok.strip_prefix('/') {
+                    assert!(
+                        app::slash::find_command(name).is_some(),
+                        "{:?}'s hint names /{name}, which is not in slash::COMMANDS: {:?}",
+                        view.id,
+                        view.hint,
+                    );
+                    assert_eq!(
+                        name, cmd,
+                        "{:?}'s hint names /{name} but a click runs `{cmd}`: {:?}",
+                        view.id, view.hint,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A modal overlay owns the screen: while one is open the border controls are

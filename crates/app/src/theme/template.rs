@@ -187,7 +187,7 @@ fn enum_hint(row: &RegRow) -> &'static str {
         "map.arrow_set" => "   # filled | line | nerdfont | nf-bold | nf-box | nf-chevron | nf-circle | nf-outline",
         "map.portal_icons" => "   # ascii | nerdfont | nerdfont-stairs",
         "map.path_style" | "map.portal_path_style" => "   # light | heavy | dotted",
-        "map.control_icons" => "   # plain | nerdfont   (the pane-border toggle controls)",
+        "map.control_icons" => "   # plain | nerdfont   (every border control: both panes' clusters and the tooltip pointer)",
         // Story-list row badges (SQ-0559). `badge_icons` IS enumerated — it names
         // a `StoryBadges` preset, and the font check writes it (SQ-1159). The
         // three under it are free-form: any string, so a patched font can use a

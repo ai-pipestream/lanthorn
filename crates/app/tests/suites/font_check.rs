@@ -157,6 +157,60 @@ fn the_seeded_commentary_survives_the_write() {
     assert!(after.contains("[map.overrides]"), "and the override table's header with them");
 }
 
+/// **SQ-1148: a "yes" reaches the MAP pane's control cluster too**, end to end —
+/// the dialog's answer, through `write_font_check_answer`, into `style.toml`, out
+/// through the style loader and into the resolved `SymbolSet` the renderer reads.
+///
+/// The cluster deliberately has NO key of its own: it rides `control_icons`,
+/// which the answer already writes for the border controls and the tooltip
+/// pointer. So there is nothing new in the file to assert — and that absence IS
+/// the assertion, because a key of its own is exactly how a config ends up
+/// half-patched, with the story pane's controls iconised and the map pane's not,
+/// and no way for the player to tell which question they answered.
+///
+/// This walks the whole chain rather than calling `MapControlGlyphs::preset`
+/// directly: the unit case in `symbols.rs` already pins that the preset holds
+/// the right codepoints, and what can still break is a link between here and
+/// there.
+#[test]
+fn a_yes_reaches_the_map_controls_too() {
+    use app::render::font_check_dialog::NERD_MAP_CONTROLS;
+
+    let dir = seeded_home("map-controls");
+    let path = style_write_path(None, &dir).unwrap();
+    write_font_check_answer(&path, true).unwrap();
+
+    let want = app::symbols::MapControlGlyphs::preset(NERD_MAP_CONTROLS)
+        .expect("the preset the answer names");
+    let got = glyphs(&dir).map_controls;
+    assert_eq!(got, want, "the map cluster is patched by the same yes");
+    assert_eq!(got.room_numbers, '\u{F03A0}', "md-numeric reached the renderer");
+
+    // One key, not two: the map cluster must NOT have grown a
+    // `map_control_icons` of its own on the way through.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let live: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with('#')).collect();
+    assert!(
+        live.iter().any(|l| l.contains("control_icons = \"nerdfont\"")),
+        "the one key the answer writes:\n{text}"
+    );
+    assert!(
+        !live.iter().any(|l| l.trim_start().starts_with("map_control_icons")),
+        "the map cluster grew a key of its own:\n{live:#?}"
+    );
+
+    // …and the plain answer leaves it plain, so this is a switch and not a
+    // one-way door.
+    let dir = seeded_home("map-controls-plain");
+    let path = style_write_path(None, &dir).unwrap();
+    write_font_check_answer(&path, false).unwrap();
+    assert_eq!(
+        glyphs(&dir).map_controls,
+        app::symbols::SymbolSet::default().map_controls,
+        "a no keeps the ASCII cluster"
+    );
+}
+
 /// The story picker's row badges follow the answer too (SQ-1159).
 ///
 /// They did not, for as long as the font check has existed: `arrow_set`,
@@ -267,12 +321,22 @@ fn the_rows_the_prompt_shows_are_the_glyphs_the_answers_install() {
     // this case defends is still exactly the one it always did — every glyph the
     // prompt SHOWS is a glyph the map DRAWS — and the stubs satisfy it whichever
     // row you pick, which is the whole reason they can be shown in both.
+    //
+    // The map pane's own control cluster joins them at SQ-1148, and is read off
+    // the RESOLVED set like everything else here — which is what makes this the
+    // exact inverse of `font_check_dialog`'s
+    // `every_map_glyph_a_yes_installs_appears_in_the_row_the_player_judges`.
+    // That one says every glyph the answer INSTALLS is shown; this one says every
+    // glyph SHOWN is installed. Neither implies the other, and the pair is what
+    // holds the rule that the prompt asks about exactly what it applies.
     let on_the_map = |set: &app::symbols::SymbolSet| {
+        let m = &set.map_controls;
         [
             set.arrows.north, set.arrows.south, set.arrows.east, set.arrows.west,
             set.portal.marker, set.portal.up, set.portal.down,
             set.portal.in_, set.portal.out, set.portal.unknown,
             set.assist_gutter,
+            m.room_numbers, m.centre, m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn,
             set.path.diag_ul, set.path.diag_ur, set.path.diag_ll, set.path.diag_lr,
         ]
     };
