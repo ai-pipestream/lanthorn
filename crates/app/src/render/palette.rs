@@ -17,6 +17,27 @@ use crate::render::dialog::{
 use crate::render::{draw_str_clipped, put_char};
 use crate::state::AppState;
 
+/// Column (relative to the list area's left edge) where a candidate's one-line
+/// help starts: the shared help column, or one clear cell past a name too long to
+/// fit before it. The name column is the same in every row so the list stays
+/// scannable, and the wrapped sole match (SQ-1149) hangs its continuation rows on
+/// this same column.
+fn help_col(name: &str) -> u16 {
+    const HELP_COL: u16 = 26;
+    (name.chars().count() as u16 + 2).max(HELP_COL)
+}
+
+/// The wrapped help of a lone candidate, or `None` while several are listed.
+///
+/// Measured against the modal's own width, so it can size the dialog *before* the
+/// chrome is drawn — the list area is the modal minus its one-cell border.
+fn sole_match_wrap(cands: &[crate::complete::PaletteCandidate], modal_w: u16) -> Option<Vec<String>> {
+    let [cand] = cands else { return None };
+    let spec = &crate::slash::COMMANDS[cand.cmd_index];
+    let w = modal_w.saturating_sub(2).saturating_sub(help_col(spec.name));
+    Some(crate::render::transcript::wrap_line(spec.description, w))
+}
+
 /// Draw the command palette centered over `area`.
 ///
 /// `vp_out` receives the candidate-list viewport height (rows) so nav actions can
@@ -40,7 +61,18 @@ pub fn draw_palette(
     let modal_w = 72u16.min(area.width.saturating_sub(4));
     // 1 field row + candidate rows + 1 footer + border(2). Cap the list height so
     // a huge registry never overflows the screen.
-    let list_rows = (cands.len() as u16).clamp(1, 14);
+    //
+    // A SINGLE match has the dialog to itself, so its help is WRAPPED over as many
+    // rows as it needs and the modal grows downward to fit (SQ-1149). With several
+    // matches the help stays one truncated row each, because a column you can scan
+    // beats a sentence you can finish. Growth is still bounded by the pane (the
+    // `.min` below): a description too long for the space clips at the last row,
+    // exactly as a truncated one does today.
+    let sole_wrap = sole_match_wrap(&cands, modal_w);
+    let list_rows = match &sole_wrap {
+        Some(lines) => lines.len().max(1) as u16,
+        None => (cands.len() as u16).clamp(1, 14),
+    };
     let modal_h = (list_rows + 4).min(area.height.saturating_sub(2));
     if modal_w < 24 || modal_h < 5 {
         return None;
@@ -104,28 +136,47 @@ pub fn draw_palette(
         let offset = palette.scroll.display_offset();
         let selected = palette.scroll.selected;
 
-        for row in 0..viewport {
-            let i = offset + row;
-            if i >= total {
-                break;
-            }
+        // Rows consumed so far. Every candidate is one row except the sole match,
+        // whose wrapped help makes its entry as many rows tall as `sole_wrap`.
+        let mut row = 0u16;
+        let mut i = offset;
+        while i < total && row < list_area.height {
             let cand = &cands[i];
             let spec = &crate::slash::COMMANDS[cand.cmd_index];
-            let row_y = list_area.y + row as u16;
+            let row_y = list_area.y + row;
             let is_sel = i == selected;
             let base = if is_sel { sel_style } else { name_style };
 
-            // Fill the row so the selection highlight spans its full width.
-            for col in list_area.x..list_area.x + row_w {
-                if let Some(cell) = buf.cell_mut((col, row_y)) {
-                    cell.set_symbol(" ").set_style(base);
+            // Help column: col 26, or one clear cell past a name too long to fit
+            // before it. `sole_wrap` was measured against this same offset.
+            let help_col = help_col(spec.name);
+            let desc_x = list_area.x + help_col;
+            let desc_w = row_w.saturating_sub(help_col);
+
+            let owned;
+            let lines: &[String] = match &sole_wrap {
+                Some(l) => l,
+                None => {
+                    owned = [spec.description.chars().take(desc_w as usize).collect::<String>()];
+                    &owned
+                }
+            };
+            let h = (lines.len() as u16).min(list_area.height - row);
+
+            // Fill the entry so the selection highlight spans its full width — and,
+            // for a wrapped sole match, all of its rows.
+            for y in row_y..row_y + h {
+                for col in list_area.x..list_area.x + row_w {
+                    if let Some(cell) = buf.cell_mut((col, y)) {
+                        cell.set_symbol(" ").set_style(base);
+                    }
                 }
             }
-            hits.push((cand.cmd_index, Rect::new(list_area.x, row_y, row_w, 1)));
+            // The whole entry is the click target, wrapped continuation included.
+            hits.push((cand.cmd_index, Rect::new(list_area.x, row_y, row_w, h)));
 
-            // Command name, matched chars highlighted.
+            // Command name, matched chars highlighted, on the entry's first row.
             let name_x = list_area.x + 1;
-            let name_right = name_x + spec.name.chars().count() as u16;
             for (ci, ch) in spec.name.chars().enumerate() {
                 let x = name_x + ci as u16;
                 let matched = cand.positions.contains(&ci);
@@ -138,15 +189,19 @@ pub fn draw_palette(
                 put_char(buf, x as i32, row_y as i32, ch, style, list_area);
             }
 
-            // One-line help, right of the name column (aligned to col 26).
-            let desc_x = name_x.max(name_right + 1).max(list_area.x + 26);
-            if desc_x < list_area.x + row_w {
+            // Help text, right of the name column. One row in a list, every
+            // wrapped row at the same column for a sole match.
+            if desc_w > 0 {
                 let d_style = if is_sel { sel_style } else { desc_style };
-                let avail = (list_area.x + row_w - desc_x) as usize;
-                let desc: String = spec.description.chars().take(avail).collect();
-                let clip = Rect::new(desc_x, row_y, list_area.x + row_w - desc_x, 1);
-                draw_str_clipped(buf, desc_x, row_y, &desc, d_style, clip);
+                for (k, line) in lines.iter().take(h as usize).enumerate() {
+                    let y = row_y + k as u16;
+                    let clip = Rect::new(desc_x, y, desc_w, 1);
+                    draw_str_clipped(buf, desc_x, y, line, d_style, clip);
+                }
             }
+
+            row += h;
+            i += 1;
         }
 
         if scrollbar_visible {
@@ -219,6 +274,64 @@ mod tests {
         assert!(rects.close.is_some());
         // Row hits recorded, and zoom-map is among them.
         assert!(hits.iter().any(|(i, _)| crate::slash::COMMANDS[*i].name == "zoom-map"));
+    }
+
+    /// SQ-1149: a lone candidate gets its whole help, wrapped, and the modal grows
+    /// downward to hold it — where a list of several still truncates each row.
+    #[test]
+    fn sole_match_wraps_its_help_and_grows_the_dialog() {
+        // A command whose help is far longer than the ~44-column help field, and a
+        // query that narrows to it alone.
+        let query = "returnprobe";
+        let cands = palette_candidates(query);
+        assert_eq!(cands.len(), 1, "query {query:?} must narrow to exactly one command");
+        let spec = &crate::slash::COMMANDS[cands[0].cmd_index];
+        assert!(spec.description.chars().count() > 60, "fixture command must have a long help");
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = state_with_palette(query);
+        let mut hits = Vec::new();
+        terminal
+            .draw(|f| {
+                draw_palette(&state, f.area(), f.buffer_mut(), &mut 0, &mut hits);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+
+        // Every word of the help is on screen somewhere, not just the first 44 chars.
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect();
+        let screen = rows.join(" ");
+        for word in spec.description.split_whitespace() {
+            assert!(screen.contains(word), "help word {word:?} missing — description was truncated");
+        }
+
+        // The dialog grew: the entry is taller than one row, and the click target
+        // covers all of it.
+        let (_, hit) = hits.first().expect("the sole candidate must be clickable");
+        assert!(hit.height > 1, "a wrapped sole match must occupy more than one row, got {hit:?}");
+    }
+
+    /// The counterpart: several matches keep one row each, so the name column stays
+    /// scannable (SQ-1149 deliberately only grows the single-match case).
+    #[test]
+    fn several_matches_keep_one_row_each() {
+        let query = "map";
+        let cands = palette_candidates(query);
+        assert!(cands.len() > 1, "query {query:?} should match several commands");
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = state_with_palette(query);
+        let mut hits = Vec::new();
+        terminal
+            .draw(|f| {
+                draw_palette(&state, f.area(), f.buffer_mut(), &mut 0, &mut hits);
+            })
+            .unwrap();
+        assert!(hits.iter().all(|(_, r)| r.height == 1), "list rows must stay one row tall");
     }
 
     #[test]
