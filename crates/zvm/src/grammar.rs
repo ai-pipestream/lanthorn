@@ -44,6 +44,30 @@
 //                    holds the address of an 8-byte verb record, which points
 //                    at separate one-object and two-object entry blocks.
 //
+// ── The compilers that emit no such table ────────────────────────────────────
+//
+// Not every Z-machine story has a grammar table to find. **Dialog** (Linus
+// Åkesson; community fork at <https://github.com/Dialog-IF/dialog>) compiles a
+// predicate language to Z-code and keeps its parser in the story's own library
+// code — `(understand $ as $)` querying a `(grammar entry $ $ $)` predicate, in
+// Dialog's own data representation, indistinguishable from any other predicate
+// once compiled. The compiler proves it: the string "grammar" does not occur
+// anywhere in `dialogc`'s sources, and `src/backend_z.c` lays static memory out
+// as the optimised alphabet table (when used), then wordmaps, then data tables,
+// then the dictionary — no verb-pointer array, at the base of static memory or
+// anywhere else.
+//
+// Dialog signs every Z-machine story it emits, which is what lets us say so
+// rather than guess (`backend_z.c`, the header block): byte $38 is `*` for a
+// `-dev` build and zero otherwise, $39..$3B are `D`, `i`, `a`, and $3C..$3F are
+// the four characters of the version with its slash removed — `0m03` for
+// release 0m/03, `1a01` for 1a/01. That is the same $3C..$3F slot Inform stamps
+// `6.NN` into, so a Dialog story reads as Inform 5 to a version check alone.
+// [`is_dialog`] tests the three-byte signature, and [`Grammar::load`] answers
+// [`GrammarError::Absent`] for such a story — the honest answer, and one that
+// forecloses the real hazard, which is a Dialog wordmap whose leading bytes
+// happen to pass the verb-table shape checks and yield a fabricated grammar.
+//
 // ── What this module is not ──────────────────────────────────────────────────
 //
 // A read-only description of what the story's parser will accept. It is not a
@@ -120,7 +144,10 @@ const MAX_LINES_PER_VERB: u8 = 64;
 pub enum GrammarError {
     /// The story has no grammar table. Journey is the canonical example: a
     /// Version 6 game driven entirely by menus, whose dictionary marks no verbs.
-    /// Also reached when the verb-pointer table's first entry is zero.
+    /// Also reached when the verb-pointer table's first entry is zero, and for
+    /// any story the Dialog compiler produced — Dialog's parser lives in the
+    /// story's own library predicates, so there is no table of any shape to
+    /// find (see the module header, and [`is_dialog`]).
     Absent,
     /// A table address or entry ran past the end of the story file.
     Truncated,
@@ -196,6 +223,12 @@ impl Grammar {
     /// -driven Version 6 game such as Journey), and one of the other variants
     /// when the bytes do not describe a table this module recognises.
     pub fn load(mem: &Memory) -> Result<Grammar, GrammarError> {
+        // Dialog first: its parser is library code, so there is no table of any
+        // shape here, and its static memory begins with wordmaps that a shape
+        // check could in principle mistake for a verb-pointer array.
+        if is_dialog(mem) {
+            return Err(GrammarError::Absent);
+        }
         let format = detect_format(mem);
         let dict = dictionary::load(mem);
         let words = scan_dictionary(mem, &dict, format);
@@ -452,6 +485,39 @@ pub fn dictionary_words(mem: &Memory) -> Vec<DictionaryWord> {
 /// there separates Inform 6 from Inform 1–5.
 ///
 /// GV1 versus GV2 needs the table itself and is settled in [`load_classic`].
+/// True when the Dialog compiler produced this story.
+///
+/// Dialog writes `D`, `i`, `a` into header bytes $39..$3B of every Z-machine
+/// story it emits, unconditionally, and the four characters of its own version
+/// into $3C..$3F — `dialogc`'s `src/backend_z.c`:
+///
+/// ```text
+/// if(VERSION[5] == '-' && VERSION[6] == 'd') { zcore[0x38] = '*'; }
+/// zcore[0x39] = 'D'; zcore[0x3a] = 'i'; zcore[0x3b] = 'a';
+/// zcore[0x3c] = VERSION[0]; ... zcore[0x3f] = VERSION[4];
+/// ```
+///
+/// Those bytes are "unspecified" in the Z-Machine Standards Document, so no
+/// other producer has a claim on them; `ImpossibleStairs.z8` reads `Dia0m03`
+/// and `frankenfingers_260330.z5` reads `*Dia1a01`, and both print the same
+/// version from their own banner (`Dialog compiler version 0m/03` and
+/// `1a/01-dev`) — the independent check on this signature.
+///
+/// The version characters are deliberately NOT tested: the signature is the
+/// three letters, and a Dialog release numbered anything at all is still Dialog.
+pub fn is_dialog(mem: &Memory) -> bool {
+    mem.read_byte(0x39) == b'D' && mem.read_byte(0x3A) == b'i' && mem.read_byte(0x3B) == b'a'
+}
+
+/// Which family's grammar tables a story uses, judged from the header alone.
+///
+/// **Answers an Inform variant for a Dialog story**, whose $3C..$3F holds a
+/// Dialog version where Inform stamps `6.NN`; [`is_dialog`] is the test that
+/// tells them apart, and [`Grammar::load`] applies it first. Nothing here is
+/// changed for Dialog on purpose — [`crate::objects::ParseNames`] reads this to
+/// choose between Inform's fixed `name` property and a tallied Infocom one, and
+/// the Inform branch is the one that then *refuses* on a Dialog story rather
+/// than adopting whatever property the tally liked best.
 pub fn detect_format(mem: &Memory) -> GrammarFormat {
     let s: Vec<u8> = (0x12..0x18).map(|a| mem.read_byte(a)).collect();
     let digit = |b: u8, lo: u8, hi: u8| b >= lo && b <= hi;
@@ -1564,5 +1630,52 @@ mod tests {
             s.error(),
             Some(GrammarError::BadVerbTable) | Some(GrammarError::Truncated)
         ));
+    }
+
+    // ── Dialog: a compiler with no grammar table at all (SQ-1101) ────────────
+
+    /// The signature, and that it is the SIGNATURE doing the work and not the
+    /// bytes at static memory happening to look wrong.
+    ///
+    /// `infocom_fixed_story` is a table this module reads perfectly well. Stamp
+    /// Dialog's three letters into $39..$3B and the same image answers `Absent`
+    /// — because a Dialog story has no table, whatever its static memory holds.
+    /// That is the whole point: `stories/ImpossibleStairs.z8` is caught today by
+    /// a shape check, and the next Dialog story's wordmaps might not be.
+    #[test]
+    fn a_dialog_signature_means_absent_however_readable_the_bytes_are() {
+        let mut s = infocom_fixed_story();
+        assert!(s.grammar_of().is_ok(), "the unstamped image is a table we read");
+        assert!(!is_dialog(&s.mem()));
+
+        s.b(0x39, b'D');
+        s.b(0x3A, b'i');
+        s.b(0x3B, b'a');
+        s.b(0x3C, b'0');
+        s.b(0x3D, b'm');
+        s.b(0x3E, b'0');
+        s.b(0x3F, b'3');
+        assert!(is_dialog(&s.mem()));
+        assert_eq!(s.error(), Some(GrammarError::Absent));
+    }
+
+    /// Two letters of the signature are not the signature. A story whose $39
+    /// and $3A happen to read `Di` is still read as whatever its header says.
+    #[test]
+    fn a_partial_signature_is_not_a_dialog_story() {
+        let mut s = infocom_fixed_story();
+        s.b(0x39, b'D');
+        s.b(0x3A, b'i');
+        assert!(!is_dialog(&s.mem()));
+        assert!(s.grammar_of().is_ok());
+    }
+
+    /// Inform's stamp lives in $3C..$3F, one byte past Dialog's letters, and the
+    /// two must not be confused: a GV2 story with `6.15` there still parses.
+    #[test]
+    fn informs_version_stamp_is_not_mistaken_for_dialogs() {
+        let s = gv2_story();
+        assert!(!is_dialog(&s.mem()));
+        assert!(s.grammar_of().is_ok());
     }
 }

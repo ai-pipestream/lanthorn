@@ -403,10 +403,35 @@ grammar_table_at` (`tables.c`), so on the Z-machine the grammar table **is**
 where this reader looks — the assumption is Inform's own layout, not a guess —
 and Inform stamps its version as `6.NN` at header bytes `$3C..$3F`, where these
 two files hold `1a01` and `0m03` instead. They are not Inform 6 output at all,
-which is why `infodump` declines them too, and why refusing is the correct
-answer rather than an incomplete one. What remains open is which compiler
-produced them (SQ-1101; Dialog is the obvious candidate) and whether it emits
-anything a reader could read.
+which is why `infodump` declines them too.
+
+**SQ-1101 closed that: both were compiled by Dialog, and Dialog emits no grammar
+table of any shape.** The files say so themselves — `Dia` sits in header bytes
+`$39..$3B`, `1a01`/`0m03` in `$3C..$3F` is the compiler's own version with its
+slash removed, and byte `$38` is `*` for a `-dev` build, which is why
+frankenfingers' banner reads `Dialog compiler version 1a/01-dev` and
+ImpossibleStairs' reads `0m/03`. `dialogc`'s `src/backend_z.c` writes that
+signature unconditionally, and settles the substantive question alongside it: the
+string "grammar" does not occur anywhere in the compiler's sources. Dialog's
+parser is library code — `(understand $ as $)` querying a `(grammar entry $ $ $)`
+predicate defined in `stdlib.dg` — compiled to the same predicate representation
+as any other rule, with no Z-machine table to point at. Static memory begins with
+the optimised alphabet table (when the story uses one), then wordmaps, then data
+tables, then the dictionary, which is what the "address/length pairs" at
+`$38ee`/`$4710` actually are.
+
+So `zvm::grammar` now answers **`Absent`** for a Dialog story rather than
+`BadVerbTable`, tested by `is_dialog` on the signature and *before* any shape
+check. That is not only a truer refusal, it forecloses the one failure this
+module exists to prevent: these two files happen to fail the shape checks, and
+the next Dialog story's wordmaps need not. A Dialog story now takes the same
+already-pinned road as Journey — the command band keeps its generic column and
+labels it, the vocabulary offer stays silent — pinned in
+`crates/zvm/tests/dialog_grammar.rs` and
+`crates/app/tests/suites/dialog_story_degradation.rs`. The corpus-wide census in
+the first of those is the durable part: every Z-machine story on disk is
+Infocom's (no stamp), Inform's (`6.NN`), or Dialog's (`Dia`), and the case fails
+if a fourth producer ever turns up.
 
 **The Glulx half now exists (SQ-1102).** `gvm::grammar` answers the same
 questions about the modern corpus, and the two readers deliberately share no
