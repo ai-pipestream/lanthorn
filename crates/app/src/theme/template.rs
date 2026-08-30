@@ -311,6 +311,10 @@ const MAP_OVERRIDES_BLOCK: &str = r#"
 # "control.map_hide" = "▶"   # border toggles: control.<map_show|map_hide|band_show|band_hide>
 # "control.guidance_on" = "●" # …control.<guidance_on|guidance_off>
 # "control.lock_on" = "▣"    # …control.<render_hybrid|render_raster|render_extended|lock_on|lock_off>
+# "map_control.centre" = "¤" # map border cluster: map_control.<room_numbers_on|room_numbers_off|centre|zoom_out|zoom_in|view_matrix|view_drawn>
+# "map_control.view_drawn" = "M" # the plain set repeats one mark per pair (# #, M M) and lets colour say which
+#                            # state you are in; set the _off/_drawn half for a SHAPE change instead. On a
+#                            # patched font that is md-numeric_off (U+F19D3) and md-grid_off (U+F02C2).
 "#;
 
 const STATIC_EXAMPLES: &str = r#"# ── Story-line styling rules: recolour whole transcript lines matching a ────

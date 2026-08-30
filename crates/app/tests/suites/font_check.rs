@@ -184,7 +184,8 @@ fn a_yes_reaches_the_map_controls_too() {
         .expect("the preset the answer names");
     let got = glyphs(&dir).map_controls;
     assert_eq!(got, want, "the map cluster is patched by the same yes");
-    assert_eq!(got.room_numbers, '\u{F03A0}', "md-numeric reached the renderer");
+    assert_eq!(got.room_numbers_on, '\u{F03A0}', "md-numeric reached the renderer");
+    assert_eq!(got.room_numbers_off, '\u{F19D3}', "and so did its off-shape");
 
     // One key, not two: the map cluster must NOT have grown a
     // `map_control_icons` of its own on the way through.
@@ -336,7 +337,8 @@ fn the_rows_the_prompt_shows_are_the_glyphs_the_answers_install() {
             set.portal.marker, set.portal.up, set.portal.down,
             set.portal.in_, set.portal.out, set.portal.unknown,
             set.assist_gutter,
-            m.room_numbers, m.centre, m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn,
+            m.room_numbers_on, m.room_numbers_off, m.centre,
+            m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn,
             set.path.diag_ul, set.path.diag_ur, set.path.diag_ll, set.path.diag_lr,
         ]
     };

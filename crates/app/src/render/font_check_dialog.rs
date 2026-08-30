@@ -94,11 +94,20 @@ pub const NERD_MAP_CONTROLS: &str = "nerdfont";
 // So the map cluster gets a slot. Range reasoning cannot answer a metrics
 // question, and an argument in a comment is not a thing the player can look at.
 
-/// The map cluster's six patched marks, in the sample row's slot order. Sampled
-/// from the preset the "yes" installs rather than written out here, for the same
-/// reason as every other slot — see [`sample_glyphs`].
-fn map_control_slots(set: &crate::symbols::MapControlGlyphs) -> [char; 6] {
-    [set.room_numbers, set.centre, set.zoom_out, set.zoom_in, set.view_matrix, set.view_drawn]
+/// The map cluster's seven patched marks, in the sample row's slot order.
+/// Sampled from the preset the "yes" installs rather than written out here, for
+/// the same reason as every other slot — see [`sample_glyphs`].
+///
+/// **Both halves of each two-mode pair are here, so the plain row repeats a
+/// mark** (`# #`, `M M`) where the patched row shows a shape change. That is not
+/// a redundant slot: it is the honest picture of what each answer installs, and
+/// the rule at the top of this module — every glyph an answer installs is in the
+/// row — is what puts `md-numeric_off` and `md-grid_off` on screen at all.
+fn map_control_slots(set: &crate::symbols::MapControlGlyphs) -> [char; 7] {
+    [
+        set.room_numbers_on, set.room_numbers_off, set.centre,
+        set.zoom_out, set.zoom_in, set.view_matrix, set.view_drawn,
+    ]
 }
 
 pub struct FontCheckRects {
@@ -123,7 +132,7 @@ pub enum FontCheckAction {
 
 /// The glyphs one answer would put on the map, in a fixed slot order:
 /// the four cardinal arrows, then the portal marker, up, down, in, out and
-/// unknown, then the Guiding Light's mark, then the map pane's six control
+/// unknown, then the Guiding Light's mark, then the map pane's seven control
 /// marks, then the diagonal corner stubs.
 ///
 /// Built from the [`SymbolSet`] each answer actually installs, so a later
@@ -147,7 +156,7 @@ fn sample_glyphs(nerdfont: bool) -> Vec<char> {
     // arrow, portal and path presets and leaves every other category at its
     // default. So the map cluster has to be resolved by name here rather than
     // read off `set`, which would have silently sampled the PLAIN marks in the
-    // patched row: six slots showing `# ¤ − + ╬ ┼` in both rows, identical,
+    // patched row: seven slots showing `# # ¤ − + M M` in both rows, identical,
     // inviting a "yes" on the strength of glyphs the answer does not install.
     // The case below caught exactly that, which is the argument for having it.
     let (set, mark, map_controls) = if nerdfont {
@@ -178,7 +187,7 @@ fn sample_glyphs(nerdfont: bool) -> Vec<char> {
 /// (arrows · portals · the Guiding Light's mark · the map cluster · the diagonal
 /// stubs) so a fallback glyph's wrong advance shows up as a group that does not
 /// line up with the row above it. Two spaces between groups rather than three,
-/// which is what keeps twenty-one slots inside `DIALOG_W`.
+/// which is what keeps twenty-two slots inside `DIALOG_W`.
 pub fn sample_row(nerdfont: bool) -> String {
     let g = sample_glyphs(nerdfont);
     let join = |r: &[char]| r.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
@@ -187,8 +196,8 @@ pub fn sample_row(nerdfont: bool) -> String {
         join(&g[0..4]),
         join(&g[4..10]),
         join(&g[10..11]),
-        join(&g[11..17]),
-        join(&g[17..21]),
+        join(&g[11..18]),
+        join(&g[18..22]),
     )
 }
 
@@ -357,7 +366,8 @@ mod tests {
             .expect("the preset the answer names");
 
         for (slot, c) in [
-            ("room_numbers", want.room_numbers),
+            ("room_numbers_on", want.room_numbers_on),
+            ("room_numbers_off", want.room_numbers_off),
             ("centre", want.centre),
             ("zoom_out", want.zoom_out),
             ("zoom_in", want.zoom_in),
@@ -378,23 +388,34 @@ mod tests {
         }
     }
 
-    /// The plain row shows the same five slots, so the comparison is a
+    /// The plain row shows the same seven slots, so the comparison is a
     /// comparison: `#` against md-numeric, `¤` against md-crosshairs, and so on.
     /// A patched-only slot would be a blank in row 2 and would read as row 2
     /// failing.
+    ///
+    /// **The plain row therefore repeats two of its marks** — `# #` and `M M` —
+    /// because ASCII has no off-shape for either and colour carries the state
+    /// there (SQ-1148). That is the honest picture: the row samples the SLOTS an
+    /// answer fills, not the distinct glyphs it happens to use, and collapsing
+    /// the duplicate would leave row 2 a slot short of row 1 and unalignable
+    /// against it — which is the one thing this whole dialog is for.
     #[test]
     fn the_plain_row_shows_the_map_cluster_too() {
         let g = sample_glyphs(false);
         let want = SymbolSet::default().map_controls;
-        for c in [want.room_numbers, want.centre, want.zoom_out, want.zoom_in, want.view_matrix] {
+        for c in [
+            want.room_numbers_on, want.room_numbers_off, want.centre,
+            want.zoom_out, want.zoom_in, want.view_matrix, want.view_drawn,
+        ] {
             assert!(g.contains(&c), "U+{:04X} missing from the plain row", c as u32);
         }
-        // `#` is the room-numbers mark in BOTH of ITS states (SQ-1148), so it
-        // occupies exactly ONE slot here — the row samples glyphs, not states.
-        assert_eq!(g.iter().filter(|&&c| c == '#').count(), 1, "one slot, not a pair");
+        // Two slots each, not one: the plain preset spells one mark in both
+        // halves of each two-mode pair, and both halves are sampled.
+        assert_eq!(g.iter().filter(|&&c| c == '#').count(), 2, "both number slots");
+        assert_eq!(g.iter().filter(|&&c| c == 'M').count(), 2, "both view slots");
     }
 
-    /// Both rows still fit the dialog. Twenty-one slots at two spaces between
+    /// Both rows still fit the dialog. Twenty-two slots at two spaces between
     /// groups is the reason the separator narrowed from three; if a later slot
     /// pushes past this, narrow the groups again or drop a slot — do not widen
     /// the dialog past what a 80x24 terminal can centre.
@@ -420,9 +441,11 @@ mod tests {
             assert!(nerd.contains(&s), "U+{:04X} missing from the patched row", s as u32);
             assert!(plain.contains(&s), "U+{:04X} missing from the plain row", s as u32);
         }
+        // The last FOUR slots, named from the end so a cluster added ahead of
+        // them cannot silently slide this window off the stubs.
         assert_eq!(
-            nerd[17..21],
-            plain[17..21],
+            nerd[nerd.len() - 4..],
+            plain[plain.len() - 4..],
             "the stub slots are identical in both rows — they are not the question being asked"
         );
         // And they are NOT private-use, which is the whole point: a patched font

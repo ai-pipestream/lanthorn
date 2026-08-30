@@ -254,41 +254,59 @@ pub struct StoryBadges {
 /// [`SymbolSet::tip`]: a patched font draws all of them or none of them, and one
 /// question has already settled which.
 ///
-/// **Room numbers is ONE field, not a pair, and that is the departure worth
-/// knowing about.** Every other two-mode control in [`ControlGlyphs`] changes
-/// SHAPE between its states — `●`/`○`, `▣`/`□`, `◧`/`■`/`▦` — and the two
-/// single-glyph ones there (`return_probe`, `reveal`) are single only because
-/// they have no opposite mode to draw. Room numbers DOES have one, and still
-/// draws the same mark in both: `#` lit for on, `#` muted for off. It was
-/// chosen for coverage — `#` is ASCII and therefore drawable in every face by
-/// construction, where every plain mark that says "number" by shape reaches at
-/// most fourteen of the sixteen faces surveyed and the ones inside Geometric
-/// Shapes as few as five.
+/// **Two of the five controls are two-mode, and each keeps BOTH of its slots —
+/// but only the patched preset can fill them with different marks.** The house
+/// rule is that a two-mode control changes SHAPE between its states, the way
+/// every one in [`ControlGlyphs`] does (`●`/`○`, `▣`/`□`, `◧`/`■`/`▦`); the two
+/// single-glyph controls there (`return_probe`, `reveal`) are single only
+/// because they have no opposite mode to draw. Room numbers and the view switch
+/// both DO have one, so both keep a pair of fields, and the patched preset obeys
+/// the rule outright: `md-numeric`/`md-numeric_off` and `md-grid`/`md-grid_off`.
 ///
-/// What makes state-by-colour survivable is that it is not colour alone:
-/// `panel.control:lit` is the `alert` role PLUS BOLD, so a colour-blind player
-/// or a low-contrast theme still reads a WEIGHT change, and the default pair
-/// (`muted` DarkGray against `alert` Yellow) separates by brightness rather than
-/// by hue. `border_controls`'s
+/// **The plain preset spells the same mark in both slots — `#`/`#` and `M`/`M` —
+/// and lets COLOUR carry the state instead.** That is a degradation forced by
+/// the plain set's vocabulary, not a second house pattern: ASCII has no
+/// off-shape for a `#` or an `M`, and Geometric Shapes cannot supply one that is
+/// better covered than the on-shape. Measured over sixteen text faces, every
+/// plain mark that says "number" by shape reaches at most 14/16, the `╬`/`┼`
+/// pair first chosen for the view switch was the weakest mark in the whole
+/// cluster at 13/16 and the only one that actually fell back in a surveyed face
+/// (Monaco), and what is left untaken inside Geometric Shapes is the
+/// worst-covered run in the survey at 5/16 to 9/16. `#` and `M` are ASCII, so
+/// they are drawable in every face BY CONSTRUCTION, and each is the letter of
+/// the thing it names.
+///
+/// So each preset does the best its own font allows, which is why the pair of
+/// fields survives even where one preset fills it twice over. A player whose
+/// terminal draws neither preset well can still set either half by hand —
+/// `[symbols.overrides] map_control.view_drawn = "…"` — the same way
+/// `badge_icons` chooses a set and a hand-set `badge_*` key still wins for its
+/// own slot. **Do not "tidy away" the duplicate**; it is the override surface.
+///
+/// What makes the degraded plain path survivable is that it is not colour
+/// ALONE: `panel.control:lit` is the `alert` role PLUS BOLD, so a colour-blind
+/// player or a low-contrast theme still reads a WEIGHT change, and the default
+/// pair (`muted` DarkGray against `alert` Yellow) separates by brightness rather
+/// than by hue. `border_controls`'s
 /// `every_on_state_is_lit_from_the_alert_role_and_every_off_state_is_muted`
-/// asserts that BOLD, and is what keeps this legible.
-///
-/// The patched preset follows the plain one to a single glyph for the same slot.
-/// A patched set that kept an on/off PAIR while the plain set had one mark would
-/// make the two presets disagree about what the control *is*, which is a worse
-/// outcome than an unused codepoint — `md-numeric_off` (U+F19D3) was verified
-/// and then deliberately dropped.
+/// asserts that BOLD — **dropping that assertion as redundant beside the colour
+/// check is exactly what would make the plain cluster unreadable**, since colour
+/// is the only other channel these two marks have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapControlGlyphs {
-    /// Room numbers, in BOTH states — colour says which. See the note above.
-    pub room_numbers: char,
+    /// Room numbers shown. The plain preset draws the same `#` in both states
+    /// and lets colour say which; the patched preset changes shape. See above.
+    pub room_numbers_on: char,
+    /// Room numbers hidden.
+    pub room_numbers_off: char,
     /// Recentre the map on the current room.
     pub centre: char,
     pub zoom_out: char,
     pub zoom_in: char,
-    /// The two map views, which ARE a shape change: one junction against a
-    /// lattice of them.
+    /// `MapView::Matrix`. Plain draws `M`; patched draws a lattice.
     pub view_matrix: char,
+    /// The drawn map. Plain draws the same `M`, muted; patched draws the
+    /// lattice struck through.
     pub view_drawn: char,
 }
 
@@ -446,8 +464,10 @@ impl Default for SymbolSet {
                 down_right: '▀',
             },
             map_controls: MapControlGlyphs {
-                // `#` in BOTH states; colour delineates on from off.
-                room_numbers: '#',
+                // `#` in BOTH slots; colour delineates on from off, because
+                // ASCII has no off-shape for it. See the type's note.
+                room_numbers_on: '#',
+                room_numbers_off: '#',
                 // ¤ is a reticle — a ring with four spokes — which is what
                 // "centre the map here" looks like, and 15/16 faces draw it.
                 centre: '¤',
@@ -455,11 +475,14 @@ impl Default for SymbolSet {
                 // height as the `+` beside it, which a hyphen does not.
                 zoom_out: '−',
                 zoom_in: '+',
-                // One junction against a lattice of them — a SHAPE change, and
-                // the same box-drawing family, so the stroke weight is the only
-                // thing that moves.
-                view_matrix: '╬',
-                view_drawn: '┼',
+                // `M` in BOTH slots, the letter of the mode it announces:
+                // lit for MATRIX, muted for the drawn map. It replaced a ╬/┼
+                // pair that was a real shape change and the weakest-covered
+                // mark in the cluster — 13/16 faces, and the only one that fell
+                // back in a surveyed face. ASCII offers no off-shape for it, so
+                // colour carries the state here exactly as it does for `#`.
+                view_matrix: 'M',
+                view_drawn: 'M',
             },
             dock_following: '◇',
             dock_pinned: '◆',
@@ -807,17 +830,23 @@ impl MapControlGlyphs {
     /// `nerdfont_map_control_glyphs_are_the_names_that_were_read_from_the_font`
     /// pins them.
     ///
-    /// All six are Material Design, the family the border controls already draw
-    /// from, so the two clusters cannot disagree about stroke weight or cap
+    /// All seven are Material Design, the family the border controls already
+    /// draw from, so the two clusters cannot disagree about stroke weight or cap
     /// height the way mixed families did before SQ-0989.
+    ///
+    /// **This preset fills both halves of both two-mode pairs, where the plain
+    /// preset repeats one mark.** That is the house rule working as intended:
+    /// a two-mode control changes SHAPE, and a patched font can draw the
+    /// off-shape where ASCII simply has none. See [`MapControlGlyphs`].
     pub fn preset(name: &str) -> Option<MapControlGlyphs> {
         let plain = SymbolSet::default().map_controls;
         Some(match name {
             "plain" => plain,
             "nerdfont" => MapControlGlyphs {
-                // md-numeric. ONE glyph for both states — see the type's note;
-                // md-numeric_off exists and is deliberately not used.
-                room_numbers: '\u{F03A0}',
+                // md-numeric / md-numeric_off — a real shape change, which is
+                // what the plain `#`/`#` gives up for coverage.
+                room_numbers_on: '\u{F03A0}',
+                room_numbers_off: '\u{F19D3}',
                 // md-crosshairs — the reticle `¤` gestures at, drawn properly.
                 centre: '\u{F01A3}',
                 // md-magnify_minus / md-magnify_plus: one family, one shape, the
@@ -825,8 +854,8 @@ impl MapControlGlyphs {
                 zoom_out: '\u{F034A}',
                 zoom_in: '\u{F034B}',
                 // md-grid / md-grid_off — a lattice and a lattice struck
-                // through, which is the same on/off shape change the plain
-                // ╬/┼ pair makes.
+                // through. The plain preset cannot follow: `M` has no
+                // off-shape, so it repeats and lets colour say which.
                 view_matrix: '\u{F02C1}',
                 view_drawn: '\u{F02C2}',
             },
@@ -1084,6 +1113,18 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "control.lock_off"       => s.controls.lock_off = ch,
         "control.return_probe"   => s.controls.return_probe = ch,
         "control.reveal"         => s.controls.reveal = ch,
+        // The map pane's own cluster (SQ-1148). Both halves of each two-mode
+        // pair are settable, which is the point of keeping the pair: the plain
+        // preset spells one mark twice, and a player who wants a shape change
+        // sets the off half themselves. `md-numeric_off` (U+F19D3) and
+        // `md-grid_off` (U+F02C2) are what such a player would reach for.
+        "map_control.room_numbers_on"  => s.map_controls.room_numbers_on = ch,
+        "map_control.room_numbers_off" => s.map_controls.room_numbers_off = ch,
+        "map_control.centre"           => s.map_controls.centre = ch,
+        "map_control.zoom_out"         => s.map_controls.zoom_out = ch,
+        "map_control.zoom_in"          => s.map_controls.zoom_in = ch,
+        "map_control.view_matrix"      => s.map_controls.view_matrix = ch,
+        "map_control.view_drawn"       => s.map_controls.view_drawn = ch,
         "tip.up_left"      => s.tip.up_left = ch,
         "tip.up_right"     => s.tip.up_right = ch,
         "tip.down_left"    => s.tip.down_left = ch,
@@ -1291,22 +1332,22 @@ mod tests {
         assert_eq!(four.iter().collect::<std::collections::HashSet<_>>().len(), 4, "up/down/in/out must differ");
     }
 
-    /// The map cluster's nerdfont set is SIX named icons, each codepoint read
+    /// The map cluster's nerdfont set is SEVEN named icons, each codepoint read
     /// from the font's own `post` table (SQ-1148) by the SQ-1141 method: name to
     /// codepoint, codepoint back to a unique name, and a non-empty outline so a
     /// blank glyph cannot pass for a drawn one.
     ///
-    /// **Six, not seven.** `md-numeric_off` (U+F19D3) was verified alongside
-    /// these and is deliberately absent: room numbers draw ONE mark in both
-    /// states and let colour say which, so the patched preset has one slot for
-    /// them exactly as the plain preset does. Keeping the off-glyph would give
-    /// the two presets a different idea of what the control is. If a later change
-    /// restores an off-state SHAPE, that codepoint is the one to reach for.
+    /// **Seven, because the patched preset obeys the shape rule that the plain
+    /// preset cannot.** Both two-mode controls get a real off-shape here —
+    /// `md-numeric_off` and `md-grid_off` — where the plain set repeats `#` and
+    /// `M` and lets colour carry the state. Each preset does the best its own
+    /// font allows; see [`MapControlGlyphs`].
     #[test]
     fn nerdfont_map_control_glyphs_are_the_names_that_were_read_from_the_font() {
         let m = MapControlGlyphs::preset("nerdfont").expect("preset");
         for (name, got, want) in [
-            ("md-numeric", m.room_numbers, '\u{F03A0}'),
+            ("md-numeric", m.room_numbers_on, '\u{F03A0}'),
+            ("md-numeric_off", m.room_numbers_off, '\u{F19D3}'),
             ("md-crosshairs", m.centre, '\u{F01A3}'),
             ("md-magnify_minus", m.zoom_out, '\u{F034A}'),
             ("md-magnify_plus", m.zoom_in, '\u{F034B}'),
@@ -1316,45 +1357,59 @@ mod tests {
             assert_eq!(got, want, "{name} moved: U+{:05X} is not U+{:05X}", got as u32, want as u32);
         }
 
-        // All six from ONE family, which is what keeps the cluster from appearing
-        // to jump between weights — the lesson SQ-0989 paid for on the border
-        // controls, restated here because a new cluster is where it recurs.
+        let all = [
+            m.room_numbers_on, m.room_numbers_off, m.centre,
+            m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn,
+        ];
+
+        // All seven from ONE family, which is what keeps the cluster from
+        // appearing to jump between weights — the lesson SQ-0989 paid for on the
+        // border controls, restated here because a new cluster is where it recurs.
         assert!(
-            [m.room_numbers, m.centre, m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn]
-                .iter()
-                .all(|c| ('\u{F0001}'..='\u{F1AF0}').contains(c)),
+            all.iter().all(|c| ('\u{F0001}'..='\u{F1AF0}').contains(c)),
             "every map control glyph must be Material Design"
         );
 
-        // The two VIEW states differ, because that pair is a real shape change…
-        assert_ne!(m.view_matrix, m.view_drawn, "the two views must be tellable apart");
+        // BOTH two-mode pairs are a real shape change in this preset, which is
+        // the whole reason it is seven marks and not five.
+        assert_ne!(m.room_numbers_on, m.room_numbers_off, "patched must change SHAPE on the numbers");
+        assert_ne!(m.view_matrix, m.view_drawn, "patched must change SHAPE on the view");
         // …and every slot is a distinct mark, so no two controls read alike.
-        let all = [m.room_numbers, m.centre, m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
                 assert_ne!(a, b, "two map controls draw the same glyph U+{:05X}", *a as u32);
             }
         }
-
-        // And md-numeric_off is NOT in the set — pinned so that restoring it is a
-        // deliberate edit here rather than a quiet one somewhere else.
-        assert!(!all.contains(&'\u{F19D3}'), "md-numeric_off was dropped on purpose (SQ-1148)");
     }
 
     /// The plain map cluster is drawable everywhere, which is the whole reason
     /// these particular marks were chosen over prettier ones.
     ///
-    /// `#` especially: it is the one slot whose two states are told apart by
-    /// COLOUR rather than by shape, so if it ever failed to draw there would be
-    /// no fallback reading left at all — where a `╬` that tofus still leaves
-    /// `┼` recognisable beside it. ASCII is what makes that safe, and this
-    /// asserts it rather than trusting the choice to survive an edit.
+    /// `#` and `M` especially: they are the two slots whose states are told
+    /// apart by COLOUR rather than by shape, so if either failed to draw there
+    /// would be no fallback reading left at all — where a patched glyph that
+    /// tofus still leaves its differently-shaped opposite recognisable beside
+    /// it. ASCII is what makes that safe, and this asserts it rather than
+    /// trusting the choice to survive an edit.
+    ///
+    /// It also pins that the plain preset REPEATS each of those marks, since
+    /// "one mark, two slots" is the whole shape of the degradation and a
+    /// half-applied edit would leave one state drawn as something else.
     #[test]
     fn the_plain_map_cluster_needs_no_patched_font() {
         let m = SymbolSet::default().map_controls;
-        assert!(m.room_numbers.is_ascii(), "room numbers must be ASCII — colour is its only other channel");
-        assert_eq!(m.room_numbers, '#');
-        for c in [m.room_numbers, m.centre, m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn] {
+        for (what, on, off, want) in [
+            ("room numbers", m.room_numbers_on, m.room_numbers_off, '#'),
+            ("the view switch", m.view_matrix, m.view_drawn, 'M'),
+        ] {
+            assert!(on.is_ascii(), "{what} must be ASCII — colour is its only other channel");
+            assert_eq!(on, want, "{what}");
+            assert_eq!(on, off, "{what}: the plain preset spells one mark in both slots");
+        }
+        for c in [
+            m.room_numbers_on, m.room_numbers_off, m.centre,
+            m.zoom_out, m.zoom_in, m.view_matrix, m.view_drawn,
+        ] {
             assert!(
                 !('\u{E000}'..='\u{F8FF}').contains(&c) && !('\u{F0000}'..='\u{FFFFD}').contains(&c),
                 "U+{:04X} is private-use — the plain preset must not need a patch",
@@ -1601,6 +1656,44 @@ mod tests {
             let mut cfg = crate::config::SymbolConfig::default();
             cfg.overrides.insert(key.into(), "#".into());
             assert_ne!(SymbolSet::resolve(&cfg), baseline, "override {key} changed nothing");
+        }
+    }
+
+    /// Every MAP control slot is themeable one glyph at a time too, and BOTH
+    /// halves of each two-mode pair are (SQ-1148).
+    ///
+    /// That is not decoration. The plain preset spells one mark in both slots of
+    /// a pair — `#`/`#`, `M`/`M` — because ASCII has no off-shape for either, so
+    /// the second key is how a player who wants a shape change gets one
+    /// (`md-numeric_off` U+F19D3 and `md-grid_off` U+F02C2 being the obvious
+    /// reaches). A pair whose off half no key can address would be a duplicate
+    /// with no purpose, and the next reader would rightly delete it.
+    #[test]
+    fn every_map_control_slot_accepts_an_override_including_both_halves_of_a_pair() {
+        let baseline = SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        for key in [
+            "map_control.room_numbers_on", "map_control.room_numbers_off",
+            "map_control.centre", "map_control.zoom_out", "map_control.zoom_in",
+            "map_control.view_matrix", "map_control.view_drawn",
+        ] {
+            let mut cfg = crate::config::SymbolConfig::default();
+            cfg.overrides.insert(key.into(), "@".into());
+            let got = SymbolSet::resolve(&cfg);
+            assert_ne!(got, baseline, "override {key} changed nothing");
+            // …and it moved ONLY its own slot, so the two halves are independent
+            // rather than one key wearing two names.
+            let mut want = baseline.clone();
+            match key {
+                "map_control.room_numbers_on" => want.map_controls.room_numbers_on = '@',
+                "map_control.room_numbers_off" => want.map_controls.room_numbers_off = '@',
+                "map_control.centre" => want.map_controls.centre = '@',
+                "map_control.zoom_out" => want.map_controls.zoom_out = '@',
+                "map_control.zoom_in" => want.map_controls.zoom_in = '@',
+                "map_control.view_matrix" => want.map_controls.view_matrix = '@',
+                "map_control.view_drawn" => want.map_controls.view_drawn = '@',
+                _ => unreachable!(),
+            }
+            assert_eq!(got, want, "override {key} reached a slot that is not its own");
         }
     }
 
