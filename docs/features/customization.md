@@ -231,10 +231,10 @@ switches that make lanthorn feel like yours without opening the whole registry.
   the room-name **location** header (`transcript_location`) and bracketed
   **system** lines such as `[Your score just went up.]` (`transcript_system`),
   plus your own ordered `[[transcript.rule]]` regex rules in `style.toml` (e.g.
-  paint every `grue` red). The meta/warning gutter glyphs are now the `glyph`
-  attribute directly on `transcript_meta` / `transcript_warning` (e.g.
-  `transcript_meta = { parent = "muted", glyph = "▏" }`) rather than a separate
-  symbol override.
+  paint every `grue` red). Those selectors carry the meta and warning lines'
+  **colour**; the gutter **mark** beside them is a glyph override, in the same
+  table and the same shape as the assist mark described below — `"gutter.meta"`
+  (`▏` by default) and `"gutter.warning"` (`!`) under `[map.overrides]`.
   **Lanthorn's Guiding Light** — the help offered while you play — has three
   selectors of its own. `transcript_assist` and `transcript_assist_caution` are
   the two it speaks in, both parented on `alert` (your terminal's yellow slot, so it stays legible on

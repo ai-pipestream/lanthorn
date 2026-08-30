@@ -196,6 +196,17 @@ fn enum_hint(row: &RegRow) -> &'static str {
         "badge_save" => "   # story-list badge: the story has a save",
         "badge_hint" => "   # story-list badge: hints are installed",
         "badge_hint_available" => "   # story-list badge: hints exist but aren't downloaded",
+        // SQ-1105: these three carry a `glyph` that MIRRORS the gutter default so
+        // the two spellings sit near each other in the registry — but the renderer
+        // draws `symbols.*_gutter`, not this. Without a note the template reads as
+        // an invitation to set a character here and watch nothing happen, which is
+        // exactly what the customization doc used to promise. Say where the mark
+        // really comes from, at the one place the reader is holding the key.
+        "transcript_meta" => "   # colour only — the gutter mark is [map.overrides] \"gutter.meta\"",
+        "transcript_warning" => "   # colour only — the gutter mark is [map.overrides] \"gutter.warning\"",
+        "transcript_assist" | "transcript_assist_caution" => {
+            "   # colour only — the gutter mark is [map.overrides] \"gutter.assist\""
+        }
         // SQ-0700: this one draws a FRAME as well as colouring it, but its default
         // delta carries no border (the frame's default lives on `ColorScheme`), so
         // the generic border hint below never fired and the `style` key that turns
@@ -428,6 +439,36 @@ mod tests {
         // a debug tier
         assert_eq!(seeded.get("debug.disasm_data").style, default.get("debug.disasm_data").style);
         assert_eq!(seeded.get("debug.disasm_data").glyph, default.get("debug.disasm_data").glyph);
+    }
+
+    /// SQ-1105: a row whose `glyph` the renderer does not read says so.
+    ///
+    /// `transcript_meta`, `transcript_warning` and the two assist rows mirror the
+    /// gutter default in their `glyph` deliberately — the registry keeps the two
+    /// spellings within a sentence of each other. But the template is read by
+    /// someone holding the key, not the registry, and an inert `glyph = "▏"`
+    /// beside a live `parent = "muted"` is an invitation to set it and watch
+    /// nothing happen. That is precisely what `customization.md` used to promise
+    /// in as many words. The note is the whole fix; this stops it going quiet.
+    #[test]
+    fn a_glyph_the_renderer_ignores_is_labelled_colour_only() {
+        let t = commented_template();
+        for (row, key) in [
+            ("transcript_meta", "gutter.meta"),
+            ("transcript_warning", "gutter.warning"),
+            ("transcript_assist", "gutter.assist"),
+            ("transcript_assist_caution", "gutter.assist"),
+        ] {
+            let line = t
+                .lines()
+                .find(|l| l.trim_start_matches("# ").starts_with(&format!("{row} = ")))
+                .unwrap_or_else(|| panic!("{row} is not in the template"));
+            assert!(
+                line.contains("colour only") && line.contains(key),
+                "{row} advertises a glyph the renderer never reads, with no note saying \
+                 the mark comes from {key}: {line:?}"
+            );
+        }
     }
 
     /// The repo-root `style.example.toml` must be exactly `commented_template()`'s

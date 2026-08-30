@@ -50,11 +50,11 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # hyperlink = { parent = "accent", underline = true }
 # story_info_label = { parent = "muted" }
 # suggestion = { parent = "muted" }
-# transcript_meta = { parent = "muted", glyph = "▏" }
-# transcript_warning = { parent = "alert", glyph = "!" }
+# transcript_meta = { parent = "muted", glyph = "▏" }   # colour only — the gutter mark is [map.overrides] "gutter.meta"
+# transcript_warning = { parent = "alert", glyph = "!" }   # colour only — the gutter mark is [map.overrides] "gutter.warning"
 # transcript_crash = { parent = "alert", bold = true }
-# transcript_assist = { parent = "alert", glyph = "●" }
-# transcript_assist_caution = { parent = "alert", bold = true, glyph = "●" }
+# transcript_assist = { parent = "alert", glyph = "●" }   # colour only — the gutter mark is [map.overrides] "gutter.assist"
+# transcript_assist_caution = { parent = "alert", bold = true, glyph = "●" }   # colour only — the gutter mark is [map.overrides] "gutter.assist"
 # transcript_reveal = { parent = "accent", underline = true }
 # more_prompt = { parent = "chrome", reversed = true }
 # tidy_progress = { parent = "accent" }
