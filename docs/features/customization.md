@@ -512,6 +512,10 @@ re-seed the new template, or hand-write the new shape from
   than from the game's reply, so it behaves the same on a story that words its
   refusal however it likes — and it says nothing at all unless it is confident,
   which is most turns.
+  One of those sources answers to the adult list below and the rest
+  never do: correcting your own word is your business, but proposing a *different*
+  word from what yours means is lanthorn's own voice, and that half is filtered
+  the way an unprompted panel is.
   And the offer is **tried before you see it**. `guidance_probe` (default `true`)
   forks your game into a silent throwaway copy, types each suggestion into it
   from exactly where you are standing, keeps only the ones that did something and
@@ -686,10 +690,15 @@ re-seed the new template, or hand-write the new shape from
   retyping; `adult_words = []` does the same from the other end. The settings
   screen flips the boolean. Shortening or extending the line changes what counts.
 
-  **It filters display only.** Every word taken out is still a word the story
-  knows: typing it parses exactly as it always did, and Lanthorn's Guiding Light
-  still offers it when you reach for a word close to it. Nothing here touches
-  what the parser accepts, what the synonym data holds, or what a game prints.
+  **It filters what lanthorn says unbidden, never what you reached for.** Every
+  word taken out is still a word the story knows: typing it parses exactly as it
+  always did, and the Guiding Light still offers it when you reach for a word
+  close to it — mistype `molst` and you are told the story knows `molest`,
+  because that is your word, corrected, not ours. The one place the list does
+  reach the Light is where it proposes a *different* word from what yours means:
+  Zork I answers `sod` with `fuck · shit · damn` on its own initiative, and with
+  the list on you get `damn`. Nothing here touches what the parser accepts, what
+  the synonym data holds, or what a game prints.
 
   **There is no key for Infocom's test rig, and that is deliberate.** Verbs
   beginning `#` or `$` — `#record`, `#command`, `#random`, `$verify` — are kept
