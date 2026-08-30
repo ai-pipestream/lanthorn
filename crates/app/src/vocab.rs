@@ -341,6 +341,17 @@ impl StoryVocabulary {
 ///    the old behaviour, kept for exactly the stories that can support nothing
 ///    better.
 ///
+/// **Where "the story marks it an adjective" comes from, in order.** On an
+/// Infocom V4+ story the object's own [`Adjectives`](grammar_model::Adjectives)
+/// answer it — `refers_to` covers them — and that is the reliable source, since
+/// it is the property the game's own parser reads. The dictionary's DESC bit is
+/// the fallback for V1–3, where the adjectives are one-byte numbers `zvm` cannot
+/// locate (SQ-1120); every V1–5 Infocom story in `stories/` sets that bit, so
+/// the fallback holds there, but the three Infocom **V6** games set it on
+/// almost nothing — Zork Zero on 11 of 1624 words, Shogun 17 of 1389, Arthur 9
+/// of 1059, and `WordRoles::adjective` is not even decoded for their flag
+/// layout. Those three are exactly the games the property now answers for.
+///
 /// `vocab` is `None` before the story's grammar has been read, and then only
 /// the object's own words can qualify a leading adjective; on Inform, where
 /// adjectives live in the name property beside the nouns, that loses nothing.
@@ -378,7 +389,17 @@ pub fn typeable_name(
 ///
 /// So: the printed name's own words where the story answers to them or marks
 /// them adjectives, then every stored word that no such spelling already
-/// reaches. Zork I's lantern gives `brass`, `lantern`, `lamp`, `light`.
+/// reaches — the nouns, and then the adjectives where the story keeps a list
+/// this can be read from. Zork I's lantern gives `brass`, `lantern`, `lamp`,
+/// `light`.
+///
+/// The stored adjectives matter beyond the printed name: Beyond Zork prints one
+/// of its keys as `key` and nothing more, while storing `mauve`, `second`,
+/// `gray` and `grey` for it — words the screen never shows and the printed name
+/// therefore cannot supply. On a story whose adjectives cannot be read —
+/// every V1–3 Infocom game — the list is the nouns plus whatever the printed
+/// name and the dictionary's DESC bit between them can recover, which is what
+/// SQ-1042 shipped and all that is available there.
 pub fn typeable_words(
     obj: &grammar_model::ObjectWords,
     vocab: Option<&StoryVocabulary>,
@@ -397,7 +418,7 @@ pub fn typeable_words(
             out.push(t.to_lowercase());
         }
     }
-    for w in &obj.words {
+    for w in obj.words.iter().chain(obj.adjectives.words()) {
         if !out.iter().any(|t| cut(t) == cut(w)) {
             out.push(w.clone());
         }

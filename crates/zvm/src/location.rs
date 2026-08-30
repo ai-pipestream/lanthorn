@@ -595,10 +595,12 @@ fn global_room_by_shown_text(machine: &Machine, cands: &[V6Candidate]) -> Option
 /// mis-guessed string can still point anywhere, and a speculative read landing
 /// out of bounds must answer "not a string", never fault the story.
 fn object_text_property(machine: &Machine, obj: u16, name: &str) -> Option<String> {
-    use crate::objects::{get_next_prop, get_prop_addr, get_prop_len};
+    use crate::objects::{get_prop_addr, get_prop_len, property_numbers};
     let mem = &machine.mem;
-    let mut prop = get_next_prop(mem, obj, 0);
-    while prop != 0 {
+    // `property_numbers` and not a bare `get_next_prop` walk: a table listing
+    // the same number twice makes that loop cycle forever, and one does
+    // (SQ-1143).
+    for prop in property_numbers(mem, obj) {
         let addr = get_prop_addr(mem, obj, prop);
         if get_prop_len(mem, addr) == 2 {
             let packed = mem.read_word(addr as u32);
@@ -611,7 +613,6 @@ fn object_text_property(machine: &Machine, obj: u16, name: &str) -> Option<Strin
                 }
             }
         }
-        prop = get_next_prop(mem, obj, prop);
     }
     None
 }

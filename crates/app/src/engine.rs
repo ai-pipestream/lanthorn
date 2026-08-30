@@ -18,7 +18,9 @@ use crate::session::{FilenameReq, InputKind, TurnResult};
 
 /// What an object is and what it can be called, re-exported so a caller of
 /// [`Introspect`] names it without depending on `grammar-model` directly.
-pub use grammar_model::ObjectWords;
+/// [`Adjectives`] travels with it: it says whether the story could be asked for
+/// an object's adjectives at all, which is a different claim from having none.
+pub use grammar_model::{Adjectives, ObjectWords};
 
 // ── Neutral key input ───────────────────────────────────────────────────────
 
