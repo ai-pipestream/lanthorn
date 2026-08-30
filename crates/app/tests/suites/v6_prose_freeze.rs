@@ -81,6 +81,12 @@ fn win0_runs(session: &GameSession) -> Vec<(u16, u16, String)> {
         .unwrap_or_default()
 }
 
+/// How many runs window 0 still holds as LIVE streamed prose — the other side of
+/// [`win0_runs`], and what tells a partial retirement from a whole one.
+fn win0_streamed(session: &GameSession) -> usize {
+    session.machine.screen.v6.as_ref().map(|v6| v6.windows[0].streamed.len()).unwrap_or(0)
+}
+
 /// The palette this suite's colours resolve through, **stated rather than inherited**
 /// (SQ-0958).
 ///
@@ -759,4 +765,92 @@ fn a_window_that_still_covers_its_prose_freezes_nothing() {
             }
         }
     }
+}
+
+/// SQ-1155: a PARTIAL retirement is not a screen clear.
+///
+/// Specimen: `arthur-r74-s890714.z6` (bare story file, so §8.3.1 is the table),
+/// twelve intro taps answering `n` at the restore prompt — `v6_arthur_status`'s
+/// own route to the first playable frame — then `look` (turn 13) and `wa` (turn
+/// 14). `wa` is not in Arthur's dictionary, and his rejection does not go to
+/// window 0 at all. Measured from `trace_screen`, the turn is
+///
+/// ```text
+///   @scroll_window(win=0, pixels=16)
+///   @window_size(win=0, y=176, x=584)     <- window 0 loses ONE row, 192 -> 176
+///   @move_window(win=3, y=385, x=29)      <- his one-line message window opens
+///   @window_size(win=3, y=16, x=584)         in the row window 0 just gave up
+///   @erase_window(win3)
+///   @set_window(win3)                     … "You don't need to use the word 'wa.'"
+/// ```
+///
+/// Window 0 is never erased and the transcript is empty for the whole turn. The
+/// row it gave up strands exactly one of its sixteen streamed runs, which is a
+/// real retirement — that run is outside the box, becomes paint, and window 3's
+/// erase paints over it. What it is NOT is a screen restart: the other fifteen
+/// runs are still on screen and still the window's own. Announcing the boundary
+/// anyway anchored the transcript past every one of them, and since the rejection
+/// prints into window 3 the player was left with a blank pane and the message
+/// alone on the bottom line — the reported symptom, bottom placement included.
+///
+/// A second `wa` in a row does not reproduce it and never could: the leading
+/// `scroll_window` has already lifted the content clear of the new bottom, so
+/// nothing is stranded. That is why the report reads as "conditional on there
+/// being something to clear".
+///
+/// FALSIFY by dropping the `.filter(|_| froze_whole)` from `prose_cleared_at` in
+/// `GameSession::finish_turn`: the `wa` turn comes back carrying a `ScreenClear`
+/// and nothing else.
+#[test]
+fn arthur_shrinking_one_row_for_his_message_window_is_not_a_screen_clear() {
+    let _g = standard_palette();
+    let Some(mut session) = boot("arthur-r74-s890714.z6") else { return };
+    for _ in 0..12 {
+        let r = match session.pending_input() {
+            InputKind::Line => session.submit(""),
+            InputKind::Char => session.submit_char(13),
+            InputKind::Event => session.submit(""),
+        };
+        if r.transcript.to_lowercase().contains("y or n") {
+            let _ = session.submit_char(b'n');
+        }
+    }
+
+    let look = session.submit("look");
+    assert!(
+        look.transcript.contains("churchyard"),
+        "turn 13 reaches the churchyard description, which is the content the wipe ate: {:?}",
+        look.transcript
+    );
+
+    let before = win0_streamed(&session);
+    let wa = session.submit("wa");
+    let after = win0_streamed(&session);
+
+    // Non-vacuity: the shape this case is about must actually occur. A turn that
+    // retired nothing would pass the assertion below for the wrong reason, and a
+    // turn that retired EVERYTHING is the Shogun case, where the boundary is
+    // correct and the cases above already pin it.
+    assert!(
+        wa.prose_retired.is_some(),
+        "the turn must RETIRE something — window 0 gives up its bottom row to \
+         window 3 — or this case is vacuous"
+    );
+    assert!(
+        after > 0 && after < before,
+        "…and the retirement must be PARTIAL: window 0 streamed {before} run(s) \
+         before the turn and {after} after, and this case only means anything \
+         while some are stranded and some are kept"
+    );
+    assert!(
+        wa.transcript.trim().is_empty(),
+        "Arthur prints the rejection into window 3, not the transcript: {:?}",
+        wa.transcript
+    );
+    assert!(
+        !wa.transcript_elems.iter().any(|e| matches!(e, TranscriptElem::ScreenClear)),
+        "a partial retirement must not announce a screen clear — the runs window 0 \
+         kept are still on screen, and anchoring the transcript past them leaves \
+         the player looking at a blank pane"
+    );
 }

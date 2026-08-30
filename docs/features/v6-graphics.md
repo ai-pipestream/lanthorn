@@ -2267,6 +2267,19 @@ the same provenance. A *partial* freeze — some lines stranded, the rest still
 inside the window's new box — keeps every line, because there the frozen and the
 live text are interleaved in one stream and no single boundary separates them.
 
+**A partial freeze draws no boundary either**, and that is the same statement as
+the paragraph above rather than a second rule. Saying "the live screen begins
+here" is only true when the window walked away from everything it had; when it
+kept most of its lines, they are still on the glass, and anchoring the transcript
+past them shows you a blank page. Arthur reaches that case on an ordinary turn:
+type a word he does not know and he shrinks his story window by exactly one row to
+open the one-line message window at the foot of the screen, stranding the bottom
+line of narration and nothing else — then prints "You don't need to use the word
+'wa.'" into that new window rather than into the story. The screen went blank with
+the rejection alone at the bottom (SQ-1155). Type the same unknown word twice and
+only the first wipes, because by the second the window has already scrolled its
+content clear of the row it is about to give up.
+
 **Only prose the window walks away from freezes.** A window resized *around* the
 text it just printed still covers it, so that text is still the window's own and
 keeps streaming — which is what Arthur does on nearly every turn of play, and

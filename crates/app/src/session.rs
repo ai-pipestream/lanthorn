@@ -1806,6 +1806,19 @@ impl GameSession {
         // and no single offset separates them, so that case keeps every line.
         let froze_whole = std::mem::take(&mut self.machine.v6_prose_retired_whole);
         let frozen_head = prose_retired.filter(|_| froze_whole);
+        // …and the BOUNDARY is the same statement as the head-drop above, so it is
+        // gated by the same condition (SQ-1155). A `ScreenClear` says "everything
+        // above is scrollback; the live screen begins here" — true of Shogun, where
+        // window 0 leaves its whole nine-line header behind, and false of a PARTIAL
+        // retirement, where the window still displays every run it kept. Arthur is
+        // the partial case and reaches it on an ordinary turn: an unknown word makes
+        // him shrink window 0 by exactly one row (192→176 native) to open his
+        // one-line message window at native y=385, which strands the bottom-most run
+        // and nothing else. Announcing that as a screen clear anchored the transcript
+        // past everything on screen, and since the rejection prints into window 3
+        // rather than window 0 the player was left looking at a blank pane with
+        // "You don't need to use the word 'wa.'" alone on the bottom line.
+        let prose_cleared_at = prose_retired_at.filter(|_| froze_whole);
         // SQ-0755: the same boundary from the other cause — the game ERASED the
         // window the host's transcript belongs to. A v6 erase never reached the host
         // at all (`erase_lower_requested` is the v1–5 lower window's flag), so the
@@ -1837,7 +1850,7 @@ impl GameSession {
         // elements; empty for turns without them (the app then uses the flat
         // transcript path unchanged).
         let transcript_elems = if self.story_pics.is_empty()
-            && prose_retired_at.is_none()
+            && prose_cleared_at.is_none()
             && screen_cleared_at.is_none()
             && cleared_mid_turn.is_none()
         {
@@ -1847,7 +1860,7 @@ impl GameSession {
                 .into_iter()
                 .map(|(at, img)| (at, TranscriptElem::Image(img)))
                 .collect();
-            for at in [prose_retired_at, screen_cleared_at, cleared_mid_turn].into_iter().flatten() {
+            for at in [prose_cleared_at, screen_cleared_at, cleared_mid_turn].into_iter().flatten() {
                 // One boundary per offset: a turn that both retires and erases at the
                 // same point in its output has cleared the screen once.
                 if !marks.iter().any(|(m, e)| *m == at && matches!(e, TranscriptElem::ScreenClear)) {
