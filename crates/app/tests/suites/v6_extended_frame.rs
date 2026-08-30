@@ -925,6 +925,188 @@ fn a_parser_error_does_not_resize_arthurs_extended_frame() {
     );
 }
 
+/// The native rows the game's own band below the story window spans on this frame —
+/// 0 with nothing down there, 1 for a parser message that fits, 2 for one that wraps.
+/// The quantity the whole of SQ-1157 turns on, so it is measured rather than assumed.
+fn band_rows(b: &mut Booted) -> u16 {
+    let cell = u32::from(b.face.cell().h.max(1));
+    let model = b.session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+    let layout = v6::classify_windows(items, b.face.cell());
+    let Some(story) = layout.story else { return 0 };
+    let bottom = u32::from(story.y_px) + u32::from(story.h_px);
+    let rows: Vec<u32> = layout
+        .chrome
+        .iter()
+        .filter_map(|w| match &w.node {
+            WinNode::Grid(g) => Some(g.px_texts.iter()),
+            _ => None,
+        })
+        .flatten()
+        .map(|t| u32::from(t.y.max(1)) - 1)
+        .filter(|&y| y >= bottom)
+        .map(|y| y / cell)
+        .collect();
+    match (rows.iter().min(), rows.iter().max()) {
+        (Some(&a), Some(&z)) => (z - a + 1) as u16,
+        _ => 0,
+    }
+}
+
+/// The shape of one frame, in whichever mode: what the ART is drawn at, how tall the
+/// composite is, and how many rows of prose the player gets.
+///
+/// The three travel together because the whole claim is about the first two NOT
+/// moving while the third does — reading them from separate calls is how a case ends
+/// up comparing a magnification from one turn against a viewport from another.
+#[derive(Debug, PartialEq)]
+struct FrameShape {
+    /// Hybrid: the ring plan. Raster and extended: `"raster"`.
+    plan: String,
+    /// Hybrid: the magnification the ring's art is drawn at. Raster and extended: the
+    /// composite's own lock.
+    scale: String,
+    /// The composite's height in native pixels; the pane's height in cells in hybrid,
+    /// where there is no composite.
+    canvas_h: u32,
+    /// The prose viewport, in terminal rows.
+    viewport: u16,
+}
+
+fn shape(b: &mut Booted, mode: app::config::V6RenderMode, pane: (u16, u16)) -> FrameShape {
+    let st = state_for(mode, "", b);
+    let model = b.session.screen();
+    let area = Rect::new(0, 0, pane.0, pane.1);
+    let mut buf = Buffer::empty(area);
+    let m = app::render::screen::render_story_pane(&model, false, None, &st, area, &mut buf);
+    let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
+    let native = v6::native_extent(items, &st.v6_text);
+    let layout = v6::classify_windows(items, st.v6_text.cell());
+    let want = match mode {
+        app::config::V6RenderMode::Extended => {
+            v6::RasterFrame::extended(native, pane_dev(pane), st.v6_text.cell(), Some(2.0))
+        }
+        _ => v6::RasterFrame::native(native),
+    };
+    let (canvas, _, built) = app::render::screen::build_v6_raster_frame(&layout, want, &st);
+    match mode {
+        app::config::V6RenderMode::Hybrid => FrameShape {
+            plan: st.v6_ring_plan.get().to_string(),
+            scale: format!("{:?}", st.v6_image_scale.get()),
+            canvas_h: u32::from(pane.1),
+            viewport: m.viewport_rows,
+        },
+        _ => FrameShape {
+            plan: "raster".into(),
+            scale: format!("{:?}", built.lock),
+            canvas_h: canvas.height(),
+            viewport: m.viewport_rows,
+        },
+    }
+}
+
+/// **A parser message that WRAPS TO TWO ROWS must not change the frame either**
+/// (SQ-1157) — in ANY of the three modes.
+///
+/// Reported from play on Arthur: type `was`, and the parser answers *"Sorry, but I
+/// don't understand. Please rephrase that, or try something else."* — long enough
+/// that his bottom status line wraps. Hybrid's side art jumped to a different size
+/// over the ring, and `extended` dropped back to the plain letterbox, both until the
+/// next command. Raster looked right, which is the tell: raster is what the other two
+/// were collapsing to.
+///
+/// MEASURED, `arthur-r74-s890714.z6` release 74, twelve taps answering `n` to the
+/// restore question then `look`, at the TALL pane. The trigger is the band's HEIGHT
+/// and nothing about the text. Arthur publishes window 3 at native `(28, 384) 584x16`
+/// with window 0 `584x176` for a message that fits, and at `(28, 368) 584x32` with
+/// window 0 `584x160` for one that wraps. `menu_strip_below_story` forgave the first
+/// shape and not the second, because its guard was "the story reaches within ONE
+/// native text row of the screen bottom": `400 <= 384 + 16` holds and `400 <= 368 +
+/// 16` does not. So a two-row band read as Journey's command menu —
+/// `BottomPlan::Menu` in hybrid, and an outright decline of the extension in
+/// `extended`.
+///
+/// The band's height is transient and the frame's shape must not track it. What
+/// distinguishes Arthur's band from Journey's menu is not how tall it is but whose
+/// window it is: Arthur's lies wholly between the story window's bottom and the
+/// screen's, so the frame carries it (`bottom_anchored_chrome`, SQ-1132), while
+/// Journey's runs belong to a full-screen grid straddling the story and nothing can
+/// move it. That test is now what both callers ask, through `anchored_band_bottom`.
+///
+/// So: **the extra row comes out of the STORY TEXT viewport, and out of nothing
+/// else.** Frame height unchanged, art unchanged, one row of prose yielded per row
+/// the band gains.
+///
+/// FALSIFY by dropping the `anchored_band_bottom` arm from `menu_strip_below_story`
+/// (and the `reach` it gives `hybrid_bottom_plan`): hybrid's plan goes `frame` →
+/// `menu` on the wrapped turn, and `extended`'s canvas comes back 640x400 against the
+/// 640x896 the other two turns build.
+#[test]
+fn a_wrapped_parser_message_costs_one_text_row_and_moves_nothing_else() {
+    let _g = app::v6_palette_at_boot();
+    let spec = Specimen {
+        file: "arthur-r74-s890714.z6",
+        pictures: None,
+        keys: b'n',
+        taps: 12,
+        release: 74,
+        then: &["look"],
+        extends: true,
+    };
+    let Some(mut b) = boot(&spec) else { return };
+
+    const MODES: [app::config::V6RenderMode; 3] = [
+        app::config::V6RenderMode::Hybrid,
+        app::config::V6RenderMode::Raster,
+        app::config::V6RenderMode::Extended,
+    ];
+
+    // Three frames of the same gameplay screen, differing only in how tall Arthur's
+    // own band under window 0 is: none, one row, two rows.
+    let mut seen: Vec<(u16, String, Vec<FrameShape>)> = Vec::new();
+    for cmd in ["", "frobozzle the grue", "was"] {
+        if !cmd.is_empty() {
+            let r = b.session.submit(cmd);
+            assert!(r.fault.is_none(), "{cmd:?} faulted: {:?}", r.fault);
+        }
+        let rows = band_rows(&mut b);
+        let text = band_text(&mut b);
+        let shapes: Vec<FrameShape> = MODES.iter().map(|&m| shape(&mut b, m, TALL)).collect();
+        eprintln!("after {cmd:?}: band {rows} row(s) {text:?} → {shapes:?}");
+        seen.push((rows, text, shapes));
+    }
+
+    // NON-VACUITY. The case is worthless unless the three frames really are a clean
+    // band, a one-row band and a WRAPPED two-row band — which is the shape SQ-1157 is
+    // about, and the one no other case in this suite reaches.
+    assert_eq!(seen[0].0, 0, "the `look` frame must have nothing below window 0, got {:?}", seen[0].1);
+    assert_eq!(seen[1].0, 1, "the rejected word must give a ONE-row band, got {:?}", seen[1].1);
+    assert_eq!(seen[2].0, 2, "`was` must give a WRAPPED two-row band, got {:?}", seen[2].1);
+    assert!(
+        seen[2].1.contains("rephrase"),
+        "the wrapped turn must be Arthur's own parser message — got {:?}",
+        seen[2].1
+    );
+
+    // The report, in every mode: the art and the frame do not move, and each row the
+    // band gains costs exactly one row of prose.
+    for (i, mode) in MODES.iter().enumerate() {
+        let (base, one, two) = (&seen[0].2[i], &seen[1].2[i], &seen[2].2[i]);
+        for (rows, s) in [(1u16, one), (2u16, two)] {
+            assert_eq!(
+                (&s.plan, &s.scale, s.canvas_h),
+                (&base.plan, &base.scale, base.canvas_h),
+                "{mode:?}: a {rows}-row band must not change the frame — {s:?} against {base:?}",
+            );
+            assert_eq!(
+                s.viewport,
+                base.viewport - rows,
+                "{mode:?}: a {rows}-row band costs exactly {rows} row(s) of prose — {s:?} against {base:?}",
+            );
+        }
+    }
+}
+
 // ── 7. The click map ─────────────────────────────────────────────────────────
 //
 // An extended composite is TALLER than the game's screen, so the click map's

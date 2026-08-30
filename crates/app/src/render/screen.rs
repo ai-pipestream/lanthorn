@@ -962,15 +962,7 @@ fn render_node(
                         let mut gfx = frame_art;
                         v6::blit_story_gfx(&mut gfx, layout.story_gfx);
                         let gfx = gfx;
-                        let chrome_runs: Vec<&crate::engine::PxText> = layout
-                            .chrome
-                            .iter()
-                            .filter_map(|it| match &it.node {
-                                WinNode::Grid(g) => Some(g.px_texts.iter()),
-                                _ => None,
-                            })
-                            .flatten()
-                            .collect();
+                        let chrome_runs: Vec<&crate::engine::PxText> = paint_runs(&layout.chrome).collect();
                         // SQ-0505 dynamic hybrid layout: reclaim the letterbox dead
                         // space below the story when the bottom edge is text-only
                         // (Journey's command menu) or empty (Arthur — header art +
@@ -981,7 +973,7 @@ fn render_node(
                         // native height — nothing to reclaim, degrade to centred).
                         let scaled_h = (native.1 as f32 * scale_center.s).round() as u32;
                         let slack = pane_dev.1.saturating_sub(scaled_h);
-                        let plan = hybrid_bottom_plan(story, &gfx, &chrome_runs, native, slack, state.v6_text.cell());
+                        let plan = hybrid_bottom_plan(story, &gfx, &layout.chrome, native, slack, state.v6_text.cell());
                         let reclaim = !matches!(plan, BottomPlan::Letterbox);
                         // Resolve the story scale, the story viewport, and an
                         // optional bottom-anchored menu scale.
@@ -3994,15 +3986,7 @@ pub fn build_v6_raster_frame(
     // (SQ-0698). The chrome runs come along because a game with a command menu
     // under its story window has no border to extend (SQ-0819). See
     // `extend_raster_flanks`.
-    let chrome_runs: Vec<&crate::engine::PxText> = layout
-        .chrome
-        .iter()
-        .filter_map(|it| match &it.node {
-            WinNode::Grid(g) => Some(g.px_texts.iter()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
+    let chrome_runs: Vec<&crate::engine::PxText> = paint_runs(&layout.chrome).collect();
     // SQ-0578: only stamp the story when its clear interior can hold at least
     // one full 8x16 text cell. A full-screen picture (Zork Zero's rebus) grows
     // window 0 over the whole screen and paints art across virtually all of it;
@@ -4046,7 +4030,7 @@ pub fn build_v6_raster_frame(
         // declines the identical frame for the identical reason (SQ-0819), so
         // extending here would strand the menu mid-canvas over an unextended flank.
         // Declining leaves Journey exactly as `Raster` draws it.
-        if menu_strip_below_story(story, &obstruction, &chrome_runs, native, cell) {
+        if menu_strip_below_story(story, &obstruction, &layout.chrome, native, cell) {
             break 'ext None;
         }
         // …and ANY chrome the game put below its story window, which the test above
@@ -4202,7 +4186,7 @@ pub fn build_v6_raster_frame(
     if extension > 0 && moved.is_empty() {
         canvas = grow_canvas_rows(canvas, frame.canvas_h);
     }
-    extend_raster_flanks(&mut canvas, &obstruction, layout.story, &chrome_runs, frame, cell);
+    extend_raster_flanks(&mut canvas, &obstruction, layout.story, &layout.chrome, frame, cell);
     let mut raster_metrics: Option<RasterMetrics> = None;
     if let Some((sx, sy, sw, sh)) = story_clear {
         // Paint the story page opaque (SQ-0510, reopened). Leaving it
@@ -5427,33 +5411,50 @@ pub fn story_window_is_a_canvas(
 ///
 /// The hoist is safe against the arms below it because [`menu_strip_below_story`]
 /// carries their guard itself: it is false as soon as the story reaches within a
-/// native text row of the screen bottom, which is precisely when the enclosed-frame
+/// native text row of the screen bottom — or, since SQ-1157, as soon as what lies
+/// below it is a band this frame carries — which is precisely when the enclosed-frame
 /// arm fires. Measured across the corpus, this moves Journey (both releases) and
 /// nothing else — Arthur reads no menu at any pane, and Shogun and Zork Zero are
 /// enclosed frames that never get as far as asking.
 fn hybrid_bottom_plan(
     story: &crate::engine::PositionedWindow,
     gfx: &image::RgbaImage,
-    chrome_runs: &[&crate::engine::PxText],
+    // SQ-1157: the chrome WINDOWS, not the runs pulled out of them. The question
+    // this asks is about a band's window — can the frame move it as a unit? — and a
+    // list of runs cannot answer it. The runs are derived where they are needed.
+    chrome: &[&crate::engine::PositionedWindow],
     native: (u16, u16),
     slack: u32,
     // See `menu_strip_below_story` — the same "one native row" question.
     cell: zvm::screen::V6Cell,
 ) -> BottomPlan {
-    if menu_strip_below_story(story, gfx, chrome_runs, native, cell) {
+    if menu_strip_below_story(story, gfx, chrome, native, cell) {
         return BottomPlan::Menu;
     }
     if slack == 0 {
         return BottomPlan::Letterbox;
     }
     let story_bottom = story.y_px as u32 + story.h_px as u32;
+    // How far the game's own content reaches DOWN (SQ-1157): the story window's
+    // bottom, or — where the game anchored a band of whole windows under it — that
+    // band's. Arthur's parser-error window 3 is the band, and its height is
+    // TRANSIENT: 584x16 across native row 384 for a message that fits, 584x**32**
+    // across 368 for one that wraps ("Sorry, but I don't understand. Please rephrase
+    // that, or try something else." — the `was` repro). Measuring the story window
+    // alone made a two-row message a different KIND of frame from a one-row one:
+    // `native.1 (400) <= 384 + 16` holds and `<= 368 + 16` does not, so the enclosed
+    // frame that stretches Arthur's poles became a `Menu`, the plan meant for
+    // Journey's command strip. The band travels with the frame's bottom edge either
+    // way (the `Extend | Frame` arm reserves exactly its rows off the pane), so what
+    // the frame has to reach is the band's bottom and not the story's.
+    let reach = anchored_band_bottom(chrome, story, native).unwrap_or(story_bottom);
     // Story fills to (within one native row of) the screen bottom → enclosed frame.
     // SQ-0511: when full-height side ART flanks the story on BOTH sides, reclaim the
     // slack via the `Frame` plan (top-anchor the story to the pane bottom, stretch
     // the flanks to keep the enclosing columns). Zork0 (story bottom 398/400) and
     // Shogun (400/400) both qualify. With no side art there is nothing to stretch, so
     // keep the centred letterbox.
-    if native.1 as u32 <= story_bottom + u32::from(cell.h) {
+    if native.1 as u32 <= reach + u32::from(cell.h) {
         let sy0 = story.y_px as u32;
         let sy1 = story_bottom.min(gfx.height());
         let sx0 = story.x_px as u32;
@@ -5495,14 +5496,19 @@ fn hybrid_bottom_plan(
 /// window" is a property of the FRAME and both modes must read it the same way.
 ///
 /// False as soon as the story reaches (within one native text row of) the screen
-/// bottom — there is no strip below it to find. That guard is the function's own,
+/// bottom — there is no strip below it to find — and false, since SQ-1157, when what
+/// IS down there is a band of whole chrome windows the frame carries with its own
+/// bottom edge ([`anchored_band_bottom`]). That guard is the function's own,
 /// not the caller's, and since SQ-0830 that matters: [`hybrid_bottom_plan`] asks
 /// this FIRST, ahead of its enclosed-frame and zero-slack arms, so this test is
 /// what keeps Zork Zero's and Shogun's enclosed frames out of the `Menu` plan.
 fn menu_strip_below_story(
     story: &crate::engine::PositionedWindow,
     gfx: &image::RgbaImage,
-    chrome_runs: &[&crate::engine::PxText],
+    // SQ-1157: the chrome WINDOWS. "Is this strip Journey's menu?" is a question
+    // about the window the runs belong to, and the runs alone cannot answer it —
+    // see the anchorable arm below.
+    chrome: &[&crate::engine::PositionedWindow],
     native: (u16, u16),
     // SQ-1020: "one native ROW of slack" is a question about the GAME's cell, and
     // was written `+ 16` here — right on every machine whose cell is 16 and quietly
@@ -5526,9 +5532,55 @@ fn menu_strip_below_story(
     if art_band {
         return false;
     }
-    chrome_runs
-        .iter()
+    // SQ-1157: …and neither is a band the frame can carry as WHOLE WINDOWS. That is
+    // the distinction this function was making all along, by proxy: Arthur's
+    // parser-error window 3 lies entirely between the story window's bottom and the
+    // screen's, so it moves with the frame's bottom edge; Journey's menu runs belong
+    // to a full-screen `(0,0) 640x400` grid straddling the story, which nothing can
+    // move without moving the whole screen. The proxy was the "within one native
+    // text row" guard above, and it only ever forgave a ONE-row band — so Arthur's
+    // OWN band read as Journey's menu the moment a parser message wrapped to two
+    // rows, and the frame changed shape on the length of an error string.
+    if anchored_band_bottom(chrome, story, native).is_some() {
+        return false;
+    }
+    paint_runs(chrome)
         .any(|t| !t.text.trim().is_empty() && (t.y.max(1) as u32 - 1) >= story_bottom)
+}
+
+/// Every paint run carried by a list of chrome windows, in window order.
+///
+/// The one place `chrome` is turned into runs, so a question asked of the runs and a
+/// question asked of the windows are asked of the same set (SQ-1157).
+fn paint_runs<'a>(
+    chrome: &'a [&'a crate::engine::PositionedWindow],
+) -> impl Iterator<Item = &'a crate::engine::PxText> {
+    chrome
+        .iter()
+        .filter_map(|it| match &it.node {
+            WinNode::Grid(g) => Some(g.px_texts.iter()),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// How far down the game's own bottom-anchored band reaches, in native pixels —
+/// `None` when there is no such band, either because nothing lies below the story
+/// window or because what does cannot be moved as whole windows (SQ-1157).
+///
+/// [`bottom_anchored_chrome`] is the test; this is its answer stated as a row, which
+/// is what both [`menu_strip_below_story`] and [`hybrid_bottom_plan`] need. An empty
+/// window list — nothing below the story at all — is `None`, so a caller's
+/// `unwrap_or(story_bottom)` is the story window's own bottom, exactly as before.
+fn anchored_band_bottom(
+    chrome: &[&crate::engine::PositionedWindow],
+    story: &crate::engine::PositionedWindow,
+    native: (u16, u16),
+) -> Option<u32> {
+    bottom_anchored_chrome(chrome, story, native)?
+        .into_iter()
+        .map(|i| u32::from(chrome[i].y_px) + u32::from(chrome[i].h_px))
+        .max()
 }
 
 /// SQ-0698: the native geometry a side flank band occupies — its columns
@@ -5717,13 +5769,13 @@ fn extend_raster_flanks(
     canvas: &mut image::RgbaImage,
     gfx: &image::RgbaImage,
     story: Option<&crate::engine::PositionedWindow>,
-    chrome_runs: &[&crate::engine::PxText],
+    chrome: &[&crate::engine::PositionedWindow],
     frame: crate::render::v6_layout::RasterFrame,
     cell: zvm::screen::V6Cell,
 ) {
     let native = frame.native;
     let Some(story) = story else { return };
-    if menu_strip_below_story(story, gfx, chrome_runs, native, cell) {
+    if menu_strip_below_story(story, gfx, chrome, native, cell) {
         return;
     }
     let native_h = native.1 as u32;
