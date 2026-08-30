@@ -365,6 +365,49 @@ fn an_unknown_field_is_refused() {
     );
 }
 
+/// `v6_render` is a MODE, not a pair of bools (SQ-1152).
+///
+/// It was `raster = true` until `extended` arrived. Two bools would have been able
+/// to spell "raster and extended at once", which is not a state the app has; one
+/// token cannot. And the tokens are the app's own — the manifest writes the value
+/// straight into the run's `config.toml`, so a spelling this file accepted and
+/// `v6_render_from_key` did not would be a shot that silently captured hybrid.
+#[test]
+fn the_render_mode_is_a_token_the_app_itself_parses() {
+    use app::config::V6RenderMode;
+    for (token, want) in [
+        ("hybrid", V6RenderMode::Hybrid),
+        ("raster", V6RenderMode::Raster),
+        ("extended", V6RenderMode::Extended),
+    ] {
+        let m = parse_one(&format!("{GOOD}v6_render = \"{token}\"\n"))
+            .unwrap_or_else(|e| panic!("`{token}` must be a valid mode: {e}"));
+        assert_eq!(m.shots[0].v6_render, Some(want));
+        assert_eq!(app::config::v6_render_key(want), token, "the manifest and the config key must be one spelling");
+    }
+    assert_eq!(parse_one(GOOD).expect("valid").shots[0].v6_render, None, "a shot that names no mode takes the shipped default");
+    // A typo must not read as hybrid. The app's own config deserializer is
+    // deliberately forgiving there (a bad `~/.lanthorn/config.toml` must not stop a
+    // game from launching); a manifest has no such excuse, and a shot that quietly
+    // captured the wrong mode is exactly the drift `expect` exists to catch.
+    assert!(
+        parse_one(&format!("{GOOD}v6_render = \"rastr\"\n")).is_err(),
+        "an unrecognised mode must be refused, not silently rendered as hybrid"
+    );
+    assert!(
+        parse_one(&format!("{GOOD}raster = true\n")).is_err(),
+        "the old `raster` bool must not still parse — a shot carrying it would capture hybrid"
+    );
+    // And the committed manifest exercises both modes that change anything.
+    let m = manifest();
+    for want in [V6RenderMode::Raster, V6RenderMode::Extended] {
+        assert!(
+            m.shots.iter().any(|s| s.v6_render == Some(want)),
+            "no committed shot captures in {want:?} — the gallery exists to show the modes differ"
+        );
+    }
+}
+
 // ── Library shots (SQ-1080) ───────────────────────────────────────────────────
 
 /// A library shot names a `[[libraries]]` entry the way every other shot names a
@@ -396,7 +439,14 @@ fn a_library_shot_may_not_describe_a_story() {
     let lib = "[[libraries]]\nid = \"lib\"\nfrom = \"stories\"\nmembers = [\"a.z6\"]\n";
     let base = format!("{}media = \"lib\"\nlibrary = true\n", GOOD.replace(r#"media = "stories/a.z6""#, ""));
     assert!(Manifest::parse(&format!("{lib}[[shots]]{base}")).is_ok(), "the control must parse");
-    for extra in ["raster = true\n", "show_map = true\n", "args = [\"--pictures\", \"Pic.data\"]\n"] {
+    for extra in [
+        "v6_render = \"raster\"\n",
+        // SQ-1152: the refusal is on the FIELD, not on one of its values — an
+        // `extended` library shot is exactly as meaningless as a `raster` one.
+        "v6_render = \"extended\"\n",
+        "show_map = true\n",
+        "args = [\"--pictures\", \"Pic.data\"]\n",
+    ] {
         let e = Manifest::parse(&format!("{lib}[[shots]]{base}{extra}"))
             .expect_err("a library shot has no story for `{extra}` to apply to");
         assert!(e.contains("library shot"), "the error must say why: {e}");

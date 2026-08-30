@@ -139,15 +139,23 @@ pub struct Shot {
     /// catches both.
     #[serde(default)]
     pub expect: Vec<String>,
-    /// Capture through the RASTER composite rather than hybrid (SQ-1009).
+    /// Pin the v6 render mode for this shot, or `None` to take the shipped
+    /// default (SQ-1009, SQ-1152).
     ///
     /// Hybrid draws text as terminal cells, so a shot meant to show a face the
     /// RELEASE shipped — Arthur's proportional Amiga typeface — cannot show it in
     /// hybrid at all: the glyphs on screen would be the terminal's. Written into
     /// the shot's own config beside the seed, which is the only channel the
     /// manifest has into a run.
+    ///
+    /// This was `raster = true` until `extended` needed a row of its own. A second
+    /// bool could have expressed "raster and extended at once", which is not a
+    /// state — the modes are one choice, so they are one field, spelled with the
+    /// same tokens `~/.lanthorn/config.toml` uses because it is the same key.
+    /// `None` rather than `Some(Hybrid)` is what keeps the library refusal below
+    /// able to tell an author who asked for a mode from one who said nothing.
     #[serde(default)]
-    pub raster: bool,
+    pub v6_render: Option<app::config::V6RenderMode>,
     /// The least number of cells a placement must actually cover.
     ///
     /// The guard for a frame with no text in it. Scopa and FMV Poker draw the
@@ -381,15 +389,15 @@ impl Shot {
             ));
         }
         // A LIBRARY SHOT HAS NO STORY, so every field that describes one is a
-        // field that would be quietly ignored (SQ-1080). `raster` is a v6 render
-        // mode and the picker is not a v6 screen; `--pictures` names a rendition
-        // of artwork inside a story nobody has opened; `show_map` writes a
-        // per-game sidecar keyed on the story path, and here that path is a
+        // field that would be quietly ignored (SQ-1080). `v6_render` names a v6
+        // render mode and the picker is not a v6 screen; `--pictures` names a
+        // rendition of artwork inside a story nobody has opened; `show_map` writes
+        // a per-game sidecar keyed on the story path, and here that path is a
         // directory. Refusing them is the difference between a manifest that
         // means what it says and one whose author believes a line that does
         // nothing.
         if self.library {
-            for (field, set) in [("raster", self.raster), ("show_map", self.show_map)] {
+            for (field, set) in [("v6_render", self.v6_render.is_some()), ("show_map", self.show_map)] {
                 if set {
                     return Err(format!(
                         "gallery manifest: `{who}` is a library shot with `{field}` — no story has \
@@ -872,7 +880,11 @@ pub fn capture(
     // The seed goes in the global config rather than the per-game sidecar: the
     // sidecar is a bare-lines file the driver already owns for `show_map`, and
     // two writers of one file is how a shot silently loses its seed.
-    let render = if shot.raster { "v6_render = \"raster\"\n" } else { "" };
+    // `v6_render_key` rather than a literal, so the manifest's token and the one
+    // the app parses back cannot drift apart (the same reason SQ-1079 gave it).
+    let render = shot.v6_render.map_or(String::new(), |m| {
+        format!("v6_render = \"{}\"\n", app::config::v6_render_key(m))
+    });
     // A LIBRARY LAUNCH ASKS A QUESTION BEFORE THE TERMINAL EXISTS (SQ-1080).
     // `resolve_launch` offers to remember a directory passed on the command line
     // as `default_story_dir`, and `prompt_yes_no` reads a LINE from stdin in
