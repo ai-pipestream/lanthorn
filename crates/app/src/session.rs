@@ -5146,6 +5146,13 @@ impl Introspect for GameSession {
         )
     }
 
+    fn all_object_words(&self) -> Option<Vec<crate::engine::ObjectWords>> {
+        // `ParseNames::detect` is cached in `parse_names`; the walk itself is
+        // one pass over the object table and runs once a TURN, from
+        // `input::refresh_seen_words`, never per frame.
+        Some(self.parse_names()?.all(&self.machine.mem))
+    }
+
     fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16> {
         let max_obj = zvm::object_tree_view(&self.machine)
             .into_iter()

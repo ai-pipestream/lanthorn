@@ -378,11 +378,16 @@ fn the_band_fallback_is_the_scrape_cut_to_the_storys_own_nouns() {
     ));
     app::render::command_band::refresh_objects(&mut state, &session);
     let band = state.overlays.command_band.as_ref().expect("the band is open");
-    assert!(band.here_is_seen, "a Scott database has no object tree, so the column is a scrape");
-    assert!(band.here.contains(&"lamp".to_string()), "{:?}", band.here);
+    assert_eq!(
+        band.here_source,
+        app::state::HereSource::Seen,
+        "a Scott database has no object tree, so every row is a scrape and the column says so",
+    );
+    assert!(band.here.is_empty(), "…and the scope block has nothing to put in it: {:?}", band.here);
+    assert!(band.here_seen.contains(&"lamp".to_string()), "{:?}", band.here_seen);
 
     let vocab = session.story_vocabulary().expect("a Scott database always has a vocabulary");
-    for w in &band.here {
+    for w in &band.here_seen {
         assert!(
             state.seen_words.contains(w),
             "`{w}` is in the column and not in the one list both consumers read"
@@ -400,6 +405,129 @@ fn the_band_fallback_is_the_scrape_cut_to_the_storys_own_nouns() {
         .filter(|w| vocab.roles(w).is_some_and(|r| (r.verb && !r.noun) || r.preposition))
         .collect();
     for v in &junk {
-        assert!(!band.here.contains(v), "`{v}` is an action or a joining word, not a thing");
+        assert!(!band.here_seen.contains(v), "`{v}` is an action or a joining word, not a thing");
     }
+}
+
+// ── Accumulation, and what a restore does to it (SQ-1135) ───────────────────
+
+/// Everything the story has printed, in an `AppState`, one line at a time —
+/// the way `turn.rs` leaves it.
+fn say(state: &mut AppState, text: &str) {
+    for line in text.split('\n') {
+        state.push_transcript(line);
+    }
+}
+
+/// **A word printed twenty turns ago is still offered.**
+///
+/// The scrape used to be a twenty-LINE window recomputed every turn, so a word
+/// walked out of the list as the transcript moved on. Mini-Zork r34/s871124:
+/// `There is a small mailbox here.` is printed once, at West of House, 0 turns
+/// in. Step north and look twenty-five times — North of House names no mailbox,
+/// so the sentence that did is fifty lines off the old window — and the word is
+/// still there to complete and still in the band's block.
+///
+/// Falsify by restoring the window (`transcript[len-20..]` recomputed into
+/// `seen_words` each call): `mailbox` is gone by the end of the walk.
+#[test]
+fn a_word_printed_twenty_turns_ago_is_still_offered() {
+    let mut session = boot_minizork();
+    let mut state = AppState::default();
+    say(&mut state, &session.take_transcript());
+    app::input::refresh_seen_words(&mut state, &session);
+    assert!(state.seen_words.contains(&"mailbox".to_string()), "{:?}", state.seen_words);
+    assert!(state.seen_nouns.contains(&"mailbox".to_string()), "{:?}", state.seen_nouns);
+
+    let printed_at = state.transcript.len();
+    say(&mut state, &session.submit("north").transcript);
+    for _ in 0..25 {
+        say(&mut state, &session.submit("look").transcript);
+        app::input::refresh_seen_words(&mut state, &session);
+    }
+    // Non-vacuity, twice: the walk really did outrun the old window, and the
+    // room it ended in really does not name the mailbox.
+    assert!(
+        state.transcript.len() > printed_at + 20,
+        "the walk has to outrun the window this case is about: {} lines",
+        state.transcript.len(),
+    );
+    let tail = state.transcript[state.transcript.len() - 20..].join(" ");
+    assert!(!tail.contains("mailbox"), "the window must have lost it, or this proves nothing");
+
+    assert!(
+        state.seen_words.contains(&"mailbox".to_string()),
+        "the word is not forgotten: {:?}",
+        state.seen_words,
+    );
+    assert!(state.seen_nouns.contains(&"mailbox".to_string()), "{:?}", state.seen_nouns);
+    // …and the newest thing leads, which is the order the band's block draws in.
+    let idx = |w: &str| state.seen_words.iter().position(|x| x == w);
+    println!("seen_words: {:?}", &state.seen_words[..state.seen_words.len().min(12)]);
+    assert!(
+        idx("windows") < idx("mailbox"),
+        "North of House's boarded windows outrank a mailbox twenty-five turns back: {:?}",
+        state.seen_words,
+    );
+}
+
+/// **A restore takes back a word printed after the save**, and it comes free
+/// from deriving the set rather than archiving it (SQ-1135).
+///
+/// The scrape is the transcript read through the story's dictionary. The archive
+/// already carries the transcript, so nothing new is stored; the invalidation
+/// lives in `AppState::reset_transcript_sidecars`, which is what every site that
+/// replaces the transcript already calls — `engine_helpers::apply_archive_state`,
+/// `turn::apply_launch_resume`, `startup`'s auto-load, and `main.rs`'s restore
+/// and rewind arms — and each of those then rebuilds from the transcript it
+/// restored.
+///
+/// Mini-Zork r34/s871124: `leaflet` is inside the closed mailbox and is printed
+/// for the first time by `open mailbox`, three turns in. The three lines below
+/// are exactly what a restore runs.
+///
+/// Falsify by making `seen_words` a field of the archive, or by dropping the
+/// reset: the word survives a restore to before it was ever printed.
+#[test]
+fn restoring_to_before_a_word_was_printed_takes_the_word_back() {
+    let mut session = boot_minizork();
+    let mut state = AppState::default();
+    say(&mut state, &session.take_transcript());
+    app::input::refresh_seen_words(&mut state, &session);
+    assert!(
+        !state.seen_nouns.contains(&"leaflet".to_string()),
+        "non-vacuity: the leaflet is in a closed mailbox and has not been named: {:?}",
+        state.seen_nouns,
+    );
+
+    // What the save holds: the transcript as it stood at this moment.
+    let saved: Vec<String> = state.transcript.clone();
+
+    say(&mut state, &session.submit("open mailbox").transcript);
+    app::input::refresh_seen_words(&mut state, &session);
+    assert!(
+        state.seen_nouns.contains(&"leaflet".to_string()),
+        "opening the mailbox names the leaflet: {:?}",
+        state.seen_nouns,
+    );
+
+    // The restore: the transcript is replaced wholesale, the sidecars reset, and
+    // the scrape rebuilt from what came back.
+    state.transcript = saved;
+    state.reset_transcript_sidecars();
+    assert!(state.seen_words.is_empty(), "the reset drops the scrape outright");
+    app::input::refresh_seen_words(&mut state, &session);
+
+    assert!(
+        !state.seen_words.contains(&"leaflet".to_string()),
+        "the word was printed after the save, so the save does not know it: {:?}",
+        state.seen_words,
+    );
+    assert!(!state.seen_nouns.contains(&"leaflet".to_string()), "{:?}", state.seen_nouns);
+    // …and the restore is not merely an erasure: what the save DID hold is back.
+    assert!(
+        state.seen_nouns.contains(&"mailbox".to_string()),
+        "the opening room's own words survive the rebuild: {:?}",
+        state.seen_nouns,
+    );
 }

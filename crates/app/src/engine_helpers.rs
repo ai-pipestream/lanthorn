@@ -293,6 +293,14 @@ pub(crate) fn apply_archive_state(
         state.command_history = ac.command_history;
     }
     state.turns = ac.meta.turns;
+    // The scraped word set is derived from the transcript and nothing else, so it
+    // is REBUILT here rather than carried in the archive (SQ-1135). The sidecar
+    // reset above already dropped the pre-restore set; this fills it from the
+    // transcript that replaced it, so the noun columns and Tab completion are
+    // right on the very first frame after a restore instead of one turn later.
+    // Restoring to before a word was printed therefore takes the word away,
+    // which is the correct per-save answer and comes free from deriving it.
+    app::input::refresh_seen_words(state, &*session);
 }
 
 /// Hand a resumed session the room the archive recorded (SQ-0523).

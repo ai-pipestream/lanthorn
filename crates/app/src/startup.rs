@@ -1916,6 +1916,10 @@ pub(crate) fn boot_story(
         // Re-attach inline images after the sidecar reset so an auto-resumed
         // transcript renders its embedded art (SQ-0518).
         state.transcript_images = images;
+        // The word scrape above ran against the FRESH boot transcript this one
+        // just replaced; the sidecar reset dropped it, so rebuild it from the
+        // resumed scrollback (SQ-1135).
+        app::input::refresh_seen_words(&mut state, &*session);
     }
     if !startup_history.is_empty() {
         state.history = startup_history;

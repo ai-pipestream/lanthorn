@@ -702,6 +702,9 @@ pub(crate) fn apply_launch_resume(
             if resumed_images.len() == state.transcript.len() {
                 state.transcript_images = resumed_images;
             }
+            // The scraped word set is derived from the transcript and never
+            // archived, so rebuild it from the resumed one (SQ-1135).
+            app::input::refresh_seen_words(state, &*session);
             // Re-observe current location (same as Action::RestoreGame).
             reobserve_location(state, mapper, &*session, last_panes.map);
             state.push_notice("[Game resumed from save.]");

@@ -310,13 +310,49 @@ pub struct CommandBandState {
     /// still on screen underneath it.
     pub col_viewport: std::cell::Cell<[usize; BAND_COLS]>,
     /// Objects in the current room, refreshed every frame from the engine.
+    /// The object tree's answer, and empty for an engine that has none.
     pub here: Vec<String>,
     /// Objects the player carries, refreshed every frame from the engine.
     pub carried: Vec<String>,
-    /// true when `here` came from the transcript scrape rather than the object
-    /// tree (Glulx / Scott, which have no `Introspect`). The column relabels
-    /// itself "seen" so the lower quality is visible instead of mixed in.
-    pub here_is_seen: bool,
+    /// The nouns the story has PRINTED, most recently first — the second block
+    /// of the noun columns, under whatever the object tree could say (SQ-1135).
+    ///
+    /// Drawn dimmed (`band.item:seen`), because it is a weaker claim: the story
+    /// knows the word, which is not the same as the thing being here. Every
+    /// engine gets this block; before SQ-1135 only an engine with NO object tree
+    /// did, so the Z-machine — the one that can say most — offered least.
+    pub here_seen: Vec<String>,
+    /// What the WHAT column's rows actually are, which is what its header may
+    /// claim. Recomputed with the lists themselves; see [`HereSource`].
+    pub here_source: HereSource,
+}
+
+/// Where the WHAT column's rows came from, and therefore what its header is
+/// allowed to say (SQ-1135).
+///
+/// The rule is that the label must be true of the WHOLE column. With scope rows
+/// and printed-word rows in one column, neither "here" nor "seen" is true of all
+/// of it, and the honest header is the bare noun.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HereSource {
+    /// Every row is something the object tree says is here.
+    #[default]
+    Scope,
+    /// Every row is a word the story has printed (an engine with no object
+    /// tree, or a story whose tree says nothing is here).
+    Seen,
+    /// Both, in one column: scope first, then the printed words.
+    Mixed,
+}
+
+/// One row of a noun column, and how strong a claim it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BandRow {
+    /// The word as the column shows it.
+    pub text: String,
+    /// True for a row from [`CommandBandState::here_seen`] — the story knows the
+    /// word, which is not a promise that the thing is here.
+    pub seen: bool,
 }
 
 impl CommandBandState {
@@ -459,13 +495,14 @@ impl CommandBandState {
             // `VerbSource::column_label`, and `draw_column` for the row that
             // header only costs when there is something to admit.
             COL_VERB => self.verb_source.column_label().unwrap_or("VERB").to_string(),
-            COL_HERE => {
-                if self.here_is_seen {
-                    "WHAT — seen".to_string()
-                } else {
-                    "WHAT — here".to_string()
-                }
-            }
+            // The label has to be true of the WHOLE column (SQ-1135): with the
+            // object tree's rows and the story's printed words stacked in one
+            // list, neither qualifier is, and the bare noun is what is left.
+            COL_HERE => match self.here_source {
+                HereSource::Scope => "WHAT — here".to_string(),
+                HereSource::Seen => "WHAT — seen".to_string(),
+                HereSource::Mixed => "WHAT".to_string(),
+            },
             COL_CARRIED => "WHAT — carried".to_string(),
             COL_SECOND => match self.prep() {
                 Some(p) => format!("{}…", p.to_uppercase()),
@@ -511,6 +548,19 @@ impl CommandBandState {
     /// `bow` on its own merits — the reuse is what is fixed here, before the next
     /// story spells a verb `port`.
     pub fn items(&self, col: usize) -> Vec<String> {
+        self.rows(col).into_iter().map(|r| r.text).collect()
+    }
+
+    /// [`Self::items`] with each row's provenance still attached — the list the
+    /// renderer draws, since a printed-word row is dimmed and a scope row is not
+    /// (SQ-1135).
+    ///
+    /// **One construction, not two.** `items` is this list with the flags
+    /// dropped, so the order the renderer dims by and the order every picker
+    /// indexes into cannot drift — the hand-maintained cross-file invariant
+    /// CLAUDE.md's refactoring policy names, which here would show up as the
+    /// wrong rows greyed out.
+    pub fn rows(&self, col: usize) -> Vec<BandRow> {
         use crate::render::command_band::compass_spelling;
         let same_word = |q: &str, w: &str| {
             q.eq_ignore_ascii_case(w)
@@ -519,6 +569,15 @@ impl CommandBandState {
                     (Some(a), Some(b)) if a == b
                 )
         };
+        // Append `src`'s words, skipping anything already listed under any
+        // spelling — one word, one row, whichever block first claimed it.
+        let push = |out: &mut Vec<BandRow>, src: &[String], seen: bool| {
+            for w in src {
+                if !out.iter().any(|r| r.text.eq_ignore_ascii_case(w)) {
+                    out.push(BandRow { text: w.clone(), seen });
+                }
+            }
+        };
         match col {
             COL_VERB => self
                 .verbs
@@ -526,19 +585,31 @@ impl CommandBandState {
                 .filter(|v| {
                     v.takes_object || !self.quick.iter().any(|q| same_word(q, &v.word))
                 })
-                .map(|v| v.word.clone())
+                .map(|v| BandRow { text: v.word.clone(), seen: false })
                 .collect(),
-            COL_HERE => self.here.clone(),
-            COL_CARRIED => self.carried.clone(),
+            // Here first, then what the story has merely PRINTED (SQ-1135). One
+            // column and not two: the second block is the same question asked
+            // more weakly, and a player scanning for a noun should not have to
+            // know which of two lists to scan.
+            COL_HERE => {
+                let mut out = Vec::new();
+                push(&mut out, &self.here, false);
+                push(&mut out, &self.here_seen, true);
+                out
+            }
+            COL_CARRIED => {
+                let mut out = Vec::new();
+                push(&mut out, &self.carried, false);
+                out
+            }
             COL_SECOND => {
                 // Carried first (the usual instrument), then anything here that
-                // isn't already listed.
-                let mut out = self.carried.clone();
-                for h in &self.here {
-                    if !out.iter().any(|c| c.eq_ignore_ascii_case(h)) {
-                        out.push(h.clone());
-                    }
-                }
+                // isn't already listed, then the printed words — the same noun
+                // slot as WHAT, so the same three tiers in the same order.
+                let mut out = Vec::new();
+                push(&mut out, &self.carried, false);
+                push(&mut out, &self.here, false);
+                push(&mut out, &self.here_seen, true);
                 out
             }
             _ => Vec::new(),
@@ -2947,9 +3018,9 @@ pub struct AppState {
     /// `zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem)`.
     /// If empty, autocomplete draws only from room-description words.
     pub dict_words: Vec<String>,
-    /// The words of the story's own recent output that its dictionary holds —
-    /// sorted, deduped, refreshed once a turn by
-    /// [`crate::input::refresh_seen_words`] (SQ-1116).
+    /// The words the story has PRINTED that its own dictionary holds — deduped,
+    /// **most recently printed first**, extended once a turn by
+    /// [`crate::input::refresh_seen_words`] (SQ-1116, accumulated by SQ-1135).
     ///
     /// Cached rather than recomputed per keystroke because it is the ENGINE that
     /// answers what a word is: the story's tokeniser splits the prose and the
@@ -2957,7 +3028,42 @@ pub struct AppState {
     /// key handler holding only `AppState`. The transcript changes once a turn
     /// anyway, so this is also strictly less work than the per-keystroke scrape it
     /// replaces.
+    ///
+    /// **It ACCUMULATES over the session** (SQ-1135). It used to be a sliding
+    /// twenty-line window, so a word walked out of the list as the transcript
+    /// moved on — Arthur names the crystal in the torque once, and three turns
+    /// later there was no way to reach the word again. Reverse recency because
+    /// the motivating case is exactly the word just printed.
+    ///
+    /// **And it is DERIVED, never persisted.** The archive already carries the
+    /// transcript this is scraped from, so storing the scrape beside it would be
+    /// keeping a result next to its own input. Deriving it gives the correct
+    /// per-save answer for free: a restore replaces the transcript wholesale, so
+    /// restoring to before the crystal was read takes `crystal` away again.
+    /// [`Self::reset_transcript_sidecars`] is the one place that invalidation
+    /// lives, because it is already called at every site that replaces the
+    /// transcript.
     pub seen_words: Vec<String>,
+    /// The subset of [`Self::seen_words`] that names a THING, in the same
+    /// order — the command band's printed-word block (SQ-1135).
+    ///
+    /// Two lists rather than one filtered at draw time, because the two answer
+    /// different questions and the expensive one is settled once a turn.
+    /// Completion wants every word the story printed, including its verbs;
+    /// a noun COLUMN wants only the things, and deciding which is which means
+    /// asking the story's own objects
+    /// ([`Introspect::all_object_words`](crate::engine::Introspect::all_object_words)),
+    /// which is a walk of the object table and has no business running per
+    /// frame. Both are built in one pass in
+    /// [`crate::input::refresh_seen_words`], so they cannot fall out of step.
+    pub seen_nouns: Vec<String>,
+    /// How many transcript lines have already been folded into [`Self::seen_words`].
+    ///
+    /// The accumulator's cursor: a turn scrapes only the lines past it, rather
+    /// than re-tokenising the whole session every turn. Zeroed together with
+    /// `seen_words` by [`Self::reset_transcript_sidecars`], which is what makes a
+    /// restore rebuild from the transcript it restored.
+    pub seen_scanned: usize,
     /// The words the parser accepts for the objects that are ACTUALLY HERE —
     /// the room's visible contents and what the player carries — refreshed once
     /// a turn by [`crate::input::refresh_scope_words`] (SQ-1042).
@@ -3292,6 +3398,8 @@ impl Default for AppState {
             filename_submitted: None,
             dict_words: Vec::new(),
             seen_words: Vec::new(),
+            seen_nouns: Vec::new(),
+            seen_scanned: 0,
             scope_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
@@ -5015,6 +5123,17 @@ impl AppState {
         self.touch_transcript(TranscriptEdit::Rewrote);
         self.transcript_styles = vec![None; self.transcript.len()];
         self.transcript_images = vec![None; self.transcript.len()];
+        // The scraped word set is a sidecar too, and the most derived one of the
+        // lot: it is the transcript read through the story's dictionary
+        // (SQ-1135). A wholesale replacement — a restore, a resume — is exactly
+        // the moment it stops describing what is on the page, so it is dropped
+        // here and rebuilt from the NEW transcript by the next
+        // `input::refresh_seen_words`. That is also what gives a restore its
+        // per-save semantics: restoring to before a word was printed takes the
+        // word away.
+        self.seen_words.clear();
+        self.seen_nouns.clear();
+        self.seen_scanned = 0;
     }
 
     /// Surface a transient message as a top-right notification toast (SQ-0176).

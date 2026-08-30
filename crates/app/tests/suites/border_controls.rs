@@ -106,7 +106,6 @@ fn story(zversion: Option<u8>) -> AppState {
 fn light_reveal(state: &mut AppState) {
     state.reveal = Some(app::reveal::Reveal {
         words: ["lantern".to_string()].into_iter().collect(),
-        tier: app::reveal::RevealTier::Scope,
         until: std::time::Instant::now() + app::reveal::REVEAL_HOLD,
     });
 }

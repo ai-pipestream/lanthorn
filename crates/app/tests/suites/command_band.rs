@@ -62,6 +62,34 @@ fn boot_zmachine(file: &str) -> Option<GameSession> {
     Some(session)
 }
 
+/// Boot a graphical Version 6 story off its bare `.z6`, or `None` when the
+/// gitignored fixture is absent.
+///
+/// The release and serial are asserted, not assumed: a medium is a different
+/// BUILD of the game, and a case that names a frame has to be sure it booted the
+/// build it is describing. Nothing here measures geometry or colour — the band's
+/// columns are the object tree and the transcript — so this deliberately stops
+/// short of the full `startup.rs` chain and never touches the palette.
+fn boot_v6(file: &str, release: u16, serial: &str) -> Option<GameSession> {
+    let path = fixture_path(file);
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!("SKIP: gitignored story missing at {}", path.display());
+        return None;
+    };
+    assert_eq!(bytes[0], 6, "{file}: Z-machine version");
+    assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), release, "{file}: release");
+    assert_eq!(String::from_utf8_lossy(&bytes[0x12..0x18]), serial, "{file}: serial");
+    let mut picts = PictSource::resolve(&path, None);
+    let dims = picts.all_pict_dims();
+    let std_window = picts.std_window();
+    let mut session =
+        GameSession::new_with_trace(bytes, true, false, None, false, dims, std_window, None, None)
+            .expect("a v6 story should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    Some(session)
+}
+
 /// The columns come from the engine's object tree, not a transcript scrape —
 /// and they are refreshed per turn, so taking an object moves it from the
 /// *here* column to the *carried* one. This is the defect the whole redesign
@@ -82,8 +110,8 @@ fn taking_an_object_moves_it_from_here_to_carried() {
     let here0 = state.overlays.command_band.as_ref().unwrap().here.clone();
     let carried0 = state.overlays.command_band.as_ref().unwrap().carried.clone();
     assert!(
-        !state.overlays.command_band.as_ref().unwrap().here_is_seen,
-        "a Z-machine story has a real object tree — never the scrape fallback"
+        !state.overlays.command_band.as_ref().unwrap().here.is_empty(),
+        "a Z-machine story has a real object tree, so the scope block is not empty"
     );
     assert!(!here0.is_empty(), "the opening room has objects in it: {here0:?}");
     assert!(carried0.is_empty(), "nothing carried at the start: {carried0:?}");
@@ -855,5 +883,182 @@ fn the_carried_column_reaches_into_an_opened_container() {
     assert!(
         holds(&open, "lunch"),
         "an opened sack's lunch is one the parser takes, so the column offers it: {open:?}"
+    );
+}
+
+// ── The printed-word block (SQ-1135) ─────────────────────────────────────────
+
+/// **Arthur's crystal, which is the reported defect.**
+///
+/// | fixture | release / serial | turns in | the frame |
+/// |---|---|---|---|
+/// | `stories/arthur-r74-s890714.z6` | 74 / 890714 | 12 taps + `n` to the restore question, then `x torque` | the churchyard, the torque on the ground |
+///
+/// The story prints, in answer to `x torque`:
+///
+/// ```text
+///   The torque is an open neckband made of twisted metal, and it looks like
+///   it's about your size. It ends in two knobs, and imbedded in one of the
+///   knobs is a sliver of crystal that gives off a faint glow.
+/// ```
+///
+/// `x crystal` works from here — the crystal is the hint menu — and before
+/// SQ-1135 the word was in NO column. The *here* column is the object tree,
+/// which stops at the torque; the printed-word block was the fallback for an
+/// engine with no object tree at all, so the Z-machine, which can say the most,
+/// offered the least.
+///
+/// Falsify by putting the `None =>` arm back in `refresh_objects` (the block
+/// only for engines with no tree): `crystal` leaves the column and the last
+/// assertion fails.
+#[test]
+fn arthurs_crystal_reaches_the_band_once_the_story_has_named_it() {
+    let Some(mut session) = boot_v6("arthur-r74-s890714.z6", 74, "890714") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+
+    // Everything the story has said so far, in the transcript, the way
+    // `turn.rs` leaves it — the scrape reads the transcript, not the last reply.
+    let say = |state: &mut AppState, text: &str| {
+        for line in text.split('\n') {
+            state.push_transcript_kind(line, app::state::TranscriptKind::Story);
+        }
+    };
+    say(&mut state, &session.take_transcript());
+    for _ in 0..12 {
+        let r = match session.pending_input() {
+            app::session::InputKind::Line => session.submit(""),
+            app::session::InputKind::Char => session.submit_char(13),
+            app::session::InputKind::Event => session.submit(""),
+        };
+        let t = r.transcript.clone();
+        say(&mut state, &t);
+        if t.to_lowercase().contains("y or n") {
+            let t2 = session.submit_char(b'n').transcript;
+            say(&mut state, &t2);
+        }
+    }
+    app::input::refresh_seen_words(&mut state, &session);
+
+    // Non-vacuity, twice over: this is the churchyard, and the crystal has NOT
+    // been named yet. Without both, the assertions below could pass on a frame
+    // the case is not about.
+    assert_eq!(
+        session.current_location().map(|l| l.name),
+        Some("churchyard".to_string()),
+        "the specimen frame is the churchyard",
+    );
+    assert!(
+        !state.seen_nouns.contains(&"crystal".to_string()),
+        "nothing has printed `crystal` yet: {:?}",
+        state.seen_nouns,
+    );
+
+    let described = session.submit("x torque").transcript;
+    println!("x torque →{described}");
+    assert!(
+        described.contains("sliver of crystal"),
+        "the description that names the crystal is what this case is about: {described:?}",
+    );
+    say(&mut state, &described);
+    app::input::refresh_seen_words(&mut state, &session);
+    seed_player_obj(&mut state, &session);
+    refresh_objects(&mut state, &session);
+
+    // The story knows the word, and it is a THING — an object answers to it —
+    // so it reaches the printed-word block, newest first.
+    assert_eq!(
+        state.seen_nouns.first().map(String::as_str),
+        Some("crystal"),
+        "the word just printed leads the block: {:?}",
+        state.seen_nouns,
+    );
+
+    let band = state.overlays.command_band.as_ref().expect("the band is open");
+    println!("here (scope): {:?}", band.here);
+    println!("seen: {:?}", band.here_seen);
+    assert!(
+        band.here.iter().any(|w| w.to_lowercase().contains("torque")),
+        "non-vacuity: the object tree still reaches the torque itself: {:?}",
+        band.here,
+    );
+    assert!(
+        !band.here.iter().any(|w| w.to_lowercase().contains("crystal")),
+        "…and does NOT reach the crystal inside it, which is why the block exists: {:?}",
+        band.here,
+    );
+    assert_eq!(
+        band.here_source,
+        app::state::HereSource::Mixed,
+        "scope rows and printed rows in one column, so the header claims neither",
+    );
+
+    let items = band.items(COL_HERE);
+    assert!(items.contains(&"crystal".to_string()), "the crystal is offerable: {items:?}");
+    // …and in the WITH… column too, which is the other noun slot.
+    let second = band.items(COL_SECOND);
+    assert!(second.contains(&"crystal".to_string()), "the other noun slot too: {second:?}");
+    // The rows carry their provenance, so the crystal draws dimmed and the
+    // torque does not.
+    let rows = band.rows(COL_HERE);
+    let seen_of = |w: &str| rows.iter().find(|r| r.text.to_lowercase().contains(w)).map(|r| r.seen);
+    assert_eq!(seen_of("crystal"), Some(true), "a printed word is a weaker claim");
+    assert_eq!(seen_of("torque"), Some(false), "an object the tree reports is not");
+}
+
+/// **The dictionary's noun bit cannot do this job on a Version 6 Infocom
+/// story**, which is why the block asks the story's own OBJECTS instead
+/// (SQ-1135).
+///
+/// `zvm::grammar::decode_roles` reads only `verb` ($01) and `noun` ($80) for
+/// `GrammarFormat::InfocomV6`, and $80 is not where these three games keep it —
+/// the layout is unknown and guessing it is exactly what CLAUDE.md forbids. The
+/// consequence, measured on the same churchyard frame, is not a filter that is
+/// merely narrow: it is one that keeps the wrong words. This pins that, so the
+/// day someone reads the V6 flag byte correctly this case says what changed.
+#[test]
+fn the_v6_noun_bit_names_the_wrong_words_and_the_objects_do_not() {
+    let Some(session) = boot_v6("arthur-r74-s890714.z6", 74, "890714") else { return };
+    let vocab = <GameSession as Engine>::story_vocabulary(&session).expect("a readable dictionary");
+    for w in ["crystal", "torque", "sword", "is", "was", "were"] {
+        println!("{w}: {:?}", vocab.roles(w));
+    }
+    // Every one of these is a thing the parser takes, and NONE carries the bit.
+    for thing in ["crystal", "torque", "sword", "knob"] {
+        assert_eq!(session.knows_word(thing), Some(true), "{thing} is in the dictionary");
+        assert!(
+            !vocab.roles(thing).is_some_and(|r| r.noun),
+            "{thing:?} is a thing this story names and the noun bit misses it",
+        );
+    }
+    // …while the bit picks out verbs of being, which name nothing at all.
+    for not_a_thing in ["is", "was", "were"] {
+        assert!(
+            vocab.roles(not_a_thing).is_some_and(|r| r.noun),
+            "{not_a_thing:?} carries the noun bit on Arthur — the falsifier for the whole filter",
+        );
+    }
+    // The objects answer correctly, and they are what the block reads.
+    let objects =
+        session.introspect().and_then(|i| i.all_object_words()).expect("a v6 object table");
+    let names = |w: &str| objects.iter().any(|o| o.refers_to(w));
+    for thing in ["crystal", "torque", "sword", "knob"] {
+        assert!(names(thing), "an object answers to {thing:?}");
+    }
+    for not_a_thing in ["is", "were"] {
+        assert!(!names(not_a_thing), "no object answers to {not_a_thing:?}");
+    }
+    // `was` is the exception, and it is the STORY's own answer rather than a
+    // slip: Arthur's password object rewrites its own parse names as the puzzle
+    // runs, and at boot they read `password passwords word words fair begot
+    // there lot`. Asking the objects inherits whatever the objects say, exactly
+    // as asking the dictionary inherits whatever the flags say — the difference
+    // is that this one is right about the crystal.
+    let holders: Vec<Option<String>> =
+        objects.iter().filter(|o| o.refers_to("was")).map(|o| o.display_name()).collect();
+    assert_eq!(
+        holders,
+        vec![Some("password".to_string())],
+        "the one object that answers to `was` is the password, mid-puzzle",
     );
 }

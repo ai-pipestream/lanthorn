@@ -427,14 +427,36 @@ know which side you're on).
 
   The object columns are **live**: they read the running story's object tree and
   refresh every turn, so taking something moves it from *here* to *carried* as
-  you watch. (Glulx and Scott have no object tree yet, so *here* degrades to a
-  clearly-labelled **WHAT — seen** list scraped from recent output — cut to the
-  words that story's own dictionary marks as *nouns* and does not write into a
-  grammar line, so its verbs and its `at`/`in`/`of`/`to` stay out of a column of
-  things. Inform's `a`, `and` and `the` carry the noun bit and nothing else, so
-  they still slip through; only the story's own object words could tell them
-  apart, and reading those on Glulx waits on its object tree.) An empty *here*/*carried* column says so
-  explicitly rather than sitting blank.
+  you watch. An empty *here*/*carried* column says so explicitly rather than
+  sitting blank.
+
+  **Under what is here, what the story has SAID.** The WHAT column carries a
+  second block, dimmed: every word the story has printed this session that names
+  a thing. It is a weaker claim than the object tree's and looks like one — the
+  story knows the word, which is not a promise the thing is within reach — and
+  it is where the nouns a room *describes* live rather than the ones it
+  *contains*. Arthur says of the torque that "imbedded in one of the knobs is a
+  sliver of crystal"; the crystal is a real object with a real use, and no
+  column had a row for it until that block existed. Newest first, because the
+  word you want is usually the one just printed, and it **accumulates** — a word
+  named forty turns ago is still one click away. Nothing about it is stored in a
+  save: it is read back off the transcript, so restoring to before the crystal
+  was mentioned takes `crystal` away again, exactly as it should.
+
+  The header says only what is true of the whole column: **WHAT — here** when
+  every row is the object tree's, **WHAT — seen** when every row is a printed
+  word (Glulx and Scott have no object tree yet, so that is what they show), and
+  a plain **WHAT** when it is both.
+
+  Which printed words count as *things* is the story's own answer, and it is
+  asked of its **objects** — a word some object in the game answers to — rather
+  than of the dictionary's parts-of-speech bits. Those bits are unusable on the
+  three Infocom Version 6 games, whose flag layout nothing has decoded: on
+  Arthur they pick out `is`, `was` and `were` and miss `crystal`, `torque` and
+  `sword` entirely. Where an engine keeps no object list — Glulx and Scott — the
+  dictionary's noun bit is still the filter, which keeps its verbs and its
+  `at`/`in`/`of`/`to` out of a column of things; Inform's `a`, `and` and `the`
+  carry the noun bit and nothing else, so they still slip through there.
 
   **And each row is a word the parser has agreed to accept**, not the name the
   game prints. The two are different sets: Zork I *prints* `bird's nest` and
