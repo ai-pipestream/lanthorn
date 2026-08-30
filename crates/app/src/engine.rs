@@ -491,6 +491,32 @@ pub trait Introspect {
     fn visible_contents(&self, container: u16) -> Vec<ObjectWords> {
         self.contents(container)
     }
+    /// **Every object in the story**, with the words its parser files each one
+    /// under — the story's whole vocabulary of THINGS, at any distance and in
+    /// any state (SQ-1135).
+    ///
+    /// Not a scope question and not a spoiler on its own: the caller is the
+    /// command band's printed-word block, which asks it only about words the
+    /// story has ALREADY PRINTED, to tell a thing from a function word.
+    ///
+    /// It exists because the DICTIONARY cannot answer that question everywhere.
+    /// The flag byte's noun bit is the obvious test and it is wrong on the three
+    /// Infocom Version 6 games, whose layout `zvm::grammar::decode_roles` reads
+    /// only `verb` from: measured on the churchyard frame, Arthur's noun bit
+    /// picks out `are is was were will` and misses `crystal`, `torque` and
+    /// `sword`; Zork Zero's picks `a all and of the then`; Shogun's picks
+    /// nothing at all. An object's parse names are the story's own answer and
+    /// need no flag layout.
+    ///
+    /// `None` means the question could not be ASKED — an engine with no such
+    /// list, which is Glulx and Scott Adams today (`gvm::objects::ParseNames`
+    /// could answer it; reaching it wants Glulx introspection). An empty `Some`
+    /// is a story that was asked and holds no parse names anywhere, which is
+    /// what Journey and `advent.z8` really are. A caller that flattens the two
+    /// reports "this story names no things" about one it never managed to read.
+    fn all_object_words(&self) -> Option<Vec<ObjectWords>> {
+        None
+    }
     /// The object handles whose parent is `parent` (drives inventory tracking).
     fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16>;
     /// The player object, if it can be identified.

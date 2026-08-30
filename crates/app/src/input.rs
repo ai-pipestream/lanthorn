@@ -3133,23 +3133,35 @@ pub fn apply_selection_autoscroll(state: &mut AppState) {
 
 // ── Suggestion recompute ──────────────────────────────────────────────────────
 
-/// The visible prose both scrapers read: the last 20 transcript lines, joined.
-///
-/// One helper because there was one block, copied verbatim at two call sites and
-/// free to drift apart (SQ-1116). Twenty lines is a window on what the story has
-/// just been talking about — a room description and the turns since — not on the
-/// session.
-fn recent_transcript_text(state: &AppState) -> String {
-    let start = state.transcript.len().saturating_sub(20);
-    state.transcript[start..].join(" ")
-}
-
-/// Recompute [`AppState::seen_words`]: the words of the story's own recent output
-/// that the story's own dictionary holds.
+/// Extend [`AppState::seen_words`] with the words the story has printed SINCE
+/// the last call that its own dictionary holds.
 ///
 /// Called once a turn, and once at boot, from wherever the engine is in hand —
 /// the answer needs the engine twice over, to split the prose and to say what a
 /// word is, and neither is reachable from a key handler holding only `AppState`.
+///
+/// # It accumulates, and it does not persist (SQ-1135)
+///
+/// This used to recompute over a twenty-line window, so a word scrolled OUT of
+/// the list as the transcript moved on: Arthur names the sliver of crystal in
+/// the torque's knob exactly once, and a few turns later there was no way to
+/// reach the word again. Now each call scrapes only the lines past
+/// [`AppState::seen_scanned`] and folds them into what is already there, so the
+/// per-turn cost is the same and nothing is forgotten.
+///
+/// New words go on the FRONT — **most recently printed first** — because the
+/// case this exists for is the word the story printed a moment ago, and a word
+/// printed again moves back to the front rather than keeping its old place.
+/// (Order is free for completion, which re-sorts its own tier in
+/// [`crate::complete::suggest`]; it is the command band's noun columns that read
+/// it as an order.)
+///
+/// **Nothing new is persisted.** The set is derived from the transcript, which
+/// the archive already carries, and
+/// [`AppState::reset_transcript_sidecars`](crate::state::AppState::reset_transcript_sidecars)
+/// drops it wherever the transcript is replaced — so a restore rebuilds from the
+/// transcript it restored, and restoring to before a word was printed correctly
+/// takes the word away.
 ///
 /// **Every engine is served, and each says how far it can go:**
 ///
@@ -3166,19 +3178,75 @@ fn recent_transcript_text(state: &AppState) -> String {
 /// [`complete::split_prose`]: crate::complete::split_prose
 /// [`StoryVocabulary`]: crate::vocab::StoryVocabulary
 pub fn refresh_seen_words(state: &mut AppState, engine: &dyn crate::engine::Engine) {
-    let text = recent_transcript_text(state);
+    // A transcript shorter than the cursor is one that was replaced without the
+    // sidecar reset; rebuild rather than index past the end.
+    if state.seen_scanned > state.transcript.len() {
+        state.seen_words.clear();
+        state.seen_nouns.clear();
+        state.seen_scanned = 0;
+    }
+    if state.seen_scanned == state.transcript.len() {
+        return;
+    }
+    let text = state.transcript[state.seen_scanned..].join(" ");
+    state.seen_scanned = state.transcript.len();
     let tokens = engine
         .split_like_parser(&text)
         .unwrap_or_else(|| crate::complete::split_prose(&text));
-    let words = {
+    // The story's whole vocabulary of THINGS, asked once a turn (a walk of the
+    // object table, so never per frame) — see
+    // [`Introspect::all_object_words`](crate::engine::Introspect::all_object_words)
+    // for why the dictionary's noun bit cannot do this job on every story.
+    let objects = engine.introspect().and_then(|i| i.all_object_words());
+    // Newest first: walk the batch backwards and keep the first sighting of each
+    // word, which is its LAST printing.
+    let (fresh, fresh_nouns): (Vec<String>, Vec<String>) = {
         // The snapshot is read once a session and cached here; asking for it is
         // free after the first turn.
         let vocab = state.vocab.get(engine);
-        crate::complete::story_words(&tokens, |w| {
-            engine.knows_word(w).unwrap_or_else(|| vocab.is_some_and(|v| v.knows(w)))
-        })
+        // Is this word a THING rather than an action or a joining word?
+        //
+        // The story's own objects where they can be read, which is exact and
+        // needs no flag layout. Otherwise the dictionary's role bits, which is
+        // what Glulx and Scott have and is unchanged for them: a word the story
+        // marks a NOUN and does not write literally into a grammar line
+        // (SQ-1042). Measured on `stories/advent.blb` at the opening room that
+        // cuts 20 scraped words to 12 — `at`, `in`, `of`, `to`, `down` and `out`
+        // are prepositions the grammar writes down, `don` and `release` are
+        // verbs. What it does NOT reach is Inform's `a`, `and` and `the`, which
+        // carry the noun bit and NOTHING else (flag byte $80, exactly like
+        // `brick`), so no role reading can separate them — which is the second
+        // reason the objects are the better question where they exist.
+        let is_thing = |w: &str| match &objects {
+            Some(objs) => objs.iter().any(|o| o.refers_to(w)),
+            None => vocab.is_some_and(|v| v.roles(w).is_some_and(|r| r.noun && !r.preposition)),
+        };
+        let mut out: Vec<String> = Vec::new();
+        let mut things: Vec<String> = Vec::new();
+        for w in tokens.iter().rev() {
+            let w = w.to_lowercase();
+            if !w.chars().any(char::is_alphanumeric) {
+                continue;
+            }
+            if out.contains(&w) {
+                continue;
+            }
+            if engine.knows_word(&w).unwrap_or_else(|| vocab.is_some_and(|v| v.knows(&w))) {
+                if is_thing(&w) {
+                    things.push(w.clone());
+                }
+                out.push(w);
+            }
+        }
+        (out, things)
     };
-    state.seen_words = words;
+    if fresh.is_empty() {
+        return;
+    }
+    state.seen_words.retain(|w| !fresh.contains(w));
+    state.seen_words.splice(0..0, fresh);
+    state.seen_nouns.retain(|w| !fresh_nouns.contains(w));
+    state.seen_nouns.splice(0..0, fresh_nouns);
 }
 
 /// Recompute [`AppState::scope_words`]: the words the parser accepts for the
@@ -8779,32 +8847,6 @@ mod tests {
             .find(|(title, _)| title == "Map \u{b7} View")
             .expect("Map \u{b7} View group should exist");
         assert!(cmds.iter().any(|c| c.1 == "open-command-band"));
-    }
-
-    /// The window both scrapers read: the tail of the transcript, and only the
-    /// tail. One helper, because it used to be one block copied at two call
-    /// sites (SQ-1116).
-    #[test]
-    fn recent_transcript_text_is_the_last_twenty_lines() {
-        let mut s = AppState::default();
-        for i in 0..30 {
-            s.push_transcript(&format!("line{i}"));
-        }
-        let text = recent_transcript_text(&s);
-        assert!(text.starts_with("line10 "), "twenty back, not thirty: {text:?}");
-        assert!(text.ends_with("line29"), "{text:?}");
-        assert!(!text.contains("line9 "), "line 9 is off the end of the window: {text:?}");
-
-        // Fewer lines than the window is not an underflow.
-        let short = state_with_two_lines();
-        assert_eq!(recent_transcript_text(&short), "one two");
-    }
-
-    fn state_with_two_lines() -> AppState {
-        let mut s = AppState::default();
-        s.push_transcript("one");
-        s.push_transcript("two");
-        s
     }
 
     // ── File-browser sub-mode key tests ───────────────────────────────────────

@@ -685,9 +685,19 @@ fn draw_divider(buf: &mut Buffer, x: u16, area: Rect, style: Style) {
 /// prints — see [`crate::vocab::typeable_name`] for why those are different sets
 /// and what happens when a game prints `bird's nest` (SQ-1042). Glulx and Scott
 /// have no tree, so `carried` falls back to the parsed-inventory snapshot and
-/// `here` to the transcript scrape cut to the story's own nouns, flagged
-/// `here_is_seen` so the column labels itself "seen" rather than passing a
-/// scrape off as the room's contents.
+/// `here` is empty.
+///
+/// **Every engine also gets the SEEN block** (SQ-1135): the words the story has
+/// printed that name a THING, settled once a turn in
+/// [`crate::input::refresh_seen_words`] and read from `AppState::seen_nouns`
+/// here. That block used to be the
+/// no-object-tree FALLBACK, which left the inversion the quest is named for —
+/// the engine with the most introspection offering the least vocabulary, because
+/// the tree looked authoritative enough to use alone. Arthur prints "imbedded in
+/// one of the knobs is a sliver of crystal" and `crystal` was reachable in
+/// neither column. It is a weaker claim than the tree's and is drawn as one
+/// (dimmed, `band.item:seen`), under a header that says only what is true of the
+/// whole column ([`crate::state::HereSource`]).
 ///
 /// `here` excludes the player object itself (SQ-0667) — it is structurally a
 /// child of whatever room the player is in, so without this it would show up
@@ -734,6 +744,14 @@ pub fn refresh_objects(state: &mut AppState, session: &dyn crate::engine::Engine
             }
             out
         };
+        // The words the story has PRINTED that name a THING, newest first —
+        // already cut down once a turn by `input::refresh_seen_words`, which is
+        // where the expensive half of that question lives (it asks the story's
+        // own objects). Nothing is filtered here, so this costs a clone.
+        //
+        // SQ-1135: every engine gets this block now, not just the ones with no
+        // object tree.
+        let seen: Vec<String> = state.seen_nouns.clone();
         match &objects {
             Some((here, carried)) => (
                 typeable(here),
@@ -741,49 +759,39 @@ pub fn refresh_objects(state: &mut AppState, session: &dyn crate::engine::Engine
                     Some(c) => typeable(c),
                     None => state.inventory_fallback.clone(),
                 },
-                false,
+                seen,
             ),
-            // No object tree: the scrape of the story's own recent output, cut
-            // to the words the story marks a NOUN and does NOT write literally
-            // into a grammar line (SQ-1042). Every word here is one the
-            // dictionary holds — SQ-1116 settled that — but a dictionary holds
-            // its function words too, and they were filling the column. The
-            // story's own role bits are the filter; an English stop list is the
-            // guess this replaces.
-            //
-            // Measured on `stories/advent.blb` at the opening room, this cuts 20
-            // scraped words to 12: `at`, `in`, `of`, `to`, `down` and `out` are
-            // prepositions the grammar writes down, `don` and `release` are
-            // verbs. What it does NOT reach is Inform's `a`, `and` and `the`,
-            // which carry the noun bit and NOTHING else — flag byte $80, exactly
-            // like `brick` — so no role reading can separate them. The filter
-            // that could is the story's OWN objects: a word no object answers to
-            // is not a thing. `gvm::objects::ParseNames` can say so; reaching it
-            // wants Glulx introspection, which is still SP4.
-            None => (
-                state
-                    .seen_words
-                    .iter()
-                    .filter(|w| {
-                        vocab.is_some_and(|v| {
-                            v.roles(w).is_some_and(|r| r.noun && !r.preposition)
-                        })
-                    })
-                    .cloned()
-                    .collect(),
-                state.inventory_fallback.clone(),
-                true,
-            ),
+            None => (Vec::new(), state.inventory_fallback.clone(), seen),
+        }
+    };
+    // The header claims only what is true of every row (SQ-1135). Read off the
+    // LISTS rather than off which engine answered, so a story whose tree says the
+    // room is empty labels its column honestly too.
+    let source = match (here.is_empty(), seen.is_empty()) {
+        (false, false) => crate::state::HereSource::Mixed,
+        (false, true) => crate::state::HereSource::Scope,
+        (true, false) => crate::state::HereSource::Seen,
+        (true, true) => {
+            if objects.is_some() {
+                crate::state::HereSource::Scope
+            } else {
+                crate::state::HereSource::Seen
+            }
         }
     };
 
     let Some(band) = state.overlays.command_band.as_mut() else { return false };
-    if band.here == here && band.carried == carried && band.here_is_seen == seen {
+    if band.here == here
+        && band.carried == carried
+        && band.here_seen == seen
+        && band.here_source == source
+    {
         return false;
     }
     band.here = here;
     band.carried = carried;
-    band.here_is_seen = seen;
+    band.here_seen = seen;
+    band.here_source = source;
     true
 }
 
@@ -1431,7 +1439,7 @@ fn draw_column(
         return;
     }
 
-    let items = band.items(col);
+    let items = band.rows(col);
     let label_style = base.patch(theme.get("band.group_label").style);
     if items.is_empty() {
         // Column-specific wording (SQ-0667, following the SQ-0668 data fix
@@ -1469,9 +1477,20 @@ fn draw_column(
             break;
         }
         let is_selected = idx == selected;
-        let style = if is_selected { theme.get("dialog.list_selected").style } else { base };
+        // A row the story merely PRINTED is dimmed (SQ-1135): it shares the
+        // column with the object tree's rows because it fills the same slot, and
+        // it is dimmed because it is a weaker claim — the story knows the word,
+        // which is not a promise that the thing is here. The selection still
+        // wins, so a dim row that is armed reads as armed.
+        let style = if is_selected {
+            theme.get("dialog.list_selected").style
+        } else if items[idx].seen {
+            base.patch(theme.get("band.item:seen").style)
+        } else {
+            base
+        };
         let marker = if is_selected { "▸" } else { " " };
-        let line = format!("{}{}", marker, items[idx]);
+        let line = format!("{}{}", marker, items[idx].text);
         let row_area = Rect::new(list_area.x, y, row_w, 1);
         hits.rows.push((col, idx, row_area));
         for x in row_area.x..row_area.right() {
@@ -1978,18 +1997,77 @@ mod tests {
         assert_ne!(buf_plain.content(), buf_hover.content(), "the flat row's hover shows too");
     }
 
+    /// The WHAT header's three states (SQ-1135). The rule is that the label has
+    /// to be true of the WHOLE column, so a column that mixes the object tree's
+    /// rows with the story's printed words can claim neither qualifier.
     #[test]
-    fn seen_fallback_relabels_the_here_column() {
+    fn the_what_header_says_only_what_is_true_of_the_whole_column() {
+        let header = |source: crate::state::HereSource, seen: Vec<String>| {
+            let mut s = state_with_band();
+            {
+                let b = s.overlays.command_band.as_mut().unwrap();
+                b.here_source = source;
+                b.here_seen = seen;
+                b.pick_word("take");
+            }
+            let mut buf = Buffer::empty(BAND);
+            draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
+            dump(&buf)
+        };
+        use crate::state::HereSource;
+
+        let scope = header(HereSource::Scope, Vec::new());
+        assert!(scope.contains("WHAT — here"), "the object tree's own rows: {scope}");
+
+        // Glulx and Scott, unchanged: no object tree, so every row is a scrape
+        // and the column labels itself rather than passing one off as the other.
+        let seen = header(HereSource::Seen, vec!["lamp".to_string()]);
+        assert!(seen.contains("WHAT — seen"), "a column that is all scrape: {seen}");
+        assert!(!seen.contains("WHAT — here"), "{seen}");
+
+        // `▸` is the current-column marker, so this is the WHAT header itself
+        // and not the neighbouring `WHAT — carried`, which is untouched.
+        let mixed = header(HereSource::Mixed, vec!["crystal".to_string()]);
+        assert!(mixed.contains("▸WHAT "), "{mixed}");
+        assert!(!mixed.contains("WHAT — here"), "neither qualifier is true of all of it: {mixed}");
+        assert!(!mixed.contains("WHAT — seen"), "{mixed}");
+    }
+
+    /// A printed-word row is drawn dimmed and a scope row is not (SQ-1135) —
+    /// same column, weaker claim, visibly so.
+    #[test]
+    fn a_seen_row_is_dimmed_and_a_scope_row_is_not() {
         let mut s = state_with_band();
         {
             let b = s.overlays.command_band.as_mut().unwrap();
-            b.here_is_seen = true;
+            b.here = vec!["torque".to_string()];
+            b.here_seen = vec!["crystal".to_string()];
+            b.here_source = crate::state::HereSource::Mixed;
             b.pick_word("take");
         }
         let mut buf = Buffer::empty(BAND);
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
-        let out = dump(&buf);
-        assert!(out.contains("seen"), "the scraped fallback labels itself 'seen'");
+
+        // The style of the cell each word starts in.
+        let style_of = |word: &str| {
+            for y in BAND.y..BAND.bottom() {
+                let row: String =
+                    (BAND.x..BAND.right()).map(|x| buf.cell((x, y)).unwrap().symbol()).collect();
+                if let Some(at) = row.find(word) {
+                    return buf.cell((BAND.x + at as u16, y)).unwrap().style();
+                }
+            }
+            panic!("{word:?} is not on screen:\n{}", dump(&buf));
+        };
+        let scope = style_of("torque");
+        let seen = style_of("crystal");
+        println!("scope row {scope:?}\nseen row  {seen:?}");
+        assert_ne!(scope, seen, "the weaker claim must look weaker");
+        assert_eq!(
+            seen.fg,
+            s.colors.theme.get("band.item:seen").style.fg,
+            "and it must take its colour from the selector, not a literal",
+        );
     }
 
     /// A genuinely empty carried/here column must say so explicitly, not

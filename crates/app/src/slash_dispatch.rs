@@ -696,20 +696,18 @@ pub(crate) fn dispatch_slash_outcome(
             // the prompt, so it would scroll the very screenful the reveal was
             // asked about, and the words would light on text that had moved.
             //
-            // The only thing said out loud is what the reveal could NOT do, and
-            // through a toast, which floats over the pane without touching it.
-            // `Armed::Lit` at the Scope tier says nothing at all: the highlight IS
-            // the answer, and a narration of it would be an assist that assists
-            // nobody.
+            // What is said out loud is what the reveal could NOT do, and its own
+            // claim — through a toast, which floats over the pane without
+            // touching it.
             use app::reveal::Armed;
             match app::reveal::arm(state, &*session) {
-                Armed::Lit { tier, .. } => {
-                    // The weak tier has to admit what it cannot tell apart — the
-                    // same rule the command band's `here_is_seen` column follows
-                    // rather than passing a scrape off as the room's contents.
-                    if let Some(caveat) = tier.caveat() {
-                        state.set_status(format!("[{caveat}]"));
-                    }
+                Armed::Lit { .. } => {
+                    // Every reveal is a vocabulary reveal now (SQ-1135), so the
+                    // legend is unconditional: these are words the story KNOWS,
+                    // which is a weaker thing than a promise that they are here,
+                    // and the player should be told which of the two they are
+                    // looking at.
+                    state.set_status(format!("[{}]", app::reveal::CAVEAT));
                 }
                 Armed::Nothing => {
                     state.set_status("[nothing on screen is a word this story takes]")

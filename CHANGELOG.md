@@ -132,6 +132,19 @@ carrying `enable_sound = false` could only be overridden by editing the file.
   again — which is what you want after changing fonts — as does
   `--font-check on`; `--font-check off` never asks, and there is a `font_check`
   row on the settings screen.
+- **The word reveal** — **F4**, the `◈` on the story pane's bottom border, or
+  `/reveal-words` — lights every word already on screen that this story knows,
+  for a few seconds, over its own prose and without moving a line of it. It goes
+  out on your next keystroke, your next turn, or on its own. It answers the
+  oldest frustration in the genre: a room description names a dozen nouns and two
+  of them are implemented. *Mini-Zork* opens on a `field` the story has never
+  heard of, and that word stays dark.
+  - The claim is the dictionary's and the reveal says so every time — *words this
+    story knows — not necessarily things that are here*. A description that
+    mentions something in the next room lights it, which is the point rather than
+    a leak: every word it touches is one the story has already printed on your
+    screen.
+  - Verbs never light. The verb panel already answers "what can I do".
 
 ### Toggle controls in the pane border
 
@@ -179,6 +192,25 @@ carrying `enable_sound = false` could only be overridden by editing the file.
 
 ### The command band
 
+- **Under what is here, what the story has said.** The WHAT column now carries a
+  second block, dimmed: every word the story has printed this session that names
+  a thing. *Arthur* says of the torque that "imbedded in one of the knobs is a
+  sliver of crystal" — the crystal is a real object with a real use, and until
+  now no column had a row for it, because the object tree stops at the torque's
+  lid. Newest first, since the word you want is usually the one just printed, and
+  it accumulates: a noun named forty turns ago is still one click away. `WITH…`
+  gets the same block, being the other noun slot.
+  - **It looks like the weaker claim it is.** Dimmed through a
+    `band.item:seen` selector of your own, because the story knowing a word is
+    not a promise that the thing is within reach.
+  - **The header only says what is true of the whole column** — `WHAT — here`
+    when every row is the object tree's, `WHAT — seen` when every row is a
+    printed word, and a plain `WHAT` when it is both.
+  - **Nothing new goes into a save.** The block is read back off the transcript,
+    so restoring to before the crystal was mentioned takes `crystal` away again.
+  - The engine that knows the most used to offer the least: this block existed
+    only for Glulx and Scott Adams, which have no object tree, so *Zork I* and
+    *Arthur* got scope and nothing else.
 - **The strong language stays out of the VERB column, and the list is yours.**
   The column is the running story's own grammar now, and Infocom's dictionaries
   are saltier than their prose — *Zork I*'s verb table really does hold `fuck`,

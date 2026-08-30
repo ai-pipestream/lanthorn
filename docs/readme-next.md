@@ -149,6 +149,25 @@ switches are the visible half of the same idea:
 > map you hid, a light you put out, a render mode you preferred. The settings
 > screen still sets the default new games inherit.
 
+**Add** after that, as its own paragraph — the two aids that answer "what is
+there a word for?":
+
+> Press **F4** and every word already on screen that the story knows lights up
+> for a few seconds, over its own prose, without moving a line of it. It answers
+> the oldest frustration in the genre: a room description names a dozen nouns and
+> two of them are implemented. *Mini-Zork* opens on a `field` the story has never
+> heard of, and that word stays dark. The claim it makes is the dictionary's and
+> it says so each time — these are words this story knows, which is not a promise
+> that the thing is within reach.
+>
+> The command band's **WHAT** column carries the same idea as a list. Under what
+> is actually here, dimmed, are the nouns the story has *printed* this session —
+> the things a room describes rather than the ones it contains. *Arthur* says of
+> the torque that "imbedded in one of the knobs is a sliver of crystal", and the
+> crystal is a real object with a real use; that block is where it turns up.
+> Newest first, and it accumulates, so a noun named forty turns ago is still one
+> click away.
+
 **Add** to the **A map that draws itself** bullet under *What it does*, or as its
 own sentence there:
 

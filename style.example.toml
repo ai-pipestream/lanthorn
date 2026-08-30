@@ -112,6 +112,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # "band.quick" = { parent = "muted" }
 # "band.quick:hover" = { parent = "band.quick", reversed = true }
 # "band.group_label" = { parent = "heading" }
+# "band.item:seen" = { parent = "muted" }
 # file_browser_cwd = { parent = "alert" }
 # file_browser_dir = { parent = "accent" }
 # inspector_edge_ok = { fg = "green" }

@@ -542,22 +542,23 @@ re-seed the new template, or hand-write the new shape from
   It answers the oldest frustration in the genre: a room description names a
   dozen nouns and two of them are implemented, and until now the only way to find
   out which was to type at all twelve. Mini-Zork's opening screen names five —
-  `field`, `house`, `door`, `mailbox`, `window` — and lights three: the story has
-  never heard the word `field` at all, and `window` is a real word for a window
-  somewhere else in the game.
-  That last distinction is the whole feature, and it needs the story's **object
-  tree**, not its dictionary — so on the Z-machine a word lights because
-  something you can actually see answers to it, and the judgement is made in the
-  present tense: a lamp described fifty turns ago and still in your hands lights
-  in that old sentence; one since taken away does not. Where the object tree
-  cannot be read — Glulx and Scott Adams today — it falls back to the dictionary,
-  filtered to the words that *name* things, and says so in the corner rather than
-  passing the weaker claim off as the stronger. That fallback inherits whatever
-  the story's dictionary thinks a word is, which is the other half of why it is
-  labelled: Mini-Zork files `west` with the same bit it gives `white`, so a
-  fallback reveal lights the compass and nothing can tell it not to. Verbs never
-  light in either case: the verb panel already answers "what can I do", and this
-  answers "what is real here".
+  `field`, `house`, `door`, `mailbox`, `window` — and the story has never heard
+  the word `field` at all, so that one stays dark while the rest light.
+  The question it asks is **does this story know the word**, answered by the
+  dictionary, and it says so in the corner every time: *words this story knows —
+  not necessarily things that are here*. A description that mentions a sword
+  sitting in the next room lights it, and that is the point rather than a leak —
+  every word it touches is one the story has already printed on your own screen,
+  so it can reveal nothing you have not been told. It used to walk the object
+  tree wherever it could and light only what was within reach, which sounds
+  stricter and read as broken: the engines that know the most lit the least, and
+  Arthur's "imbedded in one of the knobs is a sliver of crystal" — a real object
+  with a real use — lit nothing at all.
+  It inherits whatever the story's dictionary thinks a word is, which is the
+  other half of why it is labelled: Mini-Zork files `west` with the same bit it
+  gives `white`, so the compass lights beside the colour and nothing can tell it
+  not to. Verbs never light: the verb panel already answers "what can I do", and
+  this answers "what does this game know about".
   One honest limit, and it is the parser's own: a Version 3 dictionary keeps six
   characters of a word, so `candle` and `candlesticks` are the same entry, and a
   room holding a candle lights both. That is not a mistake on lanthorn's part —

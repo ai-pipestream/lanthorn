@@ -543,6 +543,12 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("band.quick:hover", Section::Elements, Kind::Style, Some("band.quick"), mods(false, false, false, true)),
     // In-column group labels and the "(nothing visible)" placeholder.
     row("band.group_label", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
+    // SQ-1135: a noun-column row that came from what the story PRINTED rather
+    // than from its object tree. Same column, weaker claim — the story knows the
+    // word, which is not a promise the thing is here — so it is dimmed. The
+    // band's first per-ROW selector; every other row still takes the panel's
+    // base style, and the selection (`dialog.list_selected`) still overrides.
+    row("band.item:seen", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     // The file browser's current-directory row and unselected directory entries.
     row("file_browser_cwd", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
     row("file_browser_dir", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
@@ -756,6 +762,8 @@ mod tests {
         "band.quick",
         "band.quick:hover",
         "band.group_label",
+        // SQ-1135: the printed-word rows in the noun columns
+        "band.item:seen",
         "file_browser_cwd",
         "file_browser_dir",
         "inspector_edge_ok",

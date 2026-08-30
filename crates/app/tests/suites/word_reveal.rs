@@ -14,21 +14,18 @@
 //!   examine window  → You can't see any window here!
 //! ```
 //!
-//! Five nouns printed in three lines of prose, and they fall into three groups
-//! that this feature has to keep apart:
+//! Five nouns printed in three lines of prose, and the line the reveal draws
+//! runs between two of the three groups, not three (SQ-1135):
 //!
-//! - **`mailbox`, `house`, `door` — here.** They light. The story answers to
-//!   them from where the player is standing, which is the whole claim.
-//! - **`field` — not a word at all.** The story has never heard it, so the
-//!   dictionary cannot hold it and no tier lights it. It is also the word the
-//!   room description leads with, which is exactly why the feature exists: the
-//!   prose opens with a noun that does not exist.
-//! - **`window` — a word, but somewhere else.** In the dictionary (Mini-Zork's
-//!   kitchen window), refused here. **The scope tier does not light it and the
-//!   dictionary tier does**, which is the difference between the two tiers made
-//!   visible, and the reason the weaker one has to say what it is.
+//! - **`mailbox`, `house`, `door` — words this story knows.** They light.
+//! - **`window` — a word this story knows, for something elsewhere.** It would
+//!   light too, wherever the prose printed it; nothing here does.
+//! - **`field` — not a word at all.** The story has never heard it, so nothing
+//!   lights it. It is also the word the room description leads with, which is
+//!   exactly why the feature exists: the prose opens with a noun that does not
+//!   exist.
 //!
-//! And one move later, the mailbox is gone while its sentence is still on
+//! And one move later, the mailbox is a room away while its sentence is still on
 //! screen:
 //!
 //! ```text
@@ -36,11 +33,12 @@
 //!   examine mailbox  → You can't see any mailbox here!
 //! ```
 //!
-//! `There is a small mailbox here.` is still in the scrollback and `mailbox`
-//! must stop lighting, because the reveal is judged in the PRESENT tense. That
-//! case is [`a_word_that_has_left_scope_stops_lighting`], and it is the one that
-//! would pass just as well against a static dictionary — so it is the one worth
-//! having.
+//! `There is a small mailbox here.` is still on screen and `mailbox` **keeps
+//! lighting**, because the claim is about the dictionary and not about scope.
+//! That case is [`a_word_the_story_knows_lights_wherever_the_thing_is`], and it
+//! asserted the reverse until SQ-1135: the scope test made the engines with the
+//! most introspection light the least, and a description naming something in the
+//! next room — Arthur's crystal in the torque — lit nothing at all.
 //!
 //! # The specimens
 //!
@@ -52,7 +50,7 @@
 //! Mini-Zork is tracked, so every case here runs on CI; nothing skips.
 
 use app::engine::Engine;
-use app::reveal::{Armed, RevealTier};
+use app::reveal::Armed;
 use app::session::GameSession;
 use app::state::{AppState, TranscriptKind};
 
@@ -140,20 +138,15 @@ fn words(state: &AppState) -> Vec<String> {
 
 // ── The reveal ──────────────────────────────────────────────────────────────
 
-/// The opening screen, lit. Three of the five nouns the prose names are real,
-/// and the reveal says which — with the story's own object tree as the source,
-/// so it is the strong tier and claims nothing it cannot support.
+/// The opening screen, lit. The reveal's question is *"does this story know the
+/// word?"* — the dictionary's answer, with no scope walk in it (SQ-1135).
 #[test]
-fn the_opening_screen_lights_the_nouns_that_are_really_here() {
+fn the_opening_screen_lights_the_words_the_story_knows() {
     let mut session = minizork();
     let mut state = screen(&mut session);
 
     let armed = app::reveal::arm(&mut state, &session);
-    assert_eq!(
-        armed,
-        Armed::Lit { words: words(&state).len(), tier: RevealTier::Scope },
-        "a Z-machine story has an object tree, so the strong tier is reachable",
-    );
+    assert_eq!(armed, Armed::Lit { words: words(&state).len() });
 
     let lit = words(&state);
     println!("lit: {lit:?}");
@@ -162,11 +155,12 @@ fn the_opening_screen_lights_the_nouns_that_are_really_here() {
     }
     // `field` is not in the dictionary at all — the parser answers
     // `[I don't know the word "field".]` — and it is the noun the description
-    // opens with.
+    // opens with. The dictionary IS the test, so this is what it excludes.
     assert!(!lit.contains(&"field".to_string()), "the story has never heard of `field`: {lit:?}");
-    // `window` IS in the dictionary and is not here: `You can't see any window
-    // here!`. Only a scope-aware reveal can tell it from `mailbox`.
-    assert!(!lit.contains(&"window".to_string()), "`window` is a word, elsewhere: {lit:?}");
+    // `window` is in the dictionary (Mini-Zork's kitchen window) and is not on
+    // this screen. The viewport is still the bound: a reveal lights words the
+    // story PRINTED, never the dictionary at large.
+    assert!(!lit.contains(&"window".to_string()), "nothing printed it here: {lit:?}");
 
     // …and it reaches the screen. The lit words are drawn underlined
     // (`transcript_reveal`), over the story's own prose, without moving it.
@@ -182,30 +176,46 @@ fn the_opening_screen_lights_the_nouns_that_are_really_here() {
 }
 
 /// **A verb never lights.** The verb panel answers "what can I do"; this answers
-/// "what is real here". `open` and `take` are all over Mini-Zork's grammar and
-/// its opening prose says `open field` — a bare dictionary test would light the
-/// verb and say nothing at all.
+/// "what does the story know about". `open` and `take` are all over Mini-Zork's
+/// grammar and its opening prose says `open field` — lighting the verb would
+/// leave the prose saying nothing at all.
+///
+/// The compass words are NOT part of this claim, and never were a filter's to
+/// make: Mini-Zork files `west` with the DESC bit, exactly as it files `white`
+/// — see `the_reveal_inherits_the_dictionary_and_says_so`.
 #[test]
 fn verbs_do_not_light() {
     let mut session = minizork();
+    let vocab = <GameSession as Engine>::story_vocabulary(&session).expect("a readable dictionary");
     let mut state = screen(&mut session);
     app::reveal::arm(&mut state, &session);
     let lit = words(&state);
-    for verb in ["open", "take", "north", "south", "west"] {
-        assert!(!lit.contains(&verb.to_string()), "{verb:?} is a verb or a direction: {lit:?}");
+    for verb in ["open", "take"] {
+        let r = vocab.roles(verb).expect("in the dictionary");
+        assert!(
+            !r.noun && !r.adjective,
+            "{verb:?} must be filed as a verb and nothing else, or this proves nothing: {r:?}"
+        );
+        assert!(!lit.contains(&verb.to_string()), "{verb:?} is a verb: {lit:?}");
     }
 }
 
-/// **The reveal is judged in the PRESENT tense**, which is the whole difference
-/// between it and a dictionary lookup.
+/// **A word for something in another room lights, and that is intended**
+/// (SQ-1135).
 ///
 /// After `north`, `There is a small mailbox here.` is still on screen — the
 /// player can read it — and the parser now answers `You can't see any mailbox
-/// here!`. So it stops lighting. Falsify by testing the dictionary instead of
-/// the object tree: `mailbox` is in Mini-Zork's dictionary either way, and this
-/// is the only case that notices.
+/// here!`. The word still lights, because the claim the highlight makes is about
+/// the DICTIONARY: this story knows `mailbox`. Lighting a word the story has
+/// already printed on the player's own screen tells them nothing they were not
+/// told.
+///
+/// This case used to assert the opposite, back when the reveal walked the object
+/// tree wherever it could. That is the inversion SQ-1135 removes, and the reason
+/// Arthur's crystal reaches a player at all: the description naming it is right
+/// there on screen, and a scope-tested reveal lit nothing in it.
 #[test]
-fn a_word_that_has_left_scope_stops_lighting() {
+fn a_word_the_story_knows_lights_wherever_the_thing_is() {
     let mut session = minizork();
     let mut state = screen(&mut session);
     app::reveal::arm(&mut state, &session);
@@ -222,12 +232,10 @@ fn a_word_that_has_left_scope_stops_lighting() {
 
     assert!(
         state.transcript.iter().any(|l| l.contains("small mailbox")),
-        "the sentence naming the mailbox must still be in the scrollback, or this proves nothing",
+        "the sentence naming the mailbox must still be on screen, or this proves nothing",
     );
-    assert!(!lit.contains(&"mailbox".to_string()), "the mailbox is a room away now: {lit:?}");
-    // …and what IS here does light, so this is not merely a reveal that stopped
-    // working. North of House names its own boarded windows.
-    assert!(lit.contains(&"house".to_string()), "the house is still here: {lit:?}");
+    assert!(lit.contains(&"mailbox".to_string()), "the story still knows the word: {lit:?}");
+    assert!(lit.contains(&"house".to_string()), "…and the house with it: {lit:?}");
 }
 
 // ── Momentary ───────────────────────────────────────────────────────────────
@@ -323,28 +331,23 @@ fn only_what_is_on_screen_is_considered() {
 
 // ── The claim, and the label on it ──────────────────────────────────────────
 
-/// **What the weak tier costs, measured.** Falsifying `arm` to take the
-/// dictionary branch on this same opening screen lights
-/// `boarded · door · front · house · mailbox · small · west · white`, and after
-/// `north` it *still* lights `mailbox` — a room away, in a sentence about
-/// somewhere the player has left. That is the whole case for the strong tier
-/// being the default, and for the weak one having to label itself.
+/// **The reveal inherits the dictionary's own idea of what a word is**, and
+/// there is no filter that could rescue it — which is why it says what it is
+/// rather than pretending to a stronger claim.
 ///
-/// `west` in that list is not a slip on our part; it is what Mini-Zork's own
-/// dictionary says. Its flag byte is `0x33`, which sets the DESC bit — the same
-/// bit `white` and `boarded` carry — so nothing in the story distinguishes the
-/// compass from an adjective, and `north` and `south` (`0x13`) are not filed as
-/// either and do not light at all. A tier that can only read the dictionary
-/// inherits the dictionary's own idea of what a word is, and there is no filter
-/// that could rescue it. One more reason it says what it is.
+/// `west` on the opening screen is not a slip on our part; it is what
+/// Mini-Zork's own dictionary says. Its flag byte is `0x33`, which sets the DESC
+/// bit — the same bit `white` and `boarded` carry — so nothing in the story
+/// distinguishes the compass from an adjective, and `north` and `south` (`0x13`)
+/// are not filed as either and do not light at all.
 ///
 /// What the filter DOES drop is the buzzword bit (`$04`): `the`, `a`, `please`
 /// and their kin, which every story files as words and no player wants lit.
 #[test]
-fn the_weak_tier_inherits_the_dictionary_and_says_so() {
+fn the_reveal_inherits_the_dictionary_and_says_so() {
     let mut session = minizork();
     let vocab = <GameSession as Engine>::story_vocabulary(&session).expect("a readable dictionary");
-    for w in ["west", "north", "white", "boarded", "mailbox"] {
+    for w in ["west", "north", "white", "boarded", "mailbox", "the"] {
         println!("{w}: {:?}", vocab.roles(w));
     }
     // The compass word and the colour are indistinguishable in this dictionary.
@@ -354,23 +357,34 @@ fn the_weak_tier_inherits_the_dictionary_and_says_so() {
         (west.noun, west.adjective, west.special),
         (white.noun, white.adjective, white.special),
         "Mini-Zork files `west` exactly as it files `white`, so no part-of-speech \
-         filter can tell them apart — which is what the weak tier's label is for",
+         filter can tell them apart — which is what the caveat is for",
     );
-    // …and the strong tier is unaffected: `west` is not a thing in the room, so
-    // the reveal a player actually gets never lights it (see `verbs_do_not_light`).
+
     let mut state = screen(&mut session);
     app::reveal::arm(&mut state, &session);
-    assert!(!words(&state).contains(&"west".to_string()));
+    let lit = words(&state);
+    // Both, or neither: the dictionary cannot separate them, so neither can this.
+    assert_eq!(
+        lit.contains(&"west".to_string()),
+        lit.contains(&"white".to_string()),
+        "the two words this dictionary files identically must fare identically: {lit:?}",
+    );
+    // The buzzword bit is what the filter really removes, and Mini-Zork's
+    // opening prose is full of `the` and `a`.
+    for buzz in ["the", "a"] {
+        assert!(!lit.contains(&buzz.to_string()), "{buzz:?} carries the buzzword bit: {lit:?}");
+    }
 }
 
-/// The strong tier is unlabelled and the weak one is not. A reveal that could
-/// only ask the dictionary cannot tell "here" from "somewhere", and says so
-/// rather than passing the weaker claim off as the stronger — the rule the
-/// command band's `here_is_seen` column already follows.
+/// The reveal states its claim out loud (SQ-1135). It cannot tell "implemented
+/// HERE" from "implemented SOMEWHERE" — by design now, not by limitation — and
+/// the legend says so rather than leaving a player to infer the stronger reading.
 #[test]
-fn only_the_weak_tier_admits_what_it_cannot_tell_apart() {
-    assert_eq!(RevealTier::Scope.caveat(), None, "the object tree is simply the truth");
-    let caveat = RevealTier::Dictionary.caveat().expect("the weak tier must label itself");
-    println!("dictionary tier says: {caveat}");
-    assert!(caveat.contains("not necessarily"), "it has to say what it cannot promise: {caveat:?}");
+fn the_reveal_admits_what_it_cannot_tell_apart() {
+    println!("the reveal says: {}", app::reveal::CAVEAT);
+    assert!(
+        app::reveal::CAVEAT.contains("not necessarily"),
+        "it has to say what it cannot promise: {:?}",
+        app::reveal::CAVEAT,
+    );
 }

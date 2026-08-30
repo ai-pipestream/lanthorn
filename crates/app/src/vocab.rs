@@ -1009,8 +1009,8 @@ const NONSENSE: [&str; 3] = ["zqxwvj", "vprkxz", "jwqzbf"];
 /// an empty room, carrying nothing. A caller that flattens the two reports "no
 /// objects are in scope" about a story it never managed to read, which is the
 /// sort of confident wrong answer this crate keeps having to un-tell (see
-/// [`crate::reveal::RevealTier`], which turns exactly this distinction into
-/// what it is allowed to say on screen).
+/// [`crate::state::HereSource`], which turns exactly this distinction into what
+/// the command band's WHAT column is allowed to call itself).
 pub fn objects_in_scope(engine: &dyn Engine) -> Option<Vec<crate::engine::ObjectWords>> {
     let (mut here, carried) = scope_split(engine, None)?;
     here.extend(carried);

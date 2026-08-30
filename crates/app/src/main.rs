@@ -3622,6 +3622,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 state.transcript_images = ac.transcript_images;
                                 state.history = ac.history;
                                 state.command_history = ac.command_history;
+                                // The scraped word set is derived from the transcript
+                                // and never archived, so rebuild it from the one that
+                                // just replaced it (SQ-1135) — which is also what makes
+                                // a restore take back a word printed after the save.
+                                app::input::refresh_seen_words(&mut state, &*session);
                                 // After restore, re-observe current location.
                                 reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
                                 state.push_notice(&format!(
@@ -3851,6 +3856,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 state.transcript_runs = vec![Vec::new(); state.transcript.len()];
                                 state.transcript_para = vec![app::state::ParaFmt::default(); state.transcript.len()];
                                 state.reset_transcript_sidecars();
+                                // Rebuilt from the replayed transcript (SQ-1135): a
+                                // rewind to turn 4 offers the words turn 4 had printed.
+                                app::input::refresh_seen_words(&mut state, &*session);
                                 state.turns = plan.turn;
                                 state.unsaved_progress = false; // resumed a past (saved) turn
                                 state.graph_gen = state.graph_gen.wrapping_add(1);

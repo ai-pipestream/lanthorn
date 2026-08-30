@@ -23,32 +23,31 @@
 //! truncation all apply exactly as the game applies them. There is no word
 //! splitter in this file, and the last one in the codebase was deleted for cause.
 //!
-//! **Which words light is the story's answer too**, at whichever of two
-//! strengths this engine can support — see [`RevealTier`]. The strong one asks
-//! the object tree what is actually here; the weak one can only ask the
-//! dictionary what exists somewhere, and SAYS SO rather than passing the weaker
-//! claim off as the stronger.
+//! **Which words light is the story's answer too**, and the question put to it
+//! is *"do you know this word?"* — the DICTIONARY's answer, with no scope walk
+//! anywhere in it (SQ-1135). It used to ask the object tree what was actually
+//! here wherever an engine had one, and fall back to the dictionary where it did
+//! not. That inverted the point: the engine that could say the most lit the
+//! least, and a description naming a sword in the next room lit nothing at all.
+//! Every word here is a word the story has ALREADY PRINTED on the player's own
+//! screen, so lighting it reveals nothing that has not been told, and there is
+//! no spoiler for a narrower test to defend against. [`CAVEAT`] states the claim
+//! rather than leaving the player to infer a stronger one.
 //!
 //! # Nouns, not verbs
 //!
-//! A verb never lights, in either tier. The verb panel already answers "what can
-//! I do"; this answers "what is real here", and they are different questions
+//! A verb never lights. The verb panel already answers "what can I do"; this
+//! answers "what does this game know about", and they are different questions
 //! that would blur into a ransom note if merged — "You are in an open field west
-//! of a white house" lights `open` and `west` on a bare dictionary test, and the
-//! prose then says nothing at all. Widening this to verbs is a decision, not a
-//! tidy-up.
+//! of a white house" lights `open` and `west` on an unfiltered dictionary test,
+//! and the prose then says nothing at all. Widening this to verbs is a decision,
+//! not a tidy-up.
 //!
-//! # The viewport, judged in the present tense
+//! # The viewport
 //!
-//! Exactly what is on screen lights, against the CURRENT game state. Scroll and
-//! press again to light a different screenful, which answers "how far back do we
-//! go?" with the scroll position instead of a constant somebody has to defend.
-//!
-//! Judging old visible text against present scope looks wrong for about as long
-//! as it takes to say out loud. The player's question is present-tense: *of the
-//! words I can see, which work right now?* A lamp described fifty turns ago and
-//! still in scope SHOULD light; one since taken away should not. The age of the
-//! text is irrelevant to it.
+//! Exactly what is on screen lights. Scroll and press again to light a different
+//! screenful, which answers "how far back do we go?" with the scroll position
+//! instead of a constant somebody has to defend.
 //!
 //! # Momentary, because a terminal cannot do hold-to-reveal
 //!
@@ -99,49 +98,17 @@ use crate::state::AppState;
 /// pressed it and then did nothing.
 pub const REVEAL_HOLD: Duration = Duration::from_millis(4_000);
 
-/// How strong a claim this reveal is making, which is decided by what the engine
-/// could be asked and not by what would be nice to say.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RevealTier {
-    /// **A word lights because something in scope answers to it.**
-    ///
-    /// The real question, and the only one worth calling a reveal: not "is this
-    /// word in the dictionary somewhere" but "does it name something HERE". Every
-    /// object in the room and in the player's hands is asked
-    /// [`ObjectWords::refers_to`](grammar_model::ObjectWords::refers_to), which
-    /// compares against the words the story files the object under, truncated the
-    /// way the story's dictionary truncates them. A sceptre named in room one and
-    /// lying in room forty does not light.
-    ///
-    /// Reachable since SQ-1042 put `ObjectWords` through the `Introspect` seam.
-    /// Unlabelled on screen: it is simply the truth.
-    Scope,
-    /// **A word lights because the dictionary holds it as a noun or adjective.**
-    ///
-    /// The fallback, for an engine with no `Introspect` and for a story whose
-    /// objects cannot be read. Weaker in a way the player must be told about,
-    /// because it cannot tell "implemented HERE" from "implemented SOMEWHERE" —
-    /// the sceptre in room forty lights.
-    ///
-    /// So it says so, the way [`AppState::here_is_seen`](crate::state::AppState)
-    /// makes the command band's scraped column label itself rather than pass a
-    /// scrape off as the room's contents (SQ-1111 / SQ-1117). See
-    /// [`RevealTier::caveat`].
-    Dictionary,
-}
-
-impl RevealTier {
-    /// What the player is told about a reveal at this strength, or `None` when
-    /// there is nothing to admit.
-    pub fn caveat(self) -> Option<&'static str> {
-        match self {
-            RevealTier::Scope => None,
-            RevealTier::Dictionary => {
-                Some("words this story knows — not necessarily things that are here")
-            }
-        }
-    }
-}
+/// The legend for a reveal, said out loud every time one lights (SQ-1135).
+///
+/// It is the whole claim, stated: the words are the ones the STORY KNOWS, and
+/// knowing a word is not a promise that the thing is within reach. There used to
+/// be a second, stronger tier that walked the object tree and lit only what was
+/// in scope, with this line reserved for the engines that had no tree to walk —
+/// and the tier that could say more was the one that offered less, because a
+/// description naming a sword in the next room lit nothing at all. Lighting a
+/// word the story has ALREADY PRINTED reveals nothing that has not been told, so
+/// there was never a spoiler for the stronger test to defend against.
+pub const CAVEAT: &str = "words this story knows — not necessarily things that are here";
 
 /// A reveal that is currently lit.
 #[derive(Debug, Clone)]
@@ -151,8 +118,6 @@ pub struct Reveal {
     /// dictionary stores, because it is the printed spelling the player is
     /// looking at.
     pub words: BTreeSet<String>,
-    /// How strong a claim these words are (see [`RevealTier`]).
-    pub tier: RevealTier,
     /// When it goes out on its own.
     pub until: Instant,
 }
@@ -169,9 +134,8 @@ impl Reveal {
 /// What [`arm`] did, so the caller can say it out loud.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Armed {
-    /// `n` words lit at this strength. The caveat, if the tier has one, is the
-    /// caller's to relay.
-    Lit { words: usize, tier: RevealTier },
+    /// `n` words lit. [`CAVEAT`] is the caller's to relay.
+    Lit { words: usize },
     /// Nothing on screen is a word this story would accept. A real answer — a
     /// room of pure scenery gives it — and said plainly rather than silently.
     Nothing,
@@ -211,54 +175,37 @@ pub fn arm(state: &mut AppState, engine: &dyn Engine) -> Armed {
         .split_like_parser(&visible)
         .unwrap_or_else(|| crate::complete::split_prose(&visible));
 
-    let (tier, words) = match crate::vocab::objects_in_scope(engine) {
-        // The strong tier. An empty list is a real answer here — an empty room —
-        // and NOT a reason to fall back: falling back would mean an empty room
-        // lights the whole dictionary, which is the opposite of what was asked.
-        Some(scope) => {
-            let lit = tokens
-                .iter()
-                .filter(|t| scope.iter().any(|o| o.refers_to(t)))
-                .cloned()
-                .collect::<BTreeSet<String>>();
-            (RevealTier::Scope, lit)
-        }
-        // The weak tier: the dictionary, filtered to the words that NAME things
-        // — nouns and adjectives, minus the buzzword bit ($04), which is `the`,
-        // `a`, `please` and their kin.
-        //
-        // A word carrying both the noun and the VERB bit — `light` in most of
-        // Infocom's catalogue — does light, because the claim being made about it
-        // here is the noun one.
-        //
-        // **And it inherits whatever the dictionary thinks a word is**, which is
-        // the second half of why this tier is labelled and the strong one is not.
-        // Mini-Zork files `west` with the DESC bit, exactly as it files `white`
-        // and `boarded`, so no part-of-speech filter can tell the compass from a
-        // colour; `north` and `south` carry neither bit and do not light at all.
-        // There is no rescuing that from here — the flags are the story's answer
-        // — so the caveat says what the tier is rather than pretending otherwise.
-        None => {
-            let Some(v) = state.vocab.get(engine) else {
-                state.reveal = None;
-                return Armed::Nothing;
-            };
-            let lit = tokens
-                .iter()
-                .filter(|t| v.roles(t).is_some_and(|r| (r.noun || r.adjective) && !r.special))
-                .cloned()
-                .collect::<BTreeSet<String>>();
-            (RevealTier::Dictionary, lit)
-        }
+    // The dictionary, filtered to the words that NAME things — nouns and
+    // adjectives, minus the buzzword bit ($04), which is `the`, `a`, `please`
+    // and their kin.
+    //
+    // A word carrying both the noun and the VERB bit — `light` in most of
+    // Infocom's catalogue — does light, because the claim being made about it
+    // here is the noun one.
+    //
+    // **And it inherits whatever the dictionary thinks a word is.** Mini-Zork
+    // files `west` with the DESC bit, exactly as it files `white` and `boarded`,
+    // so no part-of-speech filter can tell the compass from a colour; `north`
+    // and `south` carry neither bit and do not light at all. There is no
+    // rescuing that from here — the flags are the story's answer — so
+    // [`CAVEAT`] says what the reveal is rather than pretending otherwise.
+    let Some(v) = state.vocab.get(engine) else {
+        state.reveal = None;
+        return Armed::Nothing;
     };
+    let words = tokens
+        .iter()
+        .filter(|t| v.roles(t).is_some_and(|r| (r.noun || r.adjective) && !r.special))
+        .cloned()
+        .collect::<BTreeSet<String>>();
 
     if words.is_empty() {
         state.reveal = None;
         return Armed::Nothing;
     }
     let n = words.len();
-    state.reveal = Some(Reveal { words, tier, until: Instant::now() + REVEAL_HOLD });
-    Armed::Lit { words: n, tier }
+    state.reveal = Some(Reveal { words, until: Instant::now() + REVEAL_HOLD });
+    Armed::Lit { words: n }
 }
 
 /// Put out whatever is lit. `true` when something actually went out (→ repaint).
@@ -442,11 +389,10 @@ mod tests {
         assert!(lit_spans("", &set(["door"])).is_empty());
     }
 
-    /// The strong tier claims nothing on screen; the weak one has to admit what
-    /// it cannot tell apart.
+    /// The reveal states its own claim rather than letting a player infer a
+    /// stronger one (SQ-1135): these are the story's WORDS, not its scope.
     #[test]
-    fn only_the_weak_tier_carries_a_caveat() {
-        assert_eq!(RevealTier::Scope.caveat(), None);
-        assert!(RevealTier::Dictionary.caveat().is_some_and(|s| s.contains("not necessarily")));
+    fn the_caveat_says_what_the_reveal_cannot_promise() {
+        assert!(CAVEAT.contains("not necessarily"), "{CAVEAT:?}");
     }
 }
