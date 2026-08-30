@@ -319,11 +319,74 @@ fn a_halfblock_shot_may_not_ask_for_placement_cells() {
 /// player's real lanthorn home.
 #[test]
 fn a_shot_may_not_pass_an_argument_the_tool_owns() {
-    for owned in ["--image-protocol", "--user-dir", "--sound"] {
+    for owned in ["--image-protocol", "--user-dir", "--sound", "--v6-pixel-lock"] {
         let bad = parse_one(&format!("{GOOD}args = [\"{owned}\", \"x\"]\n"));
         let e = bad.unwrap_err();
         assert!(e.contains(owned), "the error must name `{owned}`: {e}");
     }
+    // And the committed file keeps its hands off all four.
+    for s in &manifest().shots {
+        for owned in ["--image-protocol", "--user-dir", "--sound", "--v6-pixel-lock"] {
+            assert!(
+                !s.args.iter().any(|a| a == owned),
+                "`{}` passes `{owned}`, which the harness sets for the whole run",
+                s.id
+            );
+        }
+    }
+}
+
+/// SQ-1152: the whole gallery captures under one set of settings, written into each
+/// shot's throwaway user directory by `write_run_settings`.
+///
+/// The pixel lock and the patched-font icons are the two the user asked for by
+/// name, and both are properties of the SET rather than of any frame: a gallery
+/// where one frame is softer than its neighbours, or draws `◈` where the rest draw
+/// a Nerd Font chevron, is inconsistent in a way no per-shot field would make
+/// obvious. Pinned here because the alternative is remembering, and the whole point
+/// of moving them into the harness was to stop anyone having to.
+#[test]
+fn every_shot_captures_pixel_locked_and_with_the_patched_font_icons() {
+    use super::pty_stream::gallery::write_run_settings;
+
+    let dir = app::scratch_dir("gallery-run-settings");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let shot = &parse_one(GOOD).expect("the control shot parses").shots[0];
+    write_run_settings(&dir, shot, std::path::Path::new("stories/a.z6")).expect("settings written");
+
+    let cfg = std::fs::read_to_string(dir.join("config.toml")).expect("config.toml written");
+    assert!(
+        cfg.contains("v6_pixel_lock = true"),
+        "every shot captures pixel-locked, so a fractional magnification cannot enter one \
+         frame while its neighbours stay crisp — got:\n{cfg}"
+    );
+    assert!(cfg.contains("random_seed = "), "the seed still goes through the same seam:\n{cfg}");
+
+    // The icons are asserted through the app's own resolver rather than by matching
+    // the strings this harness happens to write: what matters is the SymbolConfig a
+    // run ends up with, and reading it back the way lanthorn does is the only thing
+    // that proves the file it wrote is the file lanthorn reads.
+    let style = app::style::personal_style_path(&dir);
+    assert!(style.is_file(), "a style.toml is written beside the config");
+    let (doc, warns) = app::style::load_style(None, &dir);
+    assert!(warns.is_empty(), "the written style must load cleanly: {warns:?}");
+    let sym = app::style::finalize_symbols(&doc.symbols);
+    assert_eq!(
+        sym.control_icons, "nerdfont",
+        "the frames are captured through a Nerd Font, so the plain Geometric Shapes \
+         fallback is the wrong half of the choice — `zork1-map` reported `NO GLYPH \
+         ANYWHERE FOR: ◈◌` before this was wired"
+    );
+    assert_eq!(sym.arrow_set, "nerdfont", "the map's arrows come from the same answer");
+    assert_eq!(sym.portal_icons, "nerdfont-stairs", "…and its portal icons");
+    // Exactly what a `yes` to the font check sets, because that is the call this
+    // makes. If the app's presets are renamed, this fails and the gallery follows
+    // rather than drifting.
+    assert_eq!(sym.arrow_set, app::render::font_check_dialog::NERD_ARROWS);
+    assert_eq!(sym.portal_icons, app::render::font_check_dialog::NERD_PORTALS);
+    assert_eq!(sym.control_icons, app::render::font_check_dialog::NERD_CONTROLS);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -365,6 +428,49 @@ fn an_unknown_field_is_refused() {
     );
 }
 
+/// `v6_render` is a MODE, not a pair of bools (SQ-1152).
+///
+/// It was `raster = true` until `extended` arrived. Two bools would have been able
+/// to spell "raster and extended at once", which is not a state the app has; one
+/// token cannot. And the tokens are the app's own — the manifest writes the value
+/// straight into the run's `config.toml`, so a spelling this file accepted and
+/// `v6_render_from_key` did not would be a shot that silently captured hybrid.
+#[test]
+fn the_render_mode_is_a_token_the_app_itself_parses() {
+    use app::config::V6RenderMode;
+    for (token, want) in [
+        ("hybrid", V6RenderMode::Hybrid),
+        ("raster", V6RenderMode::Raster),
+        ("extended", V6RenderMode::Extended),
+    ] {
+        let m = parse_one(&format!("{GOOD}v6_render = \"{token}\"\n"))
+            .unwrap_or_else(|e| panic!("`{token}` must be a valid mode: {e}"));
+        assert_eq!(m.shots[0].v6_render, Some(want));
+        assert_eq!(app::config::v6_render_key(want), token, "the manifest and the config key must be one spelling");
+    }
+    assert_eq!(parse_one(GOOD).expect("valid").shots[0].v6_render, None, "a shot that names no mode takes the shipped default");
+    // A typo must not read as hybrid. The app's own config deserializer is
+    // deliberately forgiving there (a bad `~/.lanthorn/config.toml` must not stop a
+    // game from launching); a manifest has no such excuse, and a shot that quietly
+    // captured the wrong mode is exactly the drift `expect` exists to catch.
+    assert!(
+        parse_one(&format!("{GOOD}v6_render = \"rastr\"\n")).is_err(),
+        "an unrecognised mode must be refused, not silently rendered as hybrid"
+    );
+    assert!(
+        parse_one(&format!("{GOOD}raster = true\n")).is_err(),
+        "the old `raster` bool must not still parse — a shot carrying it would capture hybrid"
+    );
+    // And the committed manifest exercises both modes that change anything.
+    let m = manifest();
+    for want in [V6RenderMode::Raster, V6RenderMode::Extended] {
+        assert!(
+            m.shots.iter().any(|s| s.v6_render == Some(want)),
+            "no committed shot captures in {want:?} — the gallery exists to show the modes differ"
+        );
+    }
+}
+
 // ── Library shots (SQ-1080) ───────────────────────────────────────────────────
 
 /// A library shot names a `[[libraries]]` entry the way every other shot names a
@@ -396,7 +502,14 @@ fn a_library_shot_may_not_describe_a_story() {
     let lib = "[[libraries]]\nid = \"lib\"\nfrom = \"stories\"\nmembers = [\"a.z6\"]\n";
     let base = format!("{}media = \"lib\"\nlibrary = true\n", GOOD.replace(r#"media = "stories/a.z6""#, ""));
     assert!(Manifest::parse(&format!("{lib}[[shots]]{base}")).is_ok(), "the control must parse");
-    for extra in ["raster = true\n", "show_map = true\n", "args = [\"--pictures\", \"Pic.data\"]\n"] {
+    for extra in [
+        "v6_render = \"raster\"\n",
+        // SQ-1152: the refusal is on the FIELD, not on one of its values — an
+        // `extended` library shot is exactly as meaningless as a `raster` one.
+        "v6_render = \"extended\"\n",
+        "show_map = true\n",
+        "args = [\"--pictures\", \"Pic.data\"]\n",
+    ] {
         let e = Manifest::parse(&format!("{lib}[[shots]]{base}{extra}"))
             .expect_err("a library shot has no story for `{extra}` to apply to");
         assert!(e.contains("library shot"), "the error must say why: {e}");

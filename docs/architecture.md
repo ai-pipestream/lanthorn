@@ -588,7 +588,8 @@ blank, and "a file appeared" accepts one.
 `pty_stream/gallery.rs` and `--example gallery` (SQ-0942) turn the harness into
 a picture-maker for the project page. One committed recipe,
 `crates/app/examples/gallery.toml`, names every frame — the medium, the key
-script, the pane size, the backend, the pinned seed and a caption — and one
+script, the pane size, the backend, the v6 render mode, the pinned seed and a
+caption — and one
 command regenerates the whole set into `target/gallery/`, with a proof-sheet
 `index.html` and a `gallery.json` recording what was actually captured.
 

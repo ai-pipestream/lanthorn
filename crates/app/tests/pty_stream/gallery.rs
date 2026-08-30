@@ -139,15 +139,23 @@ pub struct Shot {
     /// catches both.
     #[serde(default)]
     pub expect: Vec<String>,
-    /// Capture through the RASTER composite rather than hybrid (SQ-1009).
+    /// Pin the v6 render mode for this shot, or `None` to take the shipped
+    /// default (SQ-1009, SQ-1152).
     ///
     /// Hybrid draws text as terminal cells, so a shot meant to show a face the
     /// RELEASE shipped — Arthur's proportional Amiga typeface — cannot show it in
     /// hybrid at all: the glyphs on screen would be the terminal's. Written into
     /// the shot's own config beside the seed, which is the only channel the
     /// manifest has into a run.
+    ///
+    /// This was `raster = true` until `extended` needed a row of its own. A second
+    /// bool could have expressed "raster and extended at once", which is not a
+    /// state — the modes are one choice, so they are one field, spelled with the
+    /// same tokens `~/.lanthorn/config.toml` uses because it is the same key.
+    /// `None` rather than `Some(Hybrid)` is what keeps the library refusal below
+    /// able to tell an author who asked for a mode from one who said nothing.
     #[serde(default)]
-    pub raster: bool,
+    pub v6_render: Option<app::config::V6RenderMode>,
     /// The least number of cells a placement must actually cover.
     ///
     /// The guard for a frame with no text in it. Scopa and FMV Poker draw the
@@ -381,15 +389,15 @@ impl Shot {
             ));
         }
         // A LIBRARY SHOT HAS NO STORY, so every field that describes one is a
-        // field that would be quietly ignored (SQ-1080). `raster` is a v6 render
-        // mode and the picker is not a v6 screen; `--pictures` names a rendition
-        // of artwork inside a story nobody has opened; `show_map` writes a
-        // per-game sidecar keyed on the story path, and here that path is a
+        // field that would be quietly ignored (SQ-1080). `v6_render` names a v6
+        // render mode and the picker is not a v6 screen; `--pictures` names a
+        // rendition of artwork inside a story nobody has opened; `show_map` writes
+        // a per-game sidecar keyed on the story path, and here that path is a
         // directory. Refusing them is the difference between a manifest that
         // means what it says and one whose author believes a line that does
         // nothing.
         if self.library {
-            for (field, set) in [("raster", self.raster), ("show_map", self.show_map)] {
+            for (field, set) in [("v6_render", self.v6_render.is_some()), ("show_map", self.show_map)] {
                 if set {
                     return Err(format!(
                         "gallery manifest: `{who}` is a library shot with `{field}` — no story has \
@@ -412,11 +420,16 @@ impl Shot {
         }
         // The tool owns these, and a manifest that sets them either fights the
         // backend choice or writes the gallery into the player's real home.
-        for owned in ["--image-protocol", "--user-dir", "--sound"] {
+        // `--v6-pixel-lock` joins the list because the gallery now pins it ON for
+        // every shot in the run's config (see `run_shot`). A shot passing it again
+        // is at best a second copy of the truth and at worst `off`, which would be
+        // one frame quietly softer than the rest.
+        for owned in ["--image-protocol", "--user-dir", "--sound", "--v6-pixel-lock"] {
             if self.args.iter().any(|a| a == owned) {
                 return Err(format!(
                     "gallery manifest: `{who}` passes `{owned}` — the gallery tool owns that argument \
-                     (set `backend` instead of `--image-protocol`)"
+                     (set `backend` instead of `--image-protocol`; the pixel lock is on for every \
+                     shot already)"
                 ));
             }
         }
@@ -839,6 +852,97 @@ impl Taken {
     }
 }
 
+/// Write the settings this run captures under, into the shot's own throwaway user
+/// directory: the pinned seed, the pixel lock, the render mode, the patched-font
+/// icon answer, and — for a library shot — the default story directory.
+///
+/// **This is where a setting that should hold for the WHOLE gallery goes.** A shot
+/// can still ask for something of its own through `args`, but anything the set
+/// should agree on belongs here, so that adding a row to `gallery.toml` inherits it
+/// instead of having to remember it. The seam already existed for `random_seed` and
+/// `default_story_dir`; SQ-1152 put the pixel lock and the font-check answer
+/// through it too.
+///
+/// Split out of `capture` so it can be tested without a pty: everything below is
+/// text on disk, and a case can read it back.
+pub fn write_run_settings(user_dir: &Path, shot: &Shot, media: &Path) -> Result<(), String> {
+    // The seed goes in the global config rather than the per-game sidecar: the
+    // sidecar is a bare-lines file the driver already owns for `show_map`, and
+    // two writers of one file is how a shot silently loses its seed.
+    // `v6_render_key` rather than a literal, so the manifest's token and the one
+    // the app parses back cannot drift apart (the same reason SQ-1079 gave it).
+    let render = shot.v6_render.map_or(String::new(), |m| {
+        format!("v6_render = \"{}\"\n", app::config::v6_render_key(m))
+    });
+    // A LIBRARY LAUNCH ASKS A QUESTION BEFORE THE TERMINAL EXISTS (SQ-1080).
+    // `resolve_launch` offers to remember a directory passed on the command line
+    // as `default_story_dir`, and `prompt_yes_no` reads a LINE from stdin in
+    // cooked mode — before the colour query, before raw mode, before anything is
+    // drawn. Nothing a key spec can send answers it usefully: the driver's keys
+    // start after the app has settled, and a `cr` typed into that prompt would
+    // then be a `cr` the picker never receives.
+    //
+    // So it is not answered; it is not ASKED. The prompt fires only when the
+    // config has no `default_story_dir`, and this run's config is ours to write
+    // — the same trick `pty_query_replies::library` uses, and for the same
+    // reason. A fresh user dir per shot means the answer cannot leak between
+    // shots or into anyone's real `~/.lanthorn`.
+    let default_dir = if shot.library {
+        // `to_string_lossy` and TOML's literal string: the path is this
+        // repository's own and carries no quote to escape.
+        format!("default_story_dir = '{}'\n", media.display())
+    } else {
+        String::new()
+    };
+    std::fs::write(
+        user_dir.join("config.toml"),
+        format!("random_seed = {}\nv6_pixel_lock = true\n{render}{default_dir}", shot.seed),
+    )
+    .map_err(|e| format!("writing the pinned seed: {e}"))?;
+    // EVERY v6 SHOT IS PIXEL-LOCKED, and it is set HERE rather than per shot so
+    // that the next one added gets it without anyone having to remember.
+    //
+    // It used to be `--v6-pixel-lock on` in two shots' `args`, which made it look
+    // like a property of those two frames. It is a property of the gallery: a
+    // fractional magnification puts an art pixel on a fractional number of device
+    // pixels, and every edge in the frame is then interpolated. `--v6-pixel-lock`
+    // is on the tool-owned list in `validate` for the same reason
+    // `--image-protocol` is — a shot that turned it off would be fighting this.
+    //
+    // It costs the existing frames nothing, and that is checkable rather than
+    // hopeful: `every_v6_shot_magnifies_by_a_whole_number` already fails any shot
+    // whose FREE scale is fractional, and a whole number is always a valid rung, so
+    // on a correctly-sized shot the lock has nothing to snap to. It is a floor under
+    // the sizes, not a change to them. On the modes and backends where it does not
+    // apply it is inert by construction — `v6_pixel_lock_applies` gates it off for
+    // half-blocks (SQ-0978), a non-v6 story has no rung ladder at all, and
+    // `extended` already pins a strictly finer whole-NATIVE-pixel magnification of
+    // its own (SQ-1032), so the key is harmless where it is not the thing deciding.
+    //
+    // AND EVERY SHOT DRAWS THE PATCHED-FONT ICONS. The frames are captured through a
+    // Nerd Font (see `FONT_CANDIDATES`), so the plain Geometric Shapes fallback is
+    // the wrong half of a choice the reader's terminal has already made for them —
+    // `zork1-map` reported `NO GLYPH ANYWHERE FOR: ◈◌` for exactly that reason.
+    //
+    // This calls the APP'S OWN writer with the answer a "yes" to the font check
+    // gives, rather than spelling the preset names here: `write_font_check_answer`
+    // is what `/run-font-check` writes, so the gallery cannot drift from it, and a
+    // later improvement to the `nerdfont` presets reaches these frames for free.
+    // That is also why the preset NAMES are written and not forty expanded
+    // codepoints — the same argument that function's own doc makes.
+    //
+    // What it does NOT set, so nobody reads the absence as an oversight: the six
+    // `badge_*` glyphs. They are `[elements]` keys with no `nerdfont` preset behind
+    // them — the font check has never touched them — so putting Nerd codepoints in
+    // the picker's badges is a decision about the APP's presets, not about this
+    // harness, and freezing six literals here is precisely what the paragraph above
+    // says not to do.
+    let style_path = app::style::personal_style_path(user_dir);
+    app::style::write_font_check_answer(&style_path, true)
+        .map_err(|e| format!("writing the font-check answer: {e}"))?;
+    Ok(())
+}
+
 /// Boot lanthorn for one shot and hand back the capture, having first refused
 /// every way the capture could be of the wrong thing.
 pub fn capture(
@@ -869,35 +973,7 @@ pub fn capture(
     let user_dir = work.join(&shot.id);
     let _ = std::fs::remove_dir_all(&user_dir);
     std::fs::create_dir_all(&user_dir).map_err(|e| format!("`{}`: {e}", shot.id))?;
-    // The seed goes in the global config rather than the per-game sidecar: the
-    // sidecar is a bare-lines file the driver already owns for `show_map`, and
-    // two writers of one file is how a shot silently loses its seed.
-    let render = if shot.raster { "v6_render = \"raster\"\n" } else { "" };
-    // A LIBRARY LAUNCH ASKS A QUESTION BEFORE THE TERMINAL EXISTS (SQ-1080).
-    // `resolve_launch` offers to remember a directory passed on the command line
-    // as `default_story_dir`, and `prompt_yes_no` reads a LINE from stdin in
-    // cooked mode — before the colour query, before raw mode, before anything is
-    // drawn. Nothing a key spec can send answers it usefully: the driver's keys
-    // start after the app has settled, and a `cr` typed into that prompt would
-    // then be a `cr` the picker never receives.
-    //
-    // So it is not answered; it is not ASKED. The prompt fires only when the
-    // config has no `default_story_dir`, and this run's config is ours to write
-    // — the same trick `pty_query_replies::library` uses, and for the same
-    // reason. A fresh user dir per shot means the answer cannot leak between
-    // shots or into anyone's real `~/.lanthorn`.
-    let default_dir = if shot.library {
-        // `to_string_lossy` and TOML's literal string: the path is this
-        // repository's own and carries no quote to escape.
-        format!("default_story_dir = '{}'\n", media.display())
-    } else {
-        String::new()
-    };
-    std::fs::write(
-        user_dir.join("config.toml"),
-        format!("random_seed = {}\n{render}{default_dir}", shot.seed),
-    )
-    .map_err(|e| format!("`{}`: writing the pinned seed: {e}", shot.id))?;
+    write_run_settings(&user_dir, shot, &media).map_err(|e| format!("`{}`: {e}", shot.id))?;
 
     let mut spec = Spec::new(bin, &media, &user_dir);
     // THE PICKER PRINTS THE PATH IT WAS GIVEN, so for a library shot the path is

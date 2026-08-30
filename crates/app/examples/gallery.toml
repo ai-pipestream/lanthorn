@@ -22,7 +22,10 @@
 # a capture at any other cell size draws a geometry lanthorn was not using. Both
 # cells are exactly 1:2, which is what makes a half-block sample square.
 #
-# `args` is passed to lanthorn as typed, minus the three arguments the tool owns.
+# `args` is passed to lanthorn as typed, minus the arguments the tool owns —
+# `--image-protocol`, `--user-dir`, `--sound` and `--v6-pixel-lock`, each of which
+# the harness sets for every shot so that no single frame can disagree with the
+# rest of the set.
 # `--pictures NAME` is the interesting one and the reason Zork Zero has six rows
 # below: it names WHICH rendition of the artwork to draw, and the archive's own
 # flavour then picks the machine. The harness reads that name back out of `args`
@@ -439,7 +442,7 @@ expect = ["Forest Path", "Up a Tree", "West of House"]
 
 # ── The release's own typeface ───────────────────────────────────────────────
 #
-# `raster` is the only shot field that changes a render MODE: hybrid draws text as
+# `v6_render` is the only shot field that changes a render MODE: hybrid draws text as
 # terminal cells, so a frame meant to show a FACE would show the reader's own font
 # instead.
 #
@@ -448,16 +451,18 @@ expect = ["Forest Path", "Up a Tree", "West of House"]
 # number of device pixels, and a resampled glyph edge meeting a font glyph on a
 # shared boundary is the exact seam these frames exist to show off.
 #
-# It takes both fields, and it is worth saying why, because `--v6-pixel-lock on`
-# (SQ-1079) looks sufficient and is not. The lock snaps to the coarsest RUNG at or
-# below what the pane affords, and a rung is not always an integer: the ladder
-# step is `1 / gcd(g_art, g_cell)`, which is a HALF on the usual 8x16 cell, so a
-# generous pane locks to 2.5 as happily as to 2.0. The lock guarantees a rung; the
-# `size` chooses which one. So `size` is picked to put the free scale inside
-# `[k, k + step)` for the whole `k` whose `native * k` sits closest to 1280x800 —
-# 2x for a 640x400 press, and whatever that arithmetic gives for a press of
-# another size. The pane is therefore approximate on purpose and the result is
-# not.
+# THE LOCK IS ON FOR EVERY SHOT AND `size` STILL HAS TO BE RIGHT. The pixel lock
+# (SQ-1079) is set by the harness, in the run's config, for the whole gallery —
+# no shot passes `--v6-pixel-lock`, and `validate` refuses one that tries. It is
+# not sufficient on its own, which is the part worth saying: the lock snaps to the
+# coarsest RUNG at or below what the pane affords, and a rung is not always an
+# integer — the ladder step is `1 / gcd(g_art, g_cell)`, which is a HALF on the
+# usual 8x16 cell, so a generous pane locks to 2.5 as happily as to 2.0. The lock
+# guarantees a rung; the `size` chooses WHICH one. So `size` is still picked to put
+# the free scale inside `[k, k + step)` for the whole `k` whose `native * k` sits
+# closest to 1280x800 — 2x for a 640x400 press, and whatever that arithmetic gives
+# for a press of another size. The pane is therefore approximate on purpose and the
+# result is not.
 #
 # `magnification` in `gallery.json` is the check, and it is a check rather than a
 # comment: it records what was actually captured, so a size that drifts off its
@@ -479,8 +484,7 @@ column count says."""
 keys = "wait:4000,text:n,wait:2500,text:n,wait:3000,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:2000,text:look,cr,wait:7000"
 size = "82x28"
 backend = "kitty"
-raster = true
-args = ["--v6-pixel-lock", "on"]
+v6_render = "raster"
 # In RASTER the whole screen is one image, so there are no cells for a text guard
 # to search — the same reason `scopa` and `fmvpoker` lean on `expect_art_cells`.
 # What the cells still carry is the pane title, which is what catches a medium
@@ -493,7 +497,7 @@ expect_art_cells = 900
 #
 # The shot above needs a release floppy. This one needs the opposite: a bare
 # story file and a machine named by hand, so that NOTHING answers the face
-# cascade and the embedded fallback is what draws. `raster` for the same reason
+# cascade and the embedded fallback is what draws. `v6_render` for the same reason
 # as above — in hybrid the glyphs on screen would be the reader's own font, and
 # the face is the entire subject here.
 
@@ -520,13 +524,80 @@ keys = "wait:2500,cr,wait:1200,cr,wait:800,cr,wait:800,text:look,cr,wait:2500"
 # pager without moving off the rung.
 size = "82x34"
 backend = "kitty"
-raster = true
-args = ["--interpreter", "3", "--v6-pixel-lock", "on"]
+v6_render = "raster"
+args = ["--interpreter", "3"]
 # Raster puts the whole screen in one image, so the pane title is the only text
 # left for a guard to find; `expect_art_cells` is what proves the composite
 # landed, exactly as `arthur-amiga-proportional` above does it.
 expect = ["advent"]
 expect_art_cells = 400
+
+# ── The frame that grows instead of letterboxing ─────────────────────────────
+#
+# `zork0-mac-tall` above is the HYBRID answer to a pane taller than the game's
+# screen: the border is composed to the pane out of the artwork's own repeat unit,
+# so a frame is still a frame at any height. This is the RASTER answer, and it is
+# a different claim about the same surplus — `v6_render = "extended"` (SQ-1032)
+# grows the canvas DOWNWARD, and the rows it adds are text rows of the game's own
+# prose in the game's own bitmap face. The two read as complements: hybrid extends
+# the BORDER, extended grows the FRAME.
+#
+# WHY SHOGUN. The gallery had no Shogun at any press and four Zork Zeros, and this
+# is the mode where the choice of game is about its TYPE rather than its artwork —
+# the extension is prose, so the frame is worth having on a game with a lot of it.
+# The Amiga floppy carries the face as well as the plates: release 295 / 890321,
+# and `machine-screenshots/amiga-shogun-game.png` is a capture of that same press
+# on a real machine to read this against.
+#
+# THE PIXEL LOCK IS ON HERE LIKE EVERYWHERE ELSE, and this is the one row where it
+# has nothing left to do: `RasterFrame::extended` already floors to a WHOLE number
+# of device pixels per NATIVE pixel, which is strictly finer than the lock's
+# whole-device-per-ART rung (a HALF on the usual 8x16 cell). The extension's whole
+# subject is text, and raster text is drawn on the machine's cell in native pixels,
+# so the mode cannot afford a half rung and does not take one. The lock is
+# consistency across the gallery rather than a per-shot judgement — which is
+# exactly why it is set once in the harness and not argued about per frame.
+#
+# THE SIZE STILL PINS THE RUNG, and 82 columns is doing it: `(82-2)*16 / 640` is
+# exactly 2, and the pane's height only has to be at least that, so the width
+# chooses `s = 2` and every row past the 28th is surplus the mode spends. At 44
+# rows the pane is 1312 device pixels tall, which is 656 native rows at 2x — the
+# game's own 400 plus sixteen whole 16-pixel text rows beneath it.
+
+[[shots]]
+id = "shogun-amiga-extended"
+title = "James Clavell's Shogun"
+press = "Amiga release floppy (.adf), in a tall terminal"
+media = "stories/James Clavell's Shogun.adf"
+caption = """
+Shogun is a novel with a parser in it, and this is the mode that gives it the \
+room: a terminal taller than the shape the game was drawn for, with the surplus \
+spent on the game's own screen instead of on a letterbox. The status band, the \
+Erasmus in her squall and the column of text beside her are laid out exactly \
+where the game put them — it is told nothing about any of this — and the sixteen \
+rows below its own screen are more of the same prose, set in the typeface off the \
+Amiga's own disk at a whole 2x. Nothing in the frame is resampled, and none of \
+the type in it is the reader's terminal font."""
+# The title splash takes any key, the boot menu takes Enter to select START, and
+# the intro pages out after that. `look` at the end is what puts a described room
+# under the artwork rather than the tail of the opening text. NOT more blank
+# `cr`s to be safe: they reach the parser, and three `[I beg your pardon?]`
+# replies is what the first capture of this shot actually put in the frame.
+keys = "wait:4000,cr,wait:2500,cr,wait:3000,text:look,cr,wait:4000"
+size = "82x44"
+backend = "kitty"
+v6_render = "extended"
+# In RASTER the whole screen is one image, so there are no text cells for a guard
+# to search — the same reason `arthur-amiga-proportional` and
+# `macintosh-embedded-face` above lean on the pane title plus an art floor.
+expect = ["James Clavell's Shogun.adf"]
+# THE GUARD IS THE EXTENSION ITSELF, not the artwork — set where a frame that
+# declined to grow cannot reach it. Measured: 3280 cells, which is 80x41, the whole
+# of the pane's content. A plain `raster` frame at this size letterboxes 640x400 at
+# the same 2x into 1280x800 and covers 80x25 = 2000, so anything at or above 2000
+# would pass on a frame that never extended at all. 2400 is between the two with
+# room on both sides.
+expect_art_cells = 2400
 
 # ── lanthorn itself ──────────────────────────────────────────────────────────
 #
@@ -560,7 +631,7 @@ expect_art_cells = 400
 #     is not answered — it is not asked.
 #   * no per-game sidecar is written, because the path is not a game.
 #
-# `raster`, `show_map` and `--pictures` are all REFUSED on a library shot: each
+# `v6_render`, `show_map` and `--pictures` are all REFUSED on a library shot: each
 # describes a story that has not been opened, and a field silently ignored is
 # worse than one rejected.
 #
