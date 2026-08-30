@@ -218,6 +218,149 @@ fn a_printed_nameless_object_is_named_by_the_words_it_answers_to() {
     assert_eq!(app::vocab::typeable_name(&nothing, None), None);
 }
 
+// ── Adjectives, where the story keeps a list of them — SQ-1120 ──────────────
+
+/// An Infocom V4+ story keeps its adjectives in a property of their own, and
+/// `zvm` reads it: they reach completion as words, and the printed name is no
+/// longer the only route to them.
+///
+/// Verified against the parser on `stories/zork1-invclues-r52-s871125.z5` (the
+/// v5 Solid Gold release, in the Living Room after
+/// `n / e / open window / enter window / w`): `take brass lantern → Taken.`
+#[test]
+fn adjectives_the_story_states_are_offered_beside_the_nouns() {
+    // Zork I r52's lantern, as `zvm::objects::ParseNames` reads it.
+    let lantern = app::engine::ObjectWords::new(
+        153,
+        "brass lantern".to_string(),
+        vec!["lamp".to_string(), "lantern".to_string(), "light".to_string()],
+        Some(46),
+        Some(9),
+    )
+    .with_adjectives(vec!["brass".to_string()], 44);
+    assert_eq!(
+        app::vocab::typeable_words(&lantern, None),
+        ["brass", "lantern", "lamp", "light"]
+    );
+    assert_eq!(app::vocab::typeable_name(&lantern, None).as_deref(), Some("brass lantern"));
+
+    // Beyond Zork r57 object 133, as the reader answers it: printed `key` and
+    // nothing more, with four adjectives the screen never shows. The printed
+    // name cannot supply those, so the property is the only route to them.
+    let key = app::engine::ObjectWords::new(
+        133,
+        "key".to_string(),
+        vec!["key".to_string(), "keys".to_string()],
+        Some(49),
+        Some(9),
+    )
+    .with_adjectives(
+        ["mauve", "second", "gray", "grey"].map(String::from).to_vec(),
+        48,
+    );
+    assert_eq!(
+        app::vocab::typeable_words(&key, None),
+        ["key", "keys", "mauve", "second", "gray", "grey"]
+    );
+
+    // And a story that cannot be asked offers exactly what it did before: the
+    // nouns, and nothing invented.
+    let v3 = app::engine::ObjectWords::new(
+        164,
+        "brass lantern".to_string(),
+        vec!["lamp".to_string(), "lanter".to_string(), "light".to_string()],
+        Some(18),
+        Some(6),
+    );
+    assert!(!v3.adjectives.is_available());
+    // `lanter` never appears: the printed name spells it out and the two cut to
+    // the same six-character key. `brass` does not appear either, which is the
+    // gap — with no adjective list and no vocabulary to consult, nothing in this
+    // story says it is a word.
+    assert_eq!(app::vocab::typeable_words(&v3, None), ["lantern", "lamp", "light"]);
+}
+
+/// **The census behind the fallback** (SQ-1120's first question).
+///
+/// SQ-1042 recovers Infocom adjectives through the dictionary's DESC bit ($20)
+/// because the property was unreadable, and a story that never sets that bit
+/// would lose its adjectives silently. Measured over every Z-machine story in
+/// `stories/`, the answer is in two halves:
+///
+/// * **Every V1–V5 Infocom story sets it**, 34 of 34, generously — 101 words in
+///   Zork III up to 658 in A Mind Forever Voyaging, a fifth to a third of each
+///   dictionary. The fallback is safe exactly where it is now the only source.
+/// * **The three Infocom V6 games effectively do not** — Zork Zero 11 of 1624,
+///   Shogun 17 of 1389, Arthur 9 of 1059 — and `zvm::grammar` does not even
+///   decode `adjective` for their flag layout, which moved. So on those three
+///   the fallback yields NOTHING, and they are precisely the games the
+///   adjective property now answers for.
+///
+/// Inform stories are not in either half: they have no DESC bit and keep
+/// adjectives in the `name` array beside the nouns, where `refers_to` already
+/// finds them.
+#[test]
+fn every_pre_v6_infocom_story_sets_the_desc_bit_the_fallback_depends_on() {
+    let pre_v6 = [
+        "zork1-r88-s840726.z3",
+        "zork2-r48-s840904.z3",
+        "zork3-r17-s840727.z3",
+        "hitchhiker-r59-s851108.z3",
+        "planetfall-r37-s851003.z3",
+        "trinity-r12-s860926.z4",
+        "amfv-r77-s850814.z4",
+        "beyondzork-r57-s871221.z5",
+        "sherlock-r26-s880127.z5",
+    ];
+    let v6 = ["zork0-r393-s890714.z6", "shogun-r322-s890706.z6", "arthur-r74-s890714.z6"];
+
+    let marked = |bytes: Vec<u8>| -> (usize, usize) {
+        let mem = zvm::memory::Memory::new(bytes).expect("a story that boots");
+        let words = zvm::grammar::dictionary_words(&mem);
+        let raw = words.iter().filter(|w| w.roles.raw & 0x20 != 0).count();
+        (words.len(), raw)
+    };
+
+    // Raw bytes, not a booted session: three of these are graphical V6 and this
+    // suite's `boot` is a Version 3 harness.
+    let bytes_of = |name: &str| -> Option<Vec<u8>> {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(name);
+        match std::fs::read(&path) {
+            Ok(b) => Some(b),
+            Err(_) => {
+                eprintln!("SKIP: {} absent", path.display());
+                None
+            }
+        }
+    };
+
+    let mut checked = 0;
+    for name in pre_v6 {
+        let Some(bytes) = bytes_of(name) else { continue };
+        let (total, desc) = marked(bytes);
+        assert!(
+            desc * 8 >= total,
+            "{name}: only {desc} of {total} words carry the DESC bit — the SQ-1042 \
+             fallback is the only adjective source below V6 and needs it"
+        );
+        checked += 1;
+    }
+    for name in v6 {
+        let Some(bytes) = bytes_of(name) else { continue };
+        let (total, desc) = marked(bytes);
+        assert!(
+            desc * 20 < total,
+            "{name}: {desc} of {total} words carry $20 — if V6 really marked its \
+             adjectives, the fallback would work there and this claim is wrong"
+        );
+        checked += 1;
+    }
+    if checked == 0 {
+        eprintln!("SKIP: no Infocom media present");
+    }
+}
+
 // ── Completion ──────────────────────────────────────────────────────────────
 
 /// The quest's own subject: complete from the objects actually present.

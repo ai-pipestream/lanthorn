@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The shared answer type, re-exported so `zvm::objects::ObjectWords` names it
 /// — as `zvm::grammar` re-exports the rest of `grammar-model`.
-pub use grammar_model::ObjectWords;
+pub use grammar_model::{Adjectives, ObjectWords};
 
 // ── Layout helpers ────────────────────────────────────────────────────────────
 
@@ -454,6 +454,38 @@ pub fn get_next_prop(mem: &Memory, obj: u16, prop: u8) -> u8 {
     }
 }
 
+/// Every property number object `obj` provides, in the descending order ZMSD
+/// §12.4.1 mandates — and it **stops** where the bytes stop descending instead
+/// of walking forever.
+///
+/// This is the only safe way for a READER to enumerate an object's properties.
+/// [`get_next_prop`] is the opcode (§12.4.3): it scans for the number it is
+/// given and answers with the one after it, which on a table holding the same
+/// number twice is that number again. `while prop != 0 { prop =
+/// get_next_prop(…) }` then never terminates, and a corrupt object is not
+/// hypothetical — **Sherlock r26/880127 object 308** lists property 43 twice
+/// (`51, 50, 47, 46, 45, 44, 43, 43, 43, …`), which hung
+/// [`ParseNames::detect`] on a retail game for as long as it was asked
+/// (SQ-1143).
+///
+/// `get_next_prop` itself is deliberately left alone: the story's own parser
+/// executes it and depends on its exact semantics, corrupt table or not. The
+/// guard belongs on this side, where a reader is only ever asking a question.
+pub fn property_numbers(mem: &Memory, obj: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut prop = get_next_prop(mem, obj, 0);
+    // At most 63 property numbers exist in any version (§12.2), so a walk that
+    // reaches 64 entries has already stopped describing a property table.
+    while prop != 0 && out.len() < 64 {
+        if out.last().is_some_and(|&last| prop >= last) {
+            break;
+        }
+        out.push(prop);
+        prop = get_next_prop(mem, obj, prop);
+    }
+    out
+}
+
 // ── Mapper snapshot ───────────────────────────────────────────────────────────
 
 /// Stable per-object identity for the automapper.
@@ -512,34 +544,52 @@ pub fn object_snapshot(mem: &Memory, obj: u16) -> ObjectSnapshot {
 // caller who guessed 1 on Zork I would get plausible garbage out of whatever
 // property 1 happens to hold.
 //
-// ── What is deliberately NOT read: Infocom adjectives ────────────────────────
+// ── Infocom adjectives: read from V4, and refused before it ──────────────────
 //
-// Every Infocom object keeps its ADJECTIVES in a second property, and they are
-// real parse words: Zork Zero's "Dirigible Hangar" answers `hangar` under
-// property 51 and `dirigible`/`large` under property 46; A Mind Forever
-// Voyaging's park answers `park garden gardens common commons` under 52 and
-// `kennedy riverside halley church street small downtown old popular public`
-// under 51. From V4 onwards those are dictionary addresses like the nouns; in
-// V1–3 they are one-byte *adjective numbers*, resolved against the dictionary,
-// where an adjective's entry carries the `DESC` flag ($20) with `DATA_FIRST` =
-// `ADJ_FIRST` ($02) and holds its number in the first data byte — confirmed on
-// Zork I, whose `brass` reads `flags=$22 d0=$dd` and whose brass lantern's
-// property 16 is the single byte `$dd`.
+// Every Infocom object keeps its ADJECTIVES in a SECOND property, and they are
+// real parse words a player types: Zork Zero's "Dirigible Hangar" answers
+// `hangar` under property 51 and `dirigible`/`large` under property 46; A Mind
+// Forever Voyaging's park answers `park garden gardens common commons` under 52
+// and `kennedy riverside halley church street small downtown old popular
+// public` under 51. Inform has no such split — its adjectives sit in the same
+// `name` array as its nouns — so this is an Infocom question only.
 //
-// They are not merged in, for two reasons that both point the same way. The
-// V1–3 property NUMBER cannot be detected with any margin worth trusting: any
-// short property of small byte values matches "every byte is a known adjective
-// number", and the object-count and adjective-coverage rankings pick DIFFERENT
-// properties (Hitchhiker p29 has 131 objects covering 125 of 220 adjectives,
-// p30 has 117 covering 193; Moonmist's p17, p18 and p19 are within a whisker of
-// one another). And merging the V4+ ones alone would make an object's word list
-// mean something different per story version while `property` below could name
-// only one of the two properties it came from.
+// **From V4 the second property holds dictionary addresses**, exactly like the
+// nouns, and `infocom_properties` reads it: it is the runner-up in the same
+// ranking that picks the nouns, and the CONTAINMENT test that separates them is
+// what identifies it (an object cannot have adjectives without having nouns).
+// Measured over `stories/`, all fifteen V4–V6 titles agree — Zork Zero p51/p46,
+// Shogun p45/p32, Arthur p51/p45, Trinity p51/p49, A Mind Forever Voyaging
+// p52/p51, Beyond Zork p49/p48, Sherlock p44/p43, Bureaucracy p55/p47, Nord and
+// Bert p63/p50, Border Zone p51/p38, Wishbringer (r23) p50/p40, and the four
+// v5 InvisiClues re-releases — with the runner-up covering 103 to 344 objects.
 //
-// So `brass` is absent from an Infocom object's words, this comment is the
-// reason, and the V4+ half of it is a straightforward follow-up for anyone who
-// wants it: the adjective property is the runner-up that `infocom_property`
-// already identifies and discards.
+// **In V1–3 the second property holds one-byte adjective NUMBERS**, not
+// addresses, resolved against the dictionary, where an adjective's entry
+// carries the `DESC` flag ($20) with `DATA_FIRST` = `ADJ_FIRST` ($02) and holds
+// its number in the first data byte — confirmed on Zork I, whose `brass` reads
+// `flags=$22 d0=$dd` and whose brass lantern's property 16 is the single byte
+// `$dd`. That property is NOT findable here and is not guessed at:
+//
+//   * A byte array is not a word array, so `candidate_properties` never sees
+//     it at all — the runner-up on a V1–3 story is something else entirely, and
+//     measurably noise. Zork I's is one object, Hitchhiker's one, Infidel's one,
+//     Starcross's one, Suspended's one, Spellbreaker's two, Moonmist's four,
+//     Seastalker's four; the leaders they sit beneath cover 136 to 246.
+//     Reading those as adjectives would have answered `win` for Zork I's
+//     kitchen window and `plate` for Seastalker's search light.
+//   * Detecting the byte property directly has no margin worth trusting either:
+//     any short property of small byte values matches "every byte is a known
+//     adjective number", and the object-count and adjective-coverage rankings
+//     pick DIFFERENT properties (Hitchhiker p29 has 131 objects covering 125 of
+//     220 adjectives, p30 has 117 covering 193; Moonmist's p17, p18 and p19 are
+//     within a whisker of one another).
+//
+// So the version gate in `infocom_properties` is load-bearing, and what a V1–3
+// story reports is `Adjectives::Unavailable` — "this story cannot say" — and
+// never an empty list, which would read as "this object has none". That
+// distinction is the whole reason the V4+ half could ship without making a word
+// list mean two things (SQ-1120).
 
 /// Inform's `name` property, on every Inform story and both back-ends.
 pub const INFORM_NAME_PROPERTY: u8 = 1;
@@ -590,6 +640,7 @@ pub fn object_count(mem: &Memory) -> u16 {
 #[derive(Debug, Clone)]
 pub struct ParseNames {
     property: u8,
+    adjective_property: Option<u8>,
     key_chars: usize,
     words: BTreeMap<u32, String>,
 }
@@ -618,30 +669,53 @@ impl ParseNames {
             return None;
         }
         let candidates = candidate_properties(mem, &index.by_address);
-        let property = if grammar::detect_format(mem).is_inform() {
+        let (property, adjective_property) = if grammar::detect_format(mem).is_inform() {
             // Known, not chosen — but still checked, so a story that is not
             // laid out the way its header claims refuses rather than reading
-            // whatever property 1 happens to hold.
+            // whatever property 1 happens to hold. Inform keeps adjectives in
+            // that same array, so there is no second property to find.
             let agreeing = candidates.get(&INFORM_NAME_PROPERTY).map_or(0, BTreeSet::len);
-            (agreeing >= MIN_AGREEING_OBJECTS).then_some(INFORM_NAME_PROPERTY)?
+            ((agreeing >= MIN_AGREEING_OBJECTS).then_some(INFORM_NAME_PROPERTY)?, None)
         } else {
-            infocom_property(&candidates)?
+            infocom_properties(&candidates, mem.version())?
         };
-        Some(ParseNames { property, key_chars: index.key_chars, words: index.by_address })
+        Some(ParseNames {
+            property,
+            adjective_property,
+            key_chars: index.key_chars,
+            words: index.by_address,
+        })
     }
 
-    /// The same reader with the property number supplied instead of worked out.
+    /// The same reader with the property number supplied instead of worked out,
+    /// and nothing said about adjectives.
     ///
     /// For a story whose convention is known from outside — a disassembly, a
     /// reference dump — or to falsify [`detect`](ParseNames::detect) by asking
     /// for the wrong property and watching every object refuse. The documented
     /// default is [`INFORM_NAME_PROPERTY`]; nothing here assumes it.
     pub fn with_property(mem: &Memory, property: u8) -> Option<ParseNames> {
+        Self::with_properties(mem, property, None)
+    }
+
+    /// The same, naming the adjective property too — the falsification handle
+    /// for the adjective half, and the way to read a story whose second
+    /// property is known from a disassembly.
+    pub fn with_properties(
+        mem: &Memory,
+        property: u8,
+        adjective_property: Option<u8>,
+    ) -> Option<ParseNames> {
         let index = Self::dictionary_index(mem);
         if index.by_address.is_empty() {
             return None;
         }
-        Some(ParseNames { property, key_chars: index.key_chars, words: index.by_address })
+        Some(ParseNames {
+            property,
+            adjective_property,
+            key_chars: index.key_chars,
+            words: index.by_address,
+        })
     }
 
     /// Which property the words are read from.
@@ -649,15 +723,59 @@ impl ParseNames {
         self.property
     }
 
-    /// What object `obj` is, and what it can be called.
+    /// Which property the ADJECTIVES are read from, and `None` where this story
+    /// keeps none that can be read — see [`Adjectives`] for what that means and
+    /// [`infocom_properties`] for how it is decided.
+    pub fn adjective_property(&self) -> Option<u8> {
+        self.adjective_property
+    }
+
+    /// What object `obj` is, and what it can be called — nouns always, and
+    /// adjectives where [`adjective_property`](ParseNames::adjective_property)
+    /// found somewhere to read them.
+    ///
+    /// `None` when the NOUNS cannot be read: see
+    /// [`word_array`](ParseNames::word_array) for exactly when that is. An
+    /// object whose adjectives cannot be read still answers — with an empty
+    /// adjective list, which is a different claim from the
+    /// [`Adjectives::Unavailable`] a story that keeps none reports.
+    pub fn of(&self, mem: &Memory, obj: u16) -> Option<ObjectWords> {
+        let words = self.word_array(mem, obj, self.property)?;
+        let object = ObjectWords::new(
+            u32::from(obj),
+            short_name(mem, obj),
+            words,
+            Some(u32::from(self.property)),
+            Some(self.key_chars),
+        );
+        match self.adjective_property {
+            // No second property to read: the answer is that this story cannot
+            // be asked, which `ObjectWords` reports as `Adjectives::Unavailable`
+            // and never as an empty list.
+            None => Some(object),
+            // An object with no adjective property, or one whose adjective
+            // property holds something that is not a word array, has NO
+            // adjectives to offer — an empty list, not a refusal. The nouns
+            // were read from a property this story keeps for that and are not
+            // in doubt because a second one disagreed.
+            Some(p) => Some(
+                object.with_adjectives(
+                    self.word_array(mem, obj, p).unwrap_or_default(),
+                    u32::from(p),
+                ),
+            ),
+        }
+    }
+
+    /// One property decoded as an array of dictionary addresses.
     ///
     /// `None` when the object has no such property, when its data is not a
     /// whole number of words, or when **any** entry in it is not the address of
     /// a dictionary word. That last one is the point: a property that is not a
     /// word array yields nothing, rather than a list of plausible-looking words
     /// decoded from arbitrary addresses.
-    pub fn of(&self, mem: &Memory, obj: u16) -> Option<ObjectWords> {
-        let data = get_prop_addr(mem, obj, self.property);
+    fn word_array(&self, mem: &Memory, obj: u16, property: u8) -> Option<Vec<String>> {
+        let data = get_prop_addr(mem, obj, property);
         if data == 0 {
             return None;
         }
@@ -670,13 +788,7 @@ impl ParseNames {
             let addr = mem.read_word(data as u32 + i * 2) as u32;
             words.push(self.words.get(&addr)?.clone());
         }
-        Some(ObjectWords::new(
-            u32::from(obj),
-            short_name(mem, obj),
-            words,
-            Some(u32::from(self.property)),
-            Some(self.key_chars),
-        ))
+        Some(words)
     }
 
     /// Every object that answers, in object-number order.
@@ -715,12 +827,7 @@ fn candidate_properties(
 ) -> BTreeMap<u8, BTreeSet<u16>> {
     let mut found: BTreeMap<u8, BTreeSet<u16>> = BTreeMap::new();
     for obj in 1..=object_count(mem) {
-        let mut prop = 0u8;
-        loop {
-            prop = get_next_prop(mem, obj, prop);
-            if prop == 0 {
-                break;
-            }
+        for prop in property_numbers(mem, obj) {
             let data = get_prop_addr(mem, obj, prop);
             let len = get_prop_len(mem, data) as u32;
             if data == 0 || len < 2 || !len.is_multiple_of(2) {
@@ -736,7 +843,8 @@ fn candidate_properties(
     found
 }
 
-/// Pick the Infocom parse-name property out of the candidates, or refuse.
+/// Pick the Infocom parse-name property out of the candidates — and the
+/// adjective property beside it where the story has a readable one — or refuse.
 ///
 /// **The test is containment, not size.** Every Infocom game from V3 to V6
 /// keeps its ADJECTIVES in a second property, and from V4 onwards those are
@@ -770,7 +878,21 @@ fn candidate_properties(
 /// below the runner-up are not tested — that tail is noise, a handful of
 /// objects whose two-byte property happens to hold a dictionary address, and
 /// demanding anything of it refused six games these two tests settle.
-fn infocom_property(candidates: &BTreeMap<u8, BTreeSet<u16>>) -> Option<u8> {
+///
+/// **The same containment test names the adjectives, and only from V4.** Where
+/// it is containment that let the leader through, the runner-up IS the adjective
+/// property and is returned as one — but only on a V4+ story, because a V1–3
+/// story keeps its adjectives as one-byte numbers that this scan can never see,
+/// so its runner-up is something else. That distinction has teeth: eight V1–3
+/// titles have a contained runner-up covering one to four objects, and reading
+/// those as adjectives would answer `win` for Zork I's kitchen window. The
+/// [`MIN_AGREEING_OBJECTS`] floor is a second guard on the same point rather
+/// than a load-bearing one — every real V4+ adjective property covers 103
+/// objects or more.
+fn infocom_properties(
+    candidates: &BTreeMap<u8, BTreeSet<u16>>,
+    version: u8,
+) -> Option<(u8, Option<u8>)> {
     let mut ranked: Vec<(&u8, &BTreeSet<u16>)> = candidates.iter().collect();
     // Largest first; ties broken by property number so the answer is stable.
     ranked.sort_by_key(|(p, s)| (std::cmp::Reverse(s.len()), **p));
@@ -778,14 +900,23 @@ fn infocom_property(candidates: &BTreeMap<u8, BTreeSet<u16>>) -> Option<u8> {
     if best_objects.len() < MIN_AGREEING_OBJECTS {
         return None;
     }
-    if let Some((_, second)) = ranked.get(1) {
-        let contained = second.is_subset(best_objects);
-        let outnumbered = best_objects.len() >= second.len().saturating_mul(REQUIRED_MARGIN);
-        if second.len() == best_objects.len() || !(contained || outnumbered) {
+    let mut adjectives = None;
+    if let Some((second, second_objects)) = ranked.get(1) {
+        let contained = second_objects.is_subset(best_objects);
+        let outnumbered =
+            best_objects.len() >= second_objects.len().saturating_mul(REQUIRED_MARGIN);
+        if second_objects.len() == best_objects.len() || !(contained || outnumbered) {
             return None;
         }
+        // The runner-up is the ADJECTIVES exactly when it is contained (an
+        // object cannot have adjectives without nouns) — and only from V4,
+        // where they are dictionary addresses. See the module comment above for
+        // why V1–3 cannot be answered here and what its runner-up really is.
+        if version >= 4 && contained && second_objects.len() >= MIN_AGREEING_OBJECTS {
+            adjectives = Some(**second);
+        }
     }
-    Some(*best)
+    Some((*best, adjectives))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1185,6 +1316,35 @@ mod tests {
         assert_eq!(next, 5);
         let end = get_next_prop(&m, 1, 5);
         assert_eq!(end, 0); // no more
+    }
+
+    /// SQ-1143. A property table listing the same number twice makes
+    /// `get_next_prop` answer with that number again — it looks for the entry
+    /// it was given and returns the one after it — so `while prop != 0 { prop =
+    /// get_next_prop(…) }` never terminates. Sherlock r26/880127 object 308 is
+    /// such a table on retail media, and it hung `ParseNames::detect` for as
+    /// long as anything asked.
+    ///
+    /// `get_next_prop` is the OPCODE and keeps its behaviour; the guard is on
+    /// the reader's side, where `property_numbers` stops at the first number
+    /// that does not descend (§12.4.1 mandates descending order).
+    #[test]
+    fn property_numbers_stops_where_a_table_repeats_a_number_instead_of_cycling() {
+        let mut buf = build_v3_story();
+        // Object 1's table is prop 10 (2 bytes) then prop 5 (1 byte). Rewrite
+        // the second entry's number to 10 as well, so the table reads 10, 10.
+        buf[PROP1_TBL as usize + 8] = 0x0A; // size byte: size 1, prop 10
+        let m = Memory::new(buf).unwrap();
+        // The opcode itself still does exactly what §12.4.3 says, and that is
+        // what makes the naive walk spin.
+        assert_eq!(get_next_prop(&m, 1, 0), 10);
+        assert_eq!(get_next_prop(&m, 1, 10), 10, "the second 10 is 'the one after' the first");
+        // The reader stops.
+        assert_eq!(property_numbers(&m, 1), [10]);
+        // An honest descending table is walked in full and unchanged.
+        let good = Memory::new(build_v3_story()).unwrap();
+        assert_eq!(property_numbers(&good, 1), [10, 5]);
+        assert_eq!(property_numbers(&good, 2), [], "an object with no properties");
     }
 
     #[test]

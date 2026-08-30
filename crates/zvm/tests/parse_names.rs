@@ -23,7 +23,7 @@
 //! `stories/` is gitignored commercial media and those skip vacuously.
 
 use zvm::memory::Memory;
-use zvm::objects::{self, ParseNames};
+use zvm::objects::{self, Adjectives, ParseNames};
 
 fn fixture(name: &str) -> Memory {
     Memory::new(zvm::fixtures::load(name).expect("committed fixture")).unwrap()
@@ -251,4 +251,199 @@ fn every_infocom_story_here_answers_with_a_property_of_its_own() {
     if checked == 0 {
         eprintln!("SKIP: no Infocom media present");
     }
+}
+
+// ── Adjectives: read from V4, refused before it — SQ-1120 ───────────────────
+//
+// **The oracle here is the parser too.** Driving `zvm-cli` through the real
+// stories:
+//
+// ```text
+//   zork1-r88-s840726.z3          take brass lantern      → Taken.
+//   zork1-invclues-r52-s871125.z5 take brass lantern      → Taken.
+//   trinity-r12-s860926.z4        examine baby prams      → They're probably
+//                                                            full of British
+//                                                            babies.
+// ```
+//
+// `brass` is a word both Zork I releases accept and neither keeps in its
+// SYNONYM property. The v5 release answers it out of a second property; the v3
+// release keeps it as a one-byte adjective NUMBER that nothing here can locate,
+// and says so rather than reporting an empty list.
+
+#[test]
+fn a_story_that_cannot_be_asked_says_so_instead_of_answering_none() {
+    // A v1–3 Infocom story: the adjectives exist (its parser takes `brass`)
+    // and are stored as numbers this reader cannot find. `Unavailable` is the
+    // honest answer and is NOT the same value as "this object has none".
+    let mem = fixture("minizork.z3");
+    let pn = ParseNames::detect(&mem).unwrap();
+    assert_eq!(pn.adjective_property(), None);
+    let lantern = pn.of(&mem, 102).unwrap();
+    assert_eq!(lantern.adjectives, Adjectives::Unavailable);
+    assert!(!lantern.adjectives.is_available());
+    assert_eq!(lantern.adjectives.property(), None);
+    assert_eq!(lantern.adjectives.words(), [] as [String; 0]);
+    // The nouns are untouched by any of it.
+    assert_eq!(lantern.words, ["lamp", "lanter", "light"]);
+
+    // Inform is unaffected for a different reason — its adjectives are already
+    // IN the name array — and reports the same refusal rather than pretending
+    // to a second list.
+    let inform = fixture("praxix.z5");
+    let ipn = ParseNames::detect(&inform).unwrap();
+    assert_eq!(ipn.adjective_property(), None);
+    assert!(!ipn.of(&inform, 6).unwrap().adjectives.is_available());
+}
+
+#[test]
+fn the_same_game_on_two_releases_answers_brass_only_where_it_can() {
+    // Zork I twice: r88 is v3 and r52 (Solid Gold) is v5. The parser accepts
+    // `take brass lantern` on BOTH — the difference is entirely in what can be
+    // read back, and the two answers are told apart by their type rather than
+    // by an empty list that means two things.
+    let Some(v3) = story("zork1-r88-s840726.z3") else { return };
+    let Some(v5) = story("zork1-invclues-r52-s871125.z5") else { return };
+
+    let pn3 = ParseNames::detect(&v3).expect("Zork I r88 has parse names");
+    let lantern3 = pn3.of(&v3, 164).unwrap();
+    assert_eq!(lantern3.printed_name, "brass lantern");
+    assert_eq!(lantern3.words, ["lamp", "lanter", "light"]);
+    assert_eq!(lantern3.adjectives, Adjectives::Unavailable);
+    assert!(!lantern3.refers_to("brass"), "v3 cannot know it, and must not claim to");
+
+    let pn5 = ParseNames::detect(&v5).expect("Zork I r52 has parse names");
+    assert_eq!(pn5.property(), 46);
+    assert_eq!(pn5.adjective_property(), Some(44));
+    let lantern5 = pn5.of(&v5, 153).unwrap();
+    assert_eq!(lantern5.printed_name, "brass lantern");
+    assert_eq!(lantern5.words, ["lamp", "lantern", "light"], "nouns stay nouns");
+    assert_eq!(
+        lantern5.adjectives,
+        Adjectives::Read { words: vec!["brass".into()], property: 44 }
+    );
+    assert!(lantern5.refers_to("brass") && lantern5.refers_to("lamp"));
+    assert_eq!(lantern5.describe(), "brass lantern [lamp, lantern, light + adj: brass]");
+
+    // And the adjectives are what tell three lanterns apart, which is what a
+    // player needs them for.
+    let burned = pn5.of(&v5, 95).unwrap();
+    assert_eq!(burned.adjectives.words(), ["rusty", "burned", "dead", "useless"]);
+    assert_eq!(pn5.of(&v5, 171).unwrap().adjectives.words(), ["broken"]);
+}
+
+#[test]
+fn an_object_with_no_adjectives_in_a_story_that_has_them_answers_an_empty_list() {
+    // The distinction the whole feature turns on: `Read { words: [] }` is an
+    // object with none, in a story that would have said so if it had any.
+    let Some(mem) = story("zork0-r393-s890714.z6") else { return };
+    let pn = ParseNames::detect(&mem).expect("Zork Zero has parse names");
+    assert_eq!(pn.property(), 51);
+    assert_eq!(pn.adjective_property(), Some(46));
+
+    // The quest's worked example, straight from the story.
+    let hangar = pn.of(&mem, 5).unwrap();
+    assert_eq!(hangar.printed_name, "Dirigible Hangar");
+    assert_eq!(hangar.words, ["hangar"]);
+    assert_eq!(hangar.adjectives.words(), ["dirigible", "large"]);
+    assert_eq!(hangar.adjectives.property(), Some(46));
+
+    let all = pn.all(&mem);
+    assert_eq!(all.len(), 432);
+    let bare: Vec<&zvm::objects::ObjectWords> =
+        all.iter().filter(|o| o.adjectives.words().is_empty()).collect();
+    assert!(!bare.is_empty(), "Zork Zero has objects with no adjectives");
+    assert!(
+        bare.iter().all(|o| o.adjectives.is_available()),
+        "an object with none must still report that the STORY could be asked"
+    );
+    assert_eq!(all.iter().filter(|o| !o.adjectives.words().is_empty()).count(), 306);
+}
+
+#[test]
+fn every_version_four_and_up_infocom_story_here_names_an_adjective_property() {
+    // Measured across `stories/`: the runner-up in the same ranking that picks
+    // the nouns, on every V4–V6 title, and never on a V1–3 one.
+    let v4_up = [
+        ("amfv-r77-s850814.z4", 52u8, 51u8),
+        ("bureaucracy-r116-s870602.z4", 55, 47),
+        ("nordandbert-r19-s870722.z4", 63, 50),
+        ("trinity-r12-s860926.z4", 51, 49),
+        ("beyondzork-r57-s871221.z5", 49, 48),
+        ("borderzone-r9-s871008.z5", 51, 38),
+        ("sherlock-r26-s880127.z5", 44, 43),
+        ("wishbringer-invclues-r23-s880706.z5", 50, 40),
+        ("arthur-r74-s890714.z6", 51, 45),
+        ("shogun-r322-s890706.z6", 45, 32),
+    ];
+    let v1_3 = [
+        "zork1-r88-s840726.z3",
+        "zork2-r48-s840904.z3",
+        "zork3-r17-s840727.z3",
+        "seastalker-r16-s850603.z3",
+        "hitchhiker-r59-s851108.z3",
+        "moonmist-r9-s861022.z3",
+        "spellbreaker-r87-s860904.z3",
+        "starcross-r17-s821021.z3",
+    ];
+    let mut checked = 0;
+    for (name, nouns, adjectives) in v4_up {
+        let Some(mem) = story(name) else { continue };
+        let pn = ParseNames::detect(&mem).unwrap_or_else(|| panic!("{name} has parse names"));
+        assert_eq!(pn.property(), nouns, "{name} nouns");
+        assert_eq!(pn.adjective_property(), Some(adjectives), "{name} adjectives");
+        assert!(
+            pn.all(&mem).iter().filter(|o| !o.adjectives.words().is_empty()).count() > 100,
+            "{name} should answer adjectives for most of its objects"
+        );
+        checked += 1;
+    }
+    for name in v1_3 {
+        let Some(mem) = story(name) else { continue };
+        let pn = ParseNames::detect(&mem).unwrap_or_else(|| panic!("{name} has parse names"));
+        // Every one of these has a contained runner-up covering one to four
+        // objects — noise, and reading it would answer `win` for Zork I's
+        // kitchen window. The version gate is what refuses it.
+        assert_eq!(pn.adjective_property(), None, "{name} must not guess");
+        checked += 1;
+    }
+    if checked == 0 {
+        eprintln!("SKIP: no Infocom media present");
+    }
+}
+
+#[test]
+fn asking_the_wrong_adjective_property_yields_nothing_instead_of_plausible_words() {
+    // Falsification for the adjective half, the way
+    // `asking_the_wrong_property_yields_nothing_instead_of_plausible_words`
+    // does for the nouns: point it at the NOUN property of a v1–3 story, where
+    // the bytes are adjective numbers and not addresses at all.
+    let Some(mem) = story("zork1-r88-s840726.z3") else { return };
+    let wrong = ParseNames::with_properties(&mem, 18, Some(16)).unwrap();
+    let lantern = wrong.of(&mem, 164).unwrap();
+    assert_eq!(lantern.words, ["lamp", "lanter", "light"], "the nouns are still right");
+    assert_eq!(
+        lantern.adjectives.words(),
+        [] as [String; 0],
+        "property 16 holds one-byte numbers, not dictionary addresses, and must decode to nothing"
+    );
+    // …and it still reports that the story was ASKED, which is the honest
+    // answer for a reader that was told where to look and found nothing.
+    assert!(lantern.adjectives.is_available());
+}
+
+#[test]
+fn a_property_table_that_repeats_a_number_is_walked_once_and_not_forever() {
+    // SQ-1143. Sherlock r26 object 308 lists property 43 twice, so
+    // `get_next_prop` — which answers with the entry AFTER the one it is given
+    // — returns 43 again, and an unguarded walk never terminates. Detection
+    // walks every object, so this case simply RETURNING is the assertion; it
+    // hung indefinitely before `objects::property_numbers` existed.
+    let Some(mem) = story("sherlock-r26-s880127.z5") else { return };
+    let chain = objects::property_numbers(&mem, 308);
+    assert_eq!(chain, [51, 50, 47, 46, 45, 44, 43], "the walk stops where it stops descending");
+    let pn = ParseNames::detect(&mem).expect("Sherlock has parse names");
+    assert_eq!(pn.property(), 44);
+    assert_eq!(pn.adjective_property(), Some(43));
+    assert_eq!(pn.of(&mem, 1).unwrap().printed_name, "Chamber of Horrors");
 }

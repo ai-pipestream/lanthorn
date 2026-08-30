@@ -428,6 +428,74 @@ impl WordRoles {
     }
 }
 
+/// An object's **adjectives**, where the story keeps them somewhere a reader
+/// can reach — and an explicit refusal where it does not.
+///
+/// Most of the world has nothing to report here, and reports it as
+/// [`Unavailable`](Adjectives::Unavailable) rather than as an empty list.
+/// Inform, on both back-ends, stores adjectives in the same `name` array as the
+/// nouns, so `brass` is already in [`ObjectWords::words`] and there is no second
+/// list to name; a Scott Adams noun table has no adjectives in it at all. The
+/// only producer is Infocom's own compiler, which keeps ZIL's
+/// `ADJECTIVE` property beside `SYNONYM` — and only from **Version 4**, where
+/// that property holds dictionary addresses like the nouns do. A V1–3 Infocom
+/// story stores one-byte adjective *numbers* whose property cannot be located
+/// with any margin worth trusting (see `zvm::objects`), so it answers
+/// `Unavailable` too.
+///
+/// **The distinction is the point.** Zork I's brass lantern and Zork Zero's
+/// dirigible hangar are the same kind of object in two stories, and only one of
+/// them can be asked. A caller that flattened this to `Vec<String>` would read
+/// "this object has no adjectives" off a V1–3 story whose parser takes them,
+/// and would have no way to know it. `Read { words: vec![] }` is an object with
+/// none; `Unavailable` is a story that cannot say.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Adjectives {
+    /// This story keeps no separate adjective list, or keeps one this reader
+    /// cannot locate. Says nothing about whether the object has adjectives.
+    #[default]
+    Unavailable,
+    /// Read from `property`. An **empty** `words` is a real answer: this object
+    /// has no adjectives, in a story that would have said so if it did.
+    Read {
+        /// The adjectives, lower-cased and truncated exactly as
+        /// [`ObjectWords::words`] is, in the order the story stores them.
+        words: Vec<String>,
+        /// Which property they came from — a per-game number, the *second* one
+        /// an Infocom story uses, and never the same as
+        /// [`ObjectWords::property`].
+        property: u32,
+    },
+}
+
+impl Adjectives {
+    /// The adjectives, or an empty slice where the story cannot say.
+    ///
+    /// A convenience for a caller that has already decided it treats the two
+    /// the same; anything that would report "none" to a player wants
+    /// [`is_available`](Adjectives::is_available) first.
+    pub fn words(&self) -> &[String] {
+        match self {
+            Adjectives::Unavailable => &[],
+            Adjectives::Read { words, .. } => words,
+        }
+    }
+
+    /// True when this story's adjectives could be read at all.
+    pub fn is_available(&self) -> bool {
+        matches!(self, Adjectives::Read { .. })
+    }
+
+    /// Which property they were read from, and `None` where they were not.
+    pub fn property(&self) -> Option<u32> {
+        match self {
+            Adjectives::Unavailable => None,
+            Adjectives::Read { property, .. } => Some(*property),
+        }
+    }
+}
+
 /// What an object is, and what it can be **called** — one answer, never two.
 ///
 /// A story tells you two different things about a thing in it. Its *printed*
@@ -485,10 +553,25 @@ pub struct ObjectWords {
     /// II, 14 in Seastalker). `None` where the engine has no properties at all,
     /// which is Scott Adams.
     pub property: Option<u32>,
+    /// The object's adjectives, where the story keeps them apart from its
+    /// nouns and a reader can reach them — [`Adjectives::Unavailable`] on
+    /// everything else, which is most stories.
+    ///
+    /// They are **not** folded into [`words`](ObjectWords::words), because a
+    /// caller cannot un-fold them: the same list would mean "nouns and
+    /// adjectives" on Zork Zero and "nouns only" on Zork I with nothing to say
+    /// which. See [`Adjectives`].
+    pub adjectives: Adjectives,
 }
 
 impl ObjectWords {
-    /// Build one. `#[non_exhaustive]`, so this is how another crate makes one.
+    /// Build one, with nothing said about adjectives.
+    /// `#[non_exhaustive]`, so this is how another crate makes one.
+    ///
+    /// Adjectives default to [`Adjectives::Unavailable`] and are added by
+    /// [`with_adjectives`](ObjectWords::with_adjectives), so that a reader that
+    /// has none is not asked to spell that out and a reader that has some
+    /// cannot forget which property they came from.
     pub fn new(
         id: u32,
         printed_name: String,
@@ -496,7 +579,23 @@ impl ObjectWords {
         property: Option<u32>,
         truncated_at: Option<usize>,
     ) -> ObjectWords {
-        ObjectWords { id, printed_name, words, property, truncated_at }
+        ObjectWords {
+            id,
+            printed_name,
+            words,
+            property,
+            truncated_at,
+            adjectives: Adjectives::Unavailable,
+        }
+    }
+
+    /// The same object, with its adjectives and the property they came from.
+    ///
+    /// An empty `words` is a real answer and is kept as one — this object has
+    /// no adjectives, in a story that could have said it did.
+    pub fn with_adjectives(mut self, words: Vec<String>, property: u32) -> ObjectWords {
+        self.adjectives = Adjectives::Read { words, property };
+        self
     }
 
     /// True when `word` is one of this object's parse names.
@@ -507,9 +606,16 @@ impl ObjectWords {
     /// sides, because the two engines differ in which side is already short:
     /// the Z-machine dictionary stores `lanter` truncated, and a Scott Adams
     /// noun table stores `LAMP` in full and truncates only when matching.
+    ///
+    /// Adjectives count, where the story has any to give: `dirigible` refers to
+    /// Zork Zero's hangar exactly as `hangar` does, and a caller asking whether
+    /// a word names a thing is asking about the parser, which does not
+    /// distinguish them. What varies by story is only how much can be ANSWERED —
+    /// [`adjectives`](ObjectWords::adjectives) says which, and the two lists
+    /// stay separate for a caller that needs to know.
     pub fn refers_to(&self, word: &str) -> bool {
         let key = self.truncate(&word.trim().to_lowercase());
-        self.words.iter().any(|s| self.truncate(s) == key)
+        self.words.iter().chain(self.adjectives.words()).any(|s| self.truncate(s) == key)
     }
 
     fn truncate(&self, word: &str) -> String {
@@ -539,10 +645,16 @@ impl ObjectWords {
         (!self.words.is_empty()).then(|| self.words.join(" "))
     }
 
-    /// `printed name [word, word, …]`, for a debug inspector or a test failure.
+    /// `printed name [word, word, …]`, for a debug inspector or a test failure,
+    /// with `+ adj: …` where the story keeps adjectives and this object has
+    /// any. A story that cannot be asked prints nothing extra, which is the
+    /// same rendering it had before adjectives were readable at all.
     pub fn describe(&self) -> String {
         let name = if self.printed_name.is_empty() { "(unnamed)" } else { &self.printed_name };
-        format!("{name} [{}]", self.words.join(", "))
+        let adj = self.adjectives.words();
+        let tail =
+            if adj.is_empty() { String::new() } else { format!(" + adj: {}", adj.join(", ")) };
+        format!("{name} [{}{tail}]", self.words.join(", "))
     }
 }
 
@@ -657,6 +769,7 @@ mod tests {
             words: vec!["lamp".into(), "lanter".into(), "light".into()],
             property: Some(18),
             truncated_at: Some(6),
+            adjectives: Adjectives::Unavailable,
         };
         // Either spelling: what the story holds, and what the player types.
         assert!(o.refers_to("lanter"));
@@ -688,6 +801,7 @@ mod tests {
             words: vec!["pig".into()],
             property: Some(1),
             truncated_at: Some(9),
+            adjectives: Adjectives::Unavailable,
         };
         assert_eq!(o.describe(), "(unnamed) [pig]");
         assert!(o.refers_to("pig"));
