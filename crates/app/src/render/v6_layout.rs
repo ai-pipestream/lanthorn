@@ -2645,11 +2645,27 @@ pub fn chrome_bands(
 /// game gave its bottom prose window, and both wanted the same rows.
 /// [`fill_story_page_under_chrome_text`] already spared those pixels from the page
 /// FILL; nothing spared them from the GLYPHS. Pass `&[]` for no sparing.
-pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32, cols: u16, rows: u16, fg: Rgba<u8>, spare: &[(u32, u32, u32, u32)], tf: &crate::native_font::TextFace) {
+///
+/// `reveal` is the momentary word reveal, when one is lit (SQ-1107 / SQ-1138), and
+/// `None` otherwise. The cell path re-styles its drawn cells afterwards; a canvas
+/// has no cells to re-style, so the light is applied HERE, as each glyph is
+/// blitted — which is also why it is a parameter of the draw rather than a field
+/// of [`MainText`]. The reveal is a property of the moment, not of the text: the
+/// wrapped rows are the game's own output and get persisted in the archive, and a
+/// decoration folded into them would have to be taken back out again.
+pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32, cols: u16, rows: u16, fg: Rgba<u8>, spare: &[(u32, u32, u32, u32)], tf: &crate::native_font::TextFace, reveal: Option<&crate::reveal::RasterReveal<'_>>) {
     let cell = tf.cell();
     let font_w = u32::from(cell.w);
     let font_h = u32::from(cell.h);
     let region_h = rows as u32 * font_h;
+    // The reveal's underline, in the geometry SQ-1028 gives an emphasised run:
+    // ONE MASTER ROW at the bottom of the cell — two native rows on a 16-row cell,
+    // one on the Macintosh's fifteen. Derived from `font_h`, the declared TEXT
+    // cell, and so from the same space every other number in this function is
+    // stated in; a thickness resolved from `art_scale` instead would be double on
+    // the presses where one art pixel is two native pixels and correct nowhere
+    // else (SQ-0917 / SQ-1039).
+    let rule_h = (font_h / 8).max(1);
     // A cell is spared when any pixel of it belongs to a chrome text run.
     let blocked = |px: u32, py: u32| -> bool {
         spare.iter().any(|&(x0, y0, x1, y1)| px < x1 && x0 < px + font_w && py < y1 && y0 < py + font_h)
@@ -2714,6 +2730,13 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
         // A pixel cap keeps the guarantee the character cap was there for — a row
         // that was never wrapped still cannot run past its box — without discarding
         // glyphs the wrap correctly fitted.
+
+        // While a reveal is lit, where on THIS row the story printed each of the
+        // words the parser would accept (SQ-1138). Char ranges into `line`, which
+        // is exactly what `line.chars().enumerate()` below counts in — the same
+        // `lit_spans` the cell path calls on the same wrapped row, so the two
+        // surfaces cannot disagree about which words light.
+        let lit = reveal.map(|r| crate::reveal::lit_spans(line, r.words)).unwrap_or_default();
         let mut pen = ox + text_col * font_w;
         let row_limit = pen + avail * font_w;
         let py = oy + row * font_h;
@@ -2723,8 +2746,17 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
             if pen + adv > row_limit {
                 break;
             }
+            let hit = reveal.filter(|_| lit.iter().any(|&(s, e)| col >= s && col < e));
             if !blocked(pen, py) {
-                crate::render::bitfont::blit_glyph_styled(canvas, glyph, pen, py, font_w, font_h, fg, None, style, Some(tf));
+                crate::render::bitfont::blit_glyph_styled(canvas, glyph, pen, py, font_w, font_h, hit.map_or(fg, |r| r.ink), None, style, Some(tf));
+                // …and the rule under it, AFTER the glyph so it reads as one line
+                // rather than as a row the descenders punch holes in — the same
+                // order `blit_metric_glyph` draws SQ-1028's in. Spanning the whole
+                // ADVANCE, so consecutive lit glyphs join and the player sees one
+                // underlined word instead of seven underlined letters.
+                if let Some(r) = hit.filter(|r| r.rule) {
+                    fill_cell(canvas, pen, py + font_h - rule_h, adv, rule_h, r.ink);
+                }
             }
             pen += adv;
         }
@@ -3733,7 +3765,7 @@ mod tests {
             floats: vec![RasterFloat { row: 0, rows: 2, reserve_cols: 3, text_col: 3, img_col: 0, img: Arc::new(img) }],
         };
         let mut canvas = RgbaImage::new(10 * FONT_W, 5 * FONT_H);
-        draw_story_text(&mut canvas, &main, 0, 0, 10, 5, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
+        draw_story_text(&mut canvas, &main, 0, 0, 10, 5, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT), None);
         // Rows 0-1 (beside float): glyph ink starts at column 3.
         assert!(cell_has_ink(&canvas, 0, 0), "float pixels occupy row 0 col 0");
         assert_eq!(*canvas.get_pixel(4, 20), Rgba([200, 20, 20, 255]), "float blitted at its row (spans y 0..32)");
@@ -3761,7 +3793,7 @@ mod tests {
             floats: vec![RasterFloat { row: 0, rows: 2, reserve_cols: 5, text_col: 0, img_col: 6, img: Arc::new(img) }],
         };
         let mut canvas = RgbaImage::new(10 * FONT_W, 5 * FONT_H);
-        draw_story_text(&mut canvas, &main, 0, 0, 10, 5, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
+        draw_story_text(&mut canvas, &main, 0, 0, 10, 5, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT), None);
         // Row 0 text is flush left but clipped to the narrowed column (cols 0..5).
         assert!(cell_has_ink(&canvas, 0, 0), "row 0 col 0 inked (text flush left)");
         assert!(!cell_has_ink(&canvas, 5, 0), "row 0 col 5 blank (text narrowed away from the picture)");
@@ -3840,7 +3872,7 @@ mod tests {
             floats: vec![],
         };
         let mut canvas = RgbaImage::new(20 * FONT_W, 5 * FONT_H);
-        draw_story_text(&mut canvas, &main, 0, 0, 20, 5, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
+        draw_story_text(&mut canvas, &main, 0, 0, 20, 5, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT), None);
         // ">" is on row 1; input "go" appends after it at cols 1 and 2.
         assert!(cell_has_ink(&canvas, 1, 1), "input 'g' on the prompt row, after '>'");
         assert!(cell_has_ink(&canvas, 2, 1), "input 'o' on the prompt row");
@@ -3867,7 +3899,7 @@ mod tests {
             floats: vec![],
         };
         let mut canvas = RgbaImage::new(20 * FONT_W, 5 * FONT_H);
-        draw_story_text(&mut canvas, &main, 0, 0, 20, 5, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
+        draw_story_text(&mut canvas, &main, 0, 0, 20, 5, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT), None);
         assert!(cell_has_ink(&canvas, 0, 1), "input on the empty last row at col 0");
         assert!(!(0..20).any(|col| cell_has_ink(&canvas, col, 2)), "not the row below");
     }
@@ -3890,7 +3922,7 @@ mod tests {
             floats: vec![RasterFloat { row: -1, rows: 2, reserve_cols: 2, text_col: 2, img_col: 0, img: Arc::new(img) }],
         };
         let mut canvas = RgbaImage::new(10 * FONT_W, 3 * FONT_H);
-        draw_story_text(&mut canvas, &main, 0, 0, 10, 3, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
+        draw_story_text(&mut canvas, &main, 0, 0, 10, 3, Rgba([255, 255, 255, 255]), &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT), None);
         assert_eq!(*canvas.get_pixel(4, 4), Rgba([0, 0, 200, 255]), "visible slice is the float's BOTTOM half");
     }
 
@@ -4111,7 +4143,7 @@ mod tests {
         let draw = |styles: Vec<Vec<u8>>| {
             let main = MainText { lines: vec!["AAAA".into()], styles, input: String::new(), cursor_col: 0, awaiting: false, floats: vec![] };
             let mut c = RgbaImage::new(6 * FONT_W, 2 * FONT_H);
-            draw_story_text(&mut c, &main, 0, 0, 6, 2, fg, &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
+            draw_story_text(&mut c, &main, 0, 0, 6, 2, fg, &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT), None);
             c
         };
         let roman = ink(&draw(Vec::new()), fg);

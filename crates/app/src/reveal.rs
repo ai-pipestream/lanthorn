@@ -75,12 +75,34 @@
 //! over-lighting, and the alternative is a second word splitter disagreeing with
 //! the first.
 //!
-//! # Not raster
+//! # Two surfaces, one shape (SQ-1138)
 //!
-//! Version 6 raster draws its text as bitmap glyphs on a canvas, where per-word
-//! styling is a different problem with a different answer. This is scoped to the
-//! ordinary cell text path; [`visible_text`] reads the CELL wrap cache, so on
-//! raster nothing lights and [`arm`] says so rather than appearing to work.
+//! Version 6 raster draws its text as bitmap glyphs on a canvas rather than as
+//! terminal cells, so there is nothing to re-style after the fact — the light has
+//! to be applied at the moment each glyph is blitted. It was dark there until
+//! SQ-1138, which is a real gap and not a compromise: raster is a destination.
+//!
+//! What makes one reveal serve both is that neither surface needs a record of
+//! which glyphs belonged to which word. **Both draw a row of text from a wrap
+//! cache, and [`lit_spans`] locates the words in that row's own string** — the
+//! cell path walks it by display column, the raster path by the pen. So the two
+//! differ only in what "apply the light" means:
+//!
+//! | | reads | lights by |
+//! |---|---|---|
+//! | cell / hybrid | [`crate::render::wrap_cache::CellWrapCache`] | [`paint_row`], re-styling drawn cells |
+//! | raster / extended | [`crate::render::wrap_cache::RasterWrapCache`] | [`RasterReveal`], at blit time in `draw_story_text` |
+//!
+//! [`visible_text`] asks whichever one drew the last frame, and both answers are
+//! the same string, so [`arm`] is unchanged by any of it.
+//!
+//! **And the underline survives the crossing.** `transcript_reveal` is parented on
+//! `accent` and UNDERLINED, and the rule is not decoration: this is ink laid over
+//! the story's own prose, and a foreground alone cannot promise legibility over a
+//! ground the game chose. On the canvas that rule is drawn in the same geometry
+//! SQ-1028 gives an emphasised run — the bottom of the TEXT cell, one master row
+//! thick, spanning each lit glyph's whole advance so the letters join into one
+//! unbroken line under the word.
 //!
 //! [`Engine::split_like_parser`]: crate::engine::Engine::split_like_parser
 
@@ -139,8 +161,9 @@ pub enum Armed {
     /// Nothing on screen is a word this story would accept. A real answer — a
     /// room of pure scenery gives it — and said plainly rather than silently.
     Nothing,
-    /// There is no drawn text to read: no frame yet, or the v6 raster path, whose
-    /// text is a bitmap and not a row of cells.
+    /// There is no drawn text to read — no frame has been rendered yet, or the
+    /// one that was carries no prose. Not a statement about the SURFACE: both the
+    /// cell path and the v6 raster path answer [`visible_text`] (SQ-1138).
     NoText,
     /// The Guiding Light is out, and this is one of its lamps.
     GuidanceOff,
@@ -229,14 +252,52 @@ pub fn expire(state: &mut AppState) -> bool {
 /// The text that is actually drawn in the story pane this frame, one string per
 /// visible row.
 ///
-/// Read from the CELL wrap cache windowed by the geometry the last frame
-/// recorded — not from `AppState::transcript`, which is the whole scrollback and
-/// would light words the player cannot see, and not from a re-wrap, which would
-/// have to guess at a width the renderer already knows.
+/// Read from the wrap cache of whichever path drew, windowed by the geometry that
+/// frame recorded — not from `AppState::transcript`, which is the whole scrollback
+/// and would light words the player cannot see, and not from a re-wrap, which
+/// would have to guess at a width the renderer already knows.
 ///
-/// Empty before the first frame, and on the v6 RASTER path, whose text never
-/// passes through this cache at all.
+/// The two caches are twins ([`crate::render::wrap_cache`]) and the slice is
+/// windowed the same way out of both, so the string is the same shape whichever
+/// answered and everything downstream is surface-blind.
+///
+/// Empty before the first frame.
 fn visible_text(state: &AppState) -> String {
+    raster_visible_text(state).unwrap_or_else(|| cell_visible_text(state))
+}
+
+/// The drawn rows of the v6 RASTER composite, or `None` when that is not the
+/// surface the player is looking at (SQ-1138).
+///
+/// Asked FIRST, and gated on two facts rather than one. `v6_render` is the mode
+/// the player chose, but it is set on a config that a v3 game or a text-only
+/// terminal never reaches the raster arm under; `v6_raster_metrics` is set only by
+/// that arm, and only when it found a story window to measure. Neither alone is
+/// the question — a hybrid session leaves the mode saying "hybrid" while a
+/// raster-configured session on a terminal with no image protocol leaves the
+/// metrics unset forever — so both must agree before the raster cache is believed
+/// over the cell one.
+fn raster_visible_text(state: &AppState) -> Option<String> {
+    if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
+        return None;
+    }
+    let metrics = state.v6_raster_metrics.get()?;
+    let cache = state.raster_wrap.borrow();
+    let cache = cache.as_ref()?;
+    Some(
+        cache
+            .rows
+            .iter()
+            .skip(metrics.first_visible_row as usize)
+            .take(metrics.viewport_rows as usize)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// The drawn rows of the cell/hybrid transcript — the original path, unchanged.
+fn cell_visible_text(state: &AppState) -> String {
     let Some(geom) = state.transcript_geom.get() else {
         return String::new();
     };
@@ -340,6 +401,57 @@ pub(crate) fn paint_row(
         }
         col += w;
     }
+}
+
+// ── Painting, on the pixel canvas ────────────────────────────────────────────
+
+/// A lit reveal, resolved for the RASTER canvas (SQ-1138).
+///
+/// The two facts travel together because they are only ever used together and
+/// only ever come from the same place — the lit words and the ink they light in,
+/// resolved once per frame by [`raster_reveal`] and carried into
+/// [`crate::render::v6_layout::draw_story_text`] as ONE value. Splitting them
+/// across two parameters is how a caller ends up supplying a word set at the
+/// story's own ink and drawing a reveal nobody can see.
+///
+/// There is no `rule` field: the underline's geometry is the TEXT CELL's, which
+/// the draw path already holds and this value must never second-guess. A rule
+/// sized from anywhere else is the density trap — on a Macintosh colour press one
+/// art pixel is two native pixels while one text pixel is one, so a number
+/// resolved in the wrong space is half-size on exactly one machine and correct on
+/// every other.
+pub struct RasterReveal<'a> {
+    /// The spellings that light, borrowed from the live [`Reveal`].
+    pub words: &'a BTreeSet<String>,
+    /// The ink they light in — `transcript_reveal`'s foreground, which is
+    /// `accent` unless the player's `style.toml` says otherwise.
+    pub ink: image::Rgba<u8>,
+    /// Whether to rule under them, from the SAME `transcript_reveal` modifier the
+    /// cell path's [`paint_row`] patches onto its cells.
+    ///
+    /// Read rather than assumed, so a player who restyles the selector gets the
+    /// same reveal on both surfaces. It ships true, and the default is the part
+    /// that matters: a foreground alone cannot promise legibility over a ground
+    /// the game chose, which is why the registry sets it and not why a theme may
+    /// not.
+    pub rule: bool,
+}
+
+/// Resolve the lit reveal for the pixel canvas, or `None` when nothing is lit.
+///
+/// `fallback` is what the ink falls back to when the theme names a colour the
+/// canvas cannot resolve to concrete bytes (`Reset`, an `Indexed`) — the same
+/// fallback every other themed colour on this path takes. The raster caller passes
+/// the STORY's own ink, so a theme that cannot resolve draws the prose exactly as
+/// it already was rather than in some colour nobody chose.
+pub fn raster_reveal(state: &AppState, fallback: image::Rgba<u8>) -> Option<RasterReveal<'_>> {
+    let reveal = state.reveal.as_ref().filter(|r| r.is_lit())?;
+    let style = state.colors.theme.get("transcript_reveal").style;
+    let ink = style
+        .fg
+        .map_or(fallback, |c| crate::render::v6_layout::color_to_rgba(c, fallback));
+    let rule = style.add_modifier.contains(ratatui::style::Modifier::UNDERLINED);
+    Some(RasterReveal { words: &reveal.words, ink, rule })
 }
 
 #[cfg(test)]

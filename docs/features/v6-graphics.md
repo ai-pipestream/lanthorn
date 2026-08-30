@@ -1788,6 +1788,17 @@ screenshot, a bug report and a headless capture all want:
   foreground/background at startup (OSC 10/11) and paints in those, so raster
   text stays readable on a light-background terminal instead of forcing a
   fixed light-grey-on-black.
+  - **The word reveal lights here too.** Pressing it (`◈`, **F4**,
+    `/reveal-words`) underlines the words on screen the story's own parser would
+    accept, and it was dark on every graphical v6 title for as long as it read
+    the *cell* wrap cache — which raster never fills, because raster's text is
+    bitmap glyphs on a canvas rather than terminal cells. It now reads the
+    canvas's own wrap and applies the light as each glyph is blitted: the same
+    words, from the same object tree, in the same accent ink, ruled under in the
+    same geometry the game's own emphasised runs use. The rule is the point
+    rather than the polish — this is host ink laid over prose the *game*
+    coloured, and a foreground alone cannot promise legibility over a ground
+    somebody else chose.
 - **`extended`** — raster, pinned to a **whole** magnification, spending the
   height that buys on *content* rather than on empty margin: the canvas grows
   downward and the surplus becomes whole extra text rows of prose in the game's

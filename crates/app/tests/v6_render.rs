@@ -39,6 +39,8 @@ mod v6_pixel_lock_backend;
 mod v6_pixel_lock_centring;
 #[path = "suites/v6_prose_freeze.rs"]
 mod v6_prose_freeze;
+#[path = "suites/v6_raster_reveal.rs"]
+mod v6_raster_reveal;
 #[path = "suites/v6_raster_text_loss.rs"]
 mod v6_raster_text_loss;
 #[path = "suites/v6_side_border_tiling.rs"]
