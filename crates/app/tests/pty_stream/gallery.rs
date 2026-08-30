@@ -420,11 +420,16 @@ impl Shot {
         }
         // The tool owns these, and a manifest that sets them either fights the
         // backend choice or writes the gallery into the player's real home.
-        for owned in ["--image-protocol", "--user-dir", "--sound"] {
+        // `--v6-pixel-lock` joins the list because the gallery now pins it ON for
+        // every shot in the run's config (see `run_shot`). A shot passing it again
+        // is at best a second copy of the truth and at worst `off`, which would be
+        // one frame quietly softer than the rest.
+        for owned in ["--image-protocol", "--user-dir", "--sound", "--v6-pixel-lock"] {
             if self.args.iter().any(|a| a == owned) {
                 return Err(format!(
                     "gallery manifest: `{who}` passes `{owned}` — the gallery tool owns that argument \
-                     (set `backend` instead of `--image-protocol`)"
+                     (set `backend` instead of `--image-protocol`; the pixel lock is on for every \
+                     shot already)"
                 ));
             }
         }
@@ -847,36 +852,20 @@ impl Taken {
     }
 }
 
-/// Boot lanthorn for one shot and hand back the capture, having first refused
-/// every way the capture could be of the wrong thing.
-pub fn capture(
-    shot: &Shot,
-    subject: &Subject<'_>,
-    bin: &Path,
-    work: &Path,
-    timeout: std::time::Duration,
-) -> Result<Capture, String> {
-    // The path lanthorn is launched with: the medium itself, or the directory
-    // this shot's library was just staged into.
-    let media = match subject {
-        Subject::Medium(path) => {
-            if !path.exists() {
-                return Err(format!(
-                    "`{}`: no medium at {} (the media directories are gitignored)",
-                    shot.id,
-                    path.display()
-                ));
-            }
-            path.clone()
-        }
-        Subject::Library(l) => l.stage(work).map_err(|e| format!("`{}`: {e}", shot.id))?,
-    };
-    let (cols, rows) = shot.size_cells()?;
-    let (cell_w, cell_h) = shot.cell_px();
-
-    let user_dir = work.join(&shot.id);
-    let _ = std::fs::remove_dir_all(&user_dir);
-    std::fs::create_dir_all(&user_dir).map_err(|e| format!("`{}`: {e}", shot.id))?;
+/// Write the settings this run captures under, into the shot's own throwaway user
+/// directory: the pinned seed, the pixel lock, the render mode, the patched-font
+/// icon answer, and — for a library shot — the default story directory.
+///
+/// **This is where a setting that should hold for the WHOLE gallery goes.** A shot
+/// can still ask for something of its own through `args`, but anything the set
+/// should agree on belongs here, so that adding a row to `gallery.toml` inherits it
+/// instead of having to remember it. The seam already existed for `random_seed` and
+/// `default_story_dir`; SQ-1152 put the pixel lock and the font-check answer
+/// through it too.
+///
+/// Split out of `capture` so it can be tested without a pty: everything below is
+/// text on disk, and a case can read it back.
+pub fn write_run_settings(user_dir: &Path, shot: &Shot, media: &Path) -> Result<(), String> {
     // The seed goes in the global config rather than the per-game sidecar: the
     // sidecar is a bare-lines file the driver already owns for `show_map`, and
     // two writers of one file is how a shot silently loses its seed.
@@ -907,9 +896,84 @@ pub fn capture(
     };
     std::fs::write(
         user_dir.join("config.toml"),
-        format!("random_seed = {}\n{render}{default_dir}", shot.seed),
+        format!("random_seed = {}\nv6_pixel_lock = true\n{render}{default_dir}", shot.seed),
     )
-    .map_err(|e| format!("`{}`: writing the pinned seed: {e}", shot.id))?;
+    .map_err(|e| format!("writing the pinned seed: {e}"))?;
+    // EVERY v6 SHOT IS PIXEL-LOCKED, and it is set HERE rather than per shot so
+    // that the next one added gets it without anyone having to remember.
+    //
+    // It used to be `--v6-pixel-lock on` in two shots' `args`, which made it look
+    // like a property of those two frames. It is a property of the gallery: a
+    // fractional magnification puts an art pixel on a fractional number of device
+    // pixels, and every edge in the frame is then interpolated. `--v6-pixel-lock`
+    // is on the tool-owned list in `validate` for the same reason
+    // `--image-protocol` is — a shot that turned it off would be fighting this.
+    //
+    // It costs the existing frames nothing, and that is checkable rather than
+    // hopeful: `every_v6_shot_magnifies_by_a_whole_number` already fails any shot
+    // whose FREE scale is fractional, and a whole number is always a valid rung, so
+    // on a correctly-sized shot the lock has nothing to snap to. It is a floor under
+    // the sizes, not a change to them. On the modes and backends where it does not
+    // apply it is inert by construction — `v6_pixel_lock_applies` gates it off for
+    // half-blocks (SQ-0978), a non-v6 story has no rung ladder at all, and
+    // `extended` already pins a strictly finer whole-NATIVE-pixel magnification of
+    // its own (SQ-1032), so the key is harmless where it is not the thing deciding.
+    //
+    // AND EVERY SHOT DRAWS THE PATCHED-FONT ICONS. The frames are captured through a
+    // Nerd Font (see `FONT_CANDIDATES`), so the plain Geometric Shapes fallback is
+    // the wrong half of a choice the reader's terminal has already made for them —
+    // `zork1-map` reported `NO GLYPH ANYWHERE FOR: ◈◌` for exactly that reason.
+    //
+    // This calls the APP'S OWN writer with the answer a "yes" to the font check
+    // gives, rather than spelling the preset names here: `write_font_check_answer`
+    // is what `/run-font-check` writes, so the gallery cannot drift from it, and a
+    // later improvement to the `nerdfont` presets reaches these frames for free.
+    // That is also why the preset NAMES are written and not forty expanded
+    // codepoints — the same argument that function's own doc makes.
+    //
+    // What it does NOT set, so nobody reads the absence as an oversight: the six
+    // `badge_*` glyphs. They are `[elements]` keys with no `nerdfont` preset behind
+    // them — the font check has never touched them — so putting Nerd codepoints in
+    // the picker's badges is a decision about the APP's presets, not about this
+    // harness, and freezing six literals here is precisely what the paragraph above
+    // says not to do.
+    let style_path = app::style::personal_style_path(user_dir);
+    app::style::write_font_check_answer(&style_path, true)
+        .map_err(|e| format!("writing the font-check answer: {e}"))?;
+    Ok(())
+}
+
+/// Boot lanthorn for one shot and hand back the capture, having first refused
+/// every way the capture could be of the wrong thing.
+pub fn capture(
+    shot: &Shot,
+    subject: &Subject<'_>,
+    bin: &Path,
+    work: &Path,
+    timeout: std::time::Duration,
+) -> Result<Capture, String> {
+    // The path lanthorn is launched with: the medium itself, or the directory
+    // this shot's library was just staged into.
+    let media = match subject {
+        Subject::Medium(path) => {
+            if !path.exists() {
+                return Err(format!(
+                    "`{}`: no medium at {} (the media directories are gitignored)",
+                    shot.id,
+                    path.display()
+                ));
+            }
+            path.clone()
+        }
+        Subject::Library(l) => l.stage(work).map_err(|e| format!("`{}`: {e}", shot.id))?,
+    };
+    let (cols, rows) = shot.size_cells()?;
+    let (cell_w, cell_h) = shot.cell_px();
+
+    let user_dir = work.join(&shot.id);
+    let _ = std::fs::remove_dir_all(&user_dir);
+    std::fs::create_dir_all(&user_dir).map_err(|e| format!("`{}`: {e}", shot.id))?;
+    write_run_settings(&user_dir, shot, &media).map_err(|e| format!("`{}`: {e}", shot.id))?;
 
     let mut spec = Spec::new(bin, &media, &user_dir);
     // THE PICKER PRINTS THE PATH IT WAS GIVEN, so for a library shot the path is
