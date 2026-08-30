@@ -1179,7 +1179,7 @@ fn no_flank_join_steps_harder_than_the_art_itself() {
         eprintln!(
             "{}: profile {:?}, release {} serial {}, screen {:?}, cell {}x{}, native {}x{}, {} turns",
             p.name, machine.profile, p.release, p.serial, machine.screen_px,
-            machine.cell.w, machine.cell.h, native.0, native.1, p.turns,
+            machine.cell.w(), machine.cell.h(), native.0, native.1, p.turns,
         );
         for (x0, x1, side) in [
             (0u32, story.x_px as u32, "left"),

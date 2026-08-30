@@ -360,7 +360,7 @@ fn a_frozen_prose_box_is_the_pens_extent_not_the_declared_one() {
     assert!(tf.proportional(), "the precondition: a pen that varies");
     let cell = s.machine.v6_cell();
     let declared: u32 =
-        retired.iter().map(|(t, _)| u32::from(cell.w) * t.chars().count() as u32).max().unwrap_or(0);
+        retired.iter().map(|(t, _)| u32::from(cell.w()) * t.chars().count() as u32).max().unwrap_or(0);
     let penned: u32 = retired.iter().map(|(t, st)| tf.run_px_styled(t, *st)).max().unwrap_or(0);
     assert!(
         penned > declared,
@@ -389,6 +389,6 @@ fn a_frozen_prose_box_is_the_pens_extent_not_the_declared_one() {
          `chars * {}` measure ({widest_declared} px) rather than the pen's ({penned} px)",
         r.file,
         frozen.w_px,
-        cell.w,
+        cell.w(),
     );
 }

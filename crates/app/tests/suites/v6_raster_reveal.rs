@@ -383,13 +383,13 @@ fn the_lit_words_reach_the_composite_in_the_reveals_own_ink() {
         let cell = b.face.cell();
         let row_px = b.face.run_px(PROSE);
         let word_px = b.face.run_px("table");
-        let ceiling = (word_px + u32::from(cell.w)) * u32::from(cell.h);
+        let ceiling = (word_px + u32::from(cell.w())) * u32::from(cell.h());
         assert!(
             (moved.len() as u32) <= ceiling,
             "honor={honor}: {} px moved, which is more than the {word_px}x{} cell box one word \
              can occupy (the row is {row_px} px wide)",
             moved.len(),
-            cell.h,
+            cell.h(),
         );
     }
 }
@@ -418,7 +418,7 @@ fn a_lit_word_is_ruled_under_on_the_canvas() {
 
         // The lit pixels occupy one text row; its bottom edge is the row's own
         // last scanline, and the rule is `(cell.h / 8).max(1)` deep into it.
-        let cell_h = u32::from(b.face.cell().h);
+        let cell_h = u32::from(b.face.cell().h());
         let bottom = moved.iter().map(|&(_, y)| y).max().expect("lit pixels");
         let top = moved.iter().map(|&(_, y)| y).min().expect("lit pixels");
         assert!(
@@ -461,7 +461,7 @@ fn a_lit_word_is_ruled_under_on_the_canvas() {
 #[test]
 fn the_rule_is_stated_in_the_text_cell_not_the_art_scale() {
     let _g = app::v6_palette(zvm::screen::Palette::Standard);
-    for cell in [zvm::screen::V6Cell { w: 8, h: 16 }, zvm::screen::V6Cell { w: 7, h: 15 }] {
+    for cell in [zvm::screen::V6Cell::new(8, 16), zvm::screen::V6Cell::new(7, 15)] {
         let face = app::native_font::TextFace::cell_only(cell);
         let ink = image::Rgba([255u8, 255, 255, 255]);
         let reveal_ink = image::Rgba([0u8, 255, 255, 255]);
@@ -475,15 +475,15 @@ fn the_rule_is_stated_in_the_text_cell_not_the_art_scale() {
         };
         let words: std::collections::BTreeSet<String> = ["lantern".to_string()].into_iter().collect();
         let reveal = app::reveal::RasterReveal { words: &words, ink: reveal_ink, rule: true };
-        let w = u32::from(cell.w) * 8;
-        let h = u32::from(cell.h) * 2;
+        let w = u32::from(cell.w()) * 8;
+        let h = u32::from(cell.h()) * 2;
         let mut canvas = image::RgbaImage::new(w, h);
         v6::draw_story_text(&mut canvas, &main, 0, 0, 8, 2, ink, &[], &face, Some(&reveal));
 
         // The rule is one MASTER row — `cell.h / 8` — at the bottom of the cell:
         // two native rows on the 16-row cell, one on the Macintosh's fifteen.
-        let want = (u32::from(cell.h) / 8).max(1);
-        let full: Vec<u32> = (0..u32::from(cell.h))
+        let want = (u32::from(cell.h()) / 8).max(1);
+        let full: Vec<u32> = (0..u32::from(cell.h()))
             .filter(|&y| {
                 (0..face.run_px("lantern")).all(|x| *canvas.get_pixel(x, y) == reveal_ink)
             })
@@ -497,7 +497,7 @@ fn the_rule_is_stated_in_the_text_cell_not_the_art_scale() {
         );
         assert_eq!(
             full.last().copied(),
-            Some(u32::from(cell.h) - 1),
+            Some(u32::from(cell.h()) - 1),
             "cell {cell:?}: …and it sits on the cell's bottom row, where SQ-1028 puts an \
              emphasised run's",
         );
@@ -512,7 +512,7 @@ fn the_rule_is_stated_in_the_text_cell_not_the_art_scale() {
 #[test]
 fn no_reveal_leaves_the_canvas_untouched() {
     let _g = app::v6_palette(zvm::screen::Palette::Standard);
-    let cell = zvm::screen::V6Cell { w: 8, h: 16 };
+    let cell = zvm::screen::V6Cell::new(8, 16);
     let face = app::native_font::TextFace::cell_only(cell);
     let ink = image::Rgba([255u8, 255, 255, 255]);
     let main = v6::MainText {
@@ -524,7 +524,7 @@ fn no_reveal_leaves_the_canvas_untouched() {
         floats: Vec::new(),
     };
     let draw = |reveal: Option<&app::reveal::RasterReveal<'_>>| {
-        let mut c = image::RgbaImage::new(u32::from(cell.w) * 8, u32::from(cell.h) * 2);
+        let mut c = image::RgbaImage::new(u32::from(cell.w()) * 8, u32::from(cell.h()) * 2);
         v6::draw_story_text(&mut c, &main, 0, 0, 8, 2, ink, &[], &face, reveal);
         c
     };
@@ -553,7 +553,7 @@ fn no_reveal_leaves_the_canvas_untouched() {
 #[test]
 fn the_rule_follows_the_themes_own_underline() {
     let _g = app::v6_palette(zvm::screen::Palette::Standard);
-    let cell = zvm::screen::V6Cell { w: 8, h: 16 };
+    let cell = zvm::screen::V6Cell::new(8, 16);
     let face = app::native_font::TextFace::cell_only(cell);
     let ink = image::Rgba([255u8, 255, 255, 255]);
     let reveal_ink = image::Rgba([0u8, 255, 255, 255]);
@@ -568,11 +568,11 @@ fn the_rule_follows_the_themes_own_underline() {
     let words: std::collections::BTreeSet<String> = ["table".to_string()].into_iter().collect();
     let draw = |rule: bool| {
         let r = app::reveal::RasterReveal { words: &words, ink: reveal_ink, rule };
-        let mut c = image::RgbaImage::new(u32::from(cell.w) * 8, u32::from(cell.h) * 2);
+        let mut c = image::RgbaImage::new(u32::from(cell.w()) * 8, u32::from(cell.h()) * 2);
         v6::draw_story_text(&mut c, &main, 0, 0, 8, 2, ink, &[], &face, Some(&r));
         c
     };
-    let bottom = u32::from(cell.h) - 1;
+    let bottom = u32::from(cell.h()) - 1;
     let ruled_row = |c: &image::RgbaImage| {
         (0..face.run_px("table")).all(|x| *c.get_pixel(x, bottom) == reveal_ink)
     };

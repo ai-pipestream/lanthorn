@@ -296,13 +296,24 @@ quantity is safe on one path and not on another. This is exactly `CLAUDE.md`'s
 four fields private behind saturating accessors, which fixes all six sites at
 once.
 
-`V6Cell` is the same defeat in miniature. `V6Cell::new` (`screen.rs:2237`) clamps
-each axis to at least 1, and its doc says why: "Guard against a zero axis
+`V6Cell` was the same defeat in miniature, and is **fixed** (SQ-1031). `V6Cell::new`
+clamps each axis to at least 1, and its doc said why: "Guard against a zero axis
 reaching the divisions below. A profile that stated `0` would otherwise panic
-somewhere far from the mistake." But `w` and `h` are `pub` (`:2226-2227`), so
-`V6Cell { w: 0, h: 0 }` walks straight past the constructor into the divisions at
+somewhere far from the mistake." But `w` and `h` were `pub`, so
+`V6Cell { w: 0, h: 0 }` walked straight past the constructor into the divisions at
 `exec.rs:4255` and `:3275` — and division by zero panics in **both** profiles.
-The guard is documented, correct, and bypassable by a struct literal.
+The guard was documented, correct, and bypassable by a struct literal.
+
+The fields are now private behind `w()`/`h()`, and the type lives in its own
+`mod v6_cell` inside `screen.rs` so the private fields are invisible to the rest
+of that file too — Rust scopes a private field to the defining module *and its
+children*, and `screen.rs` is four thousand lines of exactly the code most likely
+to write a new cell. The workspace holds one `V6Cell` literal, inside `new`, and
+the guard is now unreachable rather than merely documented. Note that privatising
+also closed a second route the original finding did not name: `pub w` is a
+*mutable* field on a `Copy` type, so `let mut c = m.v6_cell(); c.w = 0;` bypassed
+the constructor exactly as a literal did, and no non-exhaustive marker or private
+sentinel field would have stopped it.
 
 **One panic fires in release too.** `code_region` (`disasm_cache.rs:551`) returns
 `(min(high_mem_base, boot_root), mem.len())` with no check that start precedes
@@ -629,7 +640,7 @@ and unaffordable after a release.
 | # | change | fix cost | breaking | free now, expensive later |
 |---|---|---|---|---|
 | 1 | palette + interpreter version onto `Machine`; delete both statics | medium — 4 in-crate sites, ~278 `app` sites, deletes `app`'s whole lock apparatus | **yes** | **yes** |
-| 2 | clamp `ZWindow::put_prop`; cap `print_table`/`copy_table`; fix `unit_index_at` on an empty cache; privatise `V6Cell`'s fields | small — six overflow sites collapse to one clamp | partly | partly |
+| 2 | clamp `ZWindow::put_prop`; cap `print_table`/`copy_table`; fix `unit_index_at` on an empty cache; ~~privatise `V6Cell`'s fields~~ (done, SQ-1031) | small — six overflow sites collapse to one clamp | partly | partly |
 | 3 | `#[non_exhaustive]` sweep on read-only enums and structs | small | **yes** | **yes** |
 | 4 | privatise opcode internals (`cpu::state`, `State`/`Frame` fields, `do_branch`, `print_text`) and the queue fields | small — no external callers | **yes** | **yes** |
 | 5 | gate `pub mod fixtures` behind `cfg(test)` or a feature | trivial | **yes** | **yes** |

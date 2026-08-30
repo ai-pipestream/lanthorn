@@ -249,7 +249,7 @@ const V6_LEFT_ANCHOR_MAX_DX: u16 = 96;
 /// names. Zork Zero's 78px band and Arthur's 12-rows-down bar are unaffected either
 /// way: they sit genuinely ABOVE their story window and are found by that rule.
 fn v6_status_strip_max_h(cell: V6Cell) -> u16 {
-    2 * cell.h
+    2 * cell.h()
 }
 
 /// One v6 status-band candidate: the cleaned room text and whether it was
@@ -317,7 +317,7 @@ fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)], cell: V6Cell) -> Vec<
             // Exact for i=0, and for the rest wherever the pen is fixed. A
             // proportional machine emits one run per glyph (that is how the drift
             // above is visible at all), so i>0 does not arise there.
-            pen[c] = t.x.saturating_add((i as u16).saturating_mul(cell.w));
+            pen[c] = t.x.saturating_add((i as u16).saturating_mul(cell.w()));
         }
     }
 
@@ -367,7 +367,7 @@ fn is_v6_status_strip(
     i != prose_idx
         && w.y_size > 0
         && w.y_size <= v6_status_strip_max_h(cell)
-        && w.y_coord <= cell.h
+        && w.y_coord <= cell.h()
         && w.y_coord + w.y_size > story_top
 }
 
@@ -420,8 +420,8 @@ fn v6_status_candidates(machine: &Machine) -> Vec<V6Candidate> {
                 continue;
             }
             // Wholly above the story text: a run straddling the boundary is prose.
-            let above_story = t.y + cell.h <= story_top;
-            let in_strip = strip_bottom.is_some_and(|b| t.y + cell.h <= b);
+            let above_story = t.y + cell.h() <= story_top;
+            let in_strip = strip_bottom.is_some_and(|b| t.y + cell.h() <= b);
             if above_story || in_strip {
                 rows.entry(t.y).or_default().push((t, w.x_coord));
             }

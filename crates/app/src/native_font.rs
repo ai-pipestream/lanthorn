@@ -334,7 +334,7 @@ pub fn resolve(request: &FaceRequest<'_>) -> FaceSet {
         let scale = request.system_text_scale();
         let cell = request.profile.v6_font_cell();
         for found in crate::system_fonts::named_faces_in(disks, request.profile) {
-            if u32::from(found.font.height) * scale.1 != u32::from(cell.h) {
+            if u32::from(found.font.height) * scale.1 != u32::from(cell.h()) {
                 continue; // a size of the family the machine did not draw with
             }
             set.admit(
@@ -502,9 +502,9 @@ pub fn fit(
         return Some(FaceFit::Metric);
     }
     let (sx, sy) = (scale.0.max(1), scale.1.max(1));
-    let fills = pitch.unwrap_or(u32::from(face.width)) * sx == u32::from(cell.w)
-        && u32::from(face.width) * sx == u32::from(cell.w)
-        && u32::from(face.height) * sy == u32::from(cell.h);
+    let fills = pitch.unwrap_or(u32::from(face.width)) * sx == u32::from(cell.w())
+        && u32::from(face.width) * sx == u32::from(cell.w())
+        && u32::from(face.height) * sy == u32::from(cell.h());
     fills.then_some(FaceFit::Cell)
 }
 
@@ -564,7 +564,7 @@ pub fn declared_cell(
     let text = face_space(profile, faces.body_origin()).text_scale(art_scale);
     match faces.body().and_then(|f| fit(f, profile, text).map(|k| (f, k))) {
         Some((f, FaceFit::Metric)) => {
-            zvm::screen::V6Cell::new(cell.w, u16::from(f.height).saturating_mul(text.1 as u16))
+            zvm::screen::V6Cell::new(cell.w(), u16::from(f.height).saturating_mul(text.1 as u16))
         }
         _ => cell,
     }
@@ -633,8 +633,8 @@ fn wrap_fingerprint_of(metric: &zvm::screen::V6Metric) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let cell = metric.cell();
-    cell.w.hash(&mut h);
-    cell.h.hash(&mut h);
+    cell.w().hash(&mut h);
+    cell.h().hash(&mut h);
     // Every §8.7.1 face the pen can be asked for, not just roman: the raster wrap
     // measures the run it is about to break, and an emphasised run is measured
     // with the emphasised advances. **Fixed pitch (bit 3) is in the list** because
@@ -673,7 +673,7 @@ impl TextFace {
                 // Every byte carries a usable number, so `V6Metric` never has to
                 // guess: a glyph the face does not cover falls back to the cell,
                 // which is what the renderer draws it at.
-                let mut advances = Box::new([cell.w; 256]);
+                let mut advances = Box::new([cell.w(); 256]);
                 for (b, a) in advances.iter_mut().enumerate() {
                     if let Some(g) = f.glyph(b as u8) {
                         *a = (u32::from(g.width) * scale.0).min(u32::from(u16::MAX)) as u16;
@@ -865,7 +865,7 @@ impl TextFace {
 
     /// Native pixels from one text baseline to the next — the cell's height.
     pub fn line_px(&self) -> u32 {
-        u32::from(self.cell().h)
+        u32::from(self.cell().h())
     }
 }
 

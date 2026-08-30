@@ -1088,7 +1088,7 @@ pub struct MachineProfile {
 ///
 /// **A declared metric, not a drawn advance.** The machine painted proportional
 /// Geneva 12 and still told the story 7; see [`MachineProfile::v6_cell`].
-pub const MACINTOSH_V6_CELL: V6Cell = V6Cell { w: 7, h: 15 };
+pub const MACINTOSH_V6_CELL: V6Cell = V6Cell::new(7, 15);
 
 /// The Macintosh's Version 6 standard window, `GFXAM_X`/`GFXAM_Y` doubled.
 ///

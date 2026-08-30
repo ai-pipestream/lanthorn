@@ -3051,15 +3051,15 @@ impl GameSession {
                 "          text: grid {}x{} cells of {}x{}px · margins l={} r={} · usable {}px = {} cols",
                 w.grid.cols,
                 w.grid.rows,
-                cell.w,
-                cell.h,
+                cell.w(),
+                cell.h(),
                 w.left_margin,
                 w.right_margin,
                 w.x_size.saturating_sub(w.left_margin).saturating_sub(w.right_margin),
                 w.x_size
                     .saturating_sub(w.left_margin)
                     .saturating_sub(w.right_margin)
-                    / cell.w.max(1),
+                    / cell.w().max(1),
             ));
             // **What the WINDOW says it is set in** (SQ-1047). ZMSD §8.8.3.2
             // properties 12 and 13: the font number, and the size as
@@ -3073,10 +3073,10 @@ impl GameSession {
             out.push(format!(
                 "          font: number {} · size {fw}x{fh}px (props 12/13){}",
                 w.font_number,
-                if (fw, fh) == (cell.w, cell.h) {
+                if (fw, fh) == (cell.w(), cell.h()) {
                     String::new()
                 } else {
-                    format!(" <- not the {}x{} cell", cell.w, cell.h)
+                    format!(" <- not the {}x{} cell", cell.w(), cell.h())
                 },
             ));
             // What the model made of this window, matched by its native rect.
@@ -3140,7 +3140,7 @@ impl GameSession {
         // SQ-0917: the session's own cell, which every native-pixel-to-cell step
         // below divides by. The engine placed these runs with it, so the model has
         // to recover them with the same number.
-        let (font_w, font_h) = (self.machine.v6_cell().w, self.machine.v6_cell().h);
+        let (font_w, font_h) = (self.machine.v6_cell().w(), self.machine.v6_cell().h());
         let screen = &self.machine.screen;
         let v6 = screen.v6.as_ref().expect("caller checked screen.v6.is_some()");
 
@@ -3633,7 +3633,7 @@ fn v6_face_lines(face: Option<&crate::native_font::TextFace>) -> Vec<String> {
     });
     out.push(format!(
         "    declared cell {}x{}px · text scale {}x{} native px per face px",
-        cell.w, cell.h, scale.0, scale.1
+        cell.w(), cell.h(), scale.0, scale.1
     ));
     // The pen. A proportional one is reported by its RANGE over the printable set,
     // because that is the range a wrap is computed from — and by its bold smear,
@@ -3649,7 +3649,7 @@ fn v6_face_lines(face: Option<&crate::native_font::TextFace>) -> Vec<String> {
             smear * scale.0
         ));
     } else {
-        out.push(format!("    pen: steps the cell — {}px for every character", cell.w));
+        out.push(format!("    pen: steps the cell — {}px for every character", cell.w()));
     }
     out
 }
