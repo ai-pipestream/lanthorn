@@ -422,6 +422,56 @@ fn zork1_answers_a_word_it_never_heard_with_what_that_word_means() {
     );
 }
 
+/// SQ-1113: an IRREGULAR inflection, on the game everybody meets first. `took`
+/// is `take` by no rule at all — there is nothing to strip off it — which is why
+/// `stems` reached nothing here until WordNet's exception list shipped, and why
+/// the near miss cannot stand in: `took` is three keystrokes from `take` and
+/// that threshold is one, on purpose.
+///
+/// Zork I then adds its own synonyms for the verb once it is identified, which
+/// is the aside source doing its usual work on top.
+///
+/// Every word here is out of reach of the near miss as well as of the rule —
+/// `threw` was tried and dropped, because a single substitution reaches `throw`
+/// and the case would have passed with the table removed.
+///
+/// Falsify by dropping the `irregular_bases` loop from `vocab::stems`: all three
+/// lines fall silent.
+#[test]
+fn zork1_answers_an_irregular_inflection_with_the_verb_it_knows() {
+    let Some(mut s) = zork1() else { return };
+    let (_state, lines) = play(&mut s, &["took lamp", "broke lamp", "caught rope"]);
+    assert_eq!(
+        lines,
+        vec![
+            "this story knows — take · look · carry",
+            "this story knows — break · block · smash",
+            "this story knows — catch · carry · get",
+        ]
+    );
+}
+
+/// And `lit lamp` — the line the quest was NAMED for — is still silent, for a
+/// reason that has nothing to do with the table: `lit` is three letters and
+/// `MIN_LEN` answers nothing under four.
+///
+/// That gate is older than both word sources and is refused to both alike: `don`
+/// means `wear`, which Zork knows, and is unanswered in the case below for
+/// exactly the same reason. Pinned here so the silence reads as the policy it is
+/// rather than as a hole in the data — the two assertions after it show the
+/// table reaching `light` and the story holding it, with only the length between
+/// them.
+#[test]
+fn zork1_stays_quiet_on_a_three_letter_irregular() {
+    let Some(mut s) = zork1() else { return };
+    let (_state, lines) = play(&mut s, &["lit lamp"]);
+    assert!(lines.is_empty(), "{lines:?}");
+
+    assert_eq!(verb_synonyms::irregular_bases("lit"), ["light"], "the table does reach it");
+    let v = <app::session::GameSession as Engine>::story_vocabulary(&s).expect("zork1 has one");
+    assert!(v.knows("light"), "and the story does hold the word it reaches");
+}
+
 /// And the silences the meaning source must keep, on the same story — the ones
 /// it is MOST able to erode, because a table of three thousand groups can always
 /// find something.

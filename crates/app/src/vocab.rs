@@ -756,10 +756,22 @@ impl StoryVocabulary {
 
 /// The words `w` might be an inflected form of.
 ///
-/// English regular endings only, and deliberately generous: every stem is looked
-/// up in the story's dictionary afterwards, so a stem that is not a word costs
-/// nothing. Irregulars (`lit`, `ate`, `took`) are out of reach here and stay
-/// that way until there is a corpus to read them from.
+/// Two sources, and they answer the two halves of English morphology.
+///
+/// The regular endings are a RULE — strip `ing`, `ed`, `es`, `s` and put back
+/// the letter the spelling dropped — and it is applied generously, because every
+/// stem is looked up in the story's dictionary afterwards and a stem that is not
+/// a word costs nothing.
+///
+/// The irregulars are a TABLE, because no rule can reach them: `lit` shares no
+/// letters with the ending that would have made it from `light`, and neither do
+/// `took`, `went` or `mice`. That table is WordNet's own exception list, shipped
+/// by [`verb_synonyms::irregular_bases`] (SQ-1113) — and it is consulted for
+/// every word rather than only where the rule came up empty, because it is one
+/// hash lookup and some words are reached by both.
+///
+/// Nouns as well as verbs: this is asked about every position in a command, and
+/// `mice` → `mouse` is the same case as `lit` → `light` one slot to the right.
 fn stems(w: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |s: String| {
@@ -783,6 +795,12 @@ fn stems(w: &str) -> Vec<String> {
             y.push('y');
             push(y); // carries → carry
         }
+    }
+    // A form can be an inflection of two different words — `axes` is `ax` and
+    // `axis` — so every base is proposed and the dictionary lookup settles it,
+    // exactly as it settles the endings above.
+    for base in verb_synonyms::irregular_bases(w) {
+        push((*base).to_string());
     }
     out
 }
@@ -1689,14 +1707,35 @@ mod tests {
         assert!(osa("illuminate", "light") > 1);
     }
 
+    /// Both halves of English morphology, in the one place they meet: the rule
+    /// for the regular endings, and WordNet's exception list for the irregulars
+    /// that no rule can produce.
+    ///
+    /// `stems("lit")` was pinned as EMPTY until SQ-1113 shipped the table — the
+    /// limitation was recorded rather than papered over with a rule that
+    /// half-works. Falsify the fix by dropping the `irregular_bases` loop from
+    /// `stems`: every assertion below `lights` fails, `lit` reaching nothing
+    /// first, which is the symptom the quest was filed on.
     #[test]
-    fn stems_reach_the_regular_endings_and_admit_the_irregular_ones_are_out_of_reach() {
+    fn stems_reach_the_regular_endings_and_the_irregular_ones_too() {
         assert!(stems("lighting").contains(&"light".to_string()));
         assert!(stems("taking").contains(&"take".to_string()));
         assert!(stems("running").contains(&"run".to_string()));
         assert!(stems("carries").contains(&"carry".to_string()));
         assert!(stems("lights").contains(&"light".to_string()));
-        assert!(stems("lit").is_empty(), "an irregular form is SQ-1110's to reach");
+        // Regular words gain nothing spurious from the table: it holds only the
+        // forms a rule cannot make, so a word the rule already handles is not in
+        // it at all.
+        assert_eq!(stems("lights"), ["light", "lighte"], "an ending, and the `e` it may have lost");
+        // The irregulars, which no ending in the loop above can reach.
+        assert_eq!(stems("lit"), ["light"]);
+        assert_eq!(stems("took"), ["take"]);
+        assert_eq!(stems("went"), ["go"]);
+        assert_eq!(stems("mice"), ["mouse"], "a NOUN: `stems` serves every position");
+        // A form that inflects two ways proposes both, and the story's own
+        // dictionary is what settles which one it meant.
+        let axes = stems("axes");
+        assert!(axes.contains(&"ax".to_string()) && axes.contains(&"axis".to_string()), "{axes:?}");
     }
 
     #[test]

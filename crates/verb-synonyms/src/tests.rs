@@ -213,3 +213,73 @@ fn nothing_is_parsed_until_a_lookup_asks() {
     // `OnceLock` and two calls agree.
     assert_eq!(group_count(), group_count());
 }
+
+// ── The irregular table ──────────────────────────────────────────────────────
+
+/// The data is really there. A missing or truncated `irregular_forms.tsv` makes
+/// every lookup an empty slice, which is a feature that silently does nothing —
+/// so the count is asserted rather than trusted.
+#[test]
+fn the_irregular_table_is_present_and_parses() {
+    assert!(
+        irregular_count() > 4000,
+        "only {} forms — did irregular_forms.tsv get truncated?",
+        irregular_count()
+    );
+}
+
+/// The mappings that must survive a regeneration: the four in the quest, each
+/// one a word a player types at a game that wants the other, and every one of
+/// them unreachable by taking an ending off.
+#[test]
+fn the_irregular_forms_reach_their_base() {
+    for (form, base) in [
+        ("lit", "light"),
+        ("took", "take"),
+        ("went", "go"),
+        ("ate", "eat"),
+        ("broke", "break"),
+        ("caught", "catch"),
+        ("mice", "mouse"),   // a NOUN, and the same case one slot to the right
+        ("knives", "knife"), // ditto, and the one a player of any game types
+    ] {
+        assert!(
+            irregular_bases(form).contains(&base),
+            "`{form}` should reach `{base}`, got {:?}",
+            irregular_bases(form)
+        );
+    }
+}
+
+/// A form can be an inflection of two different words, which is why the lookup
+/// hands back a slice: `axes` is `ax` and `axis`, and nothing but the story's own
+/// dictionary can say which the player meant.
+#[test]
+fn a_form_that_inflects_two_ways_gives_both_bases() {
+    assert_eq!(irregular_bases("axes"), ["ax", "axis"]);
+    assert_eq!(irregular_bases("singing"), ["sing", "singe"]);
+}
+
+/// Regular English is NOT in this table. It holds the exceptions and nothing
+/// else, so a caller that also strips endings gets no duplicate work and no
+/// second opinion on a word its rule already handles.
+#[test]
+fn a_regular_inflection_is_absent() {
+    for w in ["lighting", "lights", "carries", "opened", "walked", "xyzzy"] {
+        assert!(irregular_bases(w).is_empty(), "`{w}` is regular and should not be listed");
+    }
+}
+
+/// Nothing about a form is ever offered as its own base — `noun.exc` carries
+/// `is is` and `testes testes`, and answering a player with the word they just
+/// typed is the one answer known to be useless.
+#[test]
+fn no_form_is_its_own_base() {
+    for line in super::IRREGULARS.lines().filter(|l| !l.starts_with('#') && !l.is_empty()) {
+        let mut f = line.split('\t');
+        let (form, base) = (f.next().unwrap_or_default(), f.next().unwrap_or_default());
+        assert!(!form.is_empty() && !base.is_empty(), "two tab-separated columns: {line:?}");
+        assert_ne!(form, base, "a form is never its own base");
+        assert!(f.next().is_none(), "exactly two columns: {line:?}");
+    }
+}
