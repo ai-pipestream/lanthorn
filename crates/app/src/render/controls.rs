@@ -174,6 +174,43 @@ impl ControlView {
     }
 }
 
+/// The keyboard route to `command`, spelled the way a hint should spell it: the
+/// key that runs it when one is bound, then the slash command that always does.
+///
+/// **Read from the live keymap and leader panel, never written out by hand**
+/// (SQ-1142). Two hints here used to name an F-key as a literal — `"F2"` for the
+/// verb panel and `"F4 · /reveal-words"` for the reveal — and when SQ-1142
+/// unbound those defaults the hints went on advertising keys that did nothing.
+/// A hint that ASKS cannot say that; it also follows a player who rebound the
+/// key rather than reciting a default at them, and it picks up the leader route
+/// for a command that has one and no direct key, which is exactly what the verb
+/// panel became. `no_hint_advertises_a_key_that_is_not_bound` in the
+/// `border_controls` suite fails the hand-written form, because a substring
+/// check on the command half is satisfied by a lie about the key half.
+fn key_route(state: &AppState, command: &str) -> String {
+    if let Some(k) = state.keymap.primary_key(command) {
+        return format!("{} · /{command}", k.label());
+    }
+    if let Some(letter) = leader_letter(state, command) {
+        return format!("{} {letter} · /{command}", state.hotkeys.prefix.label());
+    }
+    format!("/{command}")
+}
+
+/// The leader-panel letter that reaches `command`, if the panel offers one.
+///
+/// Matched on the command NAME rather than the whole entry, so a panel row that
+/// carries an argument (`"zoom-map in"`) still answers for `zoom-map`.
+fn leader_letter(state: &AppState, command: &str) -> Option<char> {
+    state
+        .hotkeys
+        .groups
+        .iter()
+        .flat_map(|(_, entries)| entries.iter())
+        .find(|(_, cmd, _)| cmd.split_whitespace().next() == Some(command))
+        .map(|(letter, _, _)| *letter)
+}
+
 /// Resolve the theme selector for a control's state: lit when it is on, quiet
 /// when it is not, and `hover` over everything — so whatever the pointer is on
 /// always reads as reachable, on or off.
@@ -278,7 +315,7 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
                 "Verb panel: closed — click to open"
             }
             .to_string(),
-            "F2".to_string(),
+            key_route(state, BorderControl::VerbPanel.command()),
         ],
     });
 
@@ -305,10 +342,12 @@ pub fn controls_for(state: &AppState) -> Vec<ControlView> {
                 "needs the Guiding Light, which is out — the lamp beside this one"
             }
             .to_string(),
-            // Both, unlike its neighbours: F2's toggle can be found by clicking
-            // the control it names, and this one cannot be found at all without
-            // being told the key.
-            "F4 · /reveal-words".to_string(),
+            // Whatever actually reaches it, unlike its neighbours: the other
+            // controls' toggles can be found by clicking the control that names
+            // them, and this one cannot be found at all without being told the
+            // route. It had a direct key until SQ-1142 took it away, so the
+            // route is READ rather than written — see `key_route`.
+            key_route(state, BorderControl::Reveal.command()),
         ],
     });
 
