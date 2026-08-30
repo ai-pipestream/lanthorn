@@ -3899,6 +3899,16 @@ pub fn offer_layer_suggestion(state: &mut AppState, mapper: &mut Mapper) {
     if state.any_modal_overlay_open() {
         return;
     }
+    // A player who has turned the map off has said what they think of the map,
+    // and a modal about how to LAY IT OUT is the least welcome thing we could
+    // put in front of them (SQ-1137). The prompt's whole subject — which layer
+    // these rooms belong on — is invisible from here, so answering it is a
+    // guess and declining it is an interruption. The map keeps mapping; it just
+    // stops asking. Guarded BEFORE `take_suggestion` for the same reason as the
+    // modal above: what is not taken is not consumed.
+    if state.layout != crate::state::Layout::Split {
+        return;
+    }
     if let Some(s) = mapper.take_suggestion() {
         open_layer_suggestion(state, &mapper.graph, s);
     }
@@ -9999,6 +10009,35 @@ mod tests {
             "with Main un-emptiable, a fresh layer is the only place they can go"
         );
         assert_eq!(m.graph.layers().len(), 1, "and nothing has moved: it only suggests");
+    }
+
+    /// SQ-1137: the same crossing, with the map panel hidden. The prompt asks which LAYER a set of
+    /// rooms belongs on, and every word of that question is about a pane the player has closed.
+    ///
+    /// The second half is the half that pins the guard's POSITION. Showing the map again and
+    /// calling once more opens the prompt, which is only possible if the first call declined to
+    /// take the suggestion rather than taking it and dropping it on the floor — a distinction
+    /// invisible from the first assertion alone, and the difference between "not now" and "never".
+    #[test]
+    fn a_hidden_map_is_not_asked_how_to_lay_itself_out() {
+        use crate::state::Layout;
+        let mut s = AppState::default();
+        s.layout = Layout::TranscriptFull;
+        let mut m = manor();
+        m.observe(1, "Hall", Some(Direction::Up));
+
+        offer_layer_suggestion(&mut s, &mut m);
+        assert!(
+            s.overlays.region_prompt.is_none(),
+            "a player who closed the map is not interrupted about how to lay it out"
+        );
+
+        s.layout = Layout::Split;
+        offer_layer_suggestion(&mut s, &mut m);
+        assert!(
+            s.overlays.region_prompt.is_some(),
+            "and the suggestion was declined, not consumed: it is still there to raise"
+        );
     }
 
     // ── SQ-0858: the sentence, spelled out and pointed the right way round ────
