@@ -503,8 +503,10 @@ re-seed the new template, or hand-write the new shape from
   The **vocabulary offer** is the first of them: when a word in your command is
   not in the story's dictionary, the light names words that are — one keystroke
   away (`lanturn` → `lantern`), the same word with a different ending (`opening`
-  → `open`), or the story's own synonyms for a verb once it has one
-  (`smell · sniff`). Never more than three, never a word the parser would refuse,
+  → `open`), a form English inflects irregularly and no ending rule can reach
+  (`took` → `take`, `broke` → `break`), what your word MEANS when nothing about
+  its shape can help (`illuminate` → `light`), or the story's own synonyms for a
+  verb once it has one (`smell · sniff`). Never more than three, never a word the parser would refuse,
   and never a rewrite of what you typed: it is an offer, and the command you sent
   went to the game exactly as you wrote it. It works from the dictionary rather
   than from the game's reply, so it behaves the same on a story that words its

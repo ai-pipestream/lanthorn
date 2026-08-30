@@ -9,7 +9,8 @@
 //! * **WordNet 3.0** (`dict/`) — Princeton University, © 2006. Supplies
 //!   synonymy (words sharing a synset) and the pointer graph (hypernym `@`,
 //!   verb group `$`, derivational `+`) used to reach an IF verb when plain
-//!   synonymy does not.
+//!   synonymy does not, and the irregular inflections of both verbs
+//!   (`verb.exc`) and nouns (`noun.exc`).
 //! * **12dicts 6.0.2**, `Lemmatized/2+2+3frq.txt` — Alan Beale, under the AGID
 //!   terms. Supplies both the frequency ranking (21 bands, commonest first) and
 //!   — because the list is LEMMATIZED, headword at column 0 with its inflected
@@ -43,8 +44,32 @@ pub struct WordNet {
     pub senses: BTreeMap<String, Vec<u32>>,
     /// Synset offset → the synset.
     pub synsets: BTreeMap<u32, Synset>,
-    /// `verb.exc`: an irregular inflected form → its base form.
-    pub exceptions: BTreeMap<String, String>,
+    /// `verb.exc`: an irregular inflected form → the base forms WordNet gives
+    /// for it, in the file's own order.
+    ///
+    /// A slice rather than one word because WordNet puts two bases on 26 of the
+    /// 2,401 lines and they are not all spelling variants: `overflown` is
+    /// `overflow` AND `overfly`, `singing` is `sing` AND `singe`. Everything
+    /// that wants a single lemma takes the first, which is what this map held
+    /// before and keeps that measurement identical.
+    pub exceptions: BTreeMap<String, Vec<String>>,
+    /// `noun.exc`, read exactly the same way and kept SEPARATE from
+    /// `exceptions` for two reasons.
+    ///
+    /// One: `main.rs`'s inflected-IF-verb analysis reads `exceptions` and
+    /// reports how many harvested spellings WordNet knows only as an
+    /// inflection — 23 of 2,860 — and that figure would silently start meaning
+    /// something else if nouns joined the map it counts.
+    ///
+    /// Two: a form can inflect two parts of speech to two different lemmas, and
+    /// one map would have to drop one of them. `axes` is the case: `ax` and
+    /// `axis` as a noun, and WordNet lists it under nouns alone, so a merged map
+    /// would answer whichever file was read last.
+    ///
+    /// Empty when the `dict/` has no `noun.exc` — the DB-only WordNet tarball
+    /// carries neither `.exc` file, and a directory that is missing this one
+    /// still loads.
+    pub noun_exceptions: BTreeMap<String, Vec<String>>,
 }
 
 /// A `dict/` line that is part of the licence header rather than data.
@@ -130,13 +155,15 @@ impl WordNet {
             wn.synsets.insert(offset, s);
         }
 
-        let exc = read_latin1(&dict.join("verb.exc"))?;
-        for line in exc.lines() {
-            let mut it = line.split_whitespace();
-            if let (Some(inflected), Some(base)) = (it.next(), it.next()) {
-                wn.exceptions.insert(unslash(inflected), unslash(base));
-            }
-        }
+        wn.exceptions = read_exc(&dict.join("verb.exc"))?;
+        // Optional: only the full WordNet-3.0 tarball carries the `.exc` files
+        // at all, and a caller that only wants synonymy should not be stopped by
+        // the absence of the noun half.
+        wn.noun_exceptions = match read_exc(&dict.join("noun.exc")) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => return Err(e),
+        };
 
         Ok(wn)
     }
@@ -145,6 +172,34 @@ impl WordNet {
     pub fn words_of(&self, offset: u32) -> &[String] {
         self.synsets.get(&offset).map_or(&[], |s| &s.words[..])
     }
+}
+
+/// One WordNet exception list — `verb.exc` or `noun.exc` — as
+/// `inflected form → base forms`.
+///
+/// The format is one space-separated line per form: the inflection, then every
+/// base WordNet resolves it to. Both files are read by this one function so the
+/// two can never drift apart.
+///
+/// WordNet's lines are kept VERBATIM, self-referential ones included: ten verb
+/// lines and fifteen noun lines give the form back as its own base (`bed bed`,
+/// `is is`), which is WordNet saying *this is not an inflection of anything,
+/// leave it alone*. Dropping them here would quietly change what
+/// [`WordNet::exceptions`] means to the callers that were reading it before the
+/// noun list arrived; the one consumer for which a self-pair is useless — the
+/// shipped `irregular_forms.tsv`, where it would offer a player the word they
+/// just typed — drops it as it writes.
+fn read_exc(path: &Path) -> std::io::Result<BTreeMap<String, Vec<String>>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for line in read_latin1(path)?.lines() {
+        let mut it = line.split_whitespace().map(unslash);
+        let Some(inflected) = it.next() else { continue };
+        let bases: Vec<String> = it.collect();
+        if !bases.is_empty() {
+            out.insert(inflected, bases);
+        }
+    }
+    Ok(out)
 }
 
 /// WordNet spells multi-word lemmas with `_`; everything else in this generator

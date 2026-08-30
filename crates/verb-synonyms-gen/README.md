@@ -59,7 +59,7 @@ exact releases by SHA-256.
 
 | source | version | what it supplies |
 |---|---|---|
-| [WordNet](https://wordnet.princeton.edu/) `dict/` | **3.0** (2006), `WordNet-3.0.tar.gz`, sha256 `640db279…d3a52` | synonymy (`data.verb`, `index.verb`), the hypernym pointer graph, and irregular verb inflections (`verb.exc`) |
+| [WordNet](https://wordnet.princeton.edu/) `dict/` | **3.0** (2006), `WordNet-3.0.tar.gz`, sha256 `640db279…d3a52` | synonymy (`data.verb`, `index.verb`), the hypernym pointer graph, and the irregular inflections of verbs (`verb.exc`) and nouns (`noun.exc`) |
 | [12dicts](http://wordlist.aspell.net/12dicts/) `Lemmatized/2+2+3frq.txt` | **6.0.2** (June 2016), `12dicts-6.0.2.zip`, sha256 `64ac1d35…780e52` | the frequency ranking (21 bands, commonest first) and a lemmatisation map, headword at column 0 with its inflected and derived forms indented |
 
 Licences: both are permissive and compatible with lanthorn's BSD-3-Clause, and
@@ -100,6 +100,12 @@ cargo run -p verb-synonyms-gen -- build \
     --if-groups crates/verb-synonyms-gen/if_groups.tsv \
     -o crates/verb-synonyms/src/synonym_groups.tsv
 
+# Step 3 — the irregular inflections. Independent of the other two: it reads no
+# corpus and no frequency list, because `lit` is `light` whoever is playing.
+cargo run -p verb-synonyms-gen -- irregulars \
+    --wordnet /tmp/verbsyn/WordNet-3.0/dict \
+    -o crates/verb-synonyms/src/irregular_forms.tsv
+
 cargo nextest run -p verb-synonyms   # the canonical mappings must survive
 ```
 
@@ -133,6 +139,30 @@ entry before it is believed), on the 1,365-verb basis:
 One story is one author's idiom: at support 1 the corpus contributes a
 33-member `attack` group carrying `vandalise` and `torture`, and a 21-member
 `cut`. Two is where those disappear and the survivors are IF conventions.
+
+## The second table
+
+`irregular_forms.tsv` is the other half of English morphology, and it is a
+straight copy of WordNet's exception lists rather than anything derived. The
+consumer, `app`'s `vocab::stems`, reaches every REGULAR inflection with a rule —
+strip `ing`, `ed`, `es`, `s`, put back the letter the spelling dropped — and
+cannot ever reach the irregular ones, because `lit` shares no letters with the
+ending that would have made it from `light`. Nor can the near miss: `lit` is two
+keystrokes away and that threshold is one, deliberately.
+
+Two things about it differ from the synonym table and are worth stating.
+
+**It is SORTED, and that is safe here.** Nothing about an irregular form's bases
+is ranked — they are alternative readings of one spelling, and only the story's
+own dictionary can choose between them — so the file is sorted to be greppable
+and to diff cleanly. `synonym_groups.tsv` must never be, because its line order
+carries WordNet's sense ranking.
+
+**It carries NOUNS as well as verbs.** `vocab::stems` is asked about every
+position in a command, not only the opening word, so `mice` → `mouse` is the
+identical case to `lit` → `light` one slot to the right. The two exception lists
+are read into two maps and never merged: a form can inflect two parts of speech
+to two different lemmas, and one map would have to drop one of them.
 
 ## Why `if_verbs.tsv` and `if_groups.tsv` are committed
 

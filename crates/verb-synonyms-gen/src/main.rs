@@ -7,7 +7,15 @@
 //! verb-synonyms-gen build --wordnet <dict> --freq <2+2+3frq.txt> \
 //!     --if-verbs if_verbs.tsv --if-groups if_groups.tsv \
 //!     -o crates/verb-synonyms/src/synonym_groups.tsv
+//! verb-synonyms-gen irregulars --wordnet <dict> \
+//!     -o crates/verb-synonyms/src/irregular_forms.tsv
 //! ```
+//!
+//! `irregulars` is the odd one out: it reads no corpus and no frequency list,
+//! because an irregular inflection is a fact about English and not about
+//! interactive fiction. It copies WordNet's own exception lists out, which is
+//! the only honest way to hold them — a hand-written table would be a second
+//! copy of this data with nothing keeping the two the same.
 //!
 //! `--groups` and `--if-groups` are the corpus's OWN synonym groups — the
 //! spellings each story's author declared to be one verb. Leaving `--if-groups`
@@ -32,8 +40,11 @@ fn main() -> ExitCode {
     let r = match args.first().map(String::as_str) {
         Some("harvest") => cmd_harvest(&args[1..]),
         Some("build") => cmd_build(&args[1..]),
+        Some("irregulars") => cmd_irregulars(&args[1..]),
         _ => {
-            eprintln!("usage: verb-synonyms-gen <harvest|build> [options]  (see crate docs)");
+            eprintln!(
+                "usage: verb-synonyms-gen <harvest|build|irregulars> [options]  (see crate docs)"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -317,7 +328,9 @@ fn lemmatise(h: &Harvest, wn: &WordNet, freq: &Frequency) -> Vec<(String, usize,
                 homographs += 1;
             }
             w.clone()
-        } else if let Some(b) = wn.exceptions.get(w).filter(|b| wn.senses.contains_key(*b)) {
+        } else if let Some(b) =
+            wn.exceptions.get(w).and_then(|b| b.first()).filter(|b| wn.senses.contains_key(*b))
+        {
             inflected.push((w.clone(), b.clone(), "verb.exc"));
             b.clone()
         } else if let Some(b) = freq
@@ -376,6 +389,114 @@ fn lemmatise(h: &Harvest, wn: &WordNet, freq: &Frequency) -> Vec<(String, usize,
             .join(" ")
     );
     out
+}
+
+// ── irregulars ───────────────────────────────────────────────────────────────
+
+/// Write `irregular_forms.tsv`: WordNet's exception lists, as `form → base`.
+///
+/// `vocab::stems` in `app` builds a base by taking an ending off, which reaches
+/// every regular inflection in English and none of the irregular ones — `lit`,
+/// `took`, `went` and `mice` share no letters with any suffix rule. This is the
+/// table that answers those, and it is GENERATED rather than written because
+/// WordNet already holds it: a hand table would be a second copy of the same
+/// data, to be reconciled with the first every time either one moved.
+///
+/// NOUNS as well as verbs, which is wider than the quest asked for and
+/// deliberate: `stems` is consulted from a position-generic place, so it serves
+/// the noun slot of a command as well as the verb slot, and `mice → mouse` is
+/// the same case as `lit → light` one slot to the right.
+fn cmd_irregulars(args: &[String]) -> Result<(), String> {
+    let m = opts(args)?;
+    let out = PathBuf::from(one(&m, "out")?);
+    let dict = one(&m, "wordnet")?;
+    let wn = WordNet::load(std::path::Path::new(&dict)).map_err(|e| format!("wordnet: {e}"))?;
+    if wn.noun_exceptions.is_empty() {
+        return Err(format!(
+            "{dict}/noun.exc is missing or empty — the DB-only WNdb tarball does not carry the \
+             exception lists; fetch-sources.sh downloads the full WordNet-3.0.tar.gz"
+        ));
+    }
+
+    // A SET, so a pair both parts of speech list is written once. Sorted,
+    // because unlike `synonym_groups.tsv` nothing here depends on line order.
+    let mut rows: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut verb_rows = 0usize;
+    let mut noun_rows = 0usize;
+    for (map, n) in [
+        (&wn.exceptions, &mut verb_rows),
+        (&wn.noun_exceptions, &mut noun_rows),
+    ] {
+        for (form, bases) in map {
+            for base in bases {
+                // WordNet gives ten verb forms and fifteen noun forms back as
+                // their own base — `bed bed`, `is is` — which is its way of
+                // saying the form is not an inflection at all. As a row here it
+                // would offer a player the word they just typed.
+                if base == form {
+                    continue;
+                }
+                *n += 1;
+                rows.insert((form.clone(), base.clone()));
+            }
+        }
+    }
+    let forms: BTreeSet<&str> = rows.iter().map(|(f, _)| f.as_str()).collect();
+
+    let mut f = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+    let head = format!(
+        "\
+# Irregular inflections — the forms no suffix rule can reach.  GENERATED; do
+# not hand-edit.
+#
+# Regenerate:
+#   ./crates/verb-synonyms-gen/fetch-sources.sh /tmp/verbsyn
+#   cargo run -p verb-synonyms-gen -- irregulars \\
+#       --wordnet /tmp/verbsyn/WordNet-3.0/dict \\
+#       -o crates/verb-synonyms/src/irregular_forms.tsv
+#
+# SOURCE: WordNet 3.0 (Princeton University, 2006) — `verb.exc` and `noun.exc`
+# out of WordNet-3.0.tar.gz, sha256 640db279…d3a52.  The notice Princeton's
+# licence requires is in THIRD-PARTY-NOTICES.md at the repository root.  The
+# DB-only WNdb-3.0.tar.gz carries neither file, which is why fetch-sources.sh
+# takes the full tarball.
+#
+# FORMAT: one `form<TAB>base` per line.  A form appears on SEVERAL lines when
+# WordNet gives it more than one base — `axes` is `ax` and `axis`, `singing` is
+# `sing` and `singe`, `overflown` is `overflow` and `overfly` — which is why the
+# reader hands back a slice and lets the story's own dictionary choose.
+#
+# SORTED, and unlike synonym_groups.tsv that is safe: nothing here depends on
+# line order.  A form's bases are alternative readings of one spelling with no
+# ranking between them available or wanted, so the file is sorted to be
+# greppable and to diff cleanly across a regeneration.
+#
+# VERBS AND NOUNS BOTH.  `lit` → `light` is the motivating case, but the
+# consumer (`vocab::stems` in `app`) is asked about every position in a command,
+# so `mice` → `mouse` is the same case one slot to the right.  A pair that both
+# lists give is written once.
+#
+# {} verb rows, {} noun rows, {} lines, {} distinct forms.
+",
+        verb_rows,
+        noun_rows,
+        rows.len(),
+        forms.len(),
+    );
+    write!(f, "{head}").map_err(|e| e.to_string())?;
+    for (form, base) in &rows {
+        writeln!(f, "{form}\t{base}").map_err(|e| e.to_string())?;
+    }
+
+    eprintln!("verb.exc rows                 {verb_rows}");
+    eprintln!("noun.exc rows                 {noun_rows}");
+    eprintln!("lines written                 {}", rows.len());
+    eprintln!("  distinct forms              {}", forms.len());
+    eprintln!(
+        "  extra bases beyond one per form {}",
+        rows.len() - forms.len()
+    );
+    Ok(())
 }
 
 // ── build ────────────────────────────────────────────────────────────────────

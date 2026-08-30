@@ -891,6 +891,7 @@ fn common_verbs(wn: &WordNet, freq: &Frequency, p: &Params) -> Vec<String> {
         } else if let Some(b) = wn
             .exceptions
             .get(lemma)
+            .and_then(|b| b.first())
             .filter(|b| wn.senses.contains_key(*b))
         {
             b.clone()

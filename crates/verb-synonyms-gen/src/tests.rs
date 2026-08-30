@@ -57,7 +57,9 @@ fn wordnet_fixture() -> WordNet {
          02091410 38 v 02 run 0 hurry 0 000 | move fast\n",
     )
     .unwrap();
-    std::fs::write(d.join("verb.exc"), "lit light\nran run\nsaw see\n").unwrap();
+    std::fs::write(d.join("verb.exc"), "lit light\nran run\nsaw see\nsinging sing singe\n")
+        .unwrap();
+    std::fs::write(d.join("noun.exc"), "mice mouse\naxes ax axis\nis is\n").unwrap();
     WordNet::load(&d).expect("fixture loads")
 }
 
@@ -84,7 +86,45 @@ fn wordnet_synsets_carry_their_words_and_verb_pointers() {
         "underscores must become spaces and the licence header must be skipped"
     );
     assert_eq!(wn.synsets[&2058590].pointers, [("@".to_string(), 2091410)]);
-    assert_eq!(wn.exceptions["lit"], "light");
+    assert_eq!(wn.exceptions["lit"], ["light"]);
+}
+
+/// The two exception lists are read the same way and kept APART.
+///
+/// Apart because `main.rs`'s inflected-IF-verb measurement counts `exceptions`
+/// and would start meaning something else if nouns joined it, and because a
+/// spelling can inflect two parts of speech to different lemmas — one map would
+/// answer whichever file was read second.
+#[test]
+fn the_noun_and_verb_exception_lists_stay_apart() {
+    let wn = wordnet_fixture();
+    assert_eq!(wn.noun_exceptions["mice"], ["mouse"]);
+    assert!(!wn.exceptions.contains_key("mice"), "a noun is not in the verb map");
+    assert_eq!(
+        wn.exceptions["singing"],
+        ["sing", "singe"],
+        "WordNet puts two bases on some lines and neither may be dropped"
+    );
+    assert_eq!(wn.noun_exceptions["axes"], ["ax", "axis"]);
+    assert_eq!(
+        wn.noun_exceptions["is"],
+        ["is"],
+        "WordNet's lines are kept verbatim — `is is` is it saying `is` inflects nothing, \
+         and it is the TABLE WRITER that drops a self-pair, not the reader"
+    );
+}
+
+/// `noun.exc` is optional: the DB-only WordNet tarball carries no exception
+/// lists at all, and a `dict/` without this one still loads for everything else.
+#[test]
+fn a_dict_without_noun_exc_still_loads() {
+    let d = scratch("wn-no-noun");
+    std::fs::write(d.join("index.verb"), "light v 1 1 @ 1 1 00291873  \n").unwrap();
+    std::fs::write(d.join("data.verb"), "00291873 30 v 01 light 0 000 | make lighter\n").unwrap();
+    std::fs::write(d.join("verb.exc"), "lit light\n").unwrap();
+    let wn = WordNet::load(&d).expect("a dict with no noun.exc still loads");
+    assert_eq!(wn.exceptions["lit"], ["light"]);
+    assert!(wn.noun_exceptions.is_empty());
 }
 
 #[test]
