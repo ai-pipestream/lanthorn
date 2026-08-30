@@ -268,7 +268,7 @@ pub fn table() -> String {
             yes_no(m.global_colour_pens),
             yes_no(m.v6_screen_page),
             yes_no(m.one_screen_palette),
-            format!("{}x{}", m.v6_cell.w, m.v6_cell.h),
+            format!("{}x{}", m.v6_cell.w(), m.v6_cell.h()),
             // Which space this machine's own RELEASE typefaces are authored in,
             // which is not always the space its ARTWORK is (SQ-1039), and not always
             // the space its SYSTEM face is either (SQ-1053). Only the Amiga says
@@ -584,10 +584,10 @@ mod tests {
             // the archive" are different answers and a reader cannot tell them
             // apart from an empty column.
             assert!(
-                all.contains(&format!("{}x{}", v6_cell.w, v6_cell.h)),
+                all.contains(&format!("{}x{}", v6_cell.w(), v6_cell.h())),
                 "{name}: v6 cell {}x{} not in\n{all}",
-                v6_cell.w,
-                v6_cell.h,
+                v6_cell.w(),
+                v6_cell.h(),
             );
             match v6_std_window {
                 Some((w, h)) => {

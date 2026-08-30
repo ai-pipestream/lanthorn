@@ -226,7 +226,7 @@ fn the_amiga_floppy_declares_the_faces_own_twenty_row_line() {
     // And the story RECEIVED it — the boot is what makes the declaration real.
     assert_eq!(session.machine.v6_cell(), zvm::screen::V6Cell::new(8, 20), "the engine holds it too");
     assert_eq!(
-        u32::from(machine.cell.h),
+        u32::from(machine.cell.h()),
         u32::from(face.height) * 2 * CAPTURE_IS_NATIVE_SCALE,
         "20 native rows = the 10 machine rows `amiga-arthur.png` measures, doubled",
     );
@@ -307,8 +307,8 @@ fn the_raster_prose_draws_the_runs_the_capture_measures() {
             main.lines,
         );
         let mut canvas = image::RgbaImage::from_pixel(
-            cols as u32 * u32::from(tf.cell().w),
-            rows as u32 * u32::from(tf.cell().h),
+            cols as u32 * u32::from(tf.cell().w()),
+            rows as u32 * u32::from(tf.cell().h()),
             ground,
         );
         v6::draw_story_text(&mut canvas, &main, 0, 0, cols, rows, ink, &[], &tf, None);
@@ -346,7 +346,7 @@ fn raster_prose_wraps_by_pixel_and_fills_the_line() {
                 with a sword thrust deep into it and words engraved upon its face.";
     state.push_transcript_kind(para, app::state::TranscriptKind::Story);
     let (cols, rows) = (73u16, 8u16);
-    let box_px = cols as u32 * u32::from(tf.cell().w);
+    let box_px = cols as u32 * u32::from(tf.cell().w());
     let (main, _) = app::render::screen::build_main_text(&state, cols, rows);
     let full: Vec<&String> = main.lines.iter().filter(|l| !l.is_empty()).collect();
     assert!(full.len() >= 3, "non-vacuity: the paragraph must wrap several times, got {full:?}");
@@ -373,7 +373,7 @@ fn raster_prose_wraps_by_pixel_and_fills_the_line() {
     assert!(
         full[..full.len() - 1]
             .iter()
-            .all(|l| cell.run_px(l) + 4 * u32::from(cell.w) < box_px),
+            .all(|l| cell.run_px(l) + 4 * u32::from(cell.w()) < box_px),
         "every full row must stop well short of its COLUMN budget — the pen ran out \
          first: {:?}",
         full.iter().map(|l| (l.chars().count(), tf.run_px(l))).collect::<Vec<_>>(),
@@ -561,7 +561,7 @@ fn a_bold_prose_line_wraps_at_the_width_it_will_be_drawn_at() {
     }]];
     state.transcript_images = vec![None];
 
-    let cols = (PROSE_WINDOW_PX / u32::from(tf.cell().w)) as u16;
+    let cols = (PROSE_WINDOW_PX / u32::from(tf.cell().w())) as u16;
     let (main, _) = app::render::screen::build_main_text(&state, cols, 12);
     let rows: Vec<(&String, u8)> = main
         .lines
@@ -1017,7 +1017,7 @@ fn the_hybrid_grid_and_the_pixel_runs_are_one_layout() {
         .find(|it| it.y_px == 0 && u32::from(it.w_px) == PROSE_WINDOW_PX)
         .expect("F5 opens a full-width description window at the top");
     let WinNode::Grid(g) = &win.node else { panic!("a v6 prose window is a Grid") };
-    let cols = PROSE_WINDOW_PX / u32::from(cell.w);
+    let cols = PROSE_WINDOW_PX / u32::from(cell.w());
 
     // 1. Every run's grid ROW is the row its own pixel y falls in. This is the
     //    invariant two passes cannot hold, and it is the one that put a word on the
@@ -1347,7 +1347,7 @@ fn the_raster_inventory_page_keeps_its_rules_and_loses_the_flood() {
     let Some((mut session, state)) = in_the_churchyard() else { return };
     let _ = session.submit_char(135); // F3 — the inventory screen
     let canvas = raster(&session, &state);
-    let row_h = u32::from(state.v6_text.cell().h);
+    let row_h = u32::from(state.v6_text.cell().h());
     let ground = *canvas.get_pixel(canvas.width() - 3, canvas.height() - 3);
 
     // Ink across the middle of text row `r`, ignoring the outer margins.
@@ -1425,7 +1425,7 @@ fn the_score_bar_comes_back_as_cells_after_an_in_game_restart() {
     // pass while saying nothing.
     assert_eq!(
         machine.text_face().cell(),
-        zvm::screen::V6Cell { w: 8, h: 20 },
+        zvm::screen::V6Cell::new(8, 20),
         "{FIXTURE}: the release face declares a 20-row line, which is what a restart \
          has to restate",
     );

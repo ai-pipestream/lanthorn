@@ -603,24 +603,24 @@ fn a_metric_faces_declared_line_takes_the_text_scale_not_the_archives() {
     assert_eq!(fit(&face, P::Amiga, (2, 2)), Some(FaceFit::Metric), "admitted on the Amiga");
 
     assert_eq!(
-        declared_cell(P::Macintosh, &released(P::Macintosh, (2, 2)), (2, 2)).h,
+        declared_cell(P::Macintosh, &released(P::Macintosh, (2, 2)), (2, 2)).h(),
         15,
         "the Macintosh COLOUR press declares the face's own fifteen rows, not thirty",
     );
     assert_eq!(
-        declared_cell(P::Macintosh, &released(P::Macintosh, (1, 1)), (1, 1)).h,
+        declared_cell(P::Macintosh, &released(P::Macintosh, (1, 1)), (1, 1)).h(),
         15,
         "the monochrome press agrees, as it does under either rule",
     );
     assert_eq!(
-        declared_cell(P::Amiga, &released(P::Amiga, (2, 2)), (2, 2)).h,
+        declared_cell(P::Amiga, &released(P::Amiga, (2, 2)), (2, 2)).h(),
         30,
         "the Amiga's RELEASE face IS in the picture space, so a doubled press doubles it",
     );
     // The WIDTH never follows the face on either machine: a proportional face has no
     // single advance, and this repo does not guess a declared metric.
-    assert_eq!(declared_cell(P::Macintosh, &released(P::Macintosh, (2, 2)), (2, 2)).w, 7);
-    assert_eq!(declared_cell(P::Amiga, &released(P::Amiga, (2, 2)), (2, 2)).w, 8);
+    assert_eq!(declared_cell(P::Macintosh, &released(P::Macintosh, (2, 2)), (2, 2)).w(), 7);
+    assert_eq!(declared_cell(P::Amiga, &released(P::Amiga, (2, 2)), (2, 2)).w(), 8);
 }
 
 /// **The PEN takes the same scale the cell does** (SQ-1039).

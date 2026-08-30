@@ -1583,7 +1583,7 @@ mod tests {
         let faces = crate::native_font::FaceSet::release(font, profile, None);
         assert!(faces.body().is_some(), "non-vacuity: the synthetic face was admitted");
         let tf = crate::native_font::TextFace::new(profile, faces, None);
-        assert_eq!((tf.cell().w, tf.cell().h), (7, 15), "non-vacuity: this IS the Macintosh cell");
+        assert_eq!((tf.cell().w(), tf.cell().h()), (7, 15), "non-vacuity: this IS the Macintosh cell");
 
         // Masked to the cell's seven columns: the face is 7 wide, so bit 0 of each
         // row is past its right edge and the blit never reads it.

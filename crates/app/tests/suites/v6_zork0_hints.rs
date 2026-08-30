@@ -479,7 +479,7 @@ fn a_promoted_menu_grid_is_not_a_transcript_surface_in_raster() {
                 .filter(|&y| {
                     (mx..(mx + mw).min(clean.width())).any(|x| *clean.get_pixel(x, y) != page)
                 })
-                .map(|y| (y - my) / u32::from(cell.h))
+                .map(|y| (y - my) / u32::from(cell.h()))
                 .collect();
             assert!(
                 rows.len() >= 4,

@@ -477,7 +477,7 @@ fn an_amiga_story_is_offered_topaz_and_never_the_workbench_display_faces() {
 #[test]
 fn the_amigas_disk_topaz_is_not_its_version_six_cell_and_declines() {
     let cell = P::Amiga.v6_font_cell();
-    assert_eq!((cell.w, cell.h), (8, 16), "the machine table's Amiga cell");
+    assert_eq!((cell.w(), cell.h()), (8, 16), "the machine table's Amiga cell");
 
     // `fonts/topaz/11` as the parser reports it: fixed pitch, 8x11.
     let topaz = blorb::bitmap_font::BitmapFont {

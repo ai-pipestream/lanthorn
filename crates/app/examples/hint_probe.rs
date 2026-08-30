@@ -126,8 +126,8 @@ fn main() {
         u16::from_be_bytes([bytes[2], bytes[3]]),
         String::from_utf8_lossy(&bytes[0x12..0x18]),
         boot.screen_px,
-        text_face.cell().w,
-        text_face.cell().h,
+        text_face.cell().w(),
+        text_face.cell().h(),
     );
 
     // ── the host state the render paths actually read ────────────────────────
@@ -315,8 +315,8 @@ fn report(
         }
         if let Some((tx, ty, tw, th)) = prose_box {
             let _ = (tx, ty);
-            let cols = (tw / u32::from(st.v6_text.cell().w)).max(1) as u16;
-            let rows = (th / u32::from(st.v6_text.cell().h)).max(1) as u16;
+            let cols = (tw / u32::from(st.v6_text.cell().w())).max(1) as u16;
+            let rows = (th / u32::from(st.v6_text.cell().h())).max(1) as u16;
             let (main, _) = app::render::screen::build_main_text(st, cols, rows);
             println!("     raster story box {cols}x{rows}, {} line(s):", main.lines.len());
             for l in main.lines.iter() {

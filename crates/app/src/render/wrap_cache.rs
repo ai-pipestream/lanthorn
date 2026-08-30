@@ -376,8 +376,8 @@ pub(crate) fn raster_wrap_extend(cache: &mut RasterWrapCache, state: &AppState, 
     // Non-square 8x16 v6 cell (SQ-0479). Picture pixels arriving here are already
     // in unit space (session scales v6 art x2 before storing), so a float spans
     // height/font_h text rows and indents width/font_w columns.
-    let font_w = u32::from(state.v6_text.cell().w);
-    let font_h = u32::from(state.v6_text.cell().h);
+    let font_w = u32::from(state.v6_text.cell().w());
+    let font_h = u32::from(state.v6_text.cell().h());
     // A prose column narrower than this (cells) isn't worth floating a picture
     // beside — fall back to a full-width band.
     const MIN_TEXT_COLS: u16 = 8;

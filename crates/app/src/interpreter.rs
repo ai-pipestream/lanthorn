@@ -1268,7 +1268,7 @@ mod tests {
         // has always advertised, so a story with no profile is told what it always
         // was. `V6Cell::DEFAULT` is the single source of that truth now.
         assert_eq!(
-            (zvm::screen::V6Cell::DEFAULT.w, zvm::screen::V6Cell::DEFAULT.h),
+            (zvm::screen::V6Cell::DEFAULT.w(), zvm::screen::V6Cell::DEFAULT.h()),
             (zvm::screen::V6_FONT_WIDTH, zvm::screen::V6_FONT_HEIGHT),
             "V6Cell::DEFAULT and the constants must not drift apart",
         );

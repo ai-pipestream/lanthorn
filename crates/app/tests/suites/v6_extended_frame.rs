@@ -306,25 +306,25 @@ fn pair(b: &mut Booted, pane: (u16, u16)) -> Pair {
 /// `/ 16` is the shape of SQ-1020.
 #[test]
 fn the_extension_is_a_whole_magnification_and_whole_text_rows() {
-    for cell in [zvm::screen::V6Cell { w: 8, h: 16 }, zvm::screen::V6Cell { w: 7, h: 15 }] {
+    for cell in [zvm::screen::V6Cell::new(8, 16), zvm::screen::V6Cell::new(7, 15)] {
         let f = v6::RasterFrame::extended((640, 400), (800, 900), cell, Some(2.0));
         let s = f.lock.expect("a pane that holds the screen at 1:1 pins a magnification");
         assert_eq!(s, s.floor(), "cell {cell:?}: the magnification is a whole number");
         assert!(s >= 1.0, "cell {cell:?}: and never a minification");
         assert_eq!(
-            f.extension() % u32::from(cell.h),
+            f.extension() % u32::from(cell.h()),
             0,
             "cell {cell:?}: the surplus is whole text rows of this machine's cell"
         );
         assert_eq!(f.native, (640, 400), "cell {cell:?}: the GAME's screen is never changed");
         // 900 device rows at s=1 is 900 native rows; 500 of them lie below the screen.
-        assert_eq!(f.extension(), 500 / u32::from(cell.h) * u32::from(cell.h));
+        assert_eq!(f.extension(), 500 / u32::from(cell.h()) * u32::from(cell.h()));
 
         // …and the rung above it. 1280x1080 doubles the screen, so the pane is 540
         // native rows and 140 of them lie below it.
         let two = v6::RasterFrame::extended((640, 400), pane_dev(WIDE), cell, Some(2.0));
         assert_eq!(two.lock, Some(2.0), "cell {cell:?}: a pane twice the screen pins 2");
-        assert_eq!(two.extension(), 140 / u32::from(cell.h) * u32::from(cell.h));
+        assert_eq!(two.extension(), 140 / u32::from(cell.h()) * u32::from(cell.h()));
     }
 }
 
@@ -333,7 +333,7 @@ fn the_extension_is_a_whole_magnification_and_whole_text_rows() {
 /// — no lock, no extension, which is `raster` exactly.
 #[test]
 fn a_pane_with_no_surplus_is_the_plain_letterboxed_frame() {
-    let cell = zvm::screen::V6Cell { w: 8, h: 16 };
+    let cell = zvm::screen::V6Cell::new(8, 16);
     let snug = v6::RasterFrame::extended((640, 400), pane_dev(SNUG), cell, Some(2.0));
     assert_eq!(snug.extension(), 0, "640x414 leaves 14 native rows — under one text row");
     assert_eq!(snug.canvas_h, 400);
@@ -396,7 +396,7 @@ fn the_extension_grows_downward_and_the_prose_box_takes_it() {
         );
         assert_eq!(
             u32::from(ev - pv),
-            ef.extension() / u32::from(app::state::AppState::default().v6_text.cell().h),
+            ef.extension() / u32::from(app::state::AppState::default().v6_text.cell().h()),
             "{}: and it is exactly the whole text rows the frame added",
             spec.file
         );
@@ -865,7 +865,7 @@ fn a_parser_error_does_not_resize_arthurs_extended_frame() {
         extends: true,
     };
     let Some(mut b) = boot(&spec) else { return };
-    let cell = u32::from(b.face.cell().h);
+    let cell = u32::from(b.face.cell().h());
 
     // The clean turn: `look` parsed, window 3 is empty, and the frame extends.
     let clean_band = band_text(&mut b);
@@ -929,7 +929,7 @@ fn a_parser_error_does_not_resize_arthurs_extended_frame() {
 /// 0 with nothing down there, 1 for a parser message that fits, 2 for one that wraps.
 /// The quantity the whole of SQ-1157 turns on, so it is measured rather than assumed.
 fn band_rows(b: &mut Booted) -> u16 {
-    let cell = u32::from(b.face.cell().h.max(1));
+    let cell = u32::from(b.face.cell().h().max(1));
     let model = b.session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("a v6 frame has a Layered root") };
     let layout = v6::classify_windows(items, b.face.cell());
@@ -1348,7 +1348,7 @@ fn the_macintosh_cell_is_what_the_extension_counts_in() {
             m.file, m.pictures, b.profile
         );
         assert_eq!(
-            (cell.w, cell.h),
+            (cell.w(), cell.h()),
             (7, 15),
             "{} [{:?}]: the Version 6 cell is the MACHINE's (SQ-0917)",
             m.file, m.pictures
@@ -1379,7 +1379,7 @@ fn the_macintosh_cell_is_what_the_extension_counts_in() {
              {}x{} (lock {:?})",
             m.file,
             m.pictures,
-            (cell.w, cell.h),
+            (cell.w(), cell.h()),
             b.art_scale,
             b.face.scale(),
             plain.width(),
@@ -1413,10 +1413,10 @@ fn the_macintosh_cell_is_what_the_extension_counts_in() {
         // (2) The extension is whole 7x15 text rows, with no partial row: the canvas
         // is the game's screen plus a whole multiple of the MACHINE's cell height.
         assert_eq!(
-            ef.extension() % u32::from(cell.h),
+            ef.extension() % u32::from(cell.h()),
             0,
             "{} [{:?}]: the extension must be whole rows of a {}-tall cell, not {}",
-            m.file, m.pictures, cell.h, ef.extension()
+            m.file, m.pictures, cell.h(), ef.extension()
         );
         assert_eq!(extended.height(), plain.height() + ef.extension());
         assert_eq!(extended.width(), plain.width(), "{}: never sideways", m.file);
@@ -1426,13 +1426,13 @@ fn the_macintosh_cell_is_what_the_extension_counts_in() {
         let ev = em.expect("and so does the extended one").viewport_rows;
         assert_eq!(
             u32::from(ev - pv),
-            ef.extension() / u32::from(cell.h),
+            ef.extension() / u32::from(cell.h()),
             "{} [{:?}]: raster {pv} rows, extended {ev} — not the {} rows the frame added",
             m.file,
             m.pictures,
-            ef.extension() / u32::from(cell.h)
+            ef.extension() / u32::from(cell.h())
         );
-        eprintln!("      prose {pv} -> {ev} rows of a {}px cell", cell.h);
+        eprintln!("      prose {pv} -> {ev} rows of a {}px cell", cell.h());
         extended_any += 1;
         }
     }
@@ -1541,7 +1541,7 @@ fn a_game_saved_in_extended_still_extends_a_move_after_it_is_restored() {
     assert_eq!(wf.lock, Some(2.0), "…at that pane's own whole magnification");
     assert_ne!(wide.dimensions(), canvas.dimensions(), "…and a different canvas for it");
     assert_eq!(
-        wf.extension() % u32::from(fresh.face.cell().h),
+        wf.extension() % u32::from(fresh.face.cell().h()),
         0,
         "…still whole text rows"
     );

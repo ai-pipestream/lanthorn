@@ -323,8 +323,8 @@ fn scout(
     );
     println!(
         "  cell {}x{}  ·  face {}",
-        boot.cell.w,
-        boot.cell.h,
+        boot.cell.w(),
+        boot.cell.h(),
         boot.faces.body().map_or("(none)".to_string(), |f| format!(
             "{}x{}{}",
             f.width,

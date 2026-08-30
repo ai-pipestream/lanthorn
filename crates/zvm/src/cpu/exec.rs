@@ -533,7 +533,7 @@ fn boot_state_and_screen(mem: &mut Memory) -> (State, ScreenState) {
             w.x_cursor = 1;
             w.font_number = 1;
             w.font_size =
-                (cell.h << 8) | cell.w;
+                (cell.h() << 8) | cell.w();
             // frotz restart_screen: attribute 8 (buffered) everywhere...
             w.attributes = 8;
         }
@@ -546,8 +546,8 @@ fn boot_state_and_screen(mem: &mut Memory) -> (State, ScreenState) {
         // get_wind_prop before ever calling window_size) and window 0 also gets
         // the full screen HEIGHT; window 1 stays at height 0. Reseeded with the
         // real screen size by `set_screen_dims` when the host reports it.
-        let width = crate::screen::DEFAULT_SCREEN_COLS as u16 * cell.w;
-        let height = crate::screen::DEFAULT_SCREEN_ROWS as u16 * cell.h;
+        let width = crate::screen::DEFAULT_SCREEN_COLS as u16 * cell.w();
+        let height = crate::screen::DEFAULT_SCREEN_ROWS as u16 * cell.h();
         v6.windows[0].x_size = width;
         v6.windows[0].y_size = height;
         v6.windows[1].x_size = width;
@@ -868,7 +868,7 @@ impl Machine {
         self.v6_metric = metric;
         if let Some(v6) = self.screen.v6.as_mut() {
             for w in v6.windows.iter_mut() {
-                w.font_size = (cell.h << 8) | cell.w;
+                w.font_size = (cell.h() << 8) | cell.w();
             }
         }
         if self.mem.version() == 6 {
@@ -915,8 +915,8 @@ impl Machine {
         crate::screen::write_screen_dims(&mut self.mem, rows, cols, cell);
         if self.mem.version() == 6 {
             if let Some(v6) = self.screen.v6.as_mut() {
-                let width = cols.max(1) as u16 * cell.w;
-                let height = rows.max(1) as u16 * cell.h;
+                let width = cols.max(1) as u16 * cell.w();
+                let height = rows.max(1) as u16 * cell.h();
                 v6.windows[0].x_size = width;
                 v6.windows[0].y_size = height;
                 v6.windows[1].x_size = width;
@@ -2976,7 +2976,7 @@ impl Machine {
                         let width = if value == 1 { to_edge } else { (value as i32 - 1).min(to_edge) };
                         (y_abs, x_abs, width)
                     };
-                    v6.erase_screen_rect(top, left, cell.h as i32, width, &self.v6_metric);
+                    v6.erase_screen_rect(top, left, cell.h() as i32, width, &self.v6_metric);
                     // Cell-grid mirror: blank from the cursor cell rightward.
                     // The CELL the cursor is in is the grid's own pen, not the
                     // pixel cursor divided by the cell (SQ-1009): on a machine
@@ -2985,7 +2985,7 @@ impl Machine {
                     // left its head standing.
                     let w = &mut v6.windows[cur.min(7)];
                     let (row, start) = w.grid_cursor(cell);
-                    let cells = (width.max(0) as u16).div_ceil(cell.w);
+                    let cells = (width.max(0) as u16).div_ceil(cell.w());
                     for c in start..(start + cells).min(w.grid.cols + 1) {
                         w.grid.put(row, c, ' ', 0, w.fg, w.bg);
                     }
@@ -3452,8 +3452,8 @@ impl Machine {
                             w.put_prop(4, 1);
                             w.put_prop(5, w.left_margin + 1);
                         }
-                        let rows = (y / cell.h).clamp(1, GRID_CELL_CAP);
-                        let cols = (x / cell.w).clamp(1, GRID_CELL_CAP);
+                        let rows = (y / cell.h()).clamp(1, GRID_CELL_CAP);
+                        let cols = (x / cell.w()).clamp(1, GRID_CELL_CAP);
                         w.grid.resize(rows, cols);
                     }
                 }
@@ -4123,9 +4123,9 @@ impl Machine {
         let w = &v6.windows[(win as usize).min(7)];
         // 1-based pixel column, relative to the window's own left margin.
         (
-            usize::from(col.saturating_sub(1).saturating_sub(w.left_margin) / cell.w),
+            usize::from(col.saturating_sub(1).saturating_sub(w.left_margin) / cell.w()),
             usize::from(
-                row.saturating_sub(1).saturating_add(cell.h / 2) / cell.h,
+                row.saturating_sub(1).saturating_add(cell.h() / 2) / cell.h(),
             ),
         )
     }
@@ -4226,7 +4226,7 @@ impl Machine {
         // reasoning alone would be choosing a rule with only one frame in hand,
         // which is how the last several of these went wrong.
         let right_edge = w.x_size.saturating_sub(w.right_margin);
-        let cols = u32::from(right_edge / cell.w.max(1));
+        let cols = u32::from(right_edge / cell.w().max(1));
         let breaks = crate::screen::wrap_text(
             s,
             (u32::from(w.x_cursor.max(1)), u32::from(w.grid_cursor(cell).1)),
@@ -4449,8 +4449,8 @@ impl Machine {
                 // width for every glyph and everything below is what it was.
                 let metric = &self.v6_metric;
                 if let Some(w) = self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(idx)) {
-                    let fw = cell.w;
-                    let fh = cell.h;
+                    let fw = cell.w();
+                    let fh = cell.h();
                     let (fg, bg) = (w.fg, w.bg);
                     let bound = screen_h.max(w.grid.rows) * fh; // px bound
                     // What this window does with text that reaches its right
@@ -5664,9 +5664,9 @@ pub(crate) mod tests {
         for (cell, want_font_size) in [
             // Arthur's Amiga floppy, whose release face declares a 20-row line
             // (SQ-1009) — the press the defect was reported on.
-            (V6Cell { w: 8, h: 20 }, 0x1408u16),
+            (V6Cell::new(8, 20), 0x1408u16),
             // …and a Macintosh, where the cell also divides neither axis.
-            (V6Cell { w: 7, h: 15 }, 0x0F07u16),
+            (V6Cell::new(7, 15), 0x0F07u16),
         ] {
             let mut m = Machine::new(Memory::new(v6_boot_story(&[0xB0])).unwrap());
             m.set_v6_cell(cell);
@@ -5682,7 +5682,7 @@ pub(crate) mod tests {
             assert_eq!(m.v6_cell(), cell, "{cell:?}: the metric is the machine's and survives");
             assert_eq!(
                 (m.mem.read_byte(0x27), m.mem.read_byte(0x26)),
-                (cell.w as u8, cell.h as u8),
+                (cell.w() as u8, cell.h() as u8),
                 "{cell:?}: …and the header still states it",
             );
             assert_eq!(
@@ -12716,7 +12716,7 @@ pub(crate) mod tests {
         assert!(w.y_cursor >= WINDOW_PX_CAP, "y_cursor saturated rather than wrapping");
         assert!(w.x_cursor >= 1, "x_cursor did not wrap through zero, got {}", w.x_cursor);
         assert!(
-            u32::from(w.x_cursor) <= u32::from(w.x_size) + u32::from(m.v6_metric.cell().w),
+            u32::from(w.x_cursor) <= u32::from(w.x_size) + u32::from(m.v6_metric.cell().w()),
             "x_cursor stays inside the window it clips at, got {} in {}",
             w.x_cursor,
             w.x_size,

@@ -246,7 +246,7 @@ pub struct MainText {
 /// game to read back (ZMSD §8.8.3.2).
 pub fn native_extent(items: &[PositionedWindow], tf: &crate::native_font::TextFace) -> (u16, u16) {
     let cell = tf.cell();
-    let font_h = u32::from(cell.h);
+    let font_h = u32::from(cell.h());
     let mut w = 1u16;
     let mut h = 1u16;
     let resolved = |px: u16| (px as i16) >= 0; // high bit clear ⇒ a real size
@@ -835,8 +835,8 @@ pub fn chrome_text_rects(
     tf: &crate::native_font::TextFace,
 ) -> Vec<(u32, u32, u32, u32)> {
     let cell = tf.cell();
-    let font_w = u32::from(cell.w);
-    let font_h = u32::from(cell.h);
+    let font_w = u32::from(cell.w());
+    let font_h = u32::from(cell.h());
     let mut rects = Vec::new();
     for it in chrome {
         // A secondary prose window's lines are drawn onto the composite too
@@ -1170,8 +1170,8 @@ pub fn story_prose_box(
     story_gfx: Option<&PositionedWindow>,
     cell: V6Cell,
 ) -> Option<(u32, u32, u32, u32)> {
-    let font_w = u32::from(cell.w);
-    let font_h = u32::from(cell.h);
+    let font_w = u32::from(cell.w());
+    let font_h = u32::from(cell.h());
     plate_free_box(clear, story_gfx).filter(|&(_, _, w, h)| w >= MIN_PROSE_COLS * font_w && h >= font_h)
 }
 
@@ -1206,8 +1206,8 @@ fn fill_reverse_row_gaps(
     colors: &ColorScheme,
     tf: &crate::native_font::TextFace,
 ) {
-    let font_w = u32::from(tf.cell().w);
-    let font_h = u32::from(tf.cell().h);
+    let font_w = u32::from(tf.cell().w());
+    let font_h = u32::from(tf.cell().h());
     use std::collections::BTreeMap;
     let full_w = canvas.width();
     let mut rows: BTreeMap<u32, Vec<&PxText>> = BTreeMap::new();
@@ -1338,8 +1338,8 @@ fn fill_explicit_bg_rows(
     colors: &ColorScheme,
     tf: &crate::native_font::TextFace,
 ) {
-    let font_w = u32::from(tf.cell().w);
-    let font_h = u32::from(tf.cell().h);
+    let font_w = u32::from(tf.cell().w());
+    let font_h = u32::from(tf.cell().h());
     use std::collections::BTreeMap;
     let mut rows: BTreeMap<u32, Vec<&PxText>> = BTreeMap::new();
     for t in texts {
@@ -1460,7 +1460,7 @@ pub fn clear_text_columns(canvas: &mut RgbaImage, cols: &[(u32, u32)], rows: (u3
 /// pixels per frame, 90% of them outside any run's glyph span, in
 /// `fill_explicit_bg_rows`' full-window flood.
 pub fn clear_text_rows(canvas: &mut RgbaImage, runs: &[(u16, u32, u32)], cell: V6Cell) {
-    let font_h = u32::from(cell.h);
+    let font_h = u32::from(cell.h());
     let (w, h) = (canvas.width(), canvas.height());
     for &(top, x0, x1) in runs {
         let y0 = top as u32;
@@ -1555,7 +1555,7 @@ impl TextLayer<'_> {
         match self {
             TextLayer::All => false,
             TextLayer::SkipGlyphRows(rows) => {
-                let h = u32::from(cell.h);
+                let h = u32::from(cell.h());
                 rows.iter().any(|&top| (top as u32..top as u32 + h).contains(&y))
             }
         }
@@ -1644,8 +1644,8 @@ pub fn build_chrome_canvas(
     tf: &crate::native_font::TextFace,
 ) -> RgbaImage {
     let cell = tf.cell();
-    let font_w = u32::from(cell.w);
-    let font_h = u32::from(cell.h);
+    let font_w = u32::from(cell.w());
+    let font_h = u32::from(cell.h());
     let mut canvas = RgbaImage::new(native.0 as u32, native.1 as u32);
 
     // Pass 1 — Graphics entries.
@@ -1883,8 +1883,8 @@ pub fn draw_secondary_prose(
     tf: &crate::native_font::TextFace,
 ) {
     let cell = tf.cell();
-    let font_w = u32::from(cell.w);
-    let font_h = u32::from(cell.h);
+    let font_w = u32::from(cell.w());
+    let font_h = u32::from(cell.h());
     for it in chrome {
         let WinNode::Buffer(b) = &it.node else { continue };
         let fg = match b.fg.filter(|_| honor) {
@@ -1963,8 +1963,8 @@ pub fn draw_story_canvas_runs(
     tf: &crate::native_font::TextFace,
 ) {
     let cell = tf.cell();
-    let font_w = u32::from(cell.w);
-    let font_h = u32::from(cell.h);
+    let font_w = u32::from(cell.w());
+    let font_h = u32::from(cell.h());
     let Some(it) = story else { return };
     let WinNode::Buffer(b) = &it.node else { return };
     // SQ-1009: a canvas window publishes one run per character just as a grid does.
@@ -2017,7 +2017,7 @@ pub fn draw_story_canvas_runs(
 /// A PRIMARY buffer is the transcript and is not drawn here at all — it yields
 /// nothing.
 fn buffer_line_rects(it: &PositionedWindow, tf: &crate::native_font::TextFace) -> Vec<(u32, u32, u32, u32)> {
-    let font_h = u32::from(tf.cell().h);
+    let font_h = u32::from(tf.cell().h());
     let WinNode::Buffer(b) = &it.node else { return Vec::new() };
     if b.primary {
         return Vec::new();
@@ -2185,7 +2185,7 @@ impl FrameGeometry {
     /// adding a case for it.
     pub fn step(self) -> u32 {
         let g_art = gcd(self.art_scale.0.max(1), self.art_scale.1.max(1));
-        let g_cell = gcd(u32::from(self.cell.w), u32::from(self.cell.h));
+        let g_cell = gcd(u32::from(self.cell.w()), u32::from(self.cell.h()));
         gcd(g_art, g_cell).max(1)
     }
 
@@ -2272,7 +2272,7 @@ impl RasterFrame {
         cap: Option<f64>,
     ) -> RasterFrame {
         let plain = RasterFrame::native(native);
-        if native.0 == 0 || native.1 == 0 || cell.h == 0 {
+        if native.0 == 0 || native.1 == 0 || cell.h() == 0 {
             return plain;
         }
         let fit = (f64::from(pane_dev.0) / f64::from(native.0))
@@ -2287,10 +2287,10 @@ impl RasterFrame {
         // The native rows the pane shows at `s`, and the whole text rows of them
         // that lie below the game's own screen.
         let rows_px = (f64::from(pane_dev.1) / s).floor() as u32;
-        let extra = rows_px.saturating_sub(u32::from(native.1)) / u32::from(cell.h);
+        let extra = rows_px.saturating_sub(u32::from(native.1)) / u32::from(cell.h());
         RasterFrame {
             native,
-            canvas_h: u32::from(native.1) + extra * u32::from(cell.h),
+            canvas_h: u32::from(native.1) + extra * u32::from(cell.h()),
             lock: Some(s as f32),
         }
     }
@@ -2448,8 +2448,8 @@ pub fn story_text_native(
     story_gfx: Option<&PositionedWindow>,
     cell: V6Cell,
 ) -> Option<(u32, u32, u32, u32)> {
-    let font_w = u32::from(cell.w);
-    let font_h = u32::from(cell.h);
+    let font_w = u32::from(cell.w());
+    let font_h = u32::from(cell.h());
     let s = story?;
     let declared = (s.x_px as u32, s.y_px as u32, s.w_px as u32, s.h_px as u32);
     let inset = story_clear_native(story, frame_art)
@@ -2655,8 +2655,8 @@ pub fn chrome_bands(
 /// decoration folded into them would have to be taken back out again.
 pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32, cols: u16, rows: u16, fg: Rgba<u8>, spare: &[(u32, u32, u32, u32)], tf: &crate::native_font::TextFace, reveal: Option<&crate::reveal::RasterReveal<'_>>) {
     let cell = tf.cell();
-    let font_w = u32::from(cell.w);
-    let font_h = u32::from(cell.h);
+    let font_w = u32::from(cell.w());
+    let font_h = u32::from(cell.h());
     let region_h = rows as u32 * font_h;
     // The reveal's underline, in the geometry SQ-1028 gives an emphasised run:
     // ONE MASTER ROW at the bottom of the cell — two native rows on a 16-row cell,
@@ -3072,7 +3072,7 @@ mod tests {
         );
         const TOPIC: &str = "GENERAL QUESTIONS";
         let pen = tf.run_px_styled(TOPIC, 0);
-        let declared = u32::from(tf.cell().w) * TOPIC.chars().count() as u32;
+        let declared = u32::from(tf.cell().w()) * TOPIC.chars().count() as u32;
         assert!(
             pen != declared,
             "non-vacuity: the two measures must differ ({pen} vs {declared})",
@@ -3165,7 +3165,7 @@ mod tests {
 
         const TOPIC: &str = "GREAT HALL AREA";
         let pen = tf.run_px_styled(TOPIC, 0);
-        let declared = u32::from(tf.cell().w) * TOPIC.chars().count() as u32;
+        let declared = u32::from(tf.cell().w()) * TOPIC.chars().count() as u32;
         assert!(
             pen > declared,
             "non-vacuity: this face must be WIDER than the cell here ({pen} vs {declared}),              or the two measures agree and the case proves nothing",
@@ -3250,7 +3250,7 @@ mod tests {
             Some((1, 1)),
         );
         assert!(tf.proportional(), "the precondition: a pen that varies");
-        let (cw, ch) = (u32::from(tf.cell().w), u32::from(tf.cell().h));
+        let (cw, ch) = (u32::from(tf.cell().w()), u32::from(tf.cell().h()));
 
         // The art: transparent everywhere but one patch, which is what a frame's
         // own rule or a pole looks like to the probe.
@@ -4736,8 +4736,8 @@ mod tests {
                 for (what, n) in [
                     ("art x", art.0),
                     ("art y", art.1),
-                    ("cell w", u32::from(c.w)),
-                    ("cell h", u32::from(c.h)),
+                    ("cell w", u32::from(c.w())),
+                    ("cell h", u32::from(c.h())),
                 ] {
                     let dev = n as f32 * sc.s;
                     assert!(

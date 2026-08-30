@@ -741,7 +741,7 @@ fn render_node(
                         // which trim to empty and never tripped the gate, which is why only
                         // the Amiga route showed it.
                         let x0 = t.x.max(1) as u32 - 1;
-                        let x1 = x0 + state.v6_text.cell().run_px(&t.text).max(u32::from(state.v6_text.cell().w));
+                        let x1 = x0 + state.v6_text.cell().run_px(&t.text).max(u32::from(state.v6_text.cell().w()));
                         !t.text.trim().is_empty()
                             && row >= STATUS_BAND_ROWS
                             && story_box.is_some_and(|(top, bot, left, right)| {
@@ -2704,7 +2704,7 @@ fn render_node(
                             // proportional machine it skips cells and drifts along the
                             // line. For a fixed pen it is the same subtraction it always
                             // was.
-                            let vp_col = (vp_native.0 / u32::from(state.v6_text.cell().w)) as i32;
+                            let vp_col = (vp_native.0 / u32::from(state.v6_text.cell().w())) as i32;
                             let run_col = |t: &crate::engine::PxText| {
                                 viewport.x as i32 + i32::from(t.gcol) - vp_col
                             };
@@ -2773,8 +2773,8 @@ fn render_node(
                                 // box: the run at the box's first row IS the viewport's
                                 // first row, by construction.
                                 let row = viewport.y as i32
-                                    + (t.y.max(1) as i32 - 1) / i32::from(state.v6_text.cell().h)
-                                    - (vp_native.1 as i32) / i32::from(state.v6_text.cell().h);
+                                    + (t.y.max(1) as i32 - 1) / i32::from(state.v6_text.cell().h())
+                                    - (vp_native.1 as i32) / i32::from(state.v6_text.cell().h());
                                 if row < viewport.y as i32
                                     || row >= viewport.bottom() as i32
                                     || col < viewport.x as i32
@@ -4273,8 +4273,8 @@ pub fn build_v6_raster_frame(
         // bottom), and this one additionally cannot walk prose over a bottom band the
         // game drew below its own story window.
         let th = th + extension;
-        let cols = (tw / u32::from(cell.w)).max(1) as u16;
-        let rows = (th / u32::from(cell.h)).max(1) as u16;
+        let cols = (tw / u32::from(cell.w())).max(1) as u16;
+        let rows = (th / u32::from(cell.h())).max(1) as u16;
         let (main, rm) = build_main_text(state, cols, rows);
         // …sparing the cells another window's own text already holds (SQ-0729).
         // The page fill above spares them; the GLYPHS did not, so the transcript
@@ -4337,11 +4337,11 @@ pub fn build_v6_raster_frame(
             // the other side. Both numbers come from the same pen, so they cannot
             // disagree.
             let width = state.v6_text.run_px(label);
-            let mut pen = sx + (cols as u32 * u32::from(cell.w)).saturating_sub(width);
+            let mut pen = sx + (cols as u32 * u32::from(cell.w())).saturating_sub(width);
             for ch in label.chars() {
                 let adv = state.v6_text.advance(ch);
                 crate::render::bitfont::blit_glyph(
-                    &mut canvas, ch, pen, sy + last_row * u32::from(cell.h), adv, u32::from(cell.h), prompt_ink, Some(block), Some(&state.v6_text),
+                    &mut canvas, ch, pen, sy + last_row * u32::from(cell.h()), adv, u32::from(cell.h()), prompt_ink, Some(block), Some(&state.v6_text),
                 );
                 pen += adv;
             }
@@ -4787,7 +4787,7 @@ fn overlaid_status_strip<'a>(
 /// there. (SQ-0582/SQ-0584)
 fn strip_rows(pw: &PositionedWindow, g: &crate::engine::GridWindow, cell: zvm::screen::V6Cell) -> Option<u16> {
     let first = cell.row_of_origin0(pw.y_px);
-    let last = pw.y_px.saturating_add(pw.h_px).div_ceil(cell.h).max(first + 1);
+    let last = pw.y_px.saturating_add(pw.h_px).div_ceil(cell.h()).max(first + 1);
     g.px_texts
         .iter()
         .filter(|t| !t.text.trim().is_empty())
@@ -5454,7 +5454,7 @@ fn hybrid_bottom_plan(
     // the flanks to keep the enclosing columns). Zork0 (story bottom 398/400) and
     // Shogun (400/400) both qualify. With no side art there is nothing to stretch, so
     // keep the centred letterbox.
-    if native.1 as u32 <= reach + u32::from(cell.h) {
+    if native.1 as u32 <= reach + u32::from(cell.h()) {
         let sy0 = story.y_px as u32;
         let sy1 = story_bottom.min(gfx.height());
         let sx0 = story.x_px as u32;
@@ -5517,7 +5517,7 @@ fn menu_strip_below_story(
     cell: zvm::screen::V6Cell,
 ) -> bool {
     let story_bottom = story.y_px as u32 + story.h_px as u32;
-    if native.1 as u32 <= story_bottom + u32::from(cell.h) {
+    if native.1 as u32 <= story_bottom + u32::from(cell.h()) {
         return false;
     }
     let sx0 = story.x_px as u32;
@@ -6126,7 +6126,7 @@ fn flank_border_extension(
     // and the menu: the user's "big chunk of the border missing from the right side (at
     // the bottom)". Look across ONE text cell for the ink before giving up. A
     // reverse-video block border inks offset 0, so it takes exactly the path it did.
-    let font_w = u32::from(cell.w);
+    let font_w = u32::from(cell.w());
     let seek_ink = |from: u32, outward_is_left: bool| -> Option<u32> {
         (0..font_w).find_map(|d| {
             let x = if outward_is_left { from.checked_sub(d + 1)? } else { from + d };
@@ -6254,7 +6254,7 @@ fn flank_border_extension(
         // over is one whose device span still reaches into the cell — so the crop starts
         // a native pixel or two inside it, and at a large enough scale that is where the
         // stroke lives. Widened, never narrowed: the cell's pixels are the border's.
-        let gnx1 = gnx0 + u32::from(cell.w);
+        let gnx1 = gnx0 + u32::from(cell.w());
         let dev = |nx: u32| (scale.off_x as f32 + nx as f32 * s) / cw;
         let x0 = (pane.x as i32 + dev(gnx0).floor() as i32).clamp(band.x as i32, col as i32) as u16;
         let x1 = (pane.x as i32 + dev(gnx1).ceil() as i32).clamp(col as i32 + 1, band.right() as i32) as u16;
@@ -6413,7 +6413,7 @@ fn strip_native_origin(
     cell: zvm::screen::V6Cell,
 ) -> Option<i32> {
     // The v6 text cell is 8x16 (SQ-0479).
-    let font_w = i32::from(cell.w);
+    let font_w = i32::from(cell.w());
     if runs.is_empty() {
         return None;
     }
@@ -6480,10 +6480,10 @@ fn run_cell(
     // So take the column from the grid and the remainder from the pen. On a fixed pen
     // `gcol == col_of(t.x)` and the two terms collapse back to `t.x - 1` exactly, so
     // every machine but the proportional one is bit-identical to the old answer.
-    let sub_x = f32::from(t.x.max(1) - 1) - f32::from(v6.col_of(t.x)) * f32::from(v6.w);
-    let sub_y = f32::from(t.y.max(1) - 1) - f32::from(v6.row_of(t.y)) * f32::from(v6.h);
-    let px = f32::from(t.gcol) * f32::from(v6.w) + sub_x;
-    let py = f32::from(t.grow) * f32::from(v6.h) + sub_y;
+    let sub_x = f32::from(t.x.max(1) - 1) - f32::from(v6.col_of(t.x)) * f32::from(v6.w());
+    let sub_y = f32::from(t.y.max(1) - 1) - f32::from(v6.row_of(t.y)) * f32::from(v6.h());
+    let px = f32::from(t.gcol) * f32::from(v6.w()) + sub_x;
+    let py = f32::from(t.grow) * f32::from(v6.h()) + sub_y;
     let col = pane.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32;
     let row = pane.y as i32 + ((scale.off_y as f32 + py * scale.s) / ch).round() as i32;
     (col, row)
@@ -6563,7 +6563,7 @@ fn edge_glyph_col(
     cell: zvm::screen::V6Cell,
 ) -> Option<i32> {
     // The v6 text cell is 8x16 (SQ-0479).
-    let font_w = u32::from(cell.w);
+    let font_w = u32::from(cell.w());
     let cw = cell_px.0.max(1) as f32;
     let dev = |nx: u32| (scale.off_x as f32 + nx as f32 * scale.s) / cw;
     if nx0 == 0 {
@@ -6638,7 +6638,7 @@ fn bottom_anchor(
     cell: zvm::screen::V6Cell,
 ) -> crate::engine::PositionedWindow {
     let px = u16::try_from(rows).unwrap_or(u16::MAX);
-    let cells = u16::try_from(rows / u32::from(cell.h.max(1))).unwrap_or(u16::MAX);
+    let cells = u16::try_from(rows / u32::from(cell.h().max(1))).unwrap_or(u16::MAX);
     let mut out = w.clone();
     out.y_px = out.y_px.saturating_add(px);
     out.y = out.y.saturating_add(cells);
@@ -6679,7 +6679,7 @@ fn menu_band_runs<'a>(
 /// leave under the story.
 fn menu_band_rows(menu: &[&crate::engine::PxText], cell: zvm::screen::V6Cell) -> u16 {
     // The v6 text cell is 8x16 (SQ-0479).
-    let font_h = i32::from(cell.h);
+    let font_h = i32::from(cell.h());
     let rows: Vec<i32> = menu.iter().map(|t| (t.y.max(1) as i32 - 1) / font_h).collect();
     match (rows.iter().min(), rows.iter().max()) {
         (Some(&a), Some(&b)) => (b - a + 1).clamp(0, u16::MAX as i32) as u16,
@@ -6767,8 +6767,8 @@ impl<'b> ChromeRowOracle<'_, 'b> {
     fn over_art(&self, t: &crate::engine::PxText) -> bool {
         let px0 = t.x.max(1) as u32 - 1;
         let py = t.y.max(1) as u32 - 1;
-        let w = self.v6_cell.run_px(&t.text).max(u32::from(self.v6_cell.w));
-        crate::render::v6_layout::region_has_opaque(self.gfx, px0, py, w, u32::from(self.v6_cell.h))
+        let w = self.v6_cell.run_px(&t.text).max(u32::from(self.v6_cell.w()));
+        crate::render::v6_layout::region_has_opaque(self.gfx, px0, py, w, u32::from(self.v6_cell.h()))
     }
 
     /// A run is a text-band candidate when it lies fully above or below the story
@@ -7113,7 +7113,7 @@ fn flank_art_columns(
     // moment it answers for one edge and not the other.
     //
     // It NEVER TOUCHED THE EDGE it is claimed for (see the table above).
-    let font_w = u32::from(cell.w);
+    let font_w = u32::from(cell.w());
     let reaches = |from: u32, inward: i32| {
         (0..h).any(|y| (0..font_w as i32).any(|d| opaque((from as i32 + d * inward) as u32, y)))
     };
@@ -7600,8 +7600,8 @@ fn stamp_runs_over_art(
     cell: zvm::screen::V6Cell,
 ) {
     use std::collections::HashMap;
-    let font_w = u32::from(cell.w);
-    let font_h = u32::from(cell.h);
+    let font_w = u32::from(cell.w());
+    let font_h = u32::from(cell.h());
 
     let rgb = |c: image::Rgba<u8>| ratatui::style::Color::Rgb(c.0[0], c.0[1], c.0[2]);
     // SQ-0892's rule, which this path has to obey like every other glyph path: a
@@ -7773,7 +7773,7 @@ fn draw_chrome_text_strip(
     // survive, since their indices differ by more than one; and wherever the old
     // mapping already produced consecutive rows — any pane small enough that a
     // game row is about a terminal row — the result is byte-identical.
-    let font_h = i32::from(cell.h); // the v6 text cell is 8×16 (SQ-0479)
+    let font_h = i32::from(cell.h()); // the v6 text cell is 8×16 (SQ-0479)
     let game_row = |t: &PxText| (t.y.max(1) as i32 - 1) / font_h;
     let first_row = runs.iter().map(|t| game_row(t)).min().unwrap_or(0);
     let mut raw: BTreeMap<i32, Vec<&PxText>> = BTreeMap::new();
@@ -7910,7 +7910,7 @@ fn draw_chrome_text_strip(
             // run's offset in NATIVE TEXT CELLS from the strip's own origin;
             // everywhere else it is this run's own native pixel through the scale.
             let c = match native_origin {
-                Some(o) => o + ((t.x.max(1) as i32 - 1 - native_x0) as f32 / f32::from(cell.w)).round() as i32,
+                Some(o) => o + ((t.x.max(1) as i32 - 1 - native_x0) as f32 / f32::from(cell.w())).round() as i32,
                 None => run_cell(t, scale, cell_px, pane, cell).0,
             };
             // SQ-0783: a LONE frame glyph standing at the game screen's own edge — the
@@ -8102,7 +8102,7 @@ fn collapse_row_rules(
             _ => None,
         }
     };
-    let end_px = |t: &PxText| (t.x.max(1) as i32 - 1) + t.text.chars().count() as i32 * i32::from(cell.w);
+    let end_px = |t: &PxText| (t.x.max(1) as i32 - 1) + t.text.chars().count() as i32 * i32::from(cell.w());
     // A glyph from the frame-drawing blocks: box drawing (U+2500..) and block
     // elements (U+2580..). What a game builds chrome geometry out of, and nothing
     // any game's prose contains.
@@ -8135,7 +8135,7 @@ fn collapse_row_rules(
     // point, that a divider holds a column of its own, stands.
     let native_span = |t: &PxText| {
         let x0 = t.x.max(1) as i32 - 1;
-        (x0, x0 + t.text.chars().count() as i32 * i32::from(cell.w))
+        (x0, x0 + t.text.chars().count() as i32 * i32::from(cell.w()))
     };
     let under_label = |t: &PxText| {
         let (a0, a1) = native_span(t);
@@ -8592,7 +8592,7 @@ mod tests {
     #[test]
     fn a_chrome_run_over_art_resolves_its_block_per_cell_on_the_cell_path() {
         let cell = zvm::screen::V6Cell::DEFAULT;
-        let (fw, fh) = (u32::from(cell.w), u32::from(cell.h));
+        let (fw, fh) = (u32::from(cell.w()), u32::from(cell.h()));
         // Artwork opaque under the FOURTH glyph alone.
         const OVER: usize = 3;
         let mut gfx = image::RgbaImage::new(fw * 8, fh);
@@ -8620,7 +8620,7 @@ mod tests {
         let bg = image::Rgba([0, 0, 0, 255]);
         let mut buf = Buffer::empty(pane);
         super::stamp_runs_over_art(
-            &[&run], &art, &scale, (cell.w, cell.h), pane, &gfx, fg, bg,
+            &[&run], &art, &scale, (cell.w(), cell.h()), pane, &gfx, fg, bg,
             &ColorScheme::terminal_default(), &mut buf, cell,
         );
 

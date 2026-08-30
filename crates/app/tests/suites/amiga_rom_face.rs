@@ -374,7 +374,7 @@ fn the_renderer_draws_topaz_at_the_faces_own_scale() {
     let media = Media::new("blit").with_rom("Kick12.rom");
     let faces = cascade(Path::new("/nonexistent.z6"), P::Amiga, (2, 2), Some(&media.disks()));
     let tf = TextFace::new(P::Amiga, faces, Some((2, 2)));
-    let (cw, ch) = (u32::from(tf.cell().w), u32::from(tf.cell().h));
+    let (cw, ch) = (u32::from(tf.cell().w()), u32::from(tf.cell().h()));
     assert_eq!((cw, ch), (8, 16), "non-vacuity: an 8-row face on a 16-row cell");
 
     let ink = image::Rgba([255, 255, 255, 255]);
@@ -509,7 +509,7 @@ fn an_amiga_release_with_no_face_of_its_own_boots_on_topaz() {
         eprintln!(
             "{disk}: r{release}/{serial}, {profile:?}, picture window {:?} x art {:?} \
              = 640x400 native, cell {}x{}",
-            machine.screen_px, machine.art_scale, machine.cell.w, machine.cell.h,
+            machine.screen_px, machine.art_scale, machine.cell.w(), machine.cell.h(),
         );
         assert_eq!(machine.art_scale, Some((2, 2)), "{disk}: a 320-wide press doubles");
         assert_eq!(

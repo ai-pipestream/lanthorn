@@ -597,7 +597,7 @@ impl ZWindow {
     /// threshold (`above + below - 1`). Degenerate (zero-height) windows
     /// report 1 rather than 0 so the count never starts already-due.
     pub fn more_interval(&self, cell: V6Cell) -> i16 {
-        let lines = (self.y_size / cell.h) as i32;
+        let lines = (self.y_size / cell.h()) as i32;
         (lines - 1).clamp(1, i16::MAX as i32) as i16
     }
 
@@ -637,9 +637,9 @@ impl ZWindow {
         if self.scrolling() {
             self.tick_line_count();
         }
-        let fh = cell.h as u32;
+        let fh = cell.h() as u32;
         if self.y_cursor as u32 + 2 * fh - 1 <= self.y_size as u32 {
-            self.y_cursor += cell.h;
+            self.y_cursor += cell.h();
         } else {
             // The window scrolled under a stationary cursor, so everything
             // already on screen moved up one line and the top line left the
@@ -647,7 +647,7 @@ impl ZWindow {
             // the old rows would freeze the prose in places it no longer is.
             let top = self.y_coord;
             for t in self.streamed.iter_mut() {
-                t.y = t.y.saturating_sub(cell.h);
+                t.y = t.y.saturating_sub(cell.h());
             }
             self.streamed.retain(|t| t.y >= top);
         }
@@ -754,7 +754,7 @@ impl ZWindow {
             let covered = rx >= left
                 && ry >= top
                 && rx + run.px_w(metric) as i32 <= right
-                && ry + cell.h as i32 <= bottom;
+                && ry + cell.h() as i32 <= bottom;
             if covered {
                 kept.push(run);
             } else {
@@ -850,7 +850,7 @@ impl ZWindow {
         let delta = pixels as i32;
         self.texts.retain_mut(|t| {
             let new_y = t.y as i32 - delta;
-            let bottom = new_y + cell.h as i32 - 1;
+            let bottom = new_y + cell.h() as i32 - 1;
             if bottom < top || new_y > bottom_edge {
                 false
             } else {
@@ -858,7 +858,7 @@ impl ZWindow {
                 true
             }
         });
-        let rows = pixels / cell.h as i16;
+        let rows = pixels / cell.h() as i16;
         self.grid.scroll_rows(rows);
     }
 }
@@ -910,7 +910,7 @@ fn covered_glyphs(
 ) -> Option<(usize, usize)> {
     let cell = metric.cell();
     let ry = run.y as i32;
-    if ry + cell.h as i32 <= top || ry >= top + h {
+    if ry + cell.h() as i32 <= top || ry >= top + h {
         return None;
     }
     let rx = run.x as i32;
@@ -970,7 +970,7 @@ fn trim_run_against_rect(
     let cell = metric.cell();
     let ry = run.y as i32;
     // Vertical band overlap?
-    if ry + cell.h as i32 <= top || ry >= top + h {
+    if ry + cell.h() as i32 <= top || ry >= top + h {
         return vec![run];
     }
     let Some((first_erased, last_erased)) = covered_glyphs(&run, top, left, h, w, metric) else {
@@ -1058,7 +1058,7 @@ impl V6Windows {
                 j += 1;
             }
             let (top, left) = (run.y as i32, run.x as i32 + edges[i]);
-            let (h, w) = (cell.h as i32, edges[j] - edges[i]);
+            let (h, w) = (cell.h() as i32, edges[j] - edges[i]);
             if e {
                 self.erase_screen_rect(top, left, h, w, metric);
             } else {
@@ -1169,7 +1169,7 @@ impl V6Windows {
                 if layer.iter().any(|t| {
                     let ty = t.y as i32;
                     let tx = t.x as i32;
-                    ty + (cell.h as i32) > top
+                    ty + (cell.h() as i32) > top
                         && ty < top + h
                         && tx + (t.px_w(metric) as i32) > left
                         && tx < left + w
@@ -2526,157 +2526,191 @@ pub const DEFAULT_SCREEN_COLS: u8 = 80;
 pub const V6_FONT_WIDTH: u16 = 8;
 pub const V6_FONT_HEIGHT: u16 = 16;
 
-/// The Version 6 character cell in native pixels, as a value rather than a pair
-/// of constants (SQ-0917).
-///
-/// # Why this is state and not a constant
-///
-/// The two constants above are one machine's cell, and for years they were read
-/// as every machine's. They are not. Infocom's Macintosh interpreter set
-/// `colWidth := 7` and `lineHeight := 15 {16}`; the Apple IIgs YZIP set
-/// `MFONT_W EQU 3` and `FONT_H EQU 9`. `v6_font_cell` in the app declined to
-/// express any of that three times — EGA (SQ-0790), Macintosh (SQ-0838), Apple
-/// IIgs (SQ-0857) — each time on the reasoning that nothing depended on it.
-///
-/// Something does now. On the black-and-white Macintosh press the archive puts
-/// the story on a 480x300 screen; at 8 wide that is 60 columns, where the
-/// machine's own 7 gives 68. The story lays its hint banner out for the columns
-/// it is told it has, so eight columns of it have nowhere to go and the glyphs
-/// overrun the banner.
-///
-/// # It is a DECLARED metric, not a drawn advance
-///
-/// Worth stating here because it is the trap: `machine-screenshots/mac-zorkzero-hint.png`
-/// shows the Macintosh drawing **proportionally** — `WING` is the same glyph run
-/// at character index 5 in both `EAST WING` and `WEST WING` and starts at x=137
-/// in one and x=139 in the other, which no fixed pitch permits. Infocom's
-/// `stdFont := geneva` is a proportional System font and 7 is simply its average
-/// advance. So `colWidth := 7` is exactly the quantity header `$27` carries: what
-/// the story is TOLD its cell is, which is a different thing from how the
-/// interpreter chose to paint. Matching the declared metric is both the smaller
-/// change and the faithful one; matching the drawn face would mean proportional
-/// layout, which the Z-machine's own column arithmetic cannot express.
-///
-/// # DECLARED, not DRAWN — the boundary that keeps this type honest
-///
-/// This is what the STORY IS TOLD: header `$26`/`$27`, the character grid, window
-/// property 13, and every coordinate the interpreter computes by advancing its
-/// cursor. **It is fixed on every machine, including ones that painted
-/// proportionally** — the Macintosh declares `colWidth := 7` while drawing Geneva
-/// 12, and a host that declared anything else would be lying to the story.
-///
-/// Where the ink actually goes is a different question, and one this type must not
-/// be asked. A proportional renderer — the Macintosh's own, or a future GUI —
-/// needs per-glyph advances, which the host supplies through
-/// [`V6Metric::proportional`] (SQ-1009). Both are true at once, and were, on real
-/// hardware: the pen is what the cursor advances by and what a printed run
-/// measures, the cell is still what the story was told.
-///
-/// So: interpreting a coordinate the story produced is [`Self::row_of`],
-/// [`Self::col_of`], [`Self::run_px`]. Deciding where to put a pixel is
-/// [`V6Metric::advance`]'s business, not this type's.
-///
-/// # Not a global
-///
-/// The cell is per-session — resolved once at boot from the medium's profile and
-/// never changed — so it lives on [`crate::cpu::Machine`] and is threaded to the
-/// handful of places that quantize by it. It deliberately does NOT live on
-/// [`ScreenState`], which the host archives: the cell is derived from the
-/// profile, so a restore must re-derive it rather than replay a stored copy
-/// (CLAUDE.md, "persist the recipe, not the result"). And it is emphatically not
-/// process-global — see `zvm::screen::set_palette` for what that costs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct V6Cell {
-    pub w: u16,
-    pub h: u16,
+/// [`V6Cell`] lives in its own module so its private fields are invisible to
+/// the REST OF THIS FILE too, not merely to other crates — Rust scopes a
+/// private field to the defining module and its children, and `screen.rs` is
+/// four thousand lines of exactly the code most likely to write a new cell.
+/// The whole workspace therefore has one `V6Cell` literal, inside
+/// [`V6Cell::new`], and the zero-axis guard cannot be walked past (SQ-1031).
+mod v6_cell {
+    use super::{V6_FONT_HEIGHT, V6_FONT_WIDTH};
+
+    /// The Version 6 character cell in native pixels, as a value rather than a pair
+    /// of constants (SQ-0917).
+    ///
+    /// # Why this is state and not a constant
+    ///
+    /// The two constants above are one machine's cell, and for years they were read
+    /// as every machine's. They are not. Infocom's Macintosh interpreter set
+    /// `colWidth := 7` and `lineHeight := 15 {16}`; the Apple IIgs YZIP set
+    /// `MFONT_W EQU 3` and `FONT_H EQU 9`. `v6_font_cell` in the app declined to
+    /// express any of that three times — EGA (SQ-0790), Macintosh (SQ-0838), Apple
+    /// IIgs (SQ-0857) — each time on the reasoning that nothing depended on it.
+    ///
+    /// Something does now. On the black-and-white Macintosh press the archive puts
+    /// the story on a 480x300 screen; at 8 wide that is 60 columns, where the
+    /// machine's own 7 gives 68. The story lays its hint banner out for the columns
+    /// it is told it has, so eight columns of it have nowhere to go and the glyphs
+    /// overrun the banner.
+    ///
+    /// # It is a DECLARED metric, not a drawn advance
+    ///
+    /// Worth stating here because it is the trap: `machine-screenshots/mac-zorkzero-hint.png`
+    /// shows the Macintosh drawing **proportionally** — `WING` is the same glyph run
+    /// at character index 5 in both `EAST WING` and `WEST WING` and starts at x=137
+    /// in one and x=139 in the other, which no fixed pitch permits. Infocom's
+    /// `stdFont := geneva` is a proportional System font and 7 is simply its average
+    /// advance. So `colWidth := 7` is exactly the quantity header `$27` carries: what
+    /// the story is TOLD its cell is, which is a different thing from how the
+    /// interpreter chose to paint. Matching the declared metric is both the smaller
+    /// change and the faithful one; matching the drawn face would mean proportional
+    /// layout, which the Z-machine's own column arithmetic cannot express.
+    ///
+    /// # DECLARED, not DRAWN — the boundary that keeps this type honest
+    ///
+    /// This is what the STORY IS TOLD: header `$26`/`$27`, the character grid, window
+    /// property 13, and every coordinate the interpreter computes by advancing its
+    /// cursor. **It is fixed on every machine, including ones that painted
+    /// proportionally** — the Macintosh declares `colWidth := 7` while drawing Geneva
+    /// 12, and a host that declared anything else would be lying to the story.
+    ///
+    /// Where the ink actually goes is a different question, and one this type must not
+    /// be asked. A proportional renderer — the Macintosh's own, or a future GUI —
+    /// needs per-glyph advances, which the host supplies through
+    /// [`V6Metric::proportional`] (SQ-1009). Both are true at once, and were, on real
+    /// hardware: the pen is what the cursor advances by and what a printed run
+    /// measures, the cell is still what the story was told.
+    ///
+    /// So: interpreting a coordinate the story produced is [`Self::row_of`],
+    /// [`Self::col_of`], [`Self::run_px`]. Deciding where to put a pixel is
+    /// [`V6Metric::advance`]'s business, not this type's.
+    ///
+    /// # Not a global
+    ///
+    /// The cell is per-session — resolved once at boot from the medium's profile and
+    /// never changed — so it lives on [`crate::cpu::Machine`] and is threaded to the
+    /// handful of places that quantize by it. It deliberately does NOT live on
+    /// [`ScreenState`], which the host archives: the cell is derived from the
+    /// profile, so a restore must re-derive it rather than replay a stored copy
+    /// (CLAUDE.md, "persist the recipe, not the result"). And it is emphatically not
+    /// process-global — see `zvm::screen::set_palette` for what that costs.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct V6Cell {
+        w: u16,
+        h: u16,
+    }
+
+    impl V6Cell {
+        /// The 8x16 cell described above — every machine's until a profile says
+        /// otherwise, and the value a bare `Machine` (every unit test) carries.
+        pub const DEFAULT: V6Cell = V6Cell::new(V6_FONT_WIDTH, V6_FONT_HEIGHT);
+
+        /// Guard against a zero axis reaching the divisions below. A profile that
+        /// stated `0` would otherwise panic somewhere far from the mistake — and
+        /// in RELEASE as well as debug, because integer division by zero is not a
+        /// debug-only overflow check.
+        ///
+        /// **This is the only `V6Cell` literal in the workspace**, which is what
+        /// the module wrapper buys: the fields are private, so `V6Cell { w: 0, h: 0 }`
+        /// is a compile error everywhere else — in other crates, and in the rest of
+        /// this file. Until SQ-1031 the guard was a convention a public field walked
+        /// straight past.
+        ///
+        /// `const` so that `DEFAULT` and `interpreter::MACINTOSH_V6_CELL` can be
+        /// consts without a second literal; written out longhand because `Ord::max`
+        /// is not a `const fn`.
+        pub const fn new(w: u16, h: u16) -> Self {
+            V6Cell { w: if w == 0 { 1 } else { w }, h: if h == 0 { 1 } else { h } }
+        }
+
+        /// The cell's width in native pixels. Never zero — see [`Self::new`].
+        pub const fn w(self) -> u16 {
+            self.w
+        }
+
+        /// The cell's height in native pixels. Never zero — see [`Self::new`].
+        pub const fn h(self) -> u16 {
+            self.h
+        }
+
+        /// The text ROW a 1-based native pixel Y falls in.
+        ///
+        /// ZMSD §8.8.1: v6 window and cursor coordinates are 1-based pixels, so the
+        /// `- 1` is the origin correction and not an off-by-one. It lived at three
+        /// dozen call sites before SQ-0917, hand-written every time, which is exactly
+        /// how a site that forgot it read one row high without anything complaining.
+        pub fn row_of(self, y_px: u16) -> u16 {
+            (y_px.max(1) - 1) / self.h
+        }
+
+        /// The row a **zero-based** native pixel Y falls in.
+        ///
+        /// Two conventions are live in this codebase and they look identical written
+        /// out longhand, which is why both are named here. A `PxText` run's `y` is
+        /// ZMSD's 1-based pixel and wants [`Self::row_of`]; a `PositionedWindow`'s
+        /// `y_px` was built as `t.y.saturating_sub(1)` and is already corrected, so
+        /// passing it to `row_of` would subtract one twice and land a row high.
+        ///
+        /// Bare `y_px / cell.h` said nothing about which it held. This says it.
+        pub fn row_of_origin0(self, y_px: u16) -> u16 {
+            y_px / self.h
+        }
+
+        /// The COLUMN a 1-based native pixel X falls in. See [`Self::row_of`].
+        pub fn col_of(self, x_px: u16) -> u16 {
+            (x_px.max(1) - 1) / self.w
+        }
+
+        /// The pixel width the STORY believes `s` occupies.
+        ///
+        /// **Uniform on purpose, even for a machine that painted proportionally.**
+        /// This answers what the story was told, and the interpreter's own cursor
+        /// arithmetic advances by a fixed cell — so a proportional answer here would
+        /// disagree with the coordinates the engine produced. See the type's own
+        /// documentation for the declared-versus-drawn split.
+        ///
+        /// Takes the text rather than a count because every call site has the text in
+        /// hand and was counting characters itself.
+        pub fn run_px(self, s: &str) -> u32 {
+            s.chars().count() as u32 * u32::from(self.w)
+        }
+
+        /// The native pixel rows a run whose 1-based top is `y_px` occupies.
+        ///
+        /// The EXTENT half of this type, and the half SQ-0917's sweep did not have.
+        /// That quest named the three DIVISIONS — [`Self::row_of`], [`Self::col_of`],
+        /// [`Self::run_px`] — and its own follow-up recorded what it was leaving
+        /// behind: "a THRESHOLD compared against a cell dimension is not arithmetic
+        /// and is not fixed by any of this". Those thresholds are written `py + 16`,
+        /// which is a bare number no grep for a constant can see, and they went on
+        /// meaning 16 after one machine stopped being 16.
+        ///
+        /// SQ-1020 is what that cost: a status bar sitting directly above the story
+        /// satisfies `py + h == story_top`, so testing it with a hardcoded 16 fails by
+        /// exactly one pixel on the Macintosh's 15-tall cell — and the bar drops out
+        /// of the text band and rasterises, on one machine, silently.
+        pub fn rows_px(self, y_px: u16) -> core::ops::Range<u32> {
+            let top = u32::from(y_px.max(1) - 1);
+            top..top + u32::from(self.h)
+        }
+
+        /// The native pixel row just PAST a run whose 1-based top is `y_px`.
+        ///
+        /// [`Self::rows_px`]'s end, defined from it so the two cannot drift — which is
+        /// the failure this whole area keeps having.
+        pub fn bottom_px(self, y_px: u16) -> u32 {
+            self.rows_px(y_px).end
+        }
+    }
+
+    impl Default for V6Cell {
+        fn default() -> Self {
+            V6Cell::DEFAULT
+        }
+    }
 }
 
-impl V6Cell {
-    /// The 8x16 cell described above — every machine's until a profile says
-    /// otherwise, and the value a bare `Machine` (every unit test) carries.
-    pub const DEFAULT: V6Cell = V6Cell { w: V6_FONT_WIDTH, h: V6_FONT_HEIGHT };
-
-    /// Guard against a zero axis reaching the divisions below. A profile that
-    /// stated `0` would otherwise panic somewhere far from the mistake.
-    pub fn new(w: u16, h: u16) -> Self {
-        V6Cell { w: w.max(1), h: h.max(1) }
-    }
-
-    /// The text ROW a 1-based native pixel Y falls in.
-    ///
-    /// ZMSD §8.8.1: v6 window and cursor coordinates are 1-based pixels, so the
-    /// `- 1` is the origin correction and not an off-by-one. It lived at three
-    /// dozen call sites before SQ-0917, hand-written every time, which is exactly
-    /// how a site that forgot it read one row high without anything complaining.
-    pub fn row_of(self, y_px: u16) -> u16 {
-        (y_px.max(1) - 1) / self.h
-    }
-
-    /// The row a **zero-based** native pixel Y falls in.
-    ///
-    /// Two conventions are live in this codebase and they look identical written
-    /// out longhand, which is why both are named here. A `PxText` run's `y` is
-    /// ZMSD's 1-based pixel and wants [`Self::row_of`]; a `PositionedWindow`'s
-    /// `y_px` was built as `t.y.saturating_sub(1)` and is already corrected, so
-    /// passing it to `row_of` would subtract one twice and land a row high.
-    ///
-    /// Bare `y_px / cell.h` said nothing about which it held. This says it.
-    pub fn row_of_origin0(self, y_px: u16) -> u16 {
-        y_px / self.h
-    }
-
-    /// The COLUMN a 1-based native pixel X falls in. See [`Self::row_of`].
-    pub fn col_of(self, x_px: u16) -> u16 {
-        (x_px.max(1) - 1) / self.w
-    }
-
-    /// The pixel width the STORY believes `s` occupies.
-    ///
-    /// **Uniform on purpose, even for a machine that painted proportionally.**
-    /// This answers what the story was told, and the interpreter's own cursor
-    /// arithmetic advances by a fixed cell — so a proportional answer here would
-    /// disagree with the coordinates the engine produced. See the type's own
-    /// documentation for the declared-versus-drawn split.
-    ///
-    /// Takes the text rather than a count because every call site has the text in
-    /// hand and was counting characters itself.
-    pub fn run_px(self, s: &str) -> u32 {
-        s.chars().count() as u32 * u32::from(self.w)
-    }
-
-    /// The native pixel rows a run whose 1-based top is `y_px` occupies.
-    ///
-    /// The EXTENT half of this type, and the half SQ-0917's sweep did not have.
-    /// That quest named the three DIVISIONS — [`Self::row_of`], [`Self::col_of`],
-    /// [`Self::run_px`] — and its own follow-up recorded what it was leaving
-    /// behind: "a THRESHOLD compared against a cell dimension is not arithmetic
-    /// and is not fixed by any of this". Those thresholds are written `py + 16`,
-    /// which is a bare number no grep for a constant can see, and they went on
-    /// meaning 16 after one machine stopped being 16.
-    ///
-    /// SQ-1020 is what that cost: a status bar sitting directly above the story
-    /// satisfies `py + h == story_top`, so testing it with a hardcoded 16 fails by
-    /// exactly one pixel on the Macintosh's 15-tall cell — and the bar drops out
-    /// of the text band and rasterises, on one machine, silently.
-    pub fn rows_px(self, y_px: u16) -> core::ops::Range<u32> {
-        let top = u32::from(y_px.max(1) - 1);
-        top..top + u32::from(self.h)
-    }
-
-    /// The native pixel row just PAST a run whose 1-based top is `y_px`.
-    ///
-    /// [`Self::rows_px`]'s end, defined from it so the two cannot drift — which is
-    /// the failure this whole area keeps having.
-    pub fn bottom_px(self, y_px: u16) -> u32 {
-        self.rows_px(y_px).end
-    }
-}
-
-impl Default for V6Cell {
-    fn default() -> Self {
-        V6Cell::DEFAULT
-    }
-}
+pub use v6_cell::V6Cell;
 
 /// ZMSD §8.7.1 style bit 0 — reverse video. Named here because a blank cell's
 /// only content is its ground, and reverse is half of what a ground IS (SQ-1054).
@@ -2775,7 +2809,7 @@ impl V6Metric {
     /// there is no other number it could be. Pairing the two here is what stops a
     /// caller inventing a pitch to go with a face it never checked.
     pub fn with_fixed_alternate(mut self) -> V6Metric {
-        self.fixed_pitch = Some(self.cell.w);
+        self.fixed_pitch = Some(self.cell.w());
         self
     }
 
@@ -2794,7 +2828,7 @@ impl V6Metric {
     /// A fixed pen answers the cell width for everything, which is what every
     /// machine but one does and what this crate did before SQ-1009.
     pub fn advance(&self, ch: char, style: u8) -> u16 {
-        let Some(advances) = self.advances.as_ref() else { return self.cell.w };
+        let Some(advances) = self.advances.as_ref() else { return self.cell.w() };
         // A fixed-pitch run is drawn with the machine's fixed ALTERNATE, so it
         // advances by that face's pitch rather than the body face's — the whole
         // reason *Zork Zero*'s Macintosh status bar lines its columns up
@@ -2802,7 +2836,7 @@ impl V6Metric {
         let base = match self.fixed_pitch {
             Some(w) if style & STYLE_FIXED_PITCH != 0 => w,
             _ => {
-                let Ok(b) = u8::try_from(u32::from(ch)) else { return self.cell.w };
+                let Ok(b) = u8::try_from(u32::from(ch)) else { return self.cell.w() };
                 advances[usize::from(b)]
             }
         };
@@ -3022,7 +3056,7 @@ pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8, cell: V6Cell) {
     if version == 6 {
         // A character grid is not a v6 screen, so recover the pixels this grid
         // stands for and go through the pixel path — see `write_screen_dims_px`.
-        write_screen_dims_px(mem, cols as u16 * cell.w, rows as u16 * cell.h, cell);
+        write_screen_dims_px(mem, cols as u16 * cell.w(), rows as u16 * cell.h(), cell);
         return;
     }
     mem.write_byte(0x20, rows);
@@ -3074,8 +3108,8 @@ pub fn write_screen_dims_px(mem: &mut Memory, width_px: u16, height_px: u16, cel
     let (w, h) = (width_px.max(1), height_px.max(1));
     // Whole characters only, and at least one: a screen narrower than a cell is
     // degenerate, but a zero in $20/$21 makes a size-sensitive story abort.
-    let cols = (w / cell.w.max(1)).clamp(1, 255) as u8;
-    let rows = (h / cell.h.max(1)).clamp(1, 255) as u8;
+    let cols = (w / cell.w().max(1)).clamp(1, 255) as u8;
+    let rows = (h / cell.h().max(1)).clamp(1, 255) as u8;
     mem.write_byte(0x20, rows);
     mem.write_byte(0x21, cols);
     // ZMSD §8.4.3: word $22 = screen width in units, word $24 = screen height in
@@ -3089,8 +3123,8 @@ pub fn write_screen_dims_px(mem: &mut Memory, width_px: u16, height_px: u16, cel
     // height are stored the other way round"). So in V6: $26 = HEIGHT, $27 =
     // WIDTH. Latent while the cell was square; load-bearing since SQ-0479, and
     // per-machine since SQ-0917.
-    mem.write_byte(0x26, cell.h as u8);
-    mem.write_byte(0x27, cell.w as u8);
+    mem.write_byte(0x26, cell.h() as u8);
+    mem.write_byte(0x27, cell.w() as u8);
 }
 
 // ---------------------------------------------------------------------------
@@ -3181,9 +3215,33 @@ mod tests {
     /// FALSIFY by routing the transparent segment of `paint_run` to nothing again
     /// (drop the `erase_blank_cells_in_rect` arm): the reversed blank survives the
     /// second print and the first assertion fails.
+    /// SQ-1031. The zero-axis clamp is the whole reason `V6Cell::new` exists, and
+    /// until the fields went private a struct literal walked straight past it into
+    /// `row_of`'s `/ self.h` — which panics in RELEASE as well as debug, because
+    /// integer division by zero is not a debug-only overflow check.
+    ///
+    /// FALSIFY by restoring `w`/`h` to `pub`: the literal below stops being a
+    /// compile error, and `V6Cell { w: 0, h: 0 }.row_of(1)` panics.
+    #[test]
+    fn a_zero_axis_cannot_reach_the_divisions() {
+        // `new` is the only way in, and it clamps both axes.
+        assert_eq!(V6Cell::new(0, 0), V6Cell::new(1, 1));
+        assert_eq!(V6Cell::new(0, 15).w(), 1);
+        assert_eq!(V6Cell::new(7, 0).h(), 1);
+        // A non-zero axis is passed through untouched — the clamp is a floor, not
+        // a substitution.
+        let mac = V6Cell::new(7, 15);
+        assert_eq!((mac.w(), mac.h()), (7, 15));
+        // And the divisions the guard exists for terminate on the clamped cell.
+        let zero = V6Cell::new(0, 0);
+        assert_eq!(zero.row_of(1), 0);
+        assert_eq!(zero.col_of(1), 0);
+        assert_eq!(zero.row_of_origin0(9), 9);
+    }
+
     #[test]
     fn a_printed_space_clears_a_blank_cell_but_not_a_letter() {
-        let metric = V6Metric::fixed(V6Cell { w: 7, h: 15 });
+        let metric = V6Metric::fixed(V6Cell::new(7, 15));
         // The highlight: a reversed space sitting alone at x=8 (native 7..14).
         let mut w = V6Windows::default();
         w.paint_run(0, run_at(8, 1, " ", 1), &metric);
