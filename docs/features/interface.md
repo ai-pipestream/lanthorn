@@ -1002,11 +1002,23 @@ to that launch alone unless you tick *Save as this game's default*, which writes
 your changes — and only your changes — to the game's own `config.toml`. See
 [choosing which artwork a game draws](v6-graphics.md#three-ways-to-say-it).
 
-The badge glyphs are yours to change: set
-`badge_zcode`, `badge_glulx`, `badge_blorb`, `badge_save`, `badge_hint` or
-`badge_hint_available` under `[elements]` in `style.toml` — they default to the
-plain letters `Z`/`G`/`B`/`S`/`H`/`h`, and a patched font can swap in real icons.
-They live beside the `story_badge` selector that colours them. The badge cluster,
+The badge glyphs are yours to change. `badge_icons` under `[elements]` in
+`style.toml` picks the whole set at once — `plain` is the letters
+`Z`/`G`/`B`/`S`/`H`/`h`, and `nerdfont` is six Material Design icons for a
+patched font: the two story types stay *letters* (in a filled chip), because
+nothing in any icon font depicts a Z-machine, while the artifacts become the
+things they are — a package for a Blorb, a floppy for a save, and one lightbulb
+for the hint slot's two states, filled for hints you have and hollow for hints
+you could fetch. Every codepoint was read from the patched font's own tables
+rather than a cheat sheet, and answering *yes* to the font check sets this key
+along with the map's. Under it, `badge_zcode`, `badge_glulx`, `badge_blorb`,
+`badge_save`, `badge_hint` and `badge_hint_available` still name one badge each
+and outrank the set, so you can take the patched icons and still spell one badge
+your own way. They live beside the `story_badge` selector that colours them.
+(Only **Save** and **Hint** are drawn in the badge cluster today — the story type
+and the Blorb wrapper moved into the TYPE column's text label — so
+`badge_zcode`, `badge_glulx` and `badge_blorb` are set and themeable but
+currently unseen.) The badge cluster,
 sortable headers, and info panel are all themeable through
 `story_badge`, `story_header`/`story_header:active` (the
 active sort column), `story_author`, `story_year`, `story_rating` (the IFDB

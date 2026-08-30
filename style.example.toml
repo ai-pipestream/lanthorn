@@ -41,6 +41,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # scrollbar_track = { parent = "muted" }
 # transcript_location = { parent = "accent" }
 # story_badge = { parent = "text" }
+# badge_icons = "plain"   # plain | nerdfont   (the story-list badges below; each key overrides one)
 # badge_zcode = "Z"   # story-list badge: a Z-machine story
 # badge_glulx = "G"   # story-list badge: a Glulx story
 # badge_blorb = "B"   # story-list badge: resources in a Blorb

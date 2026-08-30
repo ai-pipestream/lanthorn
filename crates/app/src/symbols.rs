@@ -216,6 +216,40 @@ pub struct ControlGlyphs {
     pub reveal: char,
 }
 
+/// The story picker's row badges (SQ-0559), as one preset rather than six loose
+/// keys (SQ-1159).
+///
+/// **Why a preset at all.** These were six free-text `[elements]` keys with
+/// letter defaults and nothing behind them, so the font check — which sets
+/// `arrow_set`, `portal_icons` and `control_icons` from one answer — could not
+/// reach them. A player who said "yes, my font is patched" got patched glyphs
+/// everywhere except here. Six keys is what made that possible; one name that
+/// resolves to six glyphs is what stops it happening again, and it leaves the
+/// per-badge keys working as overrides on top.
+///
+/// **Two kinds of badge, drawn two ways on purpose.** The TYPE (`zcode`,
+/// `glulx`) stays a LETTER even in the patched set, because no icon font
+/// depicts a Z-machine and an invented picture for one would be a worse answer
+/// than the letter it replaced; the boxed alphabet glyphs are the letter, drawn
+/// as a chip. The ARTIFACTS (`blorb`, `save`, `hint`) are things, so they are
+/// pictures of those things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoryBadges {
+    /// The story is Z-code.
+    pub zcode: char,
+    /// The story is Glulx.
+    pub glulx: char,
+    /// Resources for the story live in a Blorb beside it.
+    pub blorb: char,
+    /// The story has a save.
+    pub save: char,
+    /// Hints for the story are installed.
+    pub hint: char,
+    /// Hints for the story exist but have not been downloaded — the weaker
+    /// claim, so the weaker mark (`h` against `H` in the plain set).
+    pub hint_available: char,
+}
+
 // ── Top-level set ─────────────────────────────────────────────────────────────
 
 /// All map glyphs used by the renderer, resolved from config at startup.
@@ -692,6 +726,79 @@ impl ControlGlyphs {
                 // which is the whole feature. Read from the font's own `post`
                 // table, like every codepoint here; do not substitute a name.
                 reveal: '\u{F0244}',
+            },
+            _ => return None,
+        })
+    }
+}
+
+impl StoryBadges {
+    /// The plain answer, and the letters the picker has drawn since it landed:
+    /// `Z G B S H h`. Also the source of the `config::default_badge_*` values, so
+    /// there is one place a default badge is spelled rather than two that agree
+    /// by hand.
+    pub const PLAIN: StoryBadges = StoryBadges {
+        zcode: 'Z',
+        glulx: 'G',
+        blorb: 'B',
+        save: 'S',
+        hint: 'H',
+        hint_available: 'h',
+    };
+
+    /// All known preset names for [`StoryBadges`], in display order.
+    pub fn preset_names() -> &'static [&'static str] {
+        &["plain", "nerdfont"]
+    }
+
+    /// Return a named preset, or `None` for an unknown name.
+    ///
+    /// - "plain"    — [`Self::PLAIN`], the six letters (default).
+    /// - "nerdfont" — six Material Design icons, which is also why the font
+    ///   check's sample row needs no new slot for them: the row already samples
+    ///   MDI (`md-post_lamp` and the boxed arrows), and a face that draws that
+    ///   draws these. This is the same argument [`ControlGlyphs`]'s nerdfont arm
+    ///   makes, for the same reason.
+    ///
+    /// **Every codepoint below was read from the patched font's own `cmap`, and
+    /// its name from the font's own glyph order** (SQ-1045's rule, SQ-1141's
+    /// method) — never from a Nerd Fonts cheat sheet. Checked across the nine
+    /// patched families installed on the machine this was chosen on
+    /// (0xProto, Fira Code ×3, IosevkaTerm, JetBrains Mono, ProggyClean,
+    /// SauceCodePro and Symbols Nerd Font Mono): all six resolve to the SAME
+    /// codepoint under the SAME name in all nine, and each rasterises with ink
+    /// at 12–16px, so none of them is tofu on a face that claims the range.
+    ///
+    /// The choices, and why each survives being a few pixels tall in a list row:
+    ///
+    /// - `md-alpha_z_box` / `md-alpha_g_box` — the LETTER, knocked out of a
+    ///   filled chip. Nothing in any icon font depicts a Z-machine or a Glulx
+    ///   VM, and a picture invented for one would say less than the letter it
+    ///   replaced; the box is what makes it read as a badge rather than as text.
+    ///   The outline variants (`md-alpha_z_box_outline`, U+F0C36) were rejected:
+    ///   at 12px their stroke is one pixel and the letter inside it goes.
+    /// - `md-package_variant_closed` — a Blorb is a *bundle* of resources shipped
+    ///   with the story, which is what the word package means. `md-archive`
+    ///   (U+F003C) draws a heavier silhouette but is a lidded box, near enough to
+    ///   `md-content_save`'s floppy at this size to be worth avoiding.
+    /// - `md-content_save` — the floppy. The most legible small silhouette there
+    ///   is, and the one glyph here nobody has to be taught.
+    /// - `md-lightbulb` / `md-lightbulb_outline` — one FAMILY and one SHAPE for
+    ///   the hint slot's two states, differing only in fill, because that is the
+    ///   distinction being drawn: filled is a hint you have, hollow is one you
+    ///   could fetch. It is the same reading `H`/`h` carried, and the same
+    ///   filled-is-settled grammar as the portal icons' ◉/◎ and the room dock's
+    ///   two header marks.
+    pub fn preset(name: &str) -> Option<StoryBadges> {
+        Some(match name {
+            "plain" => StoryBadges::PLAIN,
+            "nerdfont" => StoryBadges {
+                zcode: '\u{F0B21}',          // md-alpha_z_box
+                glulx: '\u{F0B0E}',          // md-alpha_g_box
+                blorb: '\u{F03D7}',          // md-package_variant_closed
+                save: '\u{F0193}',           // md-content_save
+                hint: '\u{F0335}',           // md-lightbulb
+                hint_available: '\u{F0336}', // md-lightbulb_outline
             },
             _ => return None,
         })
@@ -1213,6 +1320,98 @@ mod tests {
             c.render_hybrid, c.render_raster, c.render_extended, c.lock_on, c.lock_off,
         ];
         assert!(!all.contains(&c.return_probe), "the footprint is its own mark");
+    }
+
+    /// The story badges' nerdfont set is six named icons, each codepoint read
+    /// from the patched font's own `cmap` under the font's own glyph name and
+    /// confirmed to rasterise with ink — never taken from a Nerd Fonts cheat
+    /// sheet (SQ-1045's rule, SQ-1141's method, SQ-1159's set).
+    ///
+    /// This pins the numbers because nothing else can. There is no assertion on
+    /// our side of the terminal that could notice a wrong icon drawn crisply and
+    /// confidently, and a badge that comes out as tofu is worse than the letter
+    /// it replaced — the picker's TYPE column would say nothing at all.
+    #[test]
+    fn nerdfont_badge_glyphs_are_the_names_that_were_read_from_the_font() {
+        let b = StoryBadges::preset("nerdfont").expect("preset");
+        for (name, got, want) in [
+            ("md-alpha_z_box", b.zcode, '\u{F0B21}'),
+            ("md-alpha_g_box", b.glulx, '\u{F0B0E}'),
+            ("md-package_variant_closed", b.blorb, '\u{F03D7}'),
+            ("md-content_save", b.save, '\u{F0193}'),
+            ("md-lightbulb", b.hint, '\u{F0335}'),
+            ("md-lightbulb_outline", b.hint_available, '\u{F0336}'),
+        ] {
+            assert_eq!(got, want, "{name} moved: U+{:05X} is not U+{:05X}", got as u32, want as u32);
+        }
+        // One family for the whole set — Material Design, above U+F0000 — so the
+        // six share a stroke weight and cap height and a row of them does not
+        // look assembled out of parts. It is also what lets the font check's
+        // sample row stand in for them: it already samples MDI.
+        for (slot, ch) in [
+            ("zcode", b.zcode), ("glulx", b.glulx), ("blorb", b.blorb),
+            ("save", b.save), ("hint", b.hint), ("hint_available", b.hint_available),
+        ] {
+            assert!(ch as u32 >= 0xF_0000, "badge.{slot} = U+{:05X} is not Material Design", ch as u32);
+            assert!(!is_wide_estimate(ch), "badge.{slot} = {ch:?} estimates as double-width");
+        }
+        // The type pair and the hint pair each say two different things, and the
+        // hint's two states stay one shape apart in FILL alone (adjacent
+        // codepoints in MDI's filled/outline convention) — that is the whole
+        // distinction being drawn between a hint you have and one you could get.
+        assert_ne!(b.zcode, b.glulx, "the two story types are the same glyph");
+        assert_ne!(b.hint, b.hint_available, "the hint's two states are the same glyph");
+        assert_eq!(
+            b.hint_available as u32,
+            b.hint as u32 + 1,
+            "md-lightbulb_outline is no longer the filled bulb's own outline",
+        );
+        // Six badges, six distinct marks: two rows cannot say the same thing.
+        let all = [b.zcode, b.glulx, b.blorb, b.save, b.hint, b.hint_available];
+        assert_eq!(all.iter().collect::<std::collections::HashSet<_>>().len(), 6);
+    }
+
+    /// The PLAIN badges are the letters the picker has always drawn, and they
+    /// are the source the `config::default_badge_*` values are taken FROM —
+    /// so a default cannot drift from the preset that is supposed to hold it.
+    #[test]
+    fn plain_badges_are_the_letters_and_the_config_defaults_come_from_them() {
+        let b = StoryBadges::preset("plain").expect("the default preset");
+        assert_eq!(b, StoryBadges::PLAIN);
+        assert_eq!(
+            (b.zcode, b.glulx, b.blorb, b.save, b.hint, b.hint_available),
+            ('Z', 'G', 'B', 'S', 'H', 'h'),
+        );
+        for (slot, got, want) in [
+            ("zcode", crate::config::default_badge_zcode(), b.zcode),
+            ("glulx", crate::config::default_badge_glulx(), b.glulx),
+            ("blorb", crate::config::default_badge_blorb(), b.blorb),
+            ("save", crate::config::default_badge_save(), b.save),
+            ("hint", crate::config::default_badge_hint(), b.hint),
+            ("hint_available", crate::config::default_badge_hint_available(), b.hint_available),
+        ] {
+            assert_eq!(got, want.to_string(), "default_badge_{slot} is not the plain preset's glyph");
+        }
+        // Every plain badge must be drawable by an ordinary monospace face —
+        // which is what "plain" promises — so all six are bare ASCII.
+        for (slot, ch) in [
+            ("zcode", b.zcode), ("glulx", b.glulx), ("blorb", b.blorb),
+            ("save", b.save), ("hint", b.hint), ("hint_available", b.hint_available),
+        ] {
+            assert!(ch.is_ascii_alphanumeric(), "badge.{slot} = {ch:?} is not plain ASCII");
+        }
+    }
+
+    /// Both badge presets resolve, and `preset_names` names exactly them — the
+    /// same contract `preset_names_cover_all_known_presets` holds the map's
+    /// families to.
+    #[test]
+    fn badge_preset_names_cover_all_known_presets() {
+        for name in StoryBadges::preset_names() {
+            assert!(StoryBadges::preset(name).is_some(), "preset_names lists {name:?}, which does not resolve");
+        }
+        assert_eq!(StoryBadges::preset_names(), &["plain", "nerdfont"]);
+        assert!(StoryBadges::preset("no-such-set").is_none());
     }
 
     /// Every control slot is themeable one glyph at a time, the way every other

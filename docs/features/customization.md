@@ -118,8 +118,9 @@ still reach in and override any single selector by name.
   On a **first launch** lanthorn asks which of two glyph rows your terminal draws
   properly and writes the answer into this section for you — `arrow_set`,
   `portal_icons`, `control_icons` and the Guiding Light's `"gutter.assist"`
-  together, since a
-  patched font supplies all three or none of them. It has to ask: lanthorn writes
+  together, plus `badge_icons` over in `[elements]`, which is where the story
+  picker's row badges live. A patched font supplies all of them or none of them,
+  so they are one answer rather than five. It has to ask: lanthorn writes
   characters and the font belongs to the terminal, and the nearest thing to a
   probe measures a glyph's *width*, which a missing-glyph box passes.
   Both rows also end with the four diagonal corner stubs, identically — those are

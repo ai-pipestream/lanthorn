@@ -133,6 +133,11 @@ pub struct StyleSymbols {
     /// Glyph preset for the pane-border toggle controls (SQ-1123): "plain" or
     /// "nerdfont".
     pub control_icons: Option<String>,
+    /// Glyph preset for the story picker's row badges (SQ-1159): "plain" or
+    /// "nerdfont". The six `badge_*` keys below layer over whatever it resolves
+    /// to, so a player can take the patched set and still spell one badge their
+    /// own way.
+    pub badge_icons: Option<String>,
     pub badge_zcode: Option<String>,
     pub badge_glulx: Option<String>,
     pub badge_blorb: Option<String>,
@@ -153,7 +158,16 @@ pub struct StyleSymbols {
 ///
 /// Each `None` preset is filled with the existing `config::default_*` value.
 /// The `overrides` map is copied as-is.
+///
+/// The six `badge_*` fields are the one two-stage resolution here (SQ-1159):
+/// `badge_icons` names a [`crate::symbols::StoryBadges`] preset, and each badge
+/// key that IS set overrides that preset's glyph for its own slot. An unknown
+/// preset name falls back to the letters, the same way every other category
+/// treats one.
 pub fn finalize_symbols(s: &StyleSymbols) -> crate::config::SymbolConfig {
+    let badge_icons = s.badge_icons.clone().unwrap_or_else(crate::config::default_badge_icons);
+    let badges = crate::symbols::StoryBadges::preset(&badge_icons)
+        .unwrap_or(crate::symbols::StoryBadges::PLAIN);
     crate::config::SymbolConfig {
         box_style: s.box_style.clone().unwrap_or_else(crate::config::default_box_style),
         arrow_set: s.arrow_set.clone().unwrap_or_else(crate::config::default_arrow_set),
@@ -161,12 +175,12 @@ pub fn finalize_symbols(s: &StyleSymbols) -> crate::config::SymbolConfig {
         path_style: s.path_style.clone().unwrap_or_else(crate::config::default_path_style),
         portal_path_style: s.portal_path_style.clone().unwrap_or_else(crate::config::default_portal_path_style),
         control_icons: s.control_icons.clone().unwrap_or_else(crate::config::default_control_icons),
-        badge_zcode: s.badge_zcode.clone().unwrap_or_else(crate::config::default_badge_zcode),
-        badge_glulx: s.badge_glulx.clone().unwrap_or_else(crate::config::default_badge_glulx),
-        badge_blorb: s.badge_blorb.clone().unwrap_or_else(crate::config::default_badge_blorb),
-        badge_save: s.badge_save.clone().unwrap_or_else(crate::config::default_badge_save),
-        badge_hint: s.badge_hint.clone().unwrap_or_else(crate::config::default_badge_hint),
-        badge_hint_available: s.badge_hint_available.clone().unwrap_or_else(crate::config::default_badge_hint_available),
+        badge_zcode: s.badge_zcode.clone().unwrap_or_else(|| badges.zcode.to_string()),
+        badge_glulx: s.badge_glulx.clone().unwrap_or_else(|| badges.glulx.to_string()),
+        badge_blorb: s.badge_blorb.clone().unwrap_or_else(|| badges.blorb.to_string()),
+        badge_save: s.badge_save.clone().unwrap_or_else(|| badges.save.to_string()),
+        badge_hint: s.badge_hint.clone().unwrap_or_else(|| badges.hint.to_string()),
+        badge_hint_available: s.badge_hint_available.clone().unwrap_or_else(|| badges.hint_available.to_string()),
         diagonal_corners: s.diagonal_corners.unwrap_or_else(crate::config::default_diagonal_corners),
         overrides: s.overrides.clone(),
     }
@@ -293,6 +307,7 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         path_style: over.symbols.path_style.clone().or(base.symbols.path_style.clone()),
         portal_path_style: over.symbols.portal_path_style.clone().or(base.symbols.portal_path_style.clone()),
         control_icons: over.symbols.control_icons.clone().or(base.symbols.control_icons.clone()),
+        badge_icons: over.symbols.badge_icons.clone().or(base.symbols.badge_icons.clone()),
         badge_zcode: over.symbols.badge_zcode.clone().or(base.symbols.badge_zcode.clone()),
         badge_glulx: over.symbols.badge_glulx.clone().or(base.symbols.badge_glulx.clone()),
         badge_blorb: over.symbols.badge_blorb.clone().or(base.symbols.badge_blorb.clone()),
@@ -434,6 +449,7 @@ pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
     if let Some(toml::Value::Table(el_table)) = root.get("elements") {
         for (key, val) in el_table {
             match key.as_str() {
+                "badge_icons" => symbols.badge_icons = val.as_str().map(str::to_string),
                 "badge_zcode" => symbols.badge_zcode = val.as_str().map(str::to_string),
                 "badge_glulx" => symbols.badge_glulx = val.as_str().map(str::to_string),
                 "badge_blorb" => symbols.badge_blorb = val.as_str().map(str::to_string),
@@ -885,8 +901,8 @@ pub fn style_write_path(
     }
 }
 
-/// Record the font check's answer in `path`'s `[map]` section as PRESET NAMES,
-/// format-preserving (SQ-1104).
+/// Record the font check's answer in `path`'s `[map]` and `[elements]` sections
+/// as PRESET NAMES, format-preserving (SQ-1104, SQ-1159).
 ///
 /// Names, not expanded per-slot overrides. `arrow_set = "nerdfont"` is one line
 /// a person can read and re-decide; the forty `[map.overrides]` entries it would
@@ -923,14 +939,15 @@ pub fn write_font_check_answer(path: &std::path::Path, nerdfont: bool) -> std::i
         doc["map"] = Item::Table(toml_edit::Table::new());
     }
     let lamp = crate::render::font_check_dialog::ASSIST_LAMP;
-    let (arrows, portals, controls) = if nerdfont {
+    let (arrows, portals, controls, badges) = if nerdfont {
         (
             crate::render::font_check_dialog::NERD_ARROWS,
             crate::render::font_check_dialog::NERD_PORTALS,
             crate::render::font_check_dialog::NERD_CONTROLS,
+            crate::render::font_check_dialog::NERD_BADGES,
         )
     } else {
-        ("filled", "ascii", "plain")
+        ("filled", "ascii", "plain", "plain")
     };
     // Both answers are written out, not just the affirmative one: the file is
     // then a record of what was DECIDED, and a later re-check that swings the
@@ -943,6 +960,19 @@ pub fn write_font_check_answer(path: &std::path::Path, nerdfont: bool) -> std::i
         if let Some(v) = doc["map"][key].as_value_mut() {
             v.decor_mut().set_suffix(note);
         }
+    }
+
+    // The picker's row badges are the one preset that does NOT live in `[map]` —
+    // they sit in `[elements]` beside the `story_badge` selector that colours
+    // them (SQ-0559). One key, for the same reason the three above are one key
+    // each: six expanded per-badge glyphs would freeze today's codepoints into
+    // the user's file (SQ-1159).
+    if !doc.contains_key("elements") {
+        doc["elements"] = Item::Table(toml_edit::Table::new());
+    }
+    doc["elements"]["badge_icons"] = value(badges);
+    if let Some(v) = doc["elements"]["badge_icons"].as_value_mut() {
+        v.decor_mut().set_suffix(note);
     }
 
     let map = doc["map"].as_table_mut().expect("[map] is a table");
@@ -1532,6 +1562,66 @@ room = { fg = "white" }
             ),
             ("Z", "G", "B", "S", "H", "h"),
         );
+    }
+
+    // ── `badge_icons`, the badge PRESET (SQ-1159) ────────────────────────────
+    //
+    // Six free-text keys and no preset behind them is what let the badges fall
+    // out of step with the font check: `write_font_check_answer` set the arrows,
+    // the portals and the border controls from one answer and could not reach
+    // these at all. One name resolves all six; the six keys stay as overrides.
+
+    #[test]
+    fn badge_icons_nerdfont_moves_all_six_badges_at_once() {
+        let cfg = badges_from_toml("[elements]\nbadge_icons = \"nerdfont\"\n");
+        let want = crate::symbols::StoryBadges::preset("nerdfont").unwrap();
+        assert_eq!(
+            (
+                cfg.badge_zcode.as_str(),
+                cfg.badge_glulx.as_str(),
+                cfg.badge_blorb.as_str(),
+                cfg.badge_save.as_str(),
+                cfg.badge_hint.as_str(),
+                cfg.badge_hint_available.as_str(),
+            ),
+            (
+                want.zcode.to_string().as_str(),
+                want.glulx.to_string().as_str(),
+                want.blorb.to_string().as_str(),
+                want.save.to_string().as_str(),
+                want.hint.to_string().as_str(),
+                want.hint_available.to_string().as_str(),
+            ),
+        );
+    }
+
+    #[test]
+    fn a_badge_key_set_by_hand_beats_the_preset_it_sits_under() {
+        // The preset is the answer to "does my font draw icons"; a key is the
+        // answer to "what do I want THIS badge to be". The second wins, and only
+        // for its own slot.
+        let cfg = badges_from_toml("[elements]\nbadge_icons = \"nerdfont\"\nbadge_save = \"★\"\n");
+        let want = crate::symbols::StoryBadges::preset("nerdfont").unwrap();
+        assert_eq!(cfg.badge_save, "★", "the hand-set key wins");
+        assert_eq!(cfg.badge_zcode, want.zcode.to_string(), "its neighbours still come from the preset");
+        assert_eq!(cfg.badge_hint, want.hint.to_string());
+    }
+
+    #[test]
+    fn an_unknown_badge_preset_name_falls_back_to_the_letters() {
+        // Same treatment every other category gives an unknown name: keep the
+        // default rather than draw nothing.
+        let cfg = badges_from_toml("[elements]\nbadge_icons = \"sparkles\"\n");
+        assert_eq!(cfg.badge_zcode, "Z");
+        assert_eq!(cfg.badge_hint_available, "h");
+    }
+
+    #[test]
+    fn per_game_style_can_swap_the_whole_badge_set() {
+        let global = parse_style_toml("[elements]\nbadge_icons = \"nerdfont\"\n").unwrap();
+        let per_game = parse_style_toml("[elements]\nbadge_icons = \"plain\"\n").unwrap();
+        let cfg = finalize_symbols(&merge(&global, &per_game).symbols);
+        assert_eq!(cfg.badge_zcode, "Z", "the per-game preset wins outright");
     }
 
     #[test]

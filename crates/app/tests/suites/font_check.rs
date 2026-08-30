@@ -23,9 +23,15 @@ fn seeded_home(name: &str) -> std::path::PathBuf {
 
 /// Read the home's style file back the way startup does, and resolve the glyphs.
 fn glyphs(dir: &std::path::Path) -> SymbolSet {
+    SymbolSet::resolve(&badges(dir))
+}
+
+/// The same round trip, stopped one stage earlier: the picker's row badges are
+/// `SymbolConfig` strings and never reach `SymbolSet` (SQ-1159).
+fn badges(dir: &std::path::Path) -> app::config::SymbolConfig {
     let (doc, warnings) = load_style(None, dir);
     assert!(warnings.is_empty(), "the file we just wrote must parse clean: {warnings:?}");
-    SymbolSet::resolve(&app::style::finalize_symbols(&doc.symbols))
+    app::style::finalize_symbols(&doc.symbols)
 }
 
 /// The affirmative answer reaches the map: nerdfont arrows, the four distinct
@@ -149,6 +155,73 @@ fn the_seeded_commentary_survives_the_write() {
     let comments = |t: &str| t.lines().filter(|l| l.trim_start().starts_with('#')).count();
     assert_eq!(comments(&after), comments(&before), "every comment line survives");
     assert!(after.contains("[map.overrides]"), "and the override table's header with them");
+}
+
+/// The story picker's row badges follow the answer too (SQ-1159).
+///
+/// They did not, for as long as the font check has existed: `arrow_set`,
+/// `portal_icons` and `control_icons` were written from the answer and the six
+/// `badge_*` keys were not, so a player who said yes got patched glyphs
+/// everywhere EXCEPT the picker. It is one key, in `[elements]` rather than
+/// `[map]` — that is where the badges live, beside the selector that colours
+/// them — and it round-trips through the same three stages as the rest.
+#[test]
+fn a_yes_reaches_the_picker_badges_too() {
+    use app::render::font_check_dialog::NERD_BADGES;
+
+    let dir = seeded_home("badges");
+    let path = style_write_path(None, &dir).unwrap();
+    write_font_check_answer(&path, true).unwrap();
+
+    let want = app::symbols::StoryBadges::preset(NERD_BADGES).expect("the preset the answer names");
+    let cfg = badges(&dir);
+    assert_eq!(cfg.badge_zcode, want.zcode.to_string(), "the Z-code badge is patched");
+    assert_eq!(cfg.badge_glulx, want.glulx.to_string());
+    assert_eq!(cfg.badge_blorb, want.blorb.to_string());
+    assert_eq!(cfg.badge_save, want.save.to_string());
+    assert_eq!(cfg.badge_hint, want.hint.to_string());
+    assert_eq!(cfg.badge_hint_available, want.hint_available.to_string());
+
+    // A PRESET NAME, and one of them — not six expanded glyphs. Six would freeze
+    // today's codepoints into the user's file and stop a later improvement to the
+    // set from ever reaching them, which is the same reason `[map]`'s three keys
+    // are names.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let live: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with('#')).collect();
+    assert!(
+        live.iter().any(|l| l.contains(&format!("badge_icons = \"{NERD_BADGES}\""))),
+        "{text}"
+    );
+    for key in ["badge_zcode", "badge_glulx", "badge_blorb", "badge_save", "badge_hint"] {
+        assert!(
+            !live.iter().any(|l| l.trim_start().starts_with(key)),
+            "the answer expanded into a per-badge key ({key}):\n{live:#?}"
+        );
+    }
+
+    // …and a later "no" takes them back to the letters, like every other key the
+    // answer writes.
+    write_font_check_answer(&path, false).unwrap();
+    let plain = app::symbols::StoryBadges::PLAIN;
+    assert_eq!(badges(&dir).badge_zcode, plain.zcode.to_string(), "back to the letters");
+    assert_eq!(badges(&dir).badge_hint_available, plain.hint_available.to_string());
+}
+
+/// A badge the user spelled themselves is not ours to move. The answer chooses a
+/// SET; a key names one badge, and it outranks the set either way.
+#[test]
+fn a_badge_the_user_chose_survives_both_answers() {
+    let dir = seeded_home("badge-kept");
+    let path = style_write_path(None, &dir).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    // The seeded template documents the key commented out; the user uncomments it.
+    let text = text.replace("# badge_save = \"S\"", "badge_save = \"★\"");
+    std::fs::write(&path, &text).unwrap();
+
+    write_font_check_answer(&path, true).unwrap();
+    assert_eq!(badges(&dir).badge_save, "★", "their badge survives a yes");
+    write_font_check_answer(&path, false).unwrap();
+    assert_eq!(badges(&dir).badge_save, "★", "and a no");
 }
 
 /// A file that does not parse is the text the user has to READ to fix it.

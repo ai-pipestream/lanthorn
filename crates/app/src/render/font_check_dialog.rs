@@ -62,6 +62,15 @@ pub const NERD_PORTALS: &str = "nerdfont-stairs";
 /// draws the controls.
 pub const NERD_CONTROLS: &str = "nerdfont";
 
+/// …and the fourth: the story picker's row badges (SQ-1159). Its `"nerdfont"`
+/// arm is six Material Design icons — two boxed letters for the story TYPE, a
+/// package, a floppy and a lightbulb pair for the artifacts — and the sample
+/// row above needs no slot of its own for them, on the same argument the
+/// controls make: the row already samples MDI, and a face that draws MDI draws
+/// these. `symbols::StoryBadges::preset` carries the codepoints and how each was
+/// read out of the font.
+pub const NERD_BADGES: &str = "nerdfont";
+
 pub struct FontCheckRects {
     pub area: Rect,
     pub close: Option<Rect>,
