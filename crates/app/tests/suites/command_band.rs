@@ -1006,36 +1006,45 @@ fn arthurs_crystal_reaches_the_band_once_the_story_has_named_it() {
     assert_eq!(seen_of("torque"), Some(false), "an object the tree reports is not");
 }
 
-/// **The dictionary's noun bit cannot do this job on a Version 6 Infocom
-/// story**, which is why the block asks the story's own OBJECTS instead
-/// (SQ-1135).
+/// **The dictionary's noun bit now agrees with the story's own objects on a
+/// Version 6 Infocom story** — and this case is the record of the day it
+/// started to (SQ-1153), because it used to assert the opposite.
 ///
-/// `zvm::grammar::decode_roles` reads only `verb` ($01) and `noun` ($80) for
-/// `GrammarFormat::InfocomV6`, and $80 is not where these three games keep it —
-/// the layout is unknown and guessing it is exactly what CLAUDE.md forbids. The
-/// consequence, measured on the same churchyard frame, is not a filter that is
-/// merely narrow: it is one that keeps the wrong words. This pins that, so the
-/// day someone reads the V6 flag byte correctly this case says what changed.
+/// `zvm::grammar::decode_roles` read `GrammarFormat::InfocomV6` with Inform's
+/// layout — `$01` verb, `$80` noun — and Infocom's V6 games keep neither there.
+/// `$80` selected `are is was were will` on Arthur and missed the crystal, the
+/// torque and the sword outright, which is why the band's block asks the
+/// story's own OBJECTS instead (SQ-1135). The layout is now measured against
+/// all three V6 titles' parsers — `$01` verb, `$02` noun, `$04` adjective, in
+/// the LAST byte of the entry (`zvm::grammar`'s `F_INFOCOM_V6_VERB`, and
+/// `crates/zvm/tests/v6_word_roles.rs` for the evidence) — so both routes now
+/// answer, and this case pins that they agree.
+///
+/// **The object route stays** regardless: `all_object_words` is what the band
+/// actually reads, and a word array is the only thing that can follow Arthur's
+/// `password` object as it rewrites its own parse names mid-puzzle.
 #[test]
-fn the_v6_noun_bit_names_the_wrong_words_and_the_objects_do_not() {
+fn the_v6_noun_bit_and_the_objects_name_the_same_things() {
     let Some(session) = boot_v6("arthur-r74-s890714.z6", 74, "890714") else { return };
     let vocab = <GameSession as Engine>::story_vocabulary(&session).expect("a readable dictionary");
     for w in ["crystal", "torque", "sword", "is", "was", "were"] {
         println!("{w}: {:?}", vocab.roles(w));
     }
-    // Every one of these is a thing the parser takes, and NONE carries the bit.
+    // Every one of these is a thing the parser takes, and the bit now has them.
     for thing in ["crystal", "torque", "sword", "knob"] {
         assert_eq!(session.knows_word(thing), Some(true), "{thing} is in the dictionary");
         assert!(
-            !vocab.roles(thing).is_some_and(|r| r.noun),
-            "{thing:?} is a thing this story names and the noun bit misses it",
+            vocab.roles(thing).is_some_and(|r| r.noun),
+            "{thing:?} is a thing this story names and the noun bit has to have it",
         );
     }
-    // …while the bit picks out verbs of being, which name nothing at all.
+    // …and the verbs of being it used to pick out, which name nothing at all,
+    // are no longer nouns. `was` is a DESCRIPTOR on Arthur ($84) and stays one;
+    // what matters is that none of the three is offered as a thing.
     for not_a_thing in ["is", "was", "were"] {
         assert!(
-            vocab.roles(not_a_thing).is_some_and(|r| r.noun),
-            "{not_a_thing:?} carries the noun bit on Arthur — the falsifier for the whole filter",
+            !vocab.roles(not_a_thing).is_some_and(|r| r.noun),
+            "{not_a_thing:?} used to carry the noun bit on Arthur — the whole of SQ-1153",
         );
     }
     // The objects answer correctly, and they are what the block reads.
