@@ -1815,9 +1815,15 @@ screenshot, a bug report and a headless capture all want:
     bottom line of the taller frame exactly as it lands on the bottom line of the
     game's screen. (It used to make the whole screen shrink back to plain raster
     size for one turn and grow again on the next command the parser understood.)
-    Journey is the exception, and declines: its command menu sits under the story
-    with frame art beside it that cannot be carried down past it, so that title
-    stays on the `raster` picture.
+    **However tall that band is** — Arthur's wraps to two lines for a message as
+    long as *"Sorry, but I don't understand. Please rephrase that, or try
+    something else."* — the frame keeps its height and the artwork its size, in
+    every mode, and the extra line comes out of the story text and nothing else.
+    (A wrapped message used to be read as Journey's command menu, which cost
+    `hybrid` its side art and `extended` its surplus height until the next
+    command.) Journey itself is the real exception, and declines: its command
+    menu sits under the story with frame art beside it that cannot be carried
+    down past it, so that title stays on the `raster` picture.
 - **Cell fallback** — without an image protocol (a remote or text-only terminal),
   while a menu or dialog is open over the story pane, or on a painted menu
   takeover, everything — graphics windows, status grids, and story text —
