@@ -219,28 +219,22 @@ pub struct ControlGlyphs {
 /// The story picker's row badges (SQ-0559), as one preset rather than six loose
 /// keys (SQ-1159).
 ///
-/// **Why a preset at all.** These were six free-text `[elements]` keys with
-/// letter defaults and nothing behind them, so the font check — which sets
+/// **Why a preset at all.** These were free-text `[elements]` keys with letter
+/// defaults and nothing behind them, so the font check — which sets
 /// `arrow_set`, `portal_icons` and `control_icons` from one answer — could not
 /// reach them. A player who said "yes, my font is patched" got patched glyphs
-/// everywhere except here. Six keys is what made that possible; one name that
-/// resolves to six glyphs is what stops it happening again, and it leaves the
-/// per-badge keys working as overrides on top.
+/// everywhere except here. Loose keys are what made that possible; one name
+/// that resolves to the whole set is what stops it happening again, and it
+/// leaves the per-badge keys working as overrides on top.
 ///
-/// **Two kinds of badge, drawn two ways on purpose.** The TYPE (`zcode`,
-/// `glulx`) stays a LETTER even in the patched set, because no icon font
-/// depicts a Z-machine and an invented picture for one would be a worse answer
-/// than the letter it replaced; the boxed alphabet glyphs are the letter, drawn
-/// as a chip. The ARTIFACTS (`blorb`, `save`, `hint`) are things, so they are
-/// pictures of those things.
+/// **Three badges, and every one of them is an ARTIFACT** — a save, a hint you
+/// have, a hint you could fetch — so each is a picture of that thing. The set
+/// was six until SQ-1160: the story TYPE and the Blorb were badges once too,
+/// and SQ-0369 moved both into the picker's TYPE column as text
+/// (`Z5 (blorb)`), leaving three keys themeable and drawn nowhere. They are
+/// gone rather than redrawn — the column is the shipped answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StoryBadges {
-    /// The story is Z-code.
-    pub zcode: char,
-    /// The story is Glulx.
-    pub glulx: char,
-    /// Resources for the story live in a Blorb beside it.
-    pub blorb: char,
     /// The story has a save.
     pub save: char,
     /// Hints for the story are installed.
@@ -734,13 +728,10 @@ impl ControlGlyphs {
 
 impl StoryBadges {
     /// The plain answer, and the letters the picker has drawn since it landed:
-    /// `Z G B S H h`. Also the source of the `config::default_badge_*` values, so
+    /// `S H h`. Also the source of the `config::default_badge_*` values, so
     /// there is one place a default badge is spelled rather than two that agree
     /// by hand.
     pub const PLAIN: StoryBadges = StoryBadges {
-        zcode: 'Z',
-        glulx: 'G',
-        blorb: 'B',
         save: 'S',
         hint: 'H',
         hint_available: 'h',
@@ -753,8 +744,8 @@ impl StoryBadges {
 
     /// Return a named preset, or `None` for an unknown name.
     ///
-    /// - "plain"    — [`Self::PLAIN`], the six letters (default).
-    /// - "nerdfont" — six Material Design icons, which is also why the font
+    /// - "plain"    — [`Self::PLAIN`], the three letters (default).
+    /// - "nerdfont" — three Material Design icons, which is also why the font
     ///   check's sample row needs no new slot for them: the row already samples
     ///   MDI (`md-post_lamp` and the boxed arrows), and a face that draws that
     ///   draws these. This is the same argument [`ControlGlyphs`]'s nerdfont arm
@@ -765,22 +756,14 @@ impl StoryBadges {
     /// method) — never from a Nerd Fonts cheat sheet. Checked across the nine
     /// patched families installed on the machine this was chosen on
     /// (0xProto, Fira Code ×3, IosevkaTerm, JetBrains Mono, ProggyClean,
-    /// SauceCodePro and Symbols Nerd Font Mono): all six resolve to the SAME
+    /// SauceCodePro and Symbols Nerd Font Mono): each resolves to the SAME
     /// codepoint under the SAME name in all nine, and each rasterises with ink
     /// at 12–16px, so none of them is tofu on a face that claims the range.
+    /// **They are not to be re-derived.** SQ-1160 retired three of the original
+    /// six; the survivors below are exactly what that survey read.
     ///
     /// The choices, and why each survives being a few pixels tall in a list row:
     ///
-    /// - `md-alpha_z_box` / `md-alpha_g_box` — the LETTER, knocked out of a
-    ///   filled chip. Nothing in any icon font depicts a Z-machine or a Glulx
-    ///   VM, and a picture invented for one would say less than the letter it
-    ///   replaced; the box is what makes it read as a badge rather than as text.
-    ///   The outline variants (`md-alpha_z_box_outline`, U+F0C36) were rejected:
-    ///   at 12px their stroke is one pixel and the letter inside it goes.
-    /// - `md-package_variant_closed` — a Blorb is a *bundle* of resources shipped
-    ///   with the story, which is what the word package means. `md-archive`
-    ///   (U+F003C) draws a heavier silhouette but is a lidded box, near enough to
-    ///   `md-content_save`'s floppy at this size to be worth avoiding.
     /// - `md-content_save` — the floppy. The most legible small silhouette there
     ///   is, and the one glyph here nobody has to be taught.
     /// - `md-lightbulb` / `md-lightbulb_outline` — one FAMILY and one SHAPE for
@@ -793,9 +776,6 @@ impl StoryBadges {
         Some(match name {
             "plain" => StoryBadges::PLAIN,
             "nerdfont" => StoryBadges {
-                zcode: '\u{F0B21}',          // md-alpha_z_box
-                glulx: '\u{F0B0E}',          // md-alpha_g_box
-                blorb: '\u{F03D7}',          // md-package_variant_closed
                 save: '\u{F0193}',           // md-content_save
                 hint: '\u{F0335}',           // md-lightbulb
                 hint_available: '\u{F0336}', // md-lightbulb_outline
@@ -869,9 +849,6 @@ impl SymbolSet {
             path_style: path.to_owned(),
             portal_path_style: crate::config::default_portal_path_style(),
             control_icons: crate::config::default_control_icons(),
-            badge_zcode: crate::config::default_badge_zcode(),
-            badge_glulx: crate::config::default_badge_glulx(),
-            badge_blorb: crate::config::default_badge_blorb(),
             badge_save: crate::config::default_badge_save(),
             badge_hint: crate::config::default_badge_hint(),
             badge_hint_available: crate::config::default_badge_hint_available(),
@@ -1146,9 +1123,6 @@ mod tests {
             path_style: "light".into(),
             portal_path_style: crate::config::default_portal_path_style(),
             control_icons: crate::config::default_control_icons(),
-            badge_zcode: crate::config::default_badge_zcode(),
-            badge_glulx: crate::config::default_badge_glulx(),
-            badge_blorb: crate::config::default_badge_blorb(),
             badge_save: crate::config::default_badge_save(),
             badge_hint: crate::config::default_badge_hint(),
             badge_hint_available: crate::config::default_badge_hint_available(),
@@ -1322,22 +1296,19 @@ mod tests {
         assert!(!all.contains(&c.return_probe), "the footprint is its own mark");
     }
 
-    /// The story badges' nerdfont set is six named icons, each codepoint read
+    /// The story badges' nerdfont set is three named icons, each codepoint read
     /// from the patched font's own `cmap` under the font's own glyph name and
     /// confirmed to rasterise with ink — never taken from a Nerd Fonts cheat
-    /// sheet (SQ-1045's rule, SQ-1141's method, SQ-1159's set).
+    /// sheet (SQ-1045's rule, SQ-1141's method, SQ-1159's set, SQ-1160's cut).
     ///
     /// This pins the numbers because nothing else can. There is no assertion on
     /// our side of the terminal that could notice a wrong icon drawn crisply and
     /// confidently, and a badge that comes out as tofu is worse than the letter
-    /// it replaced — the picker's TYPE column would say nothing at all.
+    /// it replaced — the row would say nothing at all where a mark belongs.
     #[test]
     fn nerdfont_badge_glyphs_are_the_names_that_were_read_from_the_font() {
         let b = StoryBadges::preset("nerdfont").expect("preset");
         for (name, got, want) in [
-            ("md-alpha_z_box", b.zcode, '\u{F0B21}'),
-            ("md-alpha_g_box", b.glulx, '\u{F0B0E}'),
-            ("md-package_variant_closed", b.blorb, '\u{F03D7}'),
             ("md-content_save", b.save, '\u{F0193}'),
             ("md-lightbulb", b.hint, '\u{F0335}'),
             ("md-lightbulb_outline", b.hint_available, '\u{F0336}'),
@@ -1345,30 +1316,28 @@ mod tests {
             assert_eq!(got, want, "{name} moved: U+{:05X} is not U+{:05X}", got as u32, want as u32);
         }
         // One family for the whole set — Material Design, above U+F0000 — so the
-        // six share a stroke weight and cap height and a row of them does not
+        // three share a stroke weight and cap height and a row of them does not
         // look assembled out of parts. It is also what lets the font check's
         // sample row stand in for them: it already samples MDI.
         for (slot, ch) in [
-            ("zcode", b.zcode), ("glulx", b.glulx), ("blorb", b.blorb),
             ("save", b.save), ("hint", b.hint), ("hint_available", b.hint_available),
         ] {
             assert!(ch as u32 >= 0xF_0000, "badge.{slot} = U+{:05X} is not Material Design", ch as u32);
             assert!(!is_wide_estimate(ch), "badge.{slot} = {ch:?} estimates as double-width");
         }
-        // The type pair and the hint pair each say two different things, and the
-        // hint's two states stay one shape apart in FILL alone (adjacent
-        // codepoints in MDI's filled/outline convention) — that is the whole
-        // distinction being drawn between a hint you have and one you could get.
-        assert_ne!(b.zcode, b.glulx, "the two story types are the same glyph");
+        // The hint pair says two different things, and its two states stay one
+        // shape apart in FILL alone (adjacent codepoints in MDI's
+        // filled/outline convention) — that is the whole distinction being
+        // drawn between a hint you have and one you could get.
         assert_ne!(b.hint, b.hint_available, "the hint's two states are the same glyph");
         assert_eq!(
             b.hint_available as u32,
             b.hint as u32 + 1,
             "md-lightbulb_outline is no longer the filled bulb's own outline",
         );
-        // Six badges, six distinct marks: two rows cannot say the same thing.
-        let all = [b.zcode, b.glulx, b.blorb, b.save, b.hint, b.hint_available];
-        assert_eq!(all.iter().collect::<std::collections::HashSet<_>>().len(), 6);
+        // Three badges, three distinct marks: two rows cannot say the same thing.
+        let all = [b.save, b.hint, b.hint_available];
+        assert_eq!(all.iter().collect::<std::collections::HashSet<_>>().len(), 3);
     }
 
     /// The PLAIN badges are the letters the picker has always drawn, and they
@@ -1378,14 +1347,8 @@ mod tests {
     fn plain_badges_are_the_letters_and_the_config_defaults_come_from_them() {
         let b = StoryBadges::preset("plain").expect("the default preset");
         assert_eq!(b, StoryBadges::PLAIN);
-        assert_eq!(
-            (b.zcode, b.glulx, b.blorb, b.save, b.hint, b.hint_available),
-            ('Z', 'G', 'B', 'S', 'H', 'h'),
-        );
+        assert_eq!((b.save, b.hint, b.hint_available), ('S', 'H', 'h'));
         for (slot, got, want) in [
-            ("zcode", crate::config::default_badge_zcode(), b.zcode),
-            ("glulx", crate::config::default_badge_glulx(), b.glulx),
-            ("blorb", crate::config::default_badge_blorb(), b.blorb),
             ("save", crate::config::default_badge_save(), b.save),
             ("hint", crate::config::default_badge_hint(), b.hint),
             ("hint_available", crate::config::default_badge_hint_available(), b.hint_available),
@@ -1393,9 +1356,8 @@ mod tests {
             assert_eq!(got, want.to_string(), "default_badge_{slot} is not the plain preset's glyph");
         }
         // Every plain badge must be drawable by an ordinary monospace face —
-        // which is what "plain" promises — so all six are bare ASCII.
+        // which is what "plain" promises — so all three are bare ASCII.
         for (slot, ch) in [
-            ("zcode", b.zcode), ("glulx", b.glulx), ("blorb", b.blorb),
             ("save", b.save), ("hint", b.hint), ("hint_available", b.hint_available),
         ] {
             assert!(ch.is_ascii_alphanumeric(), "badge.{slot} = {ch:?} is not plain ASCII");

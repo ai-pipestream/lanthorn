@@ -58,12 +58,9 @@ pub(crate) fn default_portal_icons() -> String { "ascii".into() }
 pub(crate) fn default_path_style() -> String { "light".into() }
 /// The badge preset a style file with no `badge_icons` key gets: the letters.
 pub(crate) fn default_badge_icons() -> String { "plain".into() }
-// …and the six per-badge defaults, taken FROM that preset rather than spelled a
+// …and the three per-badge defaults, taken FROM that preset rather than spelled a
 // second time beside it (SQ-1159). An absent `badge_*` key means "whatever the
-// preset says", so `[elements] badge_icons = "nerdfont"` moves all six at once.
-pub(crate) fn default_badge_zcode() -> String { crate::symbols::StoryBadges::PLAIN.zcode.to_string() }
-pub(crate) fn default_badge_glulx() -> String { crate::symbols::StoryBadges::PLAIN.glulx.to_string() }
-pub(crate) fn default_badge_blorb() -> String { crate::symbols::StoryBadges::PLAIN.blorb.to_string() }
+// preset says", so `[elements] badge_icons = "nerdfont"` moves all three at once.
 pub(crate) fn default_badge_save() -> String { crate::symbols::StoryBadges::PLAIN.save.to_string() }
 pub(crate) fn default_badge_hint() -> String { crate::symbols::StoryBadges::PLAIN.hint.to_string() }
 pub(crate) fn default_badge_hint_available() -> String {
@@ -100,15 +97,6 @@ pub struct SymbolConfig {
     /// writes this key alongside `arrow_set`/`portal_icons`.
     #[serde(default = "default_control_icons")]
     pub control_icons: String,
-    /// Row story-type badge glyph for Z-code stories (default "Z").
-    #[serde(default = "default_badge_zcode")]
-    pub badge_zcode: String,
-    /// Row story-type badge glyph for Glulx stories (default "G").
-    #[serde(default = "default_badge_glulx")]
-    pub badge_glulx: String,
-    /// Row "a blorb exists" artifact badge glyph (default "B").
-    #[serde(default = "default_badge_blorb")]
-    pub badge_blorb: String,
     /// Row "a save exists" artifact badge glyph (default "S").
     #[serde(default = "default_badge_save")]
     pub badge_save: String,
@@ -138,9 +126,6 @@ impl Default for SymbolConfig {
             path_style: default_path_style(),
             portal_path_style: default_portal_path_style(),
             control_icons: default_control_icons(),
-            badge_zcode: default_badge_zcode(),
-            badge_glulx: default_badge_glulx(),
-            badge_blorb: default_badge_blorb(),
             badge_save: default_badge_save(),
             badge_hint: default_badge_hint(),
             badge_hint_available: default_badge_hint_available(),
@@ -5205,22 +5190,35 @@ use_defaults = true
     #[test]
     fn symbol_config_badge_glyph_defaults() {
         let s = SymbolConfig::default();
-        assert_eq!(s.badge_zcode, "Z");
-        assert_eq!(s.badge_glulx, "G");
-        assert_eq!(s.badge_blorb, "B");
         assert_eq!(s.badge_save, "S");
         assert_eq!(s.badge_hint, "H");
+        assert_eq!(s.badge_hint_available, "h");
     }
 
     #[test]
     fn symbol_config_badge_glyph_override_and_absent_default() {
         // Overriding one field parses; the others keep their defaults.
         let toml = r#"
-            badge_blorb = "◆"
+            badge_save = "◆"
         "#;
         let s: SymbolConfig = toml::from_str(toml).unwrap();
-        assert_eq!(s.badge_blorb, "◆");
-        assert_eq!(s.badge_zcode, "Z");
+        assert_eq!(s.badge_save, "◆");
         assert_eq!(s.badge_hint, "H");
+    }
+
+    /// SQ-1160 retired `badge_zcode`/`badge_glulx`/`badge_blorb`. Pre-release
+    /// means no shim, but a config still naming one must LOAD: `SymbolConfig`
+    /// carries no `deny_unknown_fields`, so serde drops the retired key rather
+    /// than failing the file and taking every other symbol down with it.
+    #[test]
+    fn a_retired_badge_key_is_ignored_not_an_error() {
+        let toml = r#"
+            badge_zcode = "Z"
+            badge_glulx = "G"
+            badge_blorb = "B"
+            badge_save = "★"
+        "#;
+        let s: SymbolConfig = toml::from_str(toml).expect("a retired key must not fail the load");
+        assert_eq!(s.badge_save, "★", "the surviving key beside it still lands");
     }
 }

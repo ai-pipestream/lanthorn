@@ -204,11 +204,9 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // The badge GLYPHS sit beside the `story_badge` selector that colours them —
     // one concept, one place (SQ-0559). Presets, so the letter rides in `glyph`.
     // `badge_icons` chooses the SET (SQ-1159) and the font check writes it; the
-    // six keys under it override one badge each.
+    // keys under it override one badge each. SQ-1160 retired the story-type and
+    // Blorb badges: SQ-0369 had moved both into the row's TYPE column as text.
     row("badge_icons", Section::Elements, Kind::Placement, None, glyph("plain")),
-    row("badge_zcode", Section::Elements, Kind::Placement, None, glyph("Z")),
-    row("badge_glulx", Section::Elements, Kind::Placement, None, glyph("G")),
-    row("badge_blorb", Section::Elements, Kind::Placement, None, glyph("B")),
     row("badge_save", Section::Elements, Kind::Placement, None, glyph("S")),
     row("badge_hint", Section::Elements, Kind::Placement, None, glyph("H")),
     row("badge_hint_available", Section::Elements, Kind::Placement, None, glyph("h")),
@@ -595,9 +593,6 @@ mod tests {
         "transcript_location",
         "story_badge",
         "badge_icons",
-        "badge_zcode",
-        "badge_glulx",
-        "badge_blorb",
         "badge_save",
         "badge_hint",
         "badge_hint_available",

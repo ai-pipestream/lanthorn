@@ -1856,10 +1856,12 @@ fn game_dir_has_save(game_dir: &Path) -> bool {
 }
 
 /// Borrowed badge glyphs from the `[symbols]` config, for row rendering.
+///
+/// The story TYPE and the Blorb had glyphs here until SQ-1160. SQ-0369 had
+/// already moved both into the row's TYPE column as text (`Z5 (blorb)`), so
+/// they were borrowed by no drawing code for a year; what remains is what the
+/// row actually paints.
 pub struct BadgeGlyphs<'a> {
-    pub zcode: &'a str,
-    pub glulx: &'a str,
-    pub blorb: &'a str,
     pub save: &'a str,
     pub hint: &'a str,
     pub hint_available: &'a str,
@@ -1868,9 +1870,6 @@ pub struct BadgeGlyphs<'a> {
 impl<'a> BadgeGlyphs<'a> {
     pub fn from_symbols(s: &'a crate::config::SymbolConfig) -> Self {
         Self {
-            zcode: &s.badge_zcode,
-            glulx: &s.badge_glulx,
-            blorb: &s.badge_blorb,
             save: &s.badge_save,
             hint: &s.badge_hint,
             hint_available: &s.badge_hint_available,

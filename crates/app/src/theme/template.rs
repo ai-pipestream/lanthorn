@@ -189,13 +189,11 @@ fn enum_hint(row: &RegRow) -> &'static str {
         "map.path_style" | "map.portal_path_style" => "   # light | heavy | dotted",
         "map.control_icons" => "   # plain | nerdfont   (the pane-border toggle controls)",
         // Story-list row badges (SQ-0559). `badge_icons` IS enumerated — it names
-        // a `StoryBadges` preset, and the font check writes it (SQ-1159). The six
-        // under it are free-form: any string, so a patched font can use a real
-        // icon instead of a bare letter, and one set by hand beats the preset.
+        // a `StoryBadges` preset, and the font check writes it (SQ-1159). The
+        // three under it are free-form: any string, so a patched font can use a
+        // real icon instead of a bare letter, and one set by hand beats the
+        // preset.
         "badge_icons" => "   # plain | nerdfont   (the story-list badges below; each key overrides one)",
-        "badge_zcode" => "   # story-list badge: a Z-machine story",
-        "badge_glulx" => "   # story-list badge: a Glulx story",
-        "badge_blorb" => "   # story-list badge: resources in a Blorb",
         "badge_save" => "   # story-list badge: the story has a save",
         "badge_hint" => "   # story-list badge: hints are installed",
         "badge_hint_available" => "   # story-list badge: hints exist but aren't downloaded",

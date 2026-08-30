@@ -42,9 +42,6 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # transcript_location = { parent = "accent" }
 # story_badge = { parent = "text" }
 # badge_icons = "plain"   # plain | nerdfont   (the story-list badges below; each key overrides one)
-# badge_zcode = "Z"   # story-list badge: a Z-machine story
-# badge_glulx = "G"   # story-list badge: a Glulx story
-# badge_blorb = "B"   # story-list badge: resources in a Blorb
 # badge_save = "S"   # story-list badge: the story has a save
 # badge_hint = "H"   # story-list badge: hints are installed
 # badge_hint_available = "h"   # story-list badge: hints exist but aren't downloaded

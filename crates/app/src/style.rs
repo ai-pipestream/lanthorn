@@ -134,13 +134,10 @@ pub struct StyleSymbols {
     /// "nerdfont".
     pub control_icons: Option<String>,
     /// Glyph preset for the story picker's row badges (SQ-1159): "plain" or
-    /// "nerdfont". The six `badge_*` keys below layer over whatever it resolves
-    /// to, so a player can take the patched set and still spell one badge their
-    /// own way.
+    /// "nerdfont". The `badge_*` keys below layer over whatever it resolves to,
+    /// so a player can take the patched set and still spell one badge their own
+    /// way.
     pub badge_icons: Option<String>,
-    pub badge_zcode: Option<String>,
-    pub badge_glulx: Option<String>,
-    pub badge_blorb: Option<String>,
     pub badge_save: Option<String>,
     pub badge_hint: Option<String>,
     pub badge_hint_available: Option<String>,
@@ -159,7 +156,7 @@ pub struct StyleSymbols {
 /// Each `None` preset is filled with the existing `config::default_*` value.
 /// The `overrides` map is copied as-is.
 ///
-/// The six `badge_*` fields are the one two-stage resolution here (SQ-1159):
+/// The `badge_*` fields are the one two-stage resolution here (SQ-1159):
 /// `badge_icons` names a [`crate::symbols::StoryBadges`] preset, and each badge
 /// key that IS set overrides that preset's glyph for its own slot. An unknown
 /// preset name falls back to the letters, the same way every other category
@@ -175,9 +172,6 @@ pub fn finalize_symbols(s: &StyleSymbols) -> crate::config::SymbolConfig {
         path_style: s.path_style.clone().unwrap_or_else(crate::config::default_path_style),
         portal_path_style: s.portal_path_style.clone().unwrap_or_else(crate::config::default_portal_path_style),
         control_icons: s.control_icons.clone().unwrap_or_else(crate::config::default_control_icons),
-        badge_zcode: s.badge_zcode.clone().unwrap_or_else(|| badges.zcode.to_string()),
-        badge_glulx: s.badge_glulx.clone().unwrap_or_else(|| badges.glulx.to_string()),
-        badge_blorb: s.badge_blorb.clone().unwrap_or_else(|| badges.blorb.to_string()),
         badge_save: s.badge_save.clone().unwrap_or_else(|| badges.save.to_string()),
         badge_hint: s.badge_hint.clone().unwrap_or_else(|| badges.hint.to_string()),
         badge_hint_available: s.badge_hint_available.clone().unwrap_or_else(|| badges.hint_available.to_string()),
@@ -308,9 +302,6 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         portal_path_style: over.symbols.portal_path_style.clone().or(base.symbols.portal_path_style.clone()),
         control_icons: over.symbols.control_icons.clone().or(base.symbols.control_icons.clone()),
         badge_icons: over.symbols.badge_icons.clone().or(base.symbols.badge_icons.clone()),
-        badge_zcode: over.symbols.badge_zcode.clone().or(base.symbols.badge_zcode.clone()),
-        badge_glulx: over.symbols.badge_glulx.clone().or(base.symbols.badge_glulx.clone()),
-        badge_blorb: over.symbols.badge_blorb.clone().or(base.symbols.badge_blorb.clone()),
         badge_save: over.symbols.badge_save.clone().or(base.symbols.badge_save.clone()),
         badge_hint: over.symbols.badge_hint.clone().or(base.symbols.badge_hint.clone()),
         badge_hint_available: over.symbols.badge_hint_available.clone().or(base.symbols.badge_hint_available.clone()),
@@ -450,9 +441,6 @@ pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
         for (key, val) in el_table {
             match key.as_str() {
                 "badge_icons" => symbols.badge_icons = val.as_str().map(str::to_string),
-                "badge_zcode" => symbols.badge_zcode = val.as_str().map(str::to_string),
-                "badge_glulx" => symbols.badge_glulx = val.as_str().map(str::to_string),
-                "badge_blorb" => symbols.badge_blorb = val.as_str().map(str::to_string),
                 "badge_save"  => symbols.badge_save  = val.as_str().map(str::to_string),
                 "badge_hint"  => symbols.badge_hint  = val.as_str().map(str::to_string),
                 "badge_hint_available" => {
@@ -965,8 +953,8 @@ pub fn write_font_check_answer(path: &std::path::Path, nerdfont: bool) -> std::i
     // The picker's row badges are the one preset that does NOT live in `[map]` —
     // they sit in `[elements]` beside the `story_badge` selector that colours
     // them (SQ-0559). One key, for the same reason the three above are one key
-    // each: six expanded per-badge glyphs would freeze today's codepoints into
-    // the user's file (SQ-1159).
+    // each: expanded per-badge glyphs would freeze today's codepoints into the
+    // user's file (SQ-1159).
     if !doc.contains_key("elements") {
         doc["elements"] = Item::Table(toml_edit::Table::new());
     }
@@ -1467,9 +1455,6 @@ room = { fg = "white" }
         // …and the `[elements]` badge glyphs (SQ-0559), which the same broken
         // link kept unreachable for even longer — they were never read from any
         // section at all.
-        let text = uncomment(&text, "badge_zcode", "\"z\"");
-        let text = uncomment(&text, "badge_glulx", "\"g\"");
-        let text = uncomment(&text, "badge_blorb", "\"b\"");
         let text = uncomment(&text, "badge_save", "\"s\"");
         let text = uncomment(&text, "badge_hint", "\"?\"");
         let text = uncomment(&text, "badge_hint_available", "\"¿\"");
@@ -1483,25 +1468,20 @@ room = { fg = "white" }
 
         let cfg = badges_from_toml(&text);
         assert_eq!(
-            (
-                cfg.badge_zcode.as_str(),
-                cfg.badge_glulx.as_str(),
-                cfg.badge_blorb.as_str(),
-                cfg.badge_save.as_str(),
-                cfg.badge_hint.as_str(),
-                cfg.badge_hint_available.as_str(),
-            ),
-            ("z", "g", "b", "s", "?", "¿"),
+            (cfg.badge_save.as_str(), cfg.badge_hint.as_str(), cfg.badge_hint_available.as_str()),
+            ("s", "?", "¿"),
         );
     }
 
     // ── TOML → picker badge glyphs (SQ-0559) ─────────────────────────────────
     //
-    // The six `badge_*` fields have existed on `StyleSymbols`/`SymbolConfig` and
-    // fed `picker::BadgeGlyphs` since the picker landed, but no parser arm ever
-    // read them — not under `[symbols]`, not anywhere — so they were always the
+    // The `badge_*` fields have existed on `StyleSymbols`/`SymbolConfig` and fed
+    // `picker::BadgeGlyphs` since the picker landed, but no parser arm ever read
+    // them — not under `[symbols]`, not anywhere — so they were always the
     // built-in letters. They now live in `[elements]`, beside the `story_badge`
-    // selector that colours them.
+    // selector that colours them. Three of the original six were retired by
+    // SQ-1160: SQ-0369 had moved the story type and the Blorb into the row's
+    // TYPE column as text, so those keys reached no pixel.
 
     /// Resolve a style.toml string straight to the `SymbolConfig` the story
     /// picker reads its badge glyphs from.
@@ -1511,39 +1491,51 @@ room = { fg = "white" }
 
     #[test]
     fn elements_badge_glyphs_reach_the_symbol_config() {
-        // Every badge gets its OWN value, so a parser arm that wired all six to
+        // Every badge gets its OWN value, so a parser arm that wired them all to
         // one key — or to each other — cannot pass.
         let cfg = badges_from_toml(
             "[elements]\n\
-             badge_zcode = \"\u{e795}\"\n\
-             badge_glulx = \"\u{f188}\"\n\
-             badge_blorb = \"\u{f1c6}\"\n\
              badge_save = \"\u{f0c7}\"\n\
              badge_hint = \"\u{f059}\"\n\
              badge_hint_available = \"\u{f05a}\"\n",
         );
-        assert_eq!(cfg.badge_zcode, "\u{e795}");
-        assert_eq!(cfg.badge_glulx, "\u{f188}");
-        assert_eq!(cfg.badge_blorb, "\u{f1c6}");
         assert_eq!(cfg.badge_save, "\u{f0c7}");
         assert_eq!(cfg.badge_hint, "\u{f059}");
         assert_eq!(cfg.badge_hint_available, "\u{f05a}");
 
         // …and through to the borrowed view the picker rows actually draw with.
         let glyphs = crate::picker::BadgeGlyphs::from_symbols(&cfg);
-        assert_eq!(glyphs.zcode, "\u{e795}");
+        assert_eq!(glyphs.save, "\u{f0c7}");
         assert_eq!(glyphs.hint_available, "\u{f05a}");
     }
 
+    /// SQ-1160 retired `badge_zcode`, `badge_glulx` and `badge_blorb`. There is
+    /// no shim and none is wanted — but a style.toml that still names one must
+    /// LOAD, or retiring a key turns a working user file into a failing one.
+    /// The `[elements]` walk drops an unrecognised scalar (`_ => {}`), and
+    /// `theme::toml_schema` only reads inline TABLES from that section, so a
+    /// retired key is ignored by both halves rather than warned about or
+    /// refused.
     #[test]
-    fn one_badge_set_leaves_the_other_five_at_their_defaults() {
+    fn a_retired_badge_key_in_elements_is_ignored_not_an_error() {
+        let doc = parse_style_toml(
+            "[elements]\n\
+             badge_zcode = \"Z\"\n\
+             badge_glulx = \"G\"\n\
+             badge_blorb = \"B\"\n\
+             badge_save = \"★\"\n",
+        )
+        .expect("a retired badge key must not fail the style file");
+        let cfg = finalize_symbols(&doc.symbols);
+        assert_eq!(cfg.badge_save, "★", "the surviving key beside it still lands");
+    }
+
+    #[test]
+    fn one_badge_set_leaves_the_others_at_their_defaults() {
         // The absent keys must still fall back to the built-in letters, and the
         // one that IS set must not bleed into its neighbours.
         let cfg = badges_from_toml("[elements]\nbadge_save = \"💾\"\n");
         assert_eq!(cfg.badge_save, "💾");
-        assert_eq!(cfg.badge_zcode, "Z");
-        assert_eq!(cfg.badge_glulx, "G");
-        assert_eq!(cfg.badge_blorb, "B");
         assert_eq!(cfg.badge_hint, "H");
         assert_eq!(cfg.badge_hint_available, "h");
     }
@@ -1552,42 +1544,25 @@ room = { fg = "white" }
     fn absent_elements_section_leaves_every_badge_at_its_default() {
         let cfg = badges_from_toml("[colors]\n\"transcript\" = { fg = \"red\" }\n");
         assert_eq!(
-            (
-                cfg.badge_zcode.as_str(),
-                cfg.badge_glulx.as_str(),
-                cfg.badge_blorb.as_str(),
-                cfg.badge_save.as_str(),
-                cfg.badge_hint.as_str(),
-                cfg.badge_hint_available.as_str(),
-            ),
-            ("Z", "G", "B", "S", "H", "h"),
+            (cfg.badge_save.as_str(), cfg.badge_hint.as_str(), cfg.badge_hint_available.as_str()),
+            ("S", "H", "h"),
         );
     }
 
     // ── `badge_icons`, the badge PRESET (SQ-1159) ────────────────────────────
     //
-    // Six free-text keys and no preset behind them is what let the badges fall
-    // out of step with the font check: `write_font_check_answer` set the arrows,
-    // the portals and the border controls from one answer and could not reach
-    // these at all. One name resolves all six; the six keys stay as overrides.
+    // Free-text keys and no preset behind them is what let the badges fall out
+    // of step with the font check: `write_font_check_answer` set the arrows, the
+    // portals and the border controls from one answer and could not reach these
+    // at all. One name resolves the whole set; the keys stay as overrides.
 
     #[test]
-    fn badge_icons_nerdfont_moves_all_six_badges_at_once() {
+    fn badge_icons_nerdfont_moves_every_badge_at_once() {
         let cfg = badges_from_toml("[elements]\nbadge_icons = \"nerdfont\"\n");
         let want = crate::symbols::StoryBadges::preset("nerdfont").unwrap();
         assert_eq!(
+            (cfg.badge_save.as_str(), cfg.badge_hint.as_str(), cfg.badge_hint_available.as_str()),
             (
-                cfg.badge_zcode.as_str(),
-                cfg.badge_glulx.as_str(),
-                cfg.badge_blorb.as_str(),
-                cfg.badge_save.as_str(),
-                cfg.badge_hint.as_str(),
-                cfg.badge_hint_available.as_str(),
-            ),
-            (
-                want.zcode.to_string().as_str(),
-                want.glulx.to_string().as_str(),
-                want.blorb.to_string().as_str(),
                 want.save.to_string().as_str(),
                 want.hint.to_string().as_str(),
                 want.hint_available.to_string().as_str(),
@@ -1603,8 +1578,8 @@ room = { fg = "white" }
         let cfg = badges_from_toml("[elements]\nbadge_icons = \"nerdfont\"\nbadge_save = \"★\"\n");
         let want = crate::symbols::StoryBadges::preset("nerdfont").unwrap();
         assert_eq!(cfg.badge_save, "★", "the hand-set key wins");
-        assert_eq!(cfg.badge_zcode, want.zcode.to_string(), "its neighbours still come from the preset");
-        assert_eq!(cfg.badge_hint, want.hint.to_string());
+        assert_eq!(cfg.badge_hint, want.hint.to_string(), "its neighbours still come from the preset");
+        assert_eq!(cfg.badge_hint_available, want.hint_available.to_string());
     }
 
     #[test]
@@ -1612,7 +1587,7 @@ room = { fg = "white" }
         // Same treatment every other category gives an unknown name: keep the
         // default rather than draw nothing.
         let cfg = badges_from_toml("[elements]\nbadge_icons = \"sparkles\"\n");
-        assert_eq!(cfg.badge_zcode, "Z");
+        assert_eq!(cfg.badge_save, "S");
         assert_eq!(cfg.badge_hint_available, "h");
     }
 
@@ -1621,18 +1596,19 @@ room = { fg = "white" }
         let global = parse_style_toml("[elements]\nbadge_icons = \"nerdfont\"\n").unwrap();
         let per_game = parse_style_toml("[elements]\nbadge_icons = \"plain\"\n").unwrap();
         let cfg = finalize_symbols(&merge(&global, &per_game).symbols);
-        assert_eq!(cfg.badge_zcode, "Z", "the per-game preset wins outright");
+        assert_eq!(cfg.badge_save, "S", "the per-game preset wins outright");
     }
 
     #[test]
     fn per_game_style_layers_over_the_global_badges() {
         // `merge` already carried the badge fields; now that the parser fills
         // them, pin that the layering actually works end to end.
-        let global = parse_style_toml("[elements]\nbadge_zcode = \"z\"\nbadge_save = \"s\"\n").unwrap();
+        let global =
+            parse_style_toml("[elements]\nbadge_hint_available = \"a\"\nbadge_save = \"s\"\n").unwrap();
         let per_game = parse_style_toml("[elements]\nbadge_save = \"★\"\n").unwrap();
         let cfg = finalize_symbols(&merge(&global, &per_game).symbols);
         assert_eq!(cfg.badge_save, "★"); // per-game wins
-        assert_eq!(cfg.badge_zcode, "z"); // global stands
+        assert_eq!(cfg.badge_hint_available, "a"); // global stands
         assert_eq!(cfg.badge_hint, "H"); // neither spoke → default
     }
 
@@ -1644,7 +1620,7 @@ room = { fg = "white" }
             "[elements]\nstory_badge = { fg = \"cyan\" }\nbadge_hint = \"¡\"\n",
         );
         assert_eq!(cfg.badge_hint, "¡");
-        assert_eq!(cfg.badge_zcode, "Z");
+        assert_eq!(cfg.badge_save, "S");
     }
 
     #[test]

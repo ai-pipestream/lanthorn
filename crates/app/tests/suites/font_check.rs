@@ -160,7 +160,7 @@ fn the_seeded_commentary_survives_the_write() {
 /// The story picker's row badges follow the answer too (SQ-1159).
 ///
 /// They did not, for as long as the font check has existed: `arrow_set`,
-/// `portal_icons` and `control_icons` were written from the answer and the six
+/// `portal_icons` and `control_icons` were written from the answer and the
 /// `badge_*` keys were not, so a player who said yes got patched glyphs
 /// everywhere EXCEPT the picker. It is one key, in `[elements]` rather than
 /// `[map]` — that is where the badges live, beside the selector that colours
@@ -175,24 +175,21 @@ fn a_yes_reaches_the_picker_badges_too() {
 
     let want = app::symbols::StoryBadges::preset(NERD_BADGES).expect("the preset the answer names");
     let cfg = badges(&dir);
-    assert_eq!(cfg.badge_zcode, want.zcode.to_string(), "the Z-code badge is patched");
-    assert_eq!(cfg.badge_glulx, want.glulx.to_string());
-    assert_eq!(cfg.badge_blorb, want.blorb.to_string());
-    assert_eq!(cfg.badge_save, want.save.to_string());
+    assert_eq!(cfg.badge_save, want.save.to_string(), "the save badge is patched");
     assert_eq!(cfg.badge_hint, want.hint.to_string());
     assert_eq!(cfg.badge_hint_available, want.hint_available.to_string());
 
-    // A PRESET NAME, and one of them — not six expanded glyphs. Six would freeze
-    // today's codepoints into the user's file and stop a later improvement to the
-    // set from ever reaching them, which is the same reason `[map]`'s three keys
-    // are names.
+    // A PRESET NAME, and one of them — not a glyph per badge. Expanding them
+    // would freeze today's codepoints into the user's file and stop a later
+    // improvement to the set from ever reaching them, which is the same reason
+    // `[map]`'s three keys are names.
     let text = std::fs::read_to_string(&path).unwrap();
     let live: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with('#')).collect();
     assert!(
         live.iter().any(|l| l.contains(&format!("badge_icons = \"{NERD_BADGES}\""))),
         "{text}"
     );
-    for key in ["badge_zcode", "badge_glulx", "badge_blorb", "badge_save", "badge_hint"] {
+    for key in ["badge_save", "badge_hint", "badge_hint_available"] {
         assert!(
             !live.iter().any(|l| l.trim_start().starts_with(key)),
             "the answer expanded into a per-badge key ({key}):\n{live:#?}"
@@ -203,7 +200,7 @@ fn a_yes_reaches_the_picker_badges_too() {
     // answer writes.
     write_font_check_answer(&path, false).unwrap();
     let plain = app::symbols::StoryBadges::PLAIN;
-    assert_eq!(badges(&dir).badge_zcode, plain.zcode.to_string(), "back to the letters");
+    assert_eq!(badges(&dir).badge_save, plain.save.to_string(), "back to the letters");
     assert_eq!(badges(&dir).badge_hint_available, plain.hint_available.to_string());
 }
 

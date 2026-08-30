@@ -3748,8 +3748,6 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
         let mut sym = app::config::SymbolConfig::default();
-        sym.badge_zcode = "z!".into();  // moved to the TYPE column (SQ-0369)
-        sym.badge_blorb = "◆".into();   // ditto, as " (blorb)"
         sym.badge_save = "§".into();
         let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
 
@@ -3766,12 +3764,11 @@ mod tests {
                           &cs, &km(), app::picker::Sort::default(), area, &mut buf);
         let row0 = row_text(&buf, 2, area);
         // The configured save glyph is used for the artifact badge. Type and
-        // blorb are no longer badges (they're the TYPE column), so their
-        // configured glyphs must NOT appear as badges in the row.
+        // blorb are not badges at all — SQ-0369 made them the TYPE column's
+        // text, and SQ-1160 retired the glyph keys that were still themeable
+        // for a mark nothing drew. What is left to assert is the column.
         assert!(row0.contains('§'), "configured save glyph used: {row0:?}");
-        assert!(!row0.contains("z!"), "type is the TYPE column now, not a badge: {row0:?}");
-        assert!(!row0.contains('◆'), "blorb is the TYPE column now, not a badge: {row0:?}");
-        assert!(row0.contains("(blorb)"), "blorb shown as a TYPE suffix instead: {row0:?}");
+        assert!(row0.contains("(blorb)"), "blorb is a TYPE suffix, not a badge: {row0:?}");
     }
 
     // ── Story-picker list: columns, header, sort ────────────────────────────────
