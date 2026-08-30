@@ -16,9 +16,14 @@
 //! found them to agree, but an agreement measured once and never pinned is
 //! exactly how this slipped through the first time.
 //!
-//! So: one table, [`MEDIA`], naming every medium in `stories/` that has a
-//! floppy counterpart together with the version, release and serial it must
-//! load. Every case walks it, guards on that identity FIRST, and prefixes every
+//! So: one table, [`MEDIA`], naming every medium in `stories/` together with the
+//! version, release and serial it must load — and since SQ-1158 a guard,
+//! [`every_disk_image_in_stories_is_pinned_or_explained`], that fails on any
+//! medium the table has never heard of, because an absence from a
+//! hand-maintained table is indistinguishable from a fact about the world and
+//! was read as one.
+//!
+//! Every case walks the table, guards on that identity FIRST, and prefixes every
 //! assertion message with [`ctx`] — the file, the release and the serial it
 //! loaded — so a failure here can never again be attributed to the wrong build.
 //!
@@ -61,9 +66,10 @@ struct Medium {
 }
 
 /// Every medium in `stories/` worth pinning a build against, with the build each
-/// one carries. **Measured**, 2026-08-10 and extended 2026-08-13 for the DOS and
-/// Atari ST presses, by mounting each file through
-/// `app::hints::load_mounted_story` and reading its header.
+/// one carries. **Measured**, 2026-08-10, extended 2026-08-13 for the DOS and
+/// Atari ST presses and 2026-08-30 for the twenty-one media the guard below
+/// found unnamed, by mounting each file through `app::hints::load_mounted_story`
+/// and reading its header.
 ///
 /// Read the pairs: four of the five titles that ship both ways ship *different
 /// builds*, and the four v3/v5 pairs ship the same one. Then read the
@@ -78,6 +84,14 @@ const MEDIA: &[Medium] = &[
     // The Macintosh disk is the outlier by a mile: r296/881019 is October 1988,
     // where both others are 1989 (SQ-0837).
     Medium { title: "Zork Zero (Macintosh)", file: "Zork Zero Disk.image", image: Some(DiskImage::Hfs), version: 6, release: 296, serial: "881019" },
+    // …and the *Masterpieces of Infocom* CD-ROM, which is the same Macintosh
+    // build again on a 12 MB hybrid disc rather than an 800 KB floppy
+    // (SQ-1158). It mounts as the HFS volume it is — `blorb::medium` reads the
+    // Macintosh partition — and the story it opens with is Zork Zero
+    // r296/881019, byte-identical in release and serial to the floppy above.
+    // That agreement is the finding: the outlier build is the MACINTOSH's, not
+    // that one disk's.
+    Medium { title: "Zork Zero (Masterpieces CD)", file: "InfocomMasterpieces.img", image: Some(DiskImage::Hfs), version: 6, release: 296, serial: "881019" },
     // Zork Zero — different builds, and the floppy lays its story window out at
     // a different place and size.
     Medium { title: "Zork Zero", file: "Zork Zero - The Revenge of Megaboz.adf", image: Some(DiskImage::Adf), version: 6, release: 366, serial: "890323" },
@@ -85,12 +99,32 @@ const MEDIA: &[Medium] = &[
     // Shogun — different builds that (so far) lay out identically.
     Medium { title: "Shogun", file: "James Clavell's Shogun.adf", image: Some(DiskImage::Adf), version: 6, release: 295, serial: "890321" },
     Medium { title: "Shogun", file: "shogun-r322-s890706.z6", image: None, version: 6, release: 322, serial: "890706" },
+    // **And the Macintosh press, which this table did not name for months while
+    // the file played perfectly well** (SQ-1158). `Shogun.toast` is a bare HFS
+    // volume — `BD` at offset `0x400`, volume name `Shogun` — that
+    // `DiskImage::detect` reads by CONTENT, so a Toast CD's extension over an
+    // ordinary Macintosh floppy was never evidence about anything. What it cost
+    // is the reason the guard below exists: a lane consulted this table, found
+    // no Macintosh Shogun, and reported "Shogun has no Macintosh press in the
+    // corpus" as a fact about the world.
+    //
+    // A FOURTH Shogun build on a fifth medium, and the earliest of them:
+    // r292/890314 against the Amiga's r295/890321, the Apple's r311/890510 and
+    // the bare file's r322/890706.
+    Medium { title: "Shogun (Macintosh)", file: "Shogun.toast", image: Some(DiskImage::Hfs), version: 6, release: 292, serial: "890314" },
     // Arthur — different builds that (so far) lay out identically.
     Medium { title: "Arthur", file: "Arthur - The Quest for Excalibur.adf", image: Some(DiskImage::Adf), version: 6, release: 54, serial: "890606" },
     Medium { title: "Arthur", file: "arthur-r74-s890714.z6", image: None, version: 6, release: 74, serial: "890714" },
     // Beyond Zork — the SAME build on both media.
     Medium { title: "Beyond Zork", file: "Beyond Zork - The Coconut of Quendor.adf", image: Some(DiskImage::Adf), version: 5, release: 57, serial: "871221" },
     Medium { title: "Beyond Zork", file: "beyondzork-r57-s871221.z5", image: None, version: 5, release: 57, serial: "871221" },
+    // Sherlock on three media, and the two that pair carry the SAME build
+    // (SQ-1158). The Macintosh floppy is a third print of it — and the DOS row
+    // further down is a *different* build, r21/871214, so this title makes both
+    // halves of the rule on one shelf.
+    Medium { title: "Sherlock", file: "Sherlock - The Riddle of the Crown Jewels.adf", image: Some(DiskImage::Adf), version: 5, release: 26, serial: "880127" },
+    Medium { title: "Sherlock", file: "sherlock-r26-s880127.z5", image: None, version: 5, release: 26, serial: "880127" },
+    Medium { title: "Sherlock (Macintosh)", file: "Sherlock.img", image: Some(DiskImage::Hfs), version: 5, release: 26, serial: "880127" },
     // The Zork trilogy — the same build on both media.
     Medium { title: "Zork I", file: "Zork I - The Great Underground Empire.adf", image: Some(DiskImage::Adf), version: 3, release: 88, serial: "840726" },
     Medium { title: "Zork I", file: "zork1-r88-s840726.z3", image: None, version: 3, release: 88, serial: "840726" },
@@ -107,6 +141,16 @@ const MEDIA: &[Medium] = &[
     // CGA art sits on floppy4 and is unreachable from here. r393/890714, the
     // same build as the bare `zork0-r393-s890714.z6`, byte for byte.
     Medium { title: "Zork Zero (DOS)", file: "floppy5.ima", image: Some(DiskImage::Fat12Dos), version: 6, release: 393, serial: "890714" },
+    // …and the SAME build off two standalone DOS pressings of it (SQ-1158): a
+    // three-disk 360 KB set and a two-disk 720 KB one. Both reassemble to
+    // r393/890714, the same build the collection disk above and the bare
+    // `zork0-r393-s890714.z6` carry — three DOS images of one release, which is
+    // what makes them a control on the FAT12 reader rather than a fourth build.
+    // Only the disk that OPENS is pinned; the continuation volumes fold into it
+    // through their own set, and the guard below checks that fold is a build
+    // match and not merely a shared filename stem.
+    Medium { title: "Zork Zero (DOS 360K set)", file: "Zork Zero - The Revenge of Megaboz (1989) (r393, Serial 890714) (Infocom, Inc.) (360K) (Disk 1) [!].ima", image: Some(DiskImage::Fat12Dos), version: 6, release: 393, serial: "890714" },
+    Medium { title: "Zork Zero (DOS 720K set)", file: "Zork Zero - The Revenge of Megaboz (1989) (r393, Serial 890714) (Infocom, Inc.) (720K) (Disk 1) [!].ima", image: Some(DiskImage::Fat12Dos), version: 6, release: 393, serial: "890714" },
     // **Three media, three Hitchhiker's, two Z-machine versions.** This is the
     // project's "a disk image is a different release" rule at its most extreme,
     // and now it is pinned rather than asserted: the standalone DOS disk is v3
@@ -115,6 +159,34 @@ const MEDIA: &[Medium] = &[
     // name its medium describes none of them.
     Medium { title: "Hitchhiker's (DOS 360K)", file: "Hitchhiker's Guide to the Galaxy, The (1987) (r58, Serial 851002) (Infocom, Inc.) (360K) [!].ima", image: Some(DiskImage::Fat12Dos), version: 3, release: 58, serial: "851002" },
     Medium { title: "Hitchhiker's (Lost Treasures)", file: "floppy2.ima", image: Some(DiskImage::Fat12Dos), version: 5, release: 31, serial: "871119" },
+    // …and the other three volumes of that collection, so all five `floppy*.ima`
+    // are named rather than three of them (SQ-1158). Each opens with a different
+    // game, which is what makes them five rows and not one: `floppy1.ima` Beyond
+    // Zork v5 r57/871221 — the SAME build as the Amiga floppy, the Apple IIgs
+    // volume and the bare `.z5`, four media agreeing — `floppy3.ima` The Lurking
+    // Horror v3 r203/870506 and `floppy4.ima` Stationfall v3 r107/870430, both
+    // the builds their Apple IIgs volumes carry.
+    Medium { title: "Beyond Zork (Lost Treasures DOS)", file: "floppy1.ima", image: Some(DiskImage::Fat12Dos), version: 5, release: 57, serial: "871221" },
+    Medium { title: "The Lurking Horror (Lost Treasures DOS)", file: "floppy3.ima", image: Some(DiskImage::Fat12Dos), version: 3, release: 203, serial: "870506" },
+    Medium { title: "Stationfall (Lost Treasures DOS)", file: "floppy4.ima", image: Some(DiskImage::Fat12Dos), version: 3, release: 107, serial: "870430" },
+    // **Four more DOS floppies, four more games** (SQ-1158). `disk1.img`…
+    // `disk4.img` are 720 KB volumes labelled `DISK 1`…`DISK 4`, several stories
+    // to a disk, so the row is the one that OPENS — the largest, exactly like
+    // the Atari ST compilations below. (`disk2.img` also holds `PLUNDERE.DAT`;
+    // `disk3.img` `BORDERZO`, `CUTTHROA` and `SEASTALK`; `disk4.img` `NORDANDB`,
+    // `HOLLYWOO` and `WISHBRIN`. Ask the picker or `--story` for the rest —
+    // between them the four carry the *Lost Treasures II* line-up, though
+    // nothing on the disks says so and only the builds below are measured.)
+    //
+    // They earn their rows twice over. *Trinity* here is r12/860926 — the Apple
+    // IIgs and Commodore 128 build, where `Infocom Compilation 8`'s ST press is
+    // r11/860509 — and *Sherlock* is r21/871214 against the Amiga and Macintosh
+    // floppies' r26/880127 above. Two titles, four media each, and the DOS press
+    // siding with a different sibling in each case.
+    Medium { title: "A Mind Forever Voyaging (DOS)", file: "disk1.img", image: Some(DiskImage::Fat12Dos), version: 4, release: 77, serial: "850814" },
+    Medium { title: "Trinity (DOS)", file: "disk2.img", image: Some(DiskImage::Fat12Dos), version: 4, release: 12, serial: "860926" },
+    Medium { title: "Bureaucracy (DOS)", file: "disk3.img", image: Some(DiskImage::Fat12Dos), version: 4, release: 116, serial: "870602" },
+    Medium { title: "Sherlock (DOS)", file: "disk4.img", image: Some(DiskImage::Fat12Dos), version: 5, release: 21, serial: "871214" },
     // An Atari ST compilation: four games in four folders, every one of them
     // called `STORY.DAT`, so the conventional-name tiebreak cannot separate them
     // and the largest is what opening the disk gives you — *Bureaucracy* v4 r86.
@@ -135,6 +207,25 @@ const MEDIA: &[Medium] = &[
     // `$1E` entirely or merely prints it; this one changes what it draws and
     // what it asks. `atari_st_profile.rs` is where that is measured.
     Medium { title: "Beyond Zork (Atari ST)", file: "Infocom Compilation 6 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 5, release: 49, serial: "870917" },
+    // **And the other compilations in the survey's run** (SQ-1158), because
+    // three named volumes out of nine is exactly the absence this file's guard
+    // exists to refuse. Each opens with a different game — the largest story on
+    // the volume, as above — and every one of them is a build some other row
+    // here already carries on other media: Stationfall and Bureaucracy off the
+    // Apple IIgs and DOS collections, A Mind Forever Voyaging off `disk1.img`,
+    // Border Zone and Spellbreaker off nothing else in the corpus at all.
+    Medium { title: "Stationfall (Atari ST)", file: "Infocom Compilation 1 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 3, release: 107, serial: "870430" },
+    Medium { title: "A Mind Forever Voyaging (Atari ST)", file: "Infocom Compilation 2 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 4, release: 77, serial: "850814" },
+    Medium { title: "Border Zone (Atari ST)", file: "Infocom Compilation 3 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 5, release: 9, serial: "871008" },
+    Medium { title: "Bureaucracy (Atari ST, Compilation 4)", file: "Infocom Compilation 4 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 4, release: 116, serial: "870602" },
+    Medium { title: "Spellbreaker (Atari ST)", file: "Infocom Compilation 7 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 3, release: 87, serial: "860904" },
+    // …and Compilation 5, which opens with the build Compilation 8 opens with —
+    // Trinity r11/860509, the ST press that is six months older than every other
+    // Trinity in the corpus. Two volumes of one survey carrying one build is
+    // worth a row of its own rather than a fold, because the fold that would
+    // otherwise cover it rests on the nine images sharing a filename stem, and a
+    // shared stem is not a release.
+    Medium { title: "Trinity (Atari ST, Compilation 5)", file: "Infocom Compilation 5 (19xx)(-).st", image: Some(DiskImage::Fat12AtariSt), version: 4, release: 11, serial: "860509" },
     // ── The Apple II (SQ-0836) ───────────────────────────────────────────────
     //
     // ProDOS media, and the fifth filesystem lanthorn mounts. Every row here was
@@ -310,6 +401,38 @@ const MEDIA: &[Medium] = &[
     // 128,962 bytes, which is what makes this row an oracle for the GCR decoder
     // rather than one more thing that looks plausible. Pinned in `blorb::g64`.
     Medium { title: "Plundered Hearts (Commodore, GCR)", file: "plundered_hearts[infocom_1987](r26)(!).g64", image: Some(DiskImage::CommodoreG64), version: 3, release: 26, serial: "870730" },
+    // …and the second GCR bitstream in the corpus, which is also this table's
+    // plainest lesson about names (SQ-1158). The file is called
+    // `zork_ii[infocom_1984](r88)(!).g64` and its header says release **48**,
+    // serial 840904 — r88 is *Zork I*'s number, and the dump wears it anyway.
+    // The build is the one the Amiga floppy and the bare `zork2-r48-s840904.z3`
+    // carry, so the Commodore press agrees with both; nothing about that is
+    // readable off the filename, which is the whole thesis of this file.
+    Medium { title: "Zork II (Commodore, GCR)", file: "zork_ii[infocom_1984](r88)(!).g64", image: Some(DiskImage::CommodoreG64), version: 3, release: 48, serial: "840904" },
+];
+
+/// Recognised disk images in `stories/` that [`MEDIA`] deliberately does NOT
+/// pin, each with the reason — filename, then why it is not a press worth a row.
+///
+/// This is the other exit from
+/// [`every_disk_image_in_stories_is_pinned_or_explained`], and its whole point
+/// is that the reason is WRITTEN DOWN. An absence from [`MEDIA`] says nothing;
+/// a row here is a claim someone made and can be checked.
+const UNPINNED: &[(&str, &str)] = &[
+    (
+        "Journey.2mg",
+        "declares five segments and carries four, so 92 of its 552 pages are not on \
+         the image and `blorb::infocom_packed` refuses it rather than handing back \
+         four fifths of a game. There is no build to pin — its surviving header page \
+         reads r77/890616, which is what `Journey.po` and `journey_s1.dsk` above \
+         actually load. `blorb::prodos` pins the refusal.",
+    ),
+    (
+        "Lost Treasures of Infocom, The (1993)(Big Red Computer Club)(Disk 1 of 7).2mg",
+        "the GS/OS launcher of the seven-volume Apple IIgs collection: it carries no \
+         game at all, so there is no release to pin. Volumes 2-7 each have a row of \
+         their own above.",
+    ),
 ];
 
 /// The pairs, and whether the two media carry the SAME build. Every `false`
@@ -321,6 +444,7 @@ const PAIRS: &[(&str, bool)] = &[
     ("Shogun", false),
     ("Arthur", false),
     ("Beyond Zork", true),
+    ("Sherlock", true),
     ("Zork I", true),
     ("Zork II", true),
     ("Zork III", true),
@@ -711,6 +835,111 @@ fn every_medium_loads_the_release_it_is_pinned_at() {
         ran += 1;
     }
     assert!(ran > 0 || !any_real_media_present(), "media are present but none were read");
+}
+
+/// **The guard, and the durable half of SQ-1158.** Every disk image in
+/// `stories/` is either pinned in [`MEDIA`] or explained in [`UNPINNED`] —
+/// nothing is allowed to be merely absent.
+///
+/// `Shogun.toast` sat unpinned here for months: a bare HFS volume (`BD` at
+/// offset 0x400, volume name `Shogun`) that `DiskImage::detect` reads by
+/// CONTENT, so its Toast-CD extension never mattered and it mounted and played
+/// perfectly well. The SQ-1152 lane consulted this table, found no Macintosh
+/// Shogun in it, and reasoned from that ABSENCE to "Shogun has no Macintosh
+/// press in the corpus" — then built a capture decision on the premise and
+/// reported it as fact. An absence in a hand-maintained table is
+/// indistinguishable from a fact about the world, which is exactly CLAUDE.md's
+/// "a guard beats a convention".
+///
+/// So this asks `DiskImage::detect` of every file in the directory and fails on
+/// any recognised medium the table has never heard of. Two exits, both of them
+/// something a person wrote down: a row in [`MEDIA`], or a row in [`UNPINNED`]
+/// saying why the file is not a press worth pinning.
+///
+/// `stories/` is gitignored, so this skips vacuously when the directory is
+/// absent (CI has no media at all) and still fails loudly wherever it exists.
+///
+/// FALSIFICATION: delete the `Shogun.toast` row from [`MEDIA`] and this fails
+/// with `Shogun.toast — Hfs, v6 release 292 serial 890314` — the defect as
+/// reported, and the release the lane could not find.
+///
+/// And *Shogun* was not alone, which is the argument for a guard rather than one
+/// row: it named **twenty-one** further media on its first runs, every one of
+/// them mountable and none of them here. Six Atari ST compilations, nine DOS
+/// volumes (three more of *Lost Treasures*, four 720 KB floppies carrying the
+/// second collection, and two standalone *Zork Zero* pressings), a Macintosh
+/// *Sherlock* floppy and the *Masterpieces* CD, *Sherlock*'s Amiga floppy, a
+/// Commodore GCR bitstream, and two ProDOS volumes that carry no build to pin
+/// and now say so in [`UNPINNED`].
+#[test]
+fn every_disk_image_in_stories_is_pinned_or_explained() {
+    let dir = stories_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        eprintln!("SKIP: gitignored story directory missing at {}", dir.display());
+        return;
+    };
+    let mut files: Vec<PathBuf> =
+        entries.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+    files.sort();
+
+    let named = |n: &str| MEDIA.iter().any(|m| m.file == n) || UNPINNED.iter().any(|u| u.0 == n);
+
+    let mut detected = 0;
+    let mut unexplained: Vec<String> = Vec::new();
+    for path in &files {
+        let Ok(raw) = std::fs::read(path) else { continue };
+        let Some(image) = DiskImage::detect(&raw) else { continue };
+        detected += 1;
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if named(&name) {
+            continue;
+        }
+        let loaded = app::hints::load_mounted_story(path).ok().map(|(l, _)| l.into_bytes());
+        // A later volume of a multi-disk release folds into the row its set is
+        // pinned on, exactly as the picker folds a set into one row — but only
+        // when the story that comes off it is the SAME BUILD as that row. A
+        // shared filename stem is not a shared release: `disk1.img`…`disk4.img`
+        // are one set by that measure and four different games.
+        if let Some(bytes) = loaded.as_deref().filter(|b| b.len() > 0x18) {
+            let folded = app::disk_set::members(path).unwrap_or_default().iter().any(|v| {
+                v != path
+                    && v.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                        MEDIA.iter().any(|m| {
+                            m.file == n
+                                && m.version == bytes[0]
+                                && m.release == header_release(bytes)
+                                && m.serial == header_serial(bytes)
+                        })
+                    })
+            });
+            if folded {
+                continue;
+            }
+        }
+        // Unpinned. Say what it is, so filling the row in needs no second run.
+        let what = match loaded.as_deref() {
+            Some(b) if b.len() > 0x18 => {
+                format!("v{} release {} serial {}", b[0], header_release(b), header_serial(b))
+            }
+            Some(_) => "a story too short to identify".to_string(),
+            None => "no story comes out of it".to_string(),
+        };
+        unexplained.push(format!("  {name} — {image:?}, {what}"));
+    }
+
+    assert!(
+        unexplained.is_empty(),
+        "{} disk image(s) in stories/ are recognised media that MEDIA does not name \
+         and UNPINNED does not explain. Pin each one (mount it and read its own \
+         header — never copy a sibling medium's release), or record why it is not \
+         a press:\n{}",
+        unexplained.len(),
+        unexplained.join("\n")
+    );
+    assert!(
+        detected > 0 || !any_real_media_present(),
+        "media are present but detect() recognised none of them"
+    );
 }
 
 /// The headline. For every title shipping on both media, the two releases are

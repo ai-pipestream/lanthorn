@@ -511,6 +511,31 @@ that build and no other. It will also tell you which machine it thinks it is on
 if you ask — `version` off that disk answers *"Macintosh Interpreter version
 6.65"*, which is the game reading header byte `0x1E` back to you.
 
+It is not the only Macintosh press on the shelf, and the second one went unnamed
+here for months while it played perfectly well. `Shogun.toast` is a bare HFS
+volume — the Macintosh signature `BD` sits 1,024 bytes in, and the volume calls
+itself `Shogun` — wearing a Toast CD's extension, which lanthorn never reads:
+formats are recognised by content, so the name was never evidence about anything.
+It carries **release 292, serial 890314**, the earliest *Shogun* in the
+collection and a fourth build of it:
+
+| *Shogun* medium | Release |
+| --- | --- |
+| `Shogun.toast` (Macintosh, HFS) | v6, release 292, serial 890314 |
+| `James Clavell's Shogun.adf` (Amiga) | v6, release 295, serial 890321 |
+| `shogun_s1.dsk`…`s5` / `Shogun.po` (Apple II) | v6, release 311, serial 890510 |
+| `shogun-r322-s890706.z6` (bare) | v6, release 322, serial 890706 |
+
+*Sherlock* makes the opposite point on four media at once: the Amiga floppy, the
+Macintosh `Sherlock.img` and the bare `.z5` are all release 26, serial 880127 —
+three media, one build — while the DOS and Apple IIgs collections carry release
+21, serial 871214. The medium decides, and it decides differently per title.
+
+And the *Masterpieces of Infocom* CD-ROM (`InfocomMasterpieces.img`) mounts as
+the 12 MB HFS volume it is and opens with *Zork Zero* release 296, serial 881019
+— the same build as the Macintosh floppy. That agreement is the finding: the
+outlying October-1988 build is the *Macintosh's*, not one disk's.
+
 And *Hitchhiker's* takes the rule to its limit, now that the PC and Atari presses
 are readable. Three media, three releases, and **two different Z-machine
 versions**:
@@ -574,6 +599,17 @@ on a disk image is reproduced on that disk image, and a finding names the releas
 it was measured on. `crates/app/tests/suites/real_media_releases.rs` pins this whole
 table, plus the frame each build lays out, so an upgraded fixture announces
 itself instead of quietly rebasing someone's investigation.
+
+**And the table now guards itself.** A hand-written table has one failure mode a
+test cannot normally see: what is *not* in it. An agent went to that file for a
+Macintosh *Shogun*, found no row, and concluded there was no such press — a
+statement about a table that read as a statement about the world. So a case
+walks `stories/`, asks the format table what each file actually is, and fails on
+any medium neither pinned above nor listed with a reason for its absence. It
+found `Shogun.toast` and twenty-one more the day it was written: six Atari ST
+compilations, nine DOS floppies, two Macintosh volumes, an Amiga *Sherlock*, a
+Commodore GCR bitstream, and two ProDOS volumes that carry no whole game and now
+say so out loud.
 
 ### The command-line player takes a floppy too
 
