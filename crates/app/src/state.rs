@@ -2460,6 +2460,15 @@ pub struct AppState {
     /// In-flight background tidy job, if any. The worker runs the relayout on a clone
     /// of the graph and returns the tidied clone. Driven by the run loop (spawn, poll, apply).
     pub tidy_job: Option<TidyJob>,
+    /// The map grew while its pane was hidden, so its layout owes a tidy (SQ-1136).
+    ///
+    /// Set by `turn::schedule_map_maintenance` each time it declines to spawn a job
+    /// because nobody can see the result, and cleared by the one catch-up
+    /// `loop_tick::catch_up_deferred_map_layout` schedules when the pane comes back.
+    /// It is a debt marker, not a queue: any number of deferred turns settle with a
+    /// single relayout, because a relayout derives every position from the graph
+    /// rather than from the turns that built it.
+    pub map_layout_deferred: bool,
     /// In-flight job building a tidy *animation* off-thread, if any. The worker runs the
     /// tidy pipeline on a clone and returns the frames + tidied graph; the run loop installs
     /// the animation when it finishes. Not an overlay — input stays live during the build.
@@ -3210,6 +3219,7 @@ impl Default for AppState {
             show_portal_labels: false,
             tidy_anim: None,
             tidy_job: None,
+            map_layout_deferred: false,
             anim_build_job: None,
             sound_pulse: None,
             audio: None,

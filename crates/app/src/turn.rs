@@ -334,6 +334,22 @@ pub(crate) fn schedule_map_maintenance(
     if !app::tidy::should_schedule_tidy(&mapper.graph, state.active_layer(&mapper.graph), changed) {
         return;
     }
+    // Nobody can see the map, so nothing here is worth a main-thread cost (SQ-1136).
+    // What follows is not free just because the RELAYOUT runs on a worker: the
+    // overlap scan walks the layer, the distortion scan walks every connection,
+    // and then the whole graph is CLONED and a thread spawned — all on the thread
+    // running the story, every turn that adds a room or an edge.
+    //
+    // Skipping is safe because a tidy is cosmetic. `place_incremental` has already
+    // dead-reckoned each new room into position back in `Mapper::observe`, so a
+    // hidden map is CORRECT throughout; it is merely untidy, and one relayout on
+    // the way back settles however many turns went by. This is the same trade
+    // SQ-0671 made for a frozen maze layer, which schedules no job at all rather
+    // than spawning one to throw away.
+    if state.layout != app::state::Layout::Split {
+        state.map_layout_deferred = true;
+        return;
+    }
     let active_layer = state.active_layer(&mapper.graph);
     // Overlap/distortion signal → decides FULL relayout vs. cleanup-only.
     let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
@@ -974,6 +990,104 @@ mod tests {
         let mut cleared = blank_turn();
         cleared.transcript_elems = vec![TranscriptElem::ScreenClear];
         assert!(!silent_terminator_turn("", false, &cleared));
+    }
+
+    // ── SQ-1136: a hidden map does not pay for a layout nobody can see ─────────
+
+    /// Two rooms and a passage — enough that `should_schedule_tidy` says yes.
+    fn walked() -> mapper::mapper::Mapper {
+        let mut m = mapper::mapper::Mapper::default();
+        m.observe(1, "West of House", None);
+        m.observe(2, "North of House", Some(mapper::direction::Direction::N));
+        m
+    }
+
+    /// The visible case, which is the control: this is what the deferred case must
+    /// NOT do. Without it a broken guard that never schedules anything would pass
+    /// the test below and take the map's layout with it.
+    #[test]
+    fn a_visible_map_schedules_its_layout_as_it_always_did() {
+        use app::state::{AppState, Layout};
+        let mut s = AppState::default();
+        s.layout = Layout::Split;
+        let m = walked();
+        let mut counter = 0u32;
+        super::schedule_map_maintenance(&mut s, &m, true, true, &mut counter);
+        assert!(s.tidy_job.is_some(), "a visible map still gets its background tidy");
+        assert!(!s.map_layout_deferred, "and owes nothing");
+    }
+
+    /// The optimisation itself: no clone, no thread, just a note that one is owed.
+    #[test]
+    fn a_hidden_map_defers_its_layout_instead_of_cloning_the_graph() {
+        use app::state::{AppState, Layout};
+        let mut s = AppState::default();
+        s.layout = Layout::TranscriptFull;
+        let m = walked();
+        let mut counter = 0u32;
+        super::schedule_map_maintenance(&mut s, &m, true, true, &mut counter);
+        assert!(s.tidy_job.is_none(), "nothing is spawned for a map nobody can see");
+        assert!(s.map_layout_deferred, "but the debt is recorded");
+    }
+
+    /// …and the debt is paid once, on the way back. Many deferred turns settle with
+    /// a single relayout, because a relayout reads the graph and not the history.
+    #[test]
+    fn showing_the_map_again_settles_the_whole_deferred_stretch_with_one_job() {
+        use app::state::{AppState, Layout};
+        let mut s = AppState::default();
+        s.layout = Layout::TranscriptFull;
+        let mut m = walked();
+        let mut counter = 0u32;
+        for (id, name) in [(3u16, "Behind House"), (4, "Kitchen"), (5, "Attic")] {
+            m.observe(id, name, Some(mapper::direction::Direction::E));
+            super::schedule_map_maintenance(&mut s, &m, true, true, &mut counter);
+        }
+        assert!(s.tidy_job.is_none(), "three turns hidden, three jobs not spawned");
+        assert!(s.map_layout_deferred);
+
+        // Still hidden: the catch-up must not fire, or the optimisation undoes
+        // itself on the very tick that deferred the work.
+        assert!(
+            !crate::loop_tick::catch_up_deferred_map_layout(&mut s, &m, &mut counter),
+            "a hidden pane collects no debt"
+        );
+        assert!(s.map_layout_deferred, "and the debt survives to be paid later");
+
+        s.layout = Layout::Split;
+        assert!(crate::loop_tick::catch_up_deferred_map_layout(&mut s, &m, &mut counter));
+        assert!(s.tidy_job.is_some(), "one job settles the lot");
+        assert!(!s.map_layout_deferred, "and the debt is cleared");
+        assert!(
+            !crate::loop_tick::catch_up_deferred_map_layout(&mut s, &m, &mut counter),
+            "it is a debt marker, not a queue: it does not fire twice"
+        );
+    }
+
+    /// A catch-up never barges in on a running job. `schedule_map_maintenance`
+    /// assigns over `state.tidy_job`, dropping the live handle and detaching its
+    /// thread — so firing here would cost the very work it means to schedule.
+    #[test]
+    fn a_catch_up_waits_for_an_in_flight_tidy_rather_than_clobbering_it() {
+        use app::state::{AppState, Layout};
+        let mut s = AppState::default();
+        let m = walked();
+        let mut counter = 0u32;
+
+        s.layout = Layout::TranscriptFull;
+        super::schedule_map_maintenance(&mut s, &m, true, true, &mut counter);
+        assert!(s.map_layout_deferred);
+
+        // A job from some other route is already running.
+        s.layout = Layout::Split;
+        super::schedule_map_maintenance(&mut s, &m, true, true, &mut counter);
+        assert!(s.tidy_job.is_some());
+
+        assert!(
+            !crate::loop_tick::catch_up_deferred_map_layout(&mut s, &m, &mut counter),
+            "the catch-up stands down while a job is in flight"
+        );
+        assert!(s.map_layout_deferred, "and keeps the debt for the next tick");
     }
 
     // ── screen-trace flush (drain-always, write-when-on) ────────────────────────

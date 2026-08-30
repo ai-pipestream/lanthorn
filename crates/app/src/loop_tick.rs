@@ -533,6 +533,40 @@ pub(crate) fn expire_sound_and_settle_dock(state: &mut AppState) -> bool {
 /// The pump runs after the route, so a search whose attempt has just come back
 /// asks its next question on the same pass rather than idling a frame per
 /// direction.
+/// Pay off the layout debt a hidden map ran up, once its pane is back (SQ-1136).
+///
+/// The counterpart to `turn::schedule_map_maintenance`'s early return. One job
+/// settles any number of deferred turns, because a relayout derives every
+/// position from the graph and not from the turns that built it — which is what
+/// makes deferring sound in the first place.
+///
+/// Two conditions beyond the flag. The pane must be **visible**, or this would
+/// undo the whole optimisation on the very tick that set the flag. And no job may
+/// already be in flight: `schedule_map_maintenance` assigns over `state.tidy_job`,
+/// which drops the running handle and detaches its thread, so a catch-up that
+/// barged in would cost the very work it is trying to schedule. The debt keeps
+/// until the next tick instead — it is a flag, and waiting costs nothing.
+///
+/// Returns true when a job was scheduled, so the caller can redraw.
+pub(crate) fn catch_up_deferred_map_layout(
+    state: &mut AppState,
+    mapper: &Mapper,
+    bg_tidy_counter: &mut u32,
+) -> bool {
+    if !state.map_layout_deferred
+        || state.layout != app::state::Layout::Split
+        || state.tidy_job.is_some()
+    {
+        return false;
+    }
+    state.map_layout_deferred = false;
+    // `new_room = true` so this asks for a FULL relayout rather than a cleanup:
+    // the deferred stretch may have added many rooms, and dead reckoning is
+    // exactly what a full pass exists to straighten out.
+    crate::turn::schedule_map_maintenance(state, mapper, true, true, bg_tidy_counter);
+    true
+}
+
 pub(crate) fn poll_shadow_answers(
     state: &mut AppState,
     mapper: &mut Mapper,

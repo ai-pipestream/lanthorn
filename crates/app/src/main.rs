@@ -1839,6 +1839,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // page/ink in $2C/$2D (which a live style reload can change mid-game).
         needs_redraw |= loop_tick::poll_zvm_screen_dims(&mut *session, &state, &last_panes);
         loop_tick::poll_zvm_default_colours(&mut *session, &state);
+        // Settle the layout a hidden map deferred, now its pane is back (SQ-1136).
+        // Before the poll, so the job it schedules is picked up on the next pass
+        // rather than sitting a whole frame longer than it has to.
+        needs_redraw |=
+            loop_tick::catch_up_deferred_map_layout(&mut state, &mapper, &mut bg_tidy_counter);
         needs_redraw |= loop_tick::poll_tidy_jobs(&mut state, &mut mapper, &last_panes);
         needs_redraw |= state.poll_render_job();
         needs_redraw |= state.poll_v6_encode_job();
