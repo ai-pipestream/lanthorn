@@ -1097,7 +1097,13 @@ mod tests {
         // `version` is managed by lanthorn (stamped by write_config, never hand-set),
         // and the two open-ended tables are documented as commented example blocks in
         // the trailer rather than as enumerable keys.
-        let exempt = ["version"];
+        // `font_check_pending` joins it for the same reason and no other: it is a
+        // note lanthorn leaves itself that the font question is still owed, not a
+        // preference. Templating it would advertise a key whose only honest value
+        // is whatever lanthorn last wrote, and a reader who set it by hand would be
+        // asking to be prompted once and then never again — which is what
+        // `--font-check on` and `/run-font-check` already do, on purpose (SQ-1112).
+        let exempt = ["version", "font_check_pending"];
         let missing: Vec<&str> = persisted
             .iter()
             .copied()

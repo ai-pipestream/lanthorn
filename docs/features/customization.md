@@ -133,6 +133,10 @@ still reach in and override any single selector by name.
   and so does `--font-check on`; `--font-check off` never asks, and the settings
   screen carries a `font_check` row that runs it. Esc means "the plain row", and
   is recorded, so the question does not come back every launch.
+  If that first launch happened to be piped, redirected or otherwise unable to
+  show a dialog, the question is not lost: lanthorn notes that it is still owed
+  and asks on the next launch that *can* ask. Ctrl-C is different — that is you
+  dismissing it, so it does not come back on its own.
 - **`[debug]`** holds the selectors particular to the debug inspector: `pc`, the
   four confidence tiers that shade how sure the disassembler is that a byte is
   really code, and `zstring`. The tier defaults read as a risk gradient —

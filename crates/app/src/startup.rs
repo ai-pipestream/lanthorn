@@ -219,28 +219,36 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     //
     // A terminal that cannot be made interactive is not asked and nothing is
     // written; the plain glyphs are already the defaults. The config seed above
-    // means that launch is a first run only once, so a piped first launch spends
-    // it — `--font-check on` and `/run-font-check` are how it is asked for
-    // afterwards, which is the affordance the changed-font case needs anyway.
-    let ask_font = match cli.font_check {
-        Some(OnOff::Off) => false,
-        Some(OnOff::On) => true,
-        None => first_run,
-    };
+    // means that launch is a first run only ONCE — so a piped first launch used
+    // to spend the chance silently, and no later interactive run ever offered it
+    // (SQ-1112). It now leaves itself a note instead, and `--font-check on` /
+    // `/run-font-check` remain the way to ask for it deliberately.
+    let ask_font = should_ask_font_check(cli.font_check, first_run, cfg.font_check_pending);
     if ask_font {
-        if let Some(nerdfont) = ask_font_check(&cfg) {
-            match app::style::style_write_path(cfg.style.as_deref(), &cfg.user_dir) {
-                Some(path) => {
-                    if let Err(e) = app::style::write_font_check_answer(&path, nerdfont) {
-                        eprintln!("lanthorn: could not save the font choice: {e}");
+        match ask_font_check(&cfg) {
+            FontCheckOutcome::Answered(nerdfont) => {
+                match app::style::style_write_path(cfg.style.as_deref(), &cfg.user_dir) {
+                    Some(path) => {
+                        if let Err(e) = app::style::write_font_check_answer(&path, nerdfont) {
+                            eprintln!("lanthorn: could not save the font choice: {e}");
+                        }
                     }
+                    // `style = "default"` names the built-in style, which lives in
+                    // the binary; there is no file to record an answer in.
+                    None => eprintln!(
+                        "lanthorn: `style = \"default\"` has no file to write the font choice to."
+                    ),
                 }
-                // `style = "default"` names the built-in style, which lives in
-                // the binary; there is no file to record an answer in.
-                None => eprintln!(
-                    "lanthorn: `style = \"default\"` has no file to write the font choice to."
-                ),
+                // Asked and answered, so nothing is owed. Only ever a WRITE when
+                // the note was actually there — clearing a flag that is already
+                // clear would rewrite config.toml on every ordinary launch.
+                set_font_check_pending(&mut cfg, false);
             }
+            // Seen and dismissed. Unchanged from before: nothing written, and
+            // nothing owed — re-asking someone who pressed Ctrl-C is nagging.
+            FontCheckOutcome::Refused => {}
+            // Nobody was asked, so the question outlives this launch.
+            FontCheckOutcome::CouldNotAsk => set_font_check_pending(&mut cfg, true),
         }
     }
 
@@ -507,6 +515,60 @@ fn ask_fetch_keep(
     answer
 }
 
+/// Does this launch put the font question in front of the player?
+///
+/// Extracted from `resolve_launch` because it IS the fix for SQ-1112 and a
+/// four-line `match` buried in a hundred-line function cannot be tested. The
+/// flag still wins outright in both directions — `off` never asks however much
+/// is owed, `on` always asks — and only the absent case consults state.
+fn should_ask_font_check(flag: Option<OnOff>, first_run: bool, pending: bool) -> bool {
+    match flag {
+        Some(OnOff::Off) => false,
+        Some(OnOff::On) => true,
+        None => first_run || pending,
+    }
+}
+
+/// Record — or clear — the note that the font question is still owed (SQ-1112).
+///
+/// A no-op when the flag already reads `want`, which is the common case by a
+/// long way: an ordinary answered launch must not rewrite `config.toml` just to
+/// set a false that is already false. `write_config_file` is format-preserving,
+/// so the note joins a hand-edited file without disturbing it, and `put` skips
+/// the key at its default so answering the question takes the line back out.
+///
+/// Best-effort, like every other config write on this path: a read-only home is
+/// a reason to lose the note, never to fail the launch.
+fn set_font_check_pending(cfg: &mut Config, want: bool) {
+    if cfg.font_check_pending == want {
+        return;
+    }
+    cfg.font_check_pending = want;
+    if let Err(e) = app::config::write_config_file(cfg) {
+        eprintln!("lanthorn: could not record the font-check state: {e}");
+    }
+}
+
+/// What a run of the font check ended in — three outcomes, because two of them
+/// used to be one `None` (SQ-1112).
+///
+/// A terminal that could not be made interactive and a player who pressed Ctrl-C
+/// both left with nothing written, and the caller could not tell them apart — so
+/// the launch spent its one first-run chance either way. They want opposite
+/// treatment: nobody saw the question in the first case and it is still owed; in
+/// the second the player saw it and dismissed it, and asking again next launch is
+/// nagging.
+enum FontCheckOutcome {
+    /// The player chose: `true` = the patched-font row, `false` = the plain row
+    /// (which Esc and the close box also mean).
+    Answered(bool),
+    /// Ctrl-C. Seen and dismissed — nothing written, nothing owed.
+    Refused,
+    /// No interactive terminal, a pane too small to hold the comparison, or a
+    /// read that failed. Nobody was asked, so the question survives the launch.
+    CouldNotAsk,
+}
+
 /// Run the font check on its own, before any game exists (SQ-1104).
 ///
 /// The dialog, its focus ring, its buttons and its keyboard ladder are all
@@ -516,9 +578,9 @@ fn ask_fetch_keep(
 /// Tab/Shift-Tab move focus, Enter activates, Esc cancels; Space is left alone
 /// (widget-reserved), as the shared chrome does everywhere else.
 ///
-/// `None` when the terminal cannot be made interactive — nothing is written and
-/// the plain glyphs stand, which is the answer that works in every font.
-fn ask_font_check(cfg: &Config) -> Option<bool> {
+/// Nothing is written by any path but [`FontCheckOutcome::Answered`]; the plain
+/// glyphs stand meanwhile, which is the answer that works in every font.
+fn ask_font_check(cfg: &Config) -> FontCheckOutcome {
     use app::render::font_check_dialog::{
         draw_font_check_always, font_check_key_focused, FontCheckAction,
     };
@@ -538,11 +600,11 @@ fn ask_font_check(cfg: &Config) -> Option<bool> {
     state.overlays.dialog_focus = 1;
 
     if enable_raw_mode().is_err() {
-        return None;
+        return FontCheckOutcome::CouldNotAsk;
     }
     if execute!(stdout(), EnterAlternateScreen).is_err() {
         crate::restore_terminal();
-        return None;
+        return FontCheckOutcome::CouldNotAsk;
     }
     if cfg.mouse {
         let _ = execute!(stdout(), EnableMouseCapture);
@@ -551,7 +613,7 @@ fn ask_font_check(cfg: &Config) -> Option<bool> {
         Ok(t) => t,
         Err(_) => {
             crate::restore_terminal();
-            return None;
+            return FontCheckOutcome::CouldNotAsk;
         }
     };
 
@@ -564,16 +626,16 @@ fn ask_font_check(cfg: &Config) -> Option<bool> {
             })
             .is_err()
         {
-            break None;
+            break FontCheckOutcome::CouldNotAsk;
         }
         // A pane too small to hold the comparison cannot ask the question, and a
         // question nobody can read must not block the launch.
         if rects.is_none() {
-            break None;
+            break FontCheckOutcome::CouldNotAsk;
         }
         let ev = match crossterm::event::read() {
             Ok(ev) => ev,
-            Err(_) => break None,
+            Err(_) => break FontCheckOutcome::CouldNotAsk,
         };
         if let Event::Mouse(m) = &ev {
             if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -582,12 +644,12 @@ fn ask_font_check(cfg: &Config) -> Option<bool> {
             let Some(r) = &rects else { continue };
             let pt = (m.column, m.row);
             if r.nerd.is_some_and(|b| b.contains(pt.into())) {
-                break Some(true);
+                break FontCheckOutcome::Answered(true);
             }
             if r.plain.is_some_and(|b| b.contains(pt.into()))
                 || r.close.is_some_and(|b| b.contains(pt.into()))
             {
-                break Some(false);
+                break FontCheckOutcome::Answered(false);
             }
             continue;
         }
@@ -599,7 +661,7 @@ fn ask_font_check(cfg: &Config) -> Option<bool> {
         if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c'))
         {
-            break None;
+            break FontCheckOutcome::Refused;
         }
         match key.code {
             KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
@@ -611,8 +673,8 @@ fn ask_font_check(cfg: &Config) -> Option<bool> {
             }
             code => match font_check_key_focused(code, state.overlays.dialog_focus) {
                 FontCheckAction::None => {}
-                FontCheckAction::Nerd => break Some(true),
-                FontCheckAction::Plain => break Some(false),
+                FontCheckAction::Nerd => break FontCheckOutcome::Answered(true),
+                FontCheckAction::Plain => break FontCheckOutcome::Answered(false),
             },
         }
     };
@@ -2082,5 +2144,55 @@ fn prompt_yes_no(question: &str) -> bool {
     match std::io::stdin().read_line(&mut line) {
         Ok(0) | Err(_) => false,
         Ok(_) => matches!(line.trim().chars().next(), Some('y') | Some('Y')),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_ask_font_check;
+    use app::config::OnOff;
+
+    /// SQ-1112: the reported bug, and the guard that made it hard to fix.
+    ///
+    /// The bug is the third case. A first launch that could not show the prompt
+    /// used to leave nothing behind, and `config.toml` was seeded on that same
+    /// launch regardless — so "there is no config.toml", which IS the first-run
+    /// flag, was spent by a launch that never asked anything. Every later
+    /// interactive run then read `first_run = false` and stayed silent.
+    ///
+    /// The FIRST case is why the fix could not simply be "ask until answered".
+    /// The test harnesses seed an empty `config.toml` precisely so `first_run` is
+    /// false, and an empty file parses with every key at its default — so the
+    /// default has to mean "nothing owed", or SQ-1104's guard 2 breaks and the
+    /// prompt reappears in front of fourteen group binaries. Owing is opt-in.
+    #[test]
+    fn a_font_check_is_owed_only_when_a_launch_could_not_ask() {
+        // A seeded harness home: not a first run, nothing owed. Silence.
+        assert!(!should_ask_font_check(None, false, false));
+        // A genuine first run asks, exactly as it always did.
+        assert!(should_ask_font_check(None, true, false));
+        // …and a later run asks when a previous one could not — the fix.
+        assert!(should_ask_font_check(None, false, true));
+    }
+
+    /// The flag is an override in both directions and consults nothing.
+    ///
+    /// `off` has to beat a pending note or there is no way to say "stop asking",
+    /// and `on` has to beat a settled config or `--font-check on` could not be
+    /// the answer to "I changed terminal fonts", which is what it is for.
+    #[test]
+    fn the_flag_outranks_both_the_first_run_and_the_owed_note() {
+        for first_run in [true, false] {
+            for pending in [true, false] {
+                assert!(
+                    !should_ask_font_check(Some(OnOff::Off), first_run, pending),
+                    "off never asks (first_run={first_run}, pending={pending})"
+                );
+                assert!(
+                    should_ask_font_check(Some(OnOff::On), first_run, pending),
+                    "on always asks (first_run={first_run}, pending={pending})"
+                );
+            }
+        }
     }
 }

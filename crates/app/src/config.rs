@@ -321,8 +321,12 @@ pub struct Cli {
     /// against the terminal you are actually looking at. `off` never asks.
     ///
     /// The answer is written to `style.toml` as preset NAMES in `[map]`, not to
-    /// `config.toml` — glyphs live in the style file — so this flag has no
-    /// persisted key of its own and nothing to pin for one run.
+    /// `config.toml` — glyphs live in the style file — so this flag has nothing
+    /// to pin for one run and no persisted key that means "the answer".
+    ///
+    /// `config.toml`'s `font_check_pending` is not that key and is not settable
+    /// here: it records that a launch which WOULD have asked could not, so the
+    /// next interactive one still can (SQ-1112). Absent means nothing is owed.
     //
     // Spelled `--font-check`, not `--set-font-check`: a bare noun with a value,
     // like `--sound`, `--images`, `--accel` and `--guidance`. The `set-` belongs
@@ -1529,6 +1533,19 @@ pub struct Config {
     /// Watch the resolved style.toml and live-reload it on change (default false).
     #[serde(default)]
     pub watch_style: bool,
+    /// The font check is still owed: a launch that would have asked could not
+    /// (SQ-1112). Written by lanthorn, never hand-set — see `write_config_file`.
+    ///
+    /// **The default must stay `false`**, and that is the whole design. "There is
+    /// no config.toml" is the first-run flag, so the test harnesses seed an EMPTY
+    /// one to make themselves not-a-first-run — and an empty file parses with
+    /// every key at its default. A key defaulting to "still owed" would put the
+    /// prompt straight back in front of fourteen group binaries, `gallery` and
+    /// `pty_capture`, which is exactly the guard SQ-1104 had to build. Owing the
+    /// question is therefore opt-IN: absence means nothing is owed, and only a
+    /// launch that actually failed to ask ever writes it.
+    #[serde(default)]
+    pub font_check_pending: bool,
     /// Undo depth: max retained in-memory undo snapshots (default 16; 0 disables).
     #[serde(default = "default_undo_levels")]
     pub undo_levels: usize,
@@ -1961,6 +1978,7 @@ impl Default for Config {
             hotkeys: HotkeysConfig::default(),
             style: None,
             watch_style: false,
+            font_check_pending: false,
             undo_levels: default_undo_levels(),
             command_prefix: default_command_prefix(),
             show_room_numbers: false,
@@ -2094,6 +2112,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.hotkeys = from_file.hotkeys;
             cfg.style = from_file.style;
             cfg.watch_style = from_file.watch_style;
+            cfg.font_check_pending = from_file.font_check_pending;
             cfg.undo_levels = from_file.undo_levels;
             cfg.command_prefix = from_file.command_prefix;
             cfg.show_room_numbers = from_file.show_room_numbers;
@@ -2436,6 +2455,14 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     });
     doc.put("adult_words", words.into(), cfg.adult_words == def.adult_words);
     doc.put("watch_style", cfg.watch_style.into(), cfg.watch_style == def.watch_style);
+    // Written only while it is true, like every other key `put` skips at its
+    // default — so answering the check does not leave `font_check_pending = false`
+    // behind as a permanent line in a file the player reads (SQ-1112).
+    doc.put(
+        "font_check_pending",
+        cfg.font_check_pending.into(),
+        cfg.font_check_pending == def.font_check_pending,
+    );
     doc.put("record_turn_history", cfg.record_turn_history.into(), cfg.record_turn_history == def.record_turn_history);
     // Three one-run sources reach this key and `put` skips all three the same way:
     // a discovered garglk.ini, this game's own sidecar, and two-colour ARTWORK,
@@ -3341,6 +3368,7 @@ use_defaults = false
             hotkeys: HotkeysConfig::default(),
             style: Some("neon".into()),
             watch_style: false,
+            font_check_pending: false,
             undo_levels: 16,
             command_prefix: '/',
             show_room_numbers: false,
@@ -3462,6 +3490,47 @@ use_defaults = false
         assert!(parsed.watch_style, "watch_style must survive save→load");
         assert!(parsed.record_turn_history, "record_turn_history must survive save→load");
         assert!(!parsed.hint_skip_screen_warning, "hint_skip_screen_warning must survive save→load");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1112: the owed-question note round-trips, and — the load-bearing half —
+    /// an EMPTY config reads as owing nothing.
+    ///
+    /// The test harnesses seed an empty `config.toml` to make themselves not a
+    /// first run, and an empty file parses with every key at its default. If this
+    /// key ever defaulted to "owed", the font-check prompt would reappear in front
+    /// of fourteen group binaries, `gallery` and `pty_capture` — which is SQ-1104's
+    /// guard 2, and the reason SQ-1112 was filed rather than fixed in place.
+    /// Owing is opt-in, and this is the case that says so.
+    #[test]
+    fn an_empty_config_owes_no_font_check_and_the_note_survives_a_round_trip() {
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(
+            !empty.font_check_pending,
+            "an empty config.toml must read as owing nothing, or the harness guard breaks"
+        );
+        assert!(!Config::default().font_check_pending, "and so must the default");
+
+        let dir = std::env::temp_dir()
+            .join(format!("lanthorn-cfg-fcp-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.font_check_pending = true;
+        write_config(&dir, &cfg).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert!(parsed.font_check_pending, "the note must survive save→load");
+
+        // …and answering the question takes the line back out rather than leaving
+        // `font_check_pending = false` behind in a file the player reads.
+        cfg.font_check_pending = false;
+        write_config(&dir, &cfg).unwrap();
+        let cleared = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let reparsed: Config = toml::from_str(&cleared).unwrap();
+        assert!(!reparsed.font_check_pending, "clearing it must reload as cleared");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
