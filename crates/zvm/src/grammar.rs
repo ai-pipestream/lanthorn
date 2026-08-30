@@ -25,6 +25,13 @@
 //     `DATA_FIRST` $03, `ENDIT` $0F) are from its `tx.h`.
 //     <https://github.com/ecliptik/ztools>
 //
+// The Version 6 dictionary FLAG BYTE is the one thing here neither source
+// describes: `tx.h` names only `VERB_V6` and infodump prints no parts of speech
+// for a V6 story, so the three bits that carry across Zork Zero, Shogun and
+// Arthur were measured through those games' own parsers and are documented at
+// [`F_INFOCOM_V6_VERB`] (SQ-1153). Bits above the third are per-game, and this
+// module declines to name them.
+//
 // Every table shape below was checked against `infodump -g` output for real
 // stories; see `crates/zvm/tests/grammar_tables.rs`.
 //
@@ -118,6 +125,66 @@ const F_INFORM_PLURAL: u8 = 0x04;
 const F_INFORM_ADJ: u8 = 0x08;
 /// Inform dictionary flag bit 7: the word can be a noun.
 const F_INFORM_NOUN: u8 = 0x80;
+
+// ── Infocom's Version 6 flag byte, measured rather than looked up ────────────
+//
+// Infocom's three parser-driven V6 games do NOT keep the V1–5 bits above, and
+// they do not keep Inform's either — reading them as Inform's is what SQ-1153
+// existed to fix. The flag byte is the LAST byte of the dictionary entry (the
+// data word before it is the verb record's address, which is why the entry is
+// 9 bytes in Zork Zero and 10 in Arthur and Shogun); the three constants below
+// are the only bits that mean the same thing in all three games.
+//
+// **Only the low three.** Above bit 2 the byte — and, in Arthur and Shogun, the
+// second flag byte in front of it — is each game's own allocation of whatever
+// word classes its ZIL source declared, one bit each, from bit 0 upwards and
+// rounded up to whole bytes. Line the three games' fields up as one big-endian
+// bitfield and the first three bits agree and nothing else does:
+//
+//   bit   Zork Zero (1 byte)          Arthur (2 bytes)        Shogun (2 bytes)
+//   0     verb                        verb                    verb
+//   1     noun                        noun                    noun
+//   2     adjective                   adjective               adjective
+//   3     directions + once/twice     don't once thrice twice articles
+//   4     prepositions + articles     articles                again be not oops
+//   5     ' again but except the      ' again be not of the   DIRECTIONS
+//   6     . ! ? ask order tell then   DIRECTIONS              am are is was were
+//   7     buzzword aggregate          am are is was were      how what when who
+//   8–15  (no second byte)            wh-words, modals,       wh-words, modals,
+//                                     PREPOSITIONS, …         PREPOSITIONS, …
+//
+// Shogun is Arthur's allocation minus one class with everything above it
+// shifted down a bit, which is exactly what a per-game declaration order
+// produces and is not a layout anybody can predict from one title. So
+// [`decode_roles`] reads three bits and leaves `preposition` and `special`
+// false — "this family has no such bit", per [`WordRoles::from_raw`] — rather
+// than picking whichever bit fits the game in front of it.
+//
+// Verified against the games' own parsers, not against this reader (SQ-1153).
+// Booted headless to the first prompt and asked `x <word>` for every
+// three-letter-or-longer all-alphabetic non-verb dictionary word, the three
+// stories answer:
+//
+//   * of 1805 words with $02 — 501 Arthur, 751 Zork Zero, 553 Shogun — the
+//     parser refuses **two** ("gonzale" and "the", both Shogun) and takes the
+//     rest as the name of a thing ("You can't see any spyglass right here.");
+//   * of the words with $04 and not $02, 483 are answered with the parser's own
+//     word for a descriptor standing alone — "You can't see any **elongated
+//     object** right here" — and three are refused;
+//   * words with none of the three are refused, or answered as buzzwords, and
+//     are never taken as the name of a thing.
+//
+// Under the Inform reading this replaced, $80 selected `are is was were will`
+// on Arthur, six function words on Zork Zero and nothing at all on Shogun, and
+// `x were` is refused by Arthur's parser in as many words.
+
+/// Infocom V6 dictionary flag: the word can be a verb (`VERB_V6` in ztools'
+/// `tx.h`, and the bit [`load_v6`] reads the verb record's address from).
+const F_INFOCOM_V6_VERB: u8 = 0x01;
+/// Infocom V6 dictionary flag: the word can be a noun.
+const F_INFOCOM_V6_NOUN: u8 = 0x02;
+/// Infocom V6 dictionary flag: the word can be an adjective ("descriptor").
+const F_INFOCOM_V6_DESC: u8 = 0x04;
 
 /// GV2's end-of-line marker (Inform Technical Manual §8.6).
 const ENDIT: u8 = 0x0F;
@@ -385,13 +452,13 @@ fn scan_dictionary(mem: &Memory, dict: &Dictionary, format: GrammarFormat) -> Ve
 
         let verb_key = if format == GrammarFormat::InfocomV6 {
             // The verb record's address lives in the first data word, and the
-            // verb bit is $01 as in Inform (`VERB_V6` in ztools' `tx.h`). A
-            // word may be both noun and verb — Shogun's "who", "what", "why" —
-            // so the $80 bit does not disqualify it here. `load_v6` applies the
+            // verb bit is $01 (`VERB_V6` in ztools' `tx.h`). A word may be both
+            // noun and verb — Shogun's "sail", "ship" and "bow" all are — so
+            // the noun bit does not disqualify it here. `load_v6` applies the
             // stricter test separately, where it belongs: to bounding the verb
             // record area.
             let addr = mem.read_word(entry + klen);
-            (flags & F_INFORM_VERB != 0 && addr != 0).then_some(addr)
+            (flags & F_INFOCOM_V6_VERB != 0 && addr != 0).then_some(addr)
         } else if format.is_inform() {
             // Inform Technical Manual §8.5: dict_par2 is the verb number.
             (flags & F_INFORM_VERB != 0).then_some(data0 as u16)
@@ -418,10 +485,14 @@ fn decode_roles(flags: u8, format: GrammarFormat) -> WordRoles {
     // for either.
     let mut roles = WordRoles::from_raw(u16::from(flags));
     if format == GrammarFormat::InfocomV6 {
-        // V6 moved the flags but kept Inform's bit 0 for "verb" (ztools
-        // `VERB_V6` = $01) and $80 for noun.
-        roles.verb = flags & F_INFORM_VERB != 0;
-        roles.noun = flags & F_INFORM_NOUN != 0;
+        // Three bits, and only three: see the constants' own header for the
+        // per-game allocation above bit 2 and for the parser measurement that
+        // settled these. `preposition` and `special` stay false because this
+        // family keeps no bit that means either in every game — not because
+        // these stories have no prepositions.
+        roles.verb = flags & F_INFOCOM_V6_VERB != 0;
+        roles.noun = flags & F_INFOCOM_V6_NOUN != 0;
+        roles.adjective = flags & F_INFOCOM_V6_DESC != 0;
     } else if format.is_inform() {
         roles.verb = flags & F_INFORM_VERB != 0;
         roles.noun = flags & F_INFORM_NOUN != 0;

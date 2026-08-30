@@ -460,10 +460,15 @@ know which side you're on).
 
   Which printed words count as *things* is the story's own answer, and it is
   asked of its **objects** — a word some object in the game answers to — rather
-  than of the dictionary's parts-of-speech bits. Those bits are unusable on the
-  three Infocom Version 6 games, whose flag layout nothing has decoded: on
-  Arthur they pick out `is`, `was` and `were` and miss `crystal`, `torque` and
-  `sword` entirely. Where an engine keeps no object list — Glulx and Scott — the
+  than of the dictionary's parts-of-speech bits. That began as a workaround: the
+  bits were unusable on the three Infocom Version 6 games, where the flag layout
+  was being read as Inform's and picked out `is`, `was` and `were` on Arthur
+  while missing `crystal`, `torque` and `sword` entirely. The V6 layout has since
+  been measured against all three games' own parsers — `$01` verb, `$02` noun,
+  `$04` adjective, in the last byte of the dictionary entry — so both routes now
+  agree; the objects stay the answer, because they are the only thing that can
+  follow Arthur's password as it rewrites its own parse names mid-puzzle. Where
+  an engine keeps no object list — Glulx and Scott — the
   dictionary's noun bit is still the filter, which keeps its verbs and its
   `at`/`in`/`of`/`to` out of a column of things; Inform's `a`, `and` and `the`
   carry the noun bit and nothing else, so they still slip through there.
