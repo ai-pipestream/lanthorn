@@ -12156,9 +12156,12 @@ mod tests {
         // on the raster surface while every other reason for it is correct. That is
         // the second half of the defect, and it is invisible to a test of the DRAW.
         assert!(state.reveal.is_none(), "the base key was taken with nothing lit");
+        // `RevealTier` was removed by SQ-1135, which landed alongside this in the
+        // same wave: with the reveal annotating by VOCABULARY there is one tier
+        // left, so the field went with it. Both lanes compiled alone and the merge
+        // was textually clean — this line is the whole of the semantic conflict.
         state.reveal = Some(crate::reveal::Reveal {
             words: ["lantern".to_string()].into_iter().collect(),
-            tier: crate::reveal::RevealTier::Scope,
             until: std::time::Instant::now() + crate::reveal::REVEAL_HOLD,
         });
         let armed = v6_raster_gen(&items, &state, area, &picker);

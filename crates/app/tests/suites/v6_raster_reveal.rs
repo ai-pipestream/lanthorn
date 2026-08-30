@@ -226,9 +226,13 @@ const PROSE: &str = "A heavy table stands here in the gloom.";
 const SCROLLED_AWAY: &str = "The flathead crest is carved above the arch.";
 
 fn lit(words: &[&str]) -> app::reveal::Reveal {
+    // No `tier`: SQ-1135 landed in the same wave as this suite and removed
+    // `RevealTier`, the reveal now annotating by vocabulary rather than by scope,
+    // which leaves one tier and so no field. Neither lane could see the other's
+    // change and both compiled alone — the merge was textually clean and did not
+    // build, which is the case the full gate exists for.
     app::reveal::Reveal {
         words: words.iter().map(|w| w.to_string()).collect(),
-        tier: app::reveal::RevealTier::Scope,
         until: std::time::Instant::now() + app::reveal::REVEAL_HOLD,
     }
 }

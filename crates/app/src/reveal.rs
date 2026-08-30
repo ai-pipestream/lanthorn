@@ -216,11 +216,40 @@ pub fn arm(state: &mut AppState, engine: &dyn Engine) -> Armed {
         state.reveal = None;
         return Armed::Nothing;
     };
-    let words = tokens
-        .iter()
-        .filter(|t| v.roles(t).is_some_and(|r| (r.noun || r.adjective) && !r.special))
-        .cloned()
-        .collect::<BTreeSet<String>>();
+    // ASK THE OBJECTS FIRST, and fall back to the flag byte only where they
+    // cannot answer (SQ-1153).
+    //
+    // The role filter below is a proxy: a dictionary bit that USUALLY means "this
+    // word names a thing". On Infocom's V6 titles it does not — `decode_roles`
+    // reads that flag byte with Inform's layout, and Infocom V6 keeps the bits
+    // somewhere else. Measured: the noun bit selects `a all and of the then` on
+    // Zork Zero and `are is was were will` on Arthur, while missing `crystal`,
+    // `torque` and `sword`. So the reveal lit punctuation and articles on exactly
+    // the three titles the graphical work showcases.
+    //
+    // An object's parse names are not a proxy at all — they are the words the
+    // parser files that thing under, which is the claim the reveal is making.
+    // `Introspect::all_object_words` exists for this reason and its own doc says
+    // so ("need no flag layout"); SQ-1135 added it for the command band and left
+    // this second consumer on the flag byte. `refers_to` truncates both sides, so
+    // a printed `lantern` matches Zork I's stored `lanter`, and it answers over
+    // adjectives too — `dirigible` names Zork Zero's hangar exactly as `hangar`
+    // does, and the parser does not distinguish them.
+    //
+    // `None` means the question could not be ASKED — Glulx and Scott today — and
+    // is NOT the same as a story with no parse names. Only the first falls back.
+    let words = match engine.introspect().and_then(|i| i.all_object_words()) {
+        Some(objs) => tokens
+            .iter()
+            .filter(|t| objs.iter().any(|o| o.refers_to(t)))
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+        None => tokens
+            .iter()
+            .filter(|t| v.roles(t).is_some_and(|r| (r.noun || r.adjective) && !r.special))
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+    };
 
     if words.is_empty() {
         state.reveal = None;
