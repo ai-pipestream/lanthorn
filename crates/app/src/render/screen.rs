@@ -4301,6 +4301,17 @@ pub fn build_v6_raster_frame(
         // line the player needs in order to see their draw. The transcript is the
         // host's re-render of window 0's whole history; the label is on the screen
         // now, so the label wins.
+        // The momentary word reveal, when one is lit (SQ-1138). Resolved here and
+        // applied at blit time rather than as a pass over the finished canvas:
+        // there are no cells to re-style, and re-walking the pen afterwards to
+        // find where each word landed would be a second copy of this function's
+        // layout arithmetic — the hand-maintained cross-file invariant the
+        // refactoring policy exists to forbid.
+        //
+        // The fallback ink is the story's own, which makes a theme that cannot
+        // resolve to concrete bytes draw the prose exactly as it already was
+        // rather than in some colour nobody chose.
+        let reveal = crate::reveal::raster_reveal(state, ink);
         v6::draw_story_text(
             &mut canvas,
             &main,
@@ -4311,6 +4322,7 @@ pub fn build_v6_raster_frame(
             ink,
             &v6::chrome_text_rects(&chrome, &state.v6_text),
             &state.v6_text,
+            reveal.as_ref(),
         );
         // [more] pager indicator (SQ-0455): when a single turn's output
         // overflowed the story box the shared pager (SQ-0404) parks the
@@ -4522,6 +4534,25 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
     let mp = state.colors.theme.get("more_prompt").style;
     style_fg_rgba(mp, image::Rgba([220, 220, 220, 255])).0.hash(&mut h);
     style_bg_rgba(mp, image::Rgba([0, 0, 0, 255])).0.hash(&mut h);
+    // The lit reveal (SQ-1138), which `draw_story_text` composites INTO the canvas
+    // — so without it here the gate skips the rebuild and the reveal lights
+    // nothing at all. That is not hypothetical: arming a reveal moves no window,
+    // no run and no pixel of the model, changes no transcript line and no input
+    // character, so every other input to this key holds perfectly still. The whole
+    // feature would be dark and every reason for it correct.
+    //
+    // Hashed by CONTENT, like the painted ground above: the words, and the ink
+    // they light in. `is_lit` is wall-clock, so the key also changes on its own
+    // when a reveal expires — which is what repaints the prose back to the story's
+    // own colour without anyone having to remember to.
+    match state.reveal.as_ref().filter(|r| r.is_lit()) {
+        Some(r) => {
+            1u8.hash(&mut h);
+            r.words.hash(&mut h);
+            state.colors.theme.get("transcript_reveal").style.fg.hash(&mut h);
+        }
+        None => 0u8.hash(&mut h),
+    }
     h.finish()
 }
 
@@ -9007,7 +9038,7 @@ mod tests {
         let cols = (sw / 8).max(1) as u16;
         let rows = (sh / 16).max(1) as u16;
         let (main, _) = build_main_text(&state, cols, rows);
-        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink, &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT), None);
         let pre_flatten = canvas.clone();
         v6::flatten_onto_page(&mut canvas, page);
 
@@ -12116,6 +12147,31 @@ mod tests {
         // Scrolling the transcript back.
         state.transcript_scroll = 3;
         assert_ne!(base, v6_raster_gen(&items, &state, area, &picker), "a scroll change bumps the key");
+        state.transcript_scroll = 0;
+
+        // Arming the word reveal (SQ-1138). This is the one input that moves NOTHING
+        // else in this key — no window, no run, no pixel of the model, no transcript
+        // line and no input character — so without its own clause the gate answers
+        // "nothing changed", the composite is never rebuilt, and the reveal is dark
+        // on the raster surface while every other reason for it is correct. That is
+        // the second half of the defect, and it is invisible to a test of the DRAW.
+        assert!(state.reveal.is_none(), "the base key was taken with nothing lit");
+        state.reveal = Some(crate::reveal::Reveal {
+            words: ["lantern".to_string()].into_iter().collect(),
+            tier: crate::reveal::RevealTier::Scope,
+            until: std::time::Instant::now() + crate::reveal::REVEAL_HOLD,
+        });
+        let armed = v6_raster_gen(&items, &state, area, &picker);
+        assert_ne!(base, armed, "arming a reveal bumps the key");
+        // …and a DIFFERENT set of lit words is a different frame again: the words are
+        // hashed by content, so a reveal re-armed on a new screenful repaints rather
+        // than reusing the last one's highlights.
+        state.reveal.as_mut().expect("lit").words = ["sceptre".to_string()].into_iter().collect();
+        assert_ne!(armed, v6_raster_gen(&items, &state, area, &picker), "different words, different key");
+        // Going out returns to exactly the unlit key, so the prose repaints in the
+        // story's own colour when the reveal expires.
+        state.reveal = None;
+        assert_eq!(base, v6_raster_gen(&items, &state, area, &picker), "a reveal that went out restores the idle key");
     }
 
     /// A synthetic v6 `Layered` model for the cell-path tests: a chrome
@@ -12732,7 +12788,7 @@ mod tests {
                     let cols = (sw / 8).max(1) as u16;
                     let rows = (sh / 8).max(1) as u16;
                     let (main, _) = build_main_text(&state, cols, rows);
-                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg, &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
+                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg, &[], &crate::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT), None);
                 }
                 canvas
             };

@@ -310,7 +310,7 @@ fn the_raster_prose_draws_the_runs_the_capture_measures() {
             rows as u32 * u32::from(tf.cell().h),
             ground,
         );
-        v6::draw_story_text(&mut canvas, &main, 0, 0, cols, rows, ink, &[], &tf);
+        v6::draw_story_text(&mut canvas, &main, 0, 0, cols, rows, ink, &[], &tf, None);
         let span = ink_span(&canvas, 0..canvas.height(), 0..canvas.width(), ground)
             .unwrap_or_else(|| panic!("{run:?} drew no ink at all"));
         assert_eq!(
