@@ -555,6 +555,23 @@ fn render_segments(
 }
 
 /// Overflow rendering: show active ± neighbors, with ‹…› markers.
+/// Write one cell of a header row, never past `right` (SQ-1127).
+///
+/// `Buffer::cell_mut` clips to the BUFFER, which is the whole terminal — so it
+/// happily accepts a column belonging to the pane to the right, or to the
+/// corner glyph this pane's own frame just drew. Every write in
+/// [`render_overflow`] goes through here so the row cannot outrun the rect it
+/// was given, which is the one bound that matters when a segment is wider than
+/// the inset and the fitting loop gives up and truncates.
+fn put_capped(buf: &mut Buffer, x: u16, y: u16, right: u16, sym: &str, style: Style) {
+    if x >= right {
+        return;
+    }
+    if let Some(c) = buf.cell_mut((x, y)) {
+        c.set_symbol(sym).set_style(style);
+    }
+}
+
 fn render_overflow(
     buf: &mut Buffer,
     top_inset: Rect,
@@ -568,6 +585,8 @@ fn render_overflow(
     let avail = top_inset.width as usize;
     let row = top_inset.y;
     let x = top_inset.x;
+    // The one bound every write below respects. Exclusive, like `Rect::right`.
+    let right = top_inset.right();
 
     // Find the active index, default to 0
     let ai = active_idx.unwrap_or(0);
@@ -657,23 +676,16 @@ fn render_overflow(
     // Left marker
     if needs_left_marker {
         for ch in marker.chars() {
-            if let Some(c) = buf.cell_mut((cx, row)) {
-                let s = ch.to_string();
-                c.set_symbol(&s).set_style(base);
-            }
+            put_capped(buf, cx, row, right, &ch.to_string(), base);
             cx += 1;
         }
         // space after marker
-        if let Some(c) = buf.cell_mut((cx, row)) {
-            c.set_symbol(" ").set_style(base);
-        }
+        put_capped(buf, cx, row, right, " ", base);
         cx += 1;
     }
 
     // left bracket
-    if let Some(c) = buf.cell_mut((cx, row)) {
-        c.set_symbol(caps.left.as_str()).set_style(base);
-    }
+    put_capped(buf, cx, row, right, caps.left.as_str(), base);
     cx += 1;
 
     // Render visible segments
@@ -681,9 +693,7 @@ fn render_overflow(
         let seg = &segments[si];
         if wi > 0 {
             // divider
-            if let Some(c) = buf.cell_mut((cx, row)) {
-                c.set_symbol(caps.divider.as_str()).set_style(base);
-            }
+            put_capped(buf, cx, row, right, caps.divider.as_str(), base);
             cx += 1;
         }
 
@@ -691,48 +701,38 @@ fn render_overflow(
         let seg_start_x = cx;
 
         // space
-        if let Some(c) = buf.cell_mut((cx, row)) {
-            c.set_symbol(" ").set_style(seg_style);
-        }
+        put_capped(buf, cx, row, right, " ", seg_style);
         cx += 1;
 
         // text chars
         for ch in seg.text.chars() {
-            if let Some(c) = buf.cell_mut((cx, row)) {
-                let s = ch.to_string();
-                c.set_symbol(&s).set_style(seg_style);
-            }
+            put_capped(buf, cx, row, right, &ch.to_string(), seg_style);
             cx += 1;
         }
 
         // trailing space
-        if let Some(c) = buf.cell_mut((cx, row)) {
-            c.set_symbol(" ").set_style(seg_style);
-        }
+        put_capped(buf, cx, row, right, " ", seg_style);
         cx += 1;
 
-        let seg_end_x = cx;
-        rects[si] = Rect::new(seg_start_x, row, seg_end_x - seg_start_x, 1);
+        // The hit-rect is clamped for the same reason the writes are: a rect
+        // reaching past the inset makes a click on the NEXT pane land on this
+        // pane's tab. A segment pushed entirely off the end gets a zero-width
+        // rect, which is what `rects` is already initialised to.
+        let seg_end_x = cx.min(right);
+        rects[si] = Rect::new(seg_start_x, row, seg_end_x.saturating_sub(seg_start_x), 1);
     }
 
     // right bracket
-    if let Some(c) = buf.cell_mut((cx, row)) {
-        c.set_symbol(caps.right.as_str()).set_style(base);
-    }
+    put_capped(buf, cx, row, right, caps.right.as_str(), base);
     cx += 1;
 
     // Right marker
     if needs_right_marker {
         // space before marker
-        if let Some(c) = buf.cell_mut((cx, row)) {
-            c.set_symbol(" ").set_style(base);
-        }
+        put_capped(buf, cx, row, right, " ", base);
         cx += 1;
         for ch in marker.chars() {
-            if let Some(c) = buf.cell_mut((cx, row)) {
-                let s = ch.to_string();
-                c.set_symbol(&s).set_style(base);
-            }
+            put_capped(buf, cx, row, right, &ch.to_string(), base);
             cx += 1;
         }
     }
@@ -756,21 +756,31 @@ pub fn draw_header_plain(buf: &mut Buffer, row: Rect, segments: &[InsetSegment],
     let avail = row.width as usize;
     let leading = if total <= avail { (avail - total) / 2 } else { 0 };
     let mut cx = row.x + leading as u16;
+    // The same bound `render_overflow` respects, for the same reason: `leading`
+    // is 0 once the text overruns, and every write below would then march past
+    // this row's rect and into the pane beside it (SQ-1127). Borderless headers
+    // have no brackets to truncate against, so a title cut here loses a character
+    // or two more than the framed path would — which is the deal: a row that
+    // stays inside its pane beats a row that reads a little further and then
+    // scribbles on its neighbour.
+    let right = row.right();
     let mut rects = vec![Rect::default(); segments.len()];
     for (i, seg) in segments.iter().enumerate() {
         if i > 0 {
             for _ in 0..sep {
-                if let Some(c) = buf.cell_mut((cx, row.y)) { c.set_symbol(" ").set_style(base); }
+                put_capped(buf, cx, row.y, right, " ", base);
                 cx += 1;
             }
         }
         let style = if seg.active { active } else { base };
         let start = cx;
         for ch in seg.text.chars() {
-            if let Some(c) = buf.cell_mut((cx, row.y)) { c.set_symbol(&ch.to_string()).set_style(style); }
+            put_capped(buf, cx, row.y, right, &ch.to_string(), style);
             cx += 1;
         }
-        rects[i] = Rect::new(start, row.y, cx - start, 1);
+        // Clamped like the framed path's, so a click past the header cannot land
+        // on a tab that was never drawn there.
+        rects[i] = Rect::new(start, row.y, cx.min(right).saturating_sub(start), 1);
     }
     rects
 }
@@ -886,6 +896,68 @@ mod tests {
         // centered: leading filler before the bracket
         assert!(row.find("ZORK I").unwrap() > 3);
         assert_eq!(rects.len(), 1);
+    }
+
+    /// SQ-1127: a title too long for its inset stays INSIDE the inset.
+    ///
+    /// The buffer here is deliberately wider than the strip, which is the whole
+    /// point and the reason this went unnoticed: every other case in this module
+    /// sizes the buffer to the strip exactly, so `Buffer::cell_mut` clipped the
+    /// overrun and the row looked correct. Give the row somewhere to run to and
+    /// it runs — over the pane's top-right corner, and on into the next pane.
+    #[test]
+    fn an_overlong_title_is_clipped_to_its_inset_not_to_the_buffer() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        // The inset occupies columns 5..17; 5 and 17.. belong to the frame and
+        // to whatever is drawn beyond it.
+        let strip = Rect::new(5, 0, 12, 1);
+        let segs = [InsetSegment { text: "A VERY LONG STORY TITLE INDEED", active: true }];
+        let rects = draw_top_inset(
+            &mut buf,
+            strip,
+            &segs,
+            Style::default(),
+            Style::default(),
+            &InsetCaps::for_border(BorderStyle::Thick),
+        );
+        let sym = |x: u16| buf.cell((x, 0)).unwrap().symbol().to_string();
+        let row: String = (0..40).map(sym).collect();
+        println!("row: {row:?}");
+
+        for x in (0..strip.x).chain(strip.right()..40) {
+            assert_eq!(sym(x), " ", "column {x} is outside the inset and must be untouched: {row:?}");
+        }
+        assert!(
+            row.trim_end().chars().count() <= (strip.right()) as usize,
+            "nothing is drawn past the inset's right edge: {row:?}"
+        );
+        // And the hit-rect cannot invite a click on a column the tab does not own.
+        assert!(
+            rects[0].right() <= strip.right(),
+            "hit-rect {:?} escapes the inset {strip:?}",
+            rects[0]
+        );
+    }
+
+    /// SQ-1127, the borderless half: `draw_header_plain` has no brackets to
+    /// truncate against, and its `leading` goes to 0 the moment the text
+    /// overruns — after which it wrote straight past its own row.
+    #[test]
+    fn an_overlong_plain_header_is_clipped_to_its_row_not_to_the_buffer() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        let row = Rect::new(5, 0, 12, 1);
+        let segs = [InsetSegment { text: "A VERY LONG STORY TITLE INDEED", active: true }];
+        let rects = draw_header_plain(&mut buf, row, &segs, Style::default(), Style::default());
+        let sym = |x: u16| buf.cell((x, 0)).unwrap().symbol().to_string();
+        let drawn: String = (0..40).map(sym).collect();
+        println!("row: {drawn:?}");
+
+        for x in (0..row.x).chain(row.right()..40) {
+            assert_eq!(sym(x), " ", "column {x} is outside the header row: {drawn:?}");
+        }
+        assert!(rects[0].right() <= row.right(), "hit-rect {:?} escapes {row:?}", rects[0]);
     }
 
     #[test]
