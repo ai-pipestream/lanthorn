@@ -215,7 +215,7 @@ fn main() -> std::process::ExitCode {
         // composite is a longer loop over the same body rather than a second copy
         // of it — which is the whole argument for making this a shot KIND instead
         // of an example beside this one.
-        let mut panels: Vec<(String, image::RgbaImage)> = Vec::new();
+        let mut panels: Vec<image::RgbaImage> = Vec::new();
         let mut looks: Vec<(u8, gallery::PaneLook)> = Vec::new();
         let mut attempts = 0usize;
         let mut captured_bytes = 0usize;
@@ -277,10 +277,30 @@ fn main() -> std::process::ExitCode {
             if let (Some(n), Some(look)) = (machine, gallery::pane_look(shot, &res)) {
                 looks.push((n, look));
             }
-            let frame = pty_stream::raster::render_with(&res, &|canvas, ch, px, py, cw, chh, fg| {
+            let mut frame = pty_stream::raster::render_with(&res, &|canvas, ch, px, py, cw, chh, fg| {
                 face.draw(canvas, ch, px, py, cw, chh, fg)
             });
-            panels.push((machine.map(gallery::tile_caption).unwrap_or_default(), frame));
+            // EACH TILE NAMES ITSELF, on the picture rather than in a strip above
+            // it (SQ-1165) — the label that survives a crop. Where it goes is
+            // FOUND per tile off that tile's own resolved screen, never assumed:
+            // the badge must not land on the status band, the prose or the caret,
+            // which are the four things the frame exists to show, and the six
+            // tiles do not fill to the same height. A tile with no clear ground at
+            // all keeps its badge off rather than covering the evidence, and says
+            // so, because a silently misplaced tag is worse than a missing one.
+            if let Some(n) = machine {
+                let text = gallery::tile_badge_text(n);
+                match gallery::badge_anchor(shot, &res, gallery::badge_cells(shot, &text)) {
+                    Some(at) => gallery::stamp_badge(&mut frame, &text, at),
+                    None => eprintln!(
+                        "\ngallery: `{}` tile {n} ({text}) has no clear ground in its pane for a \
+                         badge, so it is unlabelled — the frame is full to the edges, and a badge \
+                         over the prose would cover the thing being compared",
+                        shot.id
+                    ),
+                }
+            }
+            panels.push(frame);
         }
         if lost || panels.is_empty() {
             println!("FAIL after {attempts} attempt(s)  {last}");
@@ -307,7 +327,7 @@ fn main() -> std::process::ExitCode {
         }
 
         let frame = if shot.machines.is_empty() {
-            panels.remove(0).1
+            panels.remove(0)
         } else {
             gallery::tile(&panels, shot.tile_columns())
         };

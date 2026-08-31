@@ -723,7 +723,7 @@ Six things are deliberate:
   names `machines = [2, 3, 4, 6, 7, 8]` is captured once per §11.1.3 interpreter
   number — each launch with `--interpreter N --colour machine` appended, which is
   the pair SQ-1154 made reach a bare story file — and the results are tiled into
-  a single picture, each tile captioned with its machine. It is a shot KIND rather
+  a single picture, each tile badged with its machine. It is a shot KIND rather
   than a second example beside this one, because the provenance, the guards, the
   pinned seed, the burnt-in label, the proof sheet and `gallery.json` are all
   things a composite needs exactly as much as a single frame does; a renderer of
@@ -747,6 +747,18 @@ Six things are deliberate:
   shape, so a rule of "every tile must differ" would refuse a correct frame.
   Falsified by swapping the appended `--colour machine` for `--colour theme`: all
   six tiles collapse onto the terminal default and the guard names eleven pairs.
+
+  Two layout facts are derived rather than chosen, and both because a TILE is a
+  terminal and therefore already landscape. `Shot::tile_columns` picks the count
+  that makes the finished PICTURE closest to square, not the squarest grid:
+  `ceil(sqrt(6))` gives 3x2 and a 3128x1402 banner that gets scaled down until the
+  prose is unreadable, where 2 columns give 2090x2016. And the machine's name is
+  a BADGE on the tile rather than a caption above it, drawn in the harness's own
+  bitmap face on a near-black plate under a hairline — a treatment lanthorn's
+  theme has nowhere, since the one thing the tag must not do is read as something
+  the app drew. `badge_anchor` finds the lowest clear two-row band in each pane
+  off that tile's own resolved screen, so it can never land on the status band,
+  the prose or the caret; a tile with no clear ground goes unbadged and says so.
 
 `tests/suites/gallery_manifest.rs` runs the whole validator over the committed
 recipe, so a manifest that has gone stale fails the gate rather than failing

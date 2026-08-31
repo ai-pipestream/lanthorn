@@ -737,11 +737,38 @@ impl Shot {
         }
     }
 
-    /// How many columns the tiles are laid out in — the squarest grid that holds
-    /// them, so six machines are 3x2 rather than a wall or a strip.
+    /// How many columns the tiles are laid out in: the count that makes the
+    /// finished PICTURE closest to square.
+    ///
+    /// **The squarest grid is not the squarest picture, and that is the whole of
+    /// this.** It was `ceil(sqrt(n))` — six tiles as 3x2 — which reads as the
+    /// obvious answer and produced a 3128x1402 frame, wider than 2:1. A picture
+    /// that wide is scaled down by whatever is showing it until the prose in it
+    /// cannot be read, and the prose is the entire subject of a shot about how six
+    /// machines paint text. The step being skipped is that a TILE is a terminal
+    /// and already landscape — 64x20 cells on a 16x32 cell is 1024x640, 1.6:1 —
+    /// so laying wide things out wide multiplies it.
+    ///
+    /// The question is asked about the output instead: for each candidate column
+    /// count the finished picture is `c` tiles across by `ceil(n / c)` down,
+    /// gutters included since they are what actually gets written, and the one
+    /// whose aspect is nearest 1:1 wins. Measured on this manifest's composite,
+    /// 3 columns is 2.44:1 and **2 columns is 1.09:1**, at 2090x1922 — a
+    /// window-shaped picture instead of a banner.
+    ///
+    /// Compared in LOG space, so 2:1 and 1:2 are the same distance from square. A
+    /// plain ratio would rate every portrait candidate nearer than every landscape
+    /// one and always answer 1.
     pub fn tile_columns(&self) -> usize {
         let n = self.machines.len().max(1);
-        (1..=n).find(|c| c * c >= n).unwrap_or(1)
+        let Ok((cols, rows)) = self.size_cells() else { return 1 };
+        let (cell_w, cell_h) = self.cell_px();
+        let tile_w = f64::from(u32::from(cols) * u32::from(cell_w) + TILE_GUTTER);
+        let tile_h = f64::from(u32::from(rows) * u32::from(cell_h) + TILE_GUTTER);
+        let squareness = |c: usize| {
+            ((c as f64 * tile_w) / (n.div_ceil(c) as f64 * tile_h)).ln().abs()
+        };
+        (1..=n).min_by(|&a, &b| squareness(a).total_cmp(&squareness(b))).unwrap_or(1)
     }
 
     /// The medium's absolute path.
@@ -1508,54 +1535,141 @@ pub fn machine_name(n: u8) -> String {
     zvm::interpreter::machine(n).map_or_else(|| format!("interpreter {n}"), |m| m.name.to_string())
 }
 
-/// `Amiga · interpreter 4` — the caption over one tile.
+/// `Amiga · 4` — what one tile's badge says.
 ///
 /// An unlabelled grid of similar terminals teaches nothing, and the NUMBER is
 /// half the label rather than decoration: it is what a reader types to get that
 /// tile back (`lanthorn --interpreter 4 --colour machine story.z3`), which makes
 /// the frame a thing you can reproduce instead of a thing you can look at.
-pub fn tile_caption(n: u8) -> String {
-    format!("{} \u{b7} interpreter {n}", machine_name(n))
+///
+/// Terse because it rides ON the tile now rather than sitting in a strip above it
+/// (SQ-1165): `interpreter 4` spelled out was 22 characters looking for a gap in
+/// somebody's prose, `--interpreter` is on the frame's own footer already, and a
+/// badge only has to be unambiguous rather than complete.
+pub fn tile_badge_text(n: u8) -> String {
+    format!("{} \u{b7} {n}", machine_name(n))
 }
 
-/// Lay the captured tiles out in a grid, each under its own caption.
+/// Where a tile's badge can sit without covering anything the frame is about.
 ///
-/// Captions are drawn with the BITMAP master, on the same ground the burnt-in
-/// [`label`] uses, and for the same reason: a caption in the frame's own typeface
-/// reads as part of the render, and these have to read as the harness naming what
-/// is underneath them. The gutter is not cosmetic either — the Macintosh tile is
-/// white to its edge and the Apple tile beside it is black, and two pages meeting
-/// with no ground between them read as one surface with a seam in it.
-pub fn tile(panels: &[(String, RgbaImage)], columns: usize) -> RgbaImage {
-    const PAD: u32 = 6;
-    const GUTTER: u32 = 14;
+/// **The badge must not cover the evidence, and this is that check rather than a
+/// promise about it.** What a composite is FOR is the page colour, the ink, the
+/// reverse-video status band and the caret — the band is the pane's first row and
+/// the caret sits at the prompt — so the free ground is below the prose. But the
+/// six tiles do not fill to the same height (a machine whose interpreter wraps a
+/// line differently ends a row lower), and Deadline's opening is not the last
+/// story this manifest will ever point a composite at. So the spot is FOUND, per
+/// tile, off that tile's own resolved screen: the lowest two-row band of the pane
+/// with a clear run wide enough, scanning up.
+///
+/// Returns the top-left in PIXELS, in the space [`super::raster`] draws the frame
+/// in, and `None` when the pane has no clear run at all — which the caller reports
+/// rather than papering over, because a badge dropped on the prose is the one
+/// outcome worse than no badge.
+pub fn badge_anchor(shot: &Shot, res: &super::oracle::Resolved, cells_wide: u16) -> Option<(u32, u32)> {
+    let (cols, rows) = shot.pane_content_cells()?;
+    let last_row = u16::try_from(rows).ok()?.min(res.rows.saturating_sub(1));
+    let last_col = u16::try_from(cols).ok()?.min(res.cols.saturating_sub(1));
+    let clear = |row: u16, col: u16| {
+        let c = res.cell(row, col);
+        c.image_id.is_none() && matches!(c.ch, ' ' | '\0')
+    };
+    // Right-aligned inside the pane: the badge ends one cell short of the border,
+    // and the run CHECKED reaches one cell further left than it, so there is clear
+    // ground on both sides of it rather than a badge butted against a word.
+    let left = last_col.checked_sub(cells_wide)?.max(1);
+    let checked = left.saturating_sub(1)..=last_col;
+    // TWO rows, not one: the badge is taller than a cell, so a single clear row
+    // would put its border through the descenders of the line above.
+    for row in (2..=last_row).rev() {
+        if checked.clone().all(|c| clear(row, c)) && checked.clone().all(|c| clear(row - 1, c)) {
+            let (cw, ch) = shot.cell_px();
+            return Some((u32::from(left) * u32::from(cw), u32::from(row - 1) * u32::from(ch)));
+        }
+    }
+    None
+}
+
+/// Stamp a badge onto a tile, in place.
+///
+/// **It has to read as ANNOTATION and not as something lanthorn drew**, which is
+/// the whole difficulty: every tile is a picture of a terminal app with its own
+/// title bar, its own help line and its own borders, and a tag dropped carelessly
+/// into that becomes a claim about what the app renders — the worst possible
+/// misreading of a frame whose subject is exactly that. Three things separate it,
+/// and all three are deliberate:
+///
+///   * drawn in the harness's own BITMAP master at 8px, never the frame's
+///     typeface — the same rule [`label`] follows, and for the same reason;
+///   * on the label strip's own near-black ground under a bright hairline border,
+///     a combination lanthorn's theme has nowhere;
+///   * inset INSIDE the pane rather than straddling a border, so it can never be
+///     read as a piece of the app's chrome that happens to have a word in it.
+pub fn stamp_badge(frame: &mut RgbaImage, text: &str, at: (u32, u32)) {
+    const PAD: u32 = 5;
+    let (x, y) = at;
+    let w = PAD * 2 + 8 * text.chars().count() as u32;
+    let h = PAD * 2 + LABEL_LINE;
+    for dy in 0..h {
+        for dx in 0..w {
+            let (px, py) = (x + dx, y + dy);
+            if px >= frame.width() || py >= frame.height() {
+                continue;
+            }
+            let edge = dx == 0 || dy == 0 || dx + 1 == w || dy + 1 == h;
+            frame.put_pixel(px, py, if edge { Rgba([122, 126, 140, 255]) } else { Rgba([18, 18, 20, 255]) });
+        }
+    }
+    for (j, ch) in text.chars().enumerate() {
+        app::render::bitfont::blit_glyph(
+            frame,
+            ch,
+            x + PAD + j as u32 * 8,
+            y + PAD,
+            8,
+            LABEL_LINE,
+            Rgba([214, 216, 224, 255]),
+            None,
+            None,
+        );
+    }
+}
+
+/// How many CELLS wide the badge for `text` is, so [`badge_anchor`] can ask for a
+/// clear run of the right size before [`stamp_badge`] draws into it.
+///
+/// One function rather than the same arithmetic in two places: the anchor and the
+/// stamp must agree about the badge's width or the check is of a box the drawing
+/// does not use, which is a guard that passes while the badge covers prose.
+pub fn badge_cells(shot: &Shot, text: &str) -> u16 {
+    let px = 10 + 8 * text.chars().count() as u32;
+    let (cw, _) = shot.cell_px();
+    u16::try_from(px.div_ceil(u32::from(cw))).unwrap_or(u16::MAX)
+}
+
+/// Lay the captured tiles out in a grid on the label strip's own ground.
+///
+/// Each tile has already named ITSELF, through [`stamp_badge`], so this is only
+/// the arithmetic. There was a caption strip above every tile until the badge
+/// arrived: two labels saying the same thing is clutter, and the one drawn on the
+/// picture is the one that survives the picture being cropped.
+///
+/// [`TILE_GUTTER`] carries why there is any ground between them at all, and
+/// [`Shot::tile_columns`] picks `columns` from the shape this produces.
+pub fn tile(panels: &[RgbaImage], columns: usize) -> RgbaImage {
     let ground = Rgba([18, 18, 20, 255]);
     let cols = columns.max(1);
     let rows = panels.len().div_ceil(cols);
-    let cap_h = LABEL_LINE + PAD * 2;
-    let cell_w = panels.iter().map(|(_, f)| f.width()).max().unwrap_or(1);
-    let cell_h = panels.iter().map(|(_, f)| f.height()).max().unwrap_or(1) + cap_h;
-    let w = GUTTER + (cell_w + GUTTER) * cols as u32;
-    let h = GUTTER + (cell_h + GUTTER) * rows as u32;
+    let cell_w = panels.iter().map(RgbaImage::width).max().unwrap_or(1);
+    let cell_h = panels.iter().map(RgbaImage::height).max().unwrap_or(1);
+    let w = TILE_GUTTER + (cell_w + TILE_GUTTER) * cols as u32;
+    let h = TILE_GUTTER + (cell_h + TILE_GUTTER) * rows as u32;
     let mut out = RgbaImage::from_pixel(w.max(1), h.max(1), ground);
-    for (i, (caption, frame)) in panels.iter().enumerate() {
-        let x0 = GUTTER + (cell_w + GUTTER) * (i % cols) as u32;
-        let y0 = GUTTER + (cell_h + GUTTER) * (i / cols) as u32;
-        for (j, ch) in caption.chars().enumerate() {
-            app::render::bitfont::blit_glyph(
-                &mut out,
-                ch,
-                x0 + PAD + j as u32 * 8,
-                y0 + PAD,
-                8,
-                LABEL_LINE,
-                Rgba([206, 208, 216, 255]),
-                None,
-                None,
-            );
-        }
+    for (i, frame) in panels.iter().enumerate() {
+        let x0 = TILE_GUTTER + (cell_w + TILE_GUTTER) * (i % cols) as u32;
+        let y0 = TILE_GUTTER + (cell_h + TILE_GUTTER) * (i / cols) as u32;
         for (x, y, p) in frame.enumerate_pixels() {
-            let (px, py) = (x0 + x, y0 + cap_h + y);
+            let (px, py) = (x0 + x, y0 + y);
             if px < out.width() && py < out.height() {
                 out.put_pixel(px, py, *p);
             }
@@ -1820,6 +1934,18 @@ pub fn pick_face(explicit: Option<&Path>, cell_h: u16) -> Result<Face, String> {
 
 /// Height of one label line, in pixels.
 const LABEL_LINE: u32 = 16;
+
+/// The ground left between a composite's tiles, and around them (SQ-1165).
+///
+/// Not cosmetic. The Macintosh tile is white to its edge and the Apple tile is
+/// black to its edge, and two pages meeting with no ground between them read as
+/// one surface with a seam in it.
+///
+/// Shared with [`Shot::tile_columns`], which chooses a column count by the shape
+/// of the picture this file actually writes — a grid picked against different
+/// arithmetic than the one drawing it is exactly the hand-maintained invariant
+/// across call sites that CLAUDE.md's refactoring policy is about.
+const TILE_GUTTER: u32 = 14;
 
 /// Append a footer to `frame` saying, in the picture itself, what the picture is.
 ///

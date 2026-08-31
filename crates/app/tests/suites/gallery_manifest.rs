@@ -764,17 +764,96 @@ fn every_tile_gets_its_own_user_directory() {
     );
 }
 
-/// Six tiles are 3x2 — not a strip and not a wall.
+/// Six tiles are 2 wide and 3 down, because the squarest GRID is not the squarest
+/// PICTURE (SQ-1165).
+///
+/// `ceil(sqrt(6))` is 3, and 3x2 is the answer that looks obvious — it produced a
+/// 3128x1402 frame, wider than 2:1, which any ordinary screen scales down until
+/// the prose in it cannot be read. That defeats a shot whose entire subject is how
+/// six machines paint text. The step being skipped is that a TILE is a terminal and
+/// already landscape, so laying wide things out wide multiplies it.
+///
+/// **The control is the whole case.** A rule that only checked the answer we wanted
+/// would pass just as happily if `tile_columns` returned a constant 2 — so this
+/// also pins that the count follows the tile's SHAPE: six PORTRAIT tiles want three
+/// columns, which is the mirror image and the thing a constant cannot do.
 #[test]
-fn the_tiles_are_laid_out_in_the_squarest_grid_that_holds_them() {
+fn the_tiles_are_laid_out_in_the_squarest_picture_not_the_squarest_grid() {
     let measured: Vec<u8> =
         (0u8..=255).filter(|&n| zvm::interpreter::period_look_for(n, None).is_some()).collect();
-    for (n, want) in [(2usize, 2usize), (3, 2), (4, 2), (6, 3), (9, 3)] {
+    let with = |n: usize, size: &str| {
         assert!(measured.len() >= n, "only {} machines are measured; this case wants {n}", measured.len());
         let list = measured[..n].iter().map(u8::to_string).collect::<Vec<_>>().join(", ");
-        let shot = &parse_one(&format!("{GOOD}machines = [{list}]\n")).expect("valid").shots[0];
-        assert_eq!(shot.tile_columns(), want, "{n} tiles");
+        let body = GOOD.replace(r#"size = "117x40""#, &format!("size = {size:?}"));
+        parse_one(&format!("{body}machines = [{list}]\n")).expect("valid").shots.remove(0)
+    };
+    // 64x20 on a 16x32 cell is a 1024x640 tile — landscape, like every terminal.
+    // Two of those already make a wide enough picture to want stacking.
+    for (n, want) in [(2usize, 1usize), (3, 2), (4, 2), (6, 2)] {
+        assert_eq!(with(n, "64x20").tile_columns(), want, "{n} landscape tiles");
     }
+    // THE CONTROL, and the reason this is not a case that would pass against a
+    // constant 2: turn the tile on its side — 20x40 cells is a 320x1280 portrait
+    // tile — and three of them lay out in a ROW where three landscape tiles stack
+    // two-and-one. The count follows the tile's shape, which is the claim.
+    assert_eq!(with(3, "20x40").tile_columns(), 3, "three portrait tiles lay out across");
+    assert_eq!(with(3, "64x20").tile_columns(), 2, "…where three landscape ones do not");
+}
+
+/// The badge is right-aligned in the pane's lowest CLEAR band, so it lands on
+/// nothing the frame is about (SQ-1165).
+///
+/// The status band is the pane's first row, the caret sits at the prompt, and the
+/// prose is between them — those four things are the entire subject, and a badge
+/// on top of any of them is worse than no badge. So the spot is found off the
+/// tile's own resolved screen rather than assumed, and a pane with no clear band
+/// answers `None` for the caller to report.
+///
+/// Built from a synthetic screen so it runs in CI: what is pinned is the SEARCH.
+#[test]
+fn the_badge_lands_on_clear_ground_below_the_prose() {
+    use super::pty_stream::gallery;
+    use super::pty_stream::oracle::Resolved;
+
+    // Content rect is cols 1..=8, rows 1..=5, on a 16x32 cell.
+    let shot = &parse_one(&GOOD.replace(r#"size = "117x40""#, r#"size = "10x8""#)).expect("valid").shots[0];
+    let with_text_on = |rows: &[u16]| {
+        let mut screen = Resolved::blank(10, 8);
+        for row in 0..8u16 {
+            for col in 0..10u16 {
+                screen.cell_mut(row, col).ch = if rows.contains(&row) { 'x' } else { ' ' };
+            }
+        }
+        screen
+    };
+    // Two cells wide: the badge right-aligns at cols 6..=7, leaving col 8 clear
+    // inside the border, and takes the lowest clear PAIR of rows, which is 4 and 5.
+    let at = gallery::badge_anchor(shot, &with_text_on(&[0, 1, 2, 3]), 2).expect("rows 4 and 5 are clear");
+    assert_eq!(at, (6 * 16, 4 * 32), "right-aligned, and as low as clear ground allows");
+    // A tile whose prose reaches the BOTTOM row pushes the badge up rather than
+    // over it — which is the whole point, since the six tiles do not fill alike.
+    let higher = gallery::badge_anchor(shot, &with_text_on(&[0, 1, 5]), 2).expect("rows 3 and 4 are clear");
+    assert_eq!(higher, (6 * 16, 3 * 32), "the lowest clear pair is now 3 and 4");
+    assert!(higher.1 < at.1, "never over the prose: {higher:?} vs {at:?}");
+    // TWO rows and not one, so the badge's border never sits on the descenders of
+    // the line above it: a pane clear only on its last row has nowhere to put it.
+    assert_eq!(
+        gallery::badge_anchor(shot, &with_text_on(&[1, 2, 3, 4]), 2),
+        None,
+        "one clear row is not a place for a two-row badge"
+    );
+    // A pane full to the last row is the same refusal — reported by the caller,
+    // never papered over, because a badge on the prose is worse than no badge.
+    assert_eq!(gallery::badge_anchor(shot, &with_text_on(&[1, 2, 3, 4, 5]), 2), None, "no clear ground at all");
+    // And a badge too wide for the pane.
+    assert_eq!(gallery::badge_anchor(shot, &with_text_on(&[]), 99), None, "wider than the pane");
+    // The width the search asks for is the width the stamp draws, through one
+    // function — two spellings of it is a check of a box the drawing does not use.
+    assert_eq!(
+        gallery::badge_cells(shot, "Amiga \u{b7} 4"),
+        6,
+        "nine glyphs at 8px plus 10px of padding is 82px, which is six 16px cells"
+    );
 }
 
 /// THE MEASUREMENT BEHIND THE SIX, recomputed rather than restated (SQ-1165).

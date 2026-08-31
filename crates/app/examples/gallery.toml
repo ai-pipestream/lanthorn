@@ -879,7 +879,32 @@ expect_art_cells = 200
 # THE ONE SHOT KIND THAT RENDERS MORE THAN ONE FRAME. `machines` names a list of
 # ZMSD §11.1.3 interpreter numbers; the harness captures this exact recipe once
 # per number with `--interpreter N --colour machine` appended, and tiles the
-# results into a single picture with each tile captioned by its machine.
+# results into a single picture with each tile badged with its machine.
+#
+# TWO COLUMNS OF THREE, and the column count is derived rather than chosen: a
+# TILE is a terminal and already landscape (64x20 cells on a 16x32 cell is
+# 1024x640), so the squarest GRID is not the squarest picture. `ceil(sqrt(6))`
+# gives 3x2 and a 3128x1402 frame, wider than 2:1, which any ordinary screen
+# scales down until the prose cannot be read — in a shot whose entire subject is
+# how six machines paint text. `Shot::tile_columns` asks about the OUTPUT instead
+# and answers 2, for a 2090x2016 picture that fits a window.
+#
+# The reading order is interpreter number ascending, and it pairs the frame better
+# than a hand-sorted order would: row 1 is the pure inversion (Apple's white on
+# black beside the Macintosh's black on white), row 2 puts the two BLUE machines
+# together so the Amiga's #074BA1 can be told from EGA's #0000AA at all, and row 3
+# is the two Commodores, where the C128's cyan against the C64's white is the only
+# thing separating them. The two machines that share a body pair — Apple and C64 —
+# land in opposite corners, so the grid never looks like it repeats itself.
+#
+# THE MACHINE'S NAME RIDES ON THE TILE. The badge is drawn in the harness's own
+# bitmap face on a near-black plate under a grey hairline — a combination
+# lanthorn's theme has nowhere, because the one thing a tag must never do is read
+# as something the app drew, in a frame whose whole subject is what the app draws.
+# Where it goes is FOUND per tile off that tile's own resolved screen: the lowest
+# clear two-row band in the pane, right-aligned. It must not cover the status
+# band, the prose or the caret, the six tiles do not fill to the same height, and
+# a tile with no clear ground keeps its badge off and says so.
 #
 # It is a shot KIND rather than an example of its own because everything a
 # composite needs — the release and serial read off the mount, `expect`,
