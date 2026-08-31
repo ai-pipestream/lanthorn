@@ -733,7 +733,7 @@ expect_art_cells = 2400
 # Z-machine's. They were the stills in README.md that no shot produced, so they
 # were the ones nobody could regenerate without a camera (SQ-1080).
 #
-# ── AND THE TWO THAT OPEN A DIRECTORY (SQ-1080) ──────────────────────────────
+# ── AND THE ONES THAT OPEN A DIRECTORY (SQ-1080) ─────────────────────────────
 #
 # `library = true` says the frame is the PICKER, and `media` then names a
 # `[[libraries]]` entry below rather than a file. It changes four things:
@@ -780,9 +780,13 @@ expect_art_cells = 2400
 # evenly through the alphabet and the Infocom rows have no author until somebody
 # fetches one. A named library is a fixture; a directory is a coincidence.
 #
-# Every member below carries BOTH an `Fspc` frontispiece and an `IFmd` metadata
-# chunk, so the covers, the authors and the years in these two frames all come
-# out of the stories' own bytes.
+# Every member of `frontispieces` carries BOTH an `Fspc` frontispiece and an
+# `IFmd` metadata chunk, so the covers, the authors and the years in the two
+# picker frames below all come out of the stories' own bytes. `v6-renditions`,
+# further down, is chosen on the opposite principle — its members are the four
+# Infocom Version 6 games and the picture archives beside one of them, none of
+# which carry either chunk, because that frame's subject is a dialog and not a
+# cover.
 
 [[libraries]]
 id = "frontispieces"
@@ -861,6 +865,108 @@ size = "140x38"
 # populated panel. Measured here: ~3100 cells, twelve tiles plus the panel.
 expect = ["choose a story", "g: list"]
 expect_art_cells = 2000
+
+# ── The third door out of the picker: launch options (SQ-1167) ───────────────
+#
+# The picker can do three things with the row under the cursor: open it, look it
+# up on IFDB, or ask HOW to start it. The third is `launch_options.rs` (SQ-0789 /
+# SQ-0791) and no frame showed it.
+#
+# THE ADMISSION RULE IS THE POINT, and it is why the dialog is two rows rather
+# than a second settings screen: **an option is admitted only if it cannot be
+# changed after boot.** The picture archive qualifies because its pictures
+# resolve as the story starts, and swapping it under a running game would
+# re-resolve resources beneath a VM that never learns it happened; the
+# interpreter number qualifies because header `$1E` is read by the STORY, so a
+# game that has booted has already made decisions from it. v6 render mode was
+# checked and REJECTED — `/set-v6-render` switches live and the settings screen
+# persists it — which is the same contract SQ-1161 settled from the other side.
+#
+# WHY ARTHUR. Only ONE of the two admitted options varies by story, so the
+# richest panel is the story with the most native archives beside it. Arthur has
+# five rows where Zork Zero and Journey have four: `Arthur.blb` fills the
+# automatic row at 326 pictures, and `arthur.cg1` (CGA), `arthur.eg1` (EGA, and
+# it says `2 disks` because `.eg2` is the back half of the same set), `arthur.mg1`
+# (MCGA) and `arthur.pic` (Amiga) are four renditions of one game to choose
+# between. A story with one archive would show an empty-looking dialog and teach
+# nothing.
+#
+# WHY ITS OWN LIBRARY RATHER THAN `frontispieces`. The dialog lists the archives
+# BESIDE the story, and a library stages one symlink per member — so Arthur's
+# five archives have to be members, or the panel comes up with nothing in it. The
+# `frontispieces` set is modern blorbs and holds no Arthur at all. The three
+# other Version 6 Infocom stories are in as members so the catalogue behind the
+# dialog reads as a catalogue rather than as one lonely row; their own archives
+# are NOT staged, and could not leak in anyway — `belongs_to_story` filters the
+# loose arm by name, so `arthur.pic` is offered to Arthur and to nothing else.
+# Arthur sorts first of the four by title, which is why one keypress reaches it.
+#
+# THE GUARD NAMES THINGS THAT CANNOT BE ON THE PICKER. This is the third gallery
+# recipe in one day found capturing the wrong screen (five Journey frames stopping
+# at a menu, `macintosh-embedded-face` on a `[more]` pager), and both passed
+# because `expect` named something visible either way. So every string below is
+# the DIALOG's: its title — which carries the story's name, so it also proves the
+# right ROW was under the cursor — the artwork heading, the interpreter
+# provenance line, and the persist checkbox. `expect_prose_cells` is the wrong
+# tool and is refused anyway (no story has been opened), and an art floor would
+# be met by the picker's own covers behind the dialog.
+#
+# `o` is one of three doors and they are one constructor: Shift-Enter, `o`, and a
+# double RIGHT-click all reach `BrowserAction::OpenLaunchOptions` →
+# `open_launch_options`. `o` is the one a key spec can drive, and the footer in
+# the frame names the other two.
+
+[[libraries]]
+id = "v6-renditions"
+from = "stories"
+members = [
+  "arthur-r74-s890714.z6",
+  "Arthur.blb",
+  "arthur.cg1",
+  "arthur.eg1",
+  "arthur.eg2",
+  "arthur.mg1",
+  "arthur.pic",
+  "journey-r83-s890706.z6",
+  "shogun-r322-s890706.z6",
+  "zork0-r393-s890714.z6",
+]
+
+[[shots]]
+id = "launch-options"
+title = "The launch-options panel"
+press = "a story library, with the panel open on Arthur"
+media = "v6-renditions"
+library = true
+caption = """
+Some choices can only be made BEFORE a story boots, and this is where lanthorn \
+puts them: `o` on a row in the picker — or Shift-Enter, or a double right-click — \
+asks how to start it rather than starting it. Two things qualify, and the rule \
+is that neither can be changed afterwards. The picture archive resolves as the \
+game starts, so Arthur's five renditions are offered here and nowhere else: the \
+Blorb it ships with, and the CGA, EGA, MCGA and Amiga plates its release was cut \
+from, each with its own picture count. The interpreter number is read out of the \
+header by the story itself, and the line under it says where the current answer \
+comes from. Everything the running app can already change — colours, render \
+mode, the map — lives in the settings screen instead, because two editors for \
+one value is worse than either."""
+# One keypress, and the wait before it is the library settling — the same 9s
+# `story-list` and `cover-gallery` take. Arthur sorts first of the four stories,
+# so the cursor is already on it and `o` opens its panel; the dialog title in
+# `expect` is what proves that rather than assuming it.
+keys = "wait:9000,o,wait:3000"
+# Wide enough that the footer still carries `Shift+Enter/o / 2×right-click:
+# options` — the hints drop by width, and the frame is much better for naming the
+# door it came through. The dialog itself is `MAX_W = 78` and about fifteen rows,
+# so 21 rows leaves the catalogue visible above it without a field of empty pane
+# below.
+size = "118x21"
+expect = [
+  "Launch options — Arthur: The Quest for Excalibur",
+  "Artwork — archives detected for this story",
+  "header 0x1E =",
+  "Save as this game's default",
+]
 
 [[shots]]
 id = "debug-inspector"
