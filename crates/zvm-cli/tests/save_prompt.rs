@@ -13,14 +13,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 /// A scratch directory of this test's own, so the saves it writes cannot be seen by
-/// another case. `cargo test` shares one process across these, so the thread id is
-/// what keeps two apart.
+/// another case. `zvm-cli` takes no dependency on `app`, so the counter
+/// `app::scratch_dir` appends is spelled here beside the pid: it is unique per CALL,
+/// where a `tag` is only unique if nobody spells one twice (SQ-1131, SQ-1163).
 fn scratch(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "zvm-cli-saveprompt-{tag}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NTH: AtomicUsize = AtomicUsize::new(0);
+    let nth = NTH.fetch_add(1, Ordering::Relaxed);
+    let d = std::env::temp_dir()
+        .join(format!("zvm-cli-saveprompt-{tag}-{}-{nth}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

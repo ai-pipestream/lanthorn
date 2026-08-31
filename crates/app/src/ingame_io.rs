@@ -304,17 +304,7 @@ mod tests {
     const IFID: &str = "ZCODE-1-TEST00-0531";
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "lanthorn-sq0531-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        app::scratch_dir(&format!("sq0531-{tag}"))
     }
 
     /// A fresh minizork session, parked at its opening prompt.

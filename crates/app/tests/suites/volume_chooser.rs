@@ -44,10 +44,7 @@ fn repo_root() -> PathBuf {
 
 /// A scratch directory unique to this process and `tag`.
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq0962-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+    app::scratch_dir(&format!("sq0962-{tag}"))
 }
 
 /// `src` copied into a directory holding nothing else, so no naming rule can

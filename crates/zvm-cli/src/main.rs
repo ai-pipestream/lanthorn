@@ -2915,11 +2915,10 @@ mod restore_request_tests {
     }
 
     fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("zvmcli-{tag}-{}-{stamp}", std::process::id()));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NTH: AtomicUsize = AtomicUsize::new(0);
+        let nth = NTH.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("zvmcli-{tag}-{}-{nth}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

@@ -61,11 +61,7 @@ struct Disks {
 
 impl Disks {
     fn new(tag: &str) -> Disks {
-        let dir = std::env::temp_dir()
-            .join(format!("sq1037-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        Disks { dir }
+        Disks { dir: app::scratch_dir(&format!("sq1037-{tag}")) }
     }
 
     /// Copy one of the committed fixtures in under `name`.

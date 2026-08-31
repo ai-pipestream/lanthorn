@@ -519,16 +519,17 @@ mod tests {
 
     // ── existing_saves / pick_save / save_list_line (SQ-0918) ───────────────
 
-    /// A scratch directory holding `names`, on the same
-    /// pid+thread pattern `the_game_dir_can_actually_be_created_beside_the_story_file`
-    /// uses — nextest gives every test its own process, but `cargo test` does not, so
-    /// the thread id is what keeps two of these apart.
+    /// A scratch directory holding `names`, unique per CALL: `cli-host` cannot
+    /// depend on `app`, so the counter `app::scratch_dir` appends is spelled here
+    /// beside the pid instead (SQ-1131, SQ-1163). A `tag` alone is a
+    /// hand-maintained invariant — two callers who spell one the same way share a
+    /// directory, and each `remove_dir_all`s it on the way out.
     fn dir_with(tag: &str, names: &[&str]) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "cli-host-saves-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NTH: AtomicUsize = AtomicUsize::new(0);
+        let nth = NTH.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir()
+            .join(format!("cli-host-saves-{tag}-{}-{nth}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for n in names {

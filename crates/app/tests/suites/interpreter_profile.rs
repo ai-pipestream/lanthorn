@@ -142,8 +142,7 @@ fn fake_pic_data() -> Vec<u8> {
 }
 
 fn write_image(name: &str, image: &[u8]) -> std::path::PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("lanthorn-profile-{}-{name}", std::process::id()));
+    let path = app::scratch_dir(&format!("profile-{name}")).join(format!("lanthorn-profile-{name}"));
     std::fs::write(&path, image).expect("write the disk image");
     path
 }

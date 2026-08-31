@@ -281,10 +281,7 @@ mod tests {
     // ── atomic writes (SQ-0644) ──────────────────────────────────────────────
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lanthorn-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::scratch_dir(tag)
     }
 
     /// The happy path: the target ends up with the new bytes and the temp file is

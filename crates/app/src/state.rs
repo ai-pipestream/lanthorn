@@ -6908,8 +6908,7 @@ mod tests {
     /// Create a temporary directory with a unique tag.
     /// Contents: subdir/, save.qzl, notes.txt.
     fn make_test_fb_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("lanthorn-fb-{}-{}", tag, std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch_dir(&format!("fb-{tag}"));
         std::fs::create_dir_all(dir.join("subdir")).unwrap();
         std::fs::write(dir.join("save.qzl"), b"fake quetzal").unwrap();
         std::fs::write(dir.join("notes.txt"), b"not a save").unwrap();

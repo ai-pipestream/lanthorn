@@ -3038,13 +3038,12 @@ mod tests {
         }
     }
 
-    /// Write a temp config file and return its path.  The filename carries the
-    /// test's name *and* the process id: the name keeps two tests in one process
-    /// apart, the pid keeps two concurrent runs of the same test apart (a fixed
-    /// name let one run rewrite what the other was reading — SQ-0812).
+    /// Write a temp config file and return its path.  The directory is
+    /// [`crate::scratch_dir`]'s, which is unique per CALL — the name alone kept two
+    /// tests apart only so long as nobody spelled one twice, and the pid alone keeps
+    /// two concurrent PROCESSES apart but not two threads of one (SQ-0812, SQ-1163).
     fn write_temp_config(name: &str, contents: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("lanthorn_test_{}_{}.toml", name, std::process::id()));
+        let path = crate::scratch_dir(&format!("cfg-{name}")).join("config.toml");
         let mut f = std::fs::File::create(&path).unwrap();
         write!(f, "{}", contents).unwrap();
         path

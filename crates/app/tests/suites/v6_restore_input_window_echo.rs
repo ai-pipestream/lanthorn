@@ -164,10 +164,8 @@ fn a_restore_mid_bet_still_echoes_typed_digits(honor: bool, resize: bool) {
     // Save through the REAL archive Save State path.
     let mapper = mapper::mapper::Mapper::default();
     let es = Engine::save_state(&session);
-    let path = std::env::temp_dir().join(format!(
-        "fmvpoker-input-window-{honor}-{resize}-{}.lanthorn",
-        std::process::id()
-    ));
+    let path = app::scratch_dir(&format!("fmvpoker-input-window-{honor}-{resize}"))
+        .join("save.lanthorn");
     app::archive::save_archive_meta_pics(
         &path,
         &mapper,

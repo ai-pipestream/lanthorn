@@ -41,10 +41,7 @@ use crate::fixture_paths::fixture_path;
 
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lanthorn-launchopt-it-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    app::scratch_dir(&format!("launchopt-it-{tag}"))
 }
 
 /// Zork Zero is the case the whole feature exists for: one game, five renditions

@@ -1392,9 +1392,7 @@ mod tests {
     use mapper::mapper::Mapper;
 
     fn temp_archive_path(tag: &str) -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("lanthorn-archive-test-{}-{}.lanthorn", tag, std::process::id()));
-        p
+        crate::scratch_dir(&format!("archive-test-{tag}")).join("save.lanthorn")
     }
 
     fn small_mapper() -> Mapper {

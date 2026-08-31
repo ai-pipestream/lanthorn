@@ -59,10 +59,7 @@ fn archive(got: Fetched) -> FetchedArchive {
 
 /// A fresh scratch directory, named for the case so parallel cases cannot meet.
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq1086-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+    app::scratch_dir(&format!("sq1086-{tag}"))
 }
 
 /// The gitignored library of commercial fixtures, or `None` — every case that

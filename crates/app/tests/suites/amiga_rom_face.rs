@@ -85,14 +85,7 @@ struct Media {
 
 impl Media {
     fn new(tag: &str) -> Media {
-        let dir = std::env::temp_dir().join(format!(
-            "sq1053-{tag}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        Media { dir }
+        Media { dir: app::scratch_dir(&format!("sq1053-{tag}")) }
     }
 
     fn with_bytes(self, name: &str, bytes: &[u8]) -> Media {

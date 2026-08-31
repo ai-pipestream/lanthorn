@@ -831,11 +831,7 @@ mod tests {
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("lanthorn-squrl-{tag}-{}-{:?}", std::process::id(), thread::current().id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::scratch_dir(&format!("squrl-{tag}"))
     }
 
     #[test]

@@ -66,7 +66,7 @@ fn meta() -> app::archive::Meta {
 fn round_trip(session: &mut GameSession, tag: &str, with_display: bool) -> app::archive::ArchiveContents {
     let mapper = mapper::mapper::Mapper::default();
     let es = Engine::save_state(session);
-    let path = std::env::temp_dir().join(format!("arthur-{tag}-{}.lanthorn", std::process::id()));
+    let path = app::scratch_dir(&format!("arthur-{tag}")).join("save.lanthorn");
     let (pics, display) = if with_display {
         let (dto, fallback, _diags) = session.display_list();
         (session.pictures_png_for(&fallback), Some(dto))

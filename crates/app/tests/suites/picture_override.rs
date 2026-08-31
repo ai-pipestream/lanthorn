@@ -50,9 +50,7 @@ use crate::fixture_paths::fixture_path;
 /// A throwaway `game_dir` holding the sidecar `config.toml`, seeded with the
 /// bare lines given. `None` writes no sidecar at all.
 fn game_dir_with(tag: &str, body: Option<&str>) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lanthorn-picover-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
+    let d = app::scratch_dir(&format!("picover-{tag}"));
     if let Some(body) = body {
         std::fs::write(d.join("config.toml"), body).unwrap();
     }

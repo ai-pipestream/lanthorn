@@ -1632,8 +1632,7 @@ mod tests {
 
     #[test]
     fn hint_index_round_trips() {
-        let dir = std::env::temp_dir().join(format!("bm-hintidx-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::scratch_dir("hintidx");
         save_hint_assoc(&dir, "ZCODE-1", std::path::Path::new("/x/h.z5")).unwrap();
         let idx = load_hint_index(&dir);
         assert_eq!(idx.get("ZCODE-1"), Some(std::path::PathBuf::from("/x/h.z5")));
@@ -1644,9 +1643,7 @@ mod tests {
     fn load_story_bytes_handles_raw_and_zip() {
         use std::io::Write as _;
 
-        let base = std::env::temp_dir().join(format!("bm-lsb-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::scratch_dir("lsb");
 
         // A real v5 header, distinguished by a byte the checks do not read, so
         // "the same bytes came back" stays the thing being asserted. Twelve
@@ -1733,9 +1730,7 @@ mod tests {
 
     #[test]
     fn load_story_bytes_extracts_zblorb_executable() {
-        let base = std::env::temp_dir().join(format!("bm-zblorb-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::scratch_dir("zblorb");
 
         let zcode = b"ZCODE-PAYLOAD";
         let path = base.join("game.zblorb");
@@ -1748,13 +1743,10 @@ mod tests {
 
     // ── A zip is a volume, not a wrapper around one file (SQ-1085) ───────────
 
-    /// A scratch directory of this test's own, removed first so a previous run
-    /// cannot answer for this one.
+    /// A scratch directory of this test's own, unique per CALL so two callers who
+    /// happen to pass the same `tag` still get two directories (SQ-1163).
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let base = std::env::temp_dir().join(format!("bm-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        base
+        crate::scratch_dir(tag)
     }
 
     /// Write a zip at `path` holding each `(entry name, bytes)` in order,
@@ -2029,9 +2021,7 @@ mod tests {
     fn read_zip_entry_caps_a_huge_inflated_entry() {
         use std::io::Write as _;
 
-        let base = std::env::temp_dir().join(format!("bm-zipcap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::scratch_dir("zipcap");
 
         // A deflated entry of MAX_ZIP_ENTRY + 128 KiB of zeros: tiny on disk,
         // huge inflated — exactly the zip-bomb shape the cap exists for.
@@ -2154,9 +2144,7 @@ mod tests {
 
     #[test]
     fn load_story_routes_gblorb_and_ulx() {
-        let base = std::env::temp_dir().join(format!("bm-route-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::scratch_dir("route");
 
         // A .gblorb (GLUL) routes to Glulx.
         let gpath = base.join("game.gblorb");
@@ -2180,9 +2168,7 @@ mod tests {
 
     #[test]
     fn load_story_bytes_rejects_glulx_blorb() {
-        let base = std::env::temp_dir().join(format!("bm-gblorb-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::scratch_dir("gblorb");
 
         let path = base.join("game.gblorb");
         std::fs::write(&path, make_blorb(b"GLUL", b"GLULPAYLOAD")).unwrap();
@@ -2219,9 +2205,7 @@ mod tests {
     #[test]
     fn resolve_finds_sibling_then_asks() {
         // Set up a temp dir with a story file and a sibling hints file.
-        let dir = std::env::temp_dir().join(format!("bm-resolve-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch_dir("resolve");
 
         let story = dir.join("story.z5");
         let hints = dir.join("story.hints.z5");
@@ -2235,9 +2219,7 @@ mod tests {
         assert_eq!(result, HintResolution::File(hints));
 
         // Without any hint sibling: should return AskUser.
-        let no_hints_dir = std::env::temp_dir().join(format!("bm-resolve-nosibling-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&no_hints_dir);
-        std::fs::create_dir_all(&no_hints_dir).unwrap();
+        let no_hints_dir = crate::scratch_dir("resolve-nosibling");
         let story2 = no_hints_dir.join("story.z5");
         std::fs::write(&story2, b"fake story").unwrap();
 
@@ -2250,9 +2232,7 @@ mod tests {
 
     // Create a fresh temp dir with the given files (empty contents), returning it.
     fn scratch_dir(tag: &str, files: &[&str]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("bm-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::scratch_dir(tag);
         for f in files {
             std::fs::write(dir.join(f), b"x").unwrap();
         }

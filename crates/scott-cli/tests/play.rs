@@ -14,7 +14,11 @@ fn fixture() -> PathBuf {
 
 /// A fresh empty directory for a case that writes saves.
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("scott-cli-play-{name}-{}", std::process::id()));
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NTH: AtomicUsize = AtomicUsize::new(0);
+    let nth = NTH.fetch_add(1, Ordering::Relaxed);
+    let d =
+        std::env::temp_dir().join(format!("scott-cli-play-{name}-{}-{nth}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

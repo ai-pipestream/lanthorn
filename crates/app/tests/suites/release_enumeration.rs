@@ -82,9 +82,7 @@ fn any_press_present() -> bool {
 
 /// A scratch storage base, unique per test process.
 fn data_base(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq0961-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+    app::scratch_dir(&format!("sq0961-{tag}"))
 }
 
 /// Every menu row **`zvm-cli`** would build for `path` — the seam's own answer,

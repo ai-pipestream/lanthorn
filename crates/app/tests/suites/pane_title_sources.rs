@@ -37,10 +37,7 @@ fn story(name: &str) -> Option<PathBuf> {
 }
 
 fn tmp_base(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lanthorn-sq0766-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    app::scratch_dir(&format!("sq0766-{tag}"))
 }
 
 /// The identity and engine the app derives at boot: the IFID of the EXECUTABLE

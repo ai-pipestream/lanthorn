@@ -296,11 +296,7 @@ mod tests {
     use ratatui::Terminal;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir()
-            .join(format!("lanthorn-lodlg-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::scratch_dir(&format!("lodlg-{tag}"))
     }
 
     fn render(st: &LaunchOptionsState, w: u16, h: u16) -> (String, Option<LaunchOptionsRects>) {

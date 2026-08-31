@@ -13,9 +13,7 @@ use app::symbols::SymbolSet;
 
 /// A throwaway lanthorn home, seeded exactly as a first launch seeds it.
 fn seeded_home(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lanthorn-fontcheck-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("a throwaway lanthorn home");
+    let dir = app::scratch_dir(&format!("fontcheck-{name}"));
     app::theme::template::auto_seed(&dir);
     assert!(dir.join("style.toml").is_file(), "the seed writes a style.toml");
     dir

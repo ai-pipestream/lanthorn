@@ -1406,9 +1406,7 @@ fn floppy_alone(tag: &str) -> Option<FloppyAlone> {
         eprintln!("SKIP: gitignored medium missing at {}", src.display());
         return None;
     }
-    let dir = std::env::temp_dir().join(format!("lanthorn-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("a directory of its own");
+    let dir = app::scratch_dir(tag);
     let image = dir.join("floppy5.ima");
     std::fs::copy(&src, &image).expect("the floppy is copied");
     Some(FloppyAlone { dir, image })

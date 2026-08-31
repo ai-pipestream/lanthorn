@@ -27,10 +27,7 @@ use crate::fixture_paths::fixture_path;
 
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lanthorn-uwb-{}-{}", tag, std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    app::scratch_dir(&format!("uwb-{tag}"))
 }
 
 /// Write `style_toml` into a fresh user dir and load it exactly the way the app

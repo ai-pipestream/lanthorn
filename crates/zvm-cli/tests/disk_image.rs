@@ -93,7 +93,11 @@ impl Floppy {
 
     /// Write the image beside the test binary and return its path.
     fn write(&self, name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("zvm-cli-{}-{name}", std::process::id()));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NTH: AtomicUsize = AtomicUsize::new(0);
+        let nth = NTH.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("zvm-cli-adf-{}-{name}-{nth}", std::process::id()));
         std::fs::write(&path, &self.image).expect("temp image written");
         path
     }
@@ -528,7 +532,11 @@ fn a_raw_self_booting_apple_disk_plays_through_the_shared_table() {
 
 /// Write bytes to a temp file and return the path.
 fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("zvm-cli-{}-{name}", std::process::id()));
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NTH: AtomicUsize = AtomicUsize::new(0);
+    let nth = NTH.fetch_add(1, Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("zvm-cli-tmp-{}-{name}-{nth}", std::process::id()));
     std::fs::write(&path, bytes).expect("temp file written");
     path
 }

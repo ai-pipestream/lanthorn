@@ -5563,11 +5563,7 @@ mod tests {
     }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let mut d = std::env::temp_dir();
-        d.push(format!("lanthorn-picker-ui-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        app::scratch_dir(&format!("picker-ui-{tag}"))
     }
 
     #[test]

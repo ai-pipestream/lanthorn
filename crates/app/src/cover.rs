@@ -594,9 +594,7 @@ mod tests {
     /// Set up a temp story file + its `<key>.save/` game dir, cleaned up by the
     /// caller via the returned dir's parent.
     fn temp_story_and_game_dir(name: &str, story_bytes: &[u8]) -> (PathBuf, PathBuf) {
-        let base = std::env::temp_dir()
-            .join(format!("lanthorn-cover-fallback-{}-{}", std::process::id(), name));
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::scratch_dir(&format!("cover-fallback-{name}"));
         let story_path = base.join("game.gblorb");
         std::fs::write(&story_path, story_bytes).unwrap();
         let game_dir = base.join("game.gblorb.save");

@@ -1416,9 +1416,7 @@ mod debug_dispatch_tests {
     // ── SQ-0648: overwrite confirmation on the slash `/save <name>` path ───────
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("bm-sq0648-slash-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        app::scratch_dir(&format!("sq0648-slash-{tag}"))
     }
 
     /// A save-as target that already exists must open the overwrite-confirm

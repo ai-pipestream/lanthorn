@@ -957,8 +957,11 @@ mod tests {
     /// A directory of its own, so `members_indexed`'s `read_dir` sees exactly
     /// the volumes a case put there.
     fn press(tag: &str, volumes: &[Platter<'_>]) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NTH: AtomicUsize = AtomicUsize::new(0);
+        let nth = NTH.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir()
-            .join(format!("lanthorn-sq0941-{tag}-{}", std::process::id()));
+            .join(format!("lanthorn-sq0941-{tag}-{}-{nth}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (name, files) in volumes {

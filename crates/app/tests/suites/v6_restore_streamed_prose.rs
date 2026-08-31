@@ -107,8 +107,7 @@ fn round_trip(session: &mut GameSession) -> app::archive::ArchiveContents {
     let (dto, fallback, _diags) = session.display_list();
     let pics = session.pictures_png_for(&fallback);
     let ground_png = session.paint_ground_png();
-    let path = std::env::temp_dir()
-        .join(format!("streamed-{}-{:?}.lanthorn", std::process::id(), std::thread::current().id()));
+    let path = app::scratch_dir("streamed").join("save.lanthorn");
     app::archive::save_archive_meta_pics(
         &path,
         &mapper::mapper::Mapper::default(),

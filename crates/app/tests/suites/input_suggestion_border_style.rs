@@ -33,10 +33,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lanthorn-isb-{}-{}", tag, std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    app::scratch_dir(&format!("isb-{tag}"))
 }
 
 /// Write `style_toml` into a fresh user dir and load it exactly the way the app

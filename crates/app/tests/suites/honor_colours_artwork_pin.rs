@@ -113,9 +113,7 @@ fn state_at_the_boot_reload(
     global_honour: bool,
     declines: bool,
 ) -> (AppState, PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq860-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = app::scratch_dir(&format!("sq860-{tag}"));
     let style = dir.join("style.toml");
     std::fs::write(&style, "[colors]\n\"transcript\" = { fg = \"white\" }\n").unwrap();
     let game_dir = dir.join("game.save");

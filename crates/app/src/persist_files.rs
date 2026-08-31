@@ -581,10 +581,7 @@ mod tests {
     // ── list_saves / save_named / delete_save ─────────────────────────────────
 
     fn make_temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("lanthorn-saves-test-{}-{}", tag, std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::scratch_dir(&format!("saves-test-{tag}"))
     }
 
     /// The Z-machine `EngineSave` for `m` (Quetzal bytes, `"zmachine"` tag).

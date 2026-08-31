@@ -75,10 +75,7 @@ fn candidate(story: &Path, filename: &str) -> Option<ArtCandidate> {
 
 /// A per-game sidecar directory carrying a `pictures` key.
 fn game_dir_with(tag: &str, body: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("lanthorn-sq0862-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = app::scratch_dir(&format!("sq0862-{tag}"));
     std::fs::write(dir.join("config.toml"), body).unwrap();
     dir
 }
