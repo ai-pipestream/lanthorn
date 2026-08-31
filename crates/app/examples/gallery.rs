@@ -195,55 +195,6 @@ fn main() -> std::process::ExitCode {
         };
         let (cell_w, cell_h) = shot.cell_px();
 
-        // RETRIES, because the thing being driven is a real interactive program
-        // over a real pty and `wait:` is wall-clock. A key that lands while a
-        // slow medium is still paging in reaches a different screen than the same
-        // key three seconds later, and Arthur's ProDOS press — five segments
-        // reassembled by block — does exactly that under load. Retrying is only
-        // defensible because the guard decides: a shot that cannot pass its own
-        // `expect` never becomes a picture, so this buys robustness and not a
-        // second chance at being wrong.
-        let mut cap = None;
-        let mut res = None;
-        let mut last = String::new();
-        let mut attempts = 0usize;
-        for attempt in 1..=retries.max(1) {
-            attempts = attempt;
-            let c = match gallery::capture(shot, &subject, &bin, &work, Duration::from_secs(timeout)) {
-                Ok(c) => c,
-                Err(e) => {
-                    last = e;
-                    continue;
-                }
-            };
-            // The capture's own bytes are the WIRE stream, and since SQ-0991 a kitty
-            // transmit may be zlib-deflated (`o=z`). Resolving those directly finds the
-            // placement and then has no pixels to paint, which is a BLANK illustration
-            // panel and a shot that fails its art guard for a reason that looks like the
-            // game's fault. `terminal_bytes()` inflates first, exactly as a terminal does.
-            let r = pty_stream::oracle::resolve(
-                &c.terminal_bytes(),
-                c.spec.cols,
-                c.spec.rows,
-                u32::from(cell_w),
-                u32::from(cell_h),
-                Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)),
-            );
-            match gallery::check_expectations(shot, &r) {
-                Ok(()) => {
-                    cap = Some(c);
-                    res = Some(r);
-                    break;
-                }
-                Err(e) => last = e,
-            }
-        }
-        let (Some(cap), Some(res)) = (cap, res) else {
-            println!("FAIL after {attempts} attempt(s)  {last}");
-            failed.push(last);
-            drop_stale();
-            continue;
-        };
         let face = if bitmap {
             gallery::Face::Bitmap
         } else {
@@ -258,31 +209,151 @@ fn main() -> std::process::ExitCode {
         if let Some(c) = face.cell_complaint(cell_w, cell_h) {
             eprintln!("\ngallery: {c}");
         }
-        let frame = pty_stream::raster::render_with(&res, &|canvas, ch, px, py, cw, chh, fg| {
-            face.draw(canvas, ch, px, py, cw, chh, fg)
-        });
+
+        // ONE RUN PER TILE, and exactly one run for every other shot in the file
+        // (SQ-1165). `Shot::runs` answers `[None]` for an ordinary row, so the
+        // composite is a longer loop over the same body rather than a second copy
+        // of it — which is the whole argument for making this a shot KIND instead
+        // of an example beside this one.
+        let mut panels: Vec<image::RgbaImage> = Vec::new();
+        let mut looks: Vec<(u8, gallery::PaneLook)> = Vec::new();
+        let mut attempts = 0usize;
+        let mut captured_bytes = 0usize;
+        let mut verdict = String::new();
+        let (mut cols, mut rows) = (0u16, 0u16);
+        let mut last = String::new();
+        let mut lost = false;
+
+        for machine in shot.runs() {
+            // RETRIES, because the thing being driven is a real interactive program
+            // over a real pty and `wait:` is wall-clock. A key that lands while a
+            // slow medium is still paging in reaches a different screen than the same
+            // key three seconds later, and Arthur's ProDOS press — five segments
+            // reassembled by block — does exactly that under load. Retrying is only
+            // defensible because the guard decides: a shot that cannot pass its own
+            // `expect` never becomes a picture, so this buys robustness and not a
+            // second chance at being wrong.
+            let mut cap = None;
+            let mut res = None;
+            for attempt in 1..=retries.max(1) {
+                attempts = attempts.max(attempt);
+                let c = match gallery::capture(shot, machine, &subject, &bin, &work, Duration::from_secs(timeout)) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        last = e;
+                        continue;
+                    }
+                };
+                // The capture's own bytes are the WIRE stream, and since SQ-0991 a kitty
+                // transmit may be zlib-deflated (`o=z`). Resolving those directly finds the
+                // placement and then has no pixels to paint, which is a BLANK illustration
+                // panel and a shot that fails its art guard for a reason that looks like the
+                // game's fault. `terminal_bytes()` inflates first, exactly as a terminal does.
+                let r = pty_stream::oracle::resolve(
+                    &c.terminal_bytes(),
+                    c.spec.cols,
+                    c.spec.rows,
+                    u32::from(cell_w),
+                    u32::from(cell_h),
+                    Some((pty_stream::ANSWERED_FG, pty_stream::ANSWERED_BG)),
+                );
+                match gallery::check_expectations(shot, &r) {
+                    Ok(()) => {
+                        cap = Some(c);
+                        res = Some(r);
+                        break;
+                    }
+                    Err(e) => last = e,
+                }
+            }
+            let (Some(cap), Some(res)) = (cap, res) else {
+                lost = true;
+                break;
+            };
+            captured_bytes += cap.bytes.len();
+            verdict = cap.negotiated().explain();
+            cols = cap.spec.cols;
+            rows = cap.spec.rows;
+            if let (Some(n), Some(look)) = (machine, gallery::pane_look(shot, &res)) {
+                looks.push((n, look));
+            }
+            let mut frame = pty_stream::raster::render_with(&res, &|canvas, ch, px, py, cw, chh, fg| {
+                face.draw(canvas, ch, px, py, cw, chh, fg)
+            });
+            // EACH TILE NAMES ITSELF, on the picture rather than in a strip above
+            // it (SQ-1165) — the label that survives a crop. Where it goes is
+            // FOUND per tile off that tile's own resolved screen, never assumed:
+            // the badge must not land on the status band, the prose or the caret,
+            // which are the four things the frame exists to show, and the six
+            // tiles do not fill to the same height. A tile with no clear ground at
+            // all keeps its badge off rather than covering the evidence, and says
+            // so, because a silently misplaced tag is worse than a missing one.
+            if let Some(n) = machine {
+                let text = gallery::tile_badge_text(n);
+                match gallery::badge_anchor(shot, &res, gallery::badge_cells(shot, &text)) {
+                    Some(at) => gallery::stamp_badge(&mut frame, &text, at),
+                    None => eprintln!(
+                        "\ngallery: `{}` tile {n} ({text}) has no clear ground in its pane for a \
+                         badge, so it is unlabelled — the frame is full to the edges, and a badge \
+                         over the prose would cover the thing being compared",
+                        shot.id
+                    ),
+                }
+            }
+            panels.push(frame);
+        }
+        if lost || panels.is_empty() {
+            println!("FAIL after {attempts} attempt(s)  {last}");
+            failed.push(last);
+            drop_stale();
+            continue;
+        }
+
+        // THE GUARD THIS KIND OF FRAME EXISTS FOR, and it runs before a single
+        // pixel is written: a composite whose tiles came out the same is not a
+        // weaker picture, it is a picture of a defect. It cannot be retried into
+        // passing either, which is why it sits outside the retry loop.
+        if !looks.is_empty() {
+            let zversion = match &provenance {
+                gallery::Provenance::Story(s) => s.version,
+                gallery::Provenance::Library { .. } => 0,
+            };
+            if let Err(e) = gallery::check_machines_differ(shot, zversion, &looks) {
+                println!("FAIL  {e}");
+                failed.push(e);
+                drop_stale();
+                continue;
+            }
+        }
+
+        let frame = if shot.machines.is_empty() {
+            panels.remove(0)
+        } else {
+            gallery::tile(&panels, shot.tile_columns())
+        };
 
         let native = provenance.native();
         let mut t = Taken {
             id: shot.id.clone(),
             png: png.clone(),
             provenance,
-            cols: cap.spec.cols,
-            rows: cap.spec.rows,
+            cols,
+            rows,
             cell_w,
             cell_h,
             turns: shot.turns(),
             seed: shot.seed,
             backend: shot.backend,
             face: face.describe(),
-            verdict: cap.negotiated().explain(),
+            verdict,
             attempts,
-            captured_bytes: cap.bytes.len(),
+            captured_bytes,
             width: frame.width(),
             height: frame.height(),
             native,
             magnification: native.and_then(|n| shot.magnification(n)),
             unresolved_glyphs: face.unresolved(),
+            machines: shot.machines.clone(),
         };
         let labelled = gallery::label(&frame, &gallery::label_lines(&t));
         t.width = labelled.width();

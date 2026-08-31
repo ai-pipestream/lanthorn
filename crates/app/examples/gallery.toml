@@ -873,3 +873,98 @@ size = "150x44"
 show_map = true
 expect = ["Golden Baton"]
 expect_art_cells = 200
+
+# ── The composite: one story, six machines (SQ-1165) ─────────────────────────
+#
+# THE ONE SHOT KIND THAT RENDERS MORE THAN ONE FRAME. `machines` names a list of
+# ZMSD §11.1.3 interpreter numbers; the harness captures this exact recipe once
+# per number with `--interpreter N --colour machine` appended, and tiles the
+# results into a single picture with each tile badged with its machine.
+#
+# TWO COLUMNS OF THREE, and the column count is derived rather than chosen: a
+# TILE is a terminal and already landscape (64x20 cells on a 16x32 cell is
+# 1024x640), so the squarest GRID is not the squarest picture. `ceil(sqrt(6))`
+# gives 3x2 and a 3128x1402 frame, wider than 2:1, which any ordinary screen
+# scales down until the prose cannot be read — in a shot whose entire subject is
+# how six machines paint text. `Shot::tile_columns` asks about the OUTPUT instead
+# and answers 2, for a 2090x2016 picture that fits a window.
+#
+# The reading order is interpreter number ascending, and it pairs the frame better
+# than a hand-sorted order would: row 1 is the pure inversion (Apple's white on
+# black beside the Macintosh's black on white), row 2 puts the two BLUE machines
+# together so the Amiga's #074BA1 can be told from EGA's #0000AA at all, and row 3
+# is the two Commodores, where the C128's cyan against the C64's white is the only
+# thing separating them. The two machines that share a body pair — Apple and C64 —
+# land in opposite corners, so the grid never looks like it repeats itself.
+#
+# THE MACHINE'S NAME RIDES ON THE TILE. The badge is drawn in the harness's own
+# bitmap face on a near-black plate under a grey hairline — a combination
+# lanthorn's theme has nowhere, because the one thing a tag must never do is read
+# as something the app drew, in a frame whose whole subject is what the app draws.
+# Where it goes is FOUND per tile off that tile's own resolved screen: the lowest
+# clear two-row band in the pane, right-aligned. It must not cover the status
+# band, the prose or the caret, the six tiles do not fill to the same height, and
+# a tile with no clear ground keeps its badge off and says so.
+#
+# It is a shot KIND rather than an example of its own because everything a
+# composite needs — the release and serial read off the mount, `expect`,
+# `expect_prose_cells`, the pinned seed, the burnt-in label, the proof sheet,
+# `gallery.json` — is what every other row here already gets. A second renderer
+# beside this one would have had to grow all of it again and would then have
+# drifted.
+#
+# `--colour machine` is not decoration and the harness appends it rather than
+# trusting anyone to remember: the interpreter NUMBER tells the story which
+# machine it is on, while the opt-in is what licenses lanthorn to paint that
+# machine's screen on a bare story file (SQ-1154). Without the second half every
+# tile resolves page and ink through the reader's theme and the six come out
+# identical.
+#
+# WHY SIX, AND WHY NOT NINE. `zvm::interpreter` measures nine machines and they
+# are not nine looks. Apple IIe, IIc and IIgs share one constant,
+# `APPLE_PERIOD_LOOK`, and would render pixel-identical tiles; the Atari ST shares
+# the Macintosh's pair and differs only in caret shape. So the frame shows one
+# tile per distinct look and says so.
+#
+# WHY A VERSION 3 STORY. A v3 has a STATUS LINE as well as prose, so every tile
+# carries two coloured surfaces instead of one — and the reverse-video band is
+# where the IBM PC's white-on-blue and the Commodore 128's cyan ink show hardest.
+# Deadline is the pick among the v3s present because it opens straight onto a
+# described room, four banner lines and six of prose, with no intro wall to page
+# past: the same frame is reachable in every tile by waiting, which is what makes
+# the machine the only variable.
+#
+# TWO TILES SHARE A BODY PAIR AND THAT IS CORRECT. Interpreter 2 (Apple) and
+# interpreter 8 (Commodore 64) were both measured white-on-black with a full-width
+# reverse band; they differ in CARET — `CursorShape::Block` against
+# `CursorShape::Underscore` — which is a glyph and not a colour. So six tiles show
+# five distinct body pairs, and `check_machines_differ` derives what it demands
+# from `zvm::interpreter` per pair rather than from a list written here, which is
+# how it knows not to fail that one.
+
+[[shots]]
+id = "machine-colours"
+title = "Deadline"
+press = "story file, under six period interpreters"
+media = "stories/deadline-r27-s831005.z3"
+caption = """
+The same opening screen under six of the machines Infocom shipped for, each tile \
+a real launch of `--interpreter N --colour machine`. The page, the ink and the \
+status band are measured off captures of the hardware — the Amiga's blue screen, \
+the IBM PC's white on EGA blue, the Commodore 128's light cyan — so what changes \
+between the tiles is a fact about 1984 and not a theme."""
+machines = [2, 3, 4, 6, 7, 8]
+# NO KEYPRESS AT ALL, and that is the recipe rather than a gap. Deadline opens
+# on its banner and South Lawn with the parser prompt already up, so waiting is
+# what reaches the frame — and it leaves the input CARET on screen, which is the
+# one part of a period look that is a shape rather than a colour and the only
+# thing telling the Apple tile from the Commodore 64 one.
+keys = "wait:4000"
+size = "64x20"
+expect = ["South Lawn", "Robner", "DEADLINE"]
+# The floor for the pane, per SQ-1164, and it applies to EVERY tile rather than
+# to the composite: a frame where five machines narrated and the sixth sat on a
+# boot prompt is exactly the silent hole this field exists for. Measured on this
+# frame at **367** alphanumeric cells inside the 62x17 pane; 240 leaves room for a
+# tile that wraps a line differently and still refuses one that never narrated.
+expect_prose_cells = 240
