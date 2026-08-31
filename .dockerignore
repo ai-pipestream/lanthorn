@@ -1,0 +1,18 @@
+# Only gitignored, machine-local material is excluded. Every TRACKED file must
+# stay in the context: buildinfo's build script runs `git status --porcelain`
+# to decide the `-dirty` version suffix, and a tracked file missing from the
+# context would look deleted and stamp every image as dirty. (And at least one
+# tracked non-source file is compiled in: crates/blorb include_bytes!'s
+# unit_tests/macfont.hfs.) `.git` itself is kept, deliberately, so the binary
+# carries its own short hash.
+target/
+stories/
+masterpieces
+treasures
+node_modules/
+.worktrees/
+.claude/
+.superpowers/
+*.swp
+*.swo
+.DS_Store

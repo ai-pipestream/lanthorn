@@ -1,0 +1,30 @@
+# Example deployment: lanthorn as a browser-playable web terminal.
+#
+#   mkdir -p stories        # drop your story files in here
+#   docker compose up -d    # then open http://localhost:7681
+#
+# Each browser connection gets its own lanthorn process; they share the
+# /stories library and the /data home (saves, config, map archives), so a
+# game saved in one session can be restored in the next.
+#
+# See docs/features/docker.md for details and docker/entrypoint.sh for the
+# full list of serve-mode environment knobs.
+services:
+  lanthorn:
+    build: .
+    # Or run a published image instead of building:
+    # image: ghcr.io/sharkusk/lanthorn:latest
+    command: serve
+    ports:
+      - "7681:7681"
+    volumes:
+      - ./stories:/stories
+      - lanthorn-data:/data
+    # Uncomment to require HTTP basic auth (strongly recommended before
+    # exposing the port beyond localhost; add TLS via a reverse proxy):
+    # environment:
+    #   LANTHORN_WEB_CREDENTIAL: "player:change-me"
+    restart: unless-stopped
+
+volumes:
+  lanthorn-data:
