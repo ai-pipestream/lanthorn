@@ -719,6 +719,34 @@ Six things are deliberate:
   *Ballyhoo* off a neighbouring disk while the release, serial and medium in the
   record all went on correctly describing the Zork Zero image the manifest
   named — because those are read from the file and not from the frame.
+- **One shot renders more than one frame: the composite** (SQ-1165). A shot that
+  names `machines = [2, 3, 4, 6, 7, 8]` is captured once per §11.1.3 interpreter
+  number — each launch with `--interpreter N --colour machine` appended, which is
+  the pair SQ-1154 made reach a bare story file — and the results are tiled into
+  a single picture, each tile captioned with its machine. It is a shot KIND rather
+  than a second example beside this one, because the provenance, the guards, the
+  pinned seed, the burnt-in label, the proof sheet and `gallery.json` are all
+  things a composite needs exactly as much as a single frame does; a renderer of
+  its own would have grown them again and then drifted.
+
+  `machine-colours` is the one in the manifest: *Deadline* r27/s831005, a
+  **Version 3** story chosen for its status line, so every tile carries two
+  coloured surfaces rather than one and the reverse-video band is where the IBM
+  PC's white-on-EGA-blue and the Commodore 128's cyan show hardest. Six tiles,
+  not nine, because nine machines are not nine looks: the three Apple rows share
+  `APPLE_PERIOD_LOOK` and the Atari ST shares the Macintosh's pair.
+
+  **Its guard is `check_machines_differ`, and it is the reason the kind is worth
+  having.** Every tile draws the same story at the same moment, so every string
+  `expect` could name is on all of them and six copies of one palette pass
+  unanimously — the SQ-1164 failure one shape along. The guard reads each tile's
+  page, ink and pair set off its own story pane and refuses the frame if two
+  machines `zvm::interpreter` measured APART came out the same. The obligation is
+  derived per pair rather than listed, because interpreters 2 and 8 were measured
+  alike — both white on black with a full reverse — and differ only in caret
+  shape, so a rule of "every tile must differ" would refuse a correct frame.
+  Falsified by swapping the appended `--colour machine` for `--colour theme`: all
+  six tiles collapse onto the terminal default and the guard names eleven pairs.
 
 `tests/suites/gallery_manifest.rs` runs the whole validator over the committed
 recipe, so a manifest that has gone stale fails the gate rather than failing

@@ -189,6 +189,31 @@ pub struct Shot {
     /// art is `▀`/`▄`, which is not alphanumeric and never counted either.
     #[serde(default)]
     pub expect_prose_cells: usize,
+    /// Capture this recipe once per §11.1.3 interpreter number and TILE the
+    /// results into a single frame (SQ-1165).
+    ///
+    /// **A composite is a shot KIND, not a second tool.** Every other row here
+    /// renders one frame; this one renders N and lays them out. It could have
+    /// been an example of its own, and that would have been worse: the
+    /// provenance read off the mount, `expect`, [`Shot::expect_prose_cells`],
+    /// the burnt-in label, the proof sheet and `gallery.json` are all things a
+    /// composite needs exactly as much as a single frame does, and a second
+    /// renderer would have reimplemented them and then drifted. So the only new
+    /// thing is this field and the tiling under it.
+    ///
+    /// Each tile launches with `--interpreter N --colour machine` appended,
+    /// which is the pair SQ-1154 made reach a bare story file: `machine` is the
+    /// opt-in that says you mean the number you typed, and without it a plain
+    /// `.z3` falls through to the theme and every tile comes out the same.
+    /// Everything else about the run — the story, the size, the keys, the seed —
+    /// is shared, because the frame's whole claim is that the MACHINE is the only
+    /// variable.
+    ///
+    /// The non-vacuity guard for this kind is [`check_machines_differ`], and it
+    /// is the reason the row is worth having: `expect` names a string, and six
+    /// copies of one palette all say it.
+    #[serde(default)]
+    pub machines: Vec<u8>,
 }
 
 fn default_seed() -> u32 {
@@ -440,6 +465,57 @@ impl Shot {
                      counts the letters a STORY wrote into the pane, and the picker has not opened one"
                 ));
             }
+            if !self.machines.is_empty() {
+                return Err(format!(
+                    "gallery manifest: `{who}` is a library shot with `machines` — an interpreter \
+                     number is what a STORY's header is told, and the picker has not opened one"
+                ));
+            }
+        }
+        // ── A composite shot (SQ-1165) ───────────────────────────────────────
+        if !self.machines.is_empty() {
+            // ONE TILE IS NOT A COMPARISON. The whole subject of this kind of
+            // frame is that the machines differ, which a single tile cannot
+            // show and `check_machines_differ` cannot test.
+            if self.machines.len() < 2 {
+                return Err(format!(
+                    "gallery manifest: `{who}` names {} machine(s) — a composite exists to put looks \
+                     side by side, and one tile is a comparison with nothing",
+                    self.machines.len()
+                ));
+            }
+            let mut seen: BTreeSet<u8> = BTreeSet::new();
+            for &n in &self.machines {
+                if !seen.insert(n) {
+                    return Err(format!(
+                        "gallery manifest: `{who}` names interpreter {n} twice — two tiles of one \
+                         machine are identical by construction, which is the exact frame the guard \
+                         exists to refuse"
+                    ));
+                }
+                // A number with no MEASURED look has no period screen to show:
+                // `zvm::interpreter` declines rather than guessing, and a tile of
+                // a guess is worse than a missing tile.
+                if zvm::interpreter::period_look_for(n, None).is_none() {
+                    return Err(format!(
+                        "gallery manifest: `{who}` names interpreter {n}, which `zvm::interpreter` \
+                         has no measured period look for — there is no screen of that machine to put \
+                         in a tile"
+                    ));
+                }
+            }
+            // The harness appends both to every tile's launch, so a shot that
+            // also names one is either restating the truth or contradicting it —
+            // and a contradicted `--colour` is six tiles of the reader's theme.
+            for owned in ["--interpreter", "--colour", "--color"] {
+                if self.args.iter().any(|a| a == owned) {
+                    return Err(format!(
+                        "gallery manifest: `{who}` is a composite passing `{owned}` — the harness \
+                         appends `--interpreter N --colour machine` per tile, which is what makes \
+                         the machine the only variable in the frame"
+                    ));
+                }
+            }
         }
         // The three shapes where a prose floor can only ever read zero, and so
         // would fail every shot that set it — the same refusal, and for the same
@@ -609,14 +685,63 @@ impl Shot {
         }).count()
     }
 
-    /// The arguments the tool adds on this shot's behalf.
-    pub fn lanthorn_args(&self) -> Vec<String> {
+    /// The arguments the tool adds on this shot's behalf, for the tile of
+    /// `machine` — `None` for an ordinary single-frame shot.
+    ///
+    /// `--colour machine` travels with `--interpreter N` and is not optional
+    /// (SQ-1154): the number alone tells the STORY which machine it is on, while
+    /// the opt-in is what licenses lanthorn to paint that machine's screen on a
+    /// bare story file. Without it the six tiles resolve their page and ink
+    /// through the reader's theme and come out identical — which is precisely
+    /// the frame [`check_machines_differ`] refuses.
+    pub fn lanthorn_args_for(&self, machine: Option<u8>) -> Vec<String> {
         let mut v = self.args.clone();
         if self.backend == Backend::Halfblocks {
             v.push("--image-protocol".into());
             v.push("halfblocks".into());
         }
+        if let Some(n) = machine {
+            v.push("--interpreter".into());
+            v.push(n.to_string());
+            v.push("--colour".into());
+            v.push("machine".into());
+        }
         v
+    }
+
+    /// The arguments for a shot with no machine of its own.
+    pub fn lanthorn_args(&self) -> Vec<String> {
+        self.lanthorn_args_for(None)
+    }
+
+    /// One entry per frame this shot captures: `[None]` for an ordinary shot,
+    /// one `Some(n)` per tile for a composite.
+    ///
+    /// A value rather than a bool and a list, so no caller can ask for the tiles
+    /// and forget that a plain shot still has exactly one run (CLAUDE.md's
+    /// refactoring policy — the parameter list that lets a caller supply half the
+    /// subject is how this file has been bitten twice already).
+    pub fn runs(&self) -> Vec<Option<u8>> {
+        if self.machines.is_empty() {
+            vec![None]
+        } else {
+            self.machines.iter().map(|&n| Some(n)).collect()
+        }
+    }
+
+    /// The throwaway user directory, and the progress line, for one run.
+    pub fn run_id(&self, machine: Option<u8>) -> String {
+        match machine {
+            Some(n) => format!("{}-i{n}", self.id),
+            None => self.id.clone(),
+        }
+    }
+
+    /// How many columns the tiles are laid out in — the squarest grid that holds
+    /// them, so six machines are 3x2 rather than a wall or a strip.
+    pub fn tile_columns(&self) -> usize {
+        let n = self.machines.len().max(1);
+        (1..=n).find(|c| c * c >= n).unwrap_or(1)
     }
 
     /// The medium's absolute path.
@@ -883,6 +1008,10 @@ pub struct Taken {
     pub magnification: Option<f64>,
     /// Characters neither the face nor the bitmap master could draw.
     pub unresolved_glyphs: Vec<char>,
+    /// The machines this frame tiles, in the order they were laid out. Empty for
+    /// every ordinary shot — a composite is the only kind with more than one
+    /// launch behind one picture (SQ-1165).
+    pub machines: Vec<u8>,
 }
 
 impl Taken {
@@ -993,8 +1122,12 @@ pub fn write_run_settings(user_dir: &Path, shot: &Shot, media: &Path) -> Result<
 
 /// Boot lanthorn for one shot and hand back the capture, having first refused
 /// every way the capture could be of the wrong thing.
+///
+/// `machine` is the §11.1.3 interpreter number this TILE is of, for a composite
+/// shot, and `None` for every other row — see [`Shot::runs`].
 pub fn capture(
     shot: &Shot,
+    machine: Option<u8>,
     subject: &Subject<'_>,
     bin: &Path,
     work: &Path,
@@ -1018,7 +1151,12 @@ pub fn capture(
     let (cols, rows) = shot.size_cells()?;
     let (cell_w, cell_h) = shot.cell_px();
 
-    let user_dir = work.join(&shot.id);
+    // ONE USER DIRECTORY PER TILE, not per shot. Every per-game sidecar, saved
+    // colour answer and font-check reply a run writes lands in here, and a
+    // composite boots the SAME story six times: a shared directory would let the
+    // first machine's sidecar decide what the sixth one launches with, which is
+    // the frame's one variable leaking between its own tiles.
+    let user_dir = work.join(shot.run_id(machine));
     let _ = std::fs::remove_dir_all(&user_dir);
     std::fs::create_dir_all(&user_dir).map_err(|e| format!("`{}`: {e}", shot.id))?;
     write_run_settings(&user_dir, shot, &media).map_err(|e| format!("`{}`: {e}", shot.id))?;
@@ -1046,7 +1184,7 @@ pub fn capture(
     spec.hide_map = !shot.show_map && !shot.library;
     spec.keys = shot.keys()?;
     spec.timeout = timeout;
-    spec.extra_args = shot.lanthorn_args();
+    spec.extra_args = shot.lanthorn_args_for(machine);
 
     let cap = driver::run(spec).map_err(|e| format!("`{}`: {e}", shot.id))?;
     // A run cut short is a frame captured mid-script, and it looks exactly like
@@ -1180,6 +1318,250 @@ pub fn check_expectations(shot: &Shot, res: &super::oracle::Resolved) -> Result<
         art,
         if seen.is_empty() { "        (no text at all — an all-art frame)".to_string() } else { seen.iter().map(|l| format!("        {l}")).collect::<Vec<_>>().join("\n") }
     ))
+}
+
+// ── The composite guard (SQ-1165) ─────────────────────────────────────────────
+
+/// The colours ONE tile came out with, read off its resolved story pane.
+///
+/// Three readings rather than one, because the frame's subject is spread across
+/// two surfaces. [`Self::page`] and [`Self::ink`] are the body — the ground the
+/// prose sits on and the colour it is written in — and they are what separates
+/// the Macintosh's black-on-white from the Apple's white-on-black. [`Self::pairs`]
+/// is every distinct pair in the pane, which is where the STATUS LINE shows: a
+/// reverse-video band states no new colour at all, so a comparison that only
+/// looked at the dominant pair would be blind to the one surface a Version 3
+/// story was chosen for.
+///
+/// Colours are kept in the form the stream expressed them ([`decode::Color`]),
+/// never collapsed to RGB. A palette index and a truecolour triple that happen to
+/// name the same shade are different statements by lanthorn, and folding them
+/// together here would let a tile that stopped sending its machine's colour pass
+/// as one that still did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneLook {
+    /// The most common background over the pane's content cells.
+    pub page: super::decode::Color,
+    /// The most common foreground among the cells carrying a letter or a digit.
+    pub ink: super::decode::Color,
+    /// Every distinct `(background, foreground)` pair in the pane.
+    pub pairs: BTreeSet<(super::decode::Color, super::decode::Color)>,
+}
+
+impl PaneLook {
+    /// `page #000000 ink #55ffff, 3 pair(s)` — what a failure needs to print.
+    pub fn describe(&self) -> String {
+        format!("page {} ink {}, {} pair(s)", self.page.label(), self.ink.label(), self.pairs.len())
+    }
+}
+
+/// Read one tile's [`PaneLook`] off the resolved screen, or `None` when the shot
+/// cannot say where its pane is (see [`Shot::pane_content_cells`]).
+///
+/// The rect is [`prose_cells`]', for the same reason: lanthorn's own header and
+/// help bar are painted in the THEME's colours whatever the machine did, so a
+/// screen-wide reading is dominated by cells no machine can move, and two tiles
+/// would compare equal while their story panes differed completely.
+///
+/// SGR 7 is undone rather than carried, so a reversed status band is read as the
+/// pair it puts on screen. That is the only way the band can enter [`Self::pairs`]
+/// at all — a reverse states no colour of its own.
+pub fn pane_look(shot: &Shot, res: &super::oracle::Resolved) -> Option<PaneLook> {
+    use std::collections::BTreeMap;
+
+    let (cols, rows) = shot.pane_content_cells()?;
+    let last_row = u16::try_from(rows).ok()?.min(res.rows.saturating_sub(1));
+    let last_col = u16::try_from(cols).ok()?.min(res.cols.saturating_sub(1));
+    let mut grounds: BTreeMap<super::decode::Color, usize> = BTreeMap::new();
+    let mut inks: BTreeMap<super::decode::Color, usize> = BTreeMap::new();
+    let mut pairs: BTreeSet<(super::decode::Color, super::decode::Color)> = BTreeSet::new();
+    for row in 1..=last_row {
+        for col in 1..=last_col {
+            let cell = res.cell(row, col);
+            // A cell under a placement is artwork and states nothing about the
+            // machine's text colours — the same exclusion `prose_cells` makes.
+            if cell.image_id.is_some() {
+                continue;
+            }
+            let (bg, fg) = if cell.inverse { (cell.fg, cell.bg) } else { (cell.bg, cell.fg) };
+            *grounds.entry(bg).or_default() += 1;
+            pairs.insert((bg, fg));
+            if cell.ch.is_alphanumeric() {
+                *inks.entry(fg).or_default() += 1;
+            }
+        }
+    }
+    // Ties broken on the colour itself, so one frame cannot read two ways.
+    let pick = |m: BTreeMap<super::decode::Color, usize>| {
+        m.into_iter().max_by_key(|(c, n)| (*n, *c)).map(|(c, _)| c)
+    };
+    Some(PaneLook { page: pick(grounds)?, ink: pick(inks)?, pairs })
+}
+
+/// The body a machine's MEASURED look states: page, ink, and how the status line
+/// was set apart.
+///
+/// A type rather than a tuple because the three are one subject and are always
+/// asked together — and because the CARET is deliberately outside it. A caret is
+/// a shape, not a colour, and a rendered tile cannot be compared on one; two
+/// machines that share a body and differ only in caret are twins as far as
+/// [`check_machines_differ`] can see, which is exactly what interpreters 2 and 8
+/// are.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MeasuredBody {
+    pub page: (u8, u8, u8),
+    pub ink: (u8, u8, u8),
+    pub status: zvm::interpreter::StatusBand,
+}
+
+impl MeasuredBody {
+    /// `#000000 under #55ffff` — the pair, as a failure needs to print it.
+    fn describe(&self) -> String {
+        format!(
+            "#{:02x}{:02x}{:02x} under #{:02x}{:02x}{:02x}",
+            self.page.0, self.page.1, self.page.2, self.ink.0, self.ink.1, self.ink.2
+        )
+    }
+}
+
+/// What `zvm::interpreter` measured for this machine at this story's Version, or
+/// `None` for a machine it declines to guess at.
+fn measured_body(n: u8, zversion: u8) -> Option<MeasuredBody> {
+    let l = zvm::interpreter::period_look_for(n, Some(zversion))?;
+    Some(MeasuredBody { page: l.page, ink: l.ink, status: l.status })
+}
+
+/// THE GUARD THIS KIND OF SHOT EXISTS FOR: two machines whose screens were
+/// measured as different must not have come out the same (SQ-1165).
+///
+/// # Why `expect` cannot ask this
+///
+/// A composite's whole subject is the DIFFERENCE between its tiles, and every
+/// tile renders the same story at the same moment — so every string `expect`
+/// could name is on all six of them, and six copies of one palette pass it
+/// unanimously. That is SQ-1164's failure exactly, one shape along: five Journey
+/// frames named headings that were on the wrong screen and shipped for months
+/// with an empty story pane, because the guard asked a question the defect could
+/// answer. `expect_prose_cells` was the fix there and this is the fix here — a
+/// floor on the thing the frame is actually about.
+///
+/// It doubles as a real test of SQ-1154: `--colour machine` on a bare `.z3` is
+/// what licenses the machine's page and ink, and if that licence ever stops
+/// reaching a raw file every tile falls through to the reader's theme and this
+/// fails on the first pair it looks at.
+///
+/// # Why the requirement is derived and not a list
+///
+/// The obligation is read out of `zvm::interpreter` per pair rather than written
+/// down here, because **not every pair of machines has a different screen**, and
+/// a hand-written "these must differ" list would be a second copy of a table that
+/// is already measured. Interpreter 2 (Apple) and interpreter 8 (Commodore 64)
+/// are both white on black with a full-width reverse band: they differ only in
+/// caret shape, `CursorShape::Block` against `CursorShape::Underscore`, which is
+/// a glyph and not a colour. Demanding a colour difference there would fail a
+/// frame that is perfectly correct. So [`measured_body`] is the question — page,
+/// ink, band — and the caret is left out of it on purpose.
+///
+/// `zversion` is the story's header byte 0, and it is load-bearing rather than
+/// tidy: the IBM PC's row stores no RGB at all and resolves its pair through the
+/// palette its VERSION picks, which is XZIP's `#AAAAAA` white below Version 6 and
+/// YZIP's `#FFFFFF` at it.
+pub fn check_machines_differ(shot: &Shot, zversion: u8, tiles: &[(u8, PaneLook)]) -> Result<(), String> {
+    let mut same: Vec<String> = Vec::new();
+    for (i, (a, look_a)) in tiles.iter().enumerate() {
+        for (b, look_b) in tiles.iter().skip(i + 1) {
+            let (Some(ma), Some(mb)) = (measured_body(*a, zversion), measured_body(*b, zversion)) else {
+                continue;
+            };
+            if ma == mb || look_a != look_b {
+                continue;
+            }
+            same.push(format!(
+                "interpreter {a} ({}) and interpreter {b} ({}) both rendered {} — but their screens \
+                 were measured apart: {} against {}",
+                machine_name(*a),
+                machine_name(*b),
+                look_a.describe(),
+                ma.describe(),
+                mb.describe(),
+            ));
+        }
+    }
+    if same.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "`{}`: the tiles do not differ, which is the only thing this frame claims:\n{}\n        \
+         Every tile draws the same story at the same moment, so `expect` passes on all of them \
+         whatever colour they came out — this is the guard that can tell. The usual cause is the \
+         machine-colour LICENCE not reaching a bare story file: a tile launches \
+         `--interpreter N --colour machine`, and without the second half of that pair the page and \
+         ink resolve through the reader's theme instead (SQ-1154).",
+        shot.id,
+        same.iter().map(|s| format!("        {s}")).collect::<Vec<_>>().join("\n")
+    ))
+}
+
+/// A machine's name from `zvm::interpreter`'s own table, so no tile can be
+/// captioned with a machine it was not booted as.
+pub fn machine_name(n: u8) -> String {
+    zvm::interpreter::machine(n).map_or_else(|| format!("interpreter {n}"), |m| m.name.to_string())
+}
+
+/// `Amiga · interpreter 4` — the caption over one tile.
+///
+/// An unlabelled grid of similar terminals teaches nothing, and the NUMBER is
+/// half the label rather than decoration: it is what a reader types to get that
+/// tile back (`lanthorn --interpreter 4 --colour machine story.z3`), which makes
+/// the frame a thing you can reproduce instead of a thing you can look at.
+pub fn tile_caption(n: u8) -> String {
+    format!("{} \u{b7} interpreter {n}", machine_name(n))
+}
+
+/// Lay the captured tiles out in a grid, each under its own caption.
+///
+/// Captions are drawn with the BITMAP master, on the same ground the burnt-in
+/// [`label`] uses, and for the same reason: a caption in the frame's own typeface
+/// reads as part of the render, and these have to read as the harness naming what
+/// is underneath them. The gutter is not cosmetic either — the Macintosh tile is
+/// white to its edge and the Apple tile beside it is black, and two pages meeting
+/// with no ground between them read as one surface with a seam in it.
+pub fn tile(panels: &[(String, RgbaImage)], columns: usize) -> RgbaImage {
+    const PAD: u32 = 6;
+    const GUTTER: u32 = 14;
+    let ground = Rgba([18, 18, 20, 255]);
+    let cols = columns.max(1);
+    let rows = panels.len().div_ceil(cols);
+    let cap_h = LABEL_LINE + PAD * 2;
+    let cell_w = panels.iter().map(|(_, f)| f.width()).max().unwrap_or(1);
+    let cell_h = panels.iter().map(|(_, f)| f.height()).max().unwrap_or(1) + cap_h;
+    let w = GUTTER + (cell_w + GUTTER) * cols as u32;
+    let h = GUTTER + (cell_h + GUTTER) * rows as u32;
+    let mut out = RgbaImage::from_pixel(w.max(1), h.max(1), ground);
+    for (i, (caption, frame)) in panels.iter().enumerate() {
+        let x0 = GUTTER + (cell_w + GUTTER) * (i % cols) as u32;
+        let y0 = GUTTER + (cell_h + GUTTER) * (i / cols) as u32;
+        for (j, ch) in caption.chars().enumerate() {
+            app::render::bitfont::blit_glyph(
+                &mut out,
+                ch,
+                x0 + PAD + j as u32 * 8,
+                y0 + PAD,
+                8,
+                LABEL_LINE,
+                Rgba([206, 208, 216, 255]),
+                None,
+                None,
+            );
+        }
+        for (x, y, p) in frame.enumerate_pixels() {
+            let (px, py) = (x0 + x, y0 + cap_h + y);
+            if px < out.width() && py < out.height() {
+                out.put_pixel(px, py, *p);
+            }
+        }
+    }
+    out
 }
 
 // ── Type ──────────────────────────────────────────────────────────────────────
@@ -1525,9 +1907,23 @@ fn wrap(text: &str, cols: usize) -> Vec<String> {
 /// typeface, its size and who rasterised it, which is the honest version of the
 /// same fact and is where it stays.
 pub fn label_lines(t: &Taken) -> Vec<String> {
+    // A COMPOSITE'S TILE SIZE IS NOT THE PICTURE'S SIZE, and the label has to say
+    // so: `64x20 cells` under a 3200px frame would read as a claim about the whole
+    // image. The machines travel with it too, spelled as the flags that get the
+    // tile back, so the frame stays reproducible after it has been dragged out of
+    // whatever page it was on (SQ-1165).
+    let composite = if t.machines.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " | {} tiles, one per machine (--interpreter {} --colour machine), each",
+            t.machines.len(),
+            t.machines.iter().map(u8::to_string).collect::<Vec<_>>().join("/"),
+        )
+    };
     vec![
         format!(
-            "{} | {} | {} | {}x{} cells at {}x{}px | {} | {} keypress(es) | seed {} | {}{} | lanthorn {}",
+            "{} | {} | {} |{composite} {}x{} cells at {}x{}px | {} | {} keypress(es) | seed {} | {}{} | lanthorn {}",
             t.id,
             t.provenance.describe(),
             t.face,
@@ -1588,10 +1984,19 @@ pub fn contact_sheet(taken: &[Taken], failed: &[String]) -> String {
         let _ = writeln!(s, "<figure><img src=\"{}\" alt=\"{}\">", escape(&name), escape(&t.id));
         let _ = writeln!(
             s,
-            "<figcaption><code>{}</code> — {} — {} — {}x{} cells, {} — {} keypress(es), seed {}{}{}</figcaption></figure>",
+            "<figcaption><code>{}</code> — {} — {} —{} {}x{} cells, {} — {} keypress(es), seed {}{}{}</figcaption></figure>",
             escape(&t.id),
             escape(&t.provenance.describe()),
             escape(&t.face),
+            if t.machines.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " {} tiles ({}), each",
+                    t.machines.len(),
+                    t.machines.iter().map(|&n| machine_name(n)).collect::<Vec<_>>().join(", ")
+                )
+            },
             t.cols,
             t.rows,
             t.backend.as_str(),
@@ -1655,6 +2060,13 @@ pub fn recipe_json(taken: &[Taken], manifest: &Path) -> String {
                 );
             }
         }
+        // The tiles, so a composite found on disk months later can be traced to
+        // the six launches behind it and not just to one command line.
+        let _ = writeln!(
+            s,
+            "      \"machines\": [{}],",
+            t.machines.iter().map(u8::to_string).collect::<Vec<_>>().join(", ")
+        );
         let _ = writeln!(s, "      \"cols\": {}, \"rows\": {},", t.cols, t.rows);
         let _ = writeln!(s, "      \"cell_px\": [{}, {}],", t.cell_w, t.cell_h);
         let _ = writeln!(s, "      \"backend\": {},", json_str(t.backend.as_str()));

@@ -292,6 +292,33 @@ impl Resolved {
         &self.cells[row as usize * self.cols as usize + col as usize]
     }
 
+    /// An empty grid a case can fill in by hand.
+    ///
+    /// Only for testing something that READS a resolved screen — SQ-1165's
+    /// `pane_look`, whose whole job is picking the right rect out of one. A
+    /// question about what a terminal would MAKE of a stream has to go through
+    /// [`resolve`]; this constructor has no stream behind it and can therefore
+    /// answer no such question.
+    pub fn blank(cols: u16, rows: u16) -> Resolved {
+        Resolved {
+            cols,
+            rows,
+            cell_w: 8,
+            cell_h: 16,
+            cells: vec![OracleCell::default(); usize::from(cols) * usize::from(rows)],
+            placements: Vec::new(),
+            draws: Vec::new(),
+            images: BTreeMap::new(),
+            colors: Colors { palette: [[0; 3]; 256], default_fg: [0xC0; 3], default_bg: [0; 3] },
+        }
+    }
+
+    /// One cell of a hand-built grid — see [`Resolved::blank`].
+    pub fn cell_mut(&mut self, row: u16, col: u16) -> &mut OracleCell {
+        let i = row as usize * self.cols as usize + col as usize;
+        &mut self.cells[i]
+    }
+
     /// The resolved placements, one line each, for a report.
     pub fn describe_placements(&self) -> String {
         let mut s = String::new();

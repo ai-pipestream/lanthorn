@@ -664,3 +664,329 @@ fn the_label_wraps_rather_than_clips() {
          release, which is the half of the label that has to travel with the picture"
     );
 }
+
+// ── The composite shot (SQ-1165) ──────────────────────────────────────────────
+
+/// A composite names at least two machines, names none of them twice, and names
+/// only machines `zvm::interpreter` has actually MEASURED.
+///
+/// The last clause is the one worth having. A number with no measured period look
+/// is a machine lanthorn declines to guess at, and a tile of a guess is worse than
+/// a missing tile — it looks exactly like a measurement in a frame whose whole
+/// claim is that its colours are measurements.
+#[test]
+fn a_composite_names_at_least_two_measured_machines() {
+    assert!(
+        parse_one(&format!("{GOOD}machines = [2, 3]\n")).is_ok(),
+        "two measured machines is the smallest real comparison"
+    );
+    // An empty list is simply not a composite; it must not be REFUSED, it must be
+    // inert — otherwise `machines = []` and no `machines` line would mean
+    // different things, which is a trap rather than a rule.
+    assert!(parse_one(&format!("{GOOD}machines = []\n")).is_ok(), "an empty list is not a composite at all");
+    for (machines, why) in [
+        ("[3]", "one tile is a comparison with nothing"),
+        ("[3, 3]", "two tiles of one machine are identical by construction"),
+        // 1 is DECSystem-20 and 11 is the MSDOS row lanthorn auto-selects from;
+        // neither has a period screen anyone has captured.
+        ("[3, 1]", "interpreter 1 has no measured period look"),
+        ("[3, 250]", "interpreter 250 is not a machine at all"),
+    ] {
+        assert!(parse_one(&format!("{GOOD}machines = {machines}\n")).is_err(), "{why}");
+    }
+}
+
+/// The harness appends `--interpreter N --colour machine` per tile, so a
+/// composite that names either itself is restating the truth at best and
+/// contradicting it at worst.
+///
+/// `--colour machine` is the half that matters: the interpreter NUMBER tells the
+/// story which machine it is on, and the opt-in is what licenses lanthorn to
+/// paint that machine's screen on a bare story file (SQ-1154). A composite whose
+/// `args` forced `--colour theme` would capture six tiles of the reader's theme
+/// under a caption about 1984.
+#[test]
+fn a_composite_may_not_name_the_arguments_the_tiles_are_launched_with() {
+    for owned in ["--interpreter", "--colour", "--color"] {
+        let bad = parse_one(&format!("{GOOD}machines = [2, 3]\nargs = [\"{owned}\", \"3\"]\n"));
+        let e = bad.expect_err("the harness owns both flags on a composite");
+        assert!(e.contains(owned), "the error must name `{owned}`: {e}");
+    }
+    // And a shot with NO `machines` may still pass `--interpreter`, which
+    // `macintosh-embedded-face` does and has since SQ-1001.
+    assert!(
+        parse_one(&format!("{GOOD}args = [\"--interpreter\", \"3\"]\n")).is_ok(),
+        "an ordinary shot pinning one machine is not a composite and keeps its flag"
+    );
+}
+
+/// Every tile's launch carries BOTH halves, and an ordinary shot carries neither.
+#[test]
+fn each_tile_launches_with_its_number_and_the_machine_colour_opt_in() {
+    let shot = &parse_one(&format!("{GOOD}machines = [4, 6]\n")).expect("valid").shots[0];
+    assert_eq!(shot.runs(), vec![Some(4), Some(6)], "one run per machine, in the order written");
+    for n in [4u8, 6] {
+        let args = shot.lanthorn_args_for(Some(n));
+        assert!(
+            args.windows(2).any(|w| w[0] == "--interpreter" && w[1] == n.to_string()),
+            "tile {n} must be told which machine it is: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w[0] == "--colour" && w[1] == "machine"),
+            "tile {n} must carry the opt-in that licenses a machine's colours on a bare story file \
+             (SQ-1154) — without it every tile resolves page and ink through the theme and the six \
+             come out identical: {args:?}"
+        );
+    }
+    let plain = &parse_one(GOOD).expect("valid").shots[0];
+    assert_eq!(plain.runs(), vec![None], "an ordinary shot is exactly one run");
+    assert!(
+        !plain.lanthorn_args().iter().any(|a| a == "--interpreter" || a == "--colour"),
+        "an ordinary shot's launch is untouched by any of this"
+    );
+}
+
+/// Each tile gets its own throwaway user directory.
+///
+/// A composite boots the SAME story once per machine, and a per-game sidecar is
+/// keyed on the story path — so one shared directory would let the first tile's
+/// saved answer decide what the sixth one launches with, which is the frame's one
+/// variable leaking between its own tiles.
+#[test]
+fn every_tile_gets_its_own_user_directory() {
+    let shot = &parse_one(&format!("{GOOD}machines = [2, 3, 4]\n")).expect("valid").shots[0];
+    let ids: std::collections::BTreeSet<String> = shot.runs().iter().map(|m| shot.run_id(*m)).collect();
+    assert_eq!(ids.len(), 3, "three tiles, three directories: {ids:?}");
+    assert_eq!(
+        parse_one(GOOD).expect("valid").shots[0].run_id(None),
+        "a-shot",
+        "an ordinary shot keeps its own id"
+    );
+}
+
+/// Six tiles are 3x2 — not a strip and not a wall.
+#[test]
+fn the_tiles_are_laid_out_in_the_squarest_grid_that_holds_them() {
+    let measured: Vec<u8> =
+        (0u8..=255).filter(|&n| zvm::interpreter::period_look_for(n, None).is_some()).collect();
+    for (n, want) in [(2usize, 2usize), (3, 2), (4, 2), (6, 3), (9, 3)] {
+        assert!(measured.len() >= n, "only {} machines are measured; this case wants {n}", measured.len());
+        let list = measured[..n].iter().map(u8::to_string).collect::<Vec<_>>().join(", ");
+        let shot = &parse_one(&format!("{GOOD}machines = [{list}]\n")).expect("valid").shots[0];
+        assert_eq!(shot.tile_columns(), want, "{n} tiles");
+    }
+}
+
+/// THE MEASUREMENT BEHIND THE SIX, recomputed rather than restated (SQ-1165).
+///
+/// The frame shows one tile per DISTINCT look, and this is where that claim is
+/// checked against `zvm::interpreter` instead of against a comment in
+/// `gallery.toml`. Nine machines are measured and they are not nine looks: the
+/// three Apple rows share `APPLE_PERIOD_LOOK`, and the Atari ST shares the
+/// Macintosh's pair, differing only in caret shape.
+///
+/// The case asserts the SHAPE of that argument rather than a hard-coded six, so
+/// it stays true if a tenth machine is ever measured: no two tiles in the shot
+/// may share a full period look.
+#[test]
+fn the_composite_shows_one_tile_per_distinct_period_look() {
+    let m = manifest();
+    let mut composites = 0usize;
+    for s in m.shots.iter().filter(|s| !s.machines.is_empty()) {
+        composites += 1;
+        let mut looks: std::collections::BTreeMap<String, Vec<u8>> = std::collections::BTreeMap::new();
+        for &n in &s.machines {
+            let look = zvm::interpreter::period_look_for(n, None)
+                .unwrap_or_else(|| panic!("`{}` names interpreter {n}, which has no measured look", s.id));
+            looks.entry(format!("{look:?}")).or_default().push(n);
+        }
+        for (look, ns) in &looks {
+            assert_eq!(
+                ns.len(),
+                1,
+                "`{}` names {ns:?}, which share one measured period look — they would render \
+                 pixel-identical tiles, and a grid that repeats itself teaches less than a smaller \
+                 one that does not: {look}",
+                s.id
+            );
+        }
+    }
+    assert!(composites > 0, "no composite shot at all — this case has stopped checking anything");
+}
+
+/// The composite's machines resolve to more than one BODY pair (SQ-1165).
+///
+/// This is the half that can be checked without booting anything: `period_look_for`
+/// is a pure lookup, so the obligation the capture-time guard enforces is
+/// recomputed here and lands in CI, where `stories/` is absent and the frame
+/// itself can never be taken.
+///
+/// **Two of the six share a body pair, and that is correct rather than a defect.**
+/// Interpreter 2 (Apple) and interpreter 8 (Commodore 64) were both measured white
+/// on black with a full-width reverse band; they differ in CARET —
+/// `CursorShape::Block` against `CursorShape::Underscore` — which is a glyph and
+/// not a colour. So the assertion is on the count of distinct bodies, not on every
+/// pair differing: six tiles show five bodies, and a composite whose bodies all
+/// collapsed to one would be six copies of a palette under a caption about six
+/// machines.
+#[test]
+fn the_composites_machines_resolve_to_more_than_one_body_pair() {
+    let m = manifest();
+    for s in m.shots.iter().filter(|s| !s.machines.is_empty()) {
+        // The story's Version decides the IBM PC's white — XZIP's #AAAAAA below
+        // v6, YZIP's #FFFFFF at it — so the question is asked at the version the
+        // shot's own medium carries, read off the filename it names rather than
+        // off a mount, because the media are gitignored and CI has none of them.
+        let zversion = if s.media.ends_with(".z3") { 3u8 } else { 5 };
+        let bodies: std::collections::BTreeSet<String> = s
+            .machines
+            .iter()
+            .filter_map(|&n| zvm::interpreter::period_look_for(n, Some(zversion)))
+            .map(|l| format!("{:?}/{:?}/{:?}", l.page, l.ink, l.status))
+            .collect();
+        assert!(
+            bodies.len() > 1,
+            "`{}` names {:?} and every one of them resolves to the same page, ink and status band \
+             at v{zversion}. The frame's only claim is that the tiles differ",
+            s.id,
+            s.machines
+        );
+        assert!(
+            bodies.len() <= s.machines.len(),
+            "`{}`: {} distinct bodies across {} machines",
+            s.id,
+            bodies.len(),
+            s.machines.len()
+        );
+    }
+}
+
+/// `pane_look` reads the PANE, not the chrome — and it undoes SGR 7, which is the
+/// only way a v3's reverse-video status band can be seen at all (SQ-1165).
+///
+/// Built from a synthetic screen rather than a capture, so it runs in CI: what is
+/// being pinned is the READING, and a reading that folded the reverse away, or
+/// counted lanthorn's own header, would compare two tiles equal while their story
+/// panes differed completely.
+#[test]
+fn a_tiles_look_is_read_off_the_pane_with_the_reverse_undone() {
+    use super::pty_stream::decode::Color;
+    use super::pty_stream::gallery;
+    use super::pty_stream::oracle::Resolved;
+
+    let shot = &parse_one(&GOOD.replace(r#"size = "117x40""#, r#"size = "10x8""#)).expect("valid").shots[0];
+    // Content rect is cols 1..=8, rows 1..=5.
+    let page = Color::Rgb(0x07, 0x4B, 0xA1);
+    let ink = Color::Rgb(0xFF, 0xFF, 0xFF);
+    let mut screen = Resolved::blank(10, 8);
+    for row in 0..8u16 {
+        for col in 0..10u16 {
+            // The chrome outside the pane is painted in colours NO machine can
+            // move. If they leaked into the reading, every tile would read alike.
+            let outside = row == 0 || row > 5 || col == 0 || col > 8;
+            let cell = screen.cell_mut(row, col);
+            cell.ch = 'x';
+            cell.bg = if outside { Color::Rgb(0x11, 0x11, 0x11) } else { page };
+            cell.fg = if outside { Color::Rgb(0x22, 0x22, 0x22) } else { ink };
+            // Row 1 is the status band: SGR 7 over the body pair, which states no
+            // colour of its own and is invisible to a reading that does not swap.
+            cell.inverse = !outside && row == 1;
+        }
+    }
+    let look = gallery::pane_look(shot, &screen).expect("a full-width pane");
+    assert_eq!(look.page, page, "the page is the pane's dominant ground, not the chrome's");
+    assert_eq!(look.ink, ink, "the ink is what the letters are written in");
+    assert_eq!(
+        look.pairs,
+        [(page, ink), (ink, page)].into_iter().collect(),
+        "two pairs: the body, and the status band the reverse turns inside out. A reading that \
+         carried SGR 7 instead of undoing it would see one, and a Version 3 story was chosen for \
+         this frame precisely because it has that second surface"
+    );
+}
+
+/// The capture-time guard fails a composite whose tiles came out the same, and
+/// spares one whose only twins are machines the table says are twins (SQ-1165).
+///
+/// Driven from synthetic looks, because the thing under test is the RULE. The
+/// second half is the one that matters: interpreter 2 and interpreter 8 really do
+/// share a body pair, so a guard written as "every tile must differ" would refuse
+/// a perfectly correct frame — and whoever hit that would weaken the guard rather
+/// than read the table.
+#[test]
+fn the_guard_fails_identical_tiles_and_spares_the_machines_that_match() {
+    use super::pty_stream::decode::Color;
+    use super::pty_stream::gallery::{self, PaneLook};
+
+    let shot = &parse_one(&format!("{GOOD}machines = [2, 3, 8]\n")).expect("valid").shots[0];
+    let look = |page: Color, ink: Color| PaneLook { page, ink, pairs: [(page, ink)].into_iter().collect() };
+    let white_on_black = look(Color::Rgb(0, 0, 0), Color::Rgb(0xFF, 0xFF, 0xFF));
+    let black_on_white = look(Color::Rgb(0xFF, 0xFF, 0xFF), Color::Rgb(0, 0, 0));
+
+    // Apple (2) and the C64 (8) share a measured body pair; the Macintosh (3)
+    // does not. This is the correct frame.
+    let good = [(2u8, white_on_black.clone()), (3, black_on_white), (8, white_on_black.clone())];
+    assert!(
+        gallery::check_machines_differ(shot, 3, &good).is_ok(),
+        "interpreter 2 and interpreter 8 were MEASURED the same — white on black, full reverse — \
+         and differ only in caret shape. A guard that failed this would be refusing a correct frame"
+    );
+
+    // And the failure the whole kind exists to catch: the machine-colour licence
+    // never reaches the story, so every tile falls through to one palette.
+    let collapsed =
+        [(2u8, white_on_black.clone()), (3, white_on_black.clone()), (8, white_on_black)];
+    let e = gallery::check_machines_differ(shot, 3, &collapsed)
+        .expect_err("the Macintosh's screen is black on white and cannot be white on black");
+    assert!(e.contains("do not differ"), "the error must say what is wrong: {e}");
+    assert!(e.contains("SQ-1154"), "…and point at the usual cause, the missing colour licence: {e}");
+}
+
+/// The composite's label says how many tiles it holds, and with which flags.
+///
+/// A picture gets separated from its page the first time somebody drags it into a
+/// chat window, and this frame is the one in the set whose `size` describes a TILE
+/// rather than the image: `64x20 cells` under a 3000-pixel picture, with nothing
+/// else said, would be a claim that is simply wrong.
+#[test]
+fn a_composites_label_names_its_tiles() {
+    use super::pty_stream::gallery::{self, Backend, Provenance, StoryProvenance, Taken};
+
+    let taken = |machines: Vec<u8>| Taken {
+        id: "machine-colours".into(),
+        png: std::path::PathBuf::from("machine-colours.png"),
+        provenance: Provenance::Story(StoryProvenance {
+            version: 3,
+            release: 27,
+            serial: "831005".into(),
+            medium: "a story file".into(),
+            native: None,
+        }),
+        cols: 64,
+        rows: 20,
+        cell_w: 16,
+        cell_h: 32,
+        turns: 0,
+        seed: gallery::DEFAULT_SEED,
+        backend: Backend::Kitty,
+        face: "a face".into(),
+        verdict: "kitty".into(),
+        attempts: 1,
+        captured_bytes: 0,
+        width: 3000,
+        height: 1400,
+        native: None,
+        magnification: None,
+        unresolved_glyphs: Vec::new(),
+        machines,
+    };
+    let line = gallery::label_lines(&taken(vec![2, 3, 4, 6, 7, 8])).join(" ");
+    assert!(line.contains("6 tiles"), "the label must say the picture is six frames: {line}");
+    assert!(
+        line.contains("--interpreter 2/3/4/6/7/8 --colour machine"),
+        "…and carry the flags that get any one of them back, since the opt-in is the half a reader \
+         would not guess (SQ-1154): {line}"
+    );
+    let plain = gallery::label_lines(&taken(Vec::new())).join(" ");
+    assert!(!plain.contains("tiles"), "an ordinary frame says nothing about tiles: {plain}");
+}
