@@ -23,7 +23,11 @@ still reach in and override any single selector by name.
   and `heading` (emphasized titles). Everything else is a **derivation** —
   `parent = "<role>"`
   plus an optional delta (fg/bg/bold/italic/underline/dim/reversed) — so a
-  minimal theme that only touches `[roles]` still looks fully coherent.
+  minimal theme that only touches `[roles]` still looks fully coherent. The
+  emphasis keys are **three-state**: leave one out and you inherit whatever your
+  parent had, write `bold = true` to add it, and write `bold = false` to take it
+  *away* — so "like the thing above me, but not bold" is something you can
+  actually say.
 - **Panels vs. windows.** *Panels* are the frames lanthorn itself draws — the
   story pane, map, command band, debug inspector, and every dialog/overlay.
   *Windows* are the surfaces the story/VM generates (Glk buffer/grid/graphics
@@ -177,11 +181,17 @@ still reach in and override any single selector by name.
   `[panel]`. `[dialog]` styles the modal surface (`background`, its own `border`
   frame, `title`, `button` / `button:active`, `shadow`); `[tooltip]` styles every
   hover tooltip (`background` + an optional `border`, borderless by default).
-  A tooltip is a **card lying on the page**, so unlike almost everything else its
-  `background` ships as a literal warm-dark pair rather than a role derivation —
-  deriving it from `chrome` painted the tip in the page's own colours, which is
-  the same thing as not drawing it. Set `background = { parent = "chrome" }` to
-  get the old invisible behaviour back, or any `fg`/`bg` pair you prefer. The tip
+  A tooltip is a **card lying on the page**, and none of the seven roles is one:
+  only `chrome` carries a background at all, and `chrome` *is* the page — deriving
+  the tip from it painted the card in exactly the colours it floats over, which is
+  the same thing as not drawing it. `accent` fails the same way one level down,
+  cyan ink with no fill behind it. So the tip borrows `dialog.list_selected`, the
+  Black-on-Cyan highlight every menu already uses for the row you're on: a real
+  surface, and one you've seen before. It takes that highlight's **colours but not
+  its weight** — bold reads as "this one" on a single selected row and as a bold
+  paragraph on a multi-line card — and retuning the highlight moves your tooltips
+  with it. Set `background = { parent = "chrome" }` to get the old invisible
+  behaviour back, or any `fg`/`bg` pair you prefer. The tip
   also grows a **pointer** aimed at the icon it explains, drawn in the box's own
   background so the two read as one shape; the box is centred on that icon so the
   pointer sits near its middle, sliding off-centre only when a pane edge shoves
