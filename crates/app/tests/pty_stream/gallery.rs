@@ -166,6 +166,29 @@ pub struct Shot {
     /// a cell harness reported "no art inside the viewport" and was believed.
     #[serde(default)]
     pub expect_art_cells: usize,
+    /// The least number of cells of the STORY PANE that must carry a letter or a
+    /// digit the game wrote (SQ-1164).
+    ///
+    /// The mirror of [`Shot::expect_art_cells`], and it exists because `expect`
+    /// cannot ask this question. All five Journey shots drove `n` and three blank
+    /// returns, which halts at Journey's opening MENU — the illustration on the
+    /// left, an empty text pane on the right, and *Start · Background · Change
+    /// Name · Help · Game* along the bottom. Every string those shots named ("The
+    /// Party", "Individual Commands") is a heading on that menu, so the guard
+    /// passed on a frame whose whole subject — the prose — was missing, and it
+    /// took a human eye on a proof sheet to catch it.
+    ///
+    /// Measured on `journey-blorb` at 82x28: the menu frame scores **59**, the
+    /// title splash 170, the intro card 350, and the frame in play **517**.
+    ///
+    /// INSIDE THE PANE, which is the whole of why this is not a screen-wide letter
+    /// count: lanthorn's own chrome — the header naming the story and the medium,
+    /// the `Ctrl+P: menu` help bar — is a hundred-odd letters that are there
+    /// whatever the game did, so counting the screen is vacuous by construction.
+    /// Cells under a kitty placement are art and are skipped; a half-block frame's
+    /// art is `▀`/`▄`, which is not alphanumeric and never counted either.
+    #[serde(default)]
+    pub expect_prose_cells: usize,
 }
 
 fn default_seed() -> u32 {
@@ -409,6 +432,31 @@ impl Shot {
                 return Err(format!(
                     "gallery manifest: `{who}` is a library shot passing `--pictures` — that names a \
                      rendition of artwork inside a story the picker has not opened"
+                ));
+            }
+            if self.expect_prose_cells > 0 {
+                return Err(format!(
+                    "gallery manifest: `{who}` is a library shot with `expect_prose_cells` — that \
+                     counts the letters a STORY wrote into the pane, and the picker has not opened one"
+                ));
+            }
+        }
+        // The three shapes where a prose floor can only ever read zero, and so
+        // would fail every shot that set it — the same refusal, and for the same
+        // reason, as `expect_art_cells` on half-blocks above.
+        if self.expect_prose_cells > 0 {
+            if matches!(self.v6_render, Some(app::config::V6RenderMode::Raster | app::config::V6RenderMode::Extended)) {
+                return Err(format!(
+                    "gallery manifest: `{who}` is a raster shot with `expect_prose_cells` — raster puts \
+                     the whole screen in ONE IMAGE, so there is not a text cell on it to count. The \
+                     guard a raster shot wants is `expect_art_cells`"
+                ));
+            }
+            if self.pane_content_cells().is_none() {
+                return Err(format!(
+                    "gallery manifest: `{who}` sets `expect_prose_cells` on a shot whose story pane \
+                     this file cannot locate — a map shot's pane is a percentage split resolved by \
+                     ratatui, which is the app's arithmetic and not this file's to restate"
                 ));
             }
         }
@@ -1060,6 +1108,34 @@ pub fn art_cells(res: &super::oracle::Resolved) -> usize {
     n
 }
 
+/// How many cells of the STORY PANE carry a letter or a digit the game wrote.
+///
+/// `None` when the shot cannot say where its pane is (see
+/// [`Shot::pane_content_cells`]), which [`Shot::validate`] has already refused
+/// for any shot that sets a floor.
+///
+/// The pane's content rect is rows `1..=ROWS-3` by columns `1..=COLS-2`: one row
+/// off the bottom for the help bar, and one cell of border on every side. That
+/// inset is the point rather than an implementation detail — the header outside it
+/// names the story and the medium, and the help bar under it lists three key
+/// bindings, so a count taken over the whole screen never reaches zero and can
+/// never fail.
+pub fn prose_cells(shot: &Shot, res: &super::oracle::Resolved) -> Option<usize> {
+    let (cols, rows) = shot.pane_content_cells()?;
+    let mut n = 0;
+    for row in 1..=u16::try_from(rows).ok()?.min(res.rows.saturating_sub(1)) {
+        for col in 1..=u16::try_from(cols).ok()?.min(res.cols.saturating_sub(1)) {
+            let cell = res.cell(row, col);
+            // A cell under a placement is ARTWORK, whatever glyph the placeholder
+            // encoding left in it, and must not read as text.
+            if cell.image_id.is_none() && cell.ch.is_alphanumeric() {
+                n += 1;
+            }
+        }
+    }
+    Some(n)
+}
+
 /// The non-vacuity guard: everything the shot said must be on screen, is.
 ///
 /// A failure prints what IS on the screen, because "not the frame you asked for"
@@ -1069,7 +1145,8 @@ pub fn check_expectations(shot: &Shot, res: &super::oracle::Resolved) -> Result<
     let text = screen_text(res);
     let missing: Vec<&str> = shot.expect.iter().map(|s| s.as_str()).filter(|w| !text.contains(*w)).collect();
     let art = art_cells(res);
-    if missing.is_empty() && art >= shot.expect_art_cells {
+    let prose = prose_cells(shot, res).unwrap_or(0);
+    if missing.is_empty() && art >= shot.expect_art_cells && prose >= shot.expect_prose_cells {
         return Ok(());
     }
     let mut why: Vec<String> = Vec::new();
@@ -1081,6 +1158,13 @@ pub fn check_expectations(shot: &Shot, res: &super::oracle::Resolved) -> Result<
     }
     if art < shot.expect_art_cells {
         why.push(format!("puts art on {art} cell(s), wanted at least {}", shot.expect_art_cells));
+    }
+    if prose < shot.expect_prose_cells {
+        why.push(format!(
+            "writes {prose} letter(s) into the story pane, wanted at least {} — the frame reached a \
+             menu or a card and the game has not narrated yet",
+            shot.expect_prose_cells
+        ));
     }
     let seen: Vec<String> = text
         .lines()
