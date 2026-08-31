@@ -17,6 +17,20 @@
 # neighbouring disk under a caption about Zork Zero's border art. `expect` names
 # something that must be on the resolved screen, and it caught that.
 #
+# `expect` NAMES A STRING, WHICH IS NOT THE SAME AS NAMING A SUBJECT (SQ-1164).
+# All five Journey shots drove `n` and three blank returns, which halts at
+# Journey's opening MENU: the illustration on the left, an EMPTY text pane on the
+# right, and *Start · Background · Change Name · Help · Game* along the bottom.
+# Both strings those shots named — "The Party", "Individual Commands" — are
+# headings on that menu, so five frames captioned about prose passed a guard while
+# showing none of it, and it took a human eye on a proof sheet to notice. A shot
+# whose subject is the STORY PANE therefore also sets `expect_prose_cells`: the
+# least number of cells INSIDE the pane that carry a letter or a digit the game
+# wrote. Inside the pane because lanthorn's own header and help bar are a
+# hundred-odd letters that are there whatever the game did, so a screen-wide count
+# cannot fail. Measured on `journey-blorb`: menu 59, title splash 170, intro card
+# 350, in play 517.
+#
 # `backend` chooses the cell size too (kitty 16x32, half-blocks 10x20), because
 # the half-block picker uses its own 10x20 font whatever the terminal reports and
 # a capture at any other cell size draws a geometry lanthorn was not using. Both
@@ -59,10 +73,10 @@
 #
 # This is per-shot arithmetic and cannot become one constant: presses differ in
 # native size (Arthur's Apple II press is 560x384, the Macintosh's monochrome
-# plates are 480x300 — which is why the two shots off that disk are 92 columns
-# wide and nothing else is), so a size that is integral for one is fractional for
-# the next. The native screen is DERIVED at capture time from the mounted medium,
-# never declared here.
+# plates are 480x300 — which is why `zork0-mac-mono` is 92 columns and nothing
+# else is, and why `zork0-mac-tall` is 62), so a size that is integral for one is
+# fractional for the next. The native screen is DERIVED at capture time from the
+# mounted medium, never declared here.
 #
 # ── AND WHY THE KITTY GRIDS HALVED (SQ-1001) ─────────────────────────────────
 #
@@ -96,6 +110,24 @@
 # The pair that taught this repository that a disk image is a different BUILD.
 # The bare story is release 83; the Amiga floppy is release 30, and the two
 # narrate through different windows. Both are here for that reason.
+#
+# HOW YOU GET INTO JOURNEY, since it is the one game in this file with no typed
+# parser prompt and `text:look` is therefore not the answer (SQ-1164). Five
+# keypresses, and every one of them does something different:
+#
+#   n     answers the GAME's "Do you want to restore a saved game?", which it asks
+#         before its story starts (Arthur's press does the same)
+#   cr    dismisses the full-screen title splash
+#   cr    turns the credits card ("Created by Marc Blank")
+#   cr    turns the "It was a Golden Age" prologue, which lands on the OPENING
+#         MENU — Start · Background · Change Name · Help · Game — with the story
+#         pane still empty
+#   cr    takes Start, the item the menu opens on, and the game begins narrating
+#
+# The fifth is the one the five Journey shots were missing for their whole life.
+# The frame all five reach is the party in front of the provisioner at Lavos,
+# with the in-play command menu (Proceed · Enter, the four characters, Get Advice
+# · Cast · Examine · Drop · Inventory) under the prose.
 
 [[shots]]
 id = "journey-blorb"
@@ -107,10 +139,15 @@ Journey's illustration is not a picture pasted over the text: it is a window the
 game reserves and paints into, with the prose and the party menu laid out around \
 it. lanthorn keeps the art as kitty graphics and the text as terminal cells, so \
 the two share a boundary without either being resampled."""
-keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:2000"
 size = "82x28"
 expect = ["The Party", "Individual Commands"]
 expect_art_cells = 150
+# Both `expect` strings above are headings on the OPENING MENU, so they cannot
+# tell an empty story pane from a full one — this is the guard that can. 517
+# letters measured in play; the menu frame that shipped for months scores 59, the
+# title splash 170 and the intro card 350, so 400 fails all three with room.
+expect_prose_cells = 400
 
 [[shots]]
 id = "journey-amiga"
@@ -122,9 +159,12 @@ The same game off its own Amiga release disk — a different build from the stor
 file above, with the Amiga's palette and its own idea of which window the \
 narration goes through. lanthorn reads the medium and dresses the screen as that \
 machine did."""
-keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:2000"
 size = "82x28"
 expect = ["The Party", "Individual Commands"]
+# 524 measured — release 30 wraps the same scene a little differently from r83's
+# 517, which is one more way the two builds are not the same game.
+expect_prose_cells = 400
 
 # ── Zork Zero: six renditions of one scene ───────────────────────────────────
 #
@@ -347,9 +387,12 @@ caption = """
 The same frame in a 122x41 terminal, where the same screen goes up three times \
 without a single interpolated edge — one art pixel to a 3x3 block of device \
 pixels, exactly as the artist drew it."""
-keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:2000"
 size = "122x41"
 expect = ["The Party", "Individual Commands"]
+# Same scene, same wrap, same 517 letters as `journey-blorb` — the pane is bigger,
+# not the prose. See that shot for the ladder this floor sits on.
+expect_prose_cells = 400
 
 [[shots]]
 id = "journey-huge"
@@ -360,29 +403,40 @@ caption = """
 And four times, in a 162x53 terminal — the pane a full-screen window on a 4K \
 display gives you. v6 art is scaled by pixel and text placed by cell, so each of \
 these three is a different composition rather than the same one enlarged."""
-keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:2000"
 size = "162x53"
 expect = ["The Party", "Individual Commands"]
+expect_prose_cells = 400
 
-# ── A pane the game's screen cannot fill ────────────────────────────
+# ── A pane the game's screen cannot fill: the 7x15 machine ───────────────────
 #
 # The three sizes above grow both axes together, which is the case where nothing
 # interesting happens: the magnification is `min(w, h)`, and a bigger terminal is
 # the same composition at a bigger `s`. Grow only the HEIGHT and the story pane
-# has rows the game's own screen has no pixels for. lanthorn does not letterbox
-# the border into the middle of them — the flanks are composed to the pane out of
-# the artwork's own repeat unit, so a frame is still a frame at any height.
+# has rows the game's own screen has no pixels for, and what a mode does with
+# those rows is a claim about the mode. `v6_render = "extended"` (SQ-1032) grows
+# the canvas DOWNWARD and spends them on whole text rows of the game's own prose
+# in the game's own face — the game is told nothing, so its own screen sits at the
+# top of the canvas exactly as it laid itself out.
 #
-# The monochrome Macintosh plates are the one press in this file that can PROVE
-# that, which is why this row is Zork Zero and not Journey. Every other rendition
-# here draws a featureless shaft, and a featureless shaft can be cut anywhere and
-# repeated forever without a reader being able to find the joins — a stretch, a
-# shift and an honest tile all look identical on it. `Pic.data` draws a BANDED
-# pillar instead: capital, shaft, a ring at mid-height, shaft, flared base. So
-# count the rings. `zork0-mac-mono` above is the same art in a 32-row pane and
-# carries ONE; this is 58 rows and carries THREE, spaced exactly as the artist
-# drew them, with the base still landing on the pane's last row. A taller pane
-# gets more rings rather than longer gaps, and that is the whole claim.
+# THIS SHOT AND `shogun-amiga-extended` BELOW ARE THE SAME MODE ON DIFFERENT
+# ARITHMETIC, which is the only reason the file carries two of it. The extension
+# is measured in whole CHARACTER CELLS, and the Version 6 cell is the MACHINE's:
+# **7x15 on a Macintosh, 8x16 on every other machine in this manifest** (SQ-0917).
+# So the Amiga frame below adds sixteen 16-pixel rows and this one adds
+# thirty-eight 15-pixel ones, and the surplus divides differently on each. The
+# Macintosh also draws its text at one native pixel per face pixel, so nothing in
+# the type here is scaled at all — a 7x15 cell is 7x15 native pixels, times the
+# frame's whole magnification.
+#
+# WHY 62 COLUMNS AND NOT 92. `RasterFrame::extended` pins a whole number of DEVICE
+# pixels per NATIVE pixel, and on a pixel-shipping backend that number is capped at
+# `MAX_V6_UPSCALE = 2` — the PNG-encode budget, not a layout choice. So the widest
+# this frame can ever be is `480 x 2 = 960` device pixels, which is 60 cells of the
+# 16x32 grid plus one of border on each side. At the 92 columns this shot carried
+# while it was a HYBRID shot (where the letterbox does reach 3x) the composite
+# still came out 60 cells wide and the other thirty were empty pane. `(62-2)*16 /
+# 480` is exactly 2, the same arithmetic that puts Shogun's row at 82.
 
 [[shots]]
 id = "zork0-mac-tall"
@@ -391,21 +445,35 @@ press = "Macintosh release floppy (.image, HFS), monochrome plates, in a tall te
 media = "stories/Zork Zero Disk.image"
 args = ["--pictures", "Pic.data"]
 caption = """
-A terminal taller than the shape Zork Zero was drawn for. The game lays out on a \
-480x300 screen; this pane is nearly twice that tall, and hybrid mode fills the \
-difference by extending the border out of its own artwork rather than by \
-stretching it or stranding it in a letterbox. The pillars are the tell: the \
-Macintosh's monochrome plates band theirs with a ring, and a taller pane gets \
-more rings at the same spacing, capital to first ring and last ring to base both \
-exactly as drawn. Nothing in the frame is resampled — it is still a whole 3x."""
-keys = "wait:3000,cr,wait:1200,text:look,cr,wait:1800,text:ne,cr,wait:2000,text:look,cr,wait:2000"
-size = "92x58"
-expect = ["Scullery", "pots and pans"]
-# 1731 art cells measured. The guard is set where a frame that FAILED to extend
-# cannot reach it: unextended flanks stop after 300 native rows of a 55-row pane
-# and lose most of their cells, so this number is the extension itself, not the
-# artwork.
-expect_art_cells = 1200
+A terminal taller than the shape Zork Zero was drawn for, with the surplus spent \
+on the game's own screen instead of on a letterbox. The Macintosh is the odd \
+machine here: it declares a 7x15 character cell where every other press in this \
+gallery is 8x16, and it draws its text at one native pixel per face pixel. So the \
+thirty-eight rows of prose below Dimwit's banquet hall are 15 native pixels each, \
+set in the face off the Macintosh's own disk, and the border, the pillars and the \
+compass rose above them are the same picture the game painted — one image, at a \
+whole 2x, with nothing in it resampled."""
+# `esc` rather than `cr` for the opening notice, and this is the shot that made
+# the difference visible: a blank line typed at the parser answers `[I beg your
+# pardon?]`, which the small hybrid panes elsewhere scroll away and an extended
+# pane keeps on screen for the whole of the transcript.
+keys = "wait:3000,esc,wait:1200,text:look,cr,wait:1800,text:ne,cr,wait:2000,text:look,cr,wait:2000"
+size = "62x58"
+backend = "kitty"
+v6_render = "extended"
+# In RASTER the whole screen is one image, so there are no text cells for a guard
+# to search and the pane title is all `expect` can hold — the same reason
+# `shogun-amiga-extended` and `arthur-amiga-proportional` lean on it. The GAME's
+# name and not the medium's: 62 columns clip the header at `Zork Zero Disk.ima`,
+# and a guard whose truth depends on where a title bar happens to elide is not one.
+# Which medium was mounted is measured anyway, into the provenance under the frame.
+expect = ["Zork Zero: The Revenge of Megaboz"]
+# THE GUARD IS THE EXTENSION ITSELF, not the artwork. Measured: 3300 cells, which
+# is 60x55 — the whole of the pane's content. A frame that DECLINED to extend
+# letterboxes 480x300 at the same 2x into 960x600, covering 60x19 = 1140 cells, so
+# any floor at or below that would pass on a frame that never grew. 2400 is between
+# the two with room on both sides.
+expect_art_cells = 2400
 
 # ── The fallback everyone can see ────────────────────────────────────────────
 
@@ -419,10 +487,13 @@ The same frame on a terminal with no image protocol at all. lanthorn still runs 
 pixel path and resolves it into half-block cells — two vertical samples per cell, \
 so honest but coarse. It is also the only Version 6 output an asciinema cast can \
 carry, which is why it earns a row."""
-keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1800"
+keys = "wait:2500,n,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:1500,cr,wait:2000"
 size = "194x63"
 backend = "halfblocks"
 expect = ["The Party", "Individual Commands", "▀"]
+# Half-blocks draws its art as `▀`/`▄`, which is not alphanumeric, so the count is
+# the game's letters here exactly as it is on the kitty rows: 517 measured.
+expect_prose_cells = 400
 
 # ── The automapper ───────────────────────────────────────────────────────────
 
@@ -534,13 +605,13 @@ expect_art_cells = 400
 
 # ── The frame that grows instead of letterboxing ─────────────────────────────
 #
-# `zork0-mac-tall` above is the HYBRID answer to a pane taller than the game's
-# screen: the border is composed to the pane out of the artwork's own repeat unit,
-# so a frame is still a frame at any height. This is the RASTER answer, and it is
-# a different claim about the same surplus — `v6_render = "extended"` (SQ-1032)
-# grows the canvas DOWNWARD, and the rows it adds are text rows of the game's own
-# prose in the game's own bitmap face. The two read as complements: hybrid extends
-# the BORDER, extended grows the FRAME.
+# The second of the two `extended` frames, and the pair is deliberate: the mode
+# spends a pane's surplus height in whole CHARACTER CELLS, and the Version 6 cell
+# is the machine's. `zork0-mac-tall` above is a Macintosh — 7x15, thirty-eight
+# rows, text at one native pixel per face pixel. This is an Amiga — 8x16, sixteen
+# rows, and a release face the machine draws in the PICTURE space so that a doubled
+# press doubles it too (SQ-1053). Same mode, two arithmetics; say which one a
+# frame is showing or the second frame is a duplicate of the first.
 #
 # WHY SHOGUN. The gallery had no Shogun at any press and four Zork Zeros, and this
 # is the mode where the choice of game is about its TYPE rather than its artwork —

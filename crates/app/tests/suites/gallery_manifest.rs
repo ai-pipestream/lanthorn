@@ -560,6 +560,63 @@ fn every_shot_pins_a_seed() {
     }
 }
 
+/// SQ-1164: `expect_prose_cells` is refused wherever it could only ever read
+/// zero, which is the same refusal `expect_art_cells` gets on half-blocks.
+///
+/// A guard that can only fail is worse than no guard: whoever set it believed
+/// they had one, and the shot never captures at all.
+#[test]
+fn a_prose_floor_is_refused_where_it_could_only_read_zero() {
+    assert!(
+        parse_one(&format!("{GOOD}expect_prose_cells = 400\n")).is_ok(),
+        "a plain hybrid shot is exactly what this field is for"
+    );
+    for (extra, why) in [
+        ("v6_render = \"raster\"\n", "raster puts the whole screen in one image — no text cells at all"),
+        ("v6_render = \"extended\"\n", "extended is raster, so the same is true of it"),
+        ("show_map = true\n", "a split pane's width is ratatui's arithmetic, not this file's"),
+    ] {
+        let e = parse_one(&format!("{GOOD}expect_prose_cells = 400\n{extra}"))
+            .expect_err(why);
+        assert!(
+            e.contains("expect_prose_cells"),
+            "the error must name the field the author set: {e}"
+        );
+    }
+    // And on a library shot, where the picker has opened no story to narrate.
+    let lib = "[[libraries]]\nid = \"lib\"\nfrom = \"stories\"\nmembers = [\"a.z6\"]\n";
+    let base = format!("{}media = \"lib\"\nlibrary = true\n", GOOD.replace(r#"media = "stories/a.z6""#, ""));
+    let e = Manifest::parse(&format!("{lib}[[shots]]{base}expect_prose_cells = 400\n"))
+        .expect_err("no story has been opened");
+    assert!(e.contains("library shot"), "the error must say why: {e}");
+}
+
+/// Every Journey shot guards its PROSE, and that is not decoration (SQ-1164).
+///
+/// Journey is menu-driven: it has no typed parser prompt, so a recipe that stops
+/// short lands on its opening menu with an EMPTY story pane, and both strings the
+/// five shots name in `expect` — "The Party", "Individual Commands" — are
+/// headings on that very menu. Five frames shipped for months under captions
+/// about prose that showed none, and a human eye on a proof sheet is what caught
+/// it. Keyed on the MEDIUM rather than on shot ids, so curating a row out of the
+/// gallery does not fail this case.
+#[test]
+fn every_journey_shot_guards_its_prose() {
+    let m = manifest();
+    let mut seen = 0usize;
+    for s in m.shots.iter().filter(|s| s.media.to_lowercase().contains("journey")) {
+        seen += 1;
+        assert!(
+            s.expect_prose_cells > 0,
+            "`{}` shows Journey's story pane and does not guard it. `expect` cannot: Journey is \
+             menu-driven, and every string it names is a heading on the opening menu the recipe \
+             has to drive PAST",
+            s.id
+        );
+    }
+    assert!(seen > 0, "no Journey shot at all — this case has stopped checking anything");
+}
+
 /// The gallery is supposed to SPAN the corpus. A set that has quietly collapsed
 /// onto one game at one size is still a valid manifest and a useless gallery.
 #[test]
