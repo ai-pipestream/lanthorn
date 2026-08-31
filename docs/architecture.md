@@ -372,6 +372,19 @@ follows from that.
   them. What survives is evidence and not proof, so the line claims only the
   one-step fact it tested and names the room, never that the game can still be
   won.
+- **Three switches answer for the line, in this order, and a suppression that is
+  not a switch.** `one_way_caution` (global, default on) is the player's wish
+  about this line and is checked where the sentence is made; `guidance` is
+  `push_assist`'s, for every assist at once; `return_probe` is
+  `arm_return_search`'s, because mechanically the caution is a *reading* of that
+  search and with the probe off there is nothing to read. On top of those, **the
+  line goes quiet whenever undo is off** — a warning is worth saying only if the
+  player can act on it, and the act it exists to prompt is `undo`. The value read
+  is the LIVE one, `Engine::undo_levels()` asked of the running session as the
+  search arms, not `config.undo_levels`: the undo cap is one of the three
+  settings rows that can only land at boot, so after a Save the config and the
+  machine the player is typing at disagree, and what the player can actually do
+  is the machine's answer.
 
 Measured per attempt, worker time, debug build: Zork I **0.7 ms**, Coloratura
 **4.3 ms**, Counterfeit Monkey **343 ms**. In play the priority order usually

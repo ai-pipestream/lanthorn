@@ -177,12 +177,50 @@
 //! arranged: exhausting the list marks all twelve on
 //! [`mapper::graph::Room::probed`], so the next arrival has an empty candidate
 //! list and arms no search. The caution is said once per room, ever.
+//!
+//! # The three switches the caution answers to, in this order
+//!
+//! Three, and none of them collapses into another — each answers a different
+//! question, and a player can hold any combination of the three (SQ-1043's
+//! follow-up).
+//!
+//! 1. **[`Config::one_way_caution`]** — the player's wish about THIS line, and
+//!    first because it is the only switch that is about the line itself. Off, the
+//!    map work below carries on exactly as before and only the sentence goes.
+//!    Checked in [`one_way_caution`], where the sentence is made.
+//!    Default **on**: turning `return_probe` on is already opting into this class
+//!    of help, so the key exists to decline the line, not to have to ask for it.
+//! 2. **[`Config::guidance`]** — the line is an assist, in the Guiding Light's
+//!    register and its gutter, so the Light's own switch silences it with
+//!    everything else the Light says. Enforced once for every assist in
+//!    [`AppState::push_assist`] rather than here: a feature that has to remember
+//!    to ask is a feature the player cannot turn off.
+//! 3. **[`Config::return_probe`]** — last because it is not really a preference
+//!    about the caution at all: mechanically the caution is a READING of this
+//!    search, and with the probe off there is no search to read. Enforced in
+//!    [`arm_return_search`], which is where the search would have started.
+//!
+//! # …and the suppression that is not a switch: undo
+//!
+//! **With undo switched off, the caution says nothing at all**, whatever those
+//! three hold. That is the user's own verdict on the shipped feature turned into
+//! a rule: a warning is worth saying only if the player can act on it, and the
+//! act this one exists to prompt is `undo`. With `undo_levels = 0` there is
+//! nothing to do about a one-way passage but read that it was one.
+//!
+//! The value read is the LIVE one — [`Engine::undo_levels`], asked of the running
+//! session at the moment the search arms — and not `config.undo_levels`. The two
+//! genuinely differ: `undo_levels` is one of the three settings-screen rows that
+//! can only land at boot, so after a Save the config says one thing and the
+//! machine the player is typing at is still capped at another. What the player
+//! can actually do is the machine's answer.
 
 use mapper::direction::{long_label, Direction};
 use mapper::graph::RoomId;
 use mapper::mapper::{Mapper, ProbedPassage};
 
 use crate::assist::Assist;
+use crate::config::Config;
 use crate::engine::Engine;
 use crate::state::AppState;
 
@@ -233,6 +271,19 @@ pub struct ReturnSearch {
     /// here. Only a room the shadow could walk OUT of, but not BACK from, is
     /// evidence of a one-way passage.
     left: bool,
+    /// Whether the running story could take this move back — [`Engine::undo_levels`]
+    /// asked of the live session when the search armed, `Some(0)` being undo off.
+    ///
+    /// False silences the caution and nothing else: the search still runs and
+    /// still closes the map's gap. See the module docs — a warning is worth
+    /// saying only if the player can act on it.
+    ///
+    /// Recorded HERE, at arm time, because that is the one moment in this
+    /// module's life that holds the session (`pump_return_search` runs off the
+    /// event loop with only the state and the map in hand). Nothing can change it
+    /// under a live search either: the cap is written at boot and a search is
+    /// abandoned the moment the player moves.
+    undoable: bool,
 }
 
 impl ReturnSearch {
@@ -255,6 +306,12 @@ impl ReturnSearch {
     /// third leg of SQ-1043's threshold, for tests and diagnostics.
     pub fn left_the_room(&self) -> bool {
         self.left
+    }
+
+    /// Whether the story this search armed on can take a move back, for tests and
+    /// diagnostics. See [`undoable`](Self::undoable).
+    pub fn is_undoable(&self) -> bool {
+        self.undoable
     }
 }
 
@@ -315,9 +372,14 @@ pub fn arm_return_search(
     // The one snapshot the whole search runs from, and the one thing here the
     // player's thread pays for. Taken now rather than per attempt.
     let Some(from) = state.probe.snapshot(live) else { return };
+    // Asked of the LIVE session, here, because this is the only place in the
+    // module that has one — and `Some(0)` is undo switched off, the documented
+    // value of `undo_levels = 0`. `None` is an engine with no host-settable cap
+    // (Glulx keeps its own, Scott has none) and must not read as "undo is off".
+    let undoable = live.undo_levels() != Some(0);
     queue.reverse(); // popped from the back, so the best candidate goes last
     state.return_search =
-        Some(ReturnSearch { origin, here, queue, attempt: None, from, left: false });
+        Some(ReturnSearch { origin, here, queue, attempt: None, from, left: false, undoable });
 }
 
 /// What a search that has run out of candidates has to say to the player, if
@@ -333,7 +395,24 @@ pub fn arm_return_search(
 /// The origin is named because a room the player has stood in is a room they can
 /// picture, and because the alternative — the story's own "you" — is the voice
 /// [`crate::assist`] exists to keep lanthorn out of.
-fn one_way_caution(search: &ReturnSearch, mapper: &Mapper) -> Option<Assist> {
+///
+/// Two of the caution's three switches are decided elsewhere and only the first
+/// is decided here; see the module docs for the order and why each sits where it
+/// does. `guidance` is [`AppState::push_assist`]'s, for every assist at once, and
+/// `return_probe` is [`arm_return_search`]'s, because with the probe off there is
+/// no search to read. The undo suppression is the search's own
+/// [`undoable`](ReturnSearch::undoable), recorded off the live session when it
+/// armed.
+fn one_way_caution(cfg: &Config, search: &ReturnSearch, mapper: &Mapper) -> Option<Assist> {
+    if !cfg.one_way_caution {
+        return None;
+    }
+    // Undo off ⇒ silence: the act this line exists to prompt is unavailable, and
+    // a warning nobody can act on is noise. The map work above has already
+    // happened and is untouched by this.
+    if !search.undoable {
+        return None;
+    }
     if !search.left {
         return None;
     }
@@ -364,7 +443,7 @@ pub fn pump_return_search(state: &mut AppState, mapper: &Mapper) -> bool {
         // door may need opening, and a one-way passage is a real answer. But it
         // is exactly the observation SQ-1043 wanted, so it is said out loud —
         // once, here, while the player is still standing in the room.
-        let caution = one_way_caution(search, mapper);
+        let caution = one_way_caution(&state.config, search, mapper);
         state.return_search = None;
         if let Some(caution) = caution {
             state.push_assist(&caution);
@@ -610,9 +689,22 @@ mod tests {
     /// judges, built directly because no story reliably produces it on demand
     /// and [`crate::probe::Answer`] cannot be forged.
     fn exhausted(state: &mut AppState, left: bool) {
+        exhausted_with_undo(state, left, true);
+    }
+
+    /// The same shape, with the undo the caution's suppression turns on stated
+    /// rather than assumed.
+    fn exhausted_with_undo(state: &mut AppState, left: bool, undoable: bool) {
         let from = state.probe.snapshot(&blind()).expect("the seam is armed");
-        state.return_search =
-            Some(ReturnSearch { origin: 1, here: 2, queue: Vec::new(), attempt: None, from, left });
+        state.return_search = Some(ReturnSearch {
+            origin: 1,
+            here: 2,
+            queue: Vec::new(),
+            attempt: None,
+            from,
+            left,
+            undoable,
+        });
     }
 
     /// Everything on a test-built state's transcript, which is only ever what
@@ -685,6 +777,85 @@ mod tests {
         pump_return_search(&mut state, &m);
         assert!(said(&state).is_empty(), "the light is off");
         assert!(state.config.return_probe, "and the map work is untouched");
+    }
+
+    /// **With undo off, there is nothing to say.** The act this line exists to
+    /// prompt is `undo`, so with the running machine capped at zero the caution
+    /// is noise — and the search that produced it still ends, having done the map
+    /// work it was armed for. Same state, same evidence, the one bit flipped.
+    #[test]
+    fn undo_switched_off_silences_the_caution_and_not_the_search() {
+        let mut m = Mapper::default();
+        walked(&mut m);
+
+        let mut off = armed_state();
+        off.config.guidance = true;
+        exhausted_with_undo(&mut off, true, false);
+        pump_return_search(&mut off, &m);
+        assert!(off.return_search.is_none(), "the search still ends");
+        assert!(said(&off).is_empty(), "nothing the player could act on: {:?}", said(&off));
+
+        let mut on = armed_state();
+        on.config.guidance = true;
+        exhausted_with_undo(&mut on, true, true);
+        pump_return_search(&mut on, &m);
+        assert_eq!(
+            said(&on).last().map(String::as_str),
+            Some("looks one-way — no direction leads back to Behind House"),
+            "and with undo available the very same search speaks"
+        );
+    }
+
+    /// The caution's OWN switch (SQ-1043's follow-up): off is silence, and the
+    /// probe it reads is untouched — the map still closes its gaps.
+    #[test]
+    fn the_cautions_own_switch_silences_the_line_and_not_the_probe() {
+        let mut m = Mapper::default();
+        walked(&mut m);
+        let mut state = armed_state();
+        state.config.guidance = true;
+        assert!(state.config.one_way_caution, "on out of the box");
+        state.config.one_way_caution = false;
+        exhausted(&mut state, true);
+
+        pump_return_search(&mut state, &m);
+        assert!(said(&state).is_empty(), "the player declined the line");
+        assert!(state.config.return_probe, "and kept the search that feeds it");
+    }
+
+    /// The live session is what is asked, and `Some(0)` — the documented off
+    /// value of `undo_levels` — is what silences it. An engine that answers
+    /// `None` (no host-settable cap at all) is not "undo off".
+    #[test]
+    fn the_undo_bit_is_read_off_the_running_session_when_the_search_arms() {
+        let mut m = Mapper::default();
+        walked(&mut m);
+
+        let mut state = armed_state();
+        arm_return_search(&mut state, &m, &blind(), "enter window", Some(1));
+        assert!(
+            state.return_search.as_ref().expect("armed").is_undoable(),
+            "Scott answers None — no host cap — which must not read as undo off"
+        );
+
+        let bytes = include_bytes!("../../zvm/tests/fixtures/minizork.z3").to_vec();
+        let mut z = crate::session::GameSession::new(bytes, true, false, None)
+            .expect("minizork boots");
+        z.machine.undo_cap = 0;
+        let mut state = armed_state();
+        arm_return_search(&mut state, &m, &z, "enter window", Some(1));
+        assert!(
+            !state.return_search.as_ref().expect("armed").is_undoable(),
+            "a machine capped at 0 has undo switched off"
+        );
+
+        z.machine.undo_cap = 16;
+        let mut state = armed_state();
+        arm_return_search(&mut state, &m, &z, "enter window", Some(1));
+        assert!(
+            state.return_search.as_ref().expect("armed").is_undoable(),
+            "and the same machine with a cap does not"
+        );
     }
 
     /// A room the map cannot name still gets a caution — the fact it states does

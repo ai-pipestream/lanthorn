@@ -216,6 +216,22 @@ const INTERFACE: &[Row] = &[
         ],
     ),
     d(
+        "one_way_caution",
+        "true",
+        &[
+            "When the search above walks every direction it knows and none of them",
+            "leads back, say so — one line, naming the room that shut behind you,",
+            "while you are still standing where you can type \"undo\". It states the",
+            "test and not its meaning: a way back that wants a door opened, a key,",
+            "or two moves instead of one is invisible to it.",
+            "",
+            "Needs \"return_probe\" on (it is a reading of that search) and",
+            "\"guidance\" on (it is an assist). It goes quiet on its own when undo",
+            "is switched off — \"undo_levels = 0\" — because a warning you cannot",
+            "act on is just noise. False keeps the map work and drops the line.",
+        ],
+    ),
+    d(
         "hide_adult_words",
         "true",
         &[

@@ -4955,6 +4955,13 @@ impl Engine for GameSession {
         self.machine.aux_dirty = false;
     }
 
+    /// The cap this machine is actually running with — `startup.rs` and
+    /// `reset.rs` write it at boot from `config.undo_levels`, and nothing after
+    /// that does. See [`Engine::undo_levels`].
+    fn undo_levels(&self) -> Option<usize> {
+        Some(self.machine.undo_cap)
+    }
+
     fn current_location(&self) -> Option<LocationInfo> {
         // Version-aware detection (same as a turn), NOT the v3-only global-0 read:
         // v4+ games have no location global, so `zvm::current_location` returns

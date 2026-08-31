@@ -954,6 +954,25 @@ pub trait Engine {
     /// Clear the Glk file VFS dirty flag.
     fn clear_vfs_dirty(&mut self) {}
 
+    // ── undo ──
+    /// How many undo steps the RUNNING story can take back, when the host set
+    /// that cap — the LIVE value, not `config.undo_levels`.
+    ///
+    /// The two differ, and the difference is the point (SQ-1043). `undo_levels`
+    /// is one of the three settings-screen rows that can only land at boot
+    /// (`startup.rs`, `reset.rs`, and the two restore paths in `main.rs` all
+    /// assign `machine.undo_cap`), so a player who edited the row and pressed
+    /// Save is running a story whose cap is still the one it booted with. Asking
+    /// the session is the only way to learn what the player can actually do.
+    ///
+    /// `Some(0)` is undo switched OFF — the documented off value for
+    /// `undo_levels`. `None` is the default and means this engine has no
+    /// host-settable cap (Glulx keeps its own fixed one, Scott has no undo
+    /// machinery at all), so a caller must not read it as "undo is off".
+    fn undo_levels(&self) -> Option<usize> {
+        None
+    }
+
     // ── mapping ──
     /// The player's current location, for the mapper.
     fn current_location(&self) -> Option<LocationInfo>;

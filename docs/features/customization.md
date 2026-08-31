@@ -609,6 +609,19 @@ re-seed the new template, or hand-write the new shape from
   way — turns it on, `/set-return-probe` does it from the keyboard, and both
   remember the answer for that story. See
   [mapping](mapping.md) for what it does to the map.
+- **And when that search comes back empty-handed, it says so.**
+  `one_way_caution` (global, default `true`) is the one line the search can
+  afford: *looks one-way — no direction leads back to Living Room*, said while
+  you are still standing in the room, so `undo` is one word away. It states the
+  test and not its meaning — a way back that wants a door opened, a key, or two
+  moves is invisible to a one-step search — and it is said once per room, ever.
+  It needs `return_probe` on (it is a reading of that search) and `guidance` on
+  (it is an assist), and it **goes quiet on its own while undo is switched off**:
+  with `undo_levels = 0` there is nothing to do about a one-way passage but read
+  that it was one. Turning it off keeps every bit of the map work and drops only
+  the sentence. Unlike the probe it reads, this one is global and has no
+  per-game sidecar spelling — it is a preference about how much lanthorn says,
+  not about how much work a particular story is worth.
 - **A choice for one run stays a choice for one run.** `--sound off`, `--user-dir`,
   `--game-colours off` and `--interpreter` are instructions for the launch you typed
   them on,

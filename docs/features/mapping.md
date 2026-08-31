@@ -526,9 +526,20 @@ cannot see, and a passage that really is one-way is not the same thing as a game
 you can no longer win. It will not nag: the twelve are on the probe's record
 afterwards, so the room has nothing left to ask and the line is said once.
 
-It needs both switches — the return probe on for this story, and Lanthorn's
-Guiding Light on for the line — and it inherits the probe's own "off by default",
-because it is the probe talking.
+It answers to **three** switches. Its own — `one_way_caution` in `config.toml`
+and on the settings screen, global, default on — takes the line away and leaves
+every bit of the map work behind it; `guidance` silences it along with the rest
+of Lanthorn's Guiding Light, because that is what it is; and `return_probe` has
+to be on for this story, because there is no search for it to read otherwise.
+
+And it goes quiet by itself whenever **undo** is switched off (`undo_levels =
+0`). The point of hearing this while you are still standing in the room is that
+`undo` is one word away; with undo unavailable there is nothing to do about a
+one-way passage but read that it was one, and lanthorn would rather say nothing
+than say something you cannot act on. It reads the cap the *running story* has,
+not the one in your config file — the undo setting only takes effect on the next
+launch, so those two can differ, and what you can actually do is the story's
+answer.
 
 It is **off by default** — it does run your game a few extra turns in private —
 and the footprint on the **story** pane's bottom border, immediately inboard of
