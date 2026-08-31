@@ -69,11 +69,6 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     // in the middle renumbers every row after it in four places at once. The
     // grouping is worth less than not making that edit (SQ-0785).
     ("return_probe",         ConfigRowKind::Bool, "After a move, look for the way BACK in a silent throwaway copy of the game, and put it on the map when it is found — closing the one-way gaps an automap is otherwise full of, without ever assuming that a passage runs both ways. Nothing is recorded unless the copy comes out in the room you left. Off by default; the footprint on the map pane's bottom border switches it for one game."),
-    // SQ-1043: appended for the same reason `return_probe` above it was — three
-    // tables in `input.rs` key off a row's INDEX. Global only, deliberately: it
-    // is a preference about how much lanthorn says, not about one story, so it
-    // has no per-game sidecar spelling and therefore no `one_run_key_for_row` arm.
-    ("one_way_caution",      ConfigRowKind::Bool, "When the search above walks every direction it knows and none leads back, say so — one line, naming the room that shut behind you, while you are still standing where you can type undo. It states the test, not its meaning: a way back that wants a door opened, a key, or two moves is invisible to it. Needs return_probe and guidance on, and goes quiet on its own while undo is switched off (undo_levels = 0)."),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,7 +276,6 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         28 => bool_str(cfg.guidance_probe),
         29 => bool_str(cfg.hide_adult_words),
         30 => bool_str(cfg.return_probe),
-        31 => bool_str(cfg.one_way_caution),
         _ => String::new(),
     }
 }
@@ -410,25 +404,6 @@ mod tests {
         assert_ne!(a1, a2, "hide_adult_words must flip via ←/→ too");
         assert_eq!(
             config_row_value(&state.overlays.config_screen.as_ref().unwrap().working, aidx),
-            "true",
-            "and the value column reports the row it edits, not its neighbour"
-        );
-
-        // The one-way caution's own switch (SQ-1043) — now the LAST row, so the
-        // one whose index is easiest to add to three of the four matches instead
-        // of four. Both handlers, and the value column, as above.
-        let cidx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "one_way_caution").unwrap();
-        state.overlays.config_screen.as_mut().unwrap().scroll.selected = cidx;
-        let c0 = state.overlays.config_screen.as_ref().unwrap().working.one_way_caution;
-        assert!(c0, "the caution is on out of the box");
-        apply_action(Action::ConfigToggle, &mut state, &mut m);
-        let c1 = state.overlays.config_screen.as_ref().unwrap().working.one_way_caution;
-        assert_ne!(c0, c1, "one_way_caution must toggle via Space");
-        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
-        let c2 = state.overlays.config_screen.as_ref().unwrap().working.one_way_caution;
-        assert_ne!(c1, c2, "one_way_caution must flip via ←/→ too");
-        assert_eq!(
-            config_row_value(&state.overlays.config_screen.as_ref().unwrap().working, cidx),
             "true",
             "and the value column reports the row it edits, not its neighbour"
         );

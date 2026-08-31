@@ -591,6 +591,6 @@ pub(crate) fn poll_shadow_answers(
         // search, or a vocabulary offer the player typed past. Dropping it is the
         // silence discipline both consumers already have.
     }
-    app::return_probe::pump_return_search(state, mapper);
+    app::return_probe::pump_return_search(state);
     changed
 }
