@@ -59,9 +59,9 @@ pub const NERD_PORTALS: &str = "nerdfont-stairs";
 /// …and the third: the pane-border toggle controls (SQ-1123).
 pub const NERD_CONTROLS: &str = "nerdfont";
 
-/// …and the fourth: the story picker's row badges (SQ-1159). Six Material
-/// Design icons — two boxed letters for the story TYPE, a package, a floppy and
-/// a lightbulb pair for the artifacts.
+/// …and the fourth: the story picker's row badges (SQ-1159, cut to three by
+/// SQ-1160). Three Material Design icons — a floppy for a save, and a lightbulb
+/// pair for the hint slot's two states.
 pub const NERD_BADGES: &str = "nerdfont";
 
 /// …and the fifth: the MAP pane's own control cluster (SQ-1148) — room numbers,
