@@ -564,44 +564,100 @@ v6_render = "raster"
 expect = ["Arthur - The Quest for Excalibur.adf"]
 expect_art_cells = 900
 
-# ── The face nobody had to supply ────────────────────────────────────────────
+# ── The other machine that draws its own type ────────────────────────────────
 #
-# The shot above needs a release floppy. This one needs the opposite: a bare
-# story file and a machine named by hand, so that NOTHING answers the face
-# cascade and the embedded fallback is what draws. `v6_render` for the same reason
-# as above — in hybrid the glyphs on screen would be the reader's own font, and
-# the face is the entire subject here.
+# The shot above is an Amiga release drawing its release's face. This is the
+# Macintosh doing the same job on entirely different arithmetic, and the two are
+# the pair the section exists for: an Amiga cell is 8x16 and its release faces
+# are authored in the PICTURE space, so a doubled press doubles them; a Macintosh
+# cell is 7x15 and it paints text at ONE NATIVE PIXEL PER FACE PIXEL however
+# dense the artwork beside it is (`zvm::interpreter::V6FaceSpace`, SQ-1039). This
+# press is the case that makes that visible: `CPic.data` is 320x200 doubled onto
+# 640x400, so one ART pixel here is two native pixels while one TEXT pixel stays
+# one, and the type is fifteen native rows at the frame's whole 2x rather than
+# thirty. `v6_render = "raster"` for the same reason as the Amiga row above — in
+# hybrid the glyphs on screen would be the READER's font, and the machine's own
+# rendering is the subject.
+#
+# WHAT THIS ROW REPLACED, AND WHY (SQ-1166). It was `macintosh-embedded-face`:
+# `advent.z6` told `--interpreter 3`, showing the no-disk FALLBACK face. Two
+# things were wrong with it. Its frame was captured mid-sentence on a `[more]`
+# pager — the exact defect its own comment was written to prevent — and its
+# subject was an edge case demonstrated on a game that is neither Macintosh nor
+# graphical, in a gallery whose job is what lanthorn does with real presses.
+# Nothing was lost by removing its caption: the VGA-advance argument it carried
+# (76 of Uni-VGA's 94 printable glyphs ink out to column 6, so a 7-wide cell
+# drops the one column holding the letters apart, which is why the fallback is
+# X11 misc-fixed 7x14) is stated in full in `native_font.rs`'s module header and
+# in `docs/features/v6-graphics.md`, the second with the 1649-touching-pairs
+# measurement the caption never had.
+#
+# WHICH FACE THIS ACTUALLY DRAWS, MEASURED RATHER THAN ASSUMED. `Shogun.toast`
+# is a bare HFS volume whose `Game/Shogun` application carries `FONT` 524 (7x15)
+# and `FONT` 1033 (7x12) in its resource fork — so the release DOES supply a
+# face, and it supplies the FIXED-PITCH one. The BODY face is the second rung of
+# `native_font::resolve`: Geneva 12 off a Mac OS System disk under `~/.lanthorn/`,
+# because Geneva is in the System file and on no Infocom platter at all (SQ-1036).
+# **So this frame's prose is the machine's system face where the reader keeps a
+# System disk and the release's own `FONT` 524 where they do not**, and the
+# caption says exactly that rather than naming one. Note that `~/.lanthorn/` is
+# read from `$HOME` and NOT from the fresh `--user-dir` the gallery gives each
+# shot, so this is the one row in the file whose type can differ between two
+# machines running the same recipe.
+#
+# 82x28 is the standard row and it is right here for the standard reason:
+# `CPic.data` doubles to 640x400 like every other colour press, and `(82-2)*16 /
+# 640` is exactly 2. The Macintosh's MONOCHROME plates are the ones that need
+# their own size — see `zork0-mac-mono` at 92 columns — and this shot does not
+# name an archive, so it gets the volume's own default, which is the colour set.
+#
+# THE GUARD, AND ITS HONEST LIMIT. A raster frame is ONE IMAGE, so there is not a
+# text cell inside the pane for a guard to read: `expect` can only reach
+# lanthorn's own chrome and `expect_prose_cells` is refused outright. Nor does
+# `expect_art_cells` discriminate here — measured on this press at 0, 1, 2 and 3
+# keypresses, the placement covers **2000** cells every time, which is the whole
+# 80x25 pane, because a title splash letterboxes exactly as a gameplay frame
+# does. It is set to that 2000 anyway (it still fails a browser or a frame that
+# never composited), but the thing keeping this shot on the right screen is the
+# RECIPE, driven and looked at: `esc` clears lanthorn's own notice without
+# reaching the parser, two `cr`s take the title splash and the boot menu's START,
+# and NO `look` follows — Shogun scrolls its illustration up with the text, so a
+# fourth keypress trades the whole Erasmus plate for two more lines of prose.
+# That is a weakness this file shares with every plain-`raster` row in it
+# (`arthur-amiga-proportional` at 900 of the same 2000), and closing it needs a
+# field the manifest does not have yet, not a bigger number here.
 
 [[shots]]
-id = "macintosh-embedded-face"
-title = "Adventure"
-press = "bare story file, told it is a Macintosh"
-media = "stories/advent.z6"
+id = "shogun-macintosh"
+title = "James Clavell's Shogun"
+press = "Macintosh release volume (.toast, HFS)"
+media = "stories/Shogun.toast"
 caption = """
-A Macintosh cell with no Macintosh disk behind it. The 7x15 cell is the machine's \
-own, but the face Infocom drew it with lives on media nobody is obliged to have — \
-so lanthorn falls back to X11 misc-fixed 7x14, which is public domain and, unlike \
-the built-in VGA face, is genuinely SEVEN pixels wide. That last part is the whole \
-point: the VGA face is drawn for an eight-pixel advance and inks 76 of its 94 \
-printable glyphs out to column 6, so a 7-wide cell drops the one column that was \
-holding the letters apart."""
-# The bare `cr` answers "Would you like instructions?"; the two after it clear the
-# [more] pager the credits raise, because a pager eats whatever key comes next and
-# a still of a pager is not a still of a typeface.
-keys = "wait:2500,cr,wait:1200,cr,wait:800,cr,wait:800,text:look,cr,wait:2500"
-# 82 columns is what pins the magnification: `(82-2)/40` is exactly 2, and the
-# rows only have to keep up (>= 28). The extra rows past that buy pane height for
-# free — 34 still reads `min(2.0, 2.48)` — which is what gets the intro out of the
-# pager without moving off the rung.
-size = "82x34"
+The same game as the Amiga frame further down, off the Macintosh volume it was \
+also pressed for — and the machine changes everything about how the words are \
+made. A Macintosh typesets Version 6 on a 7x15 cell and paints its text at one \
+native pixel per face pixel, so the type here is fifteen native rows however \
+dense the artwork beside it is; the Erasmus in her squall is `CPic.data`, 320x200 \
+doubled, where one art pixel is two. None of the letterforms are your terminal's: \
+they are a Macintosh bitmap face at the machine's own declared line — Geneva off \
+a System disk if you keep one under `~/.lanthorn/`, and otherwise the `FONT` \
+resource Infocom shipped inside the game's own application."""
+# `esc` for lanthorn's opening notice rather than `cr`, exactly as
+# `zork0-mac-tall` does it: a blank line typed at the parser answers `[I beg your
+# pardon?]`, and a `cr` here reaches the notice, not the game. Then the title
+# splash and the boot menu's START. NOT a `look` after them: Shogun's illustration
+# scrolls UP with the prose, so a fourth key buys two lines of text and costs most
+# of the plate — measured, and it is why this recipe is three keys where the Amiga
+# row below is four.
+keys = "wait:4000,esc,wait:1500,cr,wait:2500,cr,wait:4000"
+size = "82x28"
 backend = "kitty"
 v6_render = "raster"
-args = ["--interpreter", "3"]
-# Raster puts the whole screen in one image, so the pane title is the only text
-# left for a guard to find; `expect_art_cells` is what proves the composite
-# landed, exactly as `arthur-amiga-proportional` above does it.
-expect = ["advent"]
-expect_art_cells = 400
+# The pane title, which is what catches a medium that opened a browser or a
+# neighbouring story, plus the full-pane art floor. See the block above for why
+# neither of them can tell this frame from a title card, and what does.
+expect = ["Shogun.toast"]
+expect_art_cells = 2000
 
 # ── The frame that grows instead of letterboxing ─────────────────────────────
 #
