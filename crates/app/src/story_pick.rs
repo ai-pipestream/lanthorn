@@ -53,9 +53,20 @@ fn label_of(entry: &StoryEntry, name: &str) -> String {
 }
 
 /// The noun the error text calls what was searched.
+///
+/// A `DiskSet` of one zip is not a disk (SQ-1098) — the variant means "the
+/// stories this argument offers", and since a zip holding two games became one
+/// of them the noun has to be read off the members rather than off the variant.
+/// The four-byte sniff runs only on the refusal path, where a message that
+/// calls a download a disk is the whole of what is being fixed.
 fn subject_of(source: Option<&StorySource>) -> &'static str {
     match source {
         Some(StorySource::Library(_)) => "this library",
+        Some(StorySource::DiskSet { members, .. })
+            if !members.is_empty() && members.iter().all(|m| crate::hints::is_zip(m)) =>
+        {
+            "this archive"
+        }
         Some(StorySource::DiskSet { .. }) => "this disk",
         // No source at all: the launch argument is one story file, and the only
         // list there is is the one story it holds.

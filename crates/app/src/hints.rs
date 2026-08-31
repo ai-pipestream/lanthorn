@@ -775,10 +775,11 @@ fn mount_disk(
 /// a plain file, and which kind, so callers can name the container the story
 /// came off (SQ-0737).
 ///
-/// `want` names which story to take off a disk image that holds several
-/// (SQ-0859), by the name [`mounted_stories`] listed it under. `None` is the
-/// format's own tiebreak — what a bare path has always opened, and what every
-/// single-story disk means whatever is passed.
+/// `want` names which story to take out of a CONTAINER that holds several — a
+/// disk image (SQ-0859) or a zip (SQ-1098) — by the name [`mounted_stories`] or
+/// [`zipped_stories`] listed it under. `None` is the container's own tiebreak:
+/// what a bare path has always opened, and what every single-story disk and
+/// single-story archive means whatever is passed.
 fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Option<DiskImage>)> {
     let raw = std::fs::read(path)?;
     // An original release floppy, whichever machine pressed it (SQ-0719,
@@ -841,9 +842,20 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
         // archive is that, and it is a zip too — see `crate::archive`). So it is
         // opened the way a release floppy is: by asking what is INSIDE each
         // entry, not what its name claims. SQ-1085.
-        let scan = first_zip_story(path)?;
+        // A named entry is the browser's row (SQ-1098), exactly as it is on a
+        // disk image twenty lines above: the picker listed every story in the
+        // archive and this is the one the player chose.
+        let scan = zip_story(path, want)?;
         return match scan.story {
             Some((_name, bytes)) => Ok((bytes, None)),
+            None if want.is_some() => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "no story named '{}' in the zip {}",
+                    want.unwrap_or_default(),
+                    path.display(),
+                ),
+            )),
             None => {
                 // SQ-1096: the loader still knows exactly four kinds of story
                 // and still classifies by content — but "none of them" is a
@@ -977,9 +989,11 @@ fn for_each_zip_entry(
     Ok(examined)
 }
 
-/// The first entry of the ZIP at `path` whose CONTENT is a story lanthorn can
-/// run, with the name the archive stores it under — and how many entries were
-/// read looking for it (SQ-1085).
+/// The entry of the ZIP at `path` whose CONTENT is a story lanthorn can run,
+/// with the name the archive stores it under — and how many entries were read
+/// looking for it (SQ-1085). `want` names WHICH entry (SQ-1098); without one it
+/// is the first story in archive order, which is what a bare path has always
+/// opened.
 ///
 /// **Classified by content, exactly as a release floppy's files are.** The zip
 /// branch used to name three extensions, so `.z4`, `.z6`, `.z7`, `.ulx`,
@@ -987,17 +1001,64 @@ fn for_each_zip_entry(
 /// opening the very same file loose worked — and the one format whose whole
 /// point is that it ships artwork, Version 6, was the one a zip could not carry.
 /// [`extract_story`] already knows what a story is and says so for every engine;
-/// asking it is both broader and stricter than any list of spellings.
-fn first_zip_story(path: &Path) -> io::Result<ZipScan> {
+/// asking it is both broader and stricter than any list of spellings. That is
+/// still true of a NAMED entry: the name says which one, never what it holds.
+///
+/// A named entry is looked up by that name and **not** quietly replaced by the
+/// first story if it has gone, for the same reason the disk-image branch
+/// refuses: an archive edited between the scan and the launch must say so
+/// rather than open a different game. The scan stops at the matching name
+/// whether or not its content turned out to be a story, so `story: None` with a
+/// `want` in hand means "that name is not a game", never "keep looking".
+fn zip_story(path: &Path, want: Option<&str>) -> io::Result<ZipScan> {
     let mut story: Option<(String, Vec<u8>)> = None;
-    let examined = for_each_zip_entry(path, |name, bytes| match extract_story(bytes.clone()) {
-        Ok(_) => {
-            story = Some((name.to_string(), bytes));
-            true
-        }
-        Err(_) => false,
+    let examined = for_each_zip_entry(path, |name, bytes| match want {
+        Some(want) if !(name == want || name.eq_ignore_ascii_case(want)) => false,
+        // Classified by CONTENT even when it was asked for by name, exactly as
+        // the unnamed scan is: the name is which entry, never what it holds.
+        _ => match extract_story(bytes.clone()) {
+            Ok(_) => {
+                story = Some((name.to_string(), bytes));
+                true
+            }
+            // A named miss stops here with nothing; an unnamed one carries on.
+            Err(_) => want.is_some(),
+        },
     })?;
     Ok(ZipScan { story, examined })
+}
+
+/// Every story a ZIP holds, in archive order — the name each entry is stored
+/// under and its bytes — or `None` when `path` is not a zip, will not open, or
+/// holds no story at all (SQ-1098).
+///
+/// The zip counterpart of [`mounted_stories`], and the enumeration the picker
+/// lists one row per. SQ-1085 made a zip a volume — entries classified by
+/// content, so it carries any format lanthorn runs — but stopped at the FIRST
+/// story, so an archive holding two games played one of them and there was no
+/// way to reach the other however long you looked at the list.
+///
+/// **Classified by [`extract_story`], the same question the single-story scan
+/// asks**, so what the browser offers and what a launch opens cannot disagree
+/// about what a story is. A resource-only `Journey.blb` beside the game is not
+/// one and does not become a row.
+///
+/// Costs the whole archive rather than stopping at the first story, bounded by
+/// the same [`MAX_ZIP_SCAN`] budget — which is what an ordinary download of a
+/// game and its Blorb costs anyway, because the Blorb is read either way.
+pub fn zipped_stories(path: &Path) -> Option<Vec<(String, Vec<u8>)>> {
+    if !is_zip(path) {
+        return None;
+    }
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    for_each_zip_entry(path, |name, bytes| {
+        if extract_story(bytes.clone()).is_ok() {
+            out.push((name.to_string(), bytes));
+        }
+        false
+    })
+    .ok()?;
+    (!out.is_empty()).then_some(out)
 }
 
 /// What one scan of a ZIP for a story found, and how hard it looked.
@@ -1151,12 +1212,13 @@ pub fn load_mounted_story(path: &Path) -> io::Result<(LoadedStory, Option<DiskIm
     load_mounted_story_from(path, None)
 }
 
-/// [`load_mounted_story`] for one named story off a disk image that holds
-/// several (SQ-0859) — the browser row's own game, rather than the format's
-/// tiebreak.
+/// [`load_mounted_story`] for one named story out of a container that holds
+/// several — a disk image (SQ-0859) or a zip (SQ-1098) — the browser row's own
+/// game, rather than the container's tiebreak.
 ///
-/// `None` is exactly [`load_mounted_story`], so every loose file, every ZIP and
-/// every single-story floppy takes the byte-for-byte path it always did.
+/// `None` is exactly [`load_mounted_story`], so every loose file, every
+/// single-story archive and every single-story floppy takes the byte-for-byte
+/// path it always did.
 pub fn load_mounted_story_from(
     path: &Path,
     disk_entry: Option<&str>,

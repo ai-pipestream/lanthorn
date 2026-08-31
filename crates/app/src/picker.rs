@@ -149,10 +149,19 @@ impl StoryEntry {
     }
 
     /// This story's per-game directory token — its build when it came off a disk
-    /// image, its basename when it is a loose file (SQ-0850). Free: the scan
-    /// already read the header.
+    /// image, its ENTRY's basename when it came out of a zip (SQ-1098), and its
+    /// own basename when it is a loose file (SQ-0850). Free: the scan already
+    /// read the header.
+    ///
+    /// **The one place a row's key is worked out.** Three call sites used to
+    /// reassemble it from `path` and `disk_build()` alone, which is how the zip
+    /// entry went missing from two of them and not the third.
     pub fn story_key(&self) -> String {
-        crate::storage::story_key_for(&self.path, self.meta.disk_build().as_ref())
+        crate::storage::story_key_for(crate::storage::StoryOrigin {
+            path: &self.path,
+            entry: self.meta.disk_entry.as_deref(),
+            build: self.meta.disk_build().as_ref(),
+        })
     }
 
     /// Where this story's saves, sidecars and fetched metadata live.
@@ -377,10 +386,7 @@ pub fn resolve_aux(
         Some((b, src)) if src != entry.path => Some((src, chunks_of(&b))),
         _ => None,
     };
-    let game_dir = crate::storage::game_dir(
-        data_base,
-        &crate::storage::story_key_for(&entry.path, entry.meta.disk_build().as_ref()),
-    );
+    let game_dir = entry.game_dir(data_base);
     let saves = crate::persist_files::list_saves(&game_dir);
     let hints_available = hint_index.get(&entry.meta.ifid).is_some();
     let qzl_saves = crate::persist_files::list_qzl(&game_dir);
@@ -1022,12 +1028,21 @@ pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
 /// Beyond Zork keeps its row regardless: it is the one game the reorganisation
 /// missed, and `PC/DATA/BEYONDZO.DAT` is the only copy of it on the disc.
 fn dedupe_within_a_volume(out: &mut Vec<StoryEntry>) {
-    type Key = (PathBuf, Option<crate::hints::DiskImage>, String);
+    type Key = (PathBuf, crate::hints::DiskImage, String);
     let key = |e: &StoryEntry| -> Option<Key> {
         // Only a row that came off a disk image can be a duplicate of another
         // row off the same one; a loose story file has no volume to share.
+        //
+        // **Both halves are asked** (SQ-1098). `disk_entry.is_some()` used to
+        // IMPLY `disk_image.is_some()`, so asking one was asking both — until a
+        // zip's entries became rows, which carry an entry name and no medium.
+        // The fold's whole justification is archaeological and belongs to
+        // pressed discs: two copies on a compilation are byte-identical, where
+        // a `game.z5` and a `game.zblorb` packed in one download are not, and
+        // already have two save directories under the basename rule. Folding
+        // them would drop the one that ships the artwork.
         e.meta.disk_entry.as_ref()?;
-        Some((e.path.clone(), e.meta.disk_image, e.meta.ifid.clone()))
+        Some((e.path.clone(), e.meta.disk_image?, e.meta.ifid.clone()))
     };
     let depth = |e: &StoryEntry| {
         e.meta.disk_entry.as_deref().map_or(0, |n| n.matches('/').count())
@@ -1217,8 +1232,14 @@ impl StorySource {
 /// story file reads its bytes, fails `DiskImage::detect` and costs nothing more.
 /// It answers the question [`StorySource::of`] used to answer with "is it a
 /// volume of a set?", which was a different question (SQ-0962).
+///
+/// A **zip** is asked the same question (SQ-1098) — it is a container of
+/// stories exactly as a compilation disc is, and a download of two games was
+/// opening one of them silently. The four-byte magic check declines every
+/// ordinary story file before anything is inflated.
 fn holds_several_games(path: &Path) -> bool {
     crate::hints::mounted_stories(path).is_some_and(|(_, stories)| stories.len() >= 2)
+        || crate::hints::zipped_stories(path).is_some_and(|stories| stories.len() >= 2)
 }
 
 /// Second pass over a freshly-scanned list: attach each detected InvisiClues/
@@ -1329,37 +1350,58 @@ pub fn resolve_entry_from(
 
 /// **Every** launchable story `path` offers, as its own row.
 ///
-/// One for an ordinary story file, and one *per game* for a compilation disk —
-/// the fix for the browser listing `INFOCOM6` once and opening whichever story
-/// the format's tiebreak preferred, leaving the other four unreachable however
-/// long you looked at the list (SQ-0859).
+/// One for an ordinary story file, and one *per game* for a container that
+/// holds several — the fix for the browser listing `INFOCOM6` once and opening
+/// whichever story the format's tiebreak preferred, leaving the other four
+/// unreachable however long you looked at the list (SQ-0859), and for the same
+/// thing happening to a zip of two games (SQ-1098).
 ///
 /// The image is mounted **once** and every row is built from that one mount, so
-/// a six-game disk costs the read it always cost. A disk holding one story takes
-/// the plain path with no selector at all: nothing about a single-game floppy
-/// changes, which is most of the corpus.
+/// a six-game disk costs the read it always cost. A container holding one story
+/// takes the plain path with no selector at all: nothing about a single-game
+/// floppy or a single-game download changes, which is most of the corpus.
 pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
-    let Some((_, stories)) = crate::hints::mounted_stories(path) else {
-        return resolve_entry(path, data_base).into_iter().collect();
-    };
-    if stories.len() < 2 {
+    if let Some((_, stories)) = crate::hints::mounted_stories(path) {
+        if stories.len() >= 2 {
+            let mut rows: Vec<StoryEntry> = stories
+                .into_iter()
+                .filter_map(|(story, image)| {
+                    let loaded = crate::hints::extract_story(story.bytes).ok()?;
+                    // `image` is THIS story's, not the volume's: on a hybrid
+                    // disc the two differ, and the row's badge and interpreter
+                    // both follow from it (SQ-0876).
+                    entry_from_loaded(path, Some(&story.name), loaded, Some(image), data_base)
+                })
+                .collect();
+            // One build per machine, once — the same fold the directory scan
+            // applies, applied here because this door builds a volume's rows on
+            // its own (SQ-0878).
+            dedupe_within_a_volume(&mut rows);
+            return rows;
+        }
         return resolve_entry(path, data_base).into_iter().collect();
     }
-    let mut rows: Vec<StoryEntry> = stories
-        .into_iter()
-        .filter_map(|(story, image)| {
-            let loaded = crate::hints::extract_story(story.bytes).ok()?;
-            // `image` is THIS story's, not the volume's: on a hybrid disc the
-            // two differ, and the row's badge and interpreter both follow from
-            // it (SQ-0876).
-            entry_from_loaded(path, Some(&story.name), loaded, Some(image), data_base)
-        })
-        .collect();
-    // One build per machine, once — the same fold the directory scan applies,
-    // applied here because this door builds a volume's rows on its own
-    // (SQ-0878).
-    dedupe_within_a_volume(&mut rows);
-    rows
+    // A zip is a container too (SQ-1098). Its entries carry no `DiskImage`, so
+    // every row's save key is its ENTRY's basename — which is what had to be
+    // settled before this line could exist at all, because two rows keyed on
+    // the archive's own name would have shared one save directory.
+    //
+    // Deliberately NOT deduped the way a volume is: two entries of one archive
+    // are somebody's own filing, and `game.z5` and `game.zblorb` are already
+    // two save directories by the basename rule, so folding them would hide a
+    // row whose saves are its own.
+    if let Some(stories) = crate::hints::zipped_stories(path) {
+        if stories.len() >= 2 {
+            return stories
+                .into_iter()
+                .filter_map(|(name, bytes)| {
+                    let loaded = crate::hints::extract_story(bytes).ok()?;
+                    entry_from_loaded(path, Some(&name), loaded, None, data_base)
+                })
+                .collect();
+        }
+    }
+    resolve_entry(path, data_base).into_iter().collect()
 }
 
 /// The body both doors share: build one row out of a story that is already
@@ -1430,7 +1472,14 @@ fn entry_from_loaded(
     let disk_build = disk_image.and_then(|kind| crate::storage::DiskBuild::of(&bytes, kind));
     let game_dir = crate::storage::game_dir(
         data_base,
-        &crate::storage::story_key_for(path, disk_build.as_ref()),
+        &crate::storage::story_key_for(crate::storage::StoryOrigin {
+            path,
+            // The row does not exist yet, so this is the one site that cannot
+            // ask `StoryEntry::story_key`. It states all three facts anyway,
+            // and the struct is what makes leaving one out a compile error.
+            entry: disk_entry,
+            build: disk_build.as_ref(),
+        }),
     );
     let fetched = crate::story_info::load(&game_dir, &ifid).and_then(|info| info.fetched);
     // Scott stories have no IFID-keyed table; resolve their title (and, for the
@@ -1820,10 +1869,7 @@ pub fn compute_row_badges(
     hint_index: &hints::HintIndex,
 ) -> RowBadges {
     let ifid = &entry.meta.ifid;
-    let game_dir = crate::storage::game_dir(
-        data_base,
-        &crate::storage::story_key_for(&entry.path, entry.meta.disk_build().as_ref()),
-    );
+    let game_dir = entry.game_dir(data_base);
     let hint = if hint_index.get(ifid).is_some() || entry.hint_sidecar.is_some() {
         HintBadge::Present
     } else {

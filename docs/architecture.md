@@ -55,10 +55,17 @@ every exit *including* a panic), and `--help`/`--version`.
 
 It also owns the **save-directory key** — and that one is shared with `app`, which
 is otherwise no CLI at all. The reason is the same drift argument one layer up:
-the rule now has a case in it (a story mounted out of a disk image keys on its
+the rule now has cases in it (a story mounted out of a disk image keys on its
 release and serial, not on the image's filename, because one compilation carries
-six games) and a second copy of a rule with a case in it is a second answer
-waiting to happen. `app::storage` re-exports it rather than restating it.
+six games; a story out of a zip keys on its entry's basename, because a zip has
+no release to be keyed by and one archive can carry two games just as easily) and
+a second copy of a rule with a case in it is a second answer waiting to happen.
+`app::storage` re-exports it rather than restating it. SQ-1098 turned the rule's
+inputs into one value, `storage::StoryOrigin` — the path, the entry inside it and
+the build — because they were two positional arguments and the third was simply
+missing, which is the refactoring policy's shape exactly: five call sites
+reassembling one decision, and the omission produced a *plausible* key rather
+than an error.
 
 It owns the **pin placement** for the same reason, and that one is worth setting
 out because the reasoning is not guessable from the code (SQ-0909). Both `zvm-cli`

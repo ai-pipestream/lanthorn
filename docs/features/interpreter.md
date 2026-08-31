@@ -774,6 +774,21 @@ before, so nothing you already have moves. `zvm-cli` and the TUI read one helper
 for this, which is why `--story 3` off a compilation and the same game opened in
 lanthorn find each other's saves.
 
+**A zip is the third case, and it had to be settled before a zip could offer a
+choice at all** (SQ-1098). A story taken out of an archive has no release-and-
+serial identity to be keyed by — that key is defined in terms of the disk format
+a story was pressed onto, and a zip is somebody's download rather than a press —
+so both games in a two-game archive fell through to the zip's own filename and
+would have shared one directory. They are keyed by the **entry's own basename**
+instead: `if-archive-pack.zip` holding `amber.z5` and `beacon.z5` names
+`amber.z5.save` and `beacon.z5.save`, which is exactly what those two games key
+on when they are loose. That is why lanthorn shipped a zip that could carry two
+games *before* it would list them: enumerating first would have traded a visible
+limitation — one game reachable — for an invisible one, two games overwriting
+each other's saves. All three rules now read one value, `StoryOrigin`, so a
+caller holding two of the three facts gets a compile error instead of a
+plausible-looking key.
+
 And the floppy now tells the CLI which *machine* it is, not merely which story.
 A disk format is evidence, and evidence that only reaches one front-end is half
 an answer: for a while the TUI took an `.adf` for an Amiga while `zvm-cli`
