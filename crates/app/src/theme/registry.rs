@@ -68,11 +68,24 @@ pub enum Kind {
 pub struct Delta {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub reversed: bool,
-    pub dim: bool,
+    // ── Modifiers are TRI-STATE, and that is the whole point of the Option ────
+    //
+    // `None` inherits the parent's, `Some(true)` adds, `Some(false)` REMOVES.
+    // They were plain `bool` until SQ-1171, which composed additively and so
+    // gave a child no way to shed a modifier its parent set: `bold = false` in
+    // `style.toml` was a silent no-op rather than an eraser, and a row could
+    // only ever accumulate weight as it inherited.
+    //
+    // `RawDelta` has always parsed these as `Option<bool>` — the TOML layer
+    // could tell "absent" from "false" the whole time — and the distinction was
+    // thrown away by an `unwrap_or(false)` when lowering into this type. So this
+    // is less a new feature than the parser's own answer stopping being
+    // discarded on the way in.
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underline: Option<bool>,
+    pub reversed: Option<bool>,
+    pub dim: Option<bool>,
     pub glyph: Option<String>,
     pub border: Option<crate::render::paneframe::BorderStyle>,
     /// Per-side border-style overrides (SQ-0641): a set side wins over `border`
@@ -94,11 +107,11 @@ impl Delta {
     pub const EMPTY: Delta = Delta {
         fg: None,
         bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-        reversed: false,
-        dim: false,
+        bold: None,
+        italic: None,
+        underline: None,
+        reversed: None,
+        dim: None,
         glyph: None,
         border: None,
         border_top: None,
@@ -150,8 +163,21 @@ fn row(
 }
 
 /// A delta carrying only modifier flags (colours/glyph inherited from parent).
+///
+/// `false` here means "not mentioned", NOT "remove it" — every existing call site
+/// passes `false` for the modifiers it simply does not care about, and reading
+/// those as erasures would have each row strip its parent's weight. A row that
+/// genuinely wants to shed one spells `Some(false)` in a `Delta` literal, which
+/// is rare enough to be worth seeing at the site.
 fn mods(bold: bool, italic: bool, underline: bool, reversed: bool) -> Delta {
-    Delta { bold, italic, underline, reversed, ..Delta::EMPTY }
+    let set = |b: bool| if b { Some(true) } else { None };
+    Delta {
+        bold: set(bold),
+        italic: set(italic),
+        underline: set(underline),
+        reversed: set(reversed),
+        ..Delta::EMPTY
+    }
 }
 
 /// A delta setting only a foreground colour.
@@ -257,7 +283,7 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // `:active` = single + bold (today's cyan+bold).
     row("panel.border", Section::Panel, Kind::BorderGlyphs, Some("line"), border("single")),
     row("panel.border:active", Section::Panel, Kind::BorderGlyphs, Some("line"),
-        Delta { border: Some(crate::render::paneframe::BorderStyle::Single), bold: true, ..Delta::EMPTY }),
+        Delta { border: Some(crate::render::paneframe::BorderStyle::Single), bold: Some(true), ..Delta::EMPTY }),
     row("panel.title", Section::Panel, Kind::Style, Some("heading"), Delta::EMPTY),
     row("panel.tab", Section::Panel, Kind::Style, Some("muted"), Delta::EMPTY),
     row("panel.tab:active", Section::Panel, Kind::Style, Some("accent"), mods(true, false, false, false)),
@@ -359,16 +385,16 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("debug.disasm_executed", Section::Debug, Kind::Style, Some("accent"), Delta { fg: Some(Color::Blue), glyph: Some("|".to_string()), ..Delta::EMPTY }),
     row("debug.disasm_rd", Section::Debug, Kind::Style, Some("text"), Delta { fg: Some(Color::Yellow), glyph: Some(" ".to_string()), ..Delta::EMPTY }),
     row("debug.disasm_soft", Section::Debug, Kind::Style, Some("muted"), Delta { fg: Some(Color::Red), glyph: Some(" ".to_string()), ..Delta::EMPTY }),
-    row("debug.disasm_data", Section::Debug, Kind::Style, Some("muted"), Delta { italic: true, glyph: Some(" ".to_string()), ..Delta::EMPTY }),
+    row("debug.disasm_data", Section::Debug, Kind::Style, Some("muted"), Delta { italic: Some(true), glyph: Some(" ".to_string()), ..Delta::EMPTY }),
     // The Memory view's decoded-Z-text column (SQ-0448/SQ-0969): story text, not
     // a disassembly tier, so it takes `accent` and italics to read as a gloss on
     // the dump rather than as more of it.
-    row("debug.zstring", Section::Debug, Kind::Style, Some("accent"), Delta { italic: true, ..Delta::EMPTY }),
+    row("debug.zstring", Section::Debug, Kind::Style, Some("accent"), Delta { italic: Some(true), ..Delta::EMPTY }),
     // ── §2c dialog.* (modal surface: background + own frame + title/buttons/shadow) ──
     row("dialog.background", Section::Dialog, Kind::Style, Some("chrome"), Delta::EMPTY),
     // Modal frame: its own border (was panel.border:active); modals are always
     // "active", so single + bold reproduces today's cyan+bold dialog frame.
-    row("dialog.border", Section::Dialog, Kind::BorderGlyphs, Some("line"), Delta { border: Some(crate::render::paneframe::BorderStyle::Single), bold: true, ..Delta::EMPTY }),
+    row("dialog.border", Section::Dialog, Kind::BorderGlyphs, Some("line"), Delta { border: Some(crate::render::paneframe::BorderStyle::Single), bold: Some(true), ..Delta::EMPTY }),
     row("dialog.title", Section::Dialog, Kind::Style, Some("accent"), Delta::EMPTY),
     row("dialog.button", Section::Dialog, Kind::Style, Some("chrome"), mods(false, false, false, true)),
     row("dialog.button:active", Section::Dialog, Kind::Style, Some("accent"), mods(false, false, false, true)),
@@ -390,10 +416,19 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // a tip now reads as the same "this one" surface the menus use, and retuning the
     // highlight moves the tooltip with it instead of leaving a warm-dark card behind.
     //
-    // IT INHERITS THE BOLD TOO, and that is a limitation rather than a preference:
-    // `apply_style` composes modifiers ADDITIVELY, so a Delta cannot clear one a
-    // parent set — `bold: false` is a no-op, not an eraser. Dropping the weight here
-    // needs a modifier-clearing channel in `Delta`, not an edit to this row.
+    // IT TAKES THE COLOURS AND NOT THE WEIGHT. The highlight is bold, but that bold
+    // is not a decision anyone made: it predates the registry, inherited verbatim
+    // from six hand-written `Style::new().fg(Black).bg(Cyan).add_modifier(BOLD)`
+    // literals that SQ-0643 consolidated into one row, preserving appearance rather
+    // than re-deciding it. On a single selected ROW it reads as "this one" and is
+    // harmless; on a multi-line tooltip CARD it is a bold paragraph, which is a
+    // different thing. So this row spells `bold: Some(false)` — the tri-state's
+    // erase arm (SQ-1171), which did not exist when this parent was chosen.
+    //
+    // What IS load-bearing next door, and must not be swept up with the weight: the
+    // highlight is a fg/bg SWAP and not `REVERSED`, because the command band's hover
+    // style is `REVERSED` and both can be on screen at once
+    // (`hover_style_is_reversed_and_distinct_from_the_column_selected_style`).
     //
     // WHY NO EXPLICIT fg/bg: a row whose default Delta pins colours cannot be
     // re-rooted from `style.toml` at all. `resolve_row` applies this Delta on top of
@@ -402,7 +437,13 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // no-op. That is what the old literal pair did to
     // `background = { parent = "dialog.list_selected" }`. Inheriting instead of
     // pinning is what makes the line in `style.toml` actually work.
-    row("tooltip.background", Section::Tooltip, Kind::Style, Some("dialog.list_selected"), Delta::EMPTY),
+    row(
+        "tooltip.background",
+        Section::Tooltip,
+        Kind::Style,
+        Some("dialog.list_selected"),
+        Delta { bold: Some(false), ..Delta::EMPTY },
+    ),
     // Borderless by default (style = "none"); set a style to frame the tooltip.
     row("tooltip.border", Section::Tooltip, Kind::BorderGlyphs, Some("line"), border("none")),
     // ── §2 elements (expansion, Task 5.0): every remaining ColorScheme field ──
@@ -492,14 +533,14 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // Replay, file picker/browser, Config, and the verb dock): one family
     // instead of six one-off `Style::new()` literals.
     row("dialog.list_selected", Section::Dialog, Kind::Style, None,
-        Delta { fg: Some(Color::Black), bg: Some(Color::Cyan), bold: true, ..Delta::EMPTY }),
+        Delta { fg: Some(Color::Black), bg: Some(Color::Cyan), bold: Some(true), ..Delta::EMPTY }),
     // Dim hint/footer text on a dialog surface (key-hint footers, the empty-list
     // hint, a turn's "(no output)" line). `muted` already resolves to dark-gray.
     row("dialog.list_footer", Section::Dialog, Kind::Style, Some("muted"), Delta::EMPTY),
     // The Settings screen's underlined column-header row: plain text, underlined.
     row("dialog.list_header", Section::Dialog, Kind::Style, Some("text"), mods(false, false, true, false)),
     // The hints panel's dim "this game has its own hints" suggestion line.
-    row("dialog.hint_suggestion", Section::Dialog, Kind::Style, Some("alert"), Delta { dim: true, ..Delta::EMPTY }),
+    row("dialog.hint_suggestion", Section::Dialog, Kind::Style, Some("alert"), Delta { dim: Some(true), ..Delta::EMPTY }),
     // The composed-input preview line shown by list dialogs ("Input: <text>_").
     row("dialog.input_preview", Section::Dialog, Kind::Style, Some("alert"), Delta::EMPTY),
     // SQ-0789: the launch-options dialog's caveat lines — what a chosen art

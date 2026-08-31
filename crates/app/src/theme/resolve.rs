@@ -366,21 +366,27 @@ fn apply_style(base: Style, d: &Delta) -> Style {
     if let Some(bg) = d.bg {
         s = s.bg(bg);
     }
+    // Modifiers are tri-state (SQ-1171): `None` inherits, `Some(true)` adds,
+    // `Some(false)` REMOVES. Add and remove are accumulated separately and the
+    // removal is applied last, so a single Delta that both sets and clears is
+    // unambiguous rather than order-dependent.
     let mut m = Modifier::empty();
-    if d.bold {
-        m |= Modifier::BOLD;
+    let mut clear = Modifier::empty();
+    for (flag, bit) in [
+        (d.bold, Modifier::BOLD),
+        (d.italic, Modifier::ITALIC),
+        (d.underline, Modifier::UNDERLINED),
+        (d.reversed, Modifier::REVERSED),
+        (d.dim, Modifier::DIM),
+    ] {
+        match flag {
+            Some(true) => m |= bit,
+            Some(false) => clear |= bit,
+            None => {}
+        }
     }
-    if d.italic {
-        m |= Modifier::ITALIC;
-    }
-    if d.underline {
-        m |= Modifier::UNDERLINED;
-    }
-    if d.reversed {
-        m |= Modifier::REVERSED;
-    }
-    if d.dim {
-        m |= Modifier::DIM;
+    if !clear.is_empty() {
+        s = s.remove_modifier(clear);
     }
     if !m.is_empty() {
         s = s.add_modifier(m);
@@ -670,11 +676,17 @@ fn lower_decls(
         let delta = Delta {
             fg: raw.fg.as_deref().and_then(|s| parse_color_value(s, scheme)),
             bg: raw.bg.as_deref().and_then(|s| parse_color_value(s, scheme)),
-            bold: raw.bold.unwrap_or(false),
-            italic: raw.italic.unwrap_or(false),
-            underline: raw.underline.unwrap_or(false),
-            reversed: raw.reversed.unwrap_or(false),
-            dim: raw.dim.unwrap_or(false),
+            // SQ-1171: carried straight through, not flattened. `RawDelta` has
+            // always parsed these as `Option<bool>` — the TOML layer could tell
+            // an ABSENT key from an explicit `false` the whole time — and an
+            // `unwrap_or(false)` here threw that answer away, which is why
+            // `bold = false` in a user's style.toml was a silent no-op instead
+            // of switching the weight off.
+            bold: raw.bold,
+            italic: raw.italic,
+            underline: raw.underline,
+            reversed: raw.reversed,
+            dim: raw.dim,
             // SQ-0440: glyph / border-style / parent overrides flow through (the
             // registry `Delta` owns these channels). There is no glyph-SLOT channel:
             // a `glyphs = { … }` sub-map reached no renderer, so it is gone (SQ-0560).
@@ -1125,6 +1137,67 @@ mod tests {
         assert_eq!((tip.fg, tip.bg), (menu.fg, menu.bg), "the tip wears the highlight's pair");
         assert!(tip.bg.is_some(), "a tip with no background cannot be a surface");
         assert_ne!(tip.fg, tip.bg, "and its ink must not be its own background");
+    }
+
+    /// …the COLOURS, not the weight (SQ-1171).
+    ///
+    /// The highlight's bold predates the registry — six hand-written
+    /// `.add_modifier(BOLD)` literals that SQ-0643 consolidated verbatim. On one
+    /// selected row it reads as "this one"; on a multi-line tooltip card it is a
+    /// bold paragraph. The tip sheds it through the tri-state's erase arm.
+    #[test]
+    fn the_tooltip_takes_the_highlights_colours_but_not_its_weight() {
+        let theme = resolve(
+            &Roles::terminal_default(),
+            &Decls::new(),
+            &Decls::new(),
+            &Decls::new(),
+        );
+        assert!(
+            theme.get("dialog.list_selected").style.add_modifier.contains(Modifier::BOLD),
+            "sanity: the menu highlight is still bold — otherwise this proves nothing",
+        );
+        assert!(
+            !theme.get("tooltip.background").style.add_modifier.contains(Modifier::BOLD),
+            "the tip must not inherit the highlight's weight",
+        );
+    }
+
+    /// A modifier can be REMOVED, not merely added (SQ-1171).
+    ///
+    /// `apply_style` composed additively, so a child could only ever accumulate
+    /// weight and `bold = false` in a user's style.toml was a silent no-op. The
+    /// information was never missing — `RawDelta` has always parsed these as
+    /// `Option<bool>` — it was discarded by an `unwrap_or(false)` on the way in.
+    #[test]
+    fn an_explicit_false_switches_a_modifier_off_where_absence_leaves_it_alone() {
+        let scheme = terminal_default_scheme();
+        // `heading` is the role that carries BOLD, so panel.title inherits it.
+        let inherited = resolve_theme(&scheme, &super::super::toml_schema::parse("").unwrap());
+        assert!(
+            inherited.get("panel.title").style.add_modifier.contains(Modifier::BOLD),
+            "sanity: panel.title inherits heading's bold by default",
+        );
+
+        let off = resolve_theme(
+            &scheme,
+            &super::super::toml_schema::parse("[panel]\ntitle = { bold = false }\n").unwrap(),
+        );
+        assert!(
+            !off.get("panel.title").style.add_modifier.contains(Modifier::BOLD),
+            "`bold = false` must switch the weight off, not be ignored",
+        );
+
+        // And an ABSENT key still inherits — the two must not collapse together,
+        // which is the whole reason the channel is tri-state rather than a bool.
+        let untouched = resolve_theme(
+            &scheme,
+            &super::super::toml_schema::parse("[panel]\ntitle = { italic = true }\n").unwrap(),
+        );
+        assert!(
+            untouched.get("panel.title").style.add_modifier.contains(Modifier::BOLD),
+            "saying nothing about bold must leave the parent's bold alone",
+        );
     }
 
     // ── Task 0.3: layered decls + per-selector provenance ────────────────────

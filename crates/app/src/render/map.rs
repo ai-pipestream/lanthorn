@@ -2797,11 +2797,17 @@ mod tests {
             decls.insert(sel.to_string(), crate::theme::registry::Delta {
                 fg: style.fg,
                 bg: style.bg,
-                bold: m.contains(Modifier::BOLD),
-                italic: m.contains(Modifier::ITALIC),
-                underline: m.contains(Modifier::UNDERLINED),
-                reversed: m.contains(Modifier::REVERSED),
-                dim: m.contains(Modifier::DIM),
+                // `Some` either way, never `None`: this helper injects a COMPLETE
+                // style, so a modifier the caller left off must be explicitly off
+                // rather than inherited from the parent (SQ-1171's tri-state). The
+                // old plain `bool` could not say that — an absent modifier lowered
+                // to a no-op, so a test injecting a non-bold style over a bold
+                // parent silently got bold back.
+                bold: Some(m.contains(Modifier::BOLD)),
+                italic: Some(m.contains(Modifier::ITALIC)),
+                underline: Some(m.contains(Modifier::UNDERLINED)),
+                reversed: Some(m.contains(Modifier::REVERSED)),
+                dim: Some(m.contains(Modifier::DIM)),
                 ..crate::theme::registry::Delta::EMPTY
             });
         }

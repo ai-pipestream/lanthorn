@@ -236,20 +236,21 @@ fn row_fields(row: &RegRow) -> Vec<String> {
     if let Some(bg) = d.bg {
         fields.push(format!("bg = \"{}\"", color_to_str(bg)));
     }
-    if d.bold {
-        fields.push("bold = true".to_string());
-    }
-    if d.italic {
-        fields.push("italic = true".to_string());
-    }
-    if d.underline {
-        fields.push("underline = true".to_string());
-    }
-    if d.reversed {
-        fields.push("reversed = true".to_string());
-    }
-    if d.dim {
-        fields.push("dim = true".to_string());
+    // Tri-state (SQ-1171): an unset modifier is not mentioned, and BOTH `true` and
+    // `false` are written out. `false` is a real default now — it removes a modifier
+    // the parent set — so omitting it would document a row as inheriting a weight it
+    // actually sheds, and uncommenting the line would then change the appearance
+    // rather than restate it.
+    for (flag, key) in [
+        (d.bold, "bold"),
+        (d.italic, "italic"),
+        (d.underline, "underline"),
+        (d.reversed, "reversed"),
+        (d.dim, "dim"),
+    ] {
+        if let Some(v) = flag {
+            fields.push(format!("{key} = {v}"));
+        }
     }
     if let Some(border) = d.border {
         fields.push(format!("style = \"{}\"", crate::render::paneframe::border_style_name(border)));
