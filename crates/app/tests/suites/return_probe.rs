@@ -316,7 +316,7 @@ fn an_aborted_search_keeps_what_it_answered_and_the_next_one_resumes() {
         "north",
         Some(west),
     );
-    assert!(app::return_probe::pump_return_search(&mut p.state, &p.mapper), "one attempt went out");
+    assert!(app::return_probe::pump_return_search(&mut p.state), "one attempt went out");
     let answer = p.state.probe.settle().expect("the shadow answered it");
     assert!(app::return_probe::owns(&p.state, answer.token));
     assert!(
@@ -375,7 +375,7 @@ fn a_busy_shadow_makes_the_search_wait_rather_than_give_up() {
     let other = p.state.probe.ask(&*p.session, &["zqxwvj".to_string()]).expect("the seam is free");
     assert!(!app::return_probe::owns(&p.state, other), "and it is not ours");
     assert!(
-        !app::return_probe::pump_return_search(&mut p.state, &p.mapper),
+        !app::return_probe::pump_return_search(&mut p.state),
         "the search asked nothing while the shadow was busy"
     );
     assert!(p.state.return_search.is_some(), "and it did not give up");
@@ -385,7 +385,7 @@ fn a_busy_shadow_makes_the_search_wait_rather_than_give_up() {
     assert_eq!(a.token, other);
     assert!(!app::return_probe::owns(&p.state, a.token));
     assert!(
-        app::return_probe::pump_return_search(&mut p.state, &p.mapper),
+        app::return_probe::pump_return_search(&mut p.state),
         "with the seam free again the very next pass asks"
     );
     let found = app::return_probe::settle_return_search(&mut p.state, &mut p.mapper);
@@ -744,212 +744,4 @@ fn a_landing_on_a_known_room_is_recorded_even_when_it_is_not_the_room_asked_abou
         before,
         "no gap left to close on the return leg, so the shadow was asked nothing"
     );
-}
-
-// ── The caution the search can afford to say (SQ-1043) ──────────────────────
-
-/// Every assist line in `state`, which is where the caution lands — inline in
-/// the transcript, in the flow of play, which is also the record
-/// `export-transcript` marks with `Lanthorn: ` (SQ-1125).
-fn assists(state: &AppState) -> Vec<String> {
-    state
-        .transcript
-        .iter()
-        .zip(&state.transcript_kinds)
-        .filter(|(_, k)| **k == app::state::TranscriptKind::Assist)
-        .map(|(l, _)| l.clone())
-        .collect()
-}
-
-/// **The canonical one-way passage in the genre, on a real game.** Zork I's trap
-/// door crashes shut behind you and is barred from the other side; the Cellar has
-/// two exits that work and no way back up. So the search walks its whole list,
-/// gets OUT of the room twice over, never reaches the Living Room — and that is
-/// SQ-1043's caution, said while the player is still standing there.
-///
-/// The lamp is taken and lit first, deliberately: the Cellar is dark, and a dark
-/// room is the false positive the threshold's third leg exists to refuse. Probing
-/// it unlit would be measuring a shadow that cannot move rather than a passage
-/// that does not reciprocate — and would kill the shadow at random, since a move
-/// in the dark is a grue roll.
-///
-/// (Fixture: `zork1-r88-s840726.z3`, eleven turns in — `look`, `north`, `east`,
-/// `open window`, `enter window`, `west`, `take lamp`, `turn on lamp`, `move rug`,
-/// `open trap door`, `down`.)
-#[test]
-fn zork1_calls_the_trap_door_one_way_and_names_the_room_it_shut_behind() {
-    let Some(mut p) = Play::zork1() else { return };
-    p.state.config.guidance = true;
-    for cmd in ["north", "east", "open window", "enter window", "west"] {
-        p.turn(cmd);
-    }
-    let living = p.mapper.graph.current().expect("the Living Room");
-    assert_eq!(
-        p.mapper.graph.room(living).map(|r| r.name.as_str()),
-        Some("Living Room"),
-        "the walk really reached the room with the rug in it"
-    );
-    for cmd in ["take lamp", "turn on lamp", "move rug", "open trap door"] {
-        p.turn(cmd);
-    }
-    let before = assists(&p.state).len();
-
-    let found = p.turn("down");
-    let cellar = p.mapper.graph.current().expect("the Cellar");
-    assert_ne!(cellar, living, "the trap door was gone through");
-    assert!(found.is_none(), "and nothing leads back up: {found:?}");
-
-    let said = assists(&p.state);
-    assert_eq!(
-        said.last().map(String::as_str),
-        Some("looks one-way — no direction leads back to Living Room"),
-        "the caution, naming the room the trap door shut behind: {said:?}"
-    );
-
-    // NON-VACUITY, and the threshold's third leg on a real game: the shadow did
-    // get out of the Cellar — north and south both lead somewhere — which is what
-    // separates "one-way" from "could not move at all".
-    assert!(
-        p.state.return_search.is_none(),
-        "the search ran to the end rather than being cut short"
-    );
-
-    // …and it said nothing on any of the ten reversible moves before it. Nothing
-    // at all before this turn, and exactly one line of its own after it — the
-    // other is the once-per-session introduction, which arrives WITH the first
-    // assist and is the proof this is the first.
-    assert_eq!(before, 0, "the reversible half of the walk was silent");
-    assert_eq!(said.len(), 2, "the introduction and one caution, no more: {said:?}");
-    assert!(said[0].starts_with("Lanthorn"), "the introduction goes first: {said:?}");
-
-    // The map is untouched by the failure: no edge back, and the Cellar's real
-    // neighbours were walked into and deliberately forgotten.
-    assert!(p.edge(cellar, Direction::Up).is_none(), "no invented way back");
-    assert!(
-        !p.mapper.graph.connections().iter().any(|c| c.origin == cellar),
-        "and nothing else the shadow saw from here is on the map"
-    );
-    eprintln!(
-        "zork1 Cellar: {} command(s) total, {:?} on the worker; said {:?}",
-        p.state.probe.probes,
-        p.state.probe.spent,
-        said.last()
-    );
-}
-
-/// **And it does not cry wolf on the ordinary case.** West of House → north
-/// reaches North of House, whose way back the search finds on its third attempt —
-/// so nothing is said at all. This is the assertion that matters most: the
-/// caution is worth having only for as long as a player believes it.
-#[test]
-fn a_crossing_with_a_way_back_says_nothing() {
-    let Some(mut p) = Play::zork1() else { return };
-    p.state.config.guidance = true;
-    assert!(p.turn("north").is_some(), "the way back is found");
-    assert!(assists(&p.state).is_empty(), "and nothing is said: {:?}", assists(&p.state));
-}
-
-// ── The caution's switches (SQ-1043's follow-up) ────────────────────────────
-
-/// The eleven-turn walk that ends in the Cellar, with the lamp lit — the exact
-/// route `zork1_calls_the_trap_door_one_way_and_names_the_room_it_shut_behind`
-/// takes, and for the same reasons (the lamp because the Cellar is dark, and a
-/// dark room is what the threshold's third leg exists to refuse).
-///
-/// Spelled here rather than shared with that case: it asserts its way down the
-/// route, which is what makes IT a proof about the game, where these two cases
-/// only need to arrive.
-fn walk_through_the_trap_door(p: &mut Play) {
-    for cmd in [
-        "north",
-        "east",
-        "open window",
-        "enter window",
-        "west",
-        "take lamp",
-        "turn on lamp",
-        "move rug",
-        "open trap door",
-        "down",
-    ] {
-        p.turn(cmd);
-    }
-}
-
-/// Set the LIVE undo cap on the running Z-machine, which is what `startup.rs`
-/// does at boot from `config.undo_levels` — and the only thing the caution reads,
-/// because after a settings Save the config and the machine disagree.
-fn set_undo_cap(p: &mut Play, levels: usize) {
-    p.session
-        .as_any_mut()
-        .downcast_mut::<app::session::GameSession>()
-        .expect("zork1 runs on the Z-machine")
-        .machine
-        .undo_cap = levels;
-}
-
-/// **Undo off ⇒ the caution says nothing** (SQ-1043's first requirement, and the
-/// user's own verdict turned into a rule: a warning is worth saying only if the
-/// player can act on it). Both halves in one case, on one story, with the single
-/// bit flipped between them — the silent half proves nothing on its own, because
-/// a walk that never reached the Cellar is silent too.
-#[test]
-fn the_caution_is_silent_while_undo_is_switched_off_and_speaks_when_it_is_not() {
-    let Some(mut off) = Play::zork1() else { return };
-    off.state.config.guidance = true;
-    set_undo_cap(&mut off, 0); // `undo_levels = 0` — the documented off value
-    walk_through_the_trap_door(&mut off);
-    let cellar = off.mapper.graph.current().expect("the Cellar");
-    assert_eq!(
-        off.mapper.graph.room(cellar).map(|r| r.name.as_str()),
-        Some("Cellar"),
-        "non-vacuity: the walk really went through the trap door"
-    );
-    assert!(off.state.return_search.is_none(), "and the search ran to the end");
-    assert!(
-        assists(&off.state).is_empty(),
-        "with undo off there is nothing to act on: {:?}",
-        assists(&off.state)
-    );
-    // The MAP work is untouched — that is the half the user kept.
-    assert!(off.state.probe.probes > 0, "the shadow still walked the Cellar's exits");
-
-    let Some(mut on) = Play::zork1() else { return };
-    on.state.config.guidance = true;
-    set_undo_cap(&mut on, 16); // the shipped default
-    walk_through_the_trap_door(&mut on);
-    assert_eq!(
-        assists(&on.state).last().map(String::as_str),
-        Some("looks one-way — no direction leads back to Living Room"),
-        "all else equal, an undoable story gets the line: {:?}",
-        assists(&on.state)
-    );
-}
-
-/// **The caution's own global key** (SQ-1043's second requirement). It is a
-/// GLOBAL settings row and nothing per-game, on by default, and turning it off
-/// takes the LINE without taking the search that feeds it: `return_probe` stays
-/// on, the shadow still walks, the map still closes its gaps.
-#[test]
-fn its_own_switch_turns_the_line_off_with_the_probe_still_on() {
-    let Some(mut p) = Play::zork1() else { return };
-    p.state.config.guidance = true;
-    assert!(p.state.config.one_way_caution, "on out of the box");
-    p.state.config.one_way_caution = false;
-    set_undo_cap(&mut p, 16);
-    walk_through_the_trap_door(&mut p);
-
-    let cellar = p.mapper.graph.current().expect("the Cellar");
-    assert_eq!(
-        p.mapper.graph.room(cellar).map(|r| r.name.as_str()),
-        Some("Cellar"),
-        "non-vacuity: the walk really went through the trap door"
-    );
-    assert!(
-        assists(&p.state).is_empty(),
-        "the player declined the line: {:?}",
-        assists(&p.state)
-    );
-    assert!(p.state.config.return_probe, "and kept the probe");
-    assert!(p.state.probe.probes > 0, "which really did run");
 }

@@ -1402,22 +1402,6 @@ pub struct Config {
     /// belongs.
     #[serde(default)]
     pub return_probe: bool,
-    /// Say one line when a [`return_probe`](Self::return_probe) search walks its
-    /// whole candidate list without finding the way back (SQ-1043). Default
-    /// **true**.
-    ///
-    /// A GLOBAL key and only that: no per-game sidecar spelling, because this is
-    /// a preference about how much lanthorn talks, not about how much work a
-    /// particular story is worth (the probe's own cost switch is the per-game
-    /// one). It is read at the moment the line would be said, so Save applies it
-    /// to the running session like any other value row.
-    ///
-    /// On by default because a player who went out of their way to turn the
-    /// return probe ON has already opted into this class of help; the key exists
-    /// so they can decline the one LINE without losing the map work it comes
-    /// from.
-    #[serde(default = "default_true")]
-    pub one_way_caution: bool,
     /// Keep [`adult_words`](Self::adult_words) out of any panel that ENUMERATES
     /// a story's vocabulary unprompted (SQ-1122). Default true.
     ///
@@ -2064,7 +2048,6 @@ impl Default for Config {
             guidance: true,
             guidance_probe: true,
             return_probe: false,
-            one_way_caution: true,
             hide_adult_words: true,
             adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::EveryRoom,
@@ -2199,7 +2182,6 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.guidance = from_file.guidance;
             cfg.guidance_probe = from_file.guidance_probe;
             cfg.return_probe = from_file.return_probe;
-            cfg.one_way_caution = from_file.one_way_caution;
             cfg.hide_adult_words = from_file.hide_adult_words;
             cfg.adult_words = from_file.adult_words;
             cfg.background_tidy = from_file.background_tidy;
@@ -2546,7 +2528,6 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("guidance", cfg.guidance.into(), cfg.guidance == def.guidance);
     doc.put("guidance_probe", cfg.guidance_probe.into(), cfg.guidance_probe == def.guidance_probe);
     doc.put("return_probe", cfg.return_probe.into(), cfg.return_probe == def.return_probe);
-    doc.put("one_way_caution", cfg.one_way_caution.into(), cfg.one_way_caution == def.one_way_caution);
     doc.put("hide_adult_words", cfg.hide_adult_words.into(), cfg.hide_adult_words == def.hide_adult_words);
     // The LIST is the one setting lanthorn seeds LIVE rather than commented
     // (SQ-1122), so `put`'s "always update a key the file already has" half keeps
@@ -3456,7 +3437,6 @@ use_defaults = false
             guidance: true,
             guidance_probe: true,
             return_probe: false,
-            one_way_caution: true,
             hide_adult_words: true,
             adult_words: default_adult_words(),
             background_tidy: BackgroundTidy::OnOverlap,

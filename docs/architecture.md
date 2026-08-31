@@ -354,37 +354,6 @@ follows from that.
   whatever has arrived without knowing who wanted it, so a consumer polling for
   itself would sometimes take the other's answer off the channel and drop it.
   `loop_tick::poll_shadow_answers` collects once and routes by token.
-- **The irreversible-move caution is a reading of this search, not a third
-  consumer** (SQ-1043). A search that walks its whole list without reaching the
-  origin has already established what the quest wanted to know, so
-  `return_probe::one_way_caution` says it — one `Assist::caution` line, inline in
-  the transcript where SQ-1125 settled the surface, for **no probes beyond the
-  ones the map work paid for anyway**. Two things about it are load-bearing.
-  *It fires after the crossing*, because warning before would mean holding the
-  player's command while the worker walks thirteen turns of their game — 8.9 ms
-  on Zork I, **4.2 s on Counterfeit Monkey** (the twelve-candidate column below),
-  which is precisely the main-thread stall SQ-1124 took out of this seam; a move
-  aborts the search, so the evidence either arrives while the player is still
-  standing there or is never spoken. And *the shadow must have got OUT of the
-  room at least once* — without that, "nothing led back" is indistinguishable
-  from "nothing led anywhere", which is what a dark room, a locked cell and an
-  unreadable location all look like, and the caution would fire on every one of
-  them. What survives is evidence and not proof, so the line claims only the
-  one-step fact it tested and names the room, never that the game can still be
-  won.
-- **Three switches answer for the line, in this order, and a suppression that is
-  not a switch.** `one_way_caution` (global, default on) is the player's wish
-  about this line and is checked where the sentence is made; `guidance` is
-  `push_assist`'s, for every assist at once; `return_probe` is
-  `arm_return_search`'s, because mechanically the caution is a *reading* of that
-  search and with the probe off there is nothing to read. On top of those, **the
-  line goes quiet whenever undo is off** — a warning is worth saying only if the
-  player can act on it, and the act it exists to prompt is `undo`. The value read
-  is the LIVE one, `Engine::undo_levels()` asked of the running session as the
-  search arms, not `config.undo_levels`: the undo cap is one of the three
-  settings rows that can only land at boot, so after a Save the config and the
-  machine the player is typing at disagree, and what the player can actually do
-  is the machine's answer.
 
 Measured per attempt, worker time, debug build: Zork I **0.7 ms**, Coloratura
 **4.3 ms**, Counterfeit Monkey **343 ms**. In play the priority order usually

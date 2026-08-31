@@ -503,44 +503,6 @@ catches up a beat later. Every direction it tries is remembered *permanently*, s
 a room is searched once in the life of a map rather than once per visit, and a
 search you interrupt by walking on resumes where it stopped.
 
-### And when it finds nothing, it says so
-
-Sometimes the search walks all twelve and none of them brings it home. That is
-the shape of the oldest trap in the genre — Zork I's trap door crashes shut
-behind you and is barred from the other side — and it is worth knowing about
-while you are still standing in the room, so lanthorn says one line and stops:
-
-```
-● looks one-way — no direction leads back to Living Room
-```
-
-It is a **caution**, in the Guiding Light's louder tone, in the margin of the
-transcript where the rest of the light appears, so it stays in your scrollback
-and in a saved transcript. It costs nothing extra: those twelve commands were
-typed for the map anyway, and this is only the map work saying what it found.
-
-Read it for exactly what it claims and no more. Twelve *directions* were tried,
-one step each, from where you are standing now — so a way back that needs a door
-opened, a key, a turn to pass, or two moves instead of one is a way back this
-cannot see, and a passage that really is one-way is not the same thing as a game
-you can no longer win. It will not nag: the twelve are on the probe's record
-afterwards, so the room has nothing left to ask and the line is said once.
-
-It answers to **three** switches. Its own — `one_way_caution` in `config.toml`
-and on the settings screen, global, default on — takes the line away and leaves
-every bit of the map work behind it; `guidance` silences it along with the rest
-of Lanthorn's Guiding Light, because that is what it is; and `return_probe` has
-to be on for this story, because there is no search for it to read otherwise.
-
-And it goes quiet by itself whenever **undo** is switched off (`undo_levels =
-0`). The point of hearing this while you are still standing in the room is that
-`undo` is one word away; with undo unavailable there is nothing to do about a
-one-way passage but read that it was one, and lanthorn would rather say nothing
-than say something you cannot act on. It reads the cap the *running story* has,
-not the one in your config file — the undo setting only takes effect on the next
-launch, so those two can differ, and what you can actually do is the story's
-answer.
-
 It is **off by default** — it does run your game a few extra turns in private —
 and the footprint on the **story** pane's bottom border, immediately inboard of
 the map toggle, is how you turn it on: muted when off, lit when on, and never
