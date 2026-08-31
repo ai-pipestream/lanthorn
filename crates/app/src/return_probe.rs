@@ -132,11 +132,57 @@
 //! not ask this pass and tries again on the next one. It cannot starve on a slow
 //! game the way a vocabulary offer can, for the reason above: it is not tied to a
 //! turn, so waiting costs it nothing but time.
+//!
+//! # The caution the search can also afford to say (SQ-1043)
+//!
+//! A search that walks its whole list and never reaches the room the player left
+//! has established something the player might want to know: *the passage they
+//! just walked appears to be one-way*. That is the whole of SQ-1043, and it is
+//! **free** — the twelve commands were typed anyway, for the map. So the caution
+//! rides this search rather than forking a second one, which is what the quest
+//! asked for in as many words ("one probe, not two"; whichever lands first owns
+//! the seam, and this one landed first).
+//!
+//! **It fires AFTER the crossing, and that is a decision rather than a
+//! shortcut.** Warning before it would mean holding the player's command while a
+//! worker walks thirteen turns of their game — a stall on the main thread's
+//! behalf, which is the very thing SQ-1124 took out of this seam — or scouting
+//! every exit of every room speculatively, twelve searches deep, for exits the
+//! player will mostly never take. What it costs instead is nothing at all, and
+//! the caution still arrives while the player is standing in the room, because
+//! [`arm_return_search`] abandons the search the moment they move: either the
+//! evidence is in before their next command or it is never spoken.
+//!
+//! **The threshold is deliberately narrow, because a caution that cries wolf is
+//! worse than none.** Three things must all hold, and the third is the one that
+//! matters:
+//!
+//! 1. the search was armed at all — a real crossing, on a passage the map holds,
+//!    with no way back already known;
+//! 2. it ran its whole candidate list without landing on the origin;
+//! 3. **and the shadow got OUT of the room at least once.** Without that,
+//!    "nothing led back" is indistinguishable from "nothing led anywhere" — a
+//!    dark room, a locked cell, a cutscene, a story that ended, an engine whose
+//!    location we cannot read. Every one of those would otherwise fire the
+//!    caution on evidence it does not have.
+//!
+//! What survives that threshold is still evidence and not proof, so the line
+//! claims only what was tested: twelve directions, none of which returned. A way
+//! back that needs a door opened, a key, a turn to pass, or two moves instead of
+//! one is a way back this cannot see — which is why the wording says *looks*
+//! one-way and names the room rather than saying anything at all about whether
+//! the game can still be won.
+//!
+//! It cannot nag, either, and that falls out of the mechanism rather than being
+//! arranged: exhausting the list marks all twelve on
+//! [`mapper::graph::Room::probed`], so the next arrival has an empty candidate
+//! list and arms no search. The caution is said once per room, ever.
 
 use mapper::direction::{long_label, Direction};
 use mapper::graph::RoomId;
 use mapper::mapper::{Mapper, ProbedPassage};
 
+use crate::assist::Assist;
 use crate::engine::Engine;
 use crate::state::AppState;
 
@@ -177,6 +223,16 @@ pub struct ReturnSearch {
     /// One snapshot is 102 ms once, and the answer is about the map rather than
     /// about this instant. See [`crate::probe::ShadowProbe::snapshot`].
     from: crate::probe::ProbeSnapshot,
+    /// Whether any attempt got the shadow OUT of [`here`](Self::here) — into any
+    /// room at all, known or not, the origin or not.
+    ///
+    /// The whole of SQ-1043's threshold hangs on this. A search that exhausts its
+    /// list having never left the room has not shown that the passage is one-way;
+    /// it has shown that the shadow could not move, which is what a dark room, a
+    /// locked cell, a cutscene and an unreadable location all look like from
+    /// here. Only a room the shadow could walk OUT of, but not BACK from, is
+    /// evidence of a one-way passage.
+    left: bool,
 }
 
 impl ReturnSearch {
@@ -193,6 +249,12 @@ impl ReturnSearch {
     /// How many directions it has left to try, the one in flight excluded.
     pub fn remaining(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Whether the shadow has managed to leave [`here`](Self::here) at all — the
+    /// third leg of SQ-1043's threshold, for tests and diagnostics.
+    pub fn left_the_room(&self) -> bool {
+        self.left
     }
 }
 
@@ -254,7 +316,32 @@ pub fn arm_return_search(
     // player's thread pays for. Taken now rather than per attempt.
     let Some(from) = state.probe.snapshot(live) else { return };
     queue.reverse(); // popped from the back, so the best candidate goes last
-    state.return_search = Some(ReturnSearch { origin, here, queue, attempt: None, from });
+    state.return_search =
+        Some(ReturnSearch { origin, here, queue, attempt: None, from, left: false });
+}
+
+/// What a search that has run out of candidates has to say to the player, if
+/// anything (SQ-1043).
+///
+/// `None` unless the shadow actually left the room — see [`ReturnSearch::left`]
+/// and the module docs. The line states the test rather than its implication:
+/// twelve directions were walked from here and none of them reached the room the
+/// player came from. It does not say the game cannot be won, does not say there
+/// is no way back at all (a longer route, an opened door and a key are all
+/// invisible to a one-step search), and does not say what to do about it.
+///
+/// The origin is named because a room the player has stood in is a room they can
+/// picture, and because the alternative — the story's own "you" — is the voice
+/// [`crate::assist`] exists to keep lanthorn out of.
+fn one_way_caution(search: &ReturnSearch, mapper: &Mapper) -> Option<Assist> {
+    if !search.left {
+        return None;
+    }
+    let origin = mapper.graph.room(search.origin).map(|r| r.name.trim()).filter(|n| !n.is_empty());
+    Some(Assist::caution(match origin {
+        Some(name) => format!("looks one-way — no direction leads back to {name}"),
+        None => "looks one-way — no direction leads back".to_string(),
+    }))
 }
 
 /// Hand the next candidate to the worker, if there is one and the shadow is
@@ -263,15 +350,25 @@ pub fn arm_return_search(
 ///
 /// The shadow is shared with the vocabulary offer and holds one question at a
 /// time, so "busy" is an ordinary outcome and simply means try again next pass.
-pub fn pump_return_search(state: &mut AppState) -> bool {
+///
+/// It is also where the search says its one line to the player, on the way out:
+/// a list walked to the end without reaching the origin is SQ-1043's caution, if
+/// the run cleared the threshold in [`one_way_caution`].
+pub fn pump_return_search(state: &mut AppState, mapper: &Mapper) -> bool {
     let Some(search) = &state.return_search else { return false };
     if search.attempt.is_some() {
         return false; // one out already
     }
     let Some(&dir) = search.queue.last() else {
-        // Nothing left to try. Total failure records nothing about the map: a
-        // door may need opening, and a one-way passage is a real answer.
+        // Nothing left to try. Total failure records nothing about the MAP: a
+        // door may need opening, and a one-way passage is a real answer. But it
+        // is exactly the observation SQ-1043 wanted, so it is said out loud —
+        // once, here, while the player is still standing in the room.
+        let caution = one_way_caution(search, mapper);
         state.return_search = None;
+        if let Some(caution) = caution {
+            state.push_assist(&caution);
+        }
         return false;
     };
     let Some(token) = state.probe.ask_from(&search.from, &[long_label(dir).to_string()]) else {
@@ -332,6 +429,12 @@ pub fn deliver(
     let Some(landed) = landed else {
         return None; // no room. Nothing about it is recorded, not even that it exists.
     };
+    // The shadow got out. Not a fact about the map — the room it reached may be
+    // one nobody has seen and stays unrecorded — but the fact SQ-1043's caution
+    // needs, which is that the exits from here work at all.
+    if landed != here {
+        search.left = true;
+    }
 
     // (3) A room the map already holds is a room the PLAYER has stood in, so the
     // passage to it can be drawn without revealing anything unseen — whether or
@@ -370,7 +473,7 @@ pub fn deliver(
 /// which [`crate::probe::ShadowProbe::settle`] reports as `None`.
 pub fn settle_return_search(state: &mut AppState, mapper: &mut Mapper) -> Option<ProbedPassage> {
     while state.return_search.is_some() {
-        if !pump_return_search(state) {
+        if !pump_return_search(state, mapper) {
             // Nothing was asked: either the search just ended, or the shadow is
             // busy with somebody else's question — and in a harness there is
             // nobody else, so this is the seam refusing and the search is over.
@@ -500,6 +603,103 @@ mod tests {
         arm_return_search(&mut state, &m, &blind(), "up", Some(2));
         let s = state.return_search.as_ref().expect("a fresh search from the new room");
         assert_eq!((s.here(), s.origin()), (3, 2), "the old one is gone, not resumed");
+    }
+
+    /// A search that has run out of candidates, with the shadow's own record of
+    /// whether it ever got out of the room. The one shape [`one_way_caution`]
+    /// judges, built directly because no story reliably produces it on demand
+    /// and [`crate::probe::Answer`] cannot be forged.
+    fn exhausted(state: &mut AppState, left: bool) {
+        let from = state.probe.snapshot(&blind()).expect("the seam is armed");
+        state.return_search =
+            Some(ReturnSearch { origin: 1, here: 2, queue: Vec::new(), attempt: None, from, left });
+    }
+
+    /// Everything on a test-built state's transcript, which is only ever what
+    /// this module put there: the once-per-session introduction and the caution.
+    /// Deliberately not filtered by transcript KIND — spelling that variant
+    /// anywhere under `src/` outside the three files that own it is what
+    /// `assist_voice`'s `push_assist_is_the_only_producer_of_an_assist_line`
+    /// exists to catch, and a test helper is not a reason to relax it.
+    fn said(state: &AppState) -> Vec<String> {
+        state.transcript.clone()
+    }
+
+    /// **The caution, and the whole of what it claims** (SQ-1043). Twelve
+    /// directions walked from a room the shadow could get OUT of, none of which
+    /// reached the room the player left — so the passage looks one-way, and the
+    /// line says that and names the room, and nothing else.
+    #[test]
+    fn an_exhausted_search_that_could_leave_the_room_says_so_once() {
+        let mut m = Mapper::default();
+        walked(&mut m);
+        let mut state = armed_state();
+        state.config.guidance = true;
+        exhausted(&mut state, true);
+
+        assert!(!pump_return_search(&mut state, &m), "nothing left to ask");
+        assert!(state.return_search.is_none(), "and the search is over");
+
+        let lines = said(&state);
+        let line = lines.last().expect("the caution");
+        assert_eq!(line, "looks one-way — no direction leads back to Behind House");
+        // The register's own rules, on the one line this module writes.
+        assert!(!line.starts_with('['), "the parser's brackets are never ours: {line:?}");
+        assert!(!line.contains("you"), "the story owns \"you\": {line:?}");
+        assert!(!line.contains("win") && !line.contains("stuck"), "no claim it cannot support");
+
+        // Said once. A second pass has no search left to exhaust.
+        let before = lines.len();
+        assert!(!pump_return_search(&mut state, &m));
+        assert_eq!(said(&state).len(), before, "nothing to repeat");
+    }
+
+    /// **The threshold's third leg.** A search that exhausted its list without
+    /// the shadow ever leaving the room has not shown the passage is one-way —
+    /// it has shown the shadow could not move, which is what a dark room, a
+    /// locked cell and an unreadable location all look like. Silence.
+    #[test]
+    fn a_shadow_that_never_got_out_of_the_room_says_nothing() {
+        let mut m = Mapper::default();
+        walked(&mut m);
+        let mut state = armed_state();
+        state.config.guidance = true;
+        exhausted(&mut state, false);
+
+        pump_return_search(&mut state, &m);
+        assert!(state.return_search.is_none(), "the search still ends");
+        assert!(said(&state).is_empty(), "but it has established nothing to say");
+    }
+
+    /// The player's switch is the same switch, because there is one door: with
+    /// Lanthorn's Guiding Light off, `push_assist` drops the line and the search
+    /// goes on closing map gaps in silence.
+    #[test]
+    fn the_guidance_switch_silences_the_caution_and_not_the_search() {
+        let mut m = Mapper::default();
+        walked(&mut m);
+        let mut state = armed_state();
+        state.config.guidance = false;
+        exhausted(&mut state, true);
+
+        pump_return_search(&mut state, &m);
+        assert!(said(&state).is_empty(), "the light is off");
+        assert!(state.config.return_probe, "and the map work is untouched");
+    }
+
+    /// A room the map cannot name still gets a caution — the fact it states does
+    /// not depend on the name, and a blank one must not become `back to `.
+    #[test]
+    fn an_unnamed_origin_drops_the_clause_rather_than_trailing_it() {
+        let mut m = Mapper::default();
+        walked(&mut m);
+        m.graph.upsert_room(1, String::new());
+        let mut state = armed_state();
+        state.config.guidance = true;
+        exhausted(&mut state, true);
+
+        pump_return_search(&mut state, &m);
+        assert_eq!(said(&state).last().unwrap(), "looks one-way — no direction leads back");
     }
 
     /// Every answered attempt is marked before anything is judged, so a search

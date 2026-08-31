@@ -110,7 +110,7 @@ fn main() {
         // settle_return_search, unrolled so every attempt is visible.
         let mut found = None;
         while state.return_search.is_some() {
-            if !app::return_probe::pump_return_search(&mut state) {
+            if !app::return_probe::pump_return_search(&mut state, &mapper) {
                 if state.return_search.is_some() {
                     println!("    pump refused (shadow busy or queue empty)");
                 }

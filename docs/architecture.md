@@ -315,8 +315,9 @@ Isolation is explicit rather than assumed: the shadow boots with sound and
 graphics off, no Blorb, a read-only store it may never write, and an in-game
 `@save`/`@restore` or a Glk filename prompt inside a probe is answered *failed*
 so the VM unwinds where it stands. `app::vocab` is the first consumer (SQ-1121,
-vetting a suggestion before it is offered); SQ-1043's irreversible-move caution
-is meant to be the third, and should extend this rather than grow its own.
+vetting a suggestion before it is offered) and the return probe below is the
+second. SQ-1043's irreversible-move caution is a **reading of the second**, not a
+third consumer: see the last bullet there.
 
 ### The second consumer: the return probe (SQ-0785)
 
@@ -353,6 +354,24 @@ follows from that.
   whatever has arrived without knowing who wanted it, so a consumer polling for
   itself would sometimes take the other's answer off the channel and drop it.
   `loop_tick::poll_shadow_answers` collects once and routes by token.
+- **The irreversible-move caution is a reading of this search, not a third
+  consumer** (SQ-1043). A search that walks its whole list without reaching the
+  origin has already established what the quest wanted to know, so
+  `return_probe::one_way_caution` says it — one `Assist::caution` line, inline in
+  the transcript where SQ-1125 settled the surface, for **no probes beyond the
+  ones the map work paid for anyway**. Two things about it are load-bearing.
+  *It fires after the crossing*, because warning before would mean holding the
+  player's command while the worker walks thirteen turns of their game — 8.9 ms
+  on Zork I, **4.2 s on Counterfeit Monkey** (the twelve-candidate column below),
+  which is precisely the main-thread stall SQ-1124 took out of this seam; a move
+  aborts the search, so the evidence either arrives while the player is still
+  standing there or is never spoken. And *the shadow must have got OUT of the
+  room at least once* — without that, "nothing led back" is indistinguishable
+  from "nothing led anywhere", which is what a dark room, a locked cell and an
+  unreadable location all look like, and the caution would fire on every one of
+  them. What survives is evidence and not proof, so the line claims only the
+  one-step fact it tested and names the room, never that the game can still be
+  won.
 
 Measured per attempt, worker time, debug build: Zork I **0.7 ms**, Coloratura
 **4.3 ms**, Counterfeit Monkey **343 ms**. In play the priority order usually

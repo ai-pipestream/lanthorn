@@ -180,7 +180,10 @@ own sentence there:
 >   might curve. What it learns is drawn like anything you walked yourself; what
 >   it fails to find is left as the honest gap it is, because one-way passages
 >   are real and the map should not pretend otherwise. Off by default, per story,
->   and it never shows you a room you have not been to.
+>   and it never shows you a room you have not been to. When it finds no way back
+>   at all it tells you — *looks one-way — no direction leads back to Living
+>   Room* — which is the oldest trap in the genre, said while you are still
+>   standing in the room and can do something about it.
 
 ---
 
