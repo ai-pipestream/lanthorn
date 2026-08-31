@@ -90,12 +90,15 @@ use crate::memory::Memory;
 use crate::text::decode_string;
 
 // The shape of the ANSWER is shared with `gvm::grammar` and lives in the
-// `grammar-model` crate (SQ-1103); the READERS share nothing, and that split
-// was taken on evidence. Re-exported here so `zvm::grammar::Token` still names
-// the type. What stayed behind is what is about the FORMAT rather than the
-// answer: `GrammarFormat` (five table shapes, of which Glulx has none) and
+// `grammar-model` crate (SQ-1103), as does the CONTAINER it arrives in
+// (`Vocabulary`, SQ-1108); the READERS share nothing, and that split was taken
+// on evidence. Re-exported here so `zvm::grammar::Token` still names the type.
+// What stayed behind is what is about the FORMAT rather than the answer:
+// `GrammarFormat` (five table shapes, of which Glulx has none) and
 // `GrammarError` (whose refusals are this reader's, down to the variant).
 pub use grammar_model::{NounKind, RoutineRef, Slot, SyntaxLine, Token, Verb, WordRoles};
+
+use grammar_model::Vocabulary;
 
 // ── Format constants, from ztools `tx.h` and Inform Technical Manual §8.5 ────
 
@@ -274,13 +277,14 @@ impl GrammarFormat {
 /// kilobytes for the largest stories).
 #[derive(Debug, Clone)]
 pub struct Grammar {
+    /// This engine's own fact: which of the five table shapes was read.
     format: GrammarFormat,
-    verbs: Vec<Verb>,
-    /// Dictionary spelling → index into `verbs`.
-    by_word: BTreeMap<String, usize>,
-    prepositions: Vec<String>,
-    roles: BTreeMap<String, WordRoles>,
-    action_routines: Vec<u32>,
+    /// Everything a Glulx grammar also has — the verbs, the spelling index,
+    /// the prepositions, the dictionary roles and the action routines. Shared
+    /// with `gvm::grammar::Grammar`, which composes the same value (SQ-1108).
+    /// The accessors below delegate to it one for one, so this type's public
+    /// API is unchanged and reads on its own.
+    vocab: Vocabulary,
 }
 
 impl Grammar {
@@ -316,23 +320,7 @@ impl Grammar {
             load_classic(mem, format, &words)?
         };
 
-        let mut by_word = BTreeMap::new();
-        for (i, v) in verbs.iter().enumerate() {
-            for w in &v.words {
-                by_word.entry(w.clone()).or_insert(i);
-            }
-        }
-
-        let mut prepositions: Vec<String> = verbs
-            .iter()
-            .flat_map(|v| v.lines.iter())
-            .flat_map(SyntaxLine::literals)
-            .map(str::to_string)
-            .collect();
-        prepositions.sort();
-        prepositions.dedup();
-
-        Ok(Grammar { format, verbs, by_word, prepositions, roles, action_routines })
+        Ok(Grammar { format, vocab: Vocabulary::new(verbs, roles, action_routines) })
     }
 
     /// Which table shape this story uses.
@@ -342,40 +330,38 @@ impl Grammar {
 
     /// Every verb, in grammar-table order.
     pub fn verbs(&self) -> &[Verb] {
-        &self.verbs
+        self.vocab.verbs()
     }
 
     /// The verb a spelling belongs to, if it is one.
     pub fn verb_for_word(&self, word: &str) -> Option<&Verb> {
-        let key = word.to_lowercase();
-        self.by_word.get(&key).map(|&i| &self.verbs[i])
+        self.vocab.verb_for_word(word)
     }
 
     /// True if the story can begin a command with this word.
     pub fn is_verb(&self, word: &str) -> bool {
-        self.by_word.contains_key(&word.to_lowercase())
+        self.vocab.is_verb(word)
     }
 
     /// Every spelling that can begin a command, sorted.
     pub fn verb_words(&self) -> impl Iterator<Item = &str> {
-        self.by_word.keys().map(String::as_str)
+        self.vocab.verb_words()
     }
 
     /// Every literal word the grammar names, deduplicated and sorted — the
     /// story's prepositions.
     pub fn prepositions(&self) -> &[String] {
-        &self.prepositions
+        self.vocab.prepositions()
     }
 
     /// True if the grammar uses this word literally in some line.
     pub fn is_preposition(&self, word: &str) -> bool {
-        let key = word.to_lowercase();
-        self.prepositions.binary_search(&key).is_ok()
+        self.vocab.is_preposition(word)
     }
 
     /// The parts of speech the dictionary marks `word` with, if it knows it.
     pub fn roles(&self, word: &str) -> Option<WordRoles> {
-        self.roles.get(&word.to_lowercase()).copied()
+        self.vocab.roles(word)
     }
 
     /// Every word the dictionary holds, sorted — the whole vocabulary, verbs
@@ -383,21 +369,21 @@ impl Grammar {
     /// the same question about a Glulx story (SQ-1103); the words of one
     /// syntax LINE are [`SyntaxLine::literals`].
     pub fn words(&self) -> impl Iterator<Item = &str> {
-        self.roles.keys().map(String::as_str)
+        self.vocab.words()
     }
 
     /// Unpacked byte addresses of the action routines, indexed by action number.
     /// Empty for [`GrammarFormat::InfocomV6`], whose action table this module
     /// locates but does not walk.
     pub fn action_routines(&self) -> &[u32] {
-        &self.action_routines
+        self.vocab.action_routines()
     }
 
     /// Every verb with a line matching `nouns` noun phrases and exactly `words`
     /// as its literal words — the shape query a caller uses to keep a suggestion
     /// plausible instead of merely near.
     pub fn verbs_accepting(&self, nouns: usize, words: &[&str]) -> Vec<&Verb> {
-        self.verbs.iter().filter(|v| v.accepts(nouns, words)).collect()
+        self.vocab.verbs_accepting(nouns, words)
     }
 }
 

@@ -20,6 +20,14 @@
 // sentences does this story accept?" should get one vocabulary whichever
 // engine answered.
 //
+// SQ-1103 lifted the answer TYPES; SQ-1108 lifted the CONTAINER they arrive in,
+// which the two readers had also been holding as identical copies — five fields
+// and ten accessor bodies that matched character for character, plus the dozen
+// lines each spent building the spelling index and the preposition list.
+// [`Vocabulary`] is that container. Each engine's `Grammar` composes one and
+// delegates to it explicitly, keeping its own loader, its own format facts and
+// its own public API.
+//
 // ── Which facts stayed with the engines ──────────────────────────────────────
 //
 // Not everything a reader returns is shared, and the split is on whether the
@@ -53,6 +61,8 @@
 // wording.
 
 #![forbid(unsafe_code)]
+
+use std::collections::BTreeMap;
 
 /// The parser's built-in noun slots.
 ///
@@ -428,6 +438,125 @@ impl WordRoles {
     }
 }
 
+/// A whole story's grammar as a queryable value: every verb, every spelling
+/// that reaches one, every literal word the lines use, and what the dictionary
+/// marks each word with.
+///
+/// This is the CONTAINER the two readers produce, holding what an engine's
+/// `Grammar` has left once its format-specific facts are set aside — those
+/// stay with the engine (`zvm::grammar::GrammarFormat`, `gvm::grammar::Tables`
+/// and its verb-number base, and each engine's own `GrammarError`). The
+/// readers themselves share nothing and are not here; see the crate header.
+///
+/// A caller does not normally name this type. `zvm::grammar::Grammar` and
+/// `gvm::grammar::Grammar` compose one and answer every question below
+/// themselves, so each engine's API stays self-describing and unchanged
+/// (SQ-1108).
+#[derive(Debug, Clone)]
+pub struct Vocabulary {
+    verbs: Vec<Verb>,
+    /// Dictionary spelling → index into `verbs`.
+    by_word: BTreeMap<String, usize>,
+    /// Every literal word any line uses, sorted and deduplicated.
+    prepositions: Vec<String>,
+    roles: BTreeMap<String, WordRoles>,
+    action_routines: Vec<u32>,
+}
+
+impl Vocabulary {
+    /// Assemble a vocabulary from what a reader actually reads out of a story.
+    ///
+    /// The spelling index and the preposition list are DERIVED here rather than
+    /// asked for, because both are functions of `verbs` alone and both were
+    /// previously built by the same dozen lines in each reader — a caller that
+    /// could supply them could supply them inconsistently, and nothing
+    /// downstream could tell.
+    ///
+    /// `roles` is keyed by the dictionary spelling and is the whole
+    /// vocabulary — verbs, nouns and buzzwords alike, not only the words that
+    /// reach a verb. `action_routines` is indexed by action number, and is
+    /// empty for a format whose action table is located but not walked.
+    pub fn new(
+        verbs: Vec<Verb>,
+        roles: BTreeMap<String, WordRoles>,
+        action_routines: Vec<u32>,
+    ) -> Vocabulary {
+        let mut by_word = BTreeMap::new();
+        for (i, v) in verbs.iter().enumerate() {
+            for w in &v.words {
+                by_word.entry(w.clone()).or_insert(i);
+            }
+        }
+
+        let mut prepositions: Vec<String> = verbs
+            .iter()
+            .flat_map(|v| v.lines.iter())
+            .flat_map(SyntaxLine::literals)
+            .map(str::to_string)
+            .collect();
+        prepositions.sort();
+        prepositions.dedup();
+
+        Vocabulary { verbs, by_word, prepositions, roles, action_routines }
+    }
+
+    /// Every verb, in grammar-table order.
+    pub fn verbs(&self) -> &[Verb] {
+        &self.verbs
+    }
+
+    /// The verb a spelling belongs to, if it is one.
+    pub fn verb_for_word(&self, word: &str) -> Option<&Verb> {
+        self.by_word.get(&word.to_lowercase()).map(|&i| &self.verbs[i])
+    }
+
+    /// True if the story can begin a command with this word.
+    pub fn is_verb(&self, word: &str) -> bool {
+        self.by_word.contains_key(&word.to_lowercase())
+    }
+
+    /// Every spelling that can begin a command, sorted.
+    pub fn verb_words(&self) -> impl Iterator<Item = &str> {
+        self.by_word.keys().map(String::as_str)
+    }
+
+    /// Every literal word the grammar names, deduplicated and sorted — the
+    /// story's prepositions.
+    pub fn prepositions(&self) -> &[String] {
+        &self.prepositions
+    }
+
+    /// True if the grammar uses this word literally in some line.
+    pub fn is_preposition(&self, word: &str) -> bool {
+        self.prepositions.binary_search(&word.to_lowercase()).is_ok()
+    }
+
+    /// The parts of speech the dictionary marks `word` with, if it knows it.
+    pub fn roles(&self, word: &str) -> Option<WordRoles> {
+        self.roles.get(&word.to_lowercase()).copied()
+    }
+
+    /// Every word the dictionary holds, sorted — the whole vocabulary, verbs
+    /// and nouns and buzzwords alike. The words of one syntax LINE are
+    /// [`SyntaxLine::literals`].
+    pub fn words(&self) -> impl Iterator<Item = &str> {
+        self.roles.keys().map(String::as_str)
+    }
+
+    /// The action routines, indexed by action number — unpacked byte addresses
+    /// on the Z-machine, plain addresses on Glulx.
+    pub fn action_routines(&self) -> &[u32] {
+        &self.action_routines
+    }
+
+    /// Every verb with a line matching `nouns` noun phrases and exactly `words`
+    /// as its literal words — the shape query a caller uses to keep a
+    /// suggestion plausible instead of merely near.
+    pub fn verbs_accepting(&self, nouns: usize, words: &[&str]) -> Vec<&Verb> {
+        self.verbs.iter().filter(|v| v.accepts(nouns, words)).collect()
+    }
+}
+
 /// An object's **adjectives**, where the story keeps them somewhere a reader
 /// can reach — and an explicit refusal where it does not.
 ///
@@ -751,6 +880,49 @@ mod tests {
         assert_eq!(verb.prepositions(), vec!["with"]);
         assert!(verb.accepts(2, &["with"]));
         assert!(!verb.accepts(2, &["from"]));
+    }
+
+    #[test]
+    fn a_vocabulary_derives_its_index_and_prepositions_from_the_verbs_alone() {
+        let take = Verb::new(
+            255,
+            0x0410,
+            vec!["take".to_string(), "grab".to_string()],
+            vec![
+                SyntaxLine::new(3, false, vec![noun()]),
+                SyntaxLine::new(4, false, vec![noun(), word("with"), noun()]),
+            ],
+        );
+        // A second verb sharing a spelling: the FIRST in table order keeps it,
+        // which is what both readers' `or_insert` meant.
+        let grab = Verb::new(
+            254,
+            0x0430,
+            vec!["grab".to_string()],
+            vec![SyntaxLine::new(9, false, vec![noun(), word("from"), noun()])],
+        );
+        let roles = BTreeMap::from([
+            ("take".to_string(), WordRoles { verb: true, ..WordRoles::default() }),
+            ("with".to_string(), WordRoles { preposition: true, ..WordRoles::default() }),
+            ("lamp".to_string(), WordRoles { noun: true, ..WordRoles::default() }),
+        ]);
+        let v = Vocabulary::new(vec![take, grab], roles, vec![0x1000, 0x1200]);
+
+        assert_eq!(v.verbs().len(), 2);
+        assert_eq!(v.verb_for_word("GRAB").map(Verb::word), Some(Some("take")));
+        assert!(v.is_verb("take") && !v.is_verb("drop"));
+        assert_eq!(v.verb_words().collect::<Vec<_>>(), vec!["grab", "take"]);
+        // Sorted and deduplicated across every line of every verb.
+        assert_eq!(v.prepositions(), ["from".to_string(), "with".to_string()]);
+        assert!(v.is_preposition("WITH") && !v.is_preposition("under"));
+        assert_eq!(v.roles("Lamp").map(|r| r.noun), Some(true));
+        assert_eq!(v.roles("sword"), None);
+        // The whole dictionary, not only the words that reach a verb.
+        assert_eq!(v.words().collect::<Vec<_>>(), vec!["lamp", "take", "with"]);
+        assert_eq!(v.action_routines(), [0x1000, 0x1200]);
+        assert_eq!(v.verbs_accepting(2, &["from"]).len(), 1);
+        assert_eq!(v.verbs_accepting(1, &[]).len(), 1);
+        assert!(v.verbs_accepting(3, &[]).is_empty());
     }
 
     #[test]
