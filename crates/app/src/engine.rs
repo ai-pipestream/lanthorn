@@ -989,6 +989,35 @@ pub trait Engine {
     /// clearing it is invisible. Marking a boundary here would anchor the screen
     /// BELOW the banner the boot printed *after* the erase, i.e. hide it, which is
     /// the reported bug wearing the other hat.
+    ///
+    /// **It drains the clear and nothing else, and that is a measured answer rather
+    /// than the next omission** (SQ-1109, which handed itself over from SQ-1106 on
+    /// the reasoning that the three OTHER per-turn facts a `TurnResult` carries must
+    /// leak the same way). They were looked for and are not there:
+    ///
+    /// - `pictures` already has a boot drain, just not in here —
+    ///   [`crate::session::GameSession::flush_boot_pictures`], called from
+    ///   `startup.rs`, `reset.rs` and `turn.rs` before this seed ever runs, because a
+    ///   v6 game's opening art has to be on the canvas for the FIRST `screen()`, which
+    ///   is drawn before the player types anything.
+    /// - `sounds` and `diagnostics` have none, so a `sound_effect` or a VM diagnostic
+    ///   raised during the game's own boot does sit on the machine until turn 1's
+    ///   drain takes it. **Nothing in the corpus raises either.** Measured by booting
+    ///   every story in `stories/` through `hints::load_mounted_story_from` — 277
+    ///   Z-machine boots covering every loose file, Blorb and named entry of every
+    ///   disk image, plus 26 Glulx boots — and reading `Machine::pending_sounds` /
+    ///   `diagnostics` straight after the constructor: zero of each, everywhere. The
+    ///   44 v6 boots left 3–220 pending pictures apiece, which is the drain above
+    ///   doing its job.
+    ///
+    /// The route is nonetheless open, and can be forced: set Flags 2 bit 0 in
+    /// `advent.z8`'s header before booting and `check_transcript_bit` raises its
+    /// `output_stream 2` diagnostic at the BOOT's own input request — `seed_turn`
+    /// returns no diagnostics and the next turn delivers it. Draining it here would
+    /// not fix that, it would DISCARD it: the host feeds this result to the mapper
+    /// and neither plays its sounds nor prints its diagnostics. Surfacing a boot
+    /// sound and a boot warning at the boot is the real change, and it waits for a
+    /// story that needs one.
     fn seed_turn(&mut self) -> TurnResult {
         TurnResult {
             location: self.current_location(),
