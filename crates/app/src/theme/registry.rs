@@ -380,26 +380,29 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // floated over and was invisible except for its text (SQ-1139). It reported as
     // "blends into the background" because it *was* the background.
     //
-    // So this is a literal pair rather than a role derivation — the same licence
-    // `sound_beep_high` and `dialog.shadow` take, and for the same reason: nothing
-    // in a seven-role palette means "a card lying on top of the page", and deriving
-    // one from `chrome` is what produced the defect. Warm dark, chosen by eye from
-    // four candidates rendered in a real terminal. FG and BG together, never bg
-    // alone: `chrome`'s foreground is dark on a light theme, and a dark ink left on
-    // this dark card would be a tooltip nobody could read.
+    // `accent` is not one either, and that is the trap worth naming: the cyan a
+    // tooltip wants IS accent's cyan, but accent is `fg(Cyan)` with NO background
+    // (`slot(6, ..)` in resolve.rs), so deriving from it reproduces SQ-1139 exactly
+    // — cyan ink on whatever the tip floats over. A surface needs the PAIR.
     //
-    // One line in `style.toml` replaces it, which is the point of it being a row.
-    row(
-        "tooltip.background",
-        Section::Tooltip,
-        Kind::Style,
-        Some("chrome"),
-        Delta {
-            fg: Some(Color::Rgb(238, 230, 214)),
-            bg: Some(Color::Rgb(62, 54, 46)),
-            ..Delta::EMPTY
-        },
-    ),
+    // `dialog.list_selected` is that pair: it is the Black-on-Cyan row highlight
+    // every modal list already uses (Saves, Replay, browser, Config, verb dock), so
+    // a tip now reads as the same "this one" surface the menus use, and retuning the
+    // highlight moves the tooltip with it instead of leaving a warm-dark card behind.
+    //
+    // IT INHERITS THE BOLD TOO, and that is a limitation rather than a preference:
+    // `apply_style` composes modifiers ADDITIVELY, so a Delta cannot clear one a
+    // parent set — `bold: false` is a no-op, not an eraser. Dropping the weight here
+    // needs a modifier-clearing channel in `Delta`, not an edit to this row.
+    //
+    // WHY NO EXPLICIT fg/bg: a row whose default Delta pins colours cannot be
+    // re-rooted from `style.toml` at all. `resolve_row` applies this Delta on top of
+    // the parent BEFORE the user's decls, and a decl that sets only `parent` never
+    // touches the colour channels — so the pin wins and the re-root is a silent
+    // no-op. That is what the old literal pair did to
+    // `background = { parent = "dialog.list_selected" }`. Inheriting instead of
+    // pinning is what makes the line in `style.toml` actually work.
+    row("tooltip.background", Section::Tooltip, Kind::Style, Some("dialog.list_selected"), Delta::EMPTY),
     // Borderless by default (style = "none"); set a style to frame the tooltip.
     row("tooltip.border", Section::Tooltip, Kind::BorderGlyphs, Some("line"), border("none")),
     // ── §2 elements (expansion, Task 5.0): every remaining ColorScheme field ──

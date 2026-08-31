@@ -243,7 +243,7 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 
 # ── Tooltip: hover pop-ups — background and an optional border.
 [tooltip]
-# background = { parent = "chrome", fg = "#eee6d6", bg = "#3e362e" }
+# background = { parent = "dialog.list_selected" }
 # border = { parent = "line", style = "none" }   # style: none | single | double | thick | rounded
 
 # ── Story-line styling rules: recolour whole transcript lines matching a ────

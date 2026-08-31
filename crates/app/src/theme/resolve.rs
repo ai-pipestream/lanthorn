@@ -1073,6 +1073,60 @@ mod tests {
         );
     }
 
+    /// A re-root must move the COLOURS, and the case above cannot prove it.
+    ///
+    /// `panel.title`'s registry Delta is `Delta::EMPTY`, so its parent's colours
+    /// reach it whether or not the mechanism is sound. The rows where a re-root
+    /// can actually fail are the ones whose own Delta PINS an fg/bg — because
+    /// `resolve_row` applies that Delta on top of the parent BEFORE any user
+    /// decl, and a decl setting only `parent` never touches the colour channels.
+    /// The pin therefore wins and the re-root is a silent no-op.
+    ///
+    /// Reported against `tooltip.background`, which pinned a warm-dark pair:
+    /// `[tooltip] background = { parent = "dialog.list_selected" }` — the exact
+    /// line a user wrote — changed nothing on screen. It resolves now because
+    /// that row inherits instead of pinning.
+    #[test]
+    fn a_reroot_moves_the_colours_of_a_row_that_used_to_pin_them() {
+        let scheme = terminal_default_scheme();
+        let parsed =
+            super::super::toml_schema::parse("[tooltip]\nbackground = { parent = \"alert\" }\n")
+                .unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+        let tip = theme.get("tooltip.background").style;
+        assert_eq!(
+            tip.fg,
+            theme.get("alert").style.fg,
+            "a `parent` re-root of tooltip.background must carry the new parent's ink",
+        );
+        assert_ne!(
+            tip.bg,
+            Some(Color::Rgb(62, 54, 46)),
+            "the retired warm-dark pin must not survive a re-root",
+        );
+    }
+
+    /// The tooltip's default IS the menu highlight, not a look of its own.
+    ///
+    /// `accent` cannot serve here however cyan it is: it is `fg(Cyan)` with no
+    /// background, so deriving a borderless card from it repaints SQ-1139. The
+    /// pair comes from `dialog.list_selected`, which every modal list already
+    /// uses — so retuning that highlight moves the tooltip with it.
+    #[test]
+    fn the_tooltip_wears_the_shared_menu_highlight() {
+        let theme = resolve(
+            &Roles::terminal_default(),
+            &Decls::new(),
+            &Decls::new(),
+            &Decls::new(),
+        );
+        let tip = theme.get("tooltip.background").style;
+        let menu = theme.get("dialog.list_selected").style;
+        assert_eq!((tip.fg, tip.bg), (menu.fg, menu.bg), "the tip wears the highlight's pair");
+        assert!(tip.bg.is_some(), "a tip with no background cannot be a surface");
+        assert_ne!(tip.fg, tip.bg, "and its ink must not be its own background");
+    }
+
     // ── Task 0.3: layered decls + per-selector provenance ────────────────────
 
     #[test]
