@@ -143,10 +143,24 @@ mod unix {
         // Later than the colour answers' own lateness would allow, so the typing
         // lands while the fix is holding the terminal rather than after it.
         spec.defer_by = Duration::from_millis(900);
+        // **The typing is keyed to the PHASE, not to a stopwatch** (SQ-1162).
+        // This used to be `Wait(320)` — 320 ms of quiet after the launch key —
+        // and it reddened main once on a macOS runner and passed on a rerun of
+        // the very same commit. That is what a deadline standing in for a phase
+        // does: 320 ms of silence is "inside the boot probe" on an idle machine
+        // and can be "before it started" on a loaded one, and typing outside the
+        // window means the case asserts a property it never exercised. The
+        // harness SEES the colour query go out, so waiting for it puts the
+        // keystroke at the very start of the 900 ms the answers are held back
+        // for, on any machine at any load. A failure here now means the
+        // keystroke really was lost.
         spec.keys = vec![
             Key::Wait(Duration::from_millis(1000)),
             Key::Bytes(b"\r".to_vec()),
-            Key::Wait(Duration::from_millis(320)),
+            Key::AwaitQuery {
+                query: "default foreground (OSC 10)",
+                cap: Duration::from_secs(20),
+            },
             Key::Bytes(b"open mailbox\r".to_vec()),
             Key::Wait(Duration::from_millis(2500)),
         ];
@@ -154,6 +168,32 @@ mod unix {
         let cap = driver::run(spec).expect("pty run");
         let text = String::from_utf8_lossy(&cap.bytes).to_string();
         assert_the_scenario_ran(&cap, &text);
+
+        // **And it really was typed DURING the wait** (SQ-1162). A command that
+        // goes out after the answers have landed reaches the story for the dull
+        // reason that nothing was holding the terminal any more, and passes this
+        // case without touching the property it names. The window opens when the
+        // app asks and closes when the harness finally answers, and both moments
+        // are in the capture, so say so rather than trusting the schedule.
+        let typed = cap
+            .typed
+            .iter()
+            .find(|t| t.bytes.starts_with(b"open mailbox"))
+            .expect("the command was typed");
+        let answered = cap
+            .answered
+            .iter()
+            .filter(|a| a.query.starts_with("default f") || a.query.starts_with("default b"))
+            .map(|a| a.at)
+            .min()
+            .expect("a colour answer was sent");
+        assert!(
+            typed.at < answered,
+            "the command went out at {:?}, after the first colour answer at {:?} — the terminal \
+             was no longer being held, so this run proved nothing about typeahead",
+            typed.at,
+            answered
+        );
 
         assert!(
             text.contains("leaflet"),

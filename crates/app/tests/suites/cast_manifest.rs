@@ -30,6 +30,7 @@ fn capture(bytes: &[u8], flushes: &[(f64, usize, usize)]) -> Capture {
             .collect(),
         answered: Vec::new(),
         resizes: Vec::new(),
+        typed: Vec::new(),
         spec,
         duration: Duration::from_secs(1),
         timed_out: false,

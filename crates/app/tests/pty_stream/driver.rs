@@ -27,6 +27,24 @@ pub enum Key {
     Bytes(Vec<u8>),
     /// Let the app settle (or animate) for a while before the next key.
     Wait(Duration),
+    /// Hold the next key until the app has ASKED the terminal a named query —
+    /// a PHASE of the run rather than a reading off a stopwatch (SQ-1162).
+    ///
+    /// `Wait` is already silence-relative rather than a bare sleep, so it
+    /// stretches when the app is busy. What it cannot do is tell one LULL from
+    /// another: "320 ms of quiet after Enter" means "somewhere inside the boot"
+    /// on a fast machine and can mean "before the boot probe has even started"
+    /// on a loaded one, and a case that means to type INSIDE the window where
+    /// the app owns the terminal then types outside it and fails on a property
+    /// it never actually exercised. The [`Responder`] sees every query the app
+    /// asks, so the phase is observable: wait for it by name and the staging
+    /// stops being a race, which is the same bargain [`Spec::defer_queries`]
+    /// struck for the answers.
+    ///
+    /// `cap` is a ceiling, not a target — reaching it fails the run with a
+    /// message naming the query, because a query that never came means the
+    /// scenario could not be staged and every assertion after it is vacuous.
+    AwaitQuery { query: &'static str, cap: Duration },
     /// Resize the pty — cells AND the pixel geometry a cell size is derived from
     /// — with `TIOCSWINSZ` on the master (SQ-0993).
     ///
@@ -265,9 +283,25 @@ pub struct Capture {
     /// that stopped compressing halfway would still pass an "all of them are
     /// compressed" check as long as the tail were empty.
     pub resizes: Vec<Resized>,
+    /// Every [`Key::Bytes`] the run actually typed, and WHEN (SQ-1162).
+    ///
+    /// The script says what to type; only this says when it went out, and a
+    /// case whose whole point is that a key landed during some window of the
+    /// app's own making cannot state that from the script alone. Without it the
+    /// interesting failure — the key drifting outside the window on a loaded
+    /// machine, so the property is never exercised and the case passes anyway —
+    /// is indistinguishable from the property holding.
+    pub typed: Vec<Typed>,
     pub spec: Spec,
     pub duration: Duration,
     pub timed_out: bool,
+}
+
+/// One scripted keystroke, and the moment it was written to the pty.
+#[derive(Clone, Debug)]
+pub struct Typed {
+    pub bytes: Vec<u8>,
+    pub at: Duration,
 }
 
 impl Capture {
@@ -617,6 +651,7 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
     let mut flushes: Vec<Flush> = Vec::new();
     let mut answered: Vec<Answered> = Vec::new();
     let mut resizes: Vec<Resized> = Vec::new();
+    let mut typed: Vec<Typed> = Vec::new();
     let mut responder =
         Responder {
             answer_kitty: spec.answer_kitty,
@@ -629,6 +664,12 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
         };
     let mut keys = spec.keys.clone().into_iter();
     let mut pending_wait: Option<Duration> = None;
+    // Every query the app has asked so far, by `Responder` name — what
+    // `Key::AwaitQuery` waits on. Recorded when the query is SEEN, not when it
+    // is answered, because a deferred batch is deliberately not answered for a
+    // while and the phase begins at the asking.
+    let mut seen_queries: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    let mut awaiting: Option<(&'static str, Instant, Duration)> = None;
     let mut last_byte = Instant::now();
     // Read timing, kept apart from the key pacing above: `last_byte` moves when
     // we TYPE, which is what "has the app gone quiet enough for the next key"
@@ -675,6 +716,7 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
                         bytes.extend_from_slice(&chunk[..n]);
                         let mut batch_late = false;
                         for (name, reply) in responder.scan(&bytes) {
+                            seen_queries.insert(name);
                             batch_late |= spec.defer_queries.contains(&name);
                             if batch_late {
                                 deferred.push((Instant::now() + spec.defer_by, name, reply));
@@ -692,6 +734,22 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
             }
             Ok(false) => {
                 let quiet_for = last_byte.elapsed();
+                // Phase before stopwatch: a key held for a query goes nowhere
+                // until the app has asked it, however busy or idle the run is.
+                if let Some((q, since, cap)) = awaiting {
+                    if seen_queries.contains(q) {
+                        awaiting = None;
+                    } else if since.elapsed() >= cap {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("the app never asked `{q}`, so the scenario was never staged"),
+                        ));
+                    } else {
+                        continue;
+                    }
+                }
                 if let Some(w) = pending_wait {
                     if quiet_for >= w {
                         pending_wait = None;
@@ -704,9 +762,13 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
                 match keys.next() {
                     Some(Key::Bytes(b)) => {
                         write_all(master.as_raw_fd(), &b)?;
+                        typed.push(Typed { bytes: b, at: start.elapsed() });
                         last_byte = Instant::now();
                     }
                     Some(Key::Wait(d)) => pending_wait = Some(d),
+                    Some(Key::AwaitQuery { query, cap }) => {
+                        awaiting = Some((query, Instant::now(), cap));
+                    }
                     Some(Key::Resize { cols, rows, cell_w, cell_h }) => {
                         // The kernel signals the child for us — no keystroke, no
                         // escape, exactly as a real window resize arrives (SQ-0993).
@@ -739,7 +801,7 @@ pub fn run(spec: Spec) -> std::io::Result<Capture> {
 
     let _ = child.kill();
     let _ = child.wait();
-    Ok(Capture { bytes, flushes, answered, resizes, spec, duration: start.elapsed(), timed_out })
+    Ok(Capture { bytes, flushes, answered, resizes, typed, spec, duration: start.elapsed(), timed_out })
 }
 
 fn poll_readable(fd: RawFd, timeout: Duration) -> std::io::Result<bool> {

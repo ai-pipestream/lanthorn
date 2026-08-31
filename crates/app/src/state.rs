@@ -3267,6 +3267,33 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
+        // **No `app` test ever wants a real audio device, and several production
+        // paths a test drives build one lazily** — `ConfigSave`, `ToggleSound`,
+        // the picker's sound preview — so the rule cannot live at the call
+        // sites: a settings-screen case reaches `AudioBackend::new` without
+        // naming audio anywhere in its own body, and its author has no reason
+        // to suspect it. Saying it here, once, on the constructor every one of
+        // them starts from, is the guard that replaces that convention.
+        //
+        // It is not cosmetic. `cargo test` gives a binary's tests ONE process
+        // and many threads, and a real device opened on a libtest thread is
+        // bound to that thread: on macOS three of them together took 491s
+        // against 0.76s for the same four cases run with `--test-threads=1`,
+        // and on Windows the same shape is a hard `0xc0000005` — cpal's WASAPI
+        // backend keeps a process-global `IMMDeviceEnumerator` while
+        // initialising COM per THREAD, so a finished test thread's
+        // `CoUninitialize` can pull MMDevAPI out from under the next one. That
+        // killed the whole `-p app --lib` binary with no test reporting a
+        // failure, and nextest could not see it: one process per test means
+        // never two threads (SQ-1162).
+        //
+        // The lazy construction itself still runs and is still asserted on —
+        // `TEST_SILENCE` only skips opening the device — so nothing about the
+        // production path goes untested. Invisible to the shipped binary,
+        // which is built without `cfg(test)`.
+        #[cfg(test)]
+        audio::disable_output_for_tests();
+
         Self {
             focus: Focus::Game,
             debug: None,
