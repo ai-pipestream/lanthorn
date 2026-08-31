@@ -134,9 +134,13 @@ still reach in and override any single selector by name.
   preset **names**, not the forty expanded overrides they stand for, so the
   section stays readable and a later improvement to a preset still reaches you.
   `/run-font-check` asks again — worth doing whenever you change terminal fonts —
-  and so does `--font-check on`; `--font-check off` never asks, and the settings
-  screen carries a `font_check` row that runs it. Esc means "the plain row", and
-  is recorded, so the question does not come back every launch.
+  and so does `--font-check on`; `--font-check off` never asks. Esc means "the
+  plain row", and is recorded, so the question does not come back every launch.
+  (The settings screen used to carry a `font_check` row that ran it. It no longer
+  does: that screen is Global Settings, every row on it holds a value the Save
+  button writes to `config.toml`, and a row that merely *ran* something had its
+  answer land in `style.toml` instead — outside anything Save or Cancel could
+  speak for.)
   If that first launch happened to be piped, redirected or otherwise unable to
   show a dialog, the question is not lost: lanthorn notes that it is still owed
   and asks on the next launch that *can* ask. Ctrl-C is different — that is you
@@ -462,6 +466,19 @@ re-seed the new template, or hand-write the new shape from
 ## Configuration
 - TOML config at `~/.lanthorn/config.toml` plus command-line flags
   (`--user-dir`, `--config`); CLI overrides the file, which overrides defaults.
+- **The settings screen is Global Settings, and it means both words.** Every row
+  on it holds a value that lives in the global `config.toml` — nothing on it is a
+  button that merely *does* something, and nothing on it is a setting for the one
+  story in front of you (per-game choices live on the pane borders and in the
+  `config.toml` beside the game). Moving through the screen changes a working copy
+  and touches nothing else: **Save** writes the file *and* applies the change to the
+  session you are in, so sound, colours, margins, the status bar, the room numbers,
+  the period look and the rest simply take effect. **Cancel** discards. A handful of
+  settings genuinely cannot be applied to a game already running — `user_dir`
+  resolved this story's save and map folders when it launched, `undo_levels` set the
+  machine's undo cap, `interpreter_number` wrote header byte `$1E` — and each of
+  those rows says *on next launch* in its own description rather than looking like
+  it worked.
 - **The config file documents itself.** On first run lanthorn seeds
   `config.toml` the same way it seeds `style.toml`: every setting it reads is
   listed, grouped and commented, with the value shown being the **default** — so
