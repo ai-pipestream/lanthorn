@@ -3996,6 +3996,17 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             if cfg_to_write.command_bar != command_bar_before_save {
                 session.set_strip_prompt(cfg_to_write.command_bar);
             }
+            // SQ-1161: and re-resolve the live look, AFTER the write above. This is
+            // the single funnel the style watcher and `/reload-style` go through, so
+            // it is what makes the `period_look` row (and the theme layers, and this
+            // story's own style.toml and garglk.ini overlays) land on Save instead of
+            // waiting for the next launch. It must run after `write_config_file`,
+            // because it recomputes `honor_game_colours` from this story's sidecar and
+            // re-pins the key — and a pinned key is skipped by the writer, so running
+            // it first would drop the honour row's own edit out of the file.
+            if let app::reload::ReloadOutcome::Failed { msg } = app::reload::reload_style(&mut state) {
+                state.push_notice(&format!("[style not reloaded: {msg}]"));
+            }
         }
 
     };

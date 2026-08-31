@@ -21,8 +21,20 @@ use crate::state::AppState;
 /// checks the COUNT, and the count is right either way. Two tests were reaching
 /// their row by literal index and started editing the row below it; both now
 /// look it up by name, which is the pattern to copy.
+/// Every row is a GLOBAL config setting (SQ-1161). Editing one changes a working
+/// copy and nothing else; Save writes `config.toml` AND applies the change to the
+/// running session; Cancel discards. There are no action rows — a thing that DOES
+/// something rather than holding a value cannot be written to the global config
+/// and is not part of Save, so it belongs on a slash command, not here.
+///
+/// A handful of settings genuinely cannot be applied to a session already under
+/// way, because they are consumed once when the story boots (`user_dir` resolves
+/// the save/map folders, `undo_levels` sets the machine's cap, `interpreter_number`
+/// writes header byte $1E). Those rows SAY "on next launch" in their own
+/// description — a row that appears to work and does not is worse than an honest
+/// one.
 pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
-    ("user_dir",             ConfigRowKind::Path, "Where lanthorn keeps saves, maps, and settings (default ~/.lanthorn)."),
+    ("user_dir",             ConfigRowKind::Path, "Where lanthorn keeps saves, maps, and settings (default ~/.lanthorn). Takes effect on next launch: the story in front of you keeps the folders it was launched with."),
     ("auto_load",            ConfigRowKind::Bool, "Resume your last session automatically on launch."),
     ("auto_save",            ConfigRowKind::Bool, "Save the archive after every turn, not just on quit or Ctrl+S."),
     ("prompt_save_on_quit",  ConfigRowKind::Bool, "Ask to save when you quit (only matters when auto_save is off)."),
@@ -41,8 +53,8 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("show_status_bar",      ConfigRowKind::Bool, "Show the top status bar (location, score, moves, time)."),
     ("watch_style",          ConfigRowKind::Bool, "Live-reload style.toml automatically whenever the file changes on disk."),
     ("record_turn_history",  ConfigRowKind::Bool, "Record a per-turn rewind/replay history — enables Rewind, but grows the archive and holds per-turn blobs in memory."),
-    ("undo_levels",          ConfigRowKind::Num,  "How many in-memory undo snapshots to keep (0 disables undo). Use ← / → to adjust."),
-    ("interpreter_number",   ConfigRowKind::Num,  "Z-machine interpreter number (header byte 1Eh); changes colour behaviour on some Infocom games (e.g. Beyond Zork). ← / → to adjust."),
+    ("undo_levels",          ConfigRowKind::Num,  "How many in-memory undo snapshots to keep (0 disables undo). Use ← / → to adjust. Takes effect on next launch (or after @restart): the running story keeps the cap it booted with."),
+    ("interpreter_number",   ConfigRowKind::Num,  "Z-machine interpreter number (header byte 1Eh); changes colour behaviour on some Infocom games (e.g. Beyond Zork). ← / → to adjust. Takes effect on next launch (or after @restart): the header byte is written when the story boots."),
     ("hint_skip_screen_warning", ConfigRowKind::Bool, "Auto-skip the InvisiClues 'your screen is only N characters wide' banner when opening izm hints, landing straight on the topic menu."),
     ("text_margin_x",        ConfigRowKind::Num,  "Blank columns reserved on each side inside the story text pane. Imported from garglk tmarginx. Use ← / → to adjust."),
     ("text_margin_y",        ConfigRowKind::Num,  "Blank rows reserved above and below the story text. Imported from garglk tmarginy. Use ← / → to adjust."),
@@ -51,7 +63,6 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("v6_pixel_lock",        ConfigRowKind::Bool, "Scale v6 artwork by whole device pixels per art pixel (0.5x/1x/1.5x on a 320-wide rendition, 1x/2x/3x on the Mac mono and EGA ones) instead of stretching it to fill the pane: crisper art and seamless borders, at the cost of a wider margin. No effect under half-blocks, which draws cells rather than device pixels and has no rung to snap to."),
     ("guidance",             ConfigRowKind::Bool, "Lanthorn's Guiding Light: help offered while you play — the words the parser knows, a completed noun, a caution before a move that cannot be undone. Marked in the margin with its own glyph (style.toml's gutter.assist), never in the story's voice."),
     ("guidance_probe",       ConfigRowKind::Bool, "Vet the Guiding Light's word suggestions before showing them: each candidate is tried in a silent throwaway copy of the game and only what actually did something is offered. Nothing it does reaches the screen, your saves, or the game you are playing. Off, the light still offers — it just names what the dictionary holds instead of recommending."),
-    ("font_check",           ConfigRowKind::Action, "Enter: compare two rows of glyphs and say which your terminal's font draws properly, setting the map's arrows, portal and stairs icons and the Guiding Light's mark together. Answers land in style.toml, not here, so this row is not part of Save."),
     ("hide_adult_words",     ConfigRowKind::Bool, "Keep the strong language out of panels that list a story's whole vocabulary — the command band's VERB column and its like. Display only: the story still knows every word, typing one works exactly as before, and the Guiding Light still offers it. The words are the `adult_words` line in config.toml, there to be read, shortened or extended."),
     // Appended rather than filed beside `guidance_probe`, where it reads more
     // naturally: three tables in `input.rs` key off a row's INDEX, so inserting
@@ -66,12 +77,6 @@ pub(crate) enum ConfigRowKind {
     Bool,
     Enum,
     Num,
-    /// A row that DOES something rather than holding a value (SQ-1104). Enter
-    /// runs it; ← / → do nothing, because there is nothing to cycle. Its value
-    /// column says what the key does instead of what the setting is, and its
-    /// effect lands outside the working copy the Save button writes — which the
-    /// row's own description has to say, or Cancel looks like it would undo it.
-    Action,
 }
 
 /// Draw the config-screen modal centered over `area`.
@@ -269,11 +274,8 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         26 => bool_str(cfg.v6_pixel_lock),
         27 => bool_str(cfg.guidance),
         28 => bool_str(cfg.guidance_probe),
-        // SQ-1104: an Action row has no value to report, so the column says what
-        // the key does. `cfg` is untouched by it — the answer goes to style.toml.
-        29 => "run…".to_string(),
-        30 => bool_str(cfg.hide_adult_words),
-        31 => bool_str(cfg.return_probe),
+        29 => bool_str(cfg.hide_adult_words),
+        30 => bool_str(cfg.return_probe),
         _ => String::new(),
     }
 }
@@ -314,39 +316,42 @@ mod tests {
         assert!(content.contains("mouse"), "mouse row should be visible");
     }
 
-    /// SQ-1104: the `font_check` row is an ACTION, and its index must be the one
-    /// `config_toggle_or_edit` opens the dialog from — the four-way index match
-    /// this table warns about is exactly what a new row gets wrong. It also must
-    /// not touch the working copy, because its answer lands in `style.toml` and
-    /// Save/Cancel have nothing to say about it.
+    /// SQ-1161: the screen is Global Settings, so every row holds a global config
+    /// value — nothing on it merely DOES something. `font_check` was the one
+    /// exception (an action row whose answer landed in `style.toml`, outside what
+    /// Save writes) and it is gone; the font check is reached by `/run-font-check`,
+    /// `--font-check on`, and the first-run offer.
     #[test]
-    fn the_font_check_row_opens_the_dialog_and_leaves_the_working_copy_alone() {
-        use crate::input::{apply_action, Action};
-        use mapper::mapper::Mapper;
-        let mut m = Mapper::default();
-
-        let mut state = state_with_config_screen();
-        let idx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "font_check").unwrap();
-        assert_eq!(CONFIG_ROWS[idx].1, ConfigRowKind::Action);
-        state.overlays.config_screen.as_mut().unwrap().scroll.selected = idx;
-        let before = format!("{:?}", state.overlays.config_screen.as_ref().unwrap().working);
-
-        apply_action(Action::ConfigToggle, &mut state, &mut m);
-        assert!(state.overlays.font_check, "the row opens the font check");
-        assert!(state.overlays.config_screen.is_some(), "and the settings screen stays open behind it");
-        assert_eq!(
-            format!("{:?}", state.overlays.config_screen.as_ref().unwrap().working),
-            before,
-            "an action row changes no setting"
+    fn every_row_holds_a_value_and_none_of_them_is_an_action() {
+        for (name, kind, desc) in CONFIG_ROWS {
+            assert!(
+                matches!(kind, ConfigRowKind::Path | ConfigRowKind::Bool | ConfigRowKind::Enum | ConfigRowKind::Num),
+                "{name} must hold a value"
+            );
+            assert!(!desc.is_empty(), "{name} needs a description");
+        }
+        assert!(
+            !CONFIG_ROWS.iter().any(|(n, _, _)| *n == "font_check"),
+            "the font check is a command, not a global setting"
         );
-        // ← / → have nothing to cycle, and must not fall through to a neighbour.
-        state.overlays.font_check = false;
-        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
-        assert_eq!(
-            format!("{:?}", state.overlays.config_screen.as_ref().unwrap().working),
-            before,
-            "cycling an action row edits nothing"
-        );
+    }
+
+    /// SQ-1161: the rows Save cannot apply to a session already under way say so.
+    /// Each of these is consumed once when the story boots — the save/map folders,
+    /// the machine's undo cap, header byte $1E — so a row that stayed silent would
+    /// look like it had worked.
+    #[test]
+    fn the_boot_only_rows_say_they_land_on_the_next_launch() {
+        for name in ["user_dir", "undo_levels", "interpreter_number"] {
+            let (_, _, desc) = CONFIG_ROWS
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .unwrap_or_else(|| panic!("{name} row exists"));
+            assert!(
+                desc.contains("on next launch"),
+                "{name} cannot be applied by Save, so its description must say when it lands: {desc}"
+            );
+        }
     }
 
     #[test]

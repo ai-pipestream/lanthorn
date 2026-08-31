@@ -2983,13 +2983,50 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                 state.pending_vm_sound = Some(state.config.enable_sound);
                 // Reconcile the style file-watcher live (the run loop owns it).
                 state.pending_watch_style = Some(state.config.watch_style);
-                // Re-resolve the live look from style.toml (the single styling source).
-                let (base, _w1) =
-                    crate::style::load_style(cs.working.style.as_deref(), &cs.working.user_dir);
-                let (colors, set, _w2) =
-                    crate::style::resolve(&base, &cs.working.user_dir);
-                state.colors = colors;
-                state.symbols = set;
+                // SQ-1161: two settings are mirrored onto `AppState` at boot and
+                // read from THERE by render — `startup.rs` seeds both and the
+                // toggle keys drive the mirror, not the config. Saving the row
+                // without lowering it wrote config.toml and changed nothing on
+                // screen until the next launch, which is exactly the silent
+                // half-application the screen's contract forbids.
+                state.show_status_bar = state.config.show_status_bar;
+                state.show_room_numbers = state.config.show_room_numbers;
+                // SQ-1161: and four more keys keep a `_base` on `AppState` — the
+                // GLOBAL default a per-story source overrides for one launch, and
+                // what `/set-guidance auto` (and its siblings) fall back to. The
+                // honour row's base is lowered above for the same reason; without
+                // these, saving the row moved the live value and left `auto`
+                // pointing at the value the session started with.
+                //
+                // Only when nothing per-story is pinning the key: a pin means the
+                // row was NOT edited (editing releases it, above), so `working`
+                // still holds someone else's value for this run and lowering it
+                // would turn one game's choice into everyone's (SQ-0807).
+                if !state.config.one_run.holds(crate::config::keys::GUIDANCE) {
+                    state.guidance_base = state.config.guidance;
+                }
+                if !state.config.one_run.holds(crate::config::keys::RETURN_PROBE) {
+                    state.return_probe_base = state.config.return_probe;
+                }
+                if !state.config.one_run.holds(crate::config::keys::V6_PIXEL_LOCK) {
+                    state.v6_pixel_lock_base = state.config.v6_pixel_lock;
+                }
+                if !state.config.one_run.holds(crate::config::keys::V6_RENDER) {
+                    state.v6_render_base = state.config.v6_render;
+                }
+                // Re-resolving the live look is caller-handled, and deliberately
+                // runs AFTER `write_config_file` (SQ-1161). It used to happen here
+                // as a bare global `load_style` + `resolve`, which dropped the
+                // per-game style overlay and the garglk overlay from the live look
+                // and never recomputed `state.period_look` — so saving the
+                // `period_look` row did nothing until something else happened to
+                // reload the style. `reload::reload_style` is the ONE place the
+                // theme is built and fixes all three, but it also recomputes
+                // `honor_game_colours` from this story's sidecar and re-PINS it,
+                // and `ConfigDoc::put` skips a pinned key: run here, it would
+                // silently drop the honour row's edit from the file it was just
+                // asked to write. Ordering is the whole fix — the file first, then
+                // the story's own overrides back over the top of the live look.
                 // The style-file write + config repoint is caller-handled
                 // (main.rs snapshots working before this runs).
             }
@@ -4415,16 +4452,8 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         26 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_pixel_lock = !cs.working.v6_pixel_lock; } }
         27 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.guidance = !cs.working.guidance; } }
         28 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.guidance_probe = !cs.working.guidance_probe; } }
-        // font_check (SQ-1104) — an Action row: it opens the font check OVER the
-        // settings screen, which stays open behind it exactly as row 0's path
-        // dialog does. Nothing in `working` changes, because the answer is a
-        // glyph decision and lands in style.toml, not config.toml.
-        29 => {
-            state.overlays.dialog_focus = 1;
-            state.overlays.font_check = true;
-        }
-        30 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hide_adult_words = !cs.working.hide_adult_words; } }
-        31 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.return_probe = !cs.working.return_probe; } }
+        29 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hide_adult_words = !cs.working.hide_adult_words; } }
+        30 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.return_probe = !cs.working.return_probe; } }
         _ => {}
     }
 }
@@ -4467,6 +4496,11 @@ fn one_run_key_for_row(row: usize) -> Option<&'static str> {
         8 => Some(keys::HONOR_GAME_COLOURS),
         11 => Some(keys::ENABLE_SOUND),
         20 => Some(keys::INTERPRETER_NUMBER),
+        // SQ-1161: `startup.rs` pins V6_RENDER from this game's sidecar exactly as
+        // it pins the pixel lock below, and this row had no arm — so cycling the
+        // render mode here released nothing, and `write_config_at` skipped the key
+        // as "one-run". The user's global choice was silently not persisted.
+        24 => Some(keys::V6_RENDER),
         // SQ-0945: this game's sidecar pins the key at boot; editing the row here
         // is the user speaking about every game, so it ends the hold and the value
         // persists to the global config like any other setting.
@@ -4476,7 +4510,7 @@ fn one_run_key_for_row(row: usize) -> Option<&'static str> {
         27 => Some(keys::GUIDANCE),
         // SQ-0785: this game's sidecar pins the key at boot, exactly as the pixel
         // lock's does; editing the row is the user speaking about every game.
-        31 => Some(keys::RETURN_PROBE),
+        30 => Some(keys::RETURN_PROBE),
         _ => None,
     }
 }
@@ -4521,8 +4555,8 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         26 => working.v6_pixel_lock = !working.v6_pixel_lock,
         27 => working.guidance = !working.guidance,
         28 => working.guidance_probe = !working.guidance_probe,
-        30 => working.hide_adult_words = !working.hide_adult_words,
-        31 => working.return_probe = !working.return_probe,
+        29 => working.hide_adult_words = !working.hide_adult_words,
+        30 => working.return_probe = !working.return_probe,
         _ => {}
     }
 }
@@ -5359,6 +5393,101 @@ mod tests {
         apply_action(Action::ConfigSave, &mut s, &mut Mapper::default());
         assert_eq!(s.pending_watch_style, Some(true), "ConfigSave should queue a live watch reconcile");
         assert!(s.config.watch_style, "ConfigSave should apply the working config");
+    }
+
+    /// SQ-1161: Save applies to the RUNNING session everything it can, not just to
+    /// the file. Two of these live on `AppState` rather than on the config the row
+    /// edits (render reads the mirror, and the toggle keys drive it), and four more
+    /// are the `_base` a per-story source overrides for one launch — what
+    /// `/set-guidance auto` and its siblings fall back to. Every one of them was
+    /// written to `config.toml` and left untouched on screen until the next launch.
+    #[test]
+    fn config_save_applies_the_live_mirrors_and_the_global_bases() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        // A session booted on the opposite of everything the working copy asks for.
+        s.show_status_bar = true;
+        s.show_room_numbers = false;
+        s.guidance_base = false;
+        s.return_probe_base = true;
+        s.v6_pixel_lock_base = false;
+        s.v6_render_base = crate::config::V6RenderMode::Hybrid;
+
+        let mut working = clone_config(&s.config);
+        working.show_status_bar = false;
+        working.show_room_numbers = true;
+        working.guidance = true;
+        working.return_probe = false;
+        working.v6_pixel_lock = true;
+        working.v6_render = crate::config::V6RenderMode::Raster;
+        s.overlays.config_screen =
+            Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
+
+        apply_action(Action::ConfigSave, &mut s, &mut m);
+
+        assert!(!s.show_status_bar, "the status bar hides on Save, not on next launch");
+        assert!(s.show_room_numbers, "and the room numbers appear on Save");
+        assert!(s.guidance_base, "the global guidance default follows the row");
+        assert!(!s.return_probe_base, "so does the return probe's");
+        assert!(s.v6_pixel_lock_base, "and the pixel lock's");
+        assert_eq!(s.v6_render_base, crate::config::V6RenderMode::Raster, "and the render mode's");
+    }
+
+    /// …but a key a one-run source is PINNING is not the user speaking (SQ-0807):
+    /// the row was not edited (editing releases the pin), so `working` still holds
+    /// this story's value and lowering it into the global base would turn one
+    /// game's choice into everyone's.
+    #[test]
+    fn config_save_does_not_lower_a_pinned_value_into_the_global_base() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.guidance_base = true;
+        s.config.guidance = false;
+        s.config.one_run.pin(crate::config::keys::GUIDANCE, false);
+
+        apply_action(Action::OpenConfig, &mut s, &mut m);
+        let unrelated = crate::render::config_screen::CONFIG_ROWS
+            .iter()
+            .position(|(n, _, _)| *n == "show_room_numbers")
+            .expect("the row exists");
+        if let Some(cs) = &mut s.overlays.config_screen {
+            config_cycle(&mut cs.working, unrelated, 1);
+        }
+        apply_action(Action::ConfigSave, &mut s, &mut m);
+        assert!(
+            s.guidance_base,
+            "saving an unrelated row must not turn `--guidance off` into the global default"
+        );
+    }
+
+    /// SQ-1161: `startup.rs` pins `V6_RENDER` from this game's sidecar exactly as it
+    /// pins the pixel lock, and the settings row had no arm in `one_run_key_for_row`
+    /// — so cycling the render mode released nothing and `ConfigDoc::put` skipped the
+    /// key as still-one-run. The user's global choice was reported saved and was not.
+    #[test]
+    fn cycling_the_v6_render_row_ends_this_games_hold_on_it() {
+        use crate::config::{V6RenderMode, keys};
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        // What a per-game `v6_render = "raster"` sidecar leaves behind at boot.
+        s.config.v6_render = V6RenderMode::Raster;
+        s.config.one_run.pin(keys::V6_RENDER, crate::config::v6_render_key(V6RenderMode::Raster));
+
+        apply_action(Action::OpenConfig, &mut s, &mut m);
+        let row = crate::render::config_screen::CONFIG_ROWS
+            .iter()
+            .position(|(n, _, _)| *n == "v6_render")
+            .expect("the row exists");
+        if let Some(cs) = &mut s.overlays.config_screen {
+            config_cycle(&mut cs.working, row, 1);
+            assert!(
+                !cs.working.one_run.holds(keys::V6_RENDER),
+                "editing the row is the user speaking about every game"
+            );
+        }
+        apply_action(Action::ConfigSave, &mut s, &mut m);
+        assert_eq!(s.config.v6_render, V6RenderMode::Extended);
+        assert_eq!(s.v6_render_base, V6RenderMode::Extended, "and it becomes the global default");
     }
 
     /// SQ-0807: editing a settings row ends the one-run hold on its key.
