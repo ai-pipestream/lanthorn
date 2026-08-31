@@ -118,7 +118,10 @@ what a zip carries):
 > *contents*, not its name, so a zip carries anything lanthorn runs — every
 > Z-machine version including graphical v6, Glulx, Scott Adams, Blorb
 > containers — and a Blorb or a hints file packed beside the story is found and
-> used. A zip holding two games plays the first one.
+> used. **A zip holding two games lists both**, one row each, exactly as a
+> compilation disc does: pick one in the browser or name it with
+> `--story <name>`, and each keeps its own saves under its own name inside the
+> archive. A zip holding one game still opens straight into it.
 >
 > **And a downloaded zip of release floppies** is offered to your library: say
 > yes and the whole release is unpacked where the picker will find it and

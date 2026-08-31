@@ -808,7 +808,17 @@ pub(crate) fn boot_story(
     // directory itself is created (and read from) further down, where it always
     // was.
     let disk_build = disk_image.and_then(|kind| DiskBuild::of(&story_bytes, kind));
-    let game_dir = story_game_dir(&data_base, &story_key_for(&story_path, disk_build.as_ref()));
+    let game_dir = story_game_dir(
+        &data_base,
+        &story_key_for(app::storage::StoryOrigin {
+            path: &story_path,
+            // The zip half of the same fact (SQ-1098): a container's entry is
+            // what tells two of its games apart, and a zip has no build to be
+            // keyed by, so leaving this out gave both of them one directory.
+            entry: disk_entry,
+            build: disk_build.as_ref(),
+        }),
+    );
     // SQ-0734 tier 3: has the user named a picture archive for this story? Read
     // and PARSED here, ahead of everything, because the flavour it turns out to
     // be is an input to the profile immediately below. The archive itself is

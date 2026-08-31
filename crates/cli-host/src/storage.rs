@@ -14,7 +14,7 @@
 //!
 //! `scott-cli` has no part in this: Scott has no save protocol at all.
 //!
-//! ## Two rules, because one disk is no longer one game (SQ-0850)
+//! ## Three rules, because one FILE is no longer one game (SQ-0850, SQ-1098)
 //!
 //! A **loose story file** is keyed by its basename, exactly as it always was.
 //! That rule is a promise, not an implementation detail: every save anybody
@@ -30,6 +30,21 @@
 //! two games on one disk cannot collide — and it is the same identity this
 //! project already uses to say that a disk image is a *different release*
 //! rather than the same story on other media.
+//!
+//! A story taken out of a **zip** has no build to be keyed by: a zip is
+//! somebody's download, not a press, and `DiskBuild` is defined in terms of the
+//! `blorb::medium::DiskImage` a zip does not have. It is keyed by its ENTRY's
+//! basename instead — `pack.zip` holding `journey.z6` and `arthur.z6` names
+//! `journey.z6.save` and `arthur.z6.save`, which is exactly what those two
+//! games key on when they are loose. Keying on the zip's own basename, as this
+//! did until SQ-1098, gave both of them one directory; that is the reason
+//! SQ-1085 shipped a zip that could hold two games without a way to reach the
+//! second, and enumerating on top of it would have traded a visible limitation
+//! for a silent one.
+//!
+//! [`StoryOrigin`] is what carries the three facts to the one function that
+//! applies the rules, because a caller holding two of them must get a compile
+//! error rather than a plausible key.
 
 use std::path::{Path, PathBuf};
 
@@ -207,18 +222,53 @@ pub fn disk_story_key(build: &DiskBuild) -> String {
     }
 }
 
-/// The per-game directory token, by whichever of the two rules applies (see the
-/// module docs): the story's build when it came off a disk image, its basename
-/// when it is a loose file.
+/// **Where a story came from** — every fact that decides which directory its
+/// saves live in, travelling together rather than being reassembled at each
+/// call site (SQ-1098).
 ///
-/// `build` is `None` for every loose story file, and for a disk-mounted story
-/// whose bytes carry no Z-machine header — which cannot happen on the corpus, as
-/// every mountable format here is Infocom Z-code, and is a basename fallback
-/// rather than a failure if it ever does.
-pub fn story_key_for(story_path: &Path, build: Option<&DiskBuild>) -> String {
-    match build {
-        Some(b) => disk_story_key(b),
-        None => story_key(story_path),
+/// The three facts are not independent, and a caller holding two of them gets a
+/// *plausible* key rather than an error, which is the shape CLAUDE.md's
+/// refactoring policy exists for. It has already happened once here: this was
+/// two positional arguments, the entry was simply not among them, and the two
+/// stories of one zip were both keyed on the zip's own basename — one save
+/// directory for two games, silent, self-consistent and only visible after
+/// somebody had lost a save to it. Being a struct with no `Default` and no
+/// partial constructor is what makes the omission a compile error instead.
+///
+/// Construct it at the site that has all three; there is deliberately no
+/// shorthand for "just the path".
+#[derive(Debug, Clone, Copy)]
+pub struct StoryOrigin<'a> {
+    /// The file the player opened: a loose story, a disk image, or a zip.
+    pub path: &'a Path,
+    /// **Which** story inside that file, when the file is a container holding
+    /// more than one — the name the volume or the archive stores it under, as
+    /// `hints::mounted_stories` / `hints::zipped_stories` listed it. `None` for
+    /// every loose story file, which is its own single entry.
+    pub entry: Option<&'a str>,
+    /// The build, when the container was a disk image and the story is Z-code —
+    /// see [`disk_story_key`]. `None` for a loose file and for a zip.
+    pub build: Option<&'a DiskBuild>,
+}
+
+/// The per-game directory token, by whichever of the three rules applies (see
+/// the module docs): the story's build when it came off a disk image, its
+/// ENTRY's basename when it came out of a container that has no builds, and its
+/// own basename when it is a loose file.
+///
+/// `build` is `None` for every loose story file, for every story taken out of a
+/// zip, and for a disk-mounted story whose bytes carry no Z-machine header —
+/// which cannot happen on the corpus, as every mountable format there is
+/// Infocom Z-code. In each of those the entry decides, and where there is no
+/// entry either the container's own basename does, exactly as it always did.
+pub fn story_key_for(origin: StoryOrigin<'_>) -> String {
+    match (origin.build, origin.entry) {
+        (Some(b), _) => disk_story_key(b),
+        // `join`, so the rule is spelled once: the key is a BASENAME, and the
+        // basename of `pack.zip` + `stories/journey.z6` is `journey.z6` —
+        // which is precisely what the same game keys on when it is loose.
+        (None, Some(entry)) => story_key(&origin.path.join(entry)),
+        (None, None) => story_key(origin.path),
     }
 }
 
@@ -234,14 +284,18 @@ pub fn story_key_at(story_path: &Path) -> String {
     story_key_at_from(story_path, None)
 }
 
-/// [`story_key_at`] for one **named** story off a disk image that holds several
-/// (SQ-0859) — the game a front-end actually chose, rather than the tiebreak a
-/// bare path resolves to.
+/// [`story_key_at`] for one **named** story out of a container that holds
+/// several (SQ-0859, SQ-1098) — the game a front-end actually chose, rather
+/// than the tiebreak a bare path resolves to.
 ///
 /// `None` is exactly [`story_key_at`], which is what every loose story file and
 /// every single-game floppy passes.
-pub fn story_key_at_from(story_path: &Path, disk_entry: Option<&str>) -> String {
-    story_key_for(story_path, mounted_build(story_path, disk_entry).as_ref())
+///
+/// The name is a disk image's file OR a zip's entry: the two are the same
+/// question to a key, and only the disk half has a build to answer with.
+pub fn story_key_at_from(story_path: &Path, entry: Option<&str>) -> String {
+    let build = mounted_build(story_path, entry);
+    story_key_for(StoryOrigin { path: story_path, entry, build: build.as_ref() })
 }
 
 /// The build `story_path` would open if it is a disk image, else `None`.
@@ -652,6 +706,22 @@ mod tests {
         build_v(5, release, serial, blorb::medium::DiskImage::Adf)
     }
 
+    /// The origin of a loose story file: no container, so no entry and no build.
+    fn loose(path: &Path) -> StoryOrigin<'_> {
+        StoryOrigin { path, entry: None, build: None }
+    }
+
+    /// The origin of one story off a disk image, named by its build.
+    fn on_disk<'a>(path: &'a Path, b: &'a DiskBuild) -> StoryOrigin<'a> {
+        StoryOrigin { path, entry: None, build: Some(b) }
+    }
+
+    /// The origin of one story out of a zip: an entry, and no build to be keyed
+    /// by — the case SQ-1098 exists for.
+    fn zipped<'a>(path: &'a Path, entry: &'a str) -> StoryOrigin<'a> {
+        StoryOrigin { path, entry: Some(entry), build: None }
+    }
+
     fn build_v(
         version: u8,
         release: u16,
@@ -709,7 +779,7 @@ mod tests {
         for name in ["zork1-r88-s840726.z3", "Zork1.z5", "advent.gblorb", "a b?.z5"] {
             let p = PathBuf::from("/games").join(name);
             assert_eq!(
-                story_key_for(&p, None),
+                story_key_for(loose(&p)),
                 story_key(&p),
                 "{name}: a loose file's key is its basename, unchanged"
             );
@@ -743,12 +813,64 @@ mod tests {
     #[test]
     fn two_games_on_one_image_get_two_directories() {
         let image = Path::new("/games/Infocom Compilation 1 (19xx)(-).st");
-        let hitchhikers = story_key_for(image, Some(&build(56, "841221")));
-        let planetfall = story_key_for(image, Some(&build(29, "840118")));
+        let hitchhikers = story_key_for(on_disk(image, &build(56, "841221")));
+        let planetfall = story_key_for(on_disk(image, &build(29, "840118")));
         assert_ne!(hitchhikers, planetfall, "one image, one directory, was the defect");
         // …and neither is the image's own name, which is what they used to share.
         assert_ne!(hitchhikers, story_key(image));
         assert_ne!(planetfall, story_key(image));
+    }
+
+    /// **Guard 3b, the zip half** (SQ-1098). Two stories out of ONE zip cannot
+    /// share a directory either — and this is the case that had no answer at
+    /// all, because a zip has no `DiskBuild` to be keyed by and the key fell
+    /// through to the archive's own basename for both of them.
+    ///
+    /// It is asserted on the whole DIRECTORY as well as the token, because the
+    /// token is not what overwrites a save.
+    #[test]
+    fn two_stories_in_one_zip_get_two_directories() {
+        let pack = Path::new("/games/infocom-pack.zip");
+        let journey = story_key_for(zipped(pack, "journey.z6"));
+        let arthur = story_key_for(zipped(pack, "arthur.z6"));
+        assert_ne!(journey, arthur, "one zip, one directory, is the defect");
+        // …and neither is the zip's own name, which is what they used to share.
+        assert_eq!(story_key(pack), "infocom-pack.zip");
+        assert_ne!(journey, story_key(pack));
+        assert_ne!(arthur, story_key(pack));
+        assert_ne!(
+            game_dir(pack, None),
+            game_dir_with_key(pack, None, &journey),
+            "the directory, not only the token",
+        );
+        assert_ne!(
+            game_dir_with_key(pack, None, &journey),
+            game_dir_with_key(pack, None, &arthur),
+        );
+        assert_eq!(
+            game_dir_with_key(pack, None, &journey),
+            PathBuf::from("/games/journey.z6.save"),
+        );
+    }
+
+    /// A zip entry stored under a DIRECTORY inside the archive keys on the
+    /// basename all the same — `stories/journey.z6` is `journey.z6` — which is
+    /// what makes the key a directory name rather than a path, and what makes
+    /// the same game key alike loose and packed.
+    #[test]
+    fn a_zip_entry_in_a_subdirectory_keys_on_its_basename() {
+        let pack = Path::new("/games/infocom-pack.zip");
+        assert_eq!(story_key_for(zipped(pack, "stories/journey.z6")), "journey.z6");
+        assert_eq!(
+            story_key_for(zipped(pack, "journey.z6")),
+            story_key_for(loose(Path::new("/games/journey.z6"))),
+            "the same game, packed or loose",
+        );
+        // Nothing a zip can spell escapes the directory it names: the entry
+        // name is the archive's own claim, so it is sanitized exactly as a
+        // filename is.
+        let key = story_key_for(zipped(pack, "../../etc/pass wd"));
+        assert!(!key.contains('/') && !key.contains(' '), "{key}");
     }
 
     /// **Guard 4.** The same build off two different images is one game with one
@@ -765,7 +887,7 @@ mod tests {
             "/elsewhere/renamed.img",
         ]
         .iter()
-        .map(|p| story_key_for(Path::new(p), Some(&zork1)))
+        .map(|p| story_key_for(on_disk(Path::new(p), &zork1)))
         .collect();
         assert!(keys.windows(2).all(|w| w[0] == w[1]), "{keys:?}");
     }
@@ -784,8 +906,8 @@ mod tests {
         assert_ne!(keys[0], keys[2]);
         // The bare `zork0-r393-s890714.z6` is a LOOSE file and keeps its
         // basename, so it cannot land on the DOS floppy's directory either.
-        let loose = Path::new("/games/zork0-r393-s890714.z6");
-        assert_ne!(story_key_for(loose, None), keys[2]);
+        let loose_path = Path::new("/games/zork0-r393-s890714.z6");
+        assert_ne!(story_key_for(loose(loose_path)), keys[2]);
     }
 
     /// A key is a directory name: no separator, no space, nothing a shell or a

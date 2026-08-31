@@ -831,8 +831,18 @@ largest file. About thirty games across the six *Lost Treasures* volumes alone
 were unreachable from this screen before; sort, search and the info panel all
 work on them now because they are ordinary rows.
 
-A disk holding one story is untouched by any of this: one row, opened by path,
-exactly as before. Where the title tables know a build, the row is titled from
+**A zip is a container in exactly the same sense** (SQ-1098). An archive holding
+two games contributes two rows — one per entry, each with its own title, its own
+saves and its own cover — where it used to contribute one and play whichever
+story came first in archive order, leaving the other unreachable however long you
+looked at the list. `--story <n|name>` picks one from the command line the same
+way it picks off a disc, and the refusal for a name that matches nothing calls it
+an archive rather than a disk. What counts as an entry is decided by CONTENT, so
+the `Journey.blb` packed beside `journey.z6` is resources rather than a second
+game and never becomes a row.
+
+A disk or archive holding one story is untouched by any of this: one row, opened
+by path, exactly as before. Where the title tables know a build, the row is titled from
 it (*Sherlock: The Riddle of the Crown Jewels*); where they do not, the row takes
 the name the disk itself gives the file (`LEATHRGODDESSES`), because the image's
 own filename names the box and would read the same on every row. The info

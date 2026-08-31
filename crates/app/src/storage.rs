@@ -13,8 +13,15 @@
 //! [`cli_host::storage`], which `zvm-cli` reads from too, so the TUI and the CLI
 //! cannot name the same game's directory two ways. IFID is retained elsewhere
 //! for title/hint lookup only.
+//!
+//! A story taken out of a **zip** has no build, so it is keyed by its entry's
+//! basename — the same token the same game keys on loose (SQ-1098). All three
+//! rules read one [`StoryOrigin`], so a caller cannot supply a subset and get a
+//! plausible answer.
 
-pub use cli_host::storage::{DiskBuild, story_key_at, story_key_at_from, story_key_for};
+pub use cli_host::storage::{
+    DiskBuild, StoryOrigin, story_key_at, story_key_at_from, story_key_for,
+};
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -181,13 +188,13 @@ mod tests {
     /// basename, exactly as it did before SQ-0850. Nobody's saves move.
     #[test]
     fn key_keeps_ext_and_sanitizes() {
-        assert_eq!(story_key_for(Path::new("/g/Zork1.z5"), None), "Zork1.z5");
-        assert_ne!(
-            story_key_for(Path::new("/g/z.z5"), None),
-            story_key_for(Path::new("/g/z.gblorb"), None)
-        );
-        assert_eq!(story_key_for(Path::new("/g/a b?.z5"), None), "a_b_.z5");
-        assert_eq!(story_key_for(Path::new(""), None), "game");
+        let loose = |p: &'static str| {
+            story_key_for(StoryOrigin { path: Path::new(p), entry: None, build: None })
+        };
+        assert_eq!(loose("/g/Zork1.z5"), "Zork1.z5");
+        assert_ne!(loose("/g/z.z5"), loose("/g/z.gblorb"));
+        assert_eq!(loose("/g/a b?.z5"), "a_b_.z5");
+        assert_eq!(loose(""), "game");
     }
 
     #[test]

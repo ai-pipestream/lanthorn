@@ -103,6 +103,8 @@ mod amiga_rom_face;
 mod native_disk_font;
 #[path = "suites/story_pick_media.rs"]
 mod story_pick_media;
+#[path = "suites/zip_story_entries.rs"]
+mod zip_story_entries;
 #[path = "suites/v6_dump_windows_face.rs"]
 mod v6_dump_windows_face;
 #[path = "suites/system_face_cascade.rs"]

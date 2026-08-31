@@ -1512,7 +1512,15 @@ fn main() {
     let game_dir = cli_host::game_dir_with_key(
         &story_path,
         args.data_dir.as_deref(),
-        &cli_host::story_key_for(&story_path, disk_build.as_ref()),
+        &cli_host::story_key_for(cli_host::StoryOrigin {
+            path: &story_path,
+            // `None`, stated rather than omitted (SQ-1098): the entry is what
+            // keys a story out of a container with no builds, and the only
+            // container that can be is a zip — which `zvm-cli` does not open.
+            // A story off a disk image is keyed by the build beside this.
+            entry: None,
+            build: disk_build.as_ref(),
+        }),
     );
     let aux_file = auxiliary::aux_path(&game_dir);
 

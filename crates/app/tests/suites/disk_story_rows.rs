@@ -326,7 +326,14 @@ fn each_row_keeps_its_own_saves() {
             );
             // …and never at the image's own filename, which is what all of them
             // shared before SQ-0850.
-            assert_ne!(row.story_key(), app::storage::story_key_for(&path, None));
+            assert_ne!(
+                row.story_key(),
+                app::storage::story_key_for(app::storage::StoryOrigin {
+                    path: &path,
+                    entry: None,
+                    build: None,
+                }),
+            );
         }
         assert_eq!(dirs.len(), rows.len(), "{image}: {} rows, {} directories", rows.len(), dirs.len());
     }

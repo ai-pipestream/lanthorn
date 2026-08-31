@@ -23,9 +23,23 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use app::storage::{DiskBuild, story_key_at, story_key_for};
+use app::storage::{DiskBuild, StoryOrigin, story_key_at, story_key_for};
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
+
+/// The key a story mounted off `path` with `build` takes. A disk image names
+/// its story by the build, so there is no container entry to state here — see
+/// [`StoryOrigin`], whose whole point is that the third fact has to be stated
+/// rather than forgotten (SQ-1098).
+fn key_off_disk(path: &Path, build: Option<&DiskBuild>) -> String {
+    story_key_for(StoryOrigin { path, entry: None, build })
+}
+
+/// The key the bare container path takes with nothing else known — what every
+/// story on a compilation used to share, and what none of them may take now.
+fn key_of_container(path: &Path) -> String {
+    story_key_for(StoryOrigin { path, entry: None, build: None })
+}
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
@@ -103,10 +117,10 @@ fn every_story_on_every_image_keys_on_a_build() {
             let build = build.unwrap_or_else(|| {
                 panic!("{image}: {name} mounted with no readable Z header — it would key on the image's filename and collide with its disk-mates")
             });
-            let key = story_key_for(&path, Some(&build));
+            let key = key_off_disk(&path, Some(&build));
             assert_ne!(
                 key,
-                story_key_for(&path, None),
+                key_of_container(&path),
                 "{image}: {name} must not key on the image's own filename",
             );
             // `disk_story_key` writes the serial with everything non-alphanumeric
@@ -155,7 +169,7 @@ fn two_games_on_one_image_never_share_a_directory() {
         ran += 1;
         let mut seen: BTreeMap<PathBuf, String> = BTreeMap::new();
         for (name, build) in &stories {
-            let dir = app::storage::game_dir(base, &story_key_for(&path, build.as_ref()));
+            let dir = app::storage::game_dir(base, &key_off_disk(&path, build.as_ref()));
             if let Some(other) = seen.insert(dir.clone(), name.clone()) {
                 panic!("{image}: {name} and {other} both resolve to {}", dir.display());
             }
@@ -185,7 +199,7 @@ fn one_build_across_three_media_resolves_to_one_directory() {
         for (_, build) in stories_on(&path) {
             let Some(b) = build else { continue };
             if (b.release, b.serial.as_str()) == (88, "840726") {
-                keys.push((image.to_string(), story_key_for(&path, Some(&b))));
+                keys.push((image.to_string(), key_off_disk(&path, Some(&b))));
             }
         }
     }
@@ -223,7 +237,7 @@ fn the_zork_zero_builds_never_collide() {
                 continue; // floppy5.ima carries only Zork Zero, but be explicit
             }
             ran += 1;
-            let dir = app::storage::game_dir(base, &story_key_for(&path, Some(&b)));
+            let dir = app::storage::game_dir(base, &key_off_disk(&path, Some(&b)));
             if let Some(other) = dirs.insert(dir.clone(), format!("{image}:{name}")) {
                 panic!("{image}:{name} collides with {other} at {}", dir.display());
             }
@@ -338,7 +352,7 @@ fn a_volume_that_carries_no_story_keys_on_the_one_its_release_holds() {
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
         assert_eq!(
             story_key_at(&path),
-            story_key_for(&path, DiskBuild::of(&story.bytes, kind).as_ref()),
+            key_off_disk(&path, DiskBuild::of(&story.bytes, kind).as_ref()),
             "{name}: the path-only door and the launch path must name one directory\
              (this volume's story {} on the platter itself)",
             if platter_has_none { "is NOT" } else { "is" },
@@ -372,7 +386,14 @@ fn both_front_ends_name_one_directory() {
         let cli = cli_host::storage::game_dir_with_key(
             &path,
             Some("/data"),
-            &cli_host::storage::story_key_for(&path, DiskBuild::of(&story.bytes, kind).as_ref()),
+            // `cli_host`'s own function, deliberately — the point of the case is
+            // that the two crates apply one rule, so the TUI's helper above is
+            // not what this side may call.
+            &cli_host::storage::story_key_for(cli_host::storage::StoryOrigin {
+                path: &path,
+                entry: None,
+                build: DiskBuild::of(&story.bytes, kind).as_ref(),
+            }),
         );
         let tui = app::storage::game_dir(Path::new("/data"), &story_key_at(&path));
         assert_eq!(tui, cli, "{image}: the TUI and zvm-cli must agree");
