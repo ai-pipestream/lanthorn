@@ -898,25 +898,63 @@ impl StoryBadges {
     /// codepoint under the SAME name in all nine, and each rasterises with ink
     /// at 12–16px, so none of them is tofu on a face that claims the range.
     /// **They are not to be re-derived.** SQ-1160 retired three of the original
-    /// six; the survivors below are exactly what that survey read.
+    /// six and SQ-1168 relieved the surviving three of a weight they never had;
+    /// each replacement was read the same way, in all nine, before it shipped.
     ///
     /// The choices, and why each survives being a few pixels tall in a list row:
     ///
-    /// - `md-content_save` — the floppy. The most legible small silhouette there
-    ///   is, and the one glyph here nobody has to be taught.
-    /// - `md-lightbulb` / `md-lightbulb_outline` — one FAMILY and one SHAPE for
-    ///   the hint slot's two states, differing only in fill, because that is the
-    ///   distinction being drawn: filled is a hint you have, hollow is one you
+    /// - `md-content_save_outline` — the floppy, hollow. The most legible small
+    ///   silhouette there is, and the one glyph here nobody has to be taught.
+    /// - `md-lightbulb_on` / `md-lightbulb_on_outline` — one FAMILY and one SHAPE
+    ///   for the hint slot's two states, differing only in fill, because that is
+    ///   the distinction being drawn: filled is a hint you have, hollow is one you
     ///   could fetch. It is the same reading `H`/`h` carried, and the same
     ///   filled-is-settled grammar as the portal icons' ◉/◎ and the room dock's
     ///   two header marks.
+    ///
+    /// **All three are the OUTLINE-weight, `16x16`-boxed members of their group,
+    /// and that is the whole of SQ-1168.** The set shipped by SQ-1159 was
+    /// `md-content_save` (filled) and the `md-lightbulb`/`md-lightbulb_outline`
+    /// pair, and it read as bold when it is not: `story_badge` inherits `text`
+    /// with an EMPTY delta, so nothing adds a modifier — the weight is the
+    /// drawing. Measured in the gallery's own face and size (Fira Code Nerd Font
+    /// Mono at 26 px/em in a 16x32 cell, which is what `Face::outline` picks for
+    /// the shots the report was made against), against a cap height of 18.4px:
+    ///
+    /// | mark | ink | vs cap |
+    /// |---|---|---|
+    /// | `S` `H` `h`, the letters these replaced | 13x19, 12x18, 11x20 | 1.00 |
+    /// | `md-lightbulb` / `_outline` (was) | **16x23** | **1.25** |
+    /// | `md-content_save` (was) | 16x16, solid | 0.87 |
+    /// | `md-content_save_outline` (now) | 16x16, hollow | 0.87 |
+    /// | `md-lightbulb_on` / `_on_outline` (now) | 16x16 | 0.87 |
+    ///
+    /// So the bulb was a quarter TALLER than the letters beside it and the floppy
+    /// was solid ink edge to edge; every badge now sits inside the same 16x16 box
+    /// and none of them overshoots the letters. Nerd Fonts scales each icon by its
+    /// source artwork's own bounds, so this is per-GLYPH and not per-family: the
+    /// `_on` bulbs are smaller than the plain ones because their rays are counted
+    /// into the box that gets normalised. **A lighter colour or a style modifier
+    /// would not have fixed it** — there is no modifier to remove.
+    ///
+    /// **The hint pair must come from one family, and Material Design is the only
+    /// family that HAS one.** Font Awesome carries exactly one bulb
+    /// (`fa-lightbulb_o`, U+0F0EB — established on SQ-1159), Octicons exactly one
+    /// (`oct-light_bulb`, U+0F400), and **Codicons exactly one too**:
+    /// `cod-lightbulb` (U+0EA61) and `cod-lightbulb_autofix` (U+0EB13) are the
+    /// whole of that family, and the second is the same solid bulb with a gear
+    /// beside it, not the first one hollowed. `cod-lightbulb` is by some way the
+    /// lightest bulb in the patched font (12x17, the closest of any to letter
+    /// size) and it cannot be used here, because the `Available` state would then
+    /// differ from `Present` by COLOUR alone — the degradation SQ-1148 accepts
+    /// only where the font offers no off-shape, and one this font does offer.
     pub fn preset(name: &str) -> Option<StoryBadges> {
         Some(match name {
             "plain" => StoryBadges::PLAIN,
             "nerdfont" => StoryBadges {
-                save: '\u{F0193}',           // md-content_save
-                hint: '\u{F0335}',           // md-lightbulb
-                hint_available: '\u{F0336}', // md-lightbulb_outline
+                save: '\u{F0818}',           // md-content_save_outline
+                hint: '\u{F06E8}',           // md-lightbulb_on
+                hint_available: '\u{F06E9}', // md-lightbulb_on_outline
             },
             _ => return None,
         })
@@ -1574,9 +1612,9 @@ mod tests {
     fn nerdfont_badge_glyphs_are_the_names_that_were_read_from_the_font() {
         let b = StoryBadges::preset("nerdfont").expect("preset");
         for (name, got, want) in [
-            ("md-content_save", b.save, '\u{F0193}'),
-            ("md-lightbulb", b.hint, '\u{F0335}'),
-            ("md-lightbulb_outline", b.hint_available, '\u{F0336}'),
+            ("md-content_save_outline", b.save, '\u{F0818}'),
+            ("md-lightbulb_on", b.hint, '\u{F06E8}'),
+            ("md-lightbulb_on_outline", b.hint_available, '\u{F06E9}'),
         ] {
             assert_eq!(got, want, "{name} moved: U+{:05X} is not U+{:05X}", got as u32, want as u32);
         }
@@ -1598,7 +1636,7 @@ mod tests {
         assert_eq!(
             b.hint_available as u32,
             b.hint as u32 + 1,
-            "md-lightbulb_outline is no longer the filled bulb's own outline",
+            "md-lightbulb_on_outline is no longer the filled bulb's own outline",
         );
         // Three badges, three distinct marks: two rows cannot say the same thing.
         let all = [b.save, b.hint, b.hint_available];
