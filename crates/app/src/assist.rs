@@ -49,13 +49,13 @@
 //! Once per session, above the first assist, [`preamble`] says:
 //!
 //! ```text
-//! Lanthorn's Guiding Light: lines marked ● are the interpreter's, not the story's — turn it off in the settings menu.
+//! Lanthorn's Guiding Light: ● is mine, not the story's.
 //! ```
 //!
 //! with the **configured** glyph substituted, never a hard-coded dot. That is
 //! deliberate and load-bearing: a player whose font has no glyph for the mark
-//! sees a tofu box in the one sentence that tells them what the box is and where
-//! to turn it off. Reword this line freely, but never into a sentence that omits
+//! sees a tofu box in the one sentence that tells them what the box is. Reword
+//! this line freely, but never into a sentence that omits
 //! the icon.
 //!
 //! It is deliberately **just-in-time rather than a startup banner**. An earlier
@@ -158,9 +158,10 @@ pub const CONT_INDENT: &str = "  ";
 ///
 /// Takes the glyph actually in force so the sentence shows the reader the mark
 /// they will be seeing — and so a font missing it fails visibly HERE, in the one
-/// line that also says where to switch the feature off. See the module docs.
+/// line that also says what the mark means. Where to switch the feature off is
+/// the ●/○ control in the pane border's own job. See the module docs.
 pub fn preamble(icon: char) -> String {
-    format!("{FEATURE}: lines marked {icon} are the interpreter's, not the story's — turn it off in the settings menu.")
+    format!("{FEATURE}: {icon} is mine, not the story's.")
 }
 
 /// One transcript line as a **saved transcript** should carry it.
@@ -291,7 +292,7 @@ mod tests {
         assert!(!p.starts_with('['));
         assert!(p.starts_with(NAME), "the one line that identifies us says the name: {p:?}");
         assert!(p.contains('◈'), "the introduction must show the CONFIGURED mark: {p:?}");
-        assert!(p.contains("settings"), "and where to turn it off: {p:?}");
+        assert!(p.contains("story"), "and whose the marked lines are not: {p:?}");
         assert!(!EXPORT_PREFIX.starts_with('['));
     }
 }

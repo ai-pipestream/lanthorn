@@ -149,7 +149,7 @@ fn the_introduction_fires_once_and_shows_the_mark_in_force() {
     s.push_assist(&Assist::help("first"));
     assert_eq!(s.transcript[0], preamble('◈'));
     assert!(s.transcript[0].contains('◈'), "the introduction shows the configured mark");
-    assert!(s.transcript[0].contains("settings"), "and where to turn it off");
+    assert!(s.transcript[0].contains("story"), "and whose the marked lines are not");
     assert_eq!(s.transcript[1], "first");
 
     for n in 0..20 {
@@ -326,14 +326,14 @@ fn push_assist_is_the_only_producer_of_an_assist_line() {
 
 /// The register's constants, checked where the next four lanes will copy them
 /// from: the file marker names the app, the introduction names the FEATURE (it is
-/// the one chance to say what the mark means and where to switch it off), and
-/// neither is in the parser's voice.
+/// the one chance to say what the mark means), and neither is in the parser's
+/// voice.
 #[test]
 fn the_register_says_who_is_speaking() {
     assert!(EXPORT_PREFIX.starts_with("Lanthorn"));
     let p = preamble('●');
     assert!(p.starts_with("Lanthorn's Guiding Light"));
-    assert!(p.contains("settings"), "the introduction says where to disable it: {p:?}");
+    assert!(p.contains("story"), "the introduction says whose the marked lines are not: {p:?}");
     assert!(!p.starts_with('[') && !EXPORT_PREFIX.starts_with('['));
     // Short enough to ride on every exported assist line without reflowing it.
     assert!(EXPORT_PREFIX.len() <= 12, "{EXPORT_PREFIX:?}");

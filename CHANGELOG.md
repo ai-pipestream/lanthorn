@@ -60,10 +60,11 @@ carrying `enable_sound = false` could only be overridden by editing the file.
 ### Lanthorn's Guiding Light
 
 - **lanthorn can now help you play**, and says so once: a single line above its
-  first offer of the session — *"Lanthorn's Guiding Light: lines marked ● are the
-  interpreter's, not the story's — turn it off in the settings menu."* It arrives
-  when there is a mark on screen to explain rather than as a banner at launch,
-  which is why it describes that mark instead of promising one. After that the
+  first offer of the session — *"Lanthorn's Guiding Light: ● is mine, not the
+  story's."* It arrives when there is a mark on screen to explain rather than as
+  a banner at launch, which is why it describes that mark instead of promising
+  one. It does not say where the switch is, because the ●/○ control in the pane
+  border is right there. After that the
   help comes unannounced, carried by the glyph alone and never in the story's own
   voice.
 - **The mark is the whole of the attribution on screen.** No prefix rides the

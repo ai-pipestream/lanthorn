@@ -1364,8 +1364,9 @@ pub struct Config {
     /// door every assist goes through.
     ///
     /// `--guidance on|off` says it for a launch, `/set-guidance` for a session,
-    /// and the settings screen persists it — which is what the introduction line
-    /// promises when it says "the settings menu".
+    /// and the settings screen persists it. The ●/○ control in the pane border is
+    /// the switch a player actually finds, which is why the introduction line no
+    /// longer spends words pointing at a menu.
     #[serde(default = "default_true")]
     pub guidance: bool,
     /// Vet a vocabulary offer before it is shown, by trying each candidate in a
