@@ -541,8 +541,14 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("dialog.list_header", Section::Dialog, Kind::Style, Some("text"), mods(false, false, true, false)),
     // The hints panel's dim "this game has its own hints" suggestion line.
     row("dialog.hint_suggestion", Section::Dialog, Kind::Style, Some("alert"), Delta { dim: Some(true), ..Delta::EMPTY }),
-    // The composed-input preview line shown by list dialogs ("Input: <text>_").
-    row("dialog.input_preview", Section::Dialog, Kind::Style, Some("alert"), Delta::EMPTY),
+    // SQ-1170 retired `dialog.input_preview`. It styled the verb menu's
+    // composed-input line ("Input: <text>_"); `d5524618` replaced the verb menu
+    // with the command band, which deliberately has no phrase row at all — a
+    // player composes on the real story input line, styled by `input_line`
+    // (SQ-0667). The row outlived its only consumer by five months, documented
+    // and parsed and resolved the whole time, and reaching no pixel. There is no
+    // shim: an old style.toml that still names it is dropped by the same
+    // unrecognised-key path every retired key takes.
     // SQ-0789: the launch-options dialog's caveat lines — what a chosen art
     // rendition will and won't do (EGA's dither not yet fusing at 1:1), and
     // when a choice needs the checkbox to take effect. `alert` without `dim`:
@@ -788,7 +794,6 @@ mod tests {
         "dialog.list_footer",
         "dialog.list_header",
         "dialog.hint_suggestion",
-        "dialog.input_preview",
         // SQ-0789: the launch-options dialog's caveat lines
         "dialog.launch_caveat",
         // SQ-0439: the region prompt
@@ -901,9 +906,6 @@ mod tests {
         assert_eq!(hint.fg, Some(Color::Yellow));
         assert!(hint.add_modifier.contains(Modifier::DIM));
 
-        // dialog.input_preview: old `.fg(Yellow)`.
-        assert_eq!(theme.get("dialog.input_preview").style.fg, Some(Color::Yellow));
-
         // file_browser_cwd / file_browser_dir: old `.fg(Yellow)` / `.fg(Cyan)`.
         assert_eq!(theme.get("file_browser_cwd").style.fg, Some(Color::Yellow));
         assert_eq!(theme.get("file_browser_dir").style.fg, Some(Color::Cyan));
@@ -932,7 +934,6 @@ mod tests {
              list_footer = { fg = \"magenta\" }\n\
              list_header = { fg = \"magenta\" }\n\
              hint_suggestion = { fg = \"magenta\" }\n\
-             input_preview = { fg = \"magenta\" }\n\
              [elements]\n\
              file_browser_cwd = { fg = \"magenta\" }\n\
              file_browser_dir = { fg = \"magenta\" }\n\
@@ -948,7 +949,6 @@ mod tests {
             "dialog.list_footer",
             "dialog.list_header",
             "dialog.hint_suggestion",
-            "dialog.input_preview",
             "file_browser_cwd",
             "file_browser_dir",
             "inspector_edge_ok",
@@ -959,6 +959,98 @@ mod tests {
                 theme.get(sel).style.fg,
                 Some(Color::Magenta),
                 "selector {sel} must pick up its style.toml override"
+            );
+        }
+    }
+    /// SQ-1170: no registry row may be documented in the shipped template and
+    /// read by NOTHING.
+    ///
+    /// `template::tests::every_key_the_template_documents_takes_effect_when_uncommented`
+    /// proves a documented key is READ — parsed, lowered, resolved, and visible
+    /// in the artifact a renderer draws from. It cannot prove that any renderer
+    /// then draws with it, because a selector nothing looks up resolves exactly
+    /// as cleanly as one everything looks up. That is how two rows shipped for
+    /// months documented, parsed, resolved, warned about by nothing, and
+    /// reaching no pixel: `map.background` (the map pane simply never painted a
+    /// ground, where the debug pane has always painted `panel.background`) and
+    /// `dialog.input_preview` (whose consumer, the verb menu's composed-input
+    /// line, went with the verb menu itself).
+    ///
+    /// So this walks `crates/app/src` — minus `theme/`, which is the DECLARING
+    /// side — and asks of each row: does anything actually name it?
+    ///
+    /// Three families spell the lookup differently, and each is checked by its
+    /// own spelling rather than exempted from the check:
+    ///
+    /// - a **role** is consumed by INHERITANCE, so it is read when some registry
+    ///   row parents onto it. `heading` is named in no source file and styles
+    ///   two rows; requiring a literal would call it dead.
+    /// - a **[`Kind::Placement`]** row is read through the SYMBOL path by its
+    ///   bare key (`box_style`, `badge_save`), never by its full selector name.
+    /// - the **`glk.*`** families are the app's one CONSTRUCTED selector family
+    ///   (`format!("glk.{win}.{name}")` in `render::glk_theme_modifiers`), so a
+    ///   row is read when its leaf is one of `GLK_STYLE_NAMES` — which means a
+    ///   `glk.buffer.user3` row with no matching Glk style still fails here.
+    ///
+    /// One limit worth knowing: a literal inside a `#[cfg(test)]` block counts,
+    /// so a row only a test names passes. Both rows this case was written for
+    /// had zero references anywhere, which is the shape it catches.
+    #[test]
+    fn no_registry_row_is_documented_but_read_by_nothing() {
+        use std::collections::HashSet;
+
+        // Every span between two double quotes in every non-`theme/` source
+        // file. Deliberately an OVER-approximation: overlapping spans mean a
+        // mis-pairing (an escaped quote, a `"` inside a comment) ADDS candidates
+        // rather than dropping them, so the only mistake this can make is
+        // calling a row read — never calling a live row dead.
+        let mut quoted: HashSet<&str> = HashSet::new();
+        let mut sources: Vec<String> = Vec::new();
+        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read crates/app/src") {
+                let path = entry.expect("directory entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "theme") {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    sources.push(std::fs::read_to_string(&path).expect("read source file"));
+                }
+            }
+        }
+        assert!(sources.len() > 100, "only {} source files scanned — the walk is wrong", sources.len());
+        for text in &sources {
+            let mut open: Option<usize> = None;
+            for (i, _) in text.match_indices('"') {
+                if let Some(start) = open {
+                    if i - start <= 64 {
+                        quoted.insert(&text[start + 1..i]);
+                    }
+                }
+                open = Some(i);
+            }
+        }
+
+        for row in REGISTRY.iter() {
+            let name = row.name;
+            let read = if ROLE_NAMES.contains(&name) {
+                REGISTRY.iter().any(|r| r.parent == Some(name))
+            } else if row.kind == Kind::Placement {
+                quoted.contains(name.rsplit('.').next().expect("a name has a leaf"))
+            } else if let Some(leaf) =
+                name.strip_prefix("glk.buffer.").or_else(|| name.strip_prefix("glk.grid."))
+            {
+                crate::render::GLK_STYLE_NAMES.contains(&leaf)
+            } else {
+                quoted.contains(name)
+            };
+            assert!(
+                read,
+                "registry row {name:?} is documented in style.example.toml and read by nothing \
+                 outside crates/app/src/theme — wire it to the renderer that should honour it, \
+                 or retire the row; do not leave a knob that does nothing"
             );
         }
     }
