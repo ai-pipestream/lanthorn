@@ -918,7 +918,15 @@ fn draw_frame(
                             base: state.colors.theme.get("panel.tab").style,
                             active: state.colors.theme.get("panel.tab:active").style,
                         }),
-                        body_fill: None,
+                        // SQ-1170: the map canvas's own ground. `map.background`
+                        // has been a documented, parsed, resolved selector that
+                        // no renderer read since it landed — the map pane simply
+                        // never painted a ground, where the debug pane has always
+                        // painted `panel.background`. Transparent by default (its
+                        // registry Delta is empty), so this is inert until a
+                        // player sets a `bg`, and then it is the one thing the
+                        // key's own comment always promised.
+                        body_fill: Some(state.colors.theme.get("map.background").style),
                     }, &state.colors.theme, &map_views);
                     border_controls_out.extend(map_ctls);
                     layer_tabs_out = layer_ids.into_iter().zip(map_fp.tab_rects).collect();

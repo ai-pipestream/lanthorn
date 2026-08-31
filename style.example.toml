@@ -232,7 +232,6 @@ version = 1   # style schema version — do not remove; lets lanthorn flag an ou
 # list_footer = { parent = "muted" }
 # list_header = { parent = "text", underline = true }
 # hint_suggestion = { parent = "alert", dim = true }
-# input_preview = { parent = "alert" }
 # launch_caveat = { parent = "alert" }
 # "region_prompt.body" = { parent = "dialog.background" }
 # "region_prompt.rooms" = { parent = "dialog.list_footer" }

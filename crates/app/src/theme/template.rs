@@ -488,6 +488,309 @@ mod tests {
         assert_eq!(text, commented_template(), "style.example.toml is stale — regenerate it from commented_template()");
     }
 
+    // ── SQ-1170: every key the template documents, proven to land ─────────────
+    //
+    // `style::tests::style_example_toml_presets_take_effect_when_uncommented` is
+    // the right shape and was written for exactly this failure — a key documented
+    // under a section the parser does not read (SQ-0558/SQ-0559) — but it names
+    // EIGHT keys by hand out of the 181 rows the generator documents. A
+    // hand-written list cannot cover a row nobody remembers to add to it, which
+    // is the lesson the full test gate learned when it named five crates instead
+    // of `--workspace`. It also cost a real defect: a user's correct
+    // `[tooltip] background = { parent = "dialog.list_selected" }` parsed,
+    // resolved, warned about nothing, and changed no pixel, with every test green
+    // (SQ-1169/`a9898db9`).
+    //
+    // So the sweep below is driven off `commented_template()` itself. For every
+    // documented line it rewrites that ONE line uncommented, with a value the
+    // default is not, and requires the artifact that line feeds to change.
+    // Routing is by the row's `Kind` and the shape of its own default `Delta`,
+    // never by name, so a row added to `REGISTRY` is covered the day it lands.
+    //
+    // What this proves and what it does not: that the key is READ — parsed,
+    // lowered, resolved, and visible in the artifact a renderer reads from. That
+    // some renderer then reads that selector is a different claim, and the one
+    // `no_registry_row_is_documented_but_read_by_nothing` (registry.rs) makes.
+
+    /// The live section headers the generator emits, paired with the [`Section`]
+    /// each holds. `[map.overrides]` is deliberately absent: it is a free-form
+    /// glyph table with no registry row, covered by
+    /// `every_map_override_slot_the_example_file_documents_is_a_real_slot`.
+    fn section_headers() -> Vec<(&'static str, Section)> {
+        std::iter::once(ROLES_SECTION)
+            .chain(TEXT_SECTIONS.iter().copied())
+            .chain(SURFACE_SECTIONS.iter().copied())
+            .map(|(section, header, _)| (header, section))
+            .collect()
+    }
+
+    /// One documented value line: the registry row it was generated from, the
+    /// TOML key it is written under, and which template line it is.
+    struct Documented {
+        row: &'static RegRow,
+        key: String,
+        line: usize,
+    }
+
+    /// Every documented `# key = value` line in the generated template, paired
+    /// with the registry row it came from.
+    ///
+    /// Both directions are checked: a documented key with no row would be
+    /// SQ-0561's typo'd slot in a new place, and a row with no documented line is
+    /// a knob the shipped file never mentions.
+    fn documented_lines(template: &str) -> Vec<Documented> {
+        let registry: &'static Vec<RegRow> = &REGISTRY;
+        let headers = section_headers();
+        let mut found: Vec<Documented> = Vec::new();
+        let mut section: Option<Section> = None;
+
+        for (idx, line) in template.lines().enumerate() {
+            // The hand-written `[[transcript.rule]]` / `[statusbar]` examples at
+            // the foot of the file are COMMENTED headers, and nothing below them
+            // is a registry row.
+            if line.starts_with("# [") {
+                break;
+            }
+            if line.starts_with('[') {
+                section = headers.iter().find(|(h, _)| *h == line).map(|(_, s)| *s);
+                continue;
+            }
+            let (Some(sect), Some(rest)) = (section, line.strip_prefix("# ")) else { continue };
+            let Some((raw_key, _)) = rest.split_once('=') else { continue };
+            let key = raw_key.trim();
+            let row = registry
+                .iter()
+                .find(|r| r.section == sect && toml_key(&strip_section_prefix(sect, r.name)) == key)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the template documents {key:?} under {sect:?}, and no registry row \
+                         spells that key — nothing can read it"
+                    )
+                });
+            found.push(Documented { row, key: key.to_string(), line: idx });
+        }
+
+        for row in registry.iter().filter(|r| r.section != Section::Statusbar) {
+            assert!(
+                found.iter().any(|d| d.row.name == row.name),
+                "registry row {:?} has no documented line in the generated template",
+                row.name
+            );
+        }
+        found
+    }
+
+    /// The colour artifact a style.toml resolves to: the flat theme every
+    /// renderer reads its styles from.
+    fn theme_of(text: &str) -> crate::theme::resolve::Theme {
+        let parsed = toml_schema::parse(text)
+            .unwrap_or_else(|e| panic!("probe document failed to parse: {e:?}"));
+        resolve_theme(&terminal_default_scheme(), &parsed)
+    }
+
+    /// The glyph artifact: the resolved map symbol set plus the three
+    /// story-picker badge glyphs, which live on the `SymbolConfig` rather than
+    /// the set.
+    ///
+    /// Deliberately NOT the whole `SymbolConfig` — that carries the raw preset
+    /// NAMES, so `box_style = "bogus"` would look like a change while resolving
+    /// to the default glyphs.
+    fn glyphs_of(text: &str) -> (crate::symbols::SymbolSet, [String; 3]) {
+        let doc = crate::style::parse_style_toml(text).expect("probe document must parse");
+        let cfg = crate::style::finalize_symbols(&doc.symbols);
+        let badges = [cfg.badge_save.clone(), cfg.badge_hint.clone(), cfg.badge_hint_available.clone()];
+        (crate::symbols::SymbolSet::resolve(&cfg), badges)
+    }
+
+    /// Rewrite exactly one template line, leaving every other line commented.
+    fn with_line(template: &str, idx: usize, replacement: &str) -> String {
+        let mut lines: Vec<&str> = template.lines().collect();
+        lines[idx] = replacement;
+        lines.join("\n")
+    }
+
+    /// Every preset name every glyph family knows, asked of the families
+    /// themselves rather than spelled here — a preset added to one is a
+    /// candidate the day it lands. A [`Kind::Placement`] row names a preset from
+    /// exactly one of these, and an unknown name resolves to that row's default,
+    /// so trying the union finds the row's own family without a name table.
+    fn every_preset_name() -> Vec<&'static str> {
+        use crate::symbols::{Arrows, BoxStyle, ControlGlyphs, PathGlyphs, PortalGlyphs, StoryBadges};
+        let mut names: Vec<&'static str> = Vec::new();
+        for family in [
+            BoxStyle::preset_names(),
+            Arrows::preset_names(),
+            PathGlyphs::preset_names(),
+            PortalGlyphs::preset_names(),
+            ControlGlyphs::preset_names(),
+            StoryBadges::preset_names(),
+        ] {
+            names.extend(family.iter().copied());
+        }
+        names
+    }
+
+    /// Rows whose `parent` re-root the sweep cannot prove, and why.
+    ///
+    /// Both entries are **SQ-1169**: the row's registry `Delta` pins BOTH `fg`
+    /// and `bg`, and `resolve_row` applies that Delta on top of the resolved
+    /// parent before any user layer — so a re-root resolves, warns about
+    /// nothing, and moves no colour at all. That is the exact shape of the
+    /// tooltip defect a user reported (`a9898db9`).
+    ///
+    /// SQ-1169 lists seven live rows, and only these two are TOTAL no-ops. The
+    /// other five — `status_header`, the three `debug.disasm_*` tiers and
+    /// `dialog.shadow` — pin one channel and inherit the other, so a re-root
+    /// still moves that other one and clears the bar below. They are masked, not
+    /// inert; the quest's own list is the record of that, not this one.
+    ///
+    /// The cure is a design question with three answers written up on SQ-1169
+    /// (suppress the Delta's colours on a re-root / stop pinning them in the
+    /// registry / warn), and the choice is the user's, not this test's. Named
+    /// here so the exemption is reviewable rather than a silent gap.
+    const PARENT_REROOT_UNPROVABLE: &[&str] = &["dialog.list_selected", "transcript_search_highlight"];
+
+    #[test]
+    fn every_key_the_template_documents_takes_effect_when_uncommented() {
+        use ratatui::style::Modifier;
+
+        let template = commented_template();
+        let documented = documented_lines(&template);
+        let base_theme = theme_of(&template);
+        let base_glyphs = glyphs_of(&template);
+        let presets = every_preset_name();
+
+        for d in &documented {
+            let name = d.row.name;
+            let key = &d.key;
+            let probe = |value: &str| with_line(&template, d.line, &format!("{key} = {value}"));
+            let base = base_theme.get(name);
+
+            // ── glyph-set presets: the map's box/arrow/path/portal/control sets
+            // and the story-picker badges. These are read by the SYMBOL path, not
+            // the theme, so the artifact is the resolved set, not a style.
+            if d.row.kind == Kind::Placement {
+                // The one row whose value a `Delta` cannot carry is the bool
+                // (`map.diagonal_corners`) — told apart by the shape of its own
+                // default rather than by its name.
+                let values: Vec<String> = if d.row.default_delta.glyph.is_none() {
+                    vec!["true".to_string(), "false".to_string()]
+                } else {
+                    presets
+                        .iter()
+                        .map(|n| format!("\"{n}\""))
+                        // …and a free-form mark, for the three badge keys, which
+                        // name no preset: any string a patched font can draw.
+                        .chain(std::iter::once("\"¤\"".to_string()))
+                        .collect()
+                };
+                assert!(
+                    values.iter().any(|v| glyphs_of(&probe(v)) != base_glyphs),
+                    "the template documents {key:?} for row {name:?}, but no value changes the \
+                     resolved symbol set — nothing reads that key"
+                );
+                continue;
+            }
+
+            // ── colour channels: every selector accepts fg and bg, roles
+            // included. Two candidates so a row whose default happens to be one
+            // of them still has the other to move to.
+            for chan in ["fg", "bg"] {
+                let landed = ["#ff00ff", "#00ff7f"].iter().any(|c| {
+                    let got = theme_of(&probe(&format!("{{ {chan} = \"{c}\" }}"))).get(name);
+                    match chan {
+                        "fg" => got.style.fg != base.style.fg,
+                        _ => got.style.bg != base.style.bg,
+                    }
+                });
+                assert!(
+                    landed,
+                    "the template documents {key:?} for row {name:?}, but setting {chan} on it \
+                     changes no resolved colour"
+                );
+            }
+
+            // Roles stop here. `lower_role_decls` reads fg/bg and drops the rest
+            // — role modifiers and a role `parent` are a documented deferral
+            // (resolve.rs: "Still deferred: role modifiers"), and a role has no
+            // border or glyph to carry. Everything a `[roles]` line documents IS
+            // an fg or a bg, so nothing here is exempted, only absent.
+            if d.row.section == Section::Roles {
+                continue;
+            }
+
+            // ── modifiers: set one the row does NOT already carry. The template
+            // documents a modifier only where it is the DEFAULT (`bold = true` on
+            // a row that is bold), and `apply_style` cannot CLEAR one, so the
+            // documented spelling has no non-default value to write; probing a
+            // free flag proves the same keys are read for this row.
+            let carried = base.style.add_modifier;
+            let free = [
+                ("bold", Modifier::BOLD),
+                ("italic", Modifier::ITALIC),
+                ("underline", Modifier::UNDERLINED),
+                ("reversed", Modifier::REVERSED),
+                ("dim", Modifier::DIM),
+            ]
+            .into_iter()
+            .find(|(_, m)| !carried.contains(*m));
+            let (modifier, _) = free.unwrap_or_else(|| {
+                panic!("row {name:?} carries every modifier by default; none is free to probe")
+            });
+            assert_ne!(
+                theme_of(&probe(&format!("{{ {modifier} = true }}"))).get(name).style.add_modifier,
+                carried,
+                "the template documents {key:?} for row {name:?}, but setting {modifier} on it \
+                 changes no resolved modifier"
+            );
+
+            // ── the border `style` key, which every surface selector accepts
+            // (§2a) and which the generic line emits wherever a row's default
+            // carries one.
+            let landed = ["double", "thick", "single", "none", "rounded"]
+                .iter()
+                .any(|s| theme_of(&probe(&format!("{{ style = \"{s}\" }}"))).get(name).border != base.border);
+            assert!(
+                landed,
+                "the template documents {key:?} for row {name:?}, but no border style set on it \
+                 changes the resolved border"
+            );
+
+            // ── the `glyph` key (gutter marks, tab dividers, terminator caps).
+            let landed = ["\u{2588}", "\u{00A4}"]
+                .iter()
+                .any(|g| theme_of(&probe(&format!("{{ glyph = \"{g}\" }}"))).get(name).glyph != base.glyph);
+            assert!(
+                landed,
+                "the template documents {key:?} for row {name:?}, but setting a glyph on it \
+                 changes no resolved glyph"
+            );
+
+            // ── `parent`: the re-root channel a user reaches for to move a
+            // whole family at once, and the one the tooltip defect hid in.
+            //
+            // The bar is that re-rooting must move at least one COLOUR — not
+            // that it must move every colour, which would be picking SQ-1169's
+            // option (a) on the user's behalf, and not merely that it changes
+            // the style, which a bold `heading` parent satisfies while the
+            // colours stay pinned (that weaker bar passed the tooltip defect
+            // itself, so it is no bar at all).
+            if PARENT_REROOT_UNPROVABLE.contains(&name) {
+                continue;
+            }
+            let landed = super::super::registry::ROLE_NAMES.iter().any(|p| {
+                let got = theme_of(&probe(&format!("{{ parent = \"{p}\" }}"))).get(name);
+                got.style.fg != base.style.fg || got.style.bg != base.style.bg
+            });
+            assert!(
+                landed,
+                "the template documents `parent` on row {name:?}, but re-rooting it onto any of \
+                 the seven roles changes nothing — see SQ-1169's pinned-Delta mechanism, and add \
+                 it to PARENT_REROOT_UNPROVABLE only if that is why"
+            );
+        }
+    }
+
     #[test]
     fn auto_seed_writes_when_missing_and_never_overwrites() {
         let dir = std::env::temp_dir().join(format!(
