@@ -90,6 +90,11 @@ pub struct GlulxSession {
     pending: InputKind,
     /// Whether the game has ended.
     quit: bool,
+    /// This session's runaway-turn watchdog: the wall-clock budget one drive gets
+    /// before the turn is aborted as a fault. Resolved once at construction from
+    /// [`default_turn_budget`]; raised per session by
+    /// [`GlulxSession::set_turn_budget`].
+    turn_budget: Duration,
     /// A game-initiated save/restore awaiting the host's file I/O, bubbled to the
     /// run loop via the next `TurnResult`. Set when a turn's drive stops on an
     /// `@save`/`@restore`; cleared by `resume_save`/`resume_restore`.
@@ -286,16 +291,21 @@ impl GameStore {
     }
 }
 
-/// Wall-clock budget for a single drive (one turn's worth of execution). A
-/// well-behaved game reaches an input request in milliseconds; if it runs this
-/// long it is assumed to be in a runaway loop (e.g. layout code that cannot
-/// converge on a given screen geometry) and the turn is aborted as a recoverable
-/// fault so the app survives instead of hard-hanging. Generous, because this is a
-/// last-resort backstop — `gvm` divides every proportional split in virtual
-/// pixels and floors each child independently (SQ-1220), so the rounding a
-/// layout loop feeds on (unequal halves of an odd split) does not arise.
-/// Set via env `LANTHORN_TURN_BUDGET_MS` for testing.
-fn turn_budget() -> Duration {
+/// The DEFAULT wall-clock budget for a single drive (one turn's worth of
+/// execution). A well-behaved game reaches an input request in milliseconds; if
+/// it runs this long it is assumed to be in a runaway loop (e.g. layout code that
+/// cannot converge on a given screen geometry) and the turn is aborted as a
+/// recoverable fault so the app survives instead of hard-hanging. Generous,
+/// because this is a last-resort backstop — `gvm` divides every proportional
+/// split in virtual pixels and floors each child independently (SQ-1220), so the
+/// rounding a layout loop feeds on (unequal halves of an odd split) does not
+/// arise. Set via env `LANTHORN_TURN_BUDGET_MS`.
+///
+/// Read ONCE per session into [`GlulxSession::turn_budget`] rather than on every
+/// turn, so a session carries its own policy and the hot loop makes no env call.
+/// A caller that knows a long turn is legitimate raises it with
+/// [`GlulxSession::set_turn_budget`]; see that method for why one exists.
+fn default_turn_budget() -> Duration {
     std::env::var("LANTHORN_TURN_BUDGET_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -326,8 +336,7 @@ enum DriveStop {
 
 /// Step the machine until it pauses for input, quits, or requests an in-game
 /// save/restore. Aborts a runaway turn via the wall-clock watchdog.
-fn drive(machine: &mut Machine) -> DriveStop {
-    let budget = turn_budget();
+fn drive(machine: &mut Machine, budget: Duration) -> DriveStop {
     let start = Instant::now();
     let mut steps: u64 = 0;
     loop {
@@ -437,9 +446,9 @@ fn seed_saved_games(machine: &mut Machine, store: &GameStore) {
 /// Only the player's SAVE/RESTORE verb (`create_by_prompt`), or any save when
 /// there is no store, bubbles up as `DriveStop::Save`/`Restore`. A read-only
 /// store reads as usual and answers every write with a clean failure.
-fn drive_auto(machine: &mut Machine, store: &GameStore) -> DriveStop {
+fn drive_auto(machine: &mut Machine, store: &GameStore, budget: Duration) -> DriveStop {
     loop {
-        let stop = drive(machine);
+        let stop = drive(machine, budget);
         let restore = match stop {
             DriveStop::Save => false,
             DriveStop::Restore => true,
@@ -478,9 +487,9 @@ fn drive_auto(machine: &mut Machine, store: &GameStore) -> DriveStop {
 /// resize, sound-notify) is auto-failed — those paths have no UI to prompt the
 /// player, and leaving the VM suspended would wedge the next turn. The game's
 /// OWN fixed-name saves are serviced silently by [`drive_auto`] first.
-fn drive_settled(machine: &mut Machine, store: &GameStore) -> (InputKind, bool) {
+fn drive_settled(machine: &mut Machine, store: &GameStore, budget: Duration) -> (InputKind, bool) {
     loop {
-        match drive_auto(machine, store) {
+        match drive_auto(machine, store, budget) {
             DriveStop::Input(k) => return (k, false),
             DriveStop::Event => return (InputKind::Event, false),
             DriveStop::Quit => return (InputKind::Line, true),
@@ -652,11 +661,13 @@ impl GlulxSession {
         // later `/debug` toggle cannot see the boot PCs. Off by default, so a
         // normal launch keeps the single-branch hot loop with zero trace work.
         machine.set_trace_exec(debug);
-        let (pending, quit) = drive_settled(&mut machine, &store);
+        let turn_budget = default_turn_budget();
+        let (pending, quit) = drive_settled(&mut machine, &store, turn_budget);
         let mut session = GlulxSession {
             machine,
             pending,
             quit,
+            turn_budget,
             pending_io: None,
             pending_filename: None,
             deferred_resize: None,
@@ -759,7 +770,7 @@ impl GlulxSession {
         self.set_screen_size(cols, rows);
         self.machine.rearrange();
         self.drop_world_caches(); // the drive runs game code (SQ-1176 duty)
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
         self.refresh_screen();
@@ -793,7 +804,7 @@ impl GlulxSession {
         self.set_screen_size(cols, rows);
         self.machine.rearrange();
         self.drop_world_caches(); // the drive runs game code (SQ-1176 duty)
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
     }
@@ -810,7 +821,7 @@ impl GlulxSession {
             return;
         }
         self.drop_world_caches(); // the drive runs game code (SQ-1176 duty)
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
     }
@@ -846,7 +857,7 @@ impl GlulxSession {
         // `apply_deferred_resize`, `settle_after_event`, the two restores) each
         // take the cell too.
         self.drop_world_caches();
-        match drive_auto(&mut self.machine, &self.store) {
+        match drive_auto(&mut self.machine, &self.store, self.turn_budget) {
             DriveStop::Input(k) => {
                 self.pending = k;
                 self.quit = false;
@@ -1832,7 +1843,7 @@ impl GlulxSession {
         let kept_diagnostics = self.machine.take_diagnostics();
         self.drop_world_caches();
         self.machine.supply_line("look");
-        let stopped = drive_auto(&mut self.machine, &self.store);
+        let stopped = drive_auto(&mut self.machine, &self.store, self.turn_budget);
         self.machine.flush();
         // A `look` that reached for a file or ended the story is not an answer, and
         // the state it left is about to be discarded anyway.
@@ -2019,6 +2030,33 @@ impl GlulxSession {
         // next turn and left the impostor behind.
         let ram = self.scan_ram();
         self.last_room = Some(self.room_for(name, &ram));
+    }
+
+    /// Raise (or lower) this session's runaway-turn watchdog.
+    ///
+    /// The default is a last-resort backstop against a game that cannot reach an
+    /// input request at all, sized for the interactive app — see
+    /// [`default_turn_budget`]. A caller that KNOWS a particular turn is a long
+    /// but finite piece of work has to say so, because the watchdog cannot tell
+    /// the two apart: it aborts the turn as a fault, leaving the game half way
+    /// through whatever it was doing, and nothing downstream is looking at that
+    /// fault.
+    ///
+    /// Measured, and the reason this exists (SQ-1514): Kerkerkruip deals a
+    /// dungeon inside ONE `glk_select`-to-`glk_select` span, and the cost depends
+    /// on the pane it is laying its panels out for — **1.9s at 100x30 but 10.5s
+    /// at 120x40**, against a 10s default. A headless harness driving the
+    /// panelled layout in a debug build therefore sits right on the watchdog, and
+    /// since [`drive`] samples the clock only every million steps it tips over
+    /// *intermittently*: green locally under nextest, red on two of three CI
+    /// runners, the only symptom being a game that answered a click by doing
+    /// nothing. Such a caller raises the budget rather than racing it.
+    ///
+    /// Not a config key — the shipped app wants the default, and
+    /// `LANTHORN_TURN_BUDGET_MS` already covers wanting another one for a whole
+    /// run.
+    pub fn set_turn_budget(&mut self, budget: Duration) {
+        self.turn_budget = budget;
     }
 
     /// The Glk timer interval the game has requested (via
@@ -2491,7 +2529,7 @@ impl Engine for GlulxSession {
             if self.pending_filename.take().is_some() {
                 self.machine.supply_filename(None);
             }
-            let _ = drive_settled(&mut self.machine, &self.store);
+            let _ = drive_settled(&mut self.machine, &self.store, self.turn_budget);
             // The abandoned verb's tail ("Failed.") describes a run that is being
             // replaced and would land above the archive's own restored scrollback.
             let _ = self.take_transcript_elems();
@@ -2540,7 +2578,7 @@ impl Engine for GlulxSession {
         // line prompt, and `pending` is what the app renders its input bar from.
         // The machine is parked at its select (guaranteed by the block above), so
         // this re-reports the restored suspension without executing anything.
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
         // A size queued while the dialog was open would otherwise be stranded: the
@@ -2584,7 +2622,7 @@ impl Engine for GlulxSession {
         // Run the save-verb tail out to the next prompt, so the session is
         // re-armed at a clean input request rather than parked mid-verb
         // (mirrors the Z-machine's `restore_game_save`).
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
         self.pending_io = None;
