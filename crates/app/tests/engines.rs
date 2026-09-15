@@ -65,6 +65,8 @@ mod glulx_mouse_hyperlink_drawn_rect;
 mod glulx_imagerule_relayout;
 #[path = "suites/sq1503_anchorhead_thumbnail_link.rs"]
 mod sq1503_anchorhead_thumbnail_link;
+#[path = "suites/sq1514_kerkerkruip_panel_links.rs"]
+mod sq1514_kerkerkruip_panel_links;
 #[path = "suites/glk_grid_ground_reversed.rs"]
 mod glk_grid_ground_reversed;
 #[path = "suites/glk_proportional_split_fills_pane.rs"]
