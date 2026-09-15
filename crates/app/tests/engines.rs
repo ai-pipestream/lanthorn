@@ -152,4 +152,6 @@ mod system_face_cascade;
 mod native_disk_sound;
 #[path = "suites/dialog_story_degradation.rs"]
 mod dialog_story_degradation;
+#[path = "suites/lost_treasures_iso_dedupe.rs"]
+mod lost_treasures_iso_dedupe;
 

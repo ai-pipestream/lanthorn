@@ -1577,10 +1577,25 @@ fn dedupe_within_a_volume(out: &mut Vec<StoryEntry>) {
 ///   sits on `floppy5.ima` and on both of the DOS 360K/720K presses; those are
 ///   three separate sets and stay three rows, because they are three pieces of
 ///   media the player deliberately keeps. Nothing outside a set is ever folded.
-/// - **Keyed on the IFID**, which for Z-code is release, serial and checksum —
-///   the identity of a *build*. Zork Zero's r296, r366 and r393 are three
-///   different builds and therefore three rows however they are reached, which
-///   is the same rule SQ-0850 keys their saves on.
+/// - **Keyed on the IFID *and* the machine**, which for Z-code is release,
+///   serial and checksum plus which machine's pressing it is. Zork Zero's
+///   r296, r366 and r393 are three different builds and therefore three rows
+///   however they are reached, which is the same rule SQ-0850 keys their
+///   saves on — and the machine half is [`dedupe_within_a_volume`]'s own rule,
+///   repeated here rather than dropped.
+///
+///   **The machine cannot be left out** (SQ-1517): a "set" here is a shelf of
+///   *volumes*, and a volume can itself be a hybrid disc carrying more than
+///   one machine's pressings — exactly what [`dedupe_within_a_volume`] exists
+///   to tell apart. `LostTreasures1.iso` and `LostTreasures2.iso` satisfy the
+///   set-naming rule (`disk_set::group`) purely on their filenames, and on
+///   disc 1 alone `MAC/BEYOND ZORK` and `PC/DATA/BEYONDZO.DAT` are the same
+///   byte-identical build (`ZCODE-57-871221-C5AD`) on two different machines.
+///   An IFID-only key here re-folds that pair down to one row — silently
+///   discarding a whole machine's pressing — even though it never crossed a
+///   volume boundary at all, which is exactly the collapse
+///   `dedupe_within_a_volume`'s machine key was written to prevent. The same
+///   thing happens to `MAC/CUTTHROATS` / `PC/CUTTHROA/CUTTHROA.DAT`.
 /// - **The lowest disk number wins.** `disk_set::group` returns its members in
 ///   disk order and the scan walks a sorted file list, so which copy survives is
 ///   fixed and reproducible rather than whatever `read_dir` happened to yield.
@@ -1609,10 +1624,12 @@ fn dedupe_within_sets(out: &mut Vec<StoryEntry>, sets: &[Vec<PathBuf>]) {
         })
         .collect();
     order.sort();
-    let mut seen: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+    type SeenKey = (usize, Option<crate::hints::DiskImage>, String);
+    let mut seen: std::collections::HashSet<SeenKey> = std::collections::HashSet::new();
     let mut drop: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (set_idx, _disk, _pos, i) in order {
-        if !seen.insert((set_idx, out[i].meta.ifid.clone())) {
+        let key: SeenKey = (set_idx, out[i].meta.disk_image, out[i].meta.ifid.clone());
+        if !seen.insert(key) {
             drop.insert(i);
         }
     }
