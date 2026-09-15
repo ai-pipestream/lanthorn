@@ -969,11 +969,12 @@ fn terminal_snapshot(
         Capability::CellSize(Some((w, h))) => Some((*w, *h)),
         _ => None,
     });
-    // …and what the tty says right NOW. Asked live rather than remembered,
-    // because the story-picker screen's `refresh_cell_size` still re-derives
-    // from exactly this on every resize (SQ-0988) — the in-game picker moved
-    // to a settled stdio requery instead (SQ-1511) — so a remembered boot-time
-    // answer could be stale in a way the live one cannot.
+    // …and what the tty says right NOW. Asked live rather than remembered — a
+    // remembered boot-time answer could be stale in a way the live one cannot
+    // (both the in-game picker (SQ-1511) and the story-picker's cover preview
+    // (SQ-1520) have since moved their own resize-time cell derivation off
+    // this ioctl to a settled stdio requery; this diagnostic still reads it
+    // directly as one more data point, not as a refresh loop).
     let ioctl_cell = crate::picker_ui::terminal_cell_size().map(|f| (f.width, f.height));
     // Ordered by directness: the CSI answer if it is still the value in force,
     // then the ioctl, then the crate's hardcoded 10x20 — which is the one that

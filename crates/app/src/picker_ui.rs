@@ -928,6 +928,19 @@ pub(crate) fn build_cover_picker(
     }
 }
 
+/// Did a [`build_cover_picker`] build's own capability query — if it ran one
+/// at all — get any answer back? `Halfblocks` mode never queries stdio, so
+/// `capabilities()` reads empty for the same reason a query that timed out
+/// completely does; both must be read the same way by a settle-and-requery
+/// poller (`loop_tick::requery_picker_if_settled`), which skips paying a
+/// requery's stdio round trip on a terminal that will only ever answer with
+/// nothing. One spelling shared by `startup.rs` (for `state.game_picker`) and
+/// `run_story_picker` (for its own local cover-art preview picker), so the two
+/// `game_picker_query_answered`-shaped bools can't drift apart (SQ-1520).
+pub(crate) fn picker_query_answered(picker: Option<&ratatui_image::picker::Picker>) -> bool {
+    picker.is_some_and(|p| !p.capabilities().is_empty())
+}
+
 /// The terminal's cell size in pixels **right now**, from `TIOCGWINSZ`.
 ///
 /// One `ioctl` on the tty: no escape written, no stdin read, nothing for the
@@ -942,71 +955,21 @@ pub(crate) fn build_cover_picker(
 /// terminals, and Windows has no equivalent at all). A caller must then KEEP the
 /// value it has: a default would be a guess replacing a measurement.
 ///
-/// **The in-game `state.game_picker` no longer uses this** (SQ-1511): its
-/// resize path moved to a settled `Picker::from_query_stdio` requery (see
-/// `loop_tick::poll_picker_requery`) after `ratatui-image`'s maintainer
-/// rejected this derivation upstream as provably wrong at some window sizes.
-/// `run_story_picker`'s cover-art preview still calls [`refresh_cell_size`]
-/// below, for the reason this function's own doc gives: it runs inside that
-/// screen's own blocking read loop, which has no settle-timer machinery to
-/// hook a requery into, and font-size fidelity there was never this quest's
-/// scope.
+/// **Neither `state.game_picker` nor `run_story_picker`'s cover-art preview
+/// picker derive their resize-time cell from this any more** (SQ-1511 moved
+/// the former, SQ-1520 the latter) — both now go through a settled
+/// `Picker::from_query_stdio` requery (`loop_tick::requery_picker_if_settled`)
+/// after `ratatui-image`'s maintainer rejected this ioctl derivation upstream
+/// as provably wrong at some window sizes. What remains is `/dump-terminal`'s
+/// diagnostic read (`slash_dispatch.rs`), a one-off measurement rather than a
+/// refresh loop, which is exactly the shape this cheap ioctl is still right
+/// for.
 pub(crate) fn terminal_cell_size() -> Option<ratatui_image::FontSize> {
     let ws = crossterm::terminal::window_size().ok()?;
     if ws.width == 0 || ws.height == 0 || ws.columns == 0 || ws.rows == 0 {
         return None;
     }
     Some(ratatui_image::FontSize::new(ws.width / ws.columns, ws.height / ws.rows))
-}
-
-/// Re-derive `picker`'s cell size after a resize. Answers whether it MOVED, so
-/// the caller can throw away what it fitted against the old one.
-///
-/// Only `run_story_picker`'s cover-art preview calls this now (SQ-1511) — the
-/// in-game `state.game_picker` moved to a settled stdio requery, see
-/// [`terminal_cell_size`]'s doc for why.
-///
-/// **The absolute size does not matter; the aspect ratio does.** Geometry
-/// multiplies by `fw`/`fh` to reach a device box and divides by them again to
-/// return to cells, so a uniform scale error cancels out. What survives is
-/// `fw : fh` — and a cell is `round(advance_em · px)` by `round(line_em · px)`,
-/// two roundings at different rates, so even a face whose design ratio is
-/// exactly 2.002 (FiraCode) yields real cells from 1.750 (4x7 at 6 px) to 2.250
-/// (4x9 at 7 px). Change font size mid-session and the composite is fitted with
-/// an aspect up to ~29% wrong until the app is restarted; the art looks subtly
-/// stretched and comes right again after a relaunch, which is exactly how it was
-/// reported.
-///
-/// **The cell is the only thing that moved, so the cell is the only thing
-/// touched.** The picker is mutated in place rather than rebuilt, because a
-/// queried picker knows things this function cannot re-derive without asking the
-/// terminal again: the protocol, and behind it the whole capability list —
-/// `KittyCompression` (`o=z`, worth up to 88x on a raster composite),
-/// `RectangularOps`, the tmux flag. A font change tells you nothing about any of
-/// them.
-///
-/// This used to rebuild with the deprecated `Picker::from_fontsize` and copy the
-/// protocol across by hand, which preserved exactly the one field it named:
-/// `from_fontsize` constructs `capabilities: Vec::new()`, so a mid-session font
-/// change silently dropped compression back to raw and left it there until the
-/// app was relaunched. It fails safe, which is why nobody saw it (SQ-0992).
-/// Re-querying is not the alternative either — `Picker::from_query_stdio` writes
-/// an escape and reads the reply, which is the whole thing
-/// [`terminal_cell_size`] exists to avoid.
-pub(crate) fn refresh_cell_size(picker: &mut ratatui_image::picker::Picker) -> bool {
-    let Some(fs) = terminal_cell_size() else { return false };
-    apply_cell_size(picker, fs)
-}
-
-/// [`refresh_cell_size`] with the measurement handed in, so it can be driven
-/// without a tty.
-fn apply_cell_size(picker: &mut ratatui_image::picker::Picker, fs: ratatui_image::FontSize) -> bool {
-    let was = picker.font_size();
-    if (fs.width, fs.height) == (was.width, was.height) {
-        return false;
-    }
-    picker.set_font_size(fs);
-    true
 }
 
 /// Where the browser was sitting the moment a story was launched (SQ-1474):
@@ -1281,8 +1244,16 @@ pub(crate) fn run_story_picker(
     };
 
     // `mut` since SQ-0988: a resize can move the terminal's cell size, and the
-    // picker is re-derived from `TIOCGWINSZ` when it does.
+    // picker is re-derived via a settled stdio requery when it does (SQ-1520;
+    // was the ioctl-based `refresh_cell_size` — see `picker_ui::terminal_cell_size`'s
+    // doc for why that moved).
     let mut cover_picker = if cfg.images { build_cover_picker(cfg.image_protocol, cfg.kitty_shared_memory) } else { None };
+    // Armed by `Event::Resize` below; consumed once its settle window elapses
+    // by the `requery_picker_if_settled` call in the event-wait loop further
+    // down. `cover_query_answered` is fixed at this build — same reasoning as
+    // `AppState::game_picker_query_answered`, see `picker_query_answered`'s doc.
+    let mut cover_picker_dirty: Option<std::time::Instant> = None;
+    let cover_query_answered = picker_query_answered(cover_picker.as_ref());
     let mut cover = app::cover::CoverState::default();
 
     // The browser's keys, resolved the same way the game's are (SQ-0796): the
@@ -1482,7 +1453,7 @@ pub(crate) fn run_story_picker(
     // events within a notch.
     let mut pending_wheel: Option<isize> = None;
 
-    let chosen: Option<PickedStory> = loop {
+    let chosen: Option<PickedStory> = 'browser: loop {
         // Restore the terminal + exit if an external termination signal arrived.
         exit_if_terminated();
 
@@ -2055,6 +2026,21 @@ pub(crate) fn run_story_picker(
         // kill/SIGHUP restores the terminal promptly instead of hanging.
         loop {
             exit_if_terminated();
+            // SQ-1520: settle-and-requery `cover_picker`'s cell size on the same
+            // ~100ms cadence, same shape as `loop_tick::poll_picker_requery`
+            // drives `state.game_picker` in the main loop. A change here has no
+            // real crossterm event to `read()` below, so jump straight back to
+            // the outer loop's top (which draws unconditionally) instead of
+            // falling into the `read()` a `break` here would set up for.
+            if crate::loop_tick::requery_picker_if_settled(
+                &mut cover_picker,
+                cover_query_answered,
+                &mut cover_picker_dirty,
+                || build_cover_picker(cfg.image_protocol, cfg.kitty_shared_memory),
+            ) {
+                cover.invalidate_cell_geometry();
+                continue 'browser;
+            }
             match crossterm::event::poll(Duration::from_millis(100)) {
                 Ok(true) => break,  // an event is ready → read it below
                 Ok(false) => {}     // timeout → re-check the flag, keep waiting
@@ -2585,11 +2571,12 @@ pub(crate) fn run_story_picker(
             }
             Ok(Event::Resize(_, _)) => {
                 let _ = terminal.clear();
-                // SQ-0988: the cell may have changed shape, not just the grid.
-                // Every built cover raster was aspect-fitted against the old one.
-                if cover_picker.as_mut().is_some_and(refresh_cell_size) {
-                    cover.invalidate_cell_geometry();
-                }
+                // SQ-0988/SQ-1520: the cell may have changed shape, not just the
+                // grid — every built cover raster was aspect-fitted against the
+                // old one. Arm the settle timer rather than requerying right
+                // here; the event-wait loop above requeries once the resize
+                // burst settles (same shape as `loop_tick::poll_glulx_resize`).
+                cover_picker_dirty = Some(std::time::Instant::now());
                 // SQ-1340: a dtach reattach (the web image) hands this loop a
                 // resize from a browser tab whose fresh xterm.js never saw this
                 // loop's own mouse-capture enable a few lines up (or the
@@ -4554,74 +4541,6 @@ mod tests {
                 "the browser dispatch must not mention `{banned}` — a gesture that \
                  reads the keystroke here bypasses the slash::COMMANDS registry \
                  (SQ-0796). Add a Context::Browser command instead."
-            );
-        }
-    }
-
-    // ── Cell-size refresh (SQ-0988/SQ-0992) ───────────────────────────────────
-
-    /// A cell-size refresh moves the cell and leaves the rest of the picker
-    /// alone — the protocol it was queried for, and the capability list behind
-    /// it (SQ-0992).
-    ///
-    /// The capability half of this assertion is weaker here than it looks:
-    /// `Picker`'s fields are private and there is no way to build one carrying
-    /// capabilities from outside the crate, so the list this compares is empty.
-    /// The seeded version of the same property lives where the fields are
-    /// reachable, in `ratatui-image`'s own
-    /// `picker::tests::test_set_font_size_keeps_the_rest_of_the_picker`. What
-    /// this case pins is the arithmetic, and its neighbour below pins the shape
-    /// that made capabilities survivable at all.
-    #[test]
-    fn a_cell_size_refresh_moves_the_cell_and_nothing_else() {
-        use ratatui_image::picker::ProtocolType;
-        use ratatui_image::FontSize;
-
-        let mut picker = ratatui_image::picker::Picker::halfblocks();
-        picker.set_protocol_type(ProtocolType::Kitty);
-        let capabilities_before = picker.capabilities().clone();
-        let was = picker.font_size();
-
-        // The same measurement is not a change, and the caller is told so — it
-        // throws away everything it fitted against the old cell on a `true`.
-        assert!(!super::apply_cell_size(&mut picker, FontSize::new(was.width, was.height)));
-        assert_eq!((was.width, was.height), (picker.font_size().width, picker.font_size().height));
-
-        // A different cell: the size moves, and nothing else does.
-        assert!(super::apply_cell_size(&mut picker, FontSize::new(7, 15)));
-        assert_eq!((7, 15), (picker.font_size().width, picker.font_size().height));
-        assert_eq!(ProtocolType::Kitty, picker.protocol_type());
-        assert_eq!(&capabilities_before, picker.capabilities());
-    }
-
-    /// **The anti-drift guard (SQ-0992).** The refresh must MUTATE the picker.
-    /// Rebuilding it preserves exactly the fields whoever wrote the rebuild
-    /// remembered to copy across, and the one that was forgotten —
-    /// `capabilities`, which `Picker::from_fontsize` constructs empty — costs a
-    /// kitty session its `o=z` compression the moment the user changes font
-    /// size, silently and until relaunch.
-    ///
-    /// Read off the source because that is where the property lives: with no way
-    /// to build a picker that carries capabilities from outside the crate, no
-    /// runtime assertion in this crate can tell a rebuild from a mutation.
-    #[test]
-    fn a_cell_size_refresh_never_rebuilds_the_picker() {
-        let src = include_str!("picker_ui.rs");
-        let start = src.find("pub(crate) fn refresh_cell_size(picker").expect("the refresh");
-        let tail = start + src[start..].find("fn apply_cell_size(").expect("the applier");
-        let end = tail + src[tail..].find("\n}\n").expect("the applier's closing brace");
-        let region = &src[start..end];
-
-        assert!(region.len() > 300, "the bounds must bracket both function bodies");
-        assert!(region.contains("set_font_size"), "the refresh must go through the setter");
-
-        for banned in ["from_fontsize", "Picker::from", "*picker ="] {
-            assert!(
-                !region.contains(banned),
-                "the cell-size refresh must not mention `{banned}` — building a \
-                 replacement picker drops every capability the original was \
-                 queried for, `KittyCompression` among them (SQ-0992). Mutate the \
-                 picker instead."
             );
         }
     }
