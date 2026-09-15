@@ -132,6 +132,73 @@ pub(crate) fn reset_glulx_resize_trackers(
     *resize_dirty = None;
 }
 
+/// Settle-and-requery the in-game graphics `Picker`'s cell size after a resize
+/// (SQ-1511), replacing the ioctl-based `picker_ui::refresh_cell_size` this used
+/// to call for `state.game_picker` specifically (that function still exists —
+/// the story-picker screen's own cover-art preview still uses it; see its own
+/// docs).
+///
+/// **Why settle-and-requery instead of `TIOCGWINSZ`.** `refresh_cell_size`
+/// re-derived the cell every resize with no round trip, by dividing the
+/// window's reported pixel size by its cell count — cheap, but provably wrong
+/// at some window sizes (the division isn't always exact), which is why
+/// `ratatui-image`'s maintainer rejected a `set_font_size` call driven off it
+/// upstream. The fix that shipped upstream instead (SQ-1519) is a poll-based
+/// `Picker::from_query_stdio` — a real stdio round trip, safe to repeat
+/// mid-session now that it no longer risks racing a blocking read against the
+/// app's own input loop. A round trip is not free, so it is paid at most once
+/// per settled resize BURST rather than once per `Event::Resize` — the same
+/// shape as [`poll_glulx_resize`]'s settle timer, reused rather than
+/// reinvented.
+///
+/// **Why every resize re-triggers it, not only a suspected font change.**
+/// `Event::Resize(cols, rows)` is IDENTICAL whether the user dragged a window
+/// corner or zoomed their font — crossterm hands back the same shape either
+/// way, and there is no signal at that layer to tell them apart. The only
+/// terminal-side signal that could — comparing against a derived pixel cell —
+/// is exactly the disputed `TIOCGWINSZ` arithmetic this function exists to
+/// stop trusting, so reaching for it here to decide WHETHER to requery would
+/// just move the same rejected assumption one step earlier. Every settled
+/// resize therefore requeries; see the commit message for the measured
+/// real-world cost of that choice.
+///
+/// `dirty` is set by the caller (`main.rs`, on every `Event::Resize`) and
+/// cleared here; `query` performs the actual requery and is a parameter
+/// purely so a test can substitute a counting stub for the real stdio round
+/// trip. Returns `true` (redraw needed) only when the requery both ran and
+/// found a different cell.
+pub(crate) fn poll_picker_requery(
+    state: &mut AppState,
+    dirty: &mut Option<std::time::Instant>,
+    query: impl FnOnce() -> Option<ratatui_image::picker::Picker>,
+) -> bool {
+    if !app::watch::due(*dirty, std::time::Instant::now(), Duration::from_millis(150)) {
+        return false;
+    }
+    *dirty = None;
+
+    // SQ-1511 guard: a launch-time query that got no answer at all never will
+    // — don't pay its timeout again on every future resize. See
+    // `AppState::game_picker_query_answered`'s doc for what "no answer" covers.
+    if !state.game_picker_query_answered {
+        return false;
+    }
+    // `FontSize` has no `PartialEq` (it's a foreign type), so compare the
+    // fields it exposes.
+    let Some(was) = state.game_picker.as_ref().map(|p| (p.font_size().width, p.font_size().height))
+    else {
+        return false;
+    };
+    let Some(new_picker) = query() else { return false };
+    let now = (new_picker.font_size().width, new_picker.font_size().height);
+    if now == was {
+        return false; // same measurement; don't churn the picker for nothing
+    }
+    state.game_picker = Some(new_picker);
+    state.graphics_render.borrow_mut().invalidate_cell_geometry();
+    true
+}
+
 /// Report the story pane's REAL size to the Z-machine (ZMSD §8.4 — SQ-0532/A-F1).
 ///
 /// §8.4: the interpreter "may change the exact dimensions whenever it likes but
@@ -652,4 +719,149 @@ pub(crate) fn poll_shadow_answers(
     }
     app::return_probe::pump_return_search(state);
     changed
+}
+
+#[cfg(all(test, feature = "t-misc"))]
+mod poll_picker_requery_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::Instant;
+
+    use ratatui_image::picker::Picker;
+    use ratatui_image::FontSize;
+
+    /// A picker whose launch query got an answer, at `font`. Real `Picker`s
+    /// with non-empty `capabilities()` can only come from a real stdio round
+    /// trip (its fields are private outside `ratatui-image`), which is exactly
+    /// why `game_picker_query_answered` is a plain `AppState` bool rather than
+    /// something derived from the picker itself — see that field's doc.
+    fn answered_state(font: (u16, u16)) -> AppState {
+        let mut state = AppState::default();
+        let mut p = Picker::halfblocks();
+        p.set_font_size(FontSize::new(font.0, font.1));
+        state.game_picker = Some(p);
+        state.game_picker_query_answered = true;
+        state
+    }
+
+    fn font_of(state: &AppState) -> (u16, u16) {
+        let f = state.game_picker.as_ref().expect("picker still present").font_size();
+        (f.width, f.height)
+    }
+
+    /// (1) A resize that just arrived has not settled — the very next poll
+    /// pass must not query at all, not even to find "no change".
+    #[test]
+    fn an_unsettled_resize_never_queries() {
+        let mut state = answered_state((10, 20));
+        let calls = Cell::new(0u32);
+        let mut dirty = Some(Instant::now()); // a Resize "just" arrived
+        let redraw = poll_picker_requery(&mut state, &mut dirty, || {
+            calls.set(calls.get() + 1);
+            Some(Picker::halfblocks())
+        });
+        assert!(!redraw, "the settle window has not elapsed yet");
+        assert_eq!(calls.get(), 0, "no requery before a burst settles");
+        assert!(dirty.is_some(), "still pending — not consumed early");
+    }
+
+    /// (1) An ordinary resize with no font change: once settled, the requery
+    /// runs (there is no cheaper signal that distinguishes a font change from
+    /// a plain resize — see the fn's own docs) but finds the same measurement
+    /// and leaves the picker alone.
+    #[test]
+    fn a_settled_resize_with_no_font_change_does_not_swap() {
+        let mut state = answered_state((10, 20));
+        let calls = Cell::new(0u32);
+        let mut dirty = Some(Instant::now() - std::time::Duration::from_millis(200));
+        let redraw = poll_picker_requery(&mut state, &mut dirty, || {
+            calls.set(calls.get() + 1);
+            Some(Picker::halfblocks()) // same (10, 20) as `answered_state`
+        });
+        assert!(!redraw, "same measurement — nothing to redraw for");
+        assert_eq!(calls.get(), 1, "the settled requery still runs once");
+        assert_eq!((10, 20), font_of(&state), "unchanged measurement leaves the picker alone");
+        assert!(dirty.is_none(), "consumed once due() fires");
+    }
+
+    /// (2) A font change: once settled, the requery's result replaces
+    /// `game_picker` and asks for a redraw. FALSIFY by hard-coding this fn to
+    /// always `return false` after the swap and watch `font_of` stay stale.
+    #[test]
+    fn a_settled_font_change_swaps_the_picker_and_redraws() {
+        let mut state = answered_state((10, 20));
+        let mut dirty = Some(Instant::now() - std::time::Duration::from_millis(200));
+        let redraw = poll_picker_requery(&mut state, &mut dirty, || {
+            let mut p = Picker::halfblocks();
+            p.set_font_size(FontSize::new(7, 15));
+            Some(p)
+        });
+        assert!(redraw, "a font-size change must ask for a redraw");
+        assert_eq!((7, 15), font_of(&state));
+        assert!(dirty.is_none());
+    }
+
+    /// (3) A resize BURST — several `Resize` events arriving faster than the
+    /// settle window — must cost at most one requery, not one per event.
+    /// Driven the way `main.rs` drives it: every event just re-marks `dirty`
+    /// to "now", so a burst keeps re-arming the timer and never lets it fire
+    /// until the events stop. FALSIFY by removing the `due()` gate (always
+    /// query) and watch `calls` climb past 1 during the burst loop below.
+    #[test]
+    fn a_resize_burst_queries_at_most_once() {
+        let mut state = answered_state((10, 20));
+        let calls = Cell::new(0u32);
+        let mut dirty: Option<Instant>;
+
+        // Four "Resize" events in a row, each re-arming the settle timer
+        // before it can fire — exactly a drag delivering a burst.
+        for _ in 0..4 {
+            dirty = Some(Instant::now());
+            let redraw = poll_picker_requery(&mut state, &mut dirty, || {
+                calls.set(calls.get() + 1);
+                Some(Picker::halfblocks())
+            });
+            assert!(!redraw, "still inside the burst — never settled");
+        }
+        assert_eq!(calls.get(), 0, "no requery fired during the burst itself");
+
+        // The burst stops; the settle window has now genuinely elapsed.
+        dirty = Some(Instant::now() - std::time::Duration::from_millis(200));
+        let redraw = poll_picker_requery(&mut state, &mut dirty, || {
+            calls.set(calls.get() + 1);
+            let mut p = Picker::halfblocks();
+            p.set_font_size(FontSize::new(7, 15));
+            Some(p)
+        });
+        assert!(redraw);
+        assert_eq!(calls.get(), 1, "settling a burst costs exactly one requery");
+
+        // A further idle poll pass (no new Resize) must not re-fire.
+        let redraw2 = poll_picker_requery(&mut state, &mut dirty, || {
+            calls.set(calls.get() + 1);
+            Some(Picker::halfblocks())
+        });
+        assert!(!redraw2);
+        assert_eq!(calls.get(), 1, "consumed — an idle pass after settling must not re-query");
+    }
+
+    /// The guard: a picker whose launch query never got an answer at all must
+    /// never pay a requery's stdio round trip on a resize, however long the
+    /// settle window has elapsed — this is what keeps a terminal that never
+    /// answers DSR from paying that timeout on every resize.
+    #[test]
+    fn an_unanswered_launch_query_never_requeries() {
+        let mut state = AppState::default();
+        state.game_picker = Some(Picker::halfblocks());
+        state.game_picker_query_answered = false; // e.g. --image-protocol halfblocks, or a silent tty
+        let calls = Cell::new(0u32);
+        let mut dirty = Some(Instant::now() - std::time::Duration::from_millis(200));
+        let redraw = poll_picker_requery(&mut state, &mut dirty, || {
+            calls.set(calls.get() + 1);
+            Some(Picker::halfblocks())
+        });
+        assert!(!redraw);
+        assert_eq!(calls.get(), 0, "never pay the query's timeout for a terminal that answers nothing");
+        assert!(dirty.is_none(), "still consumed — no point re-arming for the same terminal");
+    }
 }

@@ -941,6 +941,16 @@ pub(crate) fn build_cover_picker(
 /// are documented as "unused" by the tty ioctl and are zero on plenty of
 /// terminals, and Windows has no equivalent at all). A caller must then KEEP the
 /// value it has: a default would be a guess replacing a measurement.
+///
+/// **The in-game `state.game_picker` no longer uses this** (SQ-1511): its
+/// resize path moved to a settled `Picker::from_query_stdio` requery (see
+/// `loop_tick::poll_picker_requery`) after `ratatui-image`'s maintainer
+/// rejected this derivation upstream as provably wrong at some window sizes.
+/// `run_story_picker`'s cover-art preview still calls [`refresh_cell_size`]
+/// below, for the reason this function's own doc gives: it runs inside that
+/// screen's own blocking read loop, which has no settle-timer machinery to
+/// hook a requery into, and font-size fidelity there was never this quest's
+/// scope.
 pub(crate) fn terminal_cell_size() -> Option<ratatui_image::FontSize> {
     let ws = crossterm::terminal::window_size().ok()?;
     if ws.width == 0 || ws.height == 0 || ws.columns == 0 || ws.rows == 0 {
@@ -951,6 +961,10 @@ pub(crate) fn terminal_cell_size() -> Option<ratatui_image::FontSize> {
 
 /// Re-derive `picker`'s cell size after a resize. Answers whether it MOVED, so
 /// the caller can throw away what it fitted against the old one.
+///
+/// Only `run_story_picker`'s cover-art preview calls this now (SQ-1511) — the
+/// in-game `state.game_picker` moved to a settled stdio requery, see
+/// [`terminal_cell_size`]'s doc for why.
 ///
 /// **The absolute size does not matter; the aspect ratio does.** Geometry
 /// multiplies by `fw`/`fh` to reach a device box and divides by them again to

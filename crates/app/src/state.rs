@@ -3558,6 +3558,15 @@ pub struct AppState {
 
     /// The in-game graphics Picker (None when images are disabled or unbuilt).
     pub game_picker: Option<ratatui_image::picker::Picker>,
+    /// Whether `game_picker`'s LAUNCH-time build got any answer at all from a
+    /// real stdio query (SQ-1511). `false` when `--image-protocol halfblocks`
+    /// forced a picker that never queried (`Picker::halfblocks()` touches no
+    /// stdio) and `false` when a query ran but the terminal answered nothing —
+    /// both read the same way here, and both mean a later resize's requery
+    /// would only pay a stdio round trip (up to the query's own timeout) for
+    /// the same nothing. Set once at launch (`startup.rs`) and never revised
+    /// afterward — see `loop_tick::poll_picker_requery`, the only reader.
+    pub game_picker_query_answered: bool,
     /// Bytes and frame flushes the ratatui backend has written to the terminal,
     /// for `/dump-terminal` (SQ-0994). `None` in every headless harness, which
     /// builds no terminal at all — and the report says "unavailable" rather than
@@ -3844,6 +3853,7 @@ impl Default for AppState {
             glulx_timer_next_fire: None,
             picture_pace_next: None,
             game_picker: None,
+            game_picker_query_answered: false,
             term_traffic: None,
             term_default_colors: crate::term_colors::TermDefaultColors::default(),
             query_sweep: crate::query_sweep::QuerySweep::default(),
