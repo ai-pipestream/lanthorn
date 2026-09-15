@@ -69,7 +69,7 @@ pub(crate) struct ImageBand {
 /// The cells are the ones `inline_image::blit_band` computes for its `dest`:
 /// `area.x + x_off.min(area.width)` for `cols.min(area.width - x_off)` columns,
 /// so the recorded rect and the drawn rect cannot drift apart.
-fn record_band_links(
+pub(crate) fn record_band_links(
     links: &mut Vec<((u16, u16), u32)>,
     band: Option<&ImageBand>,
     area: ratatui::layout::Rect,
@@ -83,6 +83,63 @@ fn record_band_links(
     let w = band.cols.min(area.width.saturating_sub(band.x_off));
     for j in 0..w {
         links.push(((x0 + j, row_y), band.image.link));
+    }
+}
+
+/// Record cell→link for every linked span of ONE drawn text row, so a click on
+/// the link's glyphs resolves to the game's `glk_set_hyperlink` value. No-op for
+/// a row with no linked run.
+///
+/// `run.start`/`end` are CHAR offsets within `text` (as `rebase_runs` leaves
+/// them), while the cells they were drawn in are DISPLAY columns — a wide glyph
+/// or a multibyte prefix moves a link's columns right of its char indices
+/// (SQ-0662). So the offsets are converted through the same width table
+/// `draw_str_runs` advanced by, and clipped to `area`'s right edge, which makes
+/// the recorded cells the ones actually painted. `text_x` is where the row's
+/// text starts (the transcript's gutter pushes it right of `area.x`); one pass
+/// builds char index → start column for the whole row, so N linked runs cost one
+/// scan rather than N.
+///
+/// One function, called from EVERY path that draws a Glk window's styled text,
+/// for the same reason [`record_band_links`] is: the primary transcript
+/// (`render_middle`) and every non-primary buffer window
+/// (`screen::render_inline_buffer`) both put linked text on screen, and which
+/// window a link happens to live in must not decide whether it is clickable.
+/// Recording it in the transcript alone is what left Kerkerkruip's whole
+/// side-panel UI — its "[detailed status report]" link and its menu choices,
+/// all of them in non-primary buffers — dead to the mouse (SQ-1514).
+pub(crate) fn record_run_links(
+    links: &mut Vec<((u16, u16), u32)>,
+    runs: &[StyleRun],
+    text: &str,
+    text_x: u16,
+    area: ratatui::layout::Rect,
+    row_y: u16,
+) {
+    if !runs.iter().any(|r| r.link != 0) {
+        return;
+    }
+    let mut link_cols: Vec<usize> = Vec::with_capacity(text.chars().count() + 1);
+    let mut c = 0usize;
+    for ch in text.chars() {
+        link_cols.push(c);
+        c += crate::textwidth::char_cells(ch);
+    }
+    link_cols.push(c);
+    let col_of =
+        |i: usize| -> usize { link_cols.get(i).copied().unwrap_or_else(|| link_cols.last().copied().unwrap_or(0)) };
+    for run in runs {
+        if run.link == 0 {
+            continue;
+        }
+        let (c0, c1) = (col_of(run.start), col_of(run.end));
+        for j in c0..c1 {
+            let col = text_x.saturating_add(j as u16);
+            if col >= area.right() {
+                break;
+            }
+            links.push(((col, row_y), run.link));
+        }
     }
 }
 
@@ -2737,41 +2794,10 @@ fn render_middle(
         // persisted in the archive.
         crate::reveal::paint_row(buf, text_x, row_y, &wr.text, body_area, state);
 
-        // Record cell→link for every linked span on this row. `run.start/end` are
-        // CHAR offsets within `wr.text` (re-based by `rebase_runs`), while the
-        // cells they were drawn in are DISPLAY columns — a wide glyph or a
-        // multibyte prefix moves the link's columns right of its char indices
-        // (SQ-0662). Convert through the same width table `draw_str_runs` advanced
-        // by, so the click lands on the link's actual glyphs. Clip to the body.
-        // One pass builds char index → start column for the whole row, so N linked
-        // runs cost one scan rather than N (wrapping and drawing are per-frame work
-        // over the whole window; nothing here may go quadratic in the row length).
-        let link_cols: Vec<usize> = if wr.runs.iter().any(|r| r.link != 0) {
-            let mut v = Vec::with_capacity(wr.text.chars().count() + 1);
-            let mut c = 0usize;
-            for ch in wr.text.chars() {
-                v.push(c);
-                c += crate::textwidth::char_cells(ch);
-            }
-            v.push(c);
-            v
-        } else {
-            Vec::new()
-        };
-        let col_of = |i: usize| -> usize { link_cols.get(i).copied().unwrap_or_else(|| link_cols.last().copied().unwrap_or(0)) };
-        for run in &wr.runs {
-            if run.link == 0 {
-                continue;
-            }
-            let (c0, c1) = (col_of(run.start), col_of(run.end));
-            for j in c0..c1 {
-                let col = text_x.saturating_add(j as u16);
-                if col >= body_area.right() {
-                    break;
-                }
-                links.push(((col, row_y), run.link));
-            }
-        }
+        // Record cell→link for every linked span on this row — the same function
+        // every other window's text goes through, so a link is as clickable in a
+        // side panel as it is here (SQ-1514).
+        record_run_links(&mut links, &wr.runs, &wr.text, text_x, body_area, row_y);
 
         // Extend a game-set background so a coloured paragraph reads as a solid
         // band, not a ragged block that stops at the text (when the pane's own
