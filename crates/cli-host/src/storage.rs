@@ -304,8 +304,10 @@ pub fn story_key_at_from(story_path: &Path, entry: Option<&str>) -> String {
 fn mounted_build(story_path: &Path, disk_entry: Option<&str>) -> Option<DiskBuild> {
     let raw = std::fs::read(story_path).ok()?;
     // `detect` first: mounting consumes the bytes, and the overwhelming majority
-    // of calls are about an ordinary story file.
-    let kind = blorb::medium::DiskImage::detect(&raw)?;
+    // of calls are about an ordinary story file. Its answer is only a
+    // pre-filter here — see the per-story lookup below for why the medium
+    // itself is not taken from it.
+    blorb::medium::DiskImage::detect(&raw)?;
     // Across the SET, exactly as the launch path mounts (SQ-0952). This used to
     // be `MountedDisk::mount` — the platter alone — so a volume whose story comes
     // from the RELEASE rather than from itself found nothing, returned `None`,
@@ -331,7 +333,20 @@ fn mounted_build(story_path: &Path, disk_entry: Option<&str>) -> Option<DiskBuil
             .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want))?,
         None => disk.story()?,
     };
-    DiskBuild::of(&chosen.bytes, kind)
+    // The medium is asked of THIS story, not of the container (SQ-1517): on a
+    // hybrid disc `image_for` can answer differently per entry, and on a disc
+    // that also carries a story which is itself a nested disk image — *Lost
+    // Treasures of Infocom*'s `PC/ZORK0/ZORK0.ZIP`, a Fat12 floppy dump packed
+    // inside the outer Iso9660 CD — the two disagree outright: the container
+    // detects as `Iso9660` but the story's own machine is `Fat12Dos`. Keying
+    // on the container's format here (as this used to) computes a DIFFERENT
+    // build medium from the one `hints::mounted_stories`/the picker already
+    // key that row's rows on (`disk.image_for` there too), so the fetch
+    // worker's save/metadata directory silently missed the row it was meant
+    // to write into — the sidecar `story_info::load` in `picker.rs` looks for
+    // is filed under a key nothing ever reads.
+    let medium = disk.image_for(&chosen.name);
+    DiskBuild::of(&chosen.bytes, medium)
 }
 
 /// The directory holding this story's saves and sidecars.
