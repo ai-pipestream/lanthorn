@@ -656,9 +656,10 @@ mod emitter {
     /// made one changed pixel repaint `width*height` cells. The expensive half
     /// (Ghostty's storage) is what makes the cheap half safe: the protocol says
     /// *"When re-transmitting image data for a specific id, the existing image and
-    /// all its placements must be deleted"*, and if the emulator applied that
-    /// without our `a=T,U=1,r,c,p=1` re-creating the placement in the same command,
-    /// the frame would cost one cell and draw nothing.
+    /// all its placements must be deleted"*, and our `a=T,U=1,r,c` re-creates an
+    /// anonymous placement in the same command (SQ-1512 dropped the earlier `p=1`
+    /// naming, a workaround for a Ghostty leak now fixed upstream), so the frame
+    /// still draws instead of costing one cell and nothing else.
     #[test]
     fn a_changed_canvas_re_transmits_to_the_same_id_and_emits_one_cell() {
         const PLACEHOLDER: &[u8] = "\u{10EEEE}".as_bytes();

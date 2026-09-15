@@ -1645,19 +1645,6 @@ pub fn kitty_picker(cell_w: u16, cell_h: u16) -> Picker {
     picker
 }
 
-/// The placement id every graphics-window transmit names (SQ-0995).
-///
-/// Placement ids are scoped to their image, so one constant serves every window.
-/// It has to be stated rather than left at the protocol's default of 0, because
-/// `p=0` means "assign me an internal id" and this path now re-transmits to the
-/// SAME image id on every content change: an unnamed placement would be a fresh
-/// internal placement each time, piling up unreachable duplicates for the life of
-/// the window. Naming it makes each re-transmit REPLACE the one placement the
-/// window owns. The placeholder cells still encode placement 0 — "any virtual
-/// placement of this image" — which resolves to it precisely because it is the
-/// only one.
-const KITTY_PLACEMENT: u32 = 1;
-
 /// The kitty image backing one graphics window (SQ-0520/SQ-0995).
 struct KittyWindowImage {
     /// Canvas version the upload was last reconciled against. Hashing a canvas
@@ -1961,10 +1948,10 @@ impl GraphicsRender {
     ///
     /// The protocol licenses it: *"When re-transmitting image data for a specific
     /// id, the existing image and all its placements must be deleted"* — the data
-    /// is replaced wholesale, and our `a=T,U=1,r,c,p=1` re-creates the window's one
-    /// placement in the same command, so the cells never stop resolving. The old
-    /// image also stays on screen throughout, because a chunked transmit commits
-    /// only on its final chunk: nothing blanks mid-transfer.
+    /// is replaced wholesale, and our `a=T,U=1,r,c` re-creates the window's
+    /// anonymous placement in the same command, so the cells never stop resolving.
+    /// The old image also stays on screen throughout, because a chunked transmit
+    /// commits only on its final chunk: nothing blanks mid-transfer.
     ///
     /// A repaint that lands on identical pixels still costs nothing — advent.blb's
     /// toolbar redraws itself from scratch to press and release a button, bumping
@@ -3582,16 +3569,21 @@ fn zlib_deflate(raw: &[u8]) -> Vec<u8> {
 /// `q`, as the spec demands, so `o=z` is stated once on the first chunk and
 /// governs the reassembled whole.
 ///
-/// **`p=` names the placement** (SQ-0995), because `id` is now stable across a
-/// window's whole life and this command is re-issued whenever the canvas changes.
-/// The protocol says *"When re-transmitting image data for a specific id, the
-/// existing image and all its placements must be deleted"*, so on a conforming
-/// terminal this command replaces both; but Ghostty's storage replaces only the
-/// image and leaves placements alone, and an unnamed placement (`p=0`) is
-/// *"assign me an internal id"* — so a hundred re-transmits would leave a hundred
-/// duplicate placements. A named one is replaced in the map. The placeholder cells
-/// still encode placement 0, which resolves to "the first virtual placement of
-/// this image" and therefore to the only one.
+/// **The placement is left anonymous (`p=0`, i.e. no `p=` key at all)** (SQ-0995,
+/// SQ-1512). `id` is stable across a window's whole life and this command is
+/// re-issued whenever the canvas changes; the protocol says *"When re-transmitting
+/// image data for a specific id, the existing image and all its placements must be
+/// deleted"*, which a conforming terminal honors in full. Ghostty's storage (≤1.3.1)
+/// did not: it replaced only the image and left the placement behind, so this file
+/// used to name the placement (`p=1`) to force each re-transmit to replace it in
+/// the map rather than leaving a stranded duplicate. Ghostty's own fix
+/// (ghostty#13723) replaces placements correctly now, and measuring the ≤1.3.1
+/// leak directly — 200,000 re-transmits, ~30MB resident growth, no visible artifact,
+/// no measurable latency cost — settled that the workaround costs more (a named
+/// placement is one more invariant to keep straight) than the leak it prevented on
+/// an old release. The placeholder cells still encode placement 0, which resolves
+/// to "the first virtual placement of this image" and therefore to the only one,
+/// same as before.
 // SQ-1338: the production caller now goes straight to `kitty_transmit_virtual_timed`
 // so it can fold the timing in; this thin wrapper exists only for the ~8 test
 // callers below that don't care about it, so it is test-only rather than a live
@@ -3654,7 +3646,7 @@ fn kitty_transmit_virtual_timed(
         if i == 0 {
             write!(
                 out,
-                "\x1b_Gq=2,i={id},p={KITTY_PLACEMENT},a=T,U=1,f=32,{encoding}t=d,\
+                "\x1b_Gq=2,i={id},a=T,U=1,f=32,{encoding}t=d,\
                  s={w},v={h},r={rows},c={cols},m={more};"
             )
             .unwrap();
@@ -3816,8 +3808,8 @@ fn kitty_shm_write(name: &str, bytes: &[u8]) -> Option<()> {
 /// POSIX shared memory object instead of down the wire (SQ-1374).
 ///
 /// The same virtual placement [`kitty_transmit_virtual_timed`] emits — `U=1` with
-/// an explicit `r×c` grid, the named placement `p=1`, `f=32` RGBA and the canvas's
-/// own `s`/`v` — with two differences, both of them the point:
+/// an explicit `r×c` grid, `f=32` RGBA and the canvas's own `s`/`v` — with two
+/// differences, both of them the point:
 ///
 ///   * `t=s` instead of `t=d`, and the payload is the base64 of the object's NAME
 ///     rather than of a megabyte of pixels. One chunk, always: there is nothing to
@@ -3848,7 +3840,7 @@ fn kitty_transmit_virtual_shm(
     let mut out = String::with_capacity(name.len() * 2 + 80);
     write!(
         out,
-        "\x1b_Gq=2,i={id},p={KITTY_PLACEMENT},a=T,U=1,f=32,t=s,\
+        "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=s,\
          s={w},v={h},r={rows},c={cols},m=0;"
     )
     .unwrap();
@@ -6005,7 +5997,7 @@ mod tests {
         // No `o=z`: `from_fontsize` asks the terminal nothing, so its capability
         // list is empty and the transmit must go out raw (SQ-0997).
         assert!(first.contains("a=T,U=1,f=32,t=d"), "virtual placement transmit present");
-        assert!(first.contains(",p=1,"), "and names the placement it owns (SQ-0995)");
+        assert!(!first.contains(",p="), "placement is anonymous, not named (Ghostty leak fixed upstream)");
         assert!(first.contains('\u{10EEEE}'), "placeholder run present");
         assert!(!first.contains("a=d"), "first transmit deletes nothing");
         assert!(buf.cell((0, 1)).unwrap().symbol().contains('\u{10EEEE}'), "second row placed");
@@ -7807,7 +7799,7 @@ mod tests {
             assert!(keys.contains(",s=640,v=400,"), "the canvas's own dimensions: {keys}");
             assert!(keys.contains(",r=25,c=80,"), "the explicit placeholder grid survives (SQ-0520): {keys}");
             assert!(keys.contains("i=11534343"), "the window's stable image id: {keys}");
-            assert!(keys.contains(&format!("p={KITTY_PLACEMENT}")), "the named placement (SQ-0995): {keys}");
+            assert!(!keys.contains(",p="), "the placement is anonymous, not named: {keys}");
             assert!(keys.contains(",m=0"), "one chunk: a name never needs a second: {keys}");
             assert_eq!(out.matches("\x1b_G").count(), 1, "and there IS only one command: {out}");
 
