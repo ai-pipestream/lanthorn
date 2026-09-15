@@ -2125,6 +2125,12 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
     let mut story_size_seen: Option<(u16, u16)> = None;
     let mut resize_dirty: Option<std::time::Instant> = None;
 
+    // In-game picker settle-and-requery debounce (SQ-1511). Set the instant an
+    // `Event::Resize` arrives (below); `loop_tick::poll_picker_requery` acts once
+    // it has sat unchanged for the settle window — same shape as `resize_dirty`
+    // above, one settle tracker per independent debounced poller.
+    let mut picker_resize_dirty: Option<std::time::Instant> = None;
+
     // Poll FPS while a background tidy is in flight.
     const TIDY_POLL_MS: u64 = 33;
 
@@ -2215,6 +2221,18 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             &mut resize_dirty,
             &mut vm_story_size,
         );
+        // SQ-1511: settle-and-requery the in-game Picker's cell size after a
+        // resize (see `loop_tick::poll_picker_requery`'s docs for why this
+        // requeries via stdio rather than the ioctl `refresh_cell_size` used to).
+        // `mode`/`shm` are copied out before the borrow so the closure below
+        // doesn't need to capture `state` (which is already borrowed mutably by
+        // the call itself).
+        {
+            let (mode, shm) = (state.config.image_protocol, state.config.kitty_shared_memory);
+            needs_redraw |= loop_tick::poll_picker_requery(&mut state, &mut picker_resize_dirty, || {
+                picker_ui::build_cover_picker(mode, shm)
+            });
+        }
         // ZMSD §8.4 / §8.3.3 (SQ-0532): keep the story's header describing the REAL
         // host — the story pane's measured size in $20/$21, and our own default
         // page/ink in $2C/$2D (which a live style reload can change mid-game).
@@ -2543,20 +2561,15 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             loop_tick::settle_picture_pacing(&mut state, &mut *session);
         }
 
-        // SQ-0988: a resize may have changed the CELL, not only the grid. The
-        // terminal's cell size was measured once, at launch, by a stdio query no
-        // one can safely repeat with the app in raw mode — so a font-size change
-        // left every fit running on the launch aspect ratio until restart, and
-        // the art looked stretched. `TIOCGWINSZ` re-derives it with no round
-        // trip; when it moves, everything fitted against the old cell goes.
-        //
-        // This sits AHEAD of the three `Event::Resize` arms below (each of which
-        // `continue`s after clearing), so it runs once per resize whichever arm
-        // that resize belongs to.
-        if matches!(&event, Event::Resize(_, _))
-            && state.game_picker.as_mut().is_some_and(picker_ui::refresh_cell_size)
-        {
-            state.graphics_render.borrow_mut().invalidate_cell_geometry();
+        // SQ-1511: a resize may have changed the CELL, not only the grid — mark
+        // it dirty; `loop_tick::poll_picker_requery` (Pre-input pollers, above)
+        // acts once the resize burst settles. Was a synchronous ioctl re-derive
+        // here (SQ-0988); see that poller's docs for why it moved to a settled
+        // stdio requery instead. Runs on every `Event::Resize`, ahead of the
+        // three arms below (each of which `continue`s after clearing), so no
+        // resize is missed whichever arm it belongs to.
+        if matches!(&event, Event::Resize(_, _)) {
+            picker_resize_dirty = Some(std::time::Instant::now());
         }
 
         // SQ-1340: a resize is also the only hook a dtach reattach gives us

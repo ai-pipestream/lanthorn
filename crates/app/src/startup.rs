@@ -1121,6 +1121,14 @@ pub(crate) fn boot_story(
     // and reused both for the Glulx session's char-cell pixel size and, below,
     // AppState.game_picker (the render side already tolerates None).
     let game_picker = if cfg.images { picker_ui::build_cover_picker(cfg.image_protocol, cfg.kitty_shared_memory) } else { None };
+    // SQ-1511: did that build's query — if it ran one — get any answer at all?
+    // `Halfblocks` mode never queries stdio, so `capabilities()` reads empty for
+    // the same reason a query that timed out completely does; both are read the
+    // same way by `loop_tick::poll_picker_requery`, which skips a font-change
+    // requery on either rather than paying its stdio round trip on a terminal
+    // that will only ever answer with nothing.
+    let game_picker_query_answered =
+        game_picker.as_ref().is_some_and(|p| !p.capabilities().is_empty());
     // Probe the terminal's own default fg/bg (OSC 10/11) in the same pre-UI query
     // window as the image-protocol Picker above (SQ-0510). Seeds the v6 raster
     // canvas's default ink/page so "terminal default" theme colours follow the
@@ -1834,6 +1842,7 @@ pub(crate) fn boot_story(
     state.show_room_numbers = cfg.show_room_numbers;
     state.show_status_bar = cfg.show_status_bar;
     state.game_picker = game_picker;
+    state.game_picker_query_answered = game_picker_query_answered;
     state.term_default_colors = term_default_colors;
     state.query_sweep = query_sweep;
     state.pane_sizes = app::state::PaneSizes {

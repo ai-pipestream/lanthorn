@@ -273,8 +273,13 @@ mod unix {
 
     /// **The report.** `/dump-terminal` says compression is on, names the protocol
     /// it detected, and — the distinction the whole command exists for — reports
-    /// the post-resize cell as DERIVED from the ioctl rather than as the `CSI 16 t`
-    /// measurement it no longer is.
+    /// the post-resize cell as MEASURED: SQ-1511 replaced the in-game picker's
+    /// ioctl-derived cell refresh with a settled, real `CSI 16 t` requery, so the
+    /// cell in force after a font change is now a genuine answer, not a
+    /// `TIOCGWINSZ` derivation of a stale one (that classification, and the
+    /// mechanism producing it, is what SQ-0994/SQ-0988 originally distinguished —
+    /// see `terminal_cell_size`'s doc in `picker_ui.rs` for why that path still
+    /// exists for a different screen but no longer for this one).
     ///
     /// FALSIFY by deleting the `append_terminal_dump` call in the `DumpTerminal`
     /// arm: the log never appears and every assertion here fails at the read.
@@ -301,18 +306,19 @@ mod unix {
              compressed:\n{}",
             r.report
         );
-        // The cell in force after a font change is the IOCTL's, not the stale
-        // `CSI 16 t` answer — and calling that "measured" would be exactly the
-        // conflation SQ-0994 exists to end.
+        // SQ-1511: the font change's settle timer requeried the picker for real
+        // (`Picker::from_query_stdio`), so the cell in force is a fresh `CSI 16 t`
+        // answer at the NEW size — not an ioctl derivation of the launch-time one.
         assert!(
-            r.report.contains(&format!("cell size: {CELL_W2}x{CELL_H2} px — DERIVED")),
-            "after the font change the cell is re-derived from TIOCGWINSZ, and the report must \
-             say which of the two it is:\n{}",
+            r.report.contains(&format!("cell size: {CELL_W2}x{CELL_H2} px — MEASURED")),
+            "after the font change the requeried picker's cell is a real CSI 16 t answer, and \
+             the report must say which of the two it is:\n{}",
             r.report
         );
         assert!(
-            r.report.contains(&format!("CSI 16 t answered: {CELL_W}x{CELL_H} px")),
-            "…while still showing what the terminal originally measured:\n{}",
+            r.report.contains(&format!("CSI 16 t answered: {CELL_W2}x{CELL_H2} px")),
+            "…and the capability list behind it is the FRESH one the requery got back, not the \
+             launch-time {CELL_W}x{CELL_H} one it replaced:\n{}",
             r.report
         );
         eprintln!("/dump-terminal report at {}", r.report_path.display());
