@@ -1122,13 +1122,12 @@ pub(crate) fn boot_story(
     // AppState.game_picker (the render side already tolerates None).
     let game_picker = if cfg.images { picker_ui::build_cover_picker(cfg.image_protocol, cfg.kitty_shared_memory) } else { None };
     // SQ-1511: did that build's query — if it ran one — get any answer at all?
-    // `Halfblocks` mode never queries stdio, so `capabilities()` reads empty for
-    // the same reason a query that timed out completely does; both are read the
-    // same way by `loop_tick::poll_picker_requery`, which skips a font-change
-    // requery on either rather than paying its stdio round trip on a terminal
-    // that will only ever answer with nothing.
-    let game_picker_query_answered =
-        game_picker.as_ref().is_some_and(|p| !p.capabilities().is_empty());
+    // See `picker_ui::picker_query_answered`'s doc (SQ-1520 shared it with
+    // `run_story_picker`'s own cover-art preview picker) for why this is read
+    // the same way `loop_tick::poll_picker_requery` skips a font-change
+    // requery on either case rather than paying its stdio round trip on a
+    // terminal that will only ever answer with nothing.
+    let game_picker_query_answered = picker_ui::picker_query_answered(game_picker.as_ref());
     // Probe the terminal's own default fg/bg (OSC 10/11) in the same pre-UI query
     // window as the image-protocol Picker above (SQ-0510). Seeds the v6 raster
     // canvas's default ink/page so "terminal default" theme colours follow the

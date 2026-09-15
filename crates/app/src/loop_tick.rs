@@ -134,9 +134,10 @@ pub(crate) fn reset_glulx_resize_trackers(
 
 /// Settle-and-requery the in-game graphics `Picker`'s cell size after a resize
 /// (SQ-1511), replacing the ioctl-based `picker_ui::refresh_cell_size` this used
-/// to call for `state.game_picker` specifically (that function still exists —
-/// the story-picker screen's own cover-art preview still uses it; see its own
-/// docs).
+/// to call for `state.game_picker` specifically. SQ-1520 moved
+/// `picker_ui::run_story_picker`'s own cover-art preview picker onto the same
+/// settle-and-requery core (see [`requery_picker_if_settled`]) and retired
+/// `refresh_cell_size` for good, once nothing called it any more.
 ///
 /// **Why settle-and-requery instead of `TIOCGWINSZ`.** `refresh_cell_size`
 /// re-derived the cell every resize with no round trip, by dividing the
@@ -167,8 +168,44 @@ pub(crate) fn reset_glulx_resize_trackers(
 /// purely so a test can substitute a counting stub for the real stdio round
 /// trip. Returns `true` (redraw needed) only when the requery both ran and
 /// found a different cell.
+///
+/// A thin wrapper over [`requery_picker_if_settled`], which holds the actual
+/// settle/requery/compare logic with no `AppState` dependency (SQ-1520
+/// extraction) — so `picker_ui::run_story_picker`'s own cover-art preview loop
+/// (its own local `Option<Picker>`, not `state.game_picker`) can drive the
+/// same settle timer instead of the ioctl-based `picker_ui::refresh_cell_size`
+/// it used to call.
 pub(crate) fn poll_picker_requery(
     state: &mut AppState,
+    dirty: &mut Option<std::time::Instant>,
+    query: impl FnOnce() -> Option<ratatui_image::picker::Picker>,
+) -> bool {
+    let changed = requery_picker_if_settled(
+        &mut state.game_picker,
+        state.game_picker_query_answered,
+        dirty,
+        query,
+    );
+    if changed {
+        state.graphics_render.borrow_mut().invalidate_cell_geometry();
+    }
+    changed
+}
+
+/// The settle-and-requery core [`poll_picker_requery`] wraps for `AppState`
+/// (SQ-1520 extraction — see that fn's doc). Takes every fact it needs as a
+/// parameter rather than reading `AppState`, so a second caller with its own
+/// local `Option<Picker>` (`picker_ui::run_story_picker`'s cover-art preview)
+/// can drive it too. `query_answered` is the caller's own
+/// `game_picker_query_answered`-shaped bool (SQ-1511's guard: a launch-time
+/// query that got no answer at all never will, so don't pay its timeout again
+/// on every future resize). Returns `true` only when the requery both ran and
+/// found a different cell — callers that keep a separate cell-geometry cache
+/// invalidate it on `true`, same as [`poll_picker_requery`] does for
+/// `state.graphics_render`.
+pub(crate) fn requery_picker_if_settled(
+    picker: &mut Option<ratatui_image::picker::Picker>,
+    query_answered: bool,
     dirty: &mut Option<std::time::Instant>,
     query: impl FnOnce() -> Option<ratatui_image::picker::Picker>,
 ) -> bool {
@@ -177,16 +214,12 @@ pub(crate) fn poll_picker_requery(
     }
     *dirty = None;
 
-    // SQ-1511 guard: a launch-time query that got no answer at all never will
-    // — don't pay its timeout again on every future resize. See
-    // `AppState::game_picker_query_answered`'s doc for what "no answer" covers.
-    if !state.game_picker_query_answered {
+    if !query_answered {
         return false;
     }
     // `FontSize` has no `PartialEq` (it's a foreign type), so compare the
     // fields it exposes.
-    let Some(was) = state.game_picker.as_ref().map(|p| (p.font_size().width, p.font_size().height))
-    else {
+    let Some(was) = picker.as_ref().map(|p| (p.font_size().width, p.font_size().height)) else {
         return false;
     };
     let Some(new_picker) = query() else { return false };
@@ -194,8 +227,7 @@ pub(crate) fn poll_picker_requery(
     if now == was {
         return false; // same measurement; don't churn the picker for nothing
     }
-    state.game_picker = Some(new_picker);
-    state.graphics_render.borrow_mut().invalidate_cell_geometry();
+    *picker = Some(new_picker);
     true
 }
 
@@ -863,5 +895,37 @@ mod poll_picker_requery_tests {
         assert!(!redraw);
         assert_eq!(calls.get(), 0, "never pay the query's timeout for a terminal that answers nothing");
         assert!(dirty.is_none(), "still consumed — no point re-arming for the same terminal");
+    }
+
+    /// SQ-1520: the core the AppState-shaped tests above exercise through
+    /// [`poll_picker_requery`] must also work driven directly, with no
+    /// `AppState` in sight — exactly how `picker_ui::run_story_picker`'s own
+    /// local cover-art preview picker drives it. FALSIFY by hard-coding
+    /// `requery_picker_if_settled` to always `return false` right after
+    /// building `new_picker` (skipping the `*picker = Some(new_picker)`
+    /// assignment) and watch `cover_picker`'s font stay at its stale (10, 20)
+    /// below.
+    #[test]
+    fn requery_picker_if_settled_drives_a_bare_option_with_no_appstate() {
+        let mut cover_picker = Some({
+            let mut p = Picker::halfblocks();
+            p.set_font_size(FontSize::new(10, 20));
+            p
+        });
+        let calls = Cell::new(0u32);
+        let mut dirty = Some(Instant::now() - std::time::Duration::from_millis(200));
+
+        let changed = requery_picker_if_settled(&mut cover_picker, true, &mut dirty, || {
+            calls.set(calls.get() + 1);
+            let mut p = Picker::halfblocks();
+            p.set_font_size(FontSize::new(7, 15));
+            Some(p)
+        });
+
+        assert!(changed, "a settled requery finding a different cell reports true");
+        assert_eq!(calls.get(), 1);
+        let f = cover_picker.as_ref().expect("picker still present").font_size();
+        assert_eq!((7, 15), (f.width, f.height));
+        assert!(dirty.is_none(), "consumed once due() fires");
     }
 }
