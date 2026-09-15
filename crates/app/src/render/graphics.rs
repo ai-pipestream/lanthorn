@@ -1056,6 +1056,46 @@ pub fn window_wire(picker: &Picker) -> WindowWire {
     WindowWire { compress: kitty_compression(picker), shared_memory: kitty_shared_memory(picker) }
 }
 
+/// Build a `Protocol::Kitty` directly, under a caller-chosen image id, without
+/// the fork-only `Picker::new_protocol_with_id` (SQ-1513).
+///
+/// Upstream now exposes everything the id-stability path (SQ-0995/SQ-0996)
+/// needs: [`Picker::tmux_detected`], [`Picker::capabilities`], and the
+/// already-public `Kitty::new` and [`Resize::size_for`]/[`Resize::resize`].
+/// This reproduces exactly what the fork's `new_protocol_id` did for the
+/// Kitty arm — `size_for` computes the cell area the image resizes into,
+/// `resize` performs it (background `None`, matching every picker lanthorn
+/// builds — see [`fit_for_protocol`]'s doc), and the result goes to
+/// `Kitty::new` under `id` instead of a random draw. Skipping the crate's own
+/// `needs_resize` short-circuit costs one redundant resize call when the
+/// image is already exactly cell-sized (every caller here pre-fits for
+/// exactly that reason — see [`v6_pad_to_cells`]), but produces the same
+/// pixels: a `Resize::Fit`/`Nearest` resample at 1:1 is an identity.
+///
+/// The shared-memory pid mirrors `Picker`'s own rule (`picker_ui::query_options`
+/// passes `std::process::id()` as `kitty_shared_memory_object` only when
+/// probing; `Picker` retains it only when the terminal answered `t=s`) rather
+/// than reading a field the crate does not expose.
+fn kitty_protocol_with_id(
+    picker: &Picker,
+    image: image::DynamicImage,
+    size: Size,
+    resize: Resize,
+    id: u32,
+) -> Result<Protocol, ratatui_image::errors::Errors> {
+    let font_size = picker.font_size();
+    let area = resize.size_for(&image, font_size, size);
+    let image = resize.resize(&image, font_size, area, None);
+    Ok(Protocol::Kitty(ratatui_image::protocol::kitty::Kitty::new(
+        image,
+        area,
+        id,
+        picker.tmux_detected(),
+        kitty_compression(picker),
+        kitty_shared_memory(picker).then(std::process::id),
+    )?))
+}
+
 /// The cell rect the v6 composite occupies under HALF-BLOCKS, without building a
 /// pixel of it (SQ-0973).
 ///
@@ -2137,8 +2177,10 @@ impl GraphicsRender {
                 let size = Size::new(area.width, area.height);
                 let t1 = std::time::Instant::now();
                 let proto = match reuse {
-                    Some(id) => picker.new_protocol_with_id(img, size, fit, id).ok()?,
-                    None => picker.new_protocol(img, size, fit).ok()?,
+                    Some(id) if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty => {
+                        kitty_protocol_with_id(picker, img, size, fit, id).ok()?
+                    }
+                    _ => picker.new_protocol(img, size, fit).ok()?,
                 };
                 let encode = t1.elapsed();
                 (proto, pic, Some(resize), encode)
@@ -2885,8 +2927,10 @@ impl GraphicsRender {
         let size = Size::new(band.width, band.height);
         let t0 = std::time::Instant::now();
         let encoded = match reuse {
-            Some(id) => picker.new_protocol_with_id(img, size, Resize::Fit(None), id),
-            None => picker.new_protocol(img, size, Resize::Fit(None)),
+            Some(id) if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty => {
+                kitty_protocol_with_id(picker, img, size, Resize::Fit(None), id)
+            }
+            _ => picker.new_protocol(img, size, Resize::Fit(None)),
         };
         let elapsed = t0.elapsed();
         let p = encoded.ok()?;
@@ -2978,8 +3022,10 @@ impl GraphicsRender {
                     // already placed as, so the placeholder cells stay stable.
                     let t0 = std::time::Instant::now();
                     let proto = match p.reuse {
-                        Some(id) => picker.new_protocol_with_id(p.img, size, Resize::Fit(None), id),
-                        None => picker.new_protocol(p.img, size, Resize::Fit(None)),
+                        Some(id) if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty => {
+                            kitty_protocol_with_id(&picker, p.img, size, Resize::Fit(None), id)
+                        }
+                        _ => picker.new_protocol(p.img, size, Resize::Fit(None)),
                     }
                     .ok();
                     let encode = t0.elapsed();
