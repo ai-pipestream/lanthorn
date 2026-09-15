@@ -690,7 +690,7 @@ fn render_node(
                     win_rects: Vec::new(),
                 })
             } else {
-                render_inline_buffer(b, state, area, buf, links);
+                render_inline_buffer(b, state, area, buf);
                 if b.win != 0 {
                     win_rects.push((b.win, WinKind::Buffer, area));
                 }
@@ -1394,7 +1394,7 @@ fn render_node(
                             &fill_chrome, viewport, buf, base, TextInk::of(state),
                             &|pw: &PositionedWindow| px_rect_to_cells(pw, &scale, cell_px, area, 0),
                         );
-                        draw_secondary_buffers(&layout.chrome, area, buf, state, links, &|pw: &PositionedWindow| {
+                        draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
                             px_rect_to_cells(pw, &scale, cell_px, area, 0)
                         });
                         // Chrome text runs that fall INSIDE the story box paint
@@ -2075,7 +2075,7 @@ fn render_node(
                             story_shift,
                         ),
                     );
-                    draw_secondary_buffers(&layout.chrome, area, buf, state, links, &|pw: &PositionedWindow| {
+                    draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
                         px_rect_to_cells(pw, &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 }, (8, 16), area, story_shift)
                     });
                     // Chrome text ABOVE the story, as a classic full-width status
@@ -2480,28 +2480,8 @@ fn draw_window_separator(
     }
 }
 
-/// Draw an inline (non-primary) buffer window's wrapped, styled lines, recording
-/// each drawn row's Glk hyperlink cells into `links`.
-///
-/// `links` is not optional, and that is the point (SQ-1514). A non-primary buffer
-/// is where a Glulx game puts its SIDE PANELS, and a game that presents its UI as
-/// clickable text puts most of its links there: Kerkerkruip arms
-/// `glk_request_hyperlink_event` on eight windows at once and only one of them is
-/// the primary — its "[detailed status report]" link, its inventory and its
-/// powers panel all live in windows this function draws. Recording links only in
-/// `render_transcript` left every one of them painted, hit-testable by
-/// `glk_hyperlink_window` (its rect IS recorded), and unreachable, because
-/// `main.rs`'s click arm looks the cell up in the frame's cell→link map first and
-/// found nothing there. Same shape as SQ-1503 one level out: the link was
-/// recorded on one of the routes a link reaches the screen by, and the reported
-/// one was the other.
-fn render_inline_buffer(
-    b: &BufferWindow,
-    state: &AppState,
-    area: Rect,
-    buf: &mut Buffer,
-    links: &mut Vec<((u16, u16), u32)>,
-) {
+/// Draw an inline (non-primary) buffer window's wrapped, styled lines.
+fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mut Buffer) {
     // This window's own Normal-style background (Glulx window colour, SQ-0328)
     // replaces the theme transcript bg when the game set one; `None` keeps the
     // theme background (today's behaviour).
@@ -2548,20 +2528,11 @@ fn render_inline_buffer(
     for (i, wr) in rows.iter().enumerate() {
         let row_y = area.y + i as u16;
         // Inline-image band row: blit the strip for this row instead of text
-        // (same branch as the transcript draw loop, Task 8). A linked picture in
-        // a side panel is clickable for the same reason one in the transcript is
-        // (SQ-1503), through the same recorder.
+        // (same branch as the transcript draw loop, Task 8).
         if crate::render::inline_image::try_blit_band_row(state, wr, area.x, area.width, row_y, buf) {
-            crate::render::transcript::record_band_links(links, wr.band.as_ref(), area, row_y);
             continue;
         }
         draw_str_runs(buf, area.x, row_y, &wr.text, wr.style, &wr.runs, None, area, TextInk::of(state));
-        crate::render::transcript::record_run_links(links, &wr.runs, &wr.text, area.x, area, row_y);
-        // No `float` arm here, unlike the transcript's: `visible_wrapped_lines_kinded`
-        // wraps a secondary window with `left_float = false`, so a margin picture
-        // arrives as a band (above) and never as a float strip — and this loop
-        // draws no float, so recording one's cells would claim cells nothing
-        // painted.
     }
 }
 
@@ -5275,7 +5246,6 @@ fn draw_secondary_buffers(
     area: Rect,
     buf: &mut Buffer,
     state: &AppState,
-    links: &mut Vec<((u16, u16), u32)>,
     to_cells: &dyn Fn(&PositionedWindow) -> Rect,
 ) {
     for pw in chrome {
@@ -5293,7 +5263,7 @@ fn draw_secondary_buffers(
         if clipped.width == 0 || clipped.height == 0 {
             continue;
         }
-        render_inline_buffer(b, state, clipped, buf, links);
+        render_inline_buffer(b, state, clipped, buf);
     }
 }
 
@@ -11043,7 +11013,7 @@ mod tests {
         state.colors = crate::colors::ColorScheme::terminal_default();
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = Buffer::empty(area);
-        render_inline_buffer(&b, &state, area, &mut buf, &mut Vec::new());
+        render_inline_buffer(&b, &state, area, &mut buf);
         assert_eq!(row_text(&buf, 0, 4), "abCD");
         // 'C' (col 2) carries the bold modifier.
         assert!(buf.cell((2, 0)).unwrap().modifier.contains(ratatui::style::Modifier::BOLD));
@@ -11085,81 +11055,10 @@ mod tests {
         state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
         let area = Rect::new(0, 0, 10, 8);
         let mut buf = Buffer::empty(area);
-        render_inline_buffer(&b, &state, area, &mut buf, &mut Vec::new());
+        render_inline_buffer(&b, &state, area, &mut buf);
         assert_eq!(row_text(&buf, 0, 1), "a", "first text line stays on row 0");
         let b_row = (0..8).find(|&y| row_text(&buf, y, 1).starts_with('b'));
         assert_eq!(b_row, Some(4), "\"b\" pushed below the 3-row image band");
-    }
-
-    /// SQ-1514: a linked span in a NON-PRIMARY buffer window must land in the
-    /// frame's cell→link map, on exactly the cells its glyphs were drawn in.
-    ///
-    /// Kerkerkruip's whole clickable UI lives in such windows — its side panels'
-    /// "[detailed status report]" link and every choice in its in-game menus —
-    /// and they were painted, hit-testable and dead, because only
-    /// `render_transcript` recorded links. `render_inline_buffer` draws them, so
-    /// `render_inline_buffer` records them, through the same
-    /// `transcript::record_run_links` the transcript uses.
-    #[test]
-    fn inline_buffer_records_a_linked_span_in_the_cell_link_map() {
-        let mut b = inline_buffer("go [here] now");
-        // "here" — chars 4..8 — is the link, as a game's own
-        // `glk_set_hyperlink(7)` around those glyphs would leave it.
-        b.runs = vec![vec![StyleRun { start: 4, end: 8, bits: 0, fg: 0, bg: 0, link: 7, glk_style: 0 }]];
-        let mut state = AppState::default();
-        state.colors = crate::colors::ColorScheme::terminal_default();
-        let area = Rect::new(3, 2, 20, 3);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 30, 6));
-        let mut links: Vec<((u16, u16), u32)> = Vec::new();
-        render_inline_buffer(&b, &state, area, &mut buf, &mut links);
-        assert_eq!(row_text(&buf, 2, 30)[3..16], *"go [here] now", "sanity: the row drew where we measured it");
-        assert_eq!(
-            links,
-            vec![((7, 2), 7), ((8, 2), 7), ((9, 2), 7), ((10, 2), 7)],
-            "the link's four cells are the ones its glyphs were drawn in — `area.x` (3) \
-             plus char columns 4..8 — and nothing else on the row is recorded"
-        );
-    }
-
-    /// The same, for a linked PICTURE in a non-primary buffer: the band route
-    /// SQ-1503 fixed for the transcript reaches a side panel too.
-    #[test]
-    fn inline_buffer_records_a_linked_image_bands_cells() {
-        let mut px = image::RgbaImage::new(16, 48);
-        for p in px.pixels_mut() {
-            *p = image::Rgba([200, 40, 60, 255]);
-        }
-        let linked = crate::inline_image::InlineImage {
-            pixels: std::sync::Arc::new(px),
-            align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None,
-            margin_px: None,
-            rule: None,
-            link: 11,
-        };
-        let b = BufferWindow {
-            win: 0,
-            lines: vec![String::new()],
-            runs: vec![Vec::new()],
-            para: vec![crate::state::ParaFmt::default()],
-            images: vec![Some(linked)],
-            scroll: 0,
-            primary: false,
-            bg: None,
-            fg: None,
-            panel: false,
-            px_runs: Vec::new(),
-            reads_input: false,
-        };
-        let mut state = AppState::default();
-        state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
-        let area = Rect::new(0, 0, 10, 8);
-        let mut buf = Buffer::empty(area);
-        let mut links: Vec<((u16, u16), u32)> = Vec::new();
-        render_inline_buffer(&b, &state, area, &mut buf, &mut links);
-        assert!(!links.is_empty(), "the picture's own cells must be in the click map");
-        assert!(links.iter().all(|&(_, v)| v == 11), "every recorded cell carries the picture's link");
     }
 
     #[test]
