@@ -41,7 +41,7 @@ fn treasures_dir() -> PathBuf {
 
 /// `Graphic.Data` off the Beyond Zork volume of the Amiga *Lost Treasures* set.
 fn shipped_font() -> Option<blorb::bitmap_font::BitmapFont> {
-    let disk = treasures_dir().join("Lost Treasures of Infocom, The_Disk5.adf");
+    let disk = treasures_dir().join("Amiga/Lost Treasures of Infocom, The_Disk5.adf");
     if !disk.is_file() {
         eprintln!("SKIP: gitignored Lost Treasures disk 5 absent");
         return None;

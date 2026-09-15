@@ -38,12 +38,26 @@ fn corpus_dirs() -> Vec<PathBuf> {
     ["stories", "masterpieces", "treasures"].iter().map(|d| root.join(d)).collect()
 }
 
+/// Every regular file under `dir`, recursing into subdirectories — `treasures/`
+/// now nests its discs one level down (`Amiga/`, `Mac/`, `ISOs/`), and a future
+/// reorg might nest further still.
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+}
+
 /// Every regular file in the three corpora, sorted.
 fn corpus_files() -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in corpus_dirs() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        out.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_file()));
+        files_under(&dir, &mut out);
     }
     out.sort();
     out
@@ -206,8 +220,9 @@ fn a_real_frontispiece_outranks_a_fetched_cover_png() {
 fn disk_media_carry_no_frontispiece() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for dir in ["masterpieces", "treasures"] {
-        let Ok(rd) = std::fs::read_dir(root.join(dir)) else { continue };
-        for path in rd.flatten().map(|e| e.path()).filter(|p| p.is_file()) {
+        let mut paths = Vec::new();
+        files_under(&root.join(dir), &mut paths);
+        for path in paths {
             assert!(
                 !head12(&path).is_some_and(|h| blorb::Blorb::is_blorb(&h)),
                 "{}: a Blorb turned up in {dir}/ — re-check cover_key's assumption \

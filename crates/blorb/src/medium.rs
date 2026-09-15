@@ -2930,7 +2930,7 @@ mod tests {
                 // no naming convention in common (SQ-0871). A compilation wants
                 // `stories()`; this pins that the single-story door answers
                 // deterministically at all.
-                DiskImage::Iso9660 => ("LostTreasures2.iso", "DOS/SHOGUN/SHOGUN.ZIP", 6, true),
+                DiskImage::Iso9660 => ("ISOs/LostTreasures2.iso", "DOS/SHOGUN/SHOGUN.ZIP", 6, true),
                 // Lost Treasures I floppy5: Zork Zero's story AND its EGA art.
                 // (Its CGA art is on floppy4, which is the whole of why a set
                 // model is a real thing this lane does not have.)
@@ -3201,6 +3201,21 @@ mod tests {
         assert_eq!(disk.image_for("PC/AMFV/AMFV.DAT"), DiskImage::Fat12Dos, "and both halves");
     }
 
+    /// Every regular file under `dir`, recursing into subdirectories — the
+    /// discs live one level down now (`treasures/Amiga/`, `treasures/Mac/`,
+    /// `treasures/ISOs/`), and a future reorg might nest further still.
+    fn files_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files_under(&path, out);
+            } else if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+
     /// **Every disc the user drops in `treasures/` mounts AND would be offered
     /// by a directory scan** (SQ-0879).
     ///
@@ -3215,16 +3230,14 @@ mod tests {
     #[test]
     fn every_disc_in_treasures_mounts_and_a_scan_would_offer_it() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../treasures");
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        if !dir.is_dir() {
             eprintln!("SKIP: no treasures/ at {}", dir.display());
             return;
-        };
+        }
+        let mut paths = Vec::new();
+        files_under(&dir, &mut paths);
         let mut ran = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
+        for path in paths {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
             if name.starts_with('.') {
                 continue; // .DS_Store and friends

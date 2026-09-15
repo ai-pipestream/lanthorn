@@ -1,6 +1,6 @@
 //! SQ-0961: **how far to look for stories is one question with one answer.**
 //!
-//! `zvm-cli` pointed at `treasures/Lost Treasures of Infocom, The_Disk1.adf`
+//! `zvm-cli` pointed at `treasures/Amiga/Lost Treasures of Infocom, The_Disk1.adf`
 //! offered the six games on that platter; lanthorn pointed at the same file
 //! listed all twenty across the six-volume release. Nothing was wrong with the
 //! CLI's mount — it asked a narrower question, because there was no wider one to
@@ -23,8 +23,8 @@
 //!
 //! | fixture | volumes | naming | games |
 //! | --- | --- | --- | --- |
-//! | `treasures/Lost Treasures of Infocom, The_Disk1.adf` … `_Disk6` | 6 | identical stem, index last | 20 |
-//! | `treasures/The Lost Treasures of Infocom - Disk 1 - ….dc42` … `Disk 5` | 5 | index in the middle, **no common suffix** | 20 |
+//! | `treasures/Amiga/Lost Treasures of Infocom, The_Disk1.adf` … `_Disk6` | 6 | identical stem, index last | 20 |
+//! | `treasures/Mac/The Lost Treasures of Infocom - Disk 1 - ….dc42` … `Disk 5` | 5 | index in the middle, **no common suffix** | 20 |
 //!
 //! They agree on the twenty games and on almost nothing else: the Amiga press
 //! carries *Enchanter* r16/831118, *Hitchhiker's* r58/851002 and *Zork Zero*
@@ -67,10 +67,10 @@ struct Press {
 const PRESSES: &[Press] = &[
     // The Amiga press. Named by disk 3 rather than disk 1, because the claim is
     // about the release and not about a privileged volume.
-    Press { member: "Lost Treasures of Infocom, The_Disk3.adf", volumes: 6, games: 20 },
+    Press { member: "Amiga/Lost Treasures of Infocom, The_Disk3.adf", volumes: 6, games: 20 },
     // The Macintosh DiskCopy 4.2 press — the naming that grouped as nothing.
     Press {
-        member: "The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
+        member: "Mac/The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
         volumes: 5,
         games: 20,
     },

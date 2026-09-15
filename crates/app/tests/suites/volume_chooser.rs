@@ -86,7 +86,7 @@ fn a_lone_volume_of_several_games_offers_all_of_them() {
     let mut ran = 0;
 
     let dc42 = repo_root()
-        .join("treasures/The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42");
+        .join("treasures/Mac/The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42");
     if let Some((_dir, path)) = isolated(&dc42, "dc42-one") {
         ran += 1;
         // Premise: it really is a lone volume, and it really holds several.
@@ -127,7 +127,7 @@ fn a_lone_volume_of_one_game_still_opens_it() {
     let base = scratch("single-base");
     let mut ran = 0;
 
-    let disk5 = repo_root().join("treasures/The Lost Treasures of Infocom - Disk 5 - Zork Zero.dc42");
+    let disk5 = repo_root().join("treasures/Mac/The Lost Treasures of Infocom - Disk 5 - Zork Zero.dc42");
     if let Some((_dir, path)) = isolated(&disk5, "dc42-five") {
         ran += 1;
         assert_eq!(stories_on(&path), 1, "the premise: this platter holds one story");
