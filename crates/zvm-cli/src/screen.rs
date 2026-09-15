@@ -624,6 +624,39 @@ impl ScreenView {
         }
     }
 
+    /// Reserve the pinned top band, if any, before the game prints
+    /// anything (SQ-1516). Call once, right after [`start`](Self::start) and
+    /// before the machine's first `step`.
+    ///
+    /// A v1-v3 status line is always shown (`top_rows` returns 1
+    /// unconditionally for version < 4), but the region was previously
+    /// established lazily — reactively, on the game's first `show_status`
+    /// opcode, or its first read. By then the cursor is still wherever
+    /// `start` left it: row 1. Painting the band there overwrites whatever
+    /// the game already streamed to that row — its own first printed line.
+    /// The Lurking Horror's init routine calls `show_status` before printing
+    /// anything, so the status paint landed first and the story's opening
+    /// line was clobbered outright (SQ-1516); a game that prints before its
+    /// first `show_status` fares no better, since the retroactive paint still
+    /// overwrites row 1 once it does happen.
+    ///
+    /// This claims the band and pushes the cursor below it instead — no
+    /// content is painted here, since the next real [`frame`](Self::frame)
+    /// repaints it with the game's actual status text once execution starts.
+    /// `Pin::Bottom` needs none of this: its band sits below the story, so
+    /// row 1 is already correct without reserving anything up front.
+    pub fn prime(&mut self, machine: &Machine) -> String {
+        if !self.is_tty || self.story_only || self.pin != Pin::Top || self.active_rows != 0 {
+            return String::new();
+        }
+        let top = Self::top_rows(machine);
+        if top == 0 || (self.quiet_status_line && top <= 1) {
+            return String::new();
+        }
+        self.active_rows = top;
+        format!("{}\x1b[{};1H", enter_region(top, self.term_rows, self.pin), top + 1)
+    }
+
     /// Bytes to clear the lower window in response to an `erase_window`
     /// request (ZMSD §8.7.3): leave any scroll region, clear the whole screen,
     /// home the cursor, and reset the pinned-region state so the next `frame`

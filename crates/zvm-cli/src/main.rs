@@ -1980,6 +1980,7 @@ fn main() {
     let mut score_watch = cli_host::ScoreWatch::new();
     let announce_scores = mode.plain() && !args.story_only;
     print!("{}", view.start());
+    print!("{}", view.prime(&machine));
     let _ = io::stdout().flush();
 
     // Page background: reflects the game's current bg onto the terminal's own
@@ -2362,6 +2363,139 @@ mod v6_tests {
         let start = frame.find("\x1b[7m").unwrap() + 4;
         let end = frame[start..].find("\x1b[0m").unwrap() + start;
         assert_eq!(frame[start..end].chars().count(), 60, "resized: {frame:?}");
+    }
+
+    /// Cursor tracker for `ScreenView`'s own, small escape vocabulary — absolute
+    /// CUP (`\x1b[r;cH`), single-level DECSC/DECRC save/restore (`\x1b7`/`\x1b8`),
+    /// and literal text with `\r\n` line breaks. Not a general terminal emulator:
+    /// scoped exactly to what this module emits, which is enough to answer "which
+    /// row did this text land on" for SQ-1516. Other CSI sequences (SGR, EL, the
+    /// DECSTBM scroll-margin set) do not move the cursor here, matching a real
+    /// terminal, and are skipped.
+    fn row_of(stream: &str, needle: &str) -> u16 {
+        let bytes = stream.as_bytes();
+        let needle = needle.as_bytes();
+        let mut row: u16 = 1;
+        let mut col: u16 = 1;
+        let mut saved: Option<(u16, u16)> = None;
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i..].starts_with(needle) {
+                return row;
+            }
+            if bytes[i] == 0x1b {
+                match bytes.get(i + 1) {
+                    Some(b'7') => {
+                        saved = Some((row, col));
+                        i += 2;
+                        continue;
+                    }
+                    Some(b'8') => {
+                        if let Some((r, c)) = saved {
+                            row = r;
+                            col = c;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    Some(b'[') => {
+                        let start = i + 2;
+                        let mut j = start;
+                        while j < bytes.len() && !bytes[j].is_ascii_alphabetic() {
+                            j += 1;
+                        }
+                        let params = std::str::from_utf8(&bytes[start..j]).unwrap_or("");
+                        if bytes.get(j) == Some(&b'H') || bytes.get(j) == Some(&b'f') {
+                            let mut parts = params.splitn(2, ';');
+                            row = parts.next().unwrap_or("1").parse().unwrap_or(1).max(1);
+                            col = parts.next().unwrap_or("1").parse().unwrap_or(1).max(1);
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            match bytes[i] {
+                b'\r' => col = 1,
+                b'\n' => row += 1,
+                _ => col += 1,
+            }
+            i += 1;
+        }
+        panic!("{needle:?} not found in stream: {stream:?}", needle = String::from_utf8_lossy(needle));
+    }
+
+    /// SQ-1516 (user report): the first line a v3 story prints was dropped or
+    /// overwritten. A v1-v3 status line is always shown (`top_rows` returns 1
+    /// unconditionally for version < 4 — see `screen::ScreenView`'s private
+    /// `top_rows`), but the pinned region used to be established lazily: only
+    /// reactively, on the game's first `show_status` opcode or its first read.
+    /// By then the cursor was still wherever `start()` left it — row 1 — so
+    /// painting the status band there clobbered whatever the game had already
+    /// streamed to that row. The Lurking Horror's own init routine calls
+    /// `show_status` (0OP 0x0C) before printing anything, which is the exact
+    /// ordering this reproduces on: the very FIRST thing landing at row 1 is
+    /// the status paint, and the story's first line prints right on top of it.
+    ///
+    /// `ScreenView::prime` (called once, right after `start`, before the
+    /// machine's first step) is the fix: it reserves the band and pushes the
+    /// cursor below it before anything else can land there.
+    #[test]
+    fn v3_first_story_line_is_not_swallowed_by_the_status_row() {
+        let mut machine = build(story_of_version(3)).expect("v3 builds");
+        let mut view = screen::ScreenView::new(true, false, false, 24, 80);
+
+        let mut stream = String::new();
+        stream.push_str(&view.start());
+        stream.push_str(&view.prime(&machine));
+
+        // The game's first action: an explicit show_status, as The Lurking
+        // Horror's init routine does before printing anything.
+        machine.screen.show_status_requested = true;
+        let status_frame = view.frame(&machine);
+        assert!(
+            !status_frame.contains(";80r") && !status_frame.contains(";24r"),
+            "the region must already be established by `prime` — this frame \
+             must not re-enter it: {status_frame:?}"
+        );
+        stream.push_str(&status_frame);
+
+        // The interpreter's own print path is separate from `view.frame` (see
+        // `StdoutOutput::print`) — it writes straight to the stream wherever
+        // the cursor currently sits. Simulate the story's first printed line
+        // the same way.
+        stream.push_str("You've waited until the last minute again.\r\n");
+
+        assert_eq!(
+            row_of(&stream, "You've waited"),
+            2,
+            "the story's first line must land below the pinned status row, \
+             not on top of it: {stream:?}"
+        );
+    }
+
+    /// Companion to the case above: a v5 story has no upper window at boot
+    /// (`top_rows` reads `machine.screen.upper.rows`, which is 0 until the game
+    /// splits), so `prime` has nothing to reserve and the story's first line
+    /// must still land at row 1, exactly as before SQ-1516.
+    #[test]
+    fn v5_first_story_line_is_unaffected_by_priming() {
+        let machine = build(story_of_version(5)).expect("v5 builds");
+        let mut view = screen::ScreenView::new(true, false, false, 24, 80);
+
+        let mut stream = String::new();
+        stream.push_str(&view.start());
+        let prime = view.prime(&machine);
+        assert!(prime.is_empty(), "no upper window at boot — nothing to prime: {prime:?}");
+        stream.push_str(&prime);
+        stream.push_str("Some v5 intro text.\r\n");
+
+        assert_eq!(
+            row_of(&stream, "Some v5 intro"),
+            1,
+            "v5 was never affected by this bug — text starts at row 1 as before: {stream:?}"
+        );
     }
 
     /// SQ-0611. The sink writes to the real stdout, so what is testable here is
