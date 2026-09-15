@@ -569,8 +569,9 @@ pub(crate) mod tests {
     /// The two discs live outside the repo (`treasures/` is gitignored), so
     /// every case here skips vacuously. CI has none of them.
     fn disc(name: &str) -> Option<Iso9660> {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../treasures").join(name);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../treasures/ISOs")
+            .join(name);
         let Ok(raw) = std::fs::read(&path) else {
             eprintln!("SKIP: {name} is absent at {}", path.display());
             return None;

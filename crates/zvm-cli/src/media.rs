@@ -393,8 +393,8 @@ mod tests {
     fn the_menu_lists_the_whole_release() {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../treasures");
         let presses = [
-            "Lost Treasures of Infocom, The_Disk3.adf",
-            "The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
+            "Amiga/Lost Treasures of Infocom, The_Disk3.adf",
+            "Mac/The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
         ];
         let mut ran = 0;
         for name in presses {

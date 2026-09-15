@@ -963,8 +963,8 @@ fn disc_path(dir: &str, name: &str) -> Option<PathBuf> {
 /// each carries. The count is here so a test that enumerates nothing cannot
 /// quietly pass as a test that found everything named.
 const COMPILATION_DISCS: &[(&str, &str, usize)] = &[
-    ("treasures", "LostTreasures1.iso", 40),
-    ("treasures", "LostTreasures2.iso", 28),
+    ("treasures/ISOs", "LostTreasures1.iso", 40),
+    ("treasures/ISOs", "LostTreasures2.iso", 28),
     ("masterpieces", "Classic Text Adventure Masterpieces of Infocom (USA).bin", 83),
 ];
 
@@ -1038,7 +1038,7 @@ fn every_build_on_the_compilation_discs_has_a_canonical_title() {
 /// — one game, two files, and nothing on either line that says *Beyond Zork*.
 #[test]
 fn a_real_compilation_disc_names_its_games_from_the_table() {
-    let Some(image) = disc_path("treasures", "LostTreasures1.iso") else { return };
+    let Some(image) = disc_path("treasures/ISOs", "LostTreasures1.iso") else { return };
     let err = stderr_of(&run(&image, &[], ""));
     // Sixty: `LostTreasures1.iso` and `LostTreasures2.iso` are two volumes of one
     // release, and since SQ-0961 naming either offers both. Disc 1's own forty
@@ -1108,7 +1108,7 @@ fn a_hybrid_disc_tells_a_pc_build_from_a_mac_one() {
             "PC/DATA/ZORK1.DAT",
             Some("MAC/ZORK I"),
         ),
-        ("treasures/LostTreasures1.iso", "PC/DATA/ZORK1.DAT", Some("MAC/ZORK I")),
+        ("treasures/ISOs/LostTreasures1.iso", "PC/DATA/ZORK1.DAT", Some("MAC/ZORK I")),
     ] {
         let path = root.join(disc);
         if !path.is_file() {
@@ -1143,7 +1143,7 @@ fn a_hybrid_disc_tells_a_pc_build_from_a_mac_one() {
     }
     let any_present = [
         "masterpieces/Classic Text Adventure Masterpieces of Infocom (USA).bin",
-        "treasures/LostTreasures1.iso",
+        "treasures/ISOs/LostTreasures1.iso",
     ]
     .iter()
     .any(|d| root.join(d).is_file());
