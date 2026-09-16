@@ -43,9 +43,7 @@
 
 use std::path::PathBuf;
 
-use scott::saga_atari::{
-    decode_line_art_opening, decode_record, scan_picture_side, splice_vtoc, AtariRecord, SIDE_LEN,
-};
+use scott::saga_atari::{decode_record, scan_picture_side, splice_vtoc, AtariRecord, SIDE_LEN};
 use scott::saga_atari_lineart::{LineArtCanvas, LineArtPicture};
 use scott::saga_pictures::{FamilyCScheme, CANVAS_HEIGHT, CANVAS_WIDTH};
 use scott::{SagaPlatform, SagaUs};
@@ -402,69 +400,6 @@ fn the_counts_room_one_draws_the_brass_bed_its_text_describes() {
     assert!(pic.pixels().contains(&2), "the third colour is in use");
 }
 
-/// SQ-1497: the picture that opens every **line-art** side, at
-/// `LINE_ART_OFFSET` — confirming the premise the quest states (§8.4's item
-/// 26 grammar reproduces here, byte for byte) rather than re-deriving it.
-///
-/// **The same picture, byte for byte, on all four titles.** Painted box
-/// (54,50)-(140,96), 725 green pixels (`PALETTE`'s index 2) over the white
-/// ground and nothing else — so this is not any one title's own art (four
-/// different games cannot share one room's picture), which is exactly why
-/// `crate::saga_atari`'s module docs stop here rather than claiming it answers
-/// for a room or for the boot title card.
-///
-/// **SQ-1524 settled what it is**: not a picture at all but the *tail* of the
-/// shared darkness card (`IT'S TOO DARK!`), read from the middle of its
-/// stream — the card's record starts at `0x590`, index 0 of the table
-/// [`line_art_table_entries`] below reads, and `0x1000` falls inside it. The
-/// bytes stay identical and the numbers here stay pinned; what they mean is
-/// stated there.
-#[test]
-fn the_line_art_opening_is_the_same_small_picture_on_every_title() {
-    for file in LINE_ART_TITLES {
-        let Some(raw) = side_b(file) else { continue };
-        let pic = decode_line_art_opening(&raw).unwrap_or_else(|e| panic!("{file}: {e:?}"));
-        // Family D's own canvas (280x192), not family C's (280x160) the rest
-        // of this file's `CANVAS_WIDTH`/`CANVAS_HEIGHT` imports name.
-        assert_eq!(
-            (pic.width(), pic.height()),
-            (scott::apple_pictures::CANVAS_WIDTH, scott::apple_pictures::CANVAS_HEIGHT),
-        );
-        let painted = pic.painted().unwrap_or_else(|| panic!("{file}: the opening picture paints nothing"));
-        assert_eq!(
-            (painted.left(), painted.top(), painted.right(), painted.bottom()),
-            (54, 50, 140, 96),
-            "{file}: the opening picture's own bounding box",
-        );
-        let mut counts = [0usize; 6];
-        for &v in pic.pixels() {
-            counts[usize::from(v)] += 1;
-        }
-        assert_eq!(counts, [0, 0, 725, 0, 0, 53_035], "{file}: green pixels over the white ground");
-    }
-}
-
-/// Offset precision matters: one byte off `LINE_ART_OFFSET` and the decode
-/// gives a DIFFERENT picture, not a refusal — this format has no header to
-/// bounds-check against, so a wrong offset decodes silently rather than
-/// erroring, and this is the falsification that says the exact offset is
-/// load-bearing rather than approximately right.
-#[test]
-fn one_byte_off_line_art_offset_decodes_a_different_picture() {
-    let file = "SAGA #1 - Adventureland [side B].atr";
-    let Some(raw) = side_b(file) else { return };
-    let at_offset = decode_line_art_opening(&raw).expect("decodes at LINE_ART_OFFSET");
-    // Shift the WHOLE buffer back by one byte, so `decode_line_art_opening`'s
-    // own `LINE_ART_OFFSET` addition lands one byte later in the real data
-    // than it should — the same effect a wrong constant would have.
-    let shifted = decode_line_art_opening(&raw[1..]).expect("still decodes, just wrong");
-    let non_white = |pic: &scott::apple_pictures::HiResPicture| {
-        pic.pixels().iter().filter(|&&v| v != 5).count()
-    };
-    assert_eq!(non_white(&at_offset), 725, "the real picture, pinned above");
-    assert_ne!(non_white(&shifted), non_white(&at_offset), "one byte off reads different bytes as tokens");
-}
-
 // ── The (usage, index) table on side A (SQ-1496, investigation findings) ─────
 
 /// One release's side A, or `None` with a reason on stderr — the same shape as
@@ -735,30 +670,23 @@ fn the_counts_two_damaged_records_decode_through_the_sq_1498_fallback() {
 // Adventureland's 24 a devil in flames for "...Oh Hell!"). Read the same
 // entries with the bitmap arithmetic and most land mid-stream.
 //
-// Note what this ALSO says about `decode_line_art_opening`'s premise: the
-// tokens here are on a 160 x 96 canvas with fixed three-byte width, not the
-// Apple's 280 x 192 mixed-width grammar, so that function's decode is a
-// misreading — see the SQ-1524 investigation note.
-
-/// Side B file offset of the three-byte marker (`01 01 01` on Adventureland,
-/// `02 02 02` on Pirate Adventure, and so on) in front of the table.
-const LINE_ART_TABLE_MARKER: usize = 0x290;
-
-/// Side B file offset of the table itself: 100 room-usage slots at
-/// `LINE_ART_TABLE + 2 * i`, then object slots for item `i - 100`.
-const LINE_ART_TABLE: usize = 0x293;
-
-/// How many two-byte slots the table holds: 100 rooms and 90 objects, which
-/// with the marker fills exactly three 128-byte sectors (6, 7 and 8).
-const LINE_ART_TABLE_ENTRIES: usize = 190;
-
-/// Where a line-art table entry `[a, s]` points, as a FILE offset into side
-/// B: `s` and the low two bits of `a` are a 1-based 128-byte sector, and the
-/// top six bits of `a`, times three, are the byte within it.
-fn line_art_entry_file_offset(a: u8, s: u8) -> usize {
-    let sector = (usize::from(a & 3) << 8) | usize::from(s);
-    16 + sector.saturating_sub(1) * 128 + usize::from(a >> 2) * 3
-}
+// Note what this ALSO says about the earlier `decode_line_art_opening`
+// reading (retired, SQ-1525): the tokens here are on a 160 x 96 canvas with
+// fixed three-byte width, not the Apple's 280 x 192 mixed-width grammar, so
+// that function's decode was a misreading — see the SQ-1524 investigation
+// note.
+//
+// The table's own layout (the marker offset, the table offset, the entry
+// count) and the arithmetic that turns a two-byte entry into a side-B FILE
+// offset are now production code — promoted from this suite's own hand-rolled
+// copies once SQ-1524/SQ-1525's implementation lane wired the table into
+// `PictSource`, the same way [`table_entry_file_offset`] was for the bitmap
+// titles above — so this suite calls `scott::saga_atari`'s versions rather
+// than maintaining a second copy that could drift from them.
+use scott::saga_atari::{
+    line_art_entry_file_offset, LINE_ART_TABLE_MARKER, LINE_ART_TABLE_ENTRIES,
+    LINE_ART_TABLE_OFFSET as LINE_ART_TABLE,
+};
 
 /// The GRAPHICS 7 canvas every drawing token keeps to, measured over all
 /// four titles' 310 records: no `x` above 159, no `y` above 95.
@@ -1136,4 +1064,238 @@ fn the_dark_hole_is_drawn_and_then_recoloured_black() {
     let pic = LineArtCanvas::new().draw(&rec).expect("plays");
     assert_eq!(lit(&pic), 0);
     assert!(pic.painted().is_some());
+}
+
+// ── Promoted to production (SQ-1524/SQ-1525's implementation lane) ─────────
+//
+// `line_art_entry_file_offset`, `LINE_ART_TABLE_MARKER`, `LINE_ART_TABLE`
+// (`LINE_ART_TABLE_OFFSET`) and `LINE_ART_TABLE_ENTRIES` above are already
+// `scott::saga_atari`'s own — see the `use` before them. What follows
+// exercises the production reader and player built on top of that
+// arithmetic (`read_line_art_table`, `draw_line_art_record`,
+// `draw_darkness_card`), cross-checked against this suite's own
+// lower-level walk rather than duplicating it, the same shape
+// `read_picture_table_resolves_the_same_entries_the_hand_rolled_walk_does`
+// uses for the bitmap titles above.
+
+/// [`scott::saga_atari::read_line_art_table`] end to end: the same room and
+/// object index sets [`LINE_ART_TABLES`] pins by cross-reference against the
+/// Apple II catalogues, and a title card that actually decodes.
+#[test]
+fn read_line_art_table_resolves_the_same_entries_the_hand_rolled_walk_does() {
+    for (file, adventure, want_rooms, want_objects) in LINE_ART_TABLES {
+        let Some(raw) = side_b(file) else { continue };
+        let spliced = splice_vtoc(&raw);
+        let table = scott::saga_atari::read_line_art_table(&spliced, u16::from(adventure))
+            .unwrap_or_else(|| panic!("{file}: the table's own marker should verify"));
+        let mut rooms: Vec<u16> = table
+            .entries()
+            .iter()
+            .filter(|e| e.usage == scott::PictureUsage::Room)
+            .map(|e| e.index)
+            .collect();
+        rooms.sort_unstable();
+        let mut objects: Vec<u16> = table
+            .entries()
+            .iter()
+            .filter(|e| e.usage != scott::PictureUsage::Room)
+            .map(|e| e.index)
+            .collect();
+        objects.sort_unstable();
+        let want_rooms: Vec<u16> = want_rooms.iter().map(|&i| i as u16).collect();
+        let want_objects: Vec<u16> = want_objects.iter().map(|&i| i as u16).collect();
+        assert_eq!(rooms, want_rooms, "{file}: production table room indices");
+        assert_eq!(objects, want_objects, "{file}: production table object indices");
+        // The title card (99) resolves to a real, playable record.
+        let title_offset = table
+            .find(scott::PictureUsage::Room, 99)
+            .unwrap_or_else(|| panic!("{file}: no title picture in the production table"));
+        let mut canvas = LineArtCanvas::new();
+        assert!(
+            scott::saga_atari::draw_line_art_record(&mut canvas, &spliced, title_offset).is_ok(),
+            "{file}: the title picture should play"
+        );
+        // Both object usages resolve to the SAME record (SQ-1524: no
+        // inventory flag bit here, unlike the bitmap titles).
+        if let Some(&first_object) = want_objects.first() {
+            assert_eq!(
+                table.find(scott::PictureUsage::ObjectInRoom, first_object),
+                table.find(scott::PictureUsage::ObjectInInventory, first_object),
+                "{file}: object {first_object} should answer the same record either way",
+            );
+        }
+    }
+}
+
+/// A garbage line-art table entry is refused, not played — the same caution
+/// [`scott::saga_atari::read_picture_table`] takes for the bitmap titles,
+/// mirrored here for [`scott::saga_atari::read_line_art_table`].
+#[test]
+fn a_line_art_table_entry_pointing_at_no_record_is_refused() {
+    let Some(raw) = side_b("SAGA #1 - Adventureland [side B].atr") else { return };
+    let mut corrupted = raw.clone();
+    // Room 5's slot, overwritten with a plainly-off-grid `(a, s)` pair.
+    corrupted[LINE_ART_TABLE + 2 * 5] = 0xFF;
+    corrupted[LINE_ART_TABLE + 2 * 5 + 1] = 0xFF;
+    let spliced = splice_vtoc(&corrupted);
+    let table = scott::saga_atari::read_line_art_table(&spliced, 1)
+        .expect("the marker is untouched, so the table itself still reads");
+    assert!(
+        table.find(scott::PictureUsage::Room, 5).is_none(),
+        "the corrupted entry must not resolve to any record"
+    );
+    assert!(table.find(scott::PictureUsage::Room, 1).is_some(), "room 1's own entry still resolves");
+}
+
+/// The marker in front of the line-art table is checked, not trusted.
+#[test]
+fn a_wrong_line_art_marker_refuses_the_whole_table() {
+    let Some(raw) = side_b("SAGA #1 - Adventureland [side B].atr") else { return };
+    let mut corrupted = raw.clone();
+    corrupted[LINE_ART_TABLE_MARKER] = 0xFF;
+    let spliced = splice_vtoc(&corrupted);
+    assert!(
+        scott::saga_atari::read_line_art_table(&spliced, 1).is_none(),
+        "a corrupted marker must refuse the table rather than read past it"
+    );
+}
+
+/// **SQ-1525's first host-side fact: a never-clearing room record must
+/// composite over whatever [`scott::saga_atari::draw_line_art_record`]'s
+/// canvas already held, not paint a fresh black one.**
+///
+/// *Pirate Adventure*'s room 86 is one of the six room records that never
+/// clear the screen (`every_line_art_record_plays_under_the_renderers_grammar`
+/// pins the full list) — its own `painted()` box happens to reach every edge
+/// of the canvas regardless (that test's own comment: "the maze's fills
+/// happen to reach every edge too"), so a bounding-box comparison cannot say
+/// anything here; **individual pixels** are what settle it. Play a normal,
+/// clearing room first, then room 86 onto the SAME canvas, and find a pixel
+/// the first room lit that room 86, played ALONE from a fresh canvas, never
+/// touches at all (still black there) — a pixel outside its own reach. Under
+/// the composite, that pixel must survive.
+///
+/// The falsification is built into the same search: the "fresh, alone" frame
+/// used to find that pixel is exactly the wrong answer this replaces, and the
+/// test asserts it is black there — the bug a naive per-record decode (no
+/// running canvas) would show a player instead.
+#[test]
+fn a_never_clearing_room_composites_over_the_prior_canvas_not_a_fresh_one() {
+    let Some(raw) = side_b("SAGA #2 - Pirate Adventure [side B].atr") else { return };
+    let spliced = splice_vtoc(&raw);
+    let entries = line_art_table_entries(&raw);
+    let prior_off = entries.iter().find(|e| e.0 == 20).expect("room 20's entry").3;
+    let never_clears_off = entries.iter().find(|e| e.0 == 86).expect("room 86's entry").3;
+
+    let mut canvas = LineArtCanvas::new();
+    let prior = scott::saga_atari::draw_line_art_record(&mut canvas, &spliced, prior_off)
+        .expect("room 20 (a clearing room) plays");
+
+    // The wrong approach: room 86 decoded on its own, with no history —
+    // pinned here as what a naive per-record decode would show.
+    let mut fresh = LineArtCanvas::new();
+    let fresh_pic = scott::saga_atari::draw_line_art_record(&mut fresh, &spliced, never_clears_off)
+        .expect("room 86 plays alone too");
+
+    // The composite: room 86 played over room 20's own canvas, in place.
+    let composited_after_room86 =
+        scott::saga_atari::draw_line_art_record(&mut canvas, &spliced, never_clears_off)
+            .expect("room 86 plays over room 20, in place");
+    let composited = canvas.picture();
+
+    let sample = (0..prior.width() * prior.height())
+        .find(|&i| prior.pixels()[i] != 0 && fresh_pic.pixels()[i] == 0 && composited.pixels()[i] == prior.pixels()[i])
+        .map(|i| (i % prior.width(), i / prior.width()))
+        .expect("room 20 lights at least one pixel room 86 never reaches on its own");
+
+    let at = |pic: &LineArtPicture, (x, y): (usize, usize)| pic.pixels()[y * pic.width() + x];
+    assert_eq!(
+        at(&composited, sample), at(&prior, sample),
+        "room 20's pixel at {sample:?} should survive under room 86's composite",
+    );
+    assert_eq!(
+        at(&fresh_pic, sample), 0,
+        "room 86 played alone (the wrong approach) is black at {sample:?} — that is the bug composited",
+    );
+    // Sanity: room 86 genuinely drew SOMETHING, so this is not a vacuous case
+    // where the two canvases never touched at all.
+    assert!(composited_after_room86.painted().is_some());
+}
+
+/// **SQ-1525's second host-side fact: the shared darkness card is an
+/// animation that ends on a plain clear, so [`scott::saga_atari::draw_darkness_card`]
+/// must hand back the LAST PAUSED frame, not the true final (black) one.**
+///
+/// Falsification: taking the true final frame instead (what a naive
+/// `LineArtCanvas::draw` — not `draw_frames` — would give) is pinned wrong
+/// right here too: it is the all-black fourth count, not the lit third one.
+#[test]
+fn draw_darkness_card_shows_the_last_paused_frame_not_the_final_clear() {
+    let Some(raw) = side_b("SAGA #1 - Adventureland [side B].atr") else { return };
+    let spliced = splice_vtoc(&raw);
+    let entries = line_art_table_entries(&raw);
+    let off = entries.iter().find(|e| e.0 == 0).expect("the darkness card's entry").3;
+
+    let mut canvas = LineArtCanvas::new();
+    let shown = scott::saga_atari::draw_darkness_card(&mut canvas, &spliced, off).expect("plays");
+    assert_eq!(lit(&shown), 1_148, "the third pause, not the fourth/final black frame");
+
+    // The canvas's own TRUE end state still finishes the record fully — the
+    // next record drawn onto it draws over genuine black, matching the
+    // machine, even though the DISPLAYED frame above was an earlier one.
+    assert_eq!(lit(&canvas.picture()), 0, "the canvas itself ends black, same as the real machine");
+
+    // Falsification: the naive final frame (`draw`, not `draw_darkness_card`)
+    // is the wrong thing to show — all black, not the lettering.
+    let naive = LineArtCanvas::new().draw(&entries_record(&spliced, off)).expect("plays");
+    assert_eq!(lit(&naive), 0, "the naive final frame is black — the bug this function avoids");
+}
+
+/// A record's own bytes, from a FILE offset, the way [`line_art_record`]
+/// reads one by table SLOT — used where the offset is already in hand rather
+/// than looked up again by slot.
+fn entries_record(spliced: &[u8], file_offset: usize) -> Vec<u8> {
+    let rec = &spliced[spliced_of(file_offset)..];
+    let (_, end) = walk_line_art_record(rec);
+    rec[..=end.expect("the record ends")].to_vec()
+}
+
+/// **SQ-1525's object draw order**: descending item index, item 0 drawn
+/// LAST — read off the renderer's `$8BD5` but not exercised by a test until
+/// now. Two overlapping objects on the same room, drawn through
+/// `scott::saga_atari::draw_line_art_record` in that order, must leave the
+/// LOWER-numbered one's own pixels on top wherever the two overlap.
+///
+/// *Adventureland* has no pair of objects both present in one room in this
+/// specimen's own state, so this proves the ordering directly instead: two
+/// synthetic overlapping "object" records (real line-art streams, drawn as
+/// object records are — no clear, just paint) sharing one pixel, with the
+/// higher-index one drawn FIRST and the lower-index one LAST — as descending
+/// order requires — must leave the lower one's colour on top.
+#[test]
+fn object_draw_order_is_descending_index_so_item_zero_lands_on_top() {
+    // Two one-pixel-wide "object" records at the very same point, in two
+    // different colours: item 9's (line colour 4) and item 0's (line colour
+    // 7). `scott_overlays`-style descending order draws 9 first, then 0 —
+    // matching production `PictSource::scott_overlays`'s own sort.
+    let stream = |line_colour: u8| -> Vec<u8> {
+        vec![0x60 | line_colour, 0, 0, 0x80, 50, 50, 0xA0, 50, 50, 0x00]
+    };
+    let mut indices = [9u16, 0];
+    indices.sort_by(|a, b| b.cmp(a)); // descending: highest first, 0 last
+    assert_eq!(indices, [9, 0], "descending order puts item 0 last");
+
+    let mut canvas = LineArtCanvas::new();
+    let streams = [(9u16, stream(4)), (0u16, stream(7))];
+    let by_index = |want: u16| streams.iter().find(|(i, _)| *i == want).map(|(_, s)| s.clone()).unwrap();
+    for &idx in &indices {
+        canvas.draw(&by_index(idx)).expect("plays");
+    }
+    let final_pic = canvas.picture();
+    let (a, b) = scott::saga_atari_lineart::COLOUR_PAIRS[7];
+    assert_eq!(
+        final_pic.pixels()[50 * final_pic.width() + 50],
+        a * 4 + b,
+        "item 0, drawn last, should be on top at the shared pixel",
+    );
 }

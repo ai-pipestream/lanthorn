@@ -13,11 +13,16 @@
 //! what a shared render path actually promises. Both are gitignored commercial
 //! fixtures and every case here skips vacuously without them.
 //!
-//! The Atari case pinned here is deliberately the *absence* of pictures — a
-//! LINE-ART title, still unwired (SQ-1497); see
-//! [`an_atari_line_art_side_a_reports_no_pictures_even_through_the_by_name_walk`].
-//! The three Atari titles that DO show pictures now (SQ-1496's family-C
-//! table) have their own suite, `scott_saga_atari_pictures.rs`.
+//! The Atari case pinned here is a LINE-ART title's side A **alone**, with no
+//! companion side paired in — the "gathered files by name only" shape a bare
+//! `ScottPictureSources::none().with_saga_pictures(...)` caller gets, which
+//! the Atari has nothing to offer either way (§8.3: no filesystem walk on
+//! this platform at all) — see
+//! [`an_atari_line_art_side_a_alone_reports_no_pictures`]. Both Atari picture
+//! formats — SQ-1496's family-C bitmaps and SQ-1524/SQ-1525's line art — now
+//! draw real art once the companion side is properly paired in through
+//! `ScottPictureSources::resolve`, and have their own suites,
+//! `scott_saga_atari_pictures.rs` and `scott_saga_atari_lineart_pictures.rs`.
 
 use app::engine::{Engine, GraphicsWindow, WinNode};
 use app::render::graphics::{kitty_picker, GraphicsRender};
@@ -278,13 +283,16 @@ fn the_hulks_room_one_is_a_drawing_and_not_a_flat_fill() {
 /// (`scott::AtariPictureFormat::FamilyCBitmap`) — *Voodoo Castle*, *The
 /// Count*, *Claymorgue Castle*. **This title is not one of them**:
 /// *Adventureland* is a line-drawing side (`AtariPictureFormat::LineArt`,
-/// SQ-1497), which stays unwired regardless of pairing because nothing
-/// settles which index its records answer to — so it is still the right
-/// title to pin the "no pictures" case with, and the second half of this case
-/// (below) checks that pairing its side B in through the full `resolve` path
-/// changes nothing for it.
+/// SQ-1524, SQ-1525). Its side A alone — the "gathered files by name only"
+/// shape a bare `.none().with_saga_pictures(...)` caller gets — carries no
+/// picture files in its catalogue at all (§8.3: no filesystem walk on this
+/// platform), which is still the right premise to pin the "no pictures" case
+/// with. `each_line_art_title_boots_and_shows_real_room_art`
+/// (`scott_saga_atari_lineart_pictures.rs`) is the other half: pairing the
+/// companion side in through the real `resolve` path DOES draw a room band
+/// now, off the line-art table that lives on side B itself.
 #[test]
-fn an_atari_line_art_side_a_reports_no_pictures_even_through_the_by_name_walk() {
+fn an_atari_line_art_side_a_alone_reports_no_pictures() {
     let path = fixture_path("scott-dialects/atari/SAGA #1 - Adventureland [side A].atr");
     if !path.exists() {
         eprintln!("SKIP: needs stories/scott-dialects/atari/ (gitignored commercial fixtures)");
@@ -305,7 +313,7 @@ fn an_atari_line_art_side_a_reports_no_pictures_even_through_the_by_name_walk() 
         "premise: it really is a US S.A.G.A. database on the Atari"
     );
     let session = ScottSession::new_with_options(
-        bytes.clone(),
+        bytes,
         false,
         None,
         scott::Options::default(),
@@ -321,22 +329,6 @@ fn an_atari_line_art_side_a_reports_no_pictures_even_through_the_by_name_walk() 
     assert!(
         dump.contains("a S.A.G.A. release with no picture files on this file"),
         "the dump distinguishes this from a text-only game:\n{dump}"
-    );
-
-    // And pairing the side properly in, through the real `resolve` path,
-    // changes nothing for a LINE-ART title — SQ-1496's table read refuses a
-    // side that is not the family-C bitmap shape (its own marker bytes are
-    // not there to match), so this still shows no band rather than guessing.
-    let game_dir = path.parent().expect("a directory").to_path_buf();
-    let pictures =
-        app::graphics::ScottPictureSources::resolve(&path, &bytes, &game_dir, None, None, None);
-    assert!(pictures.atari_side_b.is_some(), "the companion side pairs fine — it is just the wrong shape");
-    let paired_session =
-        ScottSession::new_with_options(bytes, false, None, scott::Options::default(), pictures)
-            .expect("Adventureland boots off its own side A, paired side B and all");
-    assert!(
-        picture_band(&paired_session.screen()).is_none(),
-        "a line-art side must not be read as a family-C table"
     );
 }
 

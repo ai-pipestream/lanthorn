@@ -6,16 +6,22 @@
 //!
 //! # This is not the Apple II grammar
 //!
-//! [`crate::saga_atari`]'s `decode_line_art_opening` reads these bytes under
-//! [`crate::apple_pictures`]' item-26 grammar, and SQ-1524 measured why that
-//! cannot be right: every record here is a stream of **fixed three-byte
-//! tokens** whose drawing coordinates never leave **160 x 96**, the Atari's
-//! four-colour `GRAPHICS 7` canvas, where the Apple's tokens are one, two or
-//! three bytes on 280 x 192. This module reads the format the machine
-//! actually draws, and everything below was settled the way
-//! `apple_pictures.rs` settled `M3`: by reading the release's **own renderer**
-//! off its own boot side as a specimen. No interpreter source was consulted
-//! (`docs/internals/clean-room.md`).
+//! An earlier reading of these bytes, in `crate::saga_atari`, tried
+//! [`crate::apple_pictures`]' item-26 grammar (the two share a byte-identical
+//! opening at file offset `0x1000`), but SQ-1524 measured why that cannot be
+//! right: every record here is a stream of **fixed three-byte tokens** whose
+//! drawing coordinates never leave **160 x 96**, the Atari's four-colour
+//! `GRAPHICS 7` canvas, where the Apple's tokens are one, two or three bytes
+//! on 280 x 192 — and the shared opening bytes turned out to be the MIDDLE of
+//! this format's own darkness-card record, not a picture in their own right.
+//! This module reads the format the machine actually draws, and everything
+//! below was settled the way `apple_pictures.rs` settled `M3`: by reading the
+//! release's **own renderer** off its own boot side as a specimen. No
+//! interpreter source was consulted (`docs/internals/clean-room.md`).
+//! `crate::saga_atari::read_line_art_table` (SQ-1524) is what tells a caller
+//! which record answers to which room or object, and
+//! `crate::saga_atari::draw_line_art_record` (SQ-1525) is how production code
+//! plays one.
 //!
 //! # The screen, as the renderer builds it
 //!

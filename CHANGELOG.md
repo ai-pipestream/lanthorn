@@ -28,6 +28,8 @@ Absolute URLs or no link.
   room one, matching the original disks.
 - **Atari 8-bit Voodoo Castle, The Count, and The Sorcerer of Claymorgue
   Castle now show their room and object artwork instead of none.**
+- **Atari 8-bit Adventureland, Pirate Adventure, Mission Impossible, and
+  Strange Odyssey now show their real room and object artwork.**
 
 ### Fixed
 

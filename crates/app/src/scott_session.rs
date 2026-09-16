@@ -348,17 +348,35 @@ impl ScottSession {
         } else if let Some(release) =
             saga_release.filter(|r| r.platform == scott::SagaPlatform::Atari8Bit)
         {
-            // SQ-1496: the Atari has no filesystem on its companion side to
-            // walk (`saga_pictures` is always empty for it) — the (usage,
-            // index) association is a table on side A instead, read against
-            // the whole companion side `ScottPictureSources` paired in.
-            // Falls back to no pictures, the same honest-empty shape the
-            // general `saga_release` arm below answers with when its own
-            // disk carries none: a missing/unpaired companion side, or a
-            // table this crate's own marker check refuses.
-            atari_side_b
-                .and_then(|side_b| PictSource::from_scott_saga_atari(&bytes, &side_b, release))
-                .unwrap_or_else(|| PictSource::new(None))
+            // SQ-1496/SQ-1524: the Atari has no filesystem on its companion
+            // side to walk (`saga_pictures` is always empty for it) — the
+            // (usage, index) association is a table instead, read against the
+            // whole companion side `ScottPictureSources` paired in. WHICH
+            // table, and which grammar the records it names play under,
+            // differ by title (`atari_picture_format`, module docs on
+            // `scott::saga_atari`): *Voodoo Castle*, *The Count* and
+            // *Claymorgue Castle* carry family-C bitmaps and their table on
+            // side A; the other four carry a line-art token stream and their
+            // table on side B itself. Falls back to no pictures either way,
+            // the same honest-empty shape the general `saga_release` arm
+            // below answers with when its own disk carries none: a
+            // missing/unpaired companion side, or a table this crate's own
+            // marker check refuses.
+            // `atari_picture_format` answers `None` only for a non-Atari8Bit
+            // platform, which cannot happen inside this `filter` — so every
+            // format but the bitmap one (including a future variant this
+            // crate does not know about yet, since `AtariPictureFormat` is
+            // `#[non_exhaustive]`) takes the line-art path rather than an
+            // exhaustive match that would have to guess at one.
+            if matches!(release.atari_picture_format(), Some(scott::AtariPictureFormat::FamilyCBitmap)) {
+                atari_side_b
+                    .and_then(|side_b| PictSource::from_scott_saga_atari(&bytes, &side_b, release))
+                    .unwrap_or_else(|| PictSource::new(None))
+            } else {
+                atari_side_b
+                    .and_then(|side_b| PictSource::from_scott_saga_atari_lineart(&side_b, release))
+                    .unwrap_or_else(|| PictSource::new(None))
+            }
         } else if let Some(release) = saga_release {
             PictSource::from_scott_saga(saga_pictures, release)
         } else if let Some(release) = dos_release {
@@ -852,6 +870,17 @@ impl Engine for ScottSession {
                     }
                     (None, _, Some(scott::SagaPlatform::AppleII)) => format!(
                         "S.A.G.A. family D (Apple II, {} picture(s))",
+                        self.picts.scott_saga_count().unwrap_or(0)
+                    ),
+                    // SQ-1524/SQ-1525: four of the seven Atari 8-bit titles
+                    // carry a line-art token stream instead of family-C
+                    // bitmaps — `scott_saga_platform` cannot tell the two
+                    // apart (both answer `Atari8Bit`), so a frame has to ask
+                    // `scott_saga_atari_is_line_art` directly rather than
+                    // naming the wrong family.
+                    (None, _, Some(platform)) if self.picts.scott_saga_atari_is_line_art() => format!(
+                        "S.A.G.A. line-art ({}, {} record(s))",
+                        platform.label(),
                         self.picts.scott_saga_count().unwrap_or(0)
                     ),
                     (None, _, Some(platform)) => format!(

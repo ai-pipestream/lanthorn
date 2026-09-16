@@ -287,6 +287,51 @@ fn atari_overlay_offset(name: &str) -> Option<usize> {
     usize::from_str_radix(name.strip_prefix("atari:")?, 16).ok()
 }
 
+/// An Atari 8-bit US S.A.G.A. release's own LINE-ART companion side (spec
+/// §8.3, SQ-1524, SQ-1525) — *Adventureland*, *Pirate Adventure*, *Mission
+/// Impossible* and *Strange Odyssey*, the four titles whose side B is a
+/// line-drawing token stream rather than [`AtariSagaPictures`]'s family-C
+/// bitmaps.
+///
+/// **Keeps a running [`scott::saga_atari_lineart::LineArtCanvas`], never a
+/// fresh one per draw.** SQ-1525's own investigation note names two host-side
+/// facts a wiring has to carry: an object picture draws over its own room
+/// because the pen, the fill colours and the two bitmaps are not reset
+/// between records, and six named room records never clear the screen at all
+/// — they draw over whatever the machine's own un-reset screen already held.
+/// [`PictSource::scott_line_art_composite`] is the only place this canvas is
+/// drawn onto, in table order (room, then each overlay), so it always reads
+/// as "the machine's own screen, one record at a time" rather than as a set
+/// of independently-decoded pictures pasted together — the shape
+/// [`AtariSagaPictures`]'s per-record `decode_table_picture` correctly uses
+/// for family C, which resets per record because family C's records do not
+/// depend on one another.
+#[derive(Debug)]
+struct AtariLineArtPictures {
+    /// Side B with the volume table of contents excised
+    /// (`scott::saga_atari::splice_vtoc`), exactly as [`AtariSagaPictures`]
+    /// keeps its own.
+    side_b_spliced: Vec<u8>,
+    table: scott::saga_atari::LineArtPictureTable,
+    /// The machine's own running screen state — see the struct doc.
+    canvas: scott::saga_atari_lineart::LineArtCanvas,
+}
+
+/// One decoded line-art picture ([`scott::saga_atari_lineart::LineArtPicture`])
+/// as the same opaque RGBA shape [`picture_to_image`] gives family C, D and E
+/// — a fourth conversion because the type is a fourth shape (a different
+/// canvas size, a sixteen-entry pair palette), not because the rule differs.
+fn line_art_picture_to_image(pic: &scott::saga_atari_lineart::LineArtPicture) -> DynamicImage {
+    let mut buf = RgbaImage::new(pic.width() as u32, pic.height() as u32);
+    for y in 0..pic.height() {
+        for x in 0..pic.width() {
+            let (r, g, b) = pic.rgb(x, y).unwrap_or((0, 0, 0));
+            buf.put_pixel(x as u32, y as u32, Rgba([r, g, b, 255]));
+        }
+    }
+    DynamicImage::ImageRgba8(buf)
+}
+
 impl SagaRecords {
     /// `parse` is the family's own naming rule — §8.3's for the Commodore 64
     /// and Atari, §8.4's for the Apple II, §8.5's for MS-DOS.
@@ -446,6 +491,18 @@ pub struct PictSource {
     /// not verify ([`PictSource::from_scott_saga_atari`] refuses rather than
     /// guesses).
     scott_saga_atari: Option<(AtariSagaPictures, scott::SagaUs)>,
+    /// An Atari 8-bit US S.A.G.A. release's own LINE-ART companion side
+    /// (SQ-1524, SQ-1525) — see [`AtariLineArtPictures`]'s own doc. A
+    /// separate field from `scott_saga_atari` rather than a third shape that
+    /// one tries to cover: the two formats share nothing (a running canvas
+    /// against independently-decoded strip records) and a release is always
+    /// exactly one of them (`scott::AtariPictureFormat`).
+    ///
+    /// `None` for every other source, and for a line-art release whose
+    /// companion side is missing, unpaired, or whose table this crate could
+    /// not verify ([`PictSource::from_scott_saga_atari_lineart`] refuses
+    /// rather than guesses).
+    scott_saga_atari_lineart: Option<(AtariLineArtPictures, scott::SagaUs)>,
     /// The MS-DOS *Questprobe* release's own **family-E** CGA bitmaps (spec
     /// §8.5, SQ-1477) as the raw `.PAK` files they are stored as, keyed by
     /// the name the zip holds them under, with the release whose room-picture
@@ -509,6 +566,7 @@ impl PictSource {
             scott_c64: None,
             scott_saga: None,
             scott_saga_atari: None,
+            scott_saga_atari_lineart: None,
             scott_saga_dos: None,
             blend_columns: false,
             screen_palette: false,
@@ -692,6 +750,39 @@ impl PictSource {
         })
     }
 
+    /// A source backed by an **Atari 8-bit** US S.A.G.A. release's own
+    /// LINE-ART companion side (spec §8.3, SQ-1524, SQ-1525) —
+    /// [`Self::from_scott_saga_atari`]'s sibling for the four titles that do
+    /// not carry family-C bitmaps. Unlike that constructor there is no side-A
+    /// argument: this format's table lives on `side_b` itself
+    /// (`scott::saga_atari::read_line_art_table`), and the records it names
+    /// are drawing-token streams rather than bitmap strips
+    /// (`scott::saga_atari_lineart`).
+    ///
+    /// `None` when the table cannot be read at all — its own marker does not
+    /// match this release's Adventure International number (a
+    /// differently-mastered disk), or `side_b` is too short to hold it —
+    /// refused rather than drawn, the same rule every entry in the table is
+    /// individually held to.
+    pub fn from_scott_saga_atari_lineart(
+        side_b: &[u8],
+        release: scott::SagaUs,
+    ) -> Option<PictSource> {
+        let side_b_spliced = scott::saga_atari::splice_vtoc(side_b);
+        let table = scott::saga_atari::read_line_art_table(&side_b_spliced, release.adventure)?;
+        Some(PictSource {
+            scott_saga_atari_lineart: Some((
+                AtariLineArtPictures {
+                    side_b_spliced,
+                    table,
+                    canvas: scott::saga_atari_lineart::LineArtCanvas::new(),
+                },
+                release,
+            )),
+            ..PictSource::new(None)
+        })
+    }
+
     /// Which platform's family-C artwork this source holds, or `None` when it
     /// holds none — `/dump-windows` names it so a frame says where a room's
     /// picture came from (SQ-1475).
@@ -700,6 +791,7 @@ impl PictSource {
             .as_ref()
             .map(|(_, release)| release.platform)
             .or_else(|| self.scott_saga_atari.as_ref().map(|_| scott::SagaPlatform::Atari8Bit))
+            .or_else(|| self.scott_saga_atari_lineart.as_ref().map(|_| scott::SagaPlatform::Atari8Bit))
     }
 
     /// How many family-C picture records this source holds. `None` when it is
@@ -711,6 +803,17 @@ impl PictSource {
             .as_ref()
             .map(|(files, _)| files.len())
             .or_else(|| self.scott_saga_atari.as_ref().map(|(pics, _)| pics.table.entries().len()))
+            .or_else(|| {
+                self.scott_saga_atari_lineart.as_ref().map(|(pics, _)| pics.table.entries().len())
+            })
+    }
+
+    /// Is this an Atari 8-bit LINE-ART source (SQ-1524, SQ-1525) rather than
+    /// family C's bitmaps? `/dump-windows` uses this to name the right format
+    /// — the two share nothing but the platform, and `scott_saga_platform`
+    /// answers [`scott::SagaPlatform::Atari8Bit`] for either one.
+    pub fn scott_saga_atari_is_line_art(&self) -> bool {
+        self.scott_saga_atari_lineart.is_some()
     }
 
     /// A source backed by an MS-DOS *Questprobe* release's own **family-E**
@@ -771,6 +874,22 @@ impl PictSource {
         usage: scott::PictureUsage,
         indices: &[u16],
     ) -> Vec<String> {
+        if let Some((pics, _)) = &self.scott_saga_atari_lineart {
+            // SQ-1525: the renderer draws item index HIGH TO LOW — item 0
+            // last, on top — read off `$8BD5` and pinned by
+            // `scott_line_art_object_overlays_draw_high_to_low` rather than
+            // exercised before now. `scott_composite`'s line-art path draws
+            // `overlays` in the order this returns them, so DESCENDING here
+            // is what puts item 0 last.
+            let mut entries: Vec<_> = pics
+                .table
+                .entries()
+                .iter()
+                .filter(|e| !matches!(e.usage, scott::PictureUsage::Room) && indices.contains(&e.index))
+                .collect();
+            entries.sort_by_key(|e| std::cmp::Reverse(e.index));
+            return entries.into_iter().map(|e| atari_overlay_name(e.file_offset)).collect();
+        }
         if let Some((pics, _)) = &self.scott_saga_atari {
             return pics
                 .table
@@ -816,6 +935,9 @@ impl PictSource {
         base: u32,
         overlays: &[String],
     ) -> Option<Arc<DynamicImage>> {
+        if self.scott_saga_atari_lineart.is_some() {
+            return self.scott_line_art_composite(base, overlays);
+        }
         let under = self.image(base)?;
         if overlays.is_empty() {
             return Some(under);
@@ -836,6 +958,52 @@ impl PictSource {
             }
         }
         Some(Arc::new(DynamicImage::ImageRgba8(canvas)))
+    }
+
+    /// [`Self::scott_composite`]'s path for an Atari 8-bit LINE-ART release
+    /// (SQ-1524, SQ-1525) — plays `base`'s room record, then each of
+    /// `overlays` (already sorted item-index-descending by
+    /// [`Self::scott_overlays`]), onto [`AtariLineArtPictures::canvas`] IN
+    /// PLACE and hands back a snapshot of it, rather than decoding `base`
+    /// independently and pasting rectangles over it the way the family-C/D/E
+    /// path above does.
+    ///
+    /// That running canvas is what carries SQ-1525's own two host-side facts
+    /// through to the picture band: an object drawn straight after its room
+    /// inherits whatever fill colour and pen the room's own record left (the
+    /// state is never reset between plays), and the six room records the
+    /// investigation names as never clearing the screen draw over whatever
+    /// this canvas already held — the previous room and its objects — instead
+    /// of over a black one.
+    ///
+    /// The shared darkness card (`base == scott::DARKNESS_PICTURE`) is its own
+    /// case: [`scott::saga_atari::draw_darkness_card`] still plays the record
+    /// onto the SAME running canvas (so its own true end state — genuinely
+    /// black — is what the next record draws over), but hands back the
+    /// animation's last PAUSED frame rather than that final black one, which
+    /// is what a host should actually show (module docs, SQ-1525). No object
+    /// is ever drawn in the dark (`ScottSession::room_overlays` returns
+    /// nothing when the room is dark), so `overlays` is not consulted there.
+    ///
+    /// `None` when this is not a line-art source, or when `base` names no
+    /// room this table resolves.
+    fn scott_line_art_composite(&mut self, base: u32, overlays: &[String]) -> Option<Arc<DynamicImage>> {
+        let (pics, _) = self.scott_saga_atari_lineart.as_mut()?;
+        if base as usize == scott::DARKNESS_PICTURE {
+            let off = pics.table.find(scott::PictureUsage::Room, base as u16)?;
+            let shown =
+                scott::saga_atari::draw_darkness_card(&mut pics.canvas, &pics.side_b_spliced, off)
+                    .ok()?;
+            return Some(Arc::new(line_art_picture_to_image(&shown)));
+        }
+        let off = pics.table.find(scott::PictureUsage::Room, base as u16)?;
+        scott::saga_atari::draw_line_art_record(&mut pics.canvas, &pics.side_b_spliced, off).ok()?;
+        for name in overlays {
+            let Some(off) = atari_overlay_offset(name) else { continue };
+            let _ =
+                scott::saga_atari::draw_line_art_record(&mut pics.canvas, &pics.side_b_spliced, off);
+        }
+        Some(Arc::new(line_art_picture_to_image(&pics.canvas.picture())))
     }
 
     /// Decode the record stored under `name` through whichever family this
@@ -1475,6 +1643,32 @@ impl PictSource {
                             pics.scheme,
                         )?;
                         Some(picture_to_image(&pic))
+                    })
+                }
+                // SQ-1524/SQ-1525: a STANDALONE decode, on a throwaway
+                // canvas — for a one-off existence/geometry query (the title
+                // card check at session boot, `/dump-windows`), not for the
+                // picture band itself. The band's own render goes through
+                // `Self::scott_composite`'s line-art path, which keeps the
+                // machine's own running canvas rather than a fresh one every
+                // time (see `AtariLineArtPictures`'s doc) — this cache-backed
+                // path cannot do that (a cached image is not a canvas state
+                // to keep drawing onto), so it would answer wrong for one of
+                // the six never-clearing room records or for a subsequent
+                // visit that should inherit prior state. Good enough for a
+                // query that only wants to know whether SOMETHING is there.
+                None if self.scott_saga_atari_lineart.is_some() => {
+                    self.scott_saga_atari_lineart.as_ref().and_then(|(pics, _)| {
+                        let off = pics.table.find(scott::PictureUsage::Room, resnum as u16)?;
+                        let mut canvas = scott::saga_atari_lineart::LineArtCanvas::new();
+                        let pic = if resnum as usize == scott::DARKNESS_PICTURE {
+                            scott::saga_atari::draw_darkness_card(&mut canvas, &pics.side_b_spliced, off)
+                                .ok()?
+                        } else {
+                            scott::saga_atari::draw_line_art_record(&mut canvas, &pics.side_b_spliced, off)
+                                .ok()?
+                        };
+                        Some(line_art_picture_to_image(&pic))
                     })
                 }
                 // SQ-1463: room n's picture is `pictures[n - 1]` (the decoder's

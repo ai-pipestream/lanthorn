@@ -14,10 +14,10 @@
 //!
 //! | title | side B | this module |
 //! |---|---|---|
-//! | #1 Adventureland | line-drawing token stream | [`decode_line_art_opening`] |
-//! | #2 Pirate Adventure | line-drawing token stream | [`decode_line_art_opening`] |
-//! | #3 Mission Impossible | line-drawing token stream | [`decode_line_art_opening`] |
-//! | #6 Strange Odyssey | line-drawing token stream | [`decode_line_art_opening`] |
+//! | #1 Adventureland | line-art token stream (`crate::saga_atari_lineart`) | [`read_line_art_table`] |
+//! | #2 Pirate Adventure | line-art token stream (`crate::saga_atari_lineart`) | [`read_line_art_table`] |
+//! | #3 Mission Impossible | line-art token stream (`crate::saga_atari_lineart`) | [`read_line_art_table`] |
+//! | #6 Strange Odyssey | line-art token stream (`crate::saga_atari_lineart`) | [`read_line_art_table`] |
 //! | #4 Voodoo Castle | family-C bitmaps, [`FamilyCScheme::NoLiteral`] | **yes** |
 //! | #5 The Count | family-C bitmaps, [`FamilyCScheme::NoLiteral`] | **yes** |
 //! | #13 Claymorgue Castle | family-C bitmaps, [`FamilyCScheme::Standard`] | **yes** |
@@ -25,13 +25,15 @@
 //! The split is exactly the split §7.4's string test makes on the **Apple II**
 //! releases of the same seven titles: the four whose Apple side A is an
 //! ordinary DOS 3.3 disk draw with line tokens on both machines, and the three
-//! "scrambled" ones ship bitmaps on both. The line-drawing format is the one
-//! Appendix A item 26 measured for the Apple II — three-byte tokens with a
-//! command in bits 7-5, `bit 0` carrying bit 8 of *x* — and all four Atari
-//! sides open with the very same bytes at file offset `0x1000`. Reading it is
-//! [`crate::apple_pictures`]' business, not this module's, and
-//! [`decode_line_art_opening`] is the addressing that hands it those bytes
-//! (SQ-1497) — see "the line-art side" below for what is, and is not, settled.
+//! "scrambled" ones ship bitmaps on both. **The line-art side is not the same
+//! grammar the Apple side is**, though the two open with byte-identical bytes
+//! at file offset `0x1000` — SQ-1524 measured that those bytes are the MIDDLE
+//! of the darkness card's own record, not a picture in their own right, and
+//! SQ-1525 read the real grammar off the release's own renderer: fixed
+//! three-byte tokens on a 160x96 Atari `GRAPHICS 7` canvas, not the Apple's
+//! mixed-width tokens on 280x192. See `crate::saga_atari_lineart` for that
+//! grammar and [`read_line_art_table`] for how a record is found at all — the
+//! table lives on SIDE B here, unlike the bitmap titles' side-A one below.
 //!
 //! # The record, as measured
 //!
@@ -113,53 +115,40 @@
 //! eleven more `0xFF`, between two stretches of run-length data that continue
 //! across them), and a record spanning them must have them excised.
 //!
-//! # The line-art side (SQ-1497)
+//! # The line-art side's own table (SQ-1524) and grammar (SQ-1525)
 //!
-//! Measured on all four `AtariPictureFormat::LineArt` specimens
-//! (`crate::saga_us::SagaUs::atari_picture_format`): [`LINE_ART_OFFSET`]
-//! really does open with the byte-identical grammar the module doc above
-//! cites, and it decodes to a real picture — [`decode_line_art_opening`]
-//! confirms this and is what a caller reaches for.
+//! Both are settled now. The four `AtariPictureFormat::LineArt` titles carry
+//! their own (usage, index) table on **side B itself** — not side A, where
+//! the three bitmap titles keep theirs — behind a three-byte adventure-number
+//! marker at [`LINE_ART_TABLE_MARKER`], 190 two-byte entries at
+//! [`LINE_ART_TABLE_OFFSET`] in the same room-then-object shape the bitmap
+//! table uses, but a different arithmetic ([`line_art_entry_file_offset`]):
+//! a line-art record's tokens are three bytes each, where a bitmap record's
+//! no-literal units are seven. There is no inventory flag bit and no separate
+//! fixed inventory-backdrop pointer either — an object picture here serves
+//! both [`PictureUsage::ObjectInRoom`] and [`PictureUsage::ObjectInInventory`]
+//! (exactly as the same four titles' Apple II `B<aa><nnn>` files, one per
+//! object with no R/I suffix, already do), and index 98 is an ordinary table
+//! entry rather than [`AtariPictureTable`]'s fixed pointer. [`read_line_art_table`]
+//! reads it, validating every entry against a record
+//! [`draw_line_art_record`] can actually play.
 //!
-//! **This is per-room artwork, not a single title card.** Feeding the bytes
-//! from `LINE_ART_OFFSET` onward through
-//! [`crate::apple_pictures::family_d_plain_stream_len`] and decoding what
-//! follows each picture's own end token, in order, over all four specimens
-//! turns up recognisable scenes distinct per title — among them a shop
-//! counter signed `TREASURE BOX SHOP` on *Pirate Adventure*'s side and a desk
-//! on *Mission Impossible*'s — not one shared splash screen. So this is the
-//! same shape family C's three sides already are: a run of pictures laid end
-//! to end with **no index anywhere in the data** saying which room (or other
-//! use) any one of them is for. §12.10's "cannot be recovered from the
-//! database" is exactly as true of this format as of family C's.
-//!
-//! **What [`decode_line_art_opening`] answers for, then, is deliberately
-//! narrow**: the picture that opens the stream at [`LINE_ART_OFFSET`], which
-//! is measured to be the same bytes — and so the same small drawing — on all
-//! four specimens, and is consequently not a specific room's own art (a
-//! shared drawing cannot be four different rooms' pictures at once). What it
-//! actually depicts was not determined, and it is not wired into the picture
-//! band: there was nowhere sound to wire it, since neither "the title card"
-//! nor "room one" is a claim the data supports over the other, and guessing
-//! either would be exactly the kind of silent, self-consistent wrong picture
-//! `docs/internals/*` elsewhere warns a hand-picked index produces.
-//! [`crate::apple_pictures::family_d_plain_stream_len`] is exposed for
-//! whoever settles the index question next — the second picture on every
-//! specimen (the room art above) starts the same way this one is found:
-//! stepping over one opening picture's own consumed length, then past the
-//! run of zero-byte filler after it (a `0x00` filler byte reads as its own
-//! immediate end-of-picture token under the same grammar, which is what let
-//! this module's own scan re-sync past it during measurement) — but turning
-//! that into a general scan needs a stronger self-proving check than a byte
-//! count, the way [`record_at`] has one for family C and this format does
-//! not yet.
+//! The grammar those records play under is `crate::saga_atari_lineart`'s, read
+//! off the release's own renderer (SQ-1525) rather than assumed from the
+//! Apple II's — see that module's docs for the tokens, the two-bitmap screen,
+//! and the fill and line algorithms. **State carries between records** (the
+//! canvas, the fill colours, the pen), which is how an object picture draws
+//! over its room and how six named room records that never clear the screen
+//! draw over whatever came before them — [`draw_line_art_record`] plays a
+//! record onto a caller-supplied [`crate::saga_atari_lineart::LineArtCanvas`] in
+//! place for exactly that reason, never onto a fresh one internally.
 
-use crate::apple_pictures;
+use crate::saga_atari_lineart::{LineArtCanvas, LineArtError, LineArtPicture};
 use crate::saga_pictures::{
     atari_colour, paint_strips, paint_strips_from, resolve_palette, FamilyCScheme, Painted, Picture,
     PictureError, StripLayout, CANVAS_HEIGHT, CANVAS_WIDTH,
 };
-use crate::saga_us::{PictureUsage, SagaPlatform};
+use crate::saga_us::PictureUsage;
 
 /// File offset of sector 360, the volume table of contents (§7.3).
 ///
@@ -184,57 +173,6 @@ pub const SIDE_LEN: usize = 92_176;
 /// that a differently-mastered disk is not refused for the sake of one
 /// constant.
 pub const FIRST_RECORD: usize = 0x290;
-
-/// File offset where a **line-art** companion side's opcode stream begins
-/// (SQ-1497) — `AtariPictureFormat::LineArt`'s four titles, `Adventureland`,
-/// `Pirate Adventure`, `Mission Impossible` and `Strange Odyssey`. Unlike
-/// [`FIRST_RECORD`]'s family-C header, there is no length-prefixed record in
-/// front of it: the byte at this offset is itself the picture format's own
-/// first token — measured identical on all four specimens; see the module
-/// docs, "the line-art side".
-pub const LINE_ART_OFFSET: usize = 0x1000;
-
-/// Decode the picture that opens a line-art companion side, at
-/// [`LINE_ART_OFFSET`] (SQ-1497).
-///
-/// `side` is the whole `.atr` file, header included, exactly as
-/// [`scan_picture_side`] and [`splice_vtoc`] take it — though this never
-/// reads far enough into the file to reach the volume table of contents
-/// ([`VTOC_OFFSET`] is far past where this picture's own end token falls on
-/// every specimen measured), so no splice is needed or applied.
-///
-/// See the module docs ("the line-art side") for what this does and does not
-/// establish: the bytes and the grammar are confirmed against real
-/// specimens, and the picture decoded here is the SAME one on all four
-/// titles (so it is not any one room's own art) — nothing here says which
-/// picture index, if any, it answers to, and it is not wired into the
-/// picture band for exactly that reason.
-///
-/// # Errors
-///
-/// [`apple_pictures::AppleError`] — [`LINE_ART_OFFSET`] past the end of
-/// `side`, or (from the decoder) a stream too short to hold anything.
-pub fn decode_line_art_opening(
-    side: &[u8],
-) -> Result<apple_pictures::HiResPicture, apple_pictures::AppleError> {
-    let stream = side
-        .get(LINE_ART_OFFSET..)
-        .ok_or(apple_pictures::AppleError::TooShort { len: side.len() })?;
-    // `decode_family_d_plain` wants a DOS 3.3 file's own four-byte prologue —
-    // a load address it ignores and a declared stream length — which this
-    // side has no filesystem to supply, so one is built here: the length only
-    // needs to be AT LEAST the real stream's own extent, since the decoder
-    // stops at its own end token regardless of how much more the declared
-    // length allows for. `SagaPlatform::AppleII` is the argument that selects
-    // which of family D's two sub-variants a plain-prologue record decodes
-    // as, not a claim about which machine rendered these particular bytes —
-    // the grammar itself is confirmed identical here (module docs).
-    let mut file = vec![0x00, 0x70];
-    let declared = u16::try_from(stream.len()).unwrap_or(u16::MAX);
-    file.extend_from_slice(&declared.to_le_bytes());
-    file.extend_from_slice(stream);
-    apple_pictures::decode_family_d_plain(&file, SagaPlatform::AppleII)
-}
 
 /// One family-C record located on a companion picture side.
 ///
@@ -797,6 +735,203 @@ pub fn decode_record_with_bad_sector_fallback(
     let (palette, unrecognised_colours) =
         resolve_palette(colour_bytes, |stored| Some(atari_colour(stored)));
     Some(Picture { width: CANVAS_WIDTH, height: CANVAS_HEIGHT, pixels, palette, colour_bytes, unrecognised_colours, painted })
+}
+
+// ── The line-art sides' own (usage, index) table (SQ-1524) ─────────────────
+//
+// Measured identically on all four `AtariPictureFormat::LineArt` titles: side
+// B file offset 0x290 holds the same three-copies-of-the-adventure-number
+// marker the bitmap sides carry (there, on side A), and 0x293 holds 190
+// two-byte entries in the same room-then-object shape — but on a THREE-byte
+// grid rather than the bitmap table's seven, because a line-art record's own
+// tokens are three bytes each. See the module docs for the full account.
+
+/// Side B file offset of the marker in front of the line-art table — three
+/// copies of the release's own Adventure International number (`01`
+/// Adventureland, `02` Pirate Adventure, `03` Mission Impossible, `06`
+/// Strange Odyssey).
+pub const LINE_ART_TABLE_MARKER: usize = 0x290;
+
+/// Side B file offset of the line-art table itself, immediately after
+/// [`LINE_ART_TABLE_MARKER`]'s three bytes.
+pub const LINE_ART_TABLE_OFFSET: usize = 0x293;
+
+/// How many two-byte entries the line-art table holds: 100 room slots, 90
+/// object slots.
+pub const LINE_ART_TABLE_ENTRIES: usize = 190;
+
+/// Where a line-art table entry `[a, s]` points, as a FILE offset into side B
+/// (SQ-1524): `s` and the low two bits of `a` are a 1-based, 128-byte Atari
+/// sector number, and the top six bits of `a`, times **three**, are the byte
+/// within it — a line-art record's tokens are three bytes each, where
+/// [`table_entry_file_offset`]'s bitmap units are seven.
+pub fn line_art_entry_file_offset(a: u8, s: u8) -> usize {
+    let sector = (usize::from(a & 3) << 8) | usize::from(s);
+    16 + sector.saturating_sub(1) * 128 + usize::from(a >> 2) * 3
+}
+
+/// One resolved (usage, index) → record association, read off a line-art
+/// side's own table (SQ-1524).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LineArtTableEntry {
+    /// What the named record is for. Every object slot is stored as
+    /// [`PictureUsage::ObjectInRoom`] — see [`LineArtPictureTable::find`] for
+    /// why an [`PictureUsage::ObjectInInventory`] lookup still finds it.
+    pub usage: PictureUsage,
+    /// The picture index — a room number for [`PictureUsage::Room`], an item
+    /// number otherwise.
+    pub index: u16,
+    /// The record's offset into the whole `.atr` FILE, not the spliced side —
+    /// pass through [`spliced_of`] before calling [`record_at`]-style code
+    /// directly, or hand it straight to [`draw_line_art_record`], which does
+    /// that already.
+    pub file_offset: usize,
+}
+
+/// A line-art side's whole picture table (SQ-1524): every (usage, index)
+/// association [`read_line_art_table`] could verify against a record
+/// [`draw_line_art_record`] can actually play.
+///
+/// Unlike the bitmap titles' [`AtariPictureTable`], there is no separate
+/// fixed inventory-backdrop pointer and no inventory flag bit: index 98 is an
+/// ordinary room-usage entry, and an object picture here serves both
+/// [`PictureUsage::ObjectInRoom`] and [`PictureUsage::ObjectInInventory`] —
+/// exactly as the same four titles' Apple II `B<aa><nnn>` files, one per
+/// object with no R/I suffix, already do.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct LineArtPictureTable {
+    entries: Vec<LineArtTableEntry>,
+}
+
+impl LineArtPictureTable {
+    /// Every resolved (usage, index) association, in table order.
+    pub fn entries(&self) -> &[LineArtTableEntry] {
+        &self.entries
+    }
+
+    /// The record a picture with this `usage` and `index` names, as a FILE
+    /// offset — pass to [`draw_line_art_record`] — or `None` when the table
+    /// carries no such entry.
+    ///
+    /// A [`PictureUsage::ObjectInRoom`] and a [`PictureUsage::ObjectInInventory`]
+    /// lookup at the same `index` answer the same record — see the struct
+    /// doc for why — so only [`PictureUsage::Room`] is checked exactly;
+    /// anything else is "an object slot", regardless of which of the two
+    /// object usages was asked for.
+    pub fn find(&self, usage: PictureUsage, index: u16) -> Option<usize> {
+        let want_room = matches!(usage, PictureUsage::Room);
+        self.entries
+            .iter()
+            .find(|e| e.index == index && matches!(e.usage, PictureUsage::Room) == want_room)
+            .map(|e| e.file_offset)
+    }
+}
+
+/// Read a line-art side's own picture table (SQ-1524).
+///
+/// `side_b_spliced` is the companion side with the volume table of contents
+/// already excised ([`splice_vtoc`]) — unlike the bitmap titles' table, this
+/// one lives on side B itself, so there is no separate side-A argument.
+/// `adventure` is the release's own AI series number
+/// ([`crate::saga_us::SagaUs::adventure`]) — checked against
+/// [`LINE_ART_TABLE_MARKER`] before the table is trusted at all. Every entry
+/// is validated by actually playing it, on a throwaway canvas, through
+/// [`draw_line_art_record`] before it is kept — refused rather than drawn,
+/// the same rule [`read_picture_table`] holds its own entries to.
+///
+/// `None` when the marker does not match (a differently-mastered disk) or
+/// when `side_b_spliced` is too short to hold the table.
+pub fn read_line_art_table(side_b_spliced: &[u8], adventure: u16) -> Option<LineArtPictureTable> {
+    let marker = side_b_spliced.get(LINE_ART_TABLE_MARKER..LINE_ART_TABLE_MARKER + 3)?;
+    let want = adventure as u8;
+    if marker != [want, want, want] {
+        return None;
+    }
+    let mut entries = Vec::new();
+    for i in 0..LINE_ART_TABLE_ENTRIES {
+        let at = LINE_ART_TABLE_OFFSET + 2 * i;
+        let pair = side_b_spliced.get(at..at + 2)?;
+        let (a, s) = (pair[0], pair[1]);
+        if a == 0 && s == 0 {
+            continue;
+        }
+        let file_offset = line_art_entry_file_offset(a, s);
+        let mut probe = LineArtCanvas::new();
+        if draw_line_art_record(&mut probe, side_b_spliced, file_offset).is_err() {
+            // Refused rather than drawn — see the doc above.
+            continue;
+        }
+        let (usage, index) = if i < 100 {
+            (PictureUsage::Room, i as u16)
+        } else {
+            (PictureUsage::ObjectInRoom, (i - 100) as u16)
+        };
+        entries.push(LineArtTableEntry { usage, index, file_offset });
+    }
+    Some(LineArtPictureTable { entries })
+}
+
+/// Play the record at `file_offset` (from [`LineArtPictureTable`]) onto
+/// `canvas`, **in place** — not a fresh decode.
+///
+/// The state [`LineArtCanvas`] carries between plays (its two bitmaps, the
+/// fill colours, the pen) is exactly how an object picture draws over its own
+/// room on the real machine, and how the six room records SQ-1525's own note
+/// names never clear the screen: they draw over whatever `canvas` already
+/// held. A caller that hands this a fresh [`LineArtCanvas`] every time gets a
+/// black canvas under those six instead of the previous picture — see the
+/// module docs.
+///
+/// # Errors
+///
+/// [`LineArtError`] from the play itself (a malformed record — refused by
+/// [`read_line_art_table`] already, for every entry it kept, but a caller
+/// reaching this directly from a raw file offset has no such guarantee), or a
+/// [`LineArtError::Truncated`] when `file_offset` (through [`spliced_of`])
+/// does not name a byte inside `side_b_spliced` at all.
+pub fn draw_line_art_record(
+    canvas: &mut LineArtCanvas,
+    side_b_spliced: &[u8],
+    file_offset: usize,
+) -> Result<LineArtPicture, LineArtError> {
+    let at = spliced_of(file_offset);
+    let stream = side_b_spliced
+        .get(at..)
+        .ok_or(LineArtError::Truncated { len: side_b_spliced.len().saturating_sub(at) })?;
+    canvas.draw(stream)
+}
+
+/// The picture a host should SHOW for the shared darkness card (line-art
+/// [`PictureUsage::Room`] index 0, the same record on all four titles) —
+/// SQ-1525's own note: the record is an animation — `IT'S TOO DARK!`
+/// lettering and a pair of eyes across three pauses — that ends with a plain
+/// clear to black, so the frame worth showing a player is the LAST one the
+/// animation paused on, not the true final (black) frame.
+///
+/// Plays the record onto `canvas` **in place**, exactly as
+/// [`draw_line_art_record`] does — so its own true end state (genuinely
+/// black) is what the next record draws over, matching the real machine —
+/// but returns the earlier snapshot instead of the final one. A record with
+/// no pause at all (not the case for any specimen measured, but not assumed
+/// impossible either) answers with its one and only frame.
+///
+/// # Errors
+///
+/// As [`draw_line_art_record`].
+pub fn draw_darkness_card(
+    canvas: &mut LineArtCanvas,
+    side_b_spliced: &[u8],
+    file_offset: usize,
+) -> Result<LineArtPicture, LineArtError> {
+    let at = spliced_of(file_offset);
+    let stream = side_b_spliced
+        .get(at..)
+        .ok_or(LineArtError::Truncated { len: side_b_spliced.len().saturating_sub(at) })?;
+    let mut frames = canvas.draw_frames(stream)?;
+    let shown = if frames.len() >= 2 { frames.len() - 2 } else { frames.len() - 1 };
+    Ok(frames.swap_remove(shown))
 }
 
 #[cfg(test)]
