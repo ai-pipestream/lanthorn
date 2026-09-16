@@ -21,6 +21,12 @@ Absolute URLs or no link.
 
 ## Unreleased
 
+### Fixed
+
+- **Restoring a Save State in a Glulx game with side panels (Kerkerkruip and
+  similar) no longer leaves the panels blank.** The game now repaints them the
+  same way it would after you resize the terminal.
+
 ---
 
 ## v0.6.1 — 2026-09-11

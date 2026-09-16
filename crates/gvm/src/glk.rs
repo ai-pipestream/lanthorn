@@ -1103,6 +1103,13 @@ pub struct TestBackend {
     local_offset: Option<i32>,
     /// Served by [`GlkBackend::borderless`] (SQ-1402). Defaults to `false`.
     borderless: bool,
+    /// Ordered log of `window_open`/`window_close` calls (SQ-1515): a restore
+    /// that swaps the whole Glk window model has to notify the backend of the
+    /// old ids closing and the new ones opening, and the ORDER matters (a
+    /// host that tracks "the first `TextBuffer` opened is primary" — as
+    /// `AppGlk` does — needs the new primary told about first). Entries read
+    /// `"open <id> <WinType>"` / `"close <id>"`.
+    window_log: Vec<String>,
 }
 
 impl Default for TestBackend {
@@ -1137,6 +1144,7 @@ impl TestBackend {
             style_colours: BTreeMap::new(),
             local_offset: None,
             borderless: false,
+            window_log: Vec::new(),
         }
     }
     /// A backend reporting a specific display size.
@@ -1262,6 +1270,17 @@ impl TestBackend {
     pub fn sound_log(&self) -> &[String] {
         &self.sound_log
     }
+    /// The recorded `window_open`/`window_close` call log, in order (SQ-1515).
+    pub fn window_log(&self) -> &[String] {
+        &self.window_log
+    }
+    /// Discard everything recorded in the `window_log` so far — lets a test
+    /// set up its own pre-existing windows (which log their own opens) and
+    /// then check only what a LATER call (e.g. `Machine::restore_state`)
+    /// logs, without those setup entries in the way (SQ-1515).
+    pub fn clear_window_log(&mut self) {
+        self.window_log.clear();
+    }
 }
 
 impl GlkBackend for TestBackend {
@@ -1275,6 +1294,7 @@ impl GlkBackend for TestBackend {
         self.borderless
     }
     fn window_open(&mut self, id: u32, wintype: WinType) {
+        self.window_log.push(format!("open {id} {wintype:?}"));
         match wintype {
             WinType::TextBuffer => {
                 self.runs.entry(id).or_default();
@@ -1288,6 +1308,7 @@ impl GlkBackend for TestBackend {
         }
     }
     fn window_close(&mut self, id: u32) {
+        self.window_log.push(format!("close {id}"));
         self.runs.remove(&id);
         self.linked_runs.remove(&id);
         self.colour_runs.remove(&id);

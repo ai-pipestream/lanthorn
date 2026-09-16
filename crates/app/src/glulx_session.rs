@@ -236,6 +236,12 @@ pub struct GlulxSession {
     /// (`create_by_name`), and whether this session may write to it. Empty = no
     /// store (game-auto saves auto-fail). See [`drive_auto`] and [`GameStore`].
     store: GameStore,
+    /// Set only by [`Self::new_shadow`]: this session's screen is never
+    /// rendered (the `probe` shadow exists purely to run commands and read
+    /// back `WorldPrint`/transcript, headless). `restore_state` reads this to
+    /// skip its Arrange delivery (SQ-1515) — see the comment there for the
+    /// measured cost that makes it worth skipping.
+    headless: bool,
 }
 
 /// Where a drive services the game's own fixed-name (`create_by_name`) saves,
@@ -592,7 +598,7 @@ impl GlulxSession {
         vfs_bytes: &[u8],
         random_seed: Option<u32>,
     ) -> Result<GlulxSession, GError> {
-        Self::new_with_store(
+        let mut s = Self::new_with_store(
             GameStore::read_only(game_dir),
             image,
             cols,
@@ -607,7 +613,9 @@ impl GlulxSession {
             [[(None, None); 11]; 2],
             false, // no execution trace
             random_seed,
-        )
+        )?;
+        s.headless = true;
+        Ok(s)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -688,6 +696,7 @@ impl GlulxSession {
             saw_buffer_heading: false,
             strip_prompt: true,
             store,
+            headless: false,
         };
         session.refresh_screen();
         session.room_lock = match session.remembered_room_global() {
@@ -2576,8 +2585,37 @@ impl Engine for GlulxSession {
         // uniformly with `GameSession::restore_state` (session.rs): a snapshot taken
         // at a "press any key" prompt may be restored while this session sits at a
         // line prompt, and `pending` is what the app renders its input bar from.
-        // The machine is parked at its select (guaranteed by the block above), so
-        // this re-reports the restored suspension without executing anything.
+        //
+        // Glulx spec §1.8.5: a save carries no window CONTENTS, only the window
+        // model, and leans on the game to repaint on its own next Arrange/Redraw.
+        // That is fine restoring into windows the game already had live; it is
+        // not fine here, because `Machine::restore_state` just swapped in an
+        // entirely different window model (different ids in general — see its
+        // own comment) that the backend was never told about through the normal
+        // `glk_window_open` path. Deliver the Arrange a resize would give it —
+        // gvm's relayout already ran (inside `Machine::restore_state`), this is
+        // the notify-the-game half — so every panel the game repaints
+        // unprompted on Arrange (Kerkerkruip's side panels among them) comes
+        // back instead of staying as blank as an un-arranged restore leaves it
+        // (SQ-1515). Skipped when a resize is ALREADY queued for the dialog's
+        // resume below: that one covers this restore too, and `deliver_arrange`
+        // has only one pending select to write into — a second call here would
+        // starve it.
+        //
+        // Also skipped for a `headless` session (the `probe` shadow) — a cost
+        // decision, not a correctness one: its screen is never rendered, so
+        // running the game's Arrange handler here is pure waste, and on a game
+        // with real side-panel repaint work it is not a small amount. Measured
+        // on Kerkerkruip: a shadow restore went from 22ms to 737ms once this
+        // fix started delivering the Arrange, and `probe::serve` restores the
+        // shadow once per probed command plus once more to park it back on the
+        // snapshot — a 5-command job pays that 715ms delta six times, on the
+        // shadow's own background thread but still real waste for nothing
+        // anyone will ever see painted.
+        if self.deferred_resize.is_none() && !self.headless {
+            self.machine.rearrange();
+            self.drop_world_caches(); // the drive runs game code (SQ-1176 duty)
+        }
         let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
@@ -4056,8 +4094,25 @@ mod tests {
         // A Glulx engine save survives a .lanthorn archive round-trip: write its
         // EngineSave (no screen entry), reload, and restore into a FRESH session
         // through Engine::restore_state — state is preserved, no panic.
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        //
+        // `graphics_split_line_image` (not the plain `simple_line_image`): since
+        // SQ-1515, `restore_state` delivers a Glk Arrange on the freshly-swapped
+        // window model (mirroring a resize, so a Glulx game with side panels
+        // repaints them rather than staying orphaned-blank — see its own
+        // restore_state doc comment). Per Glk spec §2.3 a compliant game must
+        // tolerate an Arrange at ANY select, but `simple_line_image`'s single
+        // bare `glk_select` does not re-select afterward and falls through
+        // straight into `quit` — exactly the fixture `graphics_split_line_image`
+        // exists for (its own doc: "select twice so the game stays alive across
+        // an Arrange"). Byte-for-byte equality is no longer the right
+        // assertion either: the restored run has processed one MORE event (the
+        // Arrange + its re-select) than the archived save point, so the state
+        // is functionally equivalent, not byte-identical.
+        let mut sess =
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None, &[])
+                .expect("new");
         let _ = sess.take_transcript(); // drain the banner
+        assert_eq!(sess.pending_input(), InputKind::Line, "source session reached its line prompt");
         let es = sess.save_state();
         assert_eq!(es.engine, GLULX_ENGINE);
 
@@ -4073,11 +4128,13 @@ mod tests {
         assert!(ac.screen.is_none(), "Glulx archive carries no screen entry");
         assert_eq!(ac.save, es.bytes, "archived bytes are the Glulx save");
 
-        let mut fresh = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut fresh =
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None, &[])
+                .expect("new");
         let _ = fresh.take_transcript();
         fresh.restore_state(&ac.engine_save()).expect("Glulx restore from archive");
-        assert_eq!(fresh.pending_input(), InputKind::Line, "restored input state");
-        assert_eq!(fresh.save_state().bytes, es.bytes, "restored Glulx state matches");
+        assert!(!fresh.has_quit(), "an unsolicited restore Arrange must not end the game");
+        assert_eq!(fresh.pending_input(), InputKind::Line, "restored session re-suspends on its line request");
     }
 
     #[test]

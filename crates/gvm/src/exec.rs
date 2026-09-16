@@ -2808,10 +2808,37 @@ impl Machine {
         // The per-game borderless mode is the BACKEND's now (SQ-1402), asked
         // fresh at the next relayout, so there is nothing here to preserve
         // across the model swap the way SQ-0627 once had to.
+        //
+        // The backend is never told about this swap by construction — the
+        // restored ids didn't arrive through `glk_window_open` — so a
+        // backend keyed by window id (AppGlk's grids/buffers/graphics maps)
+        // would otherwise answer for the incoming run's window with whatever
+        // the LEAVING run last held at that id (empty for an id the leaving
+        // run never used, stale for one it did). Same duty `@restart`
+        // already pays for the reset case (`op_restart`, above): close every
+        // OLD id, swap, open every NEW id, in ascending (= original
+        // open-time) order so a text-buffer window's PRIMARY status — the
+        // first `TextBuffer` a backend is told about — comes out identical
+        // to what the archived run actually had (SQ-1515).
+        for id in self.glk.all_window_ids() {
+            self.backend.window_close(id);
+        }
         self.glk = match find(b"Glk ") {
             Some(d) => Model::deserialize(d).map_err(GError::BadSave)?,
             None => Model::new(),
         };
+        for id in self.glk.all_window_ids() {
+            if let Some(ty) = self.glk.window_type(id) {
+                self.backend.window_open(id, ty);
+            }
+        }
+        // The backend now knows the windows exist, but not their sizes —
+        // relayout so it has real geometry (graphics canvases resized, grid
+        // dimensions set) before anything asks. `deliver_arrange` is the
+        // caller's job (`GlulxSession::restore_state`, mirroring a resize):
+        // this only readies the backend, it does not tell the GAME to
+        // repaint.
+        self.relayout_glk();
         // A snapshot never carries a suspended `@save`/`@restore`: §1.8.5 keeps
         // the interpreter's own suspensions out of the file, and the host guards
         // its snapshot trigger on `is_saveload_pending` precisely so an un-popped
@@ -10098,6 +10125,61 @@ mod tests {
         // And a put on the buffer window's stream routes to the buffer window.
         m2.glk_stream_put(buf_stream, "Z");
         assert_eq!(backend_of(&m2).text(buf), "Z");
+    }
+
+    /// SQ-1515: `restore_state` tells the backend every OLD window closed and
+    /// every NEW one opened, in ascending (= original open-time) id order — a
+    /// window-id-keyed backend (AppGlk's grid/buffer/graphics maps) must not
+    /// answer for the wrong run's content, and a host that infers "primary is
+    /// the first `TextBuffer` opened" (AppGlk does) needs the ids in the
+    /// right order to get that right after the swap. Exercises the SAME-id
+    /// case too (both machines' first two windows land on ids 1 and 2,
+    /// independently, since gvm's window-id counter is deterministic from a
+    /// fresh boot) — the close/open pair for id 1 is what stops a backend
+    /// leaving the LEAVING run's content under an id the incoming run reuses.
+    #[test]
+    fn restore_state_closes_old_windows_then_opens_new_ones_in_id_order() {
+        let start = asm::func(0xC1, &[], &asm::ins(0x120, &[]));
+        let built = asm::assemble(&[start], 0, 0x100);
+        let image = built.image.clone();
+
+        // Source session: buffer (id 1, root), split by a grid (id 2) — the
+        // split also allocates an implicit Pair window (id 3, the new root).
+        let mut m = Machine::with_glk(Memory::new(built.image).unwrap(), Box::new(TestBackend::new()));
+        let buf = m.glk.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m.glk.window_open(buf, 0x12, 3, 4, 0).unwrap();
+        assert_eq!((buf, grid, m.glk.root()), (1, 2, 3));
+        let snap = m.save_state();
+
+        // Target session: its OWN buffer/grid/pair (ids 1, 2, 3) already open
+        // and told to the backend — same ids as the archive purely because
+        // both machines' counters start fresh, standing in for a long-lived
+        // session whose OWN windows the restore must not leave stale.
+        let mut m2 = Machine::with_glk(Memory::new(image).unwrap(), Box::new(TestBackend::new()));
+        let own_buf = m2.glk.window_open(0, 0, 0, 3, 0).unwrap();
+        let own_grid = m2.glk.window_open(own_buf, 0x12, 3, 4, 0).unwrap();
+        let own_root = m2.glk.root();
+        assert_eq!((own_buf, own_grid, own_root), (buf, grid, m.glk.root()), "both sessions land on the same ids from a fresh boot");
+        m2.backend.window_open(own_buf, WinType::TextBuffer);
+        m2.backend.window_open(own_grid, WinType::TextGrid);
+        m2.backend.window_open(own_root, WinType::Pair);
+        m2.backend.as_any_mut().downcast_mut::<TestBackend>().unwrap().clear_window_log();
+
+        m2.restore_state(&snap).unwrap();
+
+        assert_eq!(
+            backend_of(&m2).window_log(),
+            [
+                format!("close {own_buf}"),
+                format!("close {own_grid}"),
+                format!("close {own_root}"),
+                format!("open {buf} TextBuffer"),
+                format!("open {grid} TextGrid"),
+                format!("open {} Pair", m.glk.root()),
+            ]
+            .as_slice(),
+            "old ids close, then new ids open, in ascending (= original open-time) id order"
+        );
     }
 
     /// A snapshot WITHOUT a `Glk ` chunk (an older gvm save) restores with an

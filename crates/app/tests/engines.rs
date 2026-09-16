@@ -157,3 +157,6 @@ mod dialog_story_degradation;
 #[path = "suites/lost_treasures_iso_dedupe.rs"]
 mod lost_treasures_iso_dedupe;
 
+#[path = "suites/sq1515_kerkerkruip_restore_arrange.rs"]
+mod sq1515_kerkerkruip_restore_arrange;
+

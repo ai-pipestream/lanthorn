@@ -1670,6 +1670,33 @@ mod tests {
         WinTree::Pair { vertical: false, border: false, split, rect, key_bg: None, key_fg: None, first: Box::new(first), second: Box::new(second) }
     }
 
+    /// SQ-1515: `gvm::Machine::restore_state` tells `AppGlk` every OLD window
+    /// closed, then every NEW window opened in ascending (= original
+    /// open-time) id order. `primary` is set to the first `TextBuffer`
+    /// `window_open` is told about (see [`GlkBackend::window_open`]), so this
+    /// checks that sequence actually derives the RESTORED run's own primary
+    /// buffer rather than leaving the OLD one (now-closed) or landing on
+    /// whichever window happens to reopen first.
+    #[test]
+    fn primary_follows_the_restored_runs_first_text_buffer() {
+        let mut glk = AppGlk::new(80, 24);
+        // This session's own pre-restore windows: buffer 4 (primary), grid 6.
+        glk.window_open(4, WinType::TextBuffer);
+        glk.window_open(6, WinType::TextGrid);
+        assert_eq!(glk.primary(), Some(4));
+
+        // The archive's windows land on higher, unrelated ids (a long play
+        // session's window-id counter never resets and never reuses a freed
+        // slot) — buffer 81 opened before grid 83, exactly as gvm's restore
+        // notifies in ascending id order.
+        glk.window_close(4);
+        glk.window_close(6);
+        assert_eq!(glk.primary(), None, "the old primary must not survive its window closing");
+        glk.window_open(81, WinType::TextBuffer);
+        glk.window_open(83, WinType::TextGrid);
+        assert_eq!(glk.primary(), Some(81), "primary follows the archive's own first text buffer");
+    }
+
     #[test]
     fn local_offset_is_some_and_plausible() {
         // We can't assert a specific zone on an unknown CI host, but the hook
