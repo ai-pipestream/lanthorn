@@ -26,6 +26,8 @@ Absolute URLs or no link.
 - **Restoring a Save State in a Glulx game with side panels (Kerkerkruip and
   similar) no longer leaves the panels blank.** The game now repaints them the
   same way it would after you resize the terminal.
+- **The story list no longer shows a game's own save-data folder as if it
+  were a folder of stories.**
 
 ---
 

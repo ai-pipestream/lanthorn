@@ -1324,6 +1324,11 @@ pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
 /// The sub-folders of `dir` as rows: dot-directories skipped, sorted by name
 /// case-insensitively. Symlinks are followed (a library on a NAS is often one),
 /// which is why [`library_dirs`] keeps a visited set.
+///
+/// Also skips a `.save` directory — `storage::game_dir` names a story's own
+/// per-game save data `<story-filename>.save` right beside the story it
+/// belongs to (e.g. `Kerkerkruip.gblorb.save/`), so it is a sibling in the
+/// same directory this scans, not a folder of stories.
 pub fn scan_folders(dir: &Path) -> Vec<StoryEntry> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -1336,7 +1341,7 @@ pub fn scan_folders(dir: &Path) -> Vec<StoryEntry> {
                 return None;
             }
             let name = path.file_name()?.to_str()?.to_string();
-            if name.starts_with('.') {
+            if name.starts_with('.') || name.ends_with(".save") {
                 return None;
             }
             Some((name, path))
@@ -4423,6 +4428,9 @@ mod tests {
         std::fs::create_dir_all(root.join("zcode/german")).unwrap();
         std::fs::create_dir_all(root.join("Glulx")).unwrap();
         std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        // A story's own per-game save data (`storage::game_dir`), sitting beside
+        // it in the library the way it does on disk — not a folder of stories.
+        std::fs::create_dir_all(root.join("top.z5.save")).unwrap();
         std::fs::write(root.join("top.z5"), minimal_v3_story()).unwrap();
         std::fs::write(root.join("zcode/curses.z5"), minimal_v3_story()).unwrap();
         std::fs::write(root.join("zcode/german/burg.z5"), minimal_v3_story()).unwrap();
@@ -4438,7 +4446,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         let labels: Vec<&str> = rows.iter().map(|e| e.title.as_str()).collect();
-        assert_eq!(labels, vec!["Glulx/", "zcode/", "top"], "folders first, by name, case-insensitively; no `..` at the root; no dot-dir");
+        assert_eq!(
+            labels,
+            vec!["Glulx/", "zcode/", "top"],
+            "folders first, by name, case-insensitively; no `..` at the root; no dot-dir, no `.save` dir"
+        );
         assert!(rows[0].is_folder() && rows[1].is_folder() && !rows[2].is_folder());
         assert_eq!(rows[1].path, root.join("zcode"), "a folder row's path is the directory itself");
     }
