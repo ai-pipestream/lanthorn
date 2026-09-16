@@ -456,3 +456,145 @@ fn one_byte_off_line_art_offset_decodes_a_different_picture() {
     assert_eq!(non_white(&at_offset), 725, "the real picture, pinned above");
     assert_ne!(non_white(&shifted), non_white(&at_offset), "one byte off reads different bytes as tokens");
 }
+
+// ── The (usage, index) table on side A (SQ-1496, investigation findings) ─────
+
+/// One release's side A, or `None` with a reason on stderr — the same shape as
+/// [`side_b`], because the table below lives on the DATABASE side.
+fn side_a(file: &str) -> Option<Vec<u8>> {
+    let Some(dir) = fixtures() else {
+        eprintln!("SKIP: no stories/scott-dialects — see this file's header");
+        return None;
+    };
+    let path = dir.join("atari").join(file);
+    let Ok(raw) = std::fs::read(&path) else {
+        eprintln!("SKIP: {} is absent — see this file's header", path.display());
+        return None;
+    };
+    assert_eq!(raw.len(), SIDE_LEN, "{file} is not a 720-sector single-density image");
+    Some(raw)
+}
+
+/// Where a two-byte table entry points on side B, as a FILE offset.
+///
+/// Measured on all three bitmap titles (SQ-1496): entry `[a, s]` names the
+/// 1-based 128-byte sector `((a & 3) << 8) | s` and the byte `(a >> 3) * 7`
+/// within it — every one of the 241 records starts at a multiple of seven
+/// bytes into its sector, which is what the nought-to-six bytes of filler
+/// between records are for. Bit 2 of `a` is a flag, set on the object
+/// entries that are drawn on the inventory screen rather than in a room.
+fn table_entry_file_offset(a: u8, s: u8) -> usize {
+    let sector = (usize::from(a & 3) << 8) | usize::from(s);
+    16 + (sector - 1) * 128 + usize::from(a >> 3) * 7
+}
+
+/// A side-B file offset in the spliced coordinates [`scan_picture_side`] uses.
+fn spliced_of(file_offset: usize) -> usize {
+    if file_offset < scott::saga_atari::VTOC_OFFSET {
+        file_offset
+    } else {
+        file_offset - scott::saga_atari::VTOC_LEN
+    }
+}
+
+/// Side A file offset of the picture table: two-byte entries for room-usage
+/// pictures 0-99 and then for object pictures 0-89, identical in position on
+/// all three bitmap titles. Ninety object slots, not a hundred: on *Voodoo
+/// Castle* non-table bytes begin at `0x970F`, which is entry 190.
+const PICTURE_TABLE: usize = 0x9593;
+
+/// How many two-byte entries the table holds.
+const PICTURE_TABLE_ENTRIES: usize = 190;
+
+/// Side A file offset of the one entry outside the table: the inventory
+/// backdrop, the same three-bar card on all three titles.
+const INVENTORY_ENTRY: usize = 0x984F;
+
+/// Per title: side A, side B, the room count, and how many table entries the
+/// walk must resolve to a located record (room usage, object usage) — the
+/// number that would move if the scan lost a record or the encoding drifted.
+const TABLE_TITLES: [(&str, &str, usize, usize, usize); 3] = [
+    // 23 rooms, close-ups 80 and 81, title 99; 47 objects, 80/82/83/84 among them.
+    ("SAGA #5 - The Count [side A].atr", "SAGA #5 - The Count [side B].atr", 23, 26, 47),
+    // 26 rooms, close-ups 81-84, title 99; 47 objects, 70 among them.
+    ("SAGA #4 - Voodoo Castle [side A].atr", "SAGA #4 - Voodoo Castle [side B].atr", 26, 31, 47),
+    // 33 rooms, title 99, no close-ups; 55 objects.
+    (
+        "SAGA No. 13 - The Sorcerer of Claymorgue Castle _ side A.atr",
+        "SAGA No. 13 - The Sorcerer of Claymorgue Castle _ side B.atr",
+        33,
+        34,
+        55,
+    ),
+];
+
+/// **The association §12.10 says is not in the database IS on side A**, in a
+/// 400-byte table at [`PICTURE_TABLE`] that the program reads rather than the
+/// database (SQ-1496). Every non-zero entry decodes to the header offset of a
+/// record the side-B scan located — the only exceptions being *The Count*'s
+/// two damaged records (SQ-1498), which the table names at exactly the
+/// offsets the scan skips — and every room 0..N has one, as does 99.
+#[test]
+fn side_a_carries_the_picture_table_and_every_entry_names_a_located_record() {
+    for (a_file, b_file, rooms, want_rooms, want_objects) in TABLE_TITLES {
+        let (Some(a), Some(b)) = (side_a(a_file), side_b(b_file)) else { continue };
+        let scheme = scheme_of(b_file);
+        let found = scan_picture_side(&b, scheme);
+        let starts: std::collections::BTreeSet<usize> = found.iter().map(|r| r.offset()).collect();
+        // The two records the scan cannot read (SQ-1498), in file offsets.
+        let damaged: &[usize] = if a_file.contains("Count") { &[0x7CBA, 0xF72C] } else { &[] };
+        let (mut room_hits, mut object_hits) = (0usize, 0usize);
+        for i in 0..PICTURE_TABLE_ENTRIES {
+            let (lo, hi) = (a[PICTURE_TABLE + 2 * i], a[PICTURE_TABLE + 2 * i + 1]);
+            if lo == 0 && hi == 0 {
+                assert!(i >= rooms, "{a_file}: room {i} has no picture entry");
+                continue;
+            }
+            let file_offset = table_entry_file_offset(lo, hi);
+            let located = starts.contains(&spliced_of(file_offset)) || damaged.contains(&file_offset);
+            assert!(located, "{a_file}: entry {i} ({lo:02X} {hi:02X}) points at 0x{file_offset:05X}, where no record starts");
+            if i < 100 {
+                room_hits += 1;
+                // Room usage never carries the inventory flag.
+                assert_eq!(lo & 4, 0, "{a_file}: room entry {i} carries the inventory flag");
+            } else {
+                object_hits += 1;
+            }
+        }
+        assert_eq!((room_hits, object_hits), (want_rooms, want_objects), "{a_file}: resolved entries");
+        // §8.6's reserved 99 is present and 98 is not — the inventory backdrop
+        // is reached through INVENTORY_ENTRY instead.
+        assert_ne!(a[PICTURE_TABLE + 198], 0, "{a_file}: no title picture");
+        assert_eq!(&a[PICTURE_TABLE + 196..PICTURE_TABLE + 198], &[0, 0], "{a_file}: slot 98 is unused");
+        let inv = table_entry_file_offset(a[INVENTORY_ENTRY], a[INVENTORY_ENTRY + 1]);
+        let card = found
+            .iter()
+            .find(|r| r.offset() == spliced_of(inv))
+            .unwrap_or_else(|| panic!("{a_file}: the inventory entry points at 0x{inv:05X}, no record"));
+        // Three flat colour bars, a few dozen bytes for a near-full canvas.
+        assert!(card.size() < 100, "{a_file}: the inventory backdrop is {} bytes", card.size());
+        assert!(card.layout().cols() >= 29, "{a_file}: the inventory backdrop is {} columns", card.layout().cols());
+    }
+}
+
+/// **SQ-1498: the two unreadable records are one bad sector each.** *The
+/// Count*'s room 6 (CRYPT) at file 0x7CBA has sector 258 replaced by a copy
+/// of sector 254, and its room 16 (Dungeon) at 0xF72C has sector 498 zeroed.
+/// Both headers are well-formed, both declared sizes fill their gaps exactly,
+/// and the side-A table names both offsets — so the encoding is the ordinary
+/// one and the specimen is damaged, not the reading.
+#[test]
+fn the_counts_two_unreadable_records_each_lost_exactly_one_sector() {
+    let Some(b) = side_b("SAGA #5 - The Count [side B].atr") else { return };
+    let sector = |n: usize| &b[16 + (n - 1) * 128..16 + n * 128];
+    // Room 6: header, declared size 4742 = the gap; sector 258 duplicates 254.
+    assert_eq!(&b[0x7CBA..0x7CC4], &[0x86, 0x12, 0x03, 0x00, 0x26, 0x9E, 0x36, 0x87, 0x0E, 0x00]);
+    assert_eq!(0x7CBA + 4742, 0x8F40, "the record runs up to the byte before room 7's header");
+    assert_eq!(sector(258), sector(254), "sector 258 is a stale copy of sector 254");
+    assert_ne!(sector(257), sector(258), "and its neighbours are not");
+    // Room 16: header, declared size 3344 = the gap; sector 498 is all zero.
+    assert_eq!(&b[0xF72C..0xF736], &[0x10, 0x0D, 0x03, 0x00, 0x26, 0x9E, 0x36, 0x87, 0x0E, 0x00]);
+    assert_eq!(0xF72C + 3344, 0x1043C, "the record ends five filler bytes before room 17's header at 0x10441");
+    assert!(sector(498).iter().all(|&x| x == 0), "sector 498 is unwritten");
+    assert!(sector(497).iter().any(|&x| x != 0) && sector(499).iter().any(|&x| x != 0));
+}
