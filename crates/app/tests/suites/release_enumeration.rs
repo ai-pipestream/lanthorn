@@ -222,6 +222,41 @@ fn a_one_game_release_still_opens_without_a_menu() {
     );
 }
 
+/// **The defect itself** (SQ-1523): several late-1980s Infocom titles shipped
+/// the *identical* Z-code build (same release and serial) for two machines —
+/// `treasures/ISOs/LostTreasures1.iso` and `LostTreasures2.iso` carry Trinity's
+/// r12/s860926 build on both its DOS and Mac volumes. The cross-volume fold's
+/// `seen` key used to carry only `(release, serial)`, so widening from LT1 to
+/// its sibling LT2 pushed the DOS row, then dropped the Mac row that followed it
+/// in the same sibling's own list — even though it is a different `DiskImage`
+/// and a real, separate story. `zvm-cli -- LostTreasures1.iso` reported 60
+/// stories where lanthorn's picker reported 68.
+///
+/// FALSIFICATION: key `stories_across_the_release`'s fold on `(release, serial)`
+/// alone (drop the `DiskImage` `build_of` now carries) and Trinity drops back to
+/// one row here.
+#[test]
+fn a_build_shared_by_two_machines_keeps_both_rows() {
+    let path = treasures_dir().join("ISOs/LostTreasures1.iso");
+    if !path.exists() {
+        return;
+    }
+    let rows = rows_the_cli_offers(&path);
+    let trinity: Vec<&cli_host::disk_set::Reachable> =
+        rows.iter().filter(|r| r.name.to_ascii_uppercase().contains("TRINITY")).collect();
+    assert_eq!(
+        trinity.len(),
+        2,
+        "Trinity should appear once per machine: {:?}",
+        trinity.iter().map(|r| (&r.name, r.image)).collect::<Vec<_>>()
+    );
+    assert_ne!(
+        trinity[0].image, trinity[1].image,
+        "the two Trinity rows must be two different machines, not the same one twice: {:?}",
+        trinity.iter().map(|r| (&r.name, r.image)).collect::<Vec<_>>()
+    );
+}
+
 // ── the source-level rule ─────────────────────────────────────────────────────
 
 /// Crates whose `src/` may name [`blorb::medium::MountedDisk::mount`] freely.

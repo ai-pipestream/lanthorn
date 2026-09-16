@@ -520,12 +520,17 @@ pub struct Reachable {
 /// volume's own menu does not move because the release around it is now
 /// visible.** The siblings follow in disk order.
 ///
-/// **A build already offered by an earlier volume is dropped**, keyed on release
-/// and serial — the same identity [`crate::storage::disk_story_key`] names a save
-/// directory with, so two rows that would share a save directory are one game
-/// here too. That is not tidiness: SQ-0941's widening means the 360K *Zork Zero*
-/// press answers `ZORK0.ZIP` from Disk 1 *and* from Disk 2, and without the fold
-/// a three-floppy single-game release would grow a menu.
+/// **A build already offered by an earlier volume is dropped**, keyed on release,
+/// serial **and machine/image** — the same principle `app::picker`'s
+/// `dedupe_within_a_volume` doc comment already states (SQ-0878): build-identity
+/// alone is not enough, because two different machines can legitimately ship the
+/// identical build. So two rows fold into one only when they'd also share a save
+/// directory ([`crate::storage::disk_story_key`]) *and* a machine. That is not
+/// tidiness: SQ-0941's widening means the 360K *Zork Zero* press answers
+/// `ZORK0.ZIP` from Disk 1 *and* from Disk 2, and without the fold a
+/// three-floppy single-game release would grow a menu — and that case still
+/// folds under the machine-aware key, because same build *and* same image/machine
+/// still collide.
 ///
 /// Duplicates **within** one volume are left exactly as they are. The DiskCopy
 /// *Lost Treasures* Disk 1 stores *The Lurking Horror* three times over —
@@ -546,7 +551,11 @@ pub fn stories_across_the_release(path: &Path, disk: &blorb::medium::MountedDisk
         .collect();
     let Some(members) = members_indexed(path) else { return out };
     // What the named volume already offers, so a sibling repeating it adds no row.
-    let mut seen: Vec<(u16, String)> = out.iter().filter_map(|r| build_of(&r.bytes)).collect();
+    // Keyed on the story's own image as well as its build (SQ-1523): two machines
+    // can ship the identical release+serial, and dropping one because the other
+    // was seen first silently loses a real, separate story.
+    let mut seen: Vec<(blorb::medium::DiskImage, u16, String)> =
+        out.iter().filter_map(|r| build_of(r.image, &r.bytes)).collect();
     for (_, m) in members {
         if m == path {
             continue;
@@ -558,27 +567,23 @@ pub fn stories_across_the_release(path: &Path, disk: &blorb::medium::MountedDisk
         let Ok(raw) = std::fs::read(&m) else { continue };
         let Ok(sibling) = blorb::medium::MountedDisk::mount(raw) else { continue };
         for s in sibling.stories() {
-            match build_of(&s.bytes) {
+            let image = sibling.image_for(&s.name);
+            match build_of(image, &s.bytes) {
                 Some(b) if seen.contains(&b) => continue,
                 Some(b) => seen.push(b),
                 None => {}
             }
-            out.push(Reachable {
-                volume: m.clone(),
-                image: sibling.image_for(&s.name),
-                name: s.name,
-                bytes: s.bytes,
-            });
+            out.push(Reachable { volume: m.clone(), image, name: s.name, bytes: s.bytes });
         }
     }
     out
 }
 
-/// The release and serial a story's header carries, or `None` when it has no
-/// Z-machine header to read — the identity the cross-volume fold is keyed on.
-fn build_of(bytes: &[u8]) -> Option<(u16, String)> {
+/// The image, release and serial a story's header carries, or `None` when it has
+/// no Z-machine header to read — the identity the cross-volume fold is keyed on.
+fn build_of(image: blorb::medium::DiskImage, bytes: &[u8]) -> Option<(blorb::medium::DiskImage, u16, String)> {
     let (_, release, serial) = crate::storage::DiskBuild::header_of(bytes)?;
-    Some((release, serial))
+    Some((image, release, serial))
 }
 
 #[cfg(test)]
@@ -1045,5 +1050,44 @@ mod tests {
         let lone = press("lone", &[("boot.adf", vec![("Startup-Sequence", b"echo".to_vec())])]);
         assert!(opened(&lone.join("boot.adf")).is_empty(), "a boot disk in no set");
         let _ = std::fs::remove_dir_all(&lone);
+    }
+
+    // ── The cross-volume fold's key (SQ-1523) ─────────────────────────────────
+
+    /// **The fix, isolated from disk I/O.** `build_of` is the whole of the key
+    /// `stories_across_the_release`'s `seen` fold uses. Two machines that ship
+    /// the identical release+serial (several late-1980s Infocom titles on the
+    /// Lost Treasures compilations, e.g. Trinity r12/s860926 on both its DOS and
+    /// Mac volumes) must not collide — and the SAME machine with the same build
+    /// still must, which is the SQ-0941 case this fold exists for.
+    ///
+    /// FALSIFICATION: drop the `DiskImage` from `build_of`'s key and `dos_a` and
+    /// `mac` compare equal.
+    #[test]
+    fn build_key_distinguishes_machine_not_only_build() {
+        let story = zcode(12); // one release+serial, as if shipped for two machines
+        let dos_a = build_of(blorb::medium::DiskImage::Fat12Dos, &story);
+        let dos_b = build_of(blorb::medium::DiskImage::Fat12Dos, &story);
+        let mac = build_of(blorb::medium::DiskImage::Hfs, &story);
+        assert!(dos_a.is_some() && mac.is_some());
+        assert_ne!(dos_a, mac, "two machines sharing a build must not collide in the fold");
+        assert_eq!(dos_a, dos_b, "the same machine with the same build must still collide (SQ-0941)");
+    }
+
+    /// **The full seam, same machine.** Two AmigaDOS siblings paging the
+    /// identical build (SQ-0941's shape) must still fold to one row through
+    /// `stories_across_the_release` itself, not only at the key level above.
+    #[test]
+    fn same_machine_same_build_still_folds_across_siblings() {
+        let dir = press("sq1523-fold", &[
+            ("v1.adf", vec![("Story.data", zcode(393))]),
+            ("v2.adf", vec![("Story.data", zcode(393))]),
+        ]);
+        let path = dir.join("v1.adf");
+        let raw = std::fs::read(&path).unwrap();
+        let disk = mount_one(&path, raw).unwrap();
+        let rows = stories_across_the_release(&path, &disk);
+        assert_eq!(rows.len(), 1, "same machine, same build, must still fold to one row: {rows:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

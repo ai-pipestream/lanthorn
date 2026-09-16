@@ -28,6 +28,10 @@ Absolute URLs or no link.
   same way it would after you resize the terminal.
 - **The story list no longer shows a game's own save-data folder as if it
   were a folder of stories.**
+- **A release pressed for two machines from the same build (several
+  late-1980s Infocom titles on the Lost Treasures compilations) no longer
+  loses one machine's copy when zvm-cli/gvm-cli/scott-cli reach it from a
+  sibling disk image.**
 
 ---
 
