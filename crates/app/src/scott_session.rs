@@ -156,6 +156,15 @@ pub struct ScottSession {
     /// it (the `scott::Vm` snapshot carries no picture-show state either), so
     /// resuming that save shows the room view, not a half-finished cutscene.
     showing: VecDeque<PendingShow>,
+    /// True from boot until the player's first typed command, on a US
+    /// S.A.G.A. release that carries a title picture (SQ-1495): while set,
+    /// `refresh_picture` shows [`scott::saga_us::TITLE_PICTURE`] instead of
+    /// computing the room's own picture. The real machine shows this card —
+    /// `R01099` on the Commodore 64 *Hulk* disk — behind its restore
+    /// question until dismissed; lanthorn draws the picture only, not the
+    /// prompt (deliberately out of scope). Transient host state, like
+    /// `showing` above, so a Save State restore clears it the same way.
+    showing_title_card: bool,
     /// The game's own opcode-71 SAVE GAME request, deferred while `showing`
     /// is non-empty (SQ-1487): §12.11 has the room view return only once the
     /// LAST picture's ENTER is pressed, so the save should capture the turn
@@ -328,7 +337,7 @@ impl ScottSession {
         // before the C64 attempt below; the two container sniffs cannot both
         // match, so the order only decides which refusal a third format hits
         // first, and neither ever fires for the other's files.
-        let picts = if pict_blorb.is_some() {
+        let mut picts = if pict_blorb.is_some() {
             PictSource::new(pict_blorb)
         } else if let Some(release) = saga_release {
             PictSource::from_scott_saga(saga_pictures, release)
@@ -355,6 +364,12 @@ impl ScottSession {
                 })
                 .unwrap_or_else(|| PictSource::new(None))
         };
+        // SQ-1495: the title card at boot — US S.A.G.A. (family-C) artwork
+        // only, and only when the release's own disk actually carries
+        // picture 99 (the same defensive check `submit`'s picture-show
+        // sequence already applies to its own picture numbers).
+        let showing_title_card = picts.scott_saga_platform().is_some()
+            && picts.image(u32::from(scott::saga_us::TITLE_PICTURE as u16)).is_some();
         let mut s = ScottSession {
             vm,
             intro,
@@ -366,6 +381,7 @@ impl ScottSession {
             current_overlays: Vec::new(),
             pic_version: 0,
             showing: VecDeque::new(),
+            showing_title_card,
             deferred_save: false,
         };
         s.refresh_picture();
@@ -422,6 +438,13 @@ impl ScottSession {
     }
 
     fn refresh_picture(&mut self) {
+        // SQ-1495: the title card, while it's up, pre-empts the room picture
+        // entirely rather than competing with it — the real machine shows it
+        // behind the restore question, not behind room 1.
+        if self.showing_title_card {
+            self.set_band(Some(scott::saga_us::TITLE_PICTURE as u16), Vec::new());
+            return;
+        }
         let want = self.dos_room_picture().or_else(|| self.vm.current_picture());
         let overlays = self.room_overlays();
         self.set_band(want, overlays);
@@ -586,6 +609,10 @@ impl Engine for ScottSession {
     // `submit_key` below now handle the same way every other engine's
     // `read_char` does.
     fn submit(&mut self, command: &str) -> TurnResult {
+        // SQ-1495: the player's first command of any kind dismisses the
+        // title card — every `refresh_picture` call for the rest of the
+        // session is unaffected once this is clear.
+        self.showing_title_card = false;
         self.vm.supply_line(command);
         let _ = self.vm.step();
         let transcript = self.vm.take_output();
@@ -892,6 +919,10 @@ impl Engine for ScottSession {
         // (a Save State taken mid-sequence, or simply a different save) are
         // stale and must not keep presenting against the now-replaced VM.
         self.showing.clear();
+        // SQ-1495: same category as `showing` above — transient host state,
+        // not part of the `scott::Vm` snapshot — so a restore past the
+        // title card must not re-show it.
+        self.showing_title_card = false;
         self.deferred_save = false;
         self.refresh_picture();
         r
@@ -922,6 +953,8 @@ impl Engine for ScottSession {
         // See `restore_state`'s comment: a picture-show sequence is host
         // state, not VM state, and must not survive a restore.
         self.showing.clear();
+        // SQ-1495: same category — see `restore_state`'s comment.
+        self.showing_title_card = false;
         self.deferred_save = false;
         self.refresh_picture();
         r
@@ -1529,7 +1562,8 @@ mod tests {
         )
     }
 
-    /// The opening frame shows room 1's own picture at family C's canvas.
+    /// One command past the boot title card (SQ-1495), the band shows room
+    /// 1's own picture at family C's canvas.
     ///
     /// 280x160 is the decoded size (`scott::saga_pictures::CANVAS_HEIGHT` —
     /// §8.3 states 158 and the records say 160), and `upscale` is on because
@@ -1538,8 +1572,12 @@ mod tests {
     /// nothing: a blank canvas has exactly the right dimensions.
     #[test]
     fn hulk_room_one_shows_its_own_family_c_picture() {
-        let Some(s) = hulk_session() else { return };
+        let Some(mut s) = hulk_session() else { return };
         assert_eq!(s.vm.current_room(), 1, "premise: Bruce Banner starts in room 1");
+        // The boot frame is the title card (SQ-1495); "look" dismisses it
+        // without moving Bruce Banner, so what follows is room 1's own
+        // picture.
+        s.submit("look");
         let screen = s.screen();
         let band = picture_band(&screen).expect("room 1 has a picture band");
         let canvas = &band.canvas;
@@ -1564,6 +1602,67 @@ mod tests {
                 && seen.contains(&scott::c64_palette::PEPTO_PALETTE[4]),
             "room 1's orange and purple, the VIC-II's own since SQ-1491 — the exact \
              triples `machine-screenshots/c64-hulk-start.png` shows; got {seen:?}"
+        );
+    }
+
+    /// SQ-1495: immediately after boot, before the player has typed
+    /// anything, the band shows the title card — `R01099`,
+    /// `scott::saga_us::TITLE_PICTURE` — not room 1's own picture, matching
+    /// `machine-screenshots/c64-hulk-splash.png`'s real-machine capture
+    /// (minus the restore prompt drawn over it there, which lanthorn
+    /// deliberately does not reproduce).
+    #[test]
+    fn hulk_boots_on_the_title_card() {
+        let Some(s) = hulk_session() else { return };
+        assert_eq!(s.vm.current_room(), 1, "premise: Bruce Banner starts in room 1");
+        assert_eq!(
+            s.current_pic_num,
+            Some(scott::saga_us::TITLE_PICTURE as u16),
+            "the boot frame is the title card, not room 1's own picture"
+        );
+        assert_ne!(
+            s.current_pic_num,
+            s.vm.current_picture(),
+            "the VM itself is still sitting on room 1's own choice underneath the card"
+        );
+    }
+
+    /// SQ-1495: the player's first command of any kind — even one that does
+    /// nothing else, like a blank line — dismisses the title card, after
+    /// which the band shows room 1's own picture, matching what a session
+    /// booted straight to room 1 would show.
+    #[test]
+    fn hulk_first_command_dismisses_the_title_card() {
+        let Some(mut s) = hulk_session() else { return };
+        assert_eq!(
+            s.current_pic_num,
+            Some(scott::saga_us::TITLE_PICTURE as u16),
+            "premise: booted on the title card"
+        );
+        s.submit("");
+        assert_ne!(s.current_pic_num, Some(scott::saga_us::TITLE_PICTURE as u16), "dismissed");
+        assert_eq!(
+            s.current_pic_num,
+            s.vm.current_picture(),
+            "the band now shows exactly what the VM chose, room 1's own picture"
+        );
+        assert_eq!(s.current_pic_num, Some(1), "room 1's own picture number");
+    }
+
+    /// SQ-1495: a Save State restore past the title card must not re-show
+    /// it — same category as `showing`'s own restore handling (SQ-1487),
+    /// transient host state that is not part of the `scott::Vm` snapshot.
+    #[test]
+    fn hulk_restore_never_re_shows_the_title_card() {
+        let Some(mut s) = hulk_session() else { return };
+        s.submit(""); // dismiss the title card
+        assert_eq!(s.current_pic_num, Some(1), "premise: room 1's own picture, title card dismissed");
+        let save = s.save_state();
+        s.restore_state(&save).expect("restores the same session's own save");
+        assert_eq!(
+            s.current_pic_num,
+            Some(1),
+            "restoring a post-dismissal save must not bring the title card back"
         );
     }
 
@@ -1823,18 +1922,22 @@ mod tests {
         )
     }
 
-    /// The opening frame shows the START room's own picture at family D's
-    /// canvas — the Apple II hi-res screen, 280x192, which is NOT family C's
-    /// 280x160.
+    /// One command past the boot title card (SQ-1495), the band shows the
+    /// START room's own picture at family D's canvas — the Apple II hi-res
+    /// screen, 280x192, which is NOT family C's 280x160.
     ///
     /// The non-flat guard is what would catch a decode that wrote nothing: a
     /// blank canvas has exactly the right dimensions.
     #[test]
     fn adventureland_apple_start_room_shows_its_own_family_d_picture() {
-        let Some(s) = adventureland_apple_session() else { return };
+        let Some(mut s) = adventureland_apple_session() else { return };
         // *Adventureland*'s own header says room 11, not room 1 — `adv01.dat`
         // agrees — so the frame under test is the forest the player opens in.
         assert_eq!(s.vm.current_room(), 11, "premise: this release starts in room 11");
+        // The boot frame is the title card (SQ-1495); "look" dismisses it
+        // without moving the player, so what follows is room 11's own
+        // picture.
+        s.submit("look");
         let screen = s.screen();
         let band = picture_band(&screen).expect("the start room has a picture band");
         let canvas = &band.canvas;
@@ -1902,7 +2005,7 @@ mod tests {
             let crate::hints::LoadedStory::Scott(bytes) = mounted.story else {
                 panic!("the boot side's story is a Scott database");
             };
-            let s = ScottSession::new_with_options(
+            let mut s = ScottSession::new_with_options(
                 bytes,
                 false,
                 None,
@@ -1911,6 +2014,10 @@ mod tests {
                     .with_saga_pictures(mounted.saga_pictures),
             )
             .expect("The Count boots off its own release disk");
+            // The boot frame is the title card (SQ-1495); "wait" dismisses
+            // it without moving or drawing anything, so what follows is the
+            // start room's own picture.
+            s.submit("wait");
             let screen = s.screen();
             let band = picture_band(&screen).expect("the start room has a picture band");
             assert_eq!(
@@ -2043,8 +2150,15 @@ mod tests {
     #[test]
     fn the_band_shows_exactly_the_picture_the_vm_chose() {
         let Some(mut s) = hulk_session() else { return };
-        assert_eq!(s.current_pic_num, s.vm.current_picture(), "at boot");
-        assert_eq!(s.current_pic_num, Some(1), "premise: Banner starts in room 1");
+        // SQ-1495: the boot frame is the title card, which pre-empts this
+        // delegation until the player's first command — the VM itself is
+        // still sitting on room 1's own choice underneath it.
+        assert_eq!(
+            s.current_pic_num,
+            Some(scott::saga_us::TITLE_PICTURE as u16),
+            "at boot, the title card"
+        );
+        assert_eq!(s.vm.current_picture(), Some(1), "premise: Banner starts in room 1");
         // SQ-1482 removed `inventory` from this list: §12.11 has the
         // inventory command draw picture 98 and wait for ENTER, so it goes
         // through the picture-show door and the band deliberately stops
@@ -2560,6 +2674,10 @@ mod tests {
     fn looking_at_a_thing_that_is_not_here_shows_no_close_up() {
         let Some(mut s) = voodoo_castle() else { return };
         assert_eq!(s.vm.current_room(), 1, "premise: the chapel, and the knife is east of it");
+        // The boot frame is the title card (SQ-1495); "wait" dismisses it
+        // without moving or drawing anything, so `chapel` is the room's own
+        // picture, not the title card's.
+        s.submit("wait");
         let chapel = band_pixel(&s, 140, 80);
         let r = s.submit("look knife");
         assert!(r.info.is_none(), "no keypress hint, because nothing was shown");

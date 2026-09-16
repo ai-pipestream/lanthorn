@@ -228,10 +228,14 @@ fn saga_and_blorb_room1_bands_place_identically_under_halfblocks_and_kitty() {
 /// the right dimensions and places exactly the same way.
 #[test]
 fn the_hulks_room_one_is_a_drawing_and_not_a_flat_fill() {
-    let Some(hulk) = hulk_session() else {
+    let Some(mut hulk) = hulk_session() else {
         eprintln!("SKIP: needs stories/scott-dialects/c64/QUESTPR1.D64");
         return;
     };
+    // The boot frame is the title card (SQ-1495); "wait" dismisses it
+    // without moving or drawing anything, so what follows is room 1's own
+    // picture.
+    hulk.submit("wait");
     let model = hulk.screen();
     let gw = picture_band(&model).expect("room 1 has a band");
     let mut counts: std::collections::HashMap<(u8, u8, u8), usize> = std::collections::HashMap::new();
@@ -480,7 +484,11 @@ fn the_apple_ii_band_places_identically_under_halfblocks_and_kitty() {
 /// every other number in these cases is blind to.
 #[test]
 fn the_apple_ii_opening_room_is_a_drawing_and_not_a_flat_fill() {
-    let Some(apple) = adventureland_apple_session() else { return };
+    let Some(mut apple) = adventureland_apple_session() else { return };
+    // The boot frame is the title card (SQ-1495); "wait" dismisses it
+    // without moving or drawing anything, so what follows is the start
+    // room's own picture.
+    apple.submit("wait");
     let model = apple.screen();
     let gw = picture_band(&model).expect("the start room has a band");
     let mut counts: std::collections::HashMap<(u8, u8, u8), usize> = std::collections::HashMap::new();
@@ -547,7 +555,7 @@ fn a_scrambled_apple_ii_release_draws_its_side_a_artwork() {
         Some(scott::SagaPlatform::AppleII),
         "premise: it really is a US S.A.G.A. database on the Apple II"
     );
-    let session = ScottSession::new_with_options(
+    let mut session = ScottSession::new_with_options(
         bytes,
         false,
         None,
@@ -555,6 +563,10 @@ fn a_scrambled_apple_ii_release_draws_its_side_a_artwork() {
         app::graphics::ScottPictureSources::none().with_saga_pictures(mounted.saga_pictures),
     )
     .expect("The Count boots off its own boot side");
+    // The boot frame is the title card (SQ-1495); "wait" dismisses it
+    // without moving or drawing anything, so what follows is the start
+    // room's own picture.
+    session.submit("wait");
     let screen = session.screen();
     let band = picture_band(&screen).expect("the start room has a picture band");
     assert_eq!(

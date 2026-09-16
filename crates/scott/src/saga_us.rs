@@ -503,6 +503,15 @@ pub const DARKNESS_PICTURE: usize = 0;
 /// side.
 pub const INVENTORY_PICTURE: usize = 98;
 
+/// The title card shown at boot, before the player's first command (§8.6's
+/// reserved index 99).
+///
+/// On a US S.A.G.A. release this is a full-canvas splash — `R01099` on the
+/// Commodore 64 Hulk disk — drawn behind the real machine's restore question
+/// until dismissed by the player's first typed command; lanthorn draws the
+/// picture only, not the restore prompt (out of scope, SQ-1495).
+pub const TITLE_PICTURE: usize = 99;
+
 // ── Picture files (§8.3, §8.6) ────────────────────────────────────────────────
 
 /// What a family-C picture is FOR (§8.6), read off its file name.
@@ -531,7 +540,8 @@ pub struct PictureFile {
     /// The picture index — a room number for [`PictureUsage::Room`], an item
     /// number otherwise. Three reserved values (§8.6): 0 is the darkness
     /// picture ([`DARKNESS_PICTURE`]), 98 the inventory backdrop
-    /// ([`INVENTORY_PICTURE`]) and 99 the title picture.
+    /// ([`INVENTORY_PICTURE`]) and 99 the title picture
+    /// ([`TITLE_PICTURE`]).
     pub(crate) index: u16,
 }
 

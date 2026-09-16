@@ -21,6 +21,12 @@ Absolute URLs or no link.
 
 ## Unreleased
 
+### Added
+
+- **US Adventure International releases (Questprobe featuring The Hulk and its
+  siblings) now open on their real title card** instead of jumping straight to
+  room one, matching the original disks.
+
 ### Fixed
 
 - **Restoring a Save State in a Glulx game with side panels (Kerkerkruip and

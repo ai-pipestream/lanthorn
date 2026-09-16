@@ -976,14 +976,12 @@ pub fn apple_look_table(m2: &[u8]) -> Option<AppleLookTable> {
 pub fn scrambled_picture_index(n: usize, rooms: usize, look: usize) -> Option<usize> {
     /// §8.6's first full-window index.
     const FIRST_FULL_WINDOW: usize = 80;
-    /// §8.6's reserved title picture.
-    const TITLE: usize = 99;
     if n < rooms {
         Some(n)
     } else if n < rooms + look {
         Some(FIRST_FULL_WINDOW + (n - rooms))
     } else if n == rooms + look {
-        Some(TITLE)
+        Some(crate::saga_us::TITLE_PICTURE)
     } else {
         None
     }
