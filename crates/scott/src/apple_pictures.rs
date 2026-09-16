@@ -1205,6 +1205,45 @@ pub fn decode_family_d_plain(
     })
 }
 
+/// How many bytes of `data` one **plain** family-D opcode stream consumes,
+/// stopping at its own end-of-picture token (the module doc's `0x00`-`0x1F`
+/// class) or at the end of `data` when none appears.
+///
+/// `data` is the stream itself, with **no** four-byte prologue in front of
+/// it — unlike [`decode_family_d_plain`], which is handed a whole DOS 3.3
+/// file and reads that prologue's declared length to bound the stream. This
+/// is for a caller that has no such prologue to read a length from at all
+/// (SQ-1497's Atari 8-bit companion sides, which have no filesystem and so no
+/// declared file length anywhere) and needs to find where one picture's
+/// stream ends and the next byte begins by other means.
+///
+/// This walks the **same** token grammar [`decode_family_d_plain`]'s loop
+/// does — deliberately kept to nothing but the byte-counting half of it, so
+/// there is only the one place the grammar's shape (three-byte drawing
+/// tokens, one-byte `0x20`/`0x40` attribute tokens, the two-byte `0x60`
+/// paint token, `0x00`-`0x1F` ending the picture) is spelled twice rather
+/// than derived once; `plain_stream_len_matches_the_decoders_own_end_byte`
+/// below is the guard that keeps the two from drifting apart silently.
+pub fn family_d_plain_stream_len(data: &[u8]) -> usize {
+    let mut i = 0usize;
+    while i < data.len() {
+        let b = data[i];
+        if b & 0x80 == 0 {
+            match b >> 5 {
+                0 => return i + 1,
+                1 | 2 => i += 1,
+                _ => i += 2,
+            }
+            continue;
+        }
+        if i + 3 > data.len() {
+            return data.len();
+        }
+        i += 3;
+    }
+    data.len()
+}
+
 /// Decode one family-D picture, whichever sub-variant it is (SQ-1490).
 ///
 /// The host that walks a disk knows which release it opened but not, in
@@ -1558,6 +1597,50 @@ mod tests {
             let pattern = PATTERNS[[0, 2, 1, 3, 4, 6, 5, 7][c]];
             assert_eq!(pattern[0], HCOLOR_MASKS[c], "HCOLOR {c} on an even column");
             assert_eq!(pattern[1], HCOLOR_MASKS_ODD_COLUMN[c], "HCOLOR {c} on an odd column");
+        }
+    }
+
+    // `family_d_plain_stream_len` walks the same grammar `decode_family_d_plain`
+    // does, spelled a second time (see its doc comment for why), so this checks
+    // the two agree on every stream the rest of this module's tests already
+    // build — an empty stream, one that never ends explicitly (runs to the end
+    // of `data`), one that uses every token kind, and one whose two-byte `0x60`
+    // token's operand byte would be misread as its own token if the walk did
+    // not skip it. SQ-1497 is the caller that needs this to stay right: it has
+    // no declared length to bound a stream with at all, so a length this
+    // function gets wrong is a picture decoded from the wrong bytes.
+    #[test]
+    fn plain_stream_len_matches_the_decoders_own_end_byte() {
+        assert_eq!(family_d_plain_stream_len(&[0x00]), 1, "end token alone");
+        assert_eq!(family_d_plain_stream_len(&[0x05]), 1, "any 0x00-0x1F byte ends it");
+        assert_eq!(
+            family_d_plain_stream_len(&[0x80, 10, 20, 0xA0, 40, 20]),
+            6,
+            "no end token: the whole stream, matching decode_family_d_plain's own read"
+        );
+        let stream = [
+            0x23, // hcolor 3 (one byte; the operand is the low nibble, not a second byte)
+            0x42, // brush 2 (one byte, same shape)
+            0x60, 0x10, // paint (two-byte token; 0x10 must NOT be read as its own token)
+            0x80, 10, 20, // move
+            0xA1, 40, 20, // line, x's ninth bit set
+            0xC0, 5, 5, // brush stamp
+            0xE0, 6, 6, // area fill
+            0x00, // end
+            0xFF, 0xFF, 0xFF, // trailing bytes past the end, never reached
+        ];
+        assert_eq!(family_d_plain_stream_len(&stream), stream.len() - 3, "stops at the 0x00, not after it");
+        // Cross-checked against the decoder itself: every stream this module's
+        // other tests already built stops in the same place either way.
+        for stream in [
+            &[0x00][..],
+            &[0x20, 0x80, 10, 20, 0xA0, 40, 20][..],
+            &[0x60, 0x00, 0x80, 140, 96, 0xE0, 140, 96][..],
+        ] {
+            assert!(
+                decode_family_d_plain(&file(stream), SagaPlatform::AppleII).is_ok(),
+                "sanity: the decoder itself accepts this stream"
+            );
         }
     }
 

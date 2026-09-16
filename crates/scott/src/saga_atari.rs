@@ -14,10 +14,10 @@
 //!
 //! | title | side B | this module |
 //! |---|---|---|
-//! | #1 Adventureland | line-drawing token stream | no |
-//! | #2 Pirate Adventure | line-drawing token stream | no |
-//! | #3 Mission Impossible | line-drawing token stream | no |
-//! | #6 Strange Odyssey | line-drawing token stream | no |
+//! | #1 Adventureland | line-drawing token stream | [`decode_line_art_opening`] |
+//! | #2 Pirate Adventure | line-drawing token stream | [`decode_line_art_opening`] |
+//! | #3 Mission Impossible | line-drawing token stream | [`decode_line_art_opening`] |
+//! | #6 Strange Odyssey | line-drawing token stream | [`decode_line_art_opening`] |
 //! | #4 Voodoo Castle | family-C bitmaps, [`FamilyCScheme::NoLiteral`] | **yes** |
 //! | #5 The Count | family-C bitmaps, [`FamilyCScheme::NoLiteral`] | **yes** |
 //! | #13 Claymorgue Castle | family-C bitmaps, [`FamilyCScheme::Standard`] | **yes** |
@@ -29,8 +29,9 @@
 //! Appendix A item 26 measured for the Apple II — three-byte tokens with a
 //! command in bits 7-5, `bit 0` carrying bit 8 of *x* — and all four Atari
 //! sides open with the very same bytes at file offset `0x1000`. Reading it is
-//! [`crate::apple_pictures`]' business, not this module's; nothing addresses
-//! those four titles' pictures yet.
+//! [`crate::apple_pictures`]' business, not this module's, and
+//! [`decode_line_art_opening`] is the addressing that hands it those bytes
+//! (SQ-1497) — see "the line-art side" below for what is, and is not, settled.
 //!
 //! # The record, as measured
 //!
@@ -93,11 +94,54 @@
 //! *The Count*'s side B they are ten `0xFF` bytes, a long run of zeros and
 //! eleven more `0xFF`, between two stretches of run-length data that continue
 //! across them), and a record spanning them must have them excised.
+//!
+//! # The line-art side (SQ-1497)
+//!
+//! Measured on all four `AtariPictureFormat::LineArt` specimens
+//! (`crate::saga_us::SagaUs::atari_picture_format`): [`LINE_ART_OFFSET`]
+//! really does open with the byte-identical grammar the module doc above
+//! cites, and it decodes to a real picture — [`decode_line_art_opening`]
+//! confirms this and is what a caller reaches for.
+//!
+//! **This is per-room artwork, not a single title card.** Feeding the bytes
+//! from `LINE_ART_OFFSET` onward through
+//! [`crate::apple_pictures::family_d_plain_stream_len`] and decoding what
+//! follows each picture's own end token, in order, over all four specimens
+//! turns up recognisable scenes distinct per title — among them a shop
+//! counter signed `TREASURE BOX SHOP` on *Pirate Adventure*'s side and a desk
+//! on *Mission Impossible*'s — not one shared splash screen. So this is the
+//! same shape family C's three sides already are: a run of pictures laid end
+//! to end with **no index anywhere in the data** saying which room (or other
+//! use) any one of them is for. §12.10's "cannot be recovered from the
+//! database" is exactly as true of this format as of family C's.
+//!
+//! **What [`decode_line_art_opening`] answers for, then, is deliberately
+//! narrow**: the picture that opens the stream at [`LINE_ART_OFFSET`], which
+//! is measured to be the same bytes — and so the same small drawing — on all
+//! four specimens, and is consequently not a specific room's own art (a
+//! shared drawing cannot be four different rooms' pictures at once). What it
+//! actually depicts was not determined, and it is not wired into the picture
+//! band: there was nowhere sound to wire it, since neither "the title card"
+//! nor "room one" is a claim the data supports over the other, and guessing
+//! either would be exactly the kind of silent, self-consistent wrong picture
+//! `docs/internals/*` elsewhere warns a hand-picked index produces.
+//! [`crate::apple_pictures::family_d_plain_stream_len`] is exposed for
+//! whoever settles the index question next — the second picture on every
+//! specimen (the room art above) starts the same way this one is found:
+//! stepping over one opening picture's own consumed length, then past the
+//! run of zero-byte filler after it (a `0x00` filler byte reads as its own
+//! immediate end-of-picture token under the same grammar, which is what let
+//! this module's own scan re-sync past it during measurement) — but turning
+//! that into a general scan needs a stronger self-proving check than a byte
+//! count, the way [`record_at`] has one for family C and this format does
+//! not yet.
 
+use crate::apple_pictures;
 use crate::saga_pictures::{
     atari_colour, paint_strips, resolve_palette, FamilyCScheme, Picture, PictureError, StripLayout,
     CANVAS_HEIGHT, CANVAS_WIDTH,
 };
+use crate::saga_us::SagaPlatform;
 
 /// File offset of sector 360, the volume table of contents (§7.3).
 ///
@@ -122,6 +166,57 @@ pub const SIDE_LEN: usize = 92_176;
 /// that a differently-mastered disk is not refused for the sake of one
 /// constant.
 pub const FIRST_RECORD: usize = 0x290;
+
+/// File offset where a **line-art** companion side's opcode stream begins
+/// (SQ-1497) — `AtariPictureFormat::LineArt`'s four titles, `Adventureland`,
+/// `Pirate Adventure`, `Mission Impossible` and `Strange Odyssey`. Unlike
+/// [`FIRST_RECORD`]'s family-C header, there is no length-prefixed record in
+/// front of it: the byte at this offset is itself the picture format's own
+/// first token — measured identical on all four specimens; see the module
+/// docs, "the line-art side".
+pub const LINE_ART_OFFSET: usize = 0x1000;
+
+/// Decode the picture that opens a line-art companion side, at
+/// [`LINE_ART_OFFSET`] (SQ-1497).
+///
+/// `side` is the whole `.atr` file, header included, exactly as
+/// [`scan_picture_side`] and [`splice_vtoc`] take it — though this never
+/// reads far enough into the file to reach the volume table of contents
+/// ([`VTOC_OFFSET`] is far past where this picture's own end token falls on
+/// every specimen measured), so no splice is needed or applied.
+///
+/// See the module docs ("the line-art side") for what this does and does not
+/// establish: the bytes and the grammar are confirmed against real
+/// specimens, and the picture decoded here is the SAME one on all four
+/// titles (so it is not any one room's own art) — nothing here says which
+/// picture index, if any, it answers to, and it is not wired into the
+/// picture band for exactly that reason.
+///
+/// # Errors
+///
+/// [`apple_pictures::AppleError`] — [`LINE_ART_OFFSET`] past the end of
+/// `side`, or (from the decoder) a stream too short to hold anything.
+pub fn decode_line_art_opening(
+    side: &[u8],
+) -> Result<apple_pictures::HiResPicture, apple_pictures::AppleError> {
+    let stream = side
+        .get(LINE_ART_OFFSET..)
+        .ok_or(apple_pictures::AppleError::TooShort { len: side.len() })?;
+    // `decode_family_d_plain` wants a DOS 3.3 file's own four-byte prologue —
+    // a load address it ignores and a declared stream length — which this
+    // side has no filesystem to supply, so one is built here: the length only
+    // needs to be AT LEAST the real stream's own extent, since the decoder
+    // stops at its own end token regardless of how much more the declared
+    // length allows for. `SagaPlatform::AppleII` is the argument that selects
+    // which of family D's two sub-variants a plain-prologue record decodes
+    // as, not a claim about which machine rendered these particular bytes —
+    // the grammar itself is confirmed identical here (module docs).
+    let mut file = vec![0x00, 0x70];
+    let declared = u16::try_from(stream.len()).unwrap_or(u16::MAX);
+    file.extend_from_slice(&declared.to_le_bytes());
+    file.extend_from_slice(stream);
+    apple_pictures::decode_family_d_plain(&file, SagaPlatform::AppleII)
+}
 
 /// One family-C record located on a companion picture side.
 ///

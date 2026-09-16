@@ -43,7 +43,9 @@
 
 use std::path::PathBuf;
 
-use scott::saga_atari::{decode_record, scan_picture_side, splice_vtoc, AtariRecord, SIDE_LEN};
+use scott::saga_atari::{
+    decode_line_art_opening, decode_record, scan_picture_side, splice_vtoc, AtariRecord, SIDE_LEN,
+};
 use scott::saga_pictures::{FamilyCScheme, CANVAS_HEIGHT, CANVAS_WIDTH};
 use scott::{SagaPlatform, SagaUs};
 
@@ -397,4 +399,60 @@ fn the_counts_room_one_draws_the_brass_bed_its_text_describes() {
     // And the picture is not blank anywhere it should not be.
     assert!(pic.pixels().contains(&1), "the wall colour is in use");
     assert!(pic.pixels().contains(&2), "the third colour is in use");
+}
+
+/// SQ-1497: the picture that opens every **line-art** side, at
+/// `LINE_ART_OFFSET` — confirming the premise the quest states (§8.4's item
+/// 26 grammar reproduces here, byte for byte) rather than re-deriving it.
+///
+/// **The same picture, byte for byte, on all four titles.** Painted box
+/// (54,50)-(140,96), 725 green pixels (`PALETTE`'s index 2) over the white
+/// ground and nothing else — so this is not any one title's own art (four
+/// different games cannot share one room's picture), which is exactly why
+/// `crate::saga_atari`'s module docs stop here rather than claiming it answers
+/// for a room or for the boot title card.
+#[test]
+fn the_line_art_opening_is_the_same_small_picture_on_every_title() {
+    for file in LINE_ART_TITLES {
+        let Some(raw) = side_b(file) else { continue };
+        let pic = decode_line_art_opening(&raw).unwrap_or_else(|e| panic!("{file}: {e:?}"));
+        // Family D's own canvas (280x192), not family C's (280x160) the rest
+        // of this file's `CANVAS_WIDTH`/`CANVAS_HEIGHT` imports name.
+        assert_eq!(
+            (pic.width(), pic.height()),
+            (scott::apple_pictures::CANVAS_WIDTH, scott::apple_pictures::CANVAS_HEIGHT),
+        );
+        let painted = pic.painted().unwrap_or_else(|| panic!("{file}: the opening picture paints nothing"));
+        assert_eq!(
+            (painted.left(), painted.top(), painted.right(), painted.bottom()),
+            (54, 50, 140, 96),
+            "{file}: the opening picture's own bounding box",
+        );
+        let mut counts = [0usize; 6];
+        for &v in pic.pixels() {
+            counts[usize::from(v)] += 1;
+        }
+        assert_eq!(counts, [0, 0, 725, 0, 0, 53_035], "{file}: green pixels over the white ground");
+    }
+}
+
+/// Offset precision matters: one byte off `LINE_ART_OFFSET` and the decode
+/// gives a DIFFERENT picture, not a refusal — this format has no header to
+/// bounds-check against, so a wrong offset decodes silently rather than
+/// erroring, and this is the falsification that says the exact offset is
+/// load-bearing rather than approximately right.
+#[test]
+fn one_byte_off_line_art_offset_decodes_a_different_picture() {
+    let file = "SAGA #1 - Adventureland [side B].atr";
+    let Some(raw) = side_b(file) else { return };
+    let at_offset = decode_line_art_opening(&raw).expect("decodes at LINE_ART_OFFSET");
+    // Shift the WHOLE buffer back by one byte, so `decode_line_art_opening`'s
+    // own `LINE_ART_OFFSET` addition lands one byte later in the real data
+    // than it should — the same effect a wrong constant would have.
+    let shifted = decode_line_art_opening(&raw[1..]).expect("still decodes, just wrong");
+    let non_white = |pic: &scott::apple_pictures::HiResPicture| {
+        pic.pixels().iter().filter(|&&v| v != 5).count()
+    };
+    assert_eq!(non_white(&at_offset), 725, "the real picture, pinned above");
+    assert_ne!(non_white(&shifted), non_white(&at_offset), "one byte off reads different bytes as tokens");
 }
