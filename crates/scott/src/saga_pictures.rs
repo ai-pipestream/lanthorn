@@ -545,7 +545,7 @@ impl Painted {
 /// Accumulates [`Painted`] as a decoder writes, so a decoder's own inner loop
 /// says "I wrote here" and nothing has to re-derive it from a header whose
 /// promises the data may not keep.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct PaintedBox(Option<Painted>);
 
 impl PaintedBox {

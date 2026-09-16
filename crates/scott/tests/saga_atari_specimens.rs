@@ -46,6 +46,7 @@ use std::path::PathBuf;
 use scott::saga_atari::{
     decode_line_art_opening, decode_record, scan_picture_side, splice_vtoc, AtariRecord, SIDE_LEN,
 };
+use scott::saga_atari_lineart::{LineArtCanvas, LineArtPicture};
 use scott::saga_pictures::{FamilyCScheme, CANVAS_HEIGHT, CANVAS_WIDTH};
 use scott::{SagaPlatform, SagaUs};
 
@@ -988,4 +989,151 @@ fn the_bitmap_arithmetic_reads_the_line_art_table_as_noise() {
         }
         assert!(wrong * 2 > entries.len(), "{file}: the seven-byte grid still read {} of {} entries", entries.len() - wrong, entries.len());
     }
+}
+
+// ---------------------------------------------------------------------------
+// The line-art grammar (SQ-1525)
+//
+// `scott::saga_atari_lineart` reads the format the way the releases' own
+// renderer draws it — read off side A's boot-loaded program as a specimen, no
+// interpreter consulted; see that module's docs. The cases below play every
+// record of every line-art title through it and pin what comes out.
+//
+// The per-title pixel totals are a cross-check against a second, independent
+// transcription of the same reading (a scratch Python decoder written first,
+// from the same disassembly, and used to look at the pictures): both agreeing
+// on every one of 310 records, fill by fill, is what says neither mis-copied
+// a case of the line walk or the fill sweep.
+// ---------------------------------------------------------------------------
+
+/// The bytes of one record, first token to end byte inclusive, or `None` if
+/// the table has no entry for `slot`.
+fn line_art_record(raw: &[u8], slot: usize) -> Option<Vec<u8>> {
+    let (_, _, _, at) = line_art_table_entries(raw).into_iter().find(|e| e.0 == slot)?;
+    let spliced = splice_vtoc(raw);
+    let rec = &spliced[spliced_of(at)..];
+    let (_, end) = walk_line_art_record(rec);
+    Some(rec[..=end.expect("the record ends")].to_vec())
+}
+
+/// Non-black pixels of a picture: every pixel whose pair is not (0, 0).
+fn lit(pic: &LineArtPicture) -> usize {
+    pic.pixels().iter().filter(|&&v| v != 0).count()
+}
+
+/// Every record on every line-art side plays to its end under the renderer's
+/// grammar, and the pictures sum to the same non-black pixel counts the
+/// second transcription measured. `(file, records, non-black pixels, rooms
+/// that never clear)`.
+///
+/// **Six room records never clear the screen** — *Pirate Adventure*'s 7, 12,
+/// 13 and 19 (one 353-token maze-of-caves drawing), its 86, and *Strange
+/// Odyssey*'s 3. On the machine they draw over whatever the screen held —
+/// the previous room and its objects — since nothing else clears between
+/// rooms; a host that plays them on a black canvas shows black where the
+/// machine showed the picture before. Every other room clears, so its painted
+/// box is the whole canvas (the maze's fills happen to reach every edge too).
+#[test]
+fn every_line_art_record_plays_under_the_renderers_grammar() {
+    const TOTALS: [(&str, usize, usize, &[usize]); 4] = [
+        ("SAGA #1 - Adventureland [side B].atr", 92, 560_441, &[]),
+        ("SAGA #2 - Pirate Adventure [side B].atr", 87, 489_008, &[7, 12, 13, 19, 86]),
+        ("SAGA #3 - Mission Impossible [side B].atr", 62, 409_219, &[]),
+        ("SAGA #6 - Strange Odyssey [side B].atr", 69, 452_313, &[3]),
+    ];
+    for (file, records, want_lit, never_clear) in TOTALS {
+        let Some(raw) = side_b(file) else { continue };
+        let entries = line_art_table_entries(&raw);
+        assert_eq!(entries.len(), records, "{file}: table entries");
+        let mut total = 0;
+        let mut no_clear = Vec::new();
+        for (slot, _, _, _) in &entries {
+            let rec = line_art_record(&raw, *slot).expect("an entry");
+            let mut canvas = LineArtCanvas::new();
+            let pic = canvas.draw(&rec).unwrap_or_else(|e| panic!("{file}: slot {slot} refused: {e}"));
+            total += lit(&pic);
+            if *slot < 100 {
+                let clears = rec.chunks(3).any(|t| t[0] == 0x20);
+                let p = pic.painted().unwrap_or_else(|| panic!("{file}: room {slot} drew nothing"));
+                let whole = (p.left(), p.top(), p.right(), p.bottom()) == (0, 0, 159, 95);
+                assert!(whole || !clears, "{file}: room {slot} clears but painted only {p:?}");
+                if !clears {
+                    no_clear.push(*slot);
+                }
+            }
+        }
+        assert_eq!(no_clear, never_clear, "{file}: rooms that never clear");
+        assert_eq!(total, want_lit, "{file}: non-black pixels over all records");
+    }
+}
+
+/// The darkness card (index 0) is an animation: `IT'S TOO DARK!` lettering, a
+/// pair of eyes that appear and vanish across three pauses, and a final clear
+/// to black — so its resting frame is genuinely black on the machine, and the
+/// lettering is on the paused frames a host has to reach for.
+#[test]
+fn the_darkness_card_is_an_animation_that_ends_black() {
+    let Some(raw) = side_b("SAGA #1 - Adventureland [side B].atr") else { return };
+    let rec = line_art_record(&raw, 0).expect("the darkness card");
+    let mut canvas = LineArtCanvas::new();
+    let frames = canvas.draw_frames(&rec).expect("plays");
+    let counts: Vec<usize> = frames.iter().map(lit).collect();
+    assert_eq!(counts, [2158, 1955, 1148, 0], "non-black pixels at each pause, then at the end");
+    // The lettering sits in the top and bottom bands of every paused frame;
+    // the eyes sit between them on the first and are gone by the last, bar a
+    // few strokes of the letters that reach into the band.
+    let band = |frame: &LineArtPicture, top: usize, bottom: usize| {
+        (top..=bottom)
+            .flat_map(|y| (0..160).map(move |x| (x, y)))
+            .filter(|&(x, y)| frame.rgb(x, y) != Some((0, 0, 0)))
+            .count()
+    };
+    assert!(band(&frames[2], 0, 25) > 300, "IT'S TOO on top");
+    assert!(band(&frames[2], 65, 95) > 300, "DARK! below");
+    assert!(band(&frames[0], 35, 60) > 500, "the eyes, on the first pause");
+    assert_eq!(band(&frames[2], 35, 60), 23, "gone by the last");
+    let again = canvas.draw(&rec).expect("plays again");
+    assert_eq!(again.painted().map(|p| (p.left(), p.bottom())), Some((0, 95)));
+}
+
+/// One picture per title, and the shared title card, pinned by pixel count —
+/// and the card by a few sampled pairs: the `ai` box's green, the globe's red
+/// ground, the white lettering.
+#[test]
+fn the_title_card_and_a_room_per_title_decode_to_the_measured_pictures() {
+    const ROOMS: [(&str, usize, usize); 4] = [
+        ("SAGA #1 - Adventureland [side B].atr", 98, 14_357), // INVENTORY, a man with a sack
+        ("SAGA #2 - Pirate Adventure [side B].atr", 20, 13_374), // the ship's deck
+        ("SAGA #3 - Mission Impossible [side B].atr", 2, 13_303), // the office desk
+        ("SAGA #6 - Strange Odyssey [side B].atr", 1, 14_294), // the scoutship cockpit
+    ];
+    for (file, slot, want) in ROOMS {
+        let Some(raw) = side_b(file) else { continue };
+        let rec = line_art_record(&raw, slot).expect("an entry");
+        let pic = LineArtCanvas::new().draw(&rec).expect("plays");
+        assert_eq!(lit(&pic), want, "{file}: slot {slot}");
+    }
+    let Some(raw) = side_b("SAGA #1 - Adventureland [side B].atr") else { return };
+    let rec = line_art_record(&raw, 99).expect("the title card");
+    let pic = LineArtCanvas::new().draw(&rec).expect("plays");
+    assert_eq!(lit(&pic), 13_511);
+    let at = |x: usize, y: usize| pic.pixels()[y * pic.width() + x];
+    assert_eq!(at(5, 5), 4 + 1, "the ground: pair (1, 1), colour 7");
+    assert_eq!(at(60, 15), 2 * 4 + 3, "the ai box: pair (2, 3), colour 10");
+    assert_eq!(at(80, 48), 3 * 4 + 3, "the lettering: pair (3, 3), colour 0");
+    assert_eq!(pic.rgb(80, 48), Some(scott::saga_atari_lineart::pair_rgb(3, 3)));
+}
+
+/// The recolour marker's effect on a real record: *Adventureland*'s object 0
+/// is the `Dark hole`, drawn as lines in the default colour and then, by its
+/// closing `6F 0F 09 | 21`, redrawn from the start in black — so on a black
+/// canvas it leaves no lit pixel at all, yet reports the box it drew on.
+#[test]
+fn the_dark_hole_is_drawn_and_then_recoloured_black() {
+    let Some(raw) = side_b("SAGA #1 - Adventureland [side B].atr") else { return };
+    let rec = line_art_record(&raw, 100).expect("object 0");
+    assert_eq!(&rec[rec.len() - 7..], &[0x6F, 0x0F, 0x09, 0x21, 0x87, 0x47, 0x00]);
+    let pic = LineArtCanvas::new().draw(&rec).expect("plays");
+    assert_eq!(lit(&pic), 0);
+    assert!(pic.painted().is_some());
 }

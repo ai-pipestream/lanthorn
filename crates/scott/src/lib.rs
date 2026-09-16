@@ -230,6 +230,7 @@ pub mod c64_palette;
 pub mod database;
 pub mod decompile;
 pub mod saga_atari;
+pub mod saga_atari_lineart;
 pub mod saga_dos;
 pub mod saga_pictures;
 pub mod saga_us;
