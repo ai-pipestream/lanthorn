@@ -791,25 +791,137 @@ fn scott_disk_stories(disk: &blorb::medium::MountedDisk) -> Vec<blorb::medium::D
             candidates.push((blorb::atr::IMAGE_ENTRY.to_string(), image));
         }
     }
-    candidates
+    let candidates: Vec<(String, Vec<u8>)> = candidates
         .into_iter()
         .filter(|(name, _)| !already.iter().any(|n| n.eq_ignore_ascii_case(name)))
         .filter(|(name, _)| !NON_GAME_DISK_NAMES.iter().any(|n| name.eq_ignore_ascii_case(n)))
-        .filter(|(_, bytes)| scott::looks_like_scott_bytes(bytes))
-        .filter(|(_, bytes)| matches!(extract_story(bytes.clone()), Ok(LoadedStory::Scott(_))))
-        // The real gate: `extract_story` above only re-runs the cheap sniff
-        // for a raw (non-blorb) candidate, so a database that LOOKS
-        // plausible but does not actually decode — the Atari Mission
-        // Impossible side A, whose room-description block is damaged and
-        // whose pointer tables consequently disagree (SQ-1470) — passed both
-        // filters above unchanged. `Database::parse` is the loader's own
-        // final word on whether these bytes are usable.
-        .filter(|(_, bytes)| scott::Database::parse(bytes).is_ok())
+        .collect();
+
+    let cheap: Vec<(String, Vec<u8>)> =
+        candidates.iter().filter(|(_, bytes)| resolves_to_scott(bytes)).cloned().collect();
+
+    // SQ-1488: only reach for depacking — real 6502 emulation, up to 50
+    // million instructions PER candidate — when the cheap byte sniff above
+    // found NOTHING on the whole disk. A disk that already has a working
+    // entry (every existing *Mysterious Adventures* and US S.A.G.A. disk in
+    // the corpus) never pays for it: `mounted_stories` is on the path a
+    // directory scan takes for every Commodore disk shown, and emulating
+    // every remaining candidate on disks that were already solved made
+    // `saga_us_disks::questpr1_yields_the_hulk_row` alone run for minutes
+    // instead of under a second (measured while wiring this in). The one
+    // real specimen this narrows away entirely — a disk that carries BOTH a
+    // working, uncrunched game AND a second, crunched one — has not been
+    // seen; every crunched disk in `stories/scott-dialects/c64/` holds
+    // exactly the one program the quest's own title describes.
+    let depacked: Vec<(String, Vec<u8>)> =
+        if cheap.is_empty() && disk.format() == blorb::medium::DiskImage::CommodoreD64 {
+            candidates
+                .into_iter()
+                .filter_map(|(name, bytes)| {
+                    let depacked = blorb::depack::depack_c64_prg(&bytes).ok()?;
+                    let prg = depacked_prg_bytes(&depacked);
+                    resolves_to_scott(&prg).then_some((name, prg))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+    cheap
+        .into_iter()
+        .chain(depacked)
         .map(|(name, bytes)| {
             let name = saga_us_keyed_name(&name, &bytes);
             blorb::medium::DiskStory { name, bytes }
         })
         .collect()
+}
+
+/// Whether `bytes` are a Scott Adams database this crate's own loader agrees
+/// is usable — the real gate, not just the cheap sniff.
+///
+/// `looks_like_scott_bytes` is cheap and permissive on its own, so it is
+/// paired with `extract_story` (which re-runs it for a raw, non-blorb
+/// candidate) and then `Database::parse`, the loader's own final word: a
+/// database that LOOKS plausible but does not actually decode — the Atari
+/// Mission Impossible side A, whose room-description block is damaged and
+/// whose pointer tables consequently disagree (SQ-1470) — passes the sniff
+/// unchanged and only `Database::parse` catches it.
+fn resolves_to_scott(bytes: &[u8]) -> bool {
+    scott::looks_like_scott_bytes(bytes)
+        && matches!(extract_story(bytes.to_vec()), Ok(LoadedStory::Scott(_)))
+        && scott::Database::parse(bytes).is_ok()
+}
+
+/// Re-attaches the load-address header a Commodore `PRG` carries so a
+/// depacked memory image reads the same shape every Scott Adams sniff in
+/// this crate already expects — `scott::c64::prg_image`'s own doc: "bytes 0-1
+/// are the address, little-endian, and byte 2 is the byte at that address".
+/// [`blorb::depack::depack_c64_prg`] hands back the bare image alone (it
+/// depacks a memory range, not a container entry), so this is the one place
+/// that puts the two bytes back before the result crosses back into
+/// `scott::looks_like_scott_bytes`'s door.
+fn depacked_prg_bytes(depacked: &blorb::depack::DepackedProgram) -> Vec<u8> {
+    let mut prg = Vec::with_capacity(depacked.data.len() + 2);
+    prg.extend_from_slice(&depacked.start_addr.to_le_bytes());
+    prg.extend_from_slice(&depacked.data);
+    prg
+}
+
+/// Why [`crunched_program_name`] could not turn a disk's crunched program
+/// into a playable game — carried so the refusal in [`read_story_file`] can
+/// say which of the two actually happened, rather than blurring "the
+/// emulator gave up" and "it decompressed fine but into a C64 driver this
+/// crate has no reader for" into one sentence.
+enum CrunchedProgram {
+    /// `blorb::depack::depack_c64_prg` itself did not produce a decompressed
+    /// image (timed out, or the result did not look like a real program).
+    NotUnpacked(String),
+    /// It decompressed, but the memory image is not a Scott Adams dialect
+    /// this crate's loader recognises — a different C64 driver from the
+    /// *Mysterious Adventures* one `scott::c64` reads, or a bare S.A.G.A.
+    /// database at some offset other than the one [`scott::saga_us`] checks.
+    Unrecognised(String),
+}
+
+impl CrunchedProgram {
+    fn name(&self) -> &str {
+        match self {
+            Self::NotUnpacked(name) | Self::Unrecognised(name) => name,
+        }
+    }
+}
+
+/// The Commodore disk's one crunched program, when [`scott_disk_stories`]
+/// could not turn it into a playable game — SQ-1488's honest refusal in
+/// place of the generic "no story file" message below.
+///
+/// Only asked when `scott_disk_stories` found nothing at all: a candidate
+/// that already resolved is never reported as failed, and this only runs on
+/// a Commodore disk (`blorb::depack::depack_c64_prg` reads a CBM `PRG`'s own
+/// load-address header, which is specifically what a D64 directory keeps).
+/// A candidate that never looked like a `$0801` BASIC-stub program at all —
+/// [`blorb::depack::DepackError::NoEntryPoint`] — is not reported: that is
+/// not evidence of a crunched program, just an ordinary file that is neither
+/// Scott Adams nor packed.
+fn crunched_program_name(disk: &blorb::medium::MountedDisk) -> Option<CrunchedProgram> {
+    if disk.format() != blorb::medium::DiskImage::CommodoreD64 {
+        return None;
+    }
+    let already: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
+    disk.contents()
+        .into_iter()
+        .filter(|(name, _)| !already.iter().any(|n| n.eq_ignore_ascii_case(name)))
+        .filter(|(name, _)| !NON_GAME_DISK_NAMES.iter().any(|n| name.eq_ignore_ascii_case(n)))
+        .filter(|(_, bytes)| !resolves_to_scott(bytes))
+        .find_map(|(name, bytes)| match blorb::depack::depack_c64_prg(&bytes) {
+            Err(blorb::depack::DepackError::NoEntryPoint) => None,
+            Err(_) => Some(CrunchedProgram::NotUnpacked(name)),
+            Ok(depacked) if !resolves_to_scott(&depacked_prg_bytes(&depacked)) => {
+                Some(CrunchedProgram::Unrecognised(name))
+            }
+            Ok(_) => None, // resolves — `scott_disk_stories` would have found it too
+        })
 }
 
 /// A save-key-safe name for a Scott candidate found on a disk (SQ-1470).
@@ -959,6 +1071,29 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
             let story = scott.remove(0);
             let image = disk.image_for(&story.name);
             return Ok((story.bytes, Some(image)));
+        }
+        // SQ-1488: an honest, specific refusal for a disk whose one program
+        // is crunched and could not be turned into a playable game — rather
+        // than the generic "no story file" message below, which used to be
+        // the only thing a disk like the Hulk collection's could ever say
+        // (every file scanned, none of them a Scott table in the clear).
+        if scott.is_empty() {
+            if let Some(crunched) = crunched_program_name(&disk) {
+                let name = crunched.name();
+                let reason = match crunched {
+                    CrunchedProgram::NotUnpacked(_) => "lanthorn could not unpack it",
+                    CrunchedProgram::Unrecognised(_) => {
+                        "lanthorn unpacked it, but it is not a Scott Adams game lanthorn recognises"
+                    }
+                };
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "the disk image {} holds a crunched program ('{name}') — {reason}",
+                        path.display(),
+                    ),
+                ));
+            }
         }
         return Err(io::Error::new(
             io::ErrorKind::NotFound,

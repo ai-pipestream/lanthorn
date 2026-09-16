@@ -20,3 +20,25 @@ name = "blorb"
 # compilation for zero tests). Remove if real doctests are added.
 doctest = false
 [dependencies]
+# SQ-1488: depacking a crunched Commodore 64 program (the Hulk collection
+# disks each hold ONE `$0801` BASIC-stub program packed by a cruncher, so no
+# table is ever in the clear for `scott::looks_like_scott_bytes` to find) —
+# this is blorb's first external dependency. Checked 2026-09-16, license and
+# version verified independently (not from memory or an earlier note): the
+# published 0.9.20 on crates.io declares `license = "MIT OR Apache-2.0"`,
+# matching `LICENSE-MIT` and `LICENSE-APACHE` (both read in full) at the
+# GitHub repo root pinned to the `v0.9.20` tag (commit 493f840). Its
+# `unpacker.rs` runs the depacker's own machine code against an emulated
+# 6502/C64 and finds the decompressed range by diffing memory before/after —
+# AUTHORS credits the two-phase APPROACH to `unp64` as its basis, the same
+# way this project's own dfrotz/ScottFree parity suites treat a GPL reference
+# implementation as a black box to compare output against, and no GPL text
+# appears anywhere in the crate. (`packer_signatures.rs` sits beside it and
+# matches known byte patterns purely to NAME a packer and apply one
+# documented compatibility patch — ALZ64/Kabuto's `$080B` byte — decompression
+# itself never depends on recognising a signature.) `default-features =
+# false`: its `mcp` feature (which alone pulls in tokio/rmcp/axum/reqwest) is
+# not enabled, so depacking costs only its non-optional deps (anyhow,
+# thiserror, serde(+json), toml, base64, flate2, directories, regex, log,
+# include_dir, mos6502 — mos6502 itself BSD-3-Clause, also checked).
+regenerator2000-core = { version = "0.9.20", default-features = false }

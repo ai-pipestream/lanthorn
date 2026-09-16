@@ -1,5 +1,9 @@
-//! Zero-dependency parser for the IFF "Blorb" interactive-fiction resource
-//! container. Exposes the embedded executable and a generic resource accessor.
+//! Parser for the IFF "Blorb" interactive-fiction resource container.
+//! Exposes the embedded executable and a generic resource accessor.
+//!
+//! Zero external dependencies except [`depack`]'s `regenerator2000-core`
+//! (SQ-1488, see its `Cargo.toml` dependency comment) — every reader in this
+//! crate is still hand-rolled.
 
 pub mod adf;
 pub mod amiga_font;
@@ -13,6 +17,7 @@ pub mod bpal;
 mod cd;
 pub mod atr;
 pub mod d64;
+pub mod depack;
 pub mod dos33;
 pub mod dos_order;
 pub mod fat12;

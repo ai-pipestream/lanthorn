@@ -20,8 +20,10 @@ name = "cli_host"
 
 [dependencies]
 # SQ-0850: the per-game save key of a story mounted out of a disk image is its
-# release and serial, which means mounting the image to read them. `blorb` takes
-# no external dependencies of its own, so this costs the CLIs nothing.
+# release and serial, which means mounting the image to read them. `blorb`
+# took no external dependencies of its own until SQ-1488 (C64 crunched-program
+# depacking, `blorb::depack`'s `regenerator2000-core`), so this pulls that one
+# dependency along with it — every reader itself is still hand-rolled.
 blorb = { package = "lanthorn-blorb", path = "../blorb", version = "0.6.0" }
 crossterm = "0.29"
 

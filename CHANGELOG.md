@@ -32,6 +32,9 @@ Absolute URLs or no link.
   Strange Odyssey now show their real room and object artwork.**
 - **That same Atari 8-bit line-art artwork now renders at higher resolution
   instead of the machine's native pixels.**
+- **Some crunched Commodore 64 disk images (older cracked releases) now open
+  correctly instead of reporting no story**; the ones that still can't be
+  unpacked say so clearly instead of failing silently.
 
 ### Fixed
 
