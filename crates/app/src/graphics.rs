@@ -315,6 +315,14 @@ struct AtariLineArtPictures {
     table: scott::saga_atari::LineArtPictureTable,
     /// The machine's own running screen state — see the struct doc.
     canvas: scott::saga_atari_lineart::LineArtCanvas,
+    /// The supersample every draw through this source is played at (SQ-1526)
+    /// — [`scott_atari_line_art_scale`] band-fitted the same way
+    /// `scott_c64_scale` picks family B's, or 1 under
+    /// [`ScottPictureResolution::Original`]. Carried per-source rather than
+    /// per-draw for the same reason `scott_c64`'s scale is: it is fixed once
+    /// at construction from the picture band's own device height, not a fact
+    /// that varies record to record.
+    scale: u32,
 }
 
 /// One decoded line-art picture ([`scott::saga_atari_lineart::LineArtPicture`])
@@ -764,23 +772,44 @@ impl PictSource {
     /// differently-mastered disk), or `side_b` is too short to hold it —
     /// refused rather than drawn, the same rule every entry in the table is
     /// individually held to.
+    ///
+    /// `band_px_high` and `resolution` are [`Self::from_scott_family_b`]'s
+    /// own two facts, taken the same way (SQ-1526): `band_px_high` is how
+    /// many DEVICE PIXELS tall the picture band is, and picks the
+    /// supersample under [`ScottPictureResolution::HiRes`]
+    /// ([`scott_atari_line_art_scale`]); [`ScottPictureResolution::Original`]
+    /// ignores the band and draws at the release's own scale 1.
     pub fn from_scott_saga_atari_lineart(
         side_b: &[u8],
         release: scott::SagaUs,
+        band_px_high: u32,
+        resolution: ScottPictureResolution,
     ) -> Option<PictSource> {
         let side_b_spliced = scott::saga_atari::splice_vtoc(side_b);
         let table = scott::saga_atari::read_line_art_table(&side_b_spliced, release.adventure)?;
+        let scale = match resolution {
+            ScottPictureResolution::HiRes => scott_atari_line_art_scale(band_px_high),
+            ScottPictureResolution::Original => 1,
+        };
         Some(PictSource {
             scott_saga_atari_lineart: Some((
                 AtariLineArtPictures {
                     side_b_spliced,
                     table,
                     canvas: scott::saga_atari_lineart::LineArtCanvas::new(),
+                    scale,
                 },
                 release,
             )),
             ..PictSource::new(None)
         })
+    }
+
+    /// The supersample this source draws its line-art artwork at, or `None`
+    /// when it holds none (SQ-1526) — `/dump-windows` prints it beside the
+    /// canvas size the same way [`Self::scott_c64_scale`] does for family B.
+    pub fn scott_saga_atari_line_art_scale(&self) -> Option<u32> {
+        self.scott_saga_atari_lineart.as_ref().map(|(pics, _)| pics.scale)
     }
 
     /// Which platform's family-C artwork this source holds, or `None` when it
@@ -991,19 +1020,40 @@ impl PictSource {
         let (pics, _) = self.scott_saga_atari_lineart.as_mut()?;
         if base as usize == scott::DARKNESS_PICTURE {
             let off = pics.table.find(scott::PictureUsage::Room, base as u16)?;
-            let shown =
-                scott::saga_atari::draw_darkness_card(&mut pics.canvas, &pics.side_b_spliced, off)
-                    .ok()?;
+            let shown = scott::saga_atari::draw_darkness_card_at(
+                &mut pics.canvas,
+                &pics.side_b_spliced,
+                off,
+                pics.scale,
+            )
+            .ok()?;
             return Some(Arc::new(line_art_picture_to_image(&shown)));
         }
         let off = pics.table.find(scott::PictureUsage::Room, base as u16)?;
-        scott::saga_atari::draw_line_art_record(&mut pics.canvas, &pics.side_b_spliced, off).ok()?;
+        // SQ-1526: one shared accumulator for the room AND every overlay, so
+        // the final supersample (`picture_from_lines_at`) learns about every
+        // stroke that went into this render rather than only the last
+        // record's own — see `LineArtCanvas::draw_tracking`'s doc for why it
+        // is built fresh here rather than kept on the canvas itself.
+        let mut lines = Vec::new();
+        scott::saga_atari::draw_line_art_record_tracking(
+            &mut pics.canvas,
+            &pics.side_b_spliced,
+            off,
+            &mut lines,
+        )
+        .ok()?;
         for name in overlays {
             let Some(off) = atari_overlay_offset(name) else { continue };
-            let _ =
-                scott::saga_atari::draw_line_art_record(&mut pics.canvas, &pics.side_b_spliced, off);
+            let _ = scott::saga_atari::draw_line_art_record_tracking(
+                &mut pics.canvas,
+                &pics.side_b_spliced,
+                off,
+                &mut lines,
+            );
         }
-        Some(Arc::new(line_art_picture_to_image(&pics.canvas.picture())))
+        let pic = pics.canvas.picture_from_lines_at(&lines, pics.scale);
+        Some(Arc::new(line_art_picture_to_image(&pic)))
     }
 
     /// Decode the record stored under `name` through whichever family this
@@ -2762,6 +2812,27 @@ fn scott_c64_scale(band_px_high: u32) -> u32 {
         .clamp(1, SCOTT_C64_MAX_SCALE)
 }
 
+/// The largest supersample [`scott_atari_line_art_scale`] will ask for
+/// (SQ-1526) — the same clamp [`SCOTT_C64_MAX_SCALE`] applies to family B,
+/// for the same reason: past this a room's RGBA cache entry is bigger than a
+/// terminal picture band ever needs. Four is 640 x 384 on this format's
+/// smaller 160 x 96 canvas, against family B's 1020 x 376 at the same clamp.
+const SCOTT_ATARI_LINE_ART_MAX_SCALE: u32 = 4;
+
+/// How many device pixels per native pixel to draw an Atari 8-bit line-art
+/// room picture at, given the picture band's height in device pixels
+/// (SQ-1526) — [`scott_c64_scale`]'s own rule (round the band's own
+/// magnification up, stop at the format's own max), applied to this
+/// format's [`scott::saga_atari_lineart::CANVAS_HEIGHT`] rather than family
+/// B's [`scott::c64::PICTURE_HEIGHT`]. See that function's doc for why
+/// rounding up and why the pane's width is not consulted; neither argument
+/// is specific to family B.
+fn scott_atari_line_art_scale(band_px_high: u32) -> u32 {
+    band_px_high
+        .div_ceil(scott::saga_atari_lineart::CANVAS_HEIGHT as u32)
+        .clamp(1, SCOTT_ATARI_LINE_ART_MAX_SCALE)
+}
+
 /// Which resolution to draw a Commodore 64 *Mysterious Adventures* room
 /// picture at (SQ-1473): the band-fitted supersample [`scott_c64_scale`]
 /// derives, or the release's own 255×94 canvas with no supersampling at all.
@@ -2837,8 +2908,10 @@ pub struct ScottPictureSources {
     /// band is a fixed row count, and the cell height is the other half of how
     /// many device pixels a room picture is drawn into.
     pub char_px: (u32, u32),
-    /// The player's HiRes/Original choice for the C64 vector artwork
-    /// (SQ-1473). Meaningless, and unread, for every other picture source.
+    /// The player's HiRes/Original choice for a vector-artwork picture
+    /// source (SQ-1473): the C64/ZX family-B display lists and, since
+    /// SQ-1526, the Atari 8-bit line-art token stream. Meaningless, and
+    /// unread, for every bitmap picture source.
     pub resolution: ScottPictureResolution,
     /// A US S.A.G.A. release's own family-C/D/E picture files, `(name,
     /// record)`, read off the same container the database came from (spec

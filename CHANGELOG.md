@@ -30,6 +30,8 @@ Absolute URLs or no link.
   Castle now show their room and object artwork instead of none.**
 - **Atari 8-bit Adventureland, Pirate Adventure, Mission Impossible, and
   Strange Odyssey now show their real room and object artwork.**
+- **That same Atari 8-bit line-art artwork now renders at higher resolution
+  instead of the machine's native pixels.**
 
 ### Fixed
 

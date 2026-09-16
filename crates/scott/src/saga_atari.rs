@@ -143,7 +143,7 @@
 //! record onto a caller-supplied [`crate::saga_atari_lineart::LineArtCanvas`] in
 //! place for exactly that reason, never onto a fresh one internally.
 
-use crate::saga_atari_lineart::{LineArtCanvas, LineArtError, LineArtPicture};
+use crate::saga_atari_lineart::{CommittedLine, LineArtCanvas, LineArtError, LineArtPicture};
 use crate::saga_pictures::{
     atari_colour, paint_strips, paint_strips_from, resolve_palette, FamilyCScheme, Painted, Picture,
     PictureError, StripLayout, CANVAS_HEIGHT, CANVAS_WIDTH,
@@ -930,6 +930,58 @@ pub fn draw_darkness_card(
         .get(at..)
         .ok_or(LineArtError::Truncated { len: side_b_spliced.len().saturating_sub(at) })?;
     let mut frames = canvas.draw_frames(stream)?;
+    let shown = if frames.len() >= 2 { frames.len() - 2 } else { frames.len() - 1 };
+    Ok(frames.swap_remove(shown))
+}
+
+/// [`draw_line_art_record`], also appending every line the record actually
+/// committed to `lines` (SQ-1526) — [`LineArtCanvas::draw_tracking`] in
+/// place of [`LineArtCanvas::draw`]. A caller compositing a room record and
+/// its object overlays onto one canvas for a SINGLE scale-aware render
+/// (`app::graphics::PictSource::scott_line_art_composite`) hands the SAME
+/// `lines` accumulator to every call and then supersamples once, through
+/// [`LineArtCanvas::picture_from_lines_at`], so the room's and every
+/// object's own strokes all inform it — see [`LineArtCanvas::draw_tracking`]'s
+/// own doc for why this is a caller-supplied accumulator rather than state
+/// the canvas keeps itself.
+///
+/// # Errors
+///
+/// As [`draw_line_art_record`].
+pub fn draw_line_art_record_tracking(
+    canvas: &mut LineArtCanvas,
+    side_b_spliced: &[u8],
+    file_offset: usize,
+    lines: &mut Vec<CommittedLine>,
+) -> Result<LineArtPicture, LineArtError> {
+    let at = spliced_of(file_offset);
+    let stream = side_b_spliced
+        .get(at..)
+        .ok_or(LineArtError::Truncated { len: side_b_spliced.len().saturating_sub(at) })?;
+    canvas.draw_tracking(stream, lines)
+}
+
+/// [`draw_darkness_card`] at `scale` device pixels per native pixel
+/// (SQ-1526) — [`LineArtCanvas::draw_frames_at`] in place of
+/// [`LineArtCanvas::draw_frames`], so the paused frame it hands back is
+/// supersampled from exactly the lines that frame's own snapshot shows
+/// (`LineArtCanvas::draw_frames_at`'s own doc), not a naive re-walk of the
+/// whole record.
+///
+/// # Errors
+///
+/// As [`draw_line_art_record`].
+pub fn draw_darkness_card_at(
+    canvas: &mut LineArtCanvas,
+    side_b_spliced: &[u8],
+    file_offset: usize,
+    scale: u32,
+) -> Result<LineArtPicture, LineArtError> {
+    let at = spliced_of(file_offset);
+    let stream = side_b_spliced
+        .get(at..)
+        .ok_or(LineArtError::Truncated { len: side_b_spliced.len().saturating_sub(at) })?;
+    let mut frames = canvas.draw_frames_at(stream, scale)?;
     let shown = if frames.len() >= 2 { frames.len() - 2 } else { frames.len() - 1 };
     Ok(frames.swap_remove(shown))
 }

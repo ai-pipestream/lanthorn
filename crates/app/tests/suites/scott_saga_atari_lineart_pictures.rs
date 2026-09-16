@@ -129,13 +129,24 @@ fn each_line_art_title_boots_and_shows_real_room_art() {
         let model = session.screen();
         let gw = picture_band(&model)
             .unwrap_or_else(|| panic!("{adventure}: the start room should show a picture band"));
+        // SQ-1526: the default resolution is HiRes, so the band is the
+        // line-art canvas at WHATEVER band-fitted supersample it picked —
+        // an exact multiple of the native canvas on both axes, not
+        // necessarily 1x. `a_line_art_source_draws_hi_res_by_default_and_original_at_native`
+        // below pins the exact scale arithmetic against
+        // `PictSource::from_scott_saga_atari_lineart` directly; this only
+        // checks the shape reaching the band through a real session is
+        // still the line-art canvas's, not family C's.
+        let (w, h) = (gw.canvas.width(), gw.canvas.height());
         assert_eq!(
-            (gw.canvas.width(), gw.canvas.height()),
-            (
-                scott::saga_atari_lineart::CANVAS_WIDTH as u32,
-                scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
-            ),
-            "{adventure}: the band is the line-art canvas, not family C's"
+            w % scott::saga_atari_lineart::CANVAS_WIDTH as u32,
+            0,
+            "{adventure}: the band's width should be a multiple of the line-art canvas's"
+        );
+        assert_eq!(
+            w / scott::saga_atari_lineart::CANVAS_WIDTH as u32,
+            h / scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+            "{adventure}: the same supersample on both axes"
         );
         assert!(
             distinct_colours(gw) >= 3,
@@ -158,7 +169,12 @@ fn each_line_art_title_boots_and_shows_real_room_art() {
 fn mission_impossibles_line_art_table_still_reads_off_side_b() {
     let Some(side_b) = read_side_b("SAGA #3 - Mission Impossible [side A].atr") else { return };
     let release = atari_lineart_release(3, 306);
-    let mut picts = app::graphics::PictSource::from_scott_saga_atari_lineart(&side_b, release)
+    let mut picts = app::graphics::PictSource::from_scott_saga_atari_lineart(
+        &side_b,
+        release,
+        scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+        app::graphics::ScottPictureResolution::Original,
+    )
         .expect("Mission Impossible's line-art table should read off side B alone");
     // Room 2 is the start room (SQ-1524's own note: "the office desk").
     let img = picts.image(2).expect("room 2 should decode").to_rgba8();
@@ -173,7 +189,12 @@ fn mission_impossibles_line_art_table_still_reads_off_side_b() {
 fn the_darkness_card_shows_the_paused_frame_not_black() {
     let Some(side_b) = read_side_b("SAGA #1 - Adventureland [side A].atr") else { return };
     let release = atari_lineart_release(1, 416);
-    let mut picts = app::graphics::PictSource::from_scott_saga_atari_lineart(&side_b, release)
+    let mut picts = app::graphics::PictSource::from_scott_saga_atari_lineart(
+        &side_b,
+        release,
+        scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+        app::graphics::ScottPictureResolution::Original,
+    )
         .expect("Adventureland's line-art table should read");
 
     let dark = picts
@@ -214,13 +235,23 @@ fn a_never_clearing_room_composites_through_scott_composite() {
 
     // The wrong approach: room 86 as the very first thing composited — a
     // fresh source, so its own running canvas starts black.
-    let mut fresh = app::graphics::PictSource::from_scott_saga_atari_lineart(&side_b, release)
+    let mut fresh = app::graphics::PictSource::from_scott_saga_atari_lineart(
+        &side_b,
+        release,
+        scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+        app::graphics::ScottPictureResolution::Original,
+    )
         .expect("Pirate Adventure's line-art table should read");
     let fresh_img = fresh.scott_composite(86, &[]).expect("room 86 should reach the band alone");
 
     // The composite: room 20 first (a normal, clearing room), then room 86
     // on the SAME source — its running canvas carries room 20's picture in.
-    let mut picts = app::graphics::PictSource::from_scott_saga_atari_lineart(&side_b, release)
+    let mut picts = app::graphics::PictSource::from_scott_saga_atari_lineart(
+        &side_b,
+        release,
+        scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+        app::graphics::ScottPictureResolution::Original,
+    )
         .expect("Pirate Adventure's line-art table should read");
     let _ = picts.scott_composite(20, &[]).expect("room 20 should reach the band");
     let composited_img = picts.scott_composite(86, &[]).expect("room 86 should reach the band over it");
@@ -240,7 +271,12 @@ fn a_never_clearing_room_composites_through_scott_composite() {
 fn line_art_object_overlays_are_ordered_descending_item_zero_last() {
     let Some(side_b) = read_side_b("SAGA #1 - Adventureland [side A].atr") else { return };
     let release = atari_lineart_release(1, 416);
-    let picts = app::graphics::PictSource::from_scott_saga_atari_lineart(&side_b, release)
+    let picts = app::graphics::PictSource::from_scott_saga_atari_lineart(
+        &side_b,
+        release,
+        scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+        app::graphics::ScottPictureResolution::Original,
+    )
         .expect("Adventureland's line-art table should read");
 
     // Objects 0 and 2 both have artwork on Adventureland (LINE_ART_TABLES,
@@ -273,7 +309,12 @@ fn line_art_object_overlays_are_ordered_descending_item_zero_last() {
 fn a_line_art_object_overlay_composites_over_a_room_picture() {
     let Some(side_b) = read_side_b("SAGA #1 - Adventureland [side A].atr") else { return };
     let release = atari_lineart_release(1, 416);
-    let mut picts = app::graphics::PictSource::from_scott_saga_atari_lineart(&side_b, release)
+    let mut picts = app::graphics::PictSource::from_scott_saga_atari_lineart(
+        &side_b,
+        release,
+        scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+        app::graphics::ScottPictureResolution::Original,
+    )
         .expect("Adventureland's line-art table should read");
 
     let overlays = picts.scott_overlays(scott::PictureUsage::ObjectInRoom, &[0]);
@@ -296,14 +337,80 @@ fn a_corrupted_line_art_table_marker_refuses_the_whole_source() {
     let release = atari_lineart_release(1, 416);
 
     assert!(
-        app::graphics::PictSource::from_scott_saga_atari_lineart(&side_b, release).is_some(),
+        app::graphics::PictSource::from_scott_saga_atari_lineart(
+        &side_b,
+        release,
+        scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+        app::graphics::ScottPictureResolution::Original,
+    ).is_some(),
         "premise: the real disk should read"
     );
 
     let mut corrupted = side_b;
     corrupted[scott::saga_atari::LINE_ART_TABLE_MARKER] ^= 0xFF;
     assert!(
-        app::graphics::PictSource::from_scott_saga_atari_lineart(&corrupted, release).is_none(),
+        app::graphics::PictSource::from_scott_saga_atari_lineart(
+            &corrupted,
+            release,
+            scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+            app::graphics::ScottPictureResolution::Original,
+        )
+        .is_none(),
         "a corrupted marker should refuse the whole table rather than read past it"
+    );
+}
+
+/// **SQ-1526**: [`app::graphics::PictSource::from_scott_saga_atari_lineart`]
+/// takes a resolution choice the same way
+/// [`app::graphics::PictSource::from_scott_family_b`] already does —
+/// [`app::graphics::ScottPictureResolution::HiRes`] band-fits a supersample
+/// from the picture band's own device height,
+/// [`app::graphics::ScottPictureResolution::Original`] ignores the band and
+/// draws at the release's own 160x96 scale 1 — and a COMPOSITED room
+/// picture, not just the standalone `image()` decode, actually comes out at
+/// that scale.
+#[test]
+fn a_line_art_source_draws_hi_res_by_default_and_original_at_native() {
+    let Some(side_b) = read_side_b("SAGA #1 - Adventureland [side A].atr") else { return };
+    let release = atari_lineart_release(1, 416);
+    let band_px_high = 256; // a plausible band height; irrelevant under Original
+
+    let mut native = app::graphics::PictSource::from_scott_saga_atari_lineart(
+        &side_b,
+        release,
+        band_px_high,
+        app::graphics::ScottPictureResolution::Original,
+    )
+    .expect("Adventureland's line-art table should read");
+    assert_eq!(native.scott_saga_atari_line_art_scale(), Some(1), "Original is always scale 1");
+
+    let mut hires = app::graphics::PictSource::from_scott_saga_atari_lineart(
+        &side_b,
+        release,
+        band_px_high,
+        app::graphics::ScottPictureResolution::HiRes,
+    )
+    .expect("Adventureland's line-art table should read");
+    let scale =
+        hires.scott_saga_atari_line_art_scale().expect("a line-art source should report its scale");
+    assert!(scale > 1, "a {band_px_high}px-tall band should pick a supersample above native (got {scale}x)");
+
+    let native_img = native.scott_composite(1, &[]).expect("room 1 composites at native").to_rgba8();
+    let hires_img = hires.scott_composite(1, &[]).expect("room 1 composites at hi-res").to_rgba8();
+    assert_eq!(
+        (native_img.width(), native_img.height()),
+        (
+            scott::saga_atari_lineart::CANVAS_WIDTH as u32,
+            scott::saga_atari_lineart::CANVAS_HEIGHT as u32,
+        ),
+        "Original composites at the native canvas size"
+    );
+    assert_eq!(
+        (hires_img.width(), hires_img.height()),
+        (
+            scott::saga_atari_lineart::CANVAS_WIDTH as u32 * scale,
+            scott::saga_atari_lineart::CANVAS_HEIGHT as u32 * scale,
+        ),
+        "HiRes composites at the band-fitted supersample"
     );
 }

@@ -374,7 +374,14 @@ impl ScottSession {
                     .unwrap_or_else(|| PictSource::new(None))
             } else {
                 atari_side_b
-                    .and_then(|side_b| PictSource::from_scott_saga_atari_lineart(&side_b, release))
+                    .and_then(|side_b| {
+                        PictSource::from_scott_saga_atari_lineart(
+                            &side_b,
+                            release,
+                            u32::from(PICTURE_ROWS) * char_px.1,
+                            picture_resolution,
+                        )
+                    })
                     .unwrap_or_else(|| PictSource::new(None))
             }
         } else if let Some(release) = saga_release {
@@ -878,10 +885,13 @@ impl Engine for ScottSession {
                     // apart (both answer `Atari8Bit`), so a frame has to ask
                     // `scott_saga_atari_is_line_art` directly rather than
                     // naming the wrong family.
+                    // SQ-1526: and it carries its own supersample, the same
+                    // way family B's own "native … x{scale}" line above does.
                     (None, _, Some(platform)) if self.picts.scott_saga_atari_is_line_art() => format!(
-                        "S.A.G.A. line-art ({}, {} record(s))",
+                        "S.A.G.A. line-art ({}, {} record(s)) x{}",
                         platform.label(),
-                        self.picts.scott_saga_count().unwrap_or(0)
+                        self.picts.scott_saga_count().unwrap_or(0),
+                        self.picts.scott_saga_atari_line_art_scale().unwrap_or(1)
                     ),
                     (None, _, Some(platform)) => format!(
                         "S.A.G.A. family C ({}, {} record(s))",

@@ -1299,3 +1299,213 @@ fn object_draw_order_is_descending_index_so_item_zero_lands_on_top() {
         "item 0, drawn last, should be on top at the shared pixel",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Supersampling (SQ-1526)
+//
+// `scott::saga_atari_lineart::LineArtCanvas::draw_at`/`draw_frames_at` adapt
+// `c64::PictureList::rasterise_at`'s region-then-line supersample (SQ-1467)
+// to this format's own primitives — see that module's own "Supersampling"
+// section for the rule and why fills are never re-run at scale. This is the
+// corpus check that would have caught family B's leak class: every real
+// record of all four titles, natively rendered and supersampled, must agree
+// on which REGION every pixel belongs to (`c64_specimens.rs`'s own
+// `every_picture_keeps_its_regions_at_every_supersample` is the sibling
+// check for the C64/ZX titles).
+// ---------------------------------------------------------------------------
+
+/// Downsample a supersampled picture back to native resolution by MAJORITY
+/// vote per block — `c64_specimens.rs`'s own `majority_downsample`.
+fn line_art_majority_downsample(big: &LineArtPicture, scale: u32) -> Vec<u8> {
+    let s = scale as usize;
+    let (w, h) = (big.width() / s, big.height() / s);
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut counts = [0u32; 16];
+            for dy in 0..s {
+                for dx in 0..s {
+                    let p = big.pixels()[(y * s + dy) * big.width() + x * s + dx];
+                    counts[usize::from(p) & 15] += 1;
+                }
+            }
+            let mut best = 0usize;
+            for (i, &c) in counts.iter().enumerate() {
+                if c > counts[best] {
+                    best = i;
+                }
+            }
+            out[y * w + x] = best as u8;
+        }
+    }
+    out
+}
+
+/// How far a scaled raster's majority downsample departs from the native
+/// one, split into the two things a departure can mean — `c64_specimens.rs`'s
+/// own `Departure`, ported here for the same reason: `total` counts every
+/// staircase pixel the finer resolution deliberately moved (the feature, not
+/// a defect), and `interior` counts only a disagreement neither the native
+/// pixel's own eight neighbours nor the scaled block itself can explain — the
+/// shape a leaked fill takes, since a leak floods a whole flat region where a
+/// moved staircase step is a boundary pixel by construction.
+#[derive(Default, Debug, Clone, Copy)]
+struct LineArtDeparture {
+    total: usize,
+    interior: usize,
+}
+
+fn line_art_compare(native: &LineArtPicture, big: &LineArtPicture, scale: u32) -> LineArtDeparture {
+    let s = scale as usize;
+    let (w, h) = (native.width(), native.height());
+    let small = line_art_majority_downsample(big, scale);
+    let mut d = LineArtDeparture::default();
+    for y in 0..h {
+        for x in 0..w {
+            let (a, b) = (native.pixels()[y * w + x], small[y * w + x]);
+            if a == b {
+                continue;
+            }
+            d.total += 1;
+            let flat_native = (y.saturating_sub(1)..=(y + 1).min(h - 1))
+                .flat_map(|ny| (x.saturating_sub(1)..=(x + 1).min(w - 1)).map(move |nx| (nx, ny)))
+                .all(|(nx, ny)| native.pixels()[ny * w + nx] == a);
+            let flat_block = (0..s)
+                .all(|dy| (0..s).all(|dx| big.pixels()[(y * s + dy) * big.width() + x * s + dx] == b));
+            if flat_native && flat_block {
+                d.interior += 1;
+            }
+        }
+    }
+    d
+}
+
+/// **The topology of a picture does not depend on the size it is drawn at**
+/// — `c64_specimens.rs`'s own corpus check, run here against all 310 real
+/// records of the four line-art titles rather than family B's eleven
+/// releases. Every record is drawn twice — fresh canvas, natively, and fresh
+/// canvas, supersampled at 2x and 3x — and the large raster is voted back
+/// down to the native grid, block by block. What must survive is the
+/// regions: a scaled line is a finer staircase and its pixels move, but a
+/// fill that was sealed at 1x must not find a seam at scale and flood the
+/// room. [`LineArtDeparture::interior`] is asserted zero across the whole
+/// corpus at every scale; `total` is only reported.
+#[test]
+fn every_line_art_record_keeps_its_regions_at_every_supersample() {
+    let mut any = false;
+    for (file, _, _, _) in LINE_ART_TABLES {
+        let Some(raw) = side_b(file) else { continue };
+        any = true;
+        let entries = line_art_table_entries(&raw);
+        for scale in [2u32, 3] {
+            let mut worst = (0usize, LineArtDeparture::default());
+            let mut totals = LineArtDeparture::default();
+            let mut pictures = 0usize;
+            for &(slot, ..) in &entries {
+                let rec = line_art_record(&raw, slot).expect("an entry");
+                let native = LineArtCanvas::new()
+                    .draw(&rec)
+                    .unwrap_or_else(|e| panic!("{file}: slot {slot} refused: {e}"));
+                let big = LineArtCanvas::new()
+                    .draw_at(&rec, scale)
+                    .unwrap_or_else(|e| panic!("{file}: slot {slot} refused at {scale}x: {e}"));
+                assert_eq!(
+                    (big.width(), big.height()),
+                    (160 * scale as usize, 96 * scale as usize),
+                    "{file}: slot {slot} at {scale}x"
+                );
+                let d = line_art_compare(&native, &big, scale);
+                assert_eq!(
+                    d.interior, 0,
+                    "{file}: slot {slot} at {scale}x: {} pixels disagree with no ink to explain them \
+                     — a fill reached somewhere the native raster sealed off",
+                    d.interior
+                );
+                totals.total += d.total;
+                totals.interior += d.interior;
+                if d.total > worst.1.total {
+                    worst = (slot, d);
+                }
+                pictures += 1;
+            }
+            let px = pictures * 160 * 96;
+            eprintln!(
+                "{file} at {scale}x: {} of {px} native pixels moved ({:.3}%), 0 unexplained; \
+                 worst slot {} with {}",
+                totals.total,
+                100.0 * totals.total as f64 / px as f64,
+                worst.0,
+                worst.1.total
+            );
+        }
+    }
+    if !any {
+        assert!(skipped_line_art());
+    }
+}
+
+/// A vacuous skip reads exactly like a pass, so say why.
+fn skipped_line_art() -> bool {
+    eprintln!(
+        "SKIP: no line-art side B found. Put the four titles' side B images under \
+         stories/scott-dialects/atari/, or point SCOTT_DIALECT_FIXTURES at a directory holding them."
+    );
+    true
+}
+
+/// SQ-1526's third adaptation point, against the real specimen SQ-1525's own
+/// note names: *Adventureland*'s "Dark hole" object (slot 100, object 0)
+/// draws lines and then recolours them black via `21 p q` — the supersample
+/// must redraw exactly what the recolour pass actually committed, at every
+/// scale, not the pre-recolour lines.
+#[test]
+fn the_dark_holes_recolour_survives_supersampling() {
+    let Some(raw) = side_b("SAGA #1 - Adventureland [side B].atr") else { return };
+    let rec = line_art_record(&raw, 100).expect("object 0, the dark hole");
+    let native = LineArtCanvas::new().draw(&rec).expect("plays");
+    assert_eq!(lit(&native), 0, "premise: the recolour blacks out every line it drew");
+    for scale in [2u32, 3] {
+        let big = LineArtCanvas::new().draw_at(&rec, scale).expect("plays at scale");
+        assert_eq!(
+            (big.width(), big.height()),
+            (160 * scale as usize, 96 * scale as usize),
+            "{scale}x"
+        );
+        assert_eq!(
+            big.pixels().iter().filter(|&&v| v != 0).count(),
+            0,
+            "{scale}x: the recoloured (black) lines should still be black, not their pre-recolour colour"
+        );
+        let d = line_art_compare(&native, &big, scale);
+        assert_eq!(d.interior, 0, "{scale}x: {} unexplained pixels on the dark hole", d.interior);
+    }
+}
+
+/// SQ-1526's fourth adaptation point, against a real animated record: the
+/// shared darkness card (slot 0) supersampled frame by frame via
+/// `draw_frames_at` must agree with the native `draw_frames` on region
+/// topology at every paused frame and at the final clear.
+#[test]
+fn the_darkness_cards_animation_survives_supersampling() {
+    let Some(raw) = side_b("SAGA #1 - Adventureland [side B].atr") else { return };
+    let rec = line_art_record(&raw, 0).expect("the darkness card");
+    let native_frames = LineArtCanvas::new().draw_frames(&rec).expect("plays");
+    for scale in [2u32, 3] {
+        let big_frames = LineArtCanvas::new().draw_frames_at(&rec, scale).expect("plays at scale");
+        assert_eq!(native_frames.len(), big_frames.len(), "{scale}x: same frame count");
+        for (i, (native, big)) in native_frames.iter().zip(&big_frames).enumerate() {
+            assert_eq!(
+                (big.width(), big.height()),
+                (160 * scale as usize, 96 * scale as usize),
+                "{scale}x frame {i}"
+            );
+            let d = line_art_compare(native, big, scale);
+            assert_eq!(d.interior, 0, "{scale}x frame {i}: {} unexplained pixels", d.interior);
+        }
+        // The animation's own shape survives: lit on the paused frames, black
+        // on the true final one (`the_darkness_card_is_an_animation_that_ends_black`
+        // pins the native counts).
+        assert!(lit(&big_frames[0]) > 0, "{scale}x: the first paused frame should still show lettering");
+        assert_eq!(lit(&big_frames[3]), 0, "{scale}x: the true final frame should still be plain black");
+    }
+}

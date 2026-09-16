@@ -144,6 +144,15 @@ pub const PALETTE_B: [u8; 4] = [0x00, 0x42, 0xB4, 0xE4];
 /// The line colour every record starts with: index 10 of [`COLOUR_PAIRS`].
 pub const DEFAULT_LINE_COLOUR: u8 = 10;
 
+/// The largest supersample [`LineArtCanvas::draw_at`] and
+/// [`LineArtCanvas::draw_frames_at`] will draw at (SQ-1526) — the same clamp
+/// `c64::MAX_PICTURE_SCALE` uses for the C64/ZX family-B vector artwork, and
+/// for the same reason: past this the canvas is more device pixels than any
+/// terminal picture band this artwork is shown in needs. Eight is
+/// [`CANVAS_WIDTH`] x [`CANVAS_HEIGHT`] at 1280 x 768, comparable to family
+/// B's own 2040 x 752 ceiling on its larger 255 x 94 canvas.
+pub const MAX_PICTURE_SCALE: u32 = 8;
+
 /// The colour a pixel pair presents: the average of the two GTIA colours it
 /// shows on alternate frames.
 #[must_use]
@@ -330,6 +339,39 @@ const fn pattern_pixel(pattern: u8, x: usize) -> u8 {
     (pattern >> (6 - 2 * (x & 3))) & 3
 }
 
+/// One committed line stroke's endpoints, `(from, to)` — the atomic unit a
+/// scale-aware draw's ink bookkeeping carries around (SQ-1526). Position
+/// only: the supersample always reads the NATIVE picture's own resolved
+/// colour at a line pixel rather than a re-derived one (see
+/// [`supersample_picture`]'s doc), so no colour needs to travel with one of
+/// these. `pub` because [`LineArtCanvas::draw_tracking`]'s own accumulator is
+/// one of these, held by a caller outside this crate
+/// (`crate::saga_atari::draw_line_art_record_tracking`, and `app`'s
+/// `PictSource::scott_line_art_composite` above that).
+pub type CommittedLine = ((u8, u8), (u8, u8));
+
+/// What [`LineArtCanvas::play`] logs for a scale-aware draw beyond the plain
+/// playback (SQ-1526): every line a record actually committed (post
+/// recolour filtering), position only — the supersample always reads the
+/// NATIVE picture's own resolved colour at a line pixel rather than a
+/// re-derived one (see [`supersample_picture`]'s doc), so no colour needs to
+/// travel with a logged stroke — and a snapshot of that list at each point
+/// `play` captured a frame, same length and order as its own `frames`
+/// output, so a paused frame's supersample redraws exactly the lines
+/// visible in ITS OWN snapshot rather than ones the record goes on to draw
+/// (or recolour) afterwards.
+#[derive(Default)]
+struct LineLog {
+    /// Every line actually drawn so far, in stream order. A recolour pass
+    /// re-walks the record from its start and may push the SAME (from, to)
+    /// pair again in a new colour — harmless, since this is only ever used
+    /// to build a boolean "is this pixel a line" mask ([`line_ink_mask`]),
+    /// never to reconstruct a colour.
+    all: Vec<CommittedLine>,
+    /// A copy of `all` at each frame [`LineArtCanvas::play`] captured.
+    at_frame: Vec<Vec<CommittedLine>>,
+}
+
 impl LineArtCanvas {
     /// A black screen with the fill colours at index 0 and the pen at the
     /// origin — nothing a room record does not overwrite before it draws.
@@ -381,7 +423,7 @@ impl LineArtCanvas {
     /// far as it got.
     pub fn draw(&mut self, stream: &[u8]) -> Result<LineArtPicture, LineArtError> {
         let mut frames = Vec::new();
-        self.play(stream, false, &mut frames)?;
+        self.play(stream, false, &mut frames, None)?;
         Ok(frames.pop().expect("play always pushes the final frame"))
     }
 
@@ -394,8 +436,109 @@ impl LineArtCanvas {
     /// As [`draw`](Self::draw).
     pub fn draw_frames(&mut self, stream: &[u8]) -> Result<Vec<LineArtPicture>, LineArtError> {
         let mut frames = Vec::new();
-        self.play(stream, true, &mut frames)?;
+        self.play(stream, true, &mut frames, None)?;
         Ok(frames)
+    }
+
+    /// [`draw`](Self::draw) at `scale` device pixels per native pixel,
+    /// clamped to 1..=[`MAX_PICTURE_SCALE`] (SQ-1526) — the same
+    /// region-then-line supersample `c64::PictureList::rasterise_at` uses
+    /// for the C64/ZX family-B vector artwork (SQ-1467), adapted to this
+    /// format's own primitives. [`supersample_picture`] has the rule and why
+    /// it holds here too; `scale` 1 is exactly [`draw`](Self::draw).
+    ///
+    /// # Errors
+    ///
+    /// As [`draw`](Self::draw).
+    pub fn draw_at(&mut self, stream: &[u8], scale: u32) -> Result<LineArtPicture, LineArtError> {
+        let scale = scale.clamp(1, MAX_PICTURE_SCALE);
+        if scale == 1 {
+            return self.draw(stream);
+        }
+        let mut frames = Vec::new();
+        let mut log = LineLog::default();
+        self.play(stream, false, &mut frames, Some(&mut log))?;
+        let native = frames.pop().expect("play always pushes the final frame");
+        let lines = log.at_frame.pop().unwrap_or_default();
+        Ok(supersample_picture(&native, &lines, scale))
+    }
+
+    /// [`draw_frames`](Self::draw_frames) at `scale`, clamped as
+    /// [`draw_at`](Self::draw_at) (SQ-1526) — each paused frame supersampled
+    /// independently, from exactly the lines ITS OWN snapshot shows rather
+    /// than lines the record goes on to draw (or recolour) afterwards.
+    ///
+    /// # Errors
+    ///
+    /// As [`draw`](Self::draw).
+    pub fn draw_frames_at(
+        &mut self,
+        stream: &[u8],
+        scale: u32,
+    ) -> Result<Vec<LineArtPicture>, LineArtError> {
+        let scale = scale.clamp(1, MAX_PICTURE_SCALE);
+        if scale == 1 {
+            return self.draw_frames(stream);
+        }
+        let mut frames = Vec::new();
+        let mut log = LineLog::default();
+        self.play(stream, true, &mut frames, Some(&mut log))?;
+        Ok(frames
+            .iter()
+            .zip(&log.at_frame)
+            .map(|(f, l)| supersample_picture(f, l, scale))
+            .collect())
+    }
+
+    /// [`draw`](Self::draw), also appending every line this record actually
+    /// committed to `lines` — the CALLER's own accumulator, not state this
+    /// canvas remembers itself (SQ-1526).
+    ///
+    /// For a caller compositing several records onto one canvas into ONE
+    /// scale-aware render — a room, then its object overlays, the shape
+    /// [`crate::saga_atari::draw_line_art_record_tracking`] plays — handing
+    /// the SAME `Vec` to every call and then reading
+    /// [`Self::picture_from_lines_at`] is how the final supersample learns
+    /// about every stroke that went into it, room's and objects' alike, not
+    /// only the last record's own. This canvas does not keep that history
+    /// itself: `app::graphics::AtariLineArtPictures`, this canvas's host in
+    /// `lanthorn`'s `app` crate, keeps ONE canvas alive for a whole play
+    /// session (so a never-clearing room draws over the real previous
+    /// screen), and an unconditionally-growing internal log would grow for
+    /// as long as the session does, most of it for rooms the player is no
+    /// longer looking at. A caller's own `Vec`, built fresh for one render
+    /// and dropped after, has no such lifetime.
+    ///
+    /// # Errors
+    ///
+    /// As [`draw`](Self::draw).
+    pub fn draw_tracking(
+        &mut self,
+        stream: &[u8],
+        lines: &mut Vec<CommittedLine>,
+    ) -> Result<LineArtPicture, LineArtError> {
+        let mut frames = Vec::new();
+        let mut log = LineLog::default();
+        self.play(stream, false, &mut frames, Some(&mut log))?;
+        lines.extend(log.all);
+        Ok(frames.pop().expect("play always pushes the final frame"))
+    }
+
+    /// [`Self::picture`] at `scale` device pixels per native pixel, clamped
+    /// as [`draw_at`](Self::draw_at) (SQ-1526) — supersampled using `lines`,
+    /// which [`Self::draw_tracking`]'s own doc explains. `painted` covers the
+    /// whole (scaled) canvas, exactly as [`Self::picture`]'s does.
+    #[must_use]
+    pub fn picture_from_lines_at(
+        &self,
+        lines: &[CommittedLine],
+        scale: u32,
+    ) -> LineArtPicture {
+        let scale = scale.clamp(1, MAX_PICTURE_SCALE);
+        if scale == 1 {
+            return self.picture();
+        }
+        supersample_picture(&self.picture(), lines, scale)
     }
 
     fn play(
@@ -403,6 +546,7 @@ impl LineArtCanvas {
         stream: &[u8],
         keep_pauses: bool,
         frames: &mut Vec<LineArtPicture>,
+        mut log: Option<&mut LineLog>,
     ) -> Result<(), LineArtError> {
         let mut painted = PaintedBox::default();
         let mut line_colour = DEFAULT_LINE_COLOUR;
@@ -443,6 +587,19 @@ impl LineArtCanvas {
                     };
                     if draw {
                         self.line(self.pen, (p, q), pat, &mut painted);
+                        // SQ-1526: position only — a scale-aware draw always
+                        // reads the NATIVE picture's own resolved colour at a
+                        // line pixel (see `supersample_picture`'s doc), never
+                        // a colour carried alongside the stroke, so nothing
+                        // else needs logging here. Logged from inside the
+                        // SAME `draw` gate the recolour pass itself uses, so
+                        // a supersampled redraw always redraws exactly the
+                        // lines this native run actually committed — not a
+                        // naive re-walk of every `A?` token regardless of
+                        // recolour filtering.
+                        if let Some(log) = &mut log {
+                            log.all.push((self.pen, (p, q)));
+                        }
                     }
                     self.pen = (p, q);
                 }
@@ -476,6 +633,9 @@ impl LineArtCanvas {
                 2 => {
                     if keep_pauses && recolour.is_none() {
                         frames.push(self.picture_with(painted.clone().finish()));
+                        if let Some(log) = &mut log {
+                            log.at_frame.push(log.all.clone());
+                        }
                     }
                 }
                 // clear, or the recolour marker
@@ -508,6 +668,9 @@ impl LineArtCanvas {
             at += 3;
         }
         frames.push(self.picture_with(painted.finish()));
+        if let Some(log) = &mut log {
+            log.at_frame.push(log.all.clone());
+        }
         Ok(())
     }
 
@@ -750,6 +913,283 @@ fn on_canvas(at: usize, x: u8, y: u8) -> Result<(), LineArtError> {
         Ok(())
     } else {
         Err(LineArtError::OffCanvas { at, x, y })
+    }
+}
+
+// ── Supersampling (SQ-1526) ───────────────────────────────────────────────────
+//
+// `c64::PictureList::rasterise_at` (SQ-1467) established the rule this
+// section adapts: the NATIVE (1x) raster owns which REGION every pixel
+// belongs to, because that is the picture the machine actually drew and
+// because fills naturally reproduce correctly at 1x, and the supersampled
+// canvas re-walks only the LINE-drawing operations at device resolution. See
+// `c64.rs`'s own doc on `rasterise_at` for the measured reason fills are
+// never simply re-run at scale (25 of 516 real C64 pictures leaked when they
+// were): a fill sealed by two lines a sub-pixel apart at 1x finds a seam
+// once the lines are drawn at their true finer positions and floods through
+// it. SQ-1525's own note on THIS format's fill makes the same argument
+// stronger, not weaker: it is not even a true flood fill (a column-then-span
+// sweep that deliberately never reaches back above the seed column's top),
+// which is MORE sensitive to exactly where a boundary line lands than family
+// B's simple 4-connected flood, not less.
+//
+// Three things differ from family B's version of this rule, all handled
+// below:
+//
+// 1. **Two fill semantics and five fill patterns, needing no new logic at
+//    all.** A fill only ever decides which REGION a native pixel belongs to
+//    and what colour that region resolves to — never a line's geometry — so
+//    under "native owns regions" a device pixel that inherits a native
+//    pixel's colour already carries whatever pattern and fill type resolved
+//    it. `every_fill_pattern_survives_supersampling` (this module's own
+//    tests) and the corpus check in `crates/scott/tests/saga_atari_specimens.rs`
+//    both exercise this rather than just assuming it.
+// 2. **Colour is a PAIR across two bitmaps, not one 0-15 index** — but this
+//    is orthogonal to the supersample geometry: `LineArtPicture::pixels`
+//    already stores the resolved pair as a single `u8` (`a * 4 + b`), the
+//    same atomic unit family B carries a palette index in, so
+//    `supersample_picture` below carries it around exactly the same way.
+// 3. **The recolour-replay pass changes WHICH tokens are "the lines" for a
+//    render**, so [`LineLog`] is filled from inside [`LineArtCanvas::play`]'s
+//    own `draw` gate — the same one the recolour filter already computes —
+//    rather than by a second, independent walk of the token stream that
+//    could disagree with it. A supersampled redraw therefore always redraws
+//    exactly the lines the native pass actually committed.
+//
+// (Animation frames, the fourth adaptation point, are handled by
+// `LineArtCanvas::draw_frames_at` computing each paused frame independently
+// from its own `LineLog` snapshot — see that method's doc.)
+
+/// A device pixel [`supersample_picture`] has not decided yet. Pixel values
+/// are 0-15 (`a * 4 + b`), so any value above them is free for the purpose —
+/// the same trick `c64::UNSET` plays for family B.
+const SUPERSAMPLE_UNSET: u8 = 0xFF;
+
+/// [`LineArtCanvas::draw_at`] and [`LineArtCanvas::draw_frames_at`]'s shared
+/// body (SQ-1526): `native` is the record's own [`CANVAS_WIDTH`] x
+/// [`CANVAS_HEIGHT`] picture — the ground truth for which region every pixel
+/// belongs to — and `lines` is every line stroke that record actually
+/// committed ([`LineLog::all`] or one of its [`LineLog::at_frame`]
+/// snapshots), position only.
+///
+/// # The rule (see this module's "Supersampling" section for the full
+/// argument)
+///
+/// A device pixel the scaled line covers, or whose native pixel was NOT a
+/// line at 1x, takes that native pixel's own already-resolved colour
+/// straight from `native` — whatever the native raster actually shows there,
+/// line or a fill/clear that ran afterwards. (This format commits colour
+/// straight to the pixel with no separate cell-clash layer the way family B's
+/// screen-RAM ink does, so there is no need to distinguish the two cases the
+/// way `c64::PictureList::supersample` does — `native.pixels` is already the
+/// single source of truth either way.)
+///
+/// What is left — the part of a 1x line's pixel that the finer line has
+/// moved off — inherits the nearest region colour reachable without crossing
+/// the redrawn line, by breadth-first walk from every already-resolved
+/// pixel, seeded from region pixels only and never from the ink itself (so
+/// the walk cannot paint the vacated area back the line colour). A pixel
+/// left wholly enclosed by ink, unreachable by the walk, falls back to its
+/// own native pixel's colour — which, since this format has no cell-clash
+/// layer, already IS the line's own colour there, so no separate
+/// single-picture fallback constant (`c64::PictureList::line`'s role) is
+/// needed.
+fn supersample_picture(native: &LineArtPicture, lines: &[CommittedLine], scale: u32) -> LineArtPicture {
+    let s = scale as usize;
+    let (w, h) = (CANVAS_WIDTH * s, CANVAS_HEIGHT * s);
+    let native_ink = line_ink_mask(lines, 1);
+    let big_ink = line_ink_mask(lines, scale);
+    let mut out = vec![SUPERSAMPLE_UNSET; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let native_idx = (y / s) * CANVAS_WIDTH + x / s;
+            if big_ink[i] || !native_ink[native_idx] {
+                out[i] = native.pixels[native_idx];
+            }
+        }
+    }
+
+    // Breadth-first: give every still-UNSET pixel the region it is
+    // 4-connected to without crossing the redrawn (big_ink) line — seeded
+    // from resolved pixels only, so the walk can never originate from the
+    // line itself.
+    let mut queue: std::collections::VecDeque<usize> = (0..out.len())
+        .filter(|&i| {
+            if out[i] == SUPERSAMPLE_UNSET {
+                return false;
+            }
+            let (x, y) = ((i % w) as i32, (i / w) as i32);
+            [(x, y + 1), (x, y - 1), (x + 1, y), (x - 1, y)].into_iter().any(|(nx, ny)| {
+                (0..w as i32).contains(&nx)
+                    && (0..h as i32).contains(&ny)
+                    && out[ny as usize * w + nx as usize] == SUPERSAMPLE_UNSET
+            })
+        })
+        .collect();
+    while let Some(i) = queue.pop_front() {
+        let colour = out[i];
+        let (x, y) = ((i % w) as i32, (i / w) as i32);
+        for (nx, ny) in [(x, y + 1), (x, y - 1), (x + 1, y), (x - 1, y)] {
+            if !(0..w as i32).contains(&nx) || !(0..h as i32).contains(&ny) {
+                continue;
+            }
+            let j = ny as usize * w + nx as usize;
+            if out[j] == SUPERSAMPLE_UNSET {
+                out[j] = colour;
+                queue.push_back(j);
+            }
+        }
+    }
+
+    // Wholly enclosed by ink, unreachable by the walk — see this function's
+    // own doc for why the native pixel's own colour is already the answer.
+    let pixels = out
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if v == SUPERSAMPLE_UNSET {
+                let (x, y) = (i % w, i / w);
+                native.pixels[(y / s) * CANVAS_WIDTH + x / s]
+            } else {
+                v
+            }
+        })
+        .collect();
+
+    LineArtPicture {
+        width: w,
+        height: h,
+        pixels,
+        painted: native.painted.map(|p| Painted {
+            left: p.left * s,
+            top: p.top * s,
+            right: (p.right + 1) * s - 1,
+            bottom: (p.bottom + 1) * s - 1,
+        }),
+    }
+}
+
+/// Which pixels of a `scale`-times-larger canvas the resolved line strokes
+/// touch — [`line_pixels_at_scale`] over every entry of `lines`, and nothing
+/// else. At `scale` 1 this is the native raster's own line footprint, which
+/// is what tells [`supersample_picture`] whether a native pixel's colour is
+/// a line or a fill/clear that happened to land on the same value (SQ-1526,
+/// mirroring `c64::PictureList::ink_mask`).
+fn line_ink_mask(lines: &[CommittedLine], scale: u32) -> Vec<bool> {
+    let (w, h) = (CANVAS_WIDTH * scale as usize, CANVAS_HEIGHT * scale as usize);
+    let mut mask = vec![false; w * h];
+    for &(from, to) in lines {
+        line_pixels_at_scale(from, to, scale, |x, y| {
+            if (0..w as i32).contains(&x) && (0..h as i32).contains(&y) {
+                mask[y as usize * w + x as usize] = true;
+            }
+        });
+    }
+    mask
+}
+
+/// This renderer's own line algorithm ([`LineArtCanvas::line`]), walked at
+/// `scale` device pixels per native pixel and handing every device pixel of
+/// the stroke to `pen` — `c64::bresenham`'s technique (SQ-1467), applied to
+/// THIS format's own case split rather than family B's, because the two
+/// renderers pick their starting endpoint and step sign differently and a
+/// borrowed one would silently draw a different line at scale than
+/// [`LineArtCanvas::line`] draws at 1x.
+///
+/// Endpoints are pre-multiplied by `scale` so the walk is the exact same
+/// line at finer resolution, not a coarser one nudged — scaling both
+/// endpoints of a Bresenham line and re-running it gives the true finer
+/// line. Every plot also paints a `scale`-long run across the MINOR axis:
+/// at 1x this renderer puts exactly one pixel per native step of the major
+/// axis, so without the run a magnified line would be one device pixel wide
+/// rather than one *native* pixel wide (`c64.rs`'s own doc on `bresenham`
+/// has the fuller argument, including why a square brush is wrong: it would
+/// widen every diagonal by sqrt(2)). Both endpoints are pre-capped with the
+/// whole `scale` x `scale` block so two lines sharing an endpoint still
+/// share its whole block and a joint stays sealed.
+///
+/// At `scale` 1 this reduces to exactly [`LineArtCanvas::line`]'s own walk —
+/// the endpoint-block cap becomes the same two single-pixel plots `line`
+/// already makes redundantly with its own loop, which is harmless here
+/// because `pen` only ever marks "this pixel is ink", an idempotent set.
+fn line_pixels_at_scale(from: (u8, u8), to: (u8, u8), scale: u32, mut pen: impl FnMut(i32, i32)) {
+    let s = scale as i32;
+    let (x0, y0) = (i32::from(to.0) * s, i32::from(to.1) * s);
+    let (x1, y1) = (i32::from(from.0) * s, i32::from(from.1) * s);
+    for dy in 0..s {
+        for dx in 0..s {
+            pen(x0 + dx, y0 + dy);
+            pen(x1 + dx, y1 + dy);
+        }
+    }
+    if (x0, y0) == (x1, y1) {
+        return;
+    }
+    // This renderer's own case split ([`LineArtCanvas::line`], reproduced
+    // exactly): which endpoint the major axis walks from and which sign the
+    // step uses, scale-invariant because scaling every coordinate by the
+    // same positive factor preserves every equality and ordering test below.
+    let dx = (x0 - x1).abs();
+    let dy = (y0 - y1).abs();
+    let x_major = dy < dx;
+    let (mut x, mut y, sign): (i32, i32, i32) = if x_major {
+        if y0 == y1 {
+            if x0 >= x1 {
+                (x1, y1, 1)
+            } else {
+                (x0, y0, 1)
+            }
+        } else if y1 < y0 {
+            (x1, y1, if x0 >= x1 { 1 } else { -1 })
+        } else {
+            (x0, y0, if x0 >= x1 { -1 } else { 1 })
+        }
+    } else if x0 == x1 {
+        if y0 >= y1 {
+            (x1, y1, 1)
+        } else {
+            (x1, y1, -1)
+        }
+    } else if x1 < x0 {
+        (x1, y1, if y0 >= y1 { 1 } else { -1 })
+    } else {
+        (x0, y0, if y1 >= y0 { 1 } else { -1 })
+    };
+    if x_major {
+        let mut err = 2 * dy - dx;
+        for _ in 0..dx {
+            for k in 0..s {
+                pen(x, y + k);
+            }
+            if err >= 0 {
+                y += 1;
+                err += 2 * dy - 2 * dx;
+            } else {
+                err += 2 * dy;
+            }
+            x += sign;
+        }
+        for k in 0..s {
+            pen(x, y + k);
+        }
+    } else {
+        let mut err = 2 * dx - dy;
+        for _ in 0..dy {
+            for k in 0..s {
+                pen(x + k, y);
+            }
+            if err >= 0 {
+                x += 1;
+                err += 2 * dx - 2 * dy;
+            } else {
+                err += 2 * dx;
+            }
+            y += sign;
+        }
+        for k in 0..s {
+            pen(x + k, y);
+        }
     }
 }
 
@@ -1013,6 +1453,241 @@ mod tests {
             canvas.draw(&[0x00]).unwrap().painted(),
             None,
             "an empty record is a picture that drew nothing"
+        );
+    }
+
+    // ── Supersampling (SQ-1526) ─────────────────────────────────────────────
+
+    /// Downsample a supersampled picture back to native resolution by
+    /// MAJORITY vote per block — `c64_specimens.rs`'s own
+    /// `majority_downsample`, ported here for the same reason.
+    fn majority_downsample(big: &LineArtPicture, scale: u32) -> Vec<u8> {
+        let s = scale as usize;
+        let (w, h) = (big.width() / s, big.height() / s);
+        let mut out = vec![0u8; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let mut counts = [0u32; 16];
+                for dy in 0..s {
+                    for dx in 0..s {
+                        let p = big.pixels()[(y * s + dy) * big.width() + x * s + dx];
+                        counts[usize::from(p) & 15] += 1;
+                    }
+                }
+                let mut best = 0usize;
+                for (i, &c) in counts.iter().enumerate() {
+                    if c > counts[best] {
+                        best = i;
+                    }
+                }
+                out[y * w + x] = best as u8;
+            }
+        }
+        out
+    }
+
+    /// How many native pixels a supersample's majority downsample disagrees
+    /// with AND has no ink nearby to explain — `c64_specimens.rs`'s
+    /// `Departure::interior`, the count that caught family B's 25-of-516 leak
+    /// class (see this module's "Supersampling" section). A leak floods a
+    /// whole flat region; a staircase pixel that simply moved cannot land
+    /// here, because either its native neighbourhood or its scaled block is
+    /// not flat.
+    fn interior_departures(native: &LineArtPicture, big: &LineArtPicture, scale: u32) -> usize {
+        let s = scale as usize;
+        let (w, h) = (native.width(), native.height());
+        let small = majority_downsample(big, scale);
+        let mut interior = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let (a, b) = (native.pixels()[y * w + x], small[y * w + x]);
+                if a == b {
+                    continue;
+                }
+                let flat_native = (y.saturating_sub(1)..=(y + 1).min(h - 1))
+                    .flat_map(|ny| (x.saturating_sub(1)..=(x + 1).min(w - 1)).map(move |nx| (nx, ny)))
+                    .all(|(nx, ny)| native.pixels()[ny * w + nx] == a);
+                let flat_block = (0..s)
+                    .all(|dy| (0..s).all(|dx| big.pixels()[(y * s + dy) * big.width() + x * s + dx] == b));
+                if flat_native && flat_block {
+                    interior += 1;
+                }
+            }
+        }
+        interior
+    }
+
+    #[test]
+    fn draw_at_scale_one_is_exactly_draw() {
+        let s = stream(&[(0x60, 4, 9), (0x80, 10, 10), (0xA0, 60, 40), (0xE0, 15, 15)]);
+        assert_eq!(LineArtCanvas::new().draw(&s).unwrap(), LineArtCanvas::new().draw_at(&s, 1).unwrap());
+    }
+
+    #[test]
+    fn draw_frames_at_scale_one_is_exactly_draw_frames() {
+        let s = stream(&[
+            (0x60, 4, 9),
+            (0x80, 0, 0),
+            (0xA0, 159, 95),
+            (0x41, 0, 0),
+            (0x69, 9, 9),
+            (0x20, 0, 0),
+        ]);
+        assert_eq!(
+            LineArtCanvas::new().draw_frames(&s).unwrap(),
+            LineArtCanvas::new().draw_frames_at(&s, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn scale_is_clamped_to_one_through_max_picture_scale() {
+        let s = stream(&[(0x60, 4, 9), (0x80, 10, 10), (0xA0, 60, 40), (0xE0, 15, 15)]);
+        assert_eq!(
+            LineArtCanvas::new().draw_at(&s, 0).unwrap().width(),
+            CANVAS_WIDTH,
+            "scale 0 clamps to 1"
+        );
+        assert_eq!(
+            LineArtCanvas::new().draw_at(&s, 1000).unwrap().width(),
+            CANVAS_WIDTH * MAX_PICTURE_SCALE as usize,
+            "a scale far past the max clamps to MAX_PICTURE_SCALE"
+        );
+    }
+
+    /// A parallelogram outlined in colour 0 and flood-filled with colour 4,
+    /// deliberately NOT axis-aligned so the supersample has a real staircase
+    /// to resolve on every edge — the falsification target: reverting
+    /// [`supersample_picture`] to naively re-run the fill at scale (the
+    /// approach `c64.rs`'s own doc measured leaking on 25 of 516 real C64
+    /// pictures) makes this fail with a large, non-zero interior count. Left
+    /// implemented correctly, it is zero at every scale.
+    #[test]
+    fn a_supersampled_diagonal_box_keeps_its_region_topology() {
+        let s = stream(&[
+            (0x60, 4, 9),
+            (0x80, 20, 20),
+            (0xA0, 90, 35),
+            (0xA0, 100, 80),
+            (0xA0, 30, 65),
+            (0xA0, 20, 20),
+            (0xE0, 50, 50),
+        ]);
+        let native = LineArtCanvas::new().draw(&s).unwrap();
+        for scale in [2u32, 3, 5] {
+            let big = LineArtCanvas::new().draw_at(&s, scale).unwrap();
+            assert_eq!(
+                (big.width(), big.height()),
+                (CANVAS_WIDTH * scale as usize, CANVAS_HEIGHT * scale as usize),
+                "scale {scale}"
+            );
+            let interior = interior_departures(&native, &big, scale);
+            assert_eq!(
+                interior, 0,
+                "scale {scale}: {interior} pixels disagree with no ink to explain them — \
+                 a fill reached somewhere the native raster sealed off"
+            );
+        }
+    }
+
+    /// Every fill pattern (SQ-1526's first adaptation point) only ever
+    /// decides which region a native pixel belongs to, never a line's
+    /// geometry — so it needs no supersample-specific logic, and this checks
+    /// that rather than assuming it: a device pixel inheriting its native
+    /// pixel's colour already carries whatever pattern resolved it.
+    #[test]
+    fn every_fill_pattern_survives_supersampling() {
+        for style in 0u8..=4 {
+            let s = stream(&[
+                (0x60, 4, 9),
+                (0x80, 20, 15),
+                (0xA0, 95, 30),
+                (0xA0, 110, 75),
+                (0xA0, 35, 60),
+                (0xA0, 20, 15),
+                (0xE0 | style, 50, 45),
+            ]);
+            let native = LineArtCanvas::new().draw(&s).unwrap();
+            let big = LineArtCanvas::new().draw_at(&s, 3).unwrap();
+            let interior = interior_departures(&native, &big, 3);
+            assert_eq!(interior, 0, "fill pattern {style}: {interior} unexplained pixels at 3x");
+        }
+    }
+
+    /// SQ-1526's third adaptation point: the recolour-replay pass changes
+    /// which tokens are "the lines" for a render, so the supersample must
+    /// redraw the SAME lines the native pass actually committed, not every
+    /// `A?` token regardless of the filter.
+    #[test]
+    fn a_recoloured_line_is_redrawn_correctly_at_scale() {
+        let s = stream(&[
+            (0x60, 9, 9),
+            (0x80, 10, 10),
+            (0xA0, 60, 45),
+            (0x64, 9, 9),
+            (0x80, 10, 60),
+            (0xA0, 60, 90),
+            (0x60, 0, 9),
+            (0x21, 0, 0),
+        ]);
+        let native = LineArtCanvas::new().draw(&s).unwrap();
+        assert_eq!(
+            native.pixels()[10 * CANVAS_WIDTH + 10],
+            0,
+            "premise: the recoloured line's own start point should already be black at 1x"
+        );
+        for scale in [2u32, 3] {
+            let big = LineArtCanvas::new().draw_at(&s, scale).unwrap();
+            let interior = interior_departures(&native, &big, scale);
+            assert_eq!(interior, 0, "scale {scale}: recoloured picture, {interior} unexplained pixels");
+            let (mx, my) = (10 * scale as usize, 10 * scale as usize);
+            assert_eq!(
+                big.pixels()[my * big.width() + mx],
+                0,
+                "scale {scale}: the recoloured line should still be black, not its pre-recolour colour"
+            );
+            // And the line NOT touched by the recolour marker (colour 4,
+            // drawn at y=60..90) should be untouched either way.
+            let (ox, oy) = (10 * scale as usize, 60 * scale as usize);
+            assert_eq!(
+                big.pixels()[oy * big.width() + ox],
+                native.pixels()[60 * CANVAS_WIDTH + 10],
+                "scale {scale}: the untouched line should keep its own colour"
+            );
+        }
+    }
+
+    /// SQ-1526's fourth adaptation point: each paused frame is supersampled
+    /// independently, from exactly the lines ITS OWN snapshot shows.
+    #[test]
+    fn draw_frames_at_supersamples_each_paused_frame_independently() {
+        let s = stream(&[
+            (0x60, 4, 9),
+            (0x80, 0, 0),
+            (0xA0, 159, 95),
+            (0x41, 0, 0),
+            (0x69, 9, 9),
+            (0x20, 0, 0),
+        ]);
+        let native_frames = LineArtCanvas::new().draw_frames(&s).unwrap();
+        let big_frames = LineArtCanvas::new().draw_frames_at(&s, 3).unwrap();
+        assert_eq!(native_frames.len(), big_frames.len());
+        assert_eq!(big_frames.len(), 2, "one paused frame, then the final clear");
+        for (i, (native, big)) in native_frames.iter().zip(&big_frames).enumerate() {
+            assert_eq!(
+                (big.width(), big.height()),
+                (CANVAS_WIDTH * 3, CANVAS_HEIGHT * 3),
+                "frame {i}"
+            );
+            let interior = interior_departures(native, big, 3);
+            assert_eq!(interior, 0, "frame {i}: {interior} unexplained pixels");
+        }
+        assert!(
+            big_frames[0].pixels().iter().any(|&v| v != 0),
+            "the diagonal should be on the paused frame, supersampled"
+        );
+        assert!(
+            big_frames[1].pixels().iter().all(|&v| v == 0),
+            "the final (post-clear) frame should still be plain black"
         );
     }
 }
