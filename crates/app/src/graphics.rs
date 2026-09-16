@@ -249,6 +249,44 @@ struct SagaRecords {
     order: Vec<(String, scott::PictureFile)>,
 }
 
+/// A US S.A.G.A. **Atari 8-bit** release's own family-C picture TABLE and
+/// companion side (spec §8.3, §12.10, SQ-1496), used instead of
+/// [`SagaRecords`]'s by-NAME lookup because the Atari companion side has no
+/// filesystem at all — `scott::saga_atari`'s module docs.
+///
+/// Records are found by the (usage, index) table
+/// [`scott::saga_atari::read_picture_table`] reads off side A, keyed by a
+/// FILE OFFSET into side B rather than by name — so overlays are identified
+/// here by a synthetic `"atari:<hex file offset>"` string
+/// ([`atari_overlay_name`]/[`atari_overlay_offset`]) instead of a real disk
+/// file name, which lets every other piece of overlay plumbing
+/// (`Self::scott_overlays`, `ScottSession::current_overlays`,
+/// `Self::scott_composite`) go on treating an overlay as "a name the
+/// container holds" without knowing this platform has no names at all.
+#[derive(Debug)]
+struct AtariSagaPictures {
+    /// Side B with the volume table of contents excised
+    /// (`scott::saga_atari::splice_vtoc`) — every file offset `table` names
+    /// is decoded against this buffer, through `spliced_of`.
+    side_b_spliced: Vec<u8>,
+    table: scott::saga_atari::AtariPictureTable,
+    scheme: scott::saga_pictures::FamilyCScheme,
+}
+
+/// The synthetic overlay "name" for an Atari picture record at `file_offset`
+/// — see [`AtariSagaPictures`]'s own doc for why there is no real name to use
+/// instead.
+fn atari_overlay_name(file_offset: usize) -> String {
+    format!("atari:{file_offset:05x}")
+}
+
+/// The inverse of [`atari_overlay_name`], or `None` for a name that is not
+/// one of these synthetic ones (every real disk file name is, since none of
+/// them starts with `atari:`).
+fn atari_overlay_offset(name: &str) -> Option<usize> {
+    usize::from_str_radix(name.strip_prefix("atari:")?, 16).ok()
+}
+
 impl SagaRecords {
     /// `parse` is the family's own naming rule — §8.3's for the Commodore 64
     /// and Atari, §8.4's for the Apple II, §8.5's for MS-DOS.
@@ -397,6 +435,17 @@ pub struct PictSource {
     ///
     /// `None` for every other source.
     scott_saga: Option<(SagaRecords, scott::SagaUs)>,
+    /// An Atari 8-bit US S.A.G.A. release's own family-C picture TABLE and
+    /// companion side (SQ-1496) — see [`AtariSagaPictures`]'s own doc for why
+    /// this is a separate field from `scott_saga` rather than a fourth shape
+    /// that struct's by-name lookup tries to cover: the Atari has no names to
+    /// key by at all.
+    ///
+    /// `None` for every other source, and for an Atari release whose
+    /// companion side is missing, unpaired, or whose table this crate could
+    /// not verify ([`PictSource::from_scott_saga_atari`] refuses rather than
+    /// guesses).
+    scott_saga_atari: Option<(AtariSagaPictures, scott::SagaUs)>,
     /// The MS-DOS *Questprobe* release's own **family-E** CGA bitmaps (spec
     /// §8.5, SQ-1477) as the raw `.PAK` files they are stored as, keyed by
     /// the name the zip holds them under, with the release whose room-picture
@@ -459,6 +508,7 @@ impl PictSource {
             hw_palette: None,
             scott_c64: None,
             scott_saga: None,
+            scott_saga_atari: None,
             scott_saga_dos: None,
             blend_columns: false,
             screen_palette: false,
@@ -606,11 +656,50 @@ impl PictSource {
         PictSource { scott_saga: Some((records, release)), ..PictSource::new(None) }
     }
 
+    /// A source backed by an **Atari 8-bit** US S.A.G.A. release's own
+    /// family-C picture TABLE and companion side (spec §8.3, §12.10,
+    /// SQ-1496) — [`Self::from_scott_saga`] with no filesystem to walk, so
+    /// this reads the (usage, index) association off side A's own table
+    /// instead (`scott::saga_atari::read_picture_table`) and locates records
+    /// on side B by header rather than by name.
+    ///
+    /// `side_a` is the whole database side — the same bytes
+    /// `ScottSession::new_with_options` already parsed the database from —
+    /// and `side_b` is the companion picture side
+    /// [`crate::hints::saga_companion_side`] pairs it with.
+    ///
+    /// `None` when the table cannot be read at all — side A's own marker in
+    /// front of it does not match this release's Adventure International
+    /// number (a differently-mastered disk), or `side_a` is too short to
+    /// hold it — refused rather than drawn, the same rule every record in
+    /// this table is individually held to.
+    pub fn from_scott_saga_atari(
+        side_a: &[u8],
+        side_b: &[u8],
+        release: scott::SagaUs,
+    ) -> Option<PictSource> {
+        let scheme = release.picture_scheme();
+        let side_b_spliced = scott::saga_atari::splice_vtoc(side_b);
+        let table = scott::saga_atari::read_picture_table(
+            side_a,
+            &side_b_spliced,
+            scheme,
+            release.adventure,
+        )?;
+        Some(PictSource {
+            scott_saga_atari: Some((AtariSagaPictures { side_b_spliced, table, scheme }, release)),
+            ..PictSource::new(None)
+        })
+    }
+
     /// Which platform's family-C artwork this source holds, or `None` when it
     /// holds none — `/dump-windows` names it so a frame says where a room's
     /// picture came from (SQ-1475).
     pub fn scott_saga_platform(&self) -> Option<scott::SagaPlatform> {
-        self.scott_saga.as_ref().map(|(_, release)| release.platform)
+        self.scott_saga
+            .as_ref()
+            .map(|(_, release)| release.platform)
+            .or_else(|| self.scott_saga_atari.as_ref().map(|_| scott::SagaPlatform::Atari8Bit))
     }
 
     /// How many family-C picture records this source holds. `None` when it is
@@ -618,7 +707,10 @@ impl PictSource {
     /// [`ScottSession`](crate::scott_session::ScottSession) only builds one
     /// from a non-empty walk.
     pub fn scott_saga_count(&self) -> Option<usize> {
-        self.scott_saga.as_ref().map(|(files, _)| files.len())
+        self.scott_saga
+            .as_ref()
+            .map(|(files, _)| files.len())
+            .or_else(|| self.scott_saga_atari.as_ref().map(|(pics, _)| pics.table.entries().len()))
     }
 
     /// A source backed by an MS-DOS *Questprobe* release's own **family-E**
@@ -679,6 +771,15 @@ impl PictSource {
         usage: scott::PictureUsage,
         indices: &[u16],
     ) -> Vec<String> {
+        if let Some((pics, _)) = &self.scott_saga_atari {
+            return pics
+                .table
+                .entries()
+                .iter()
+                .filter(|e| e.usage == usage && indices.contains(&e.index))
+                .map(|e| atari_overlay_name(e.file_offset))
+                .collect();
+        }
         match (&self.scott_saga, &self.scott_saga_dos) {
             (Some((files, _)), _) | (None, Some((files, _))) => {
                 files.overlays_for(usage, indices)
@@ -741,6 +842,12 @@ impl PictSource {
     /// source holds. `None` for a name the container does not carry, or a
     /// record its own family's decoder refuses (§11).
     fn scott_record_picture(&self, name: &str) -> Option<OverlayRecord> {
+        if let Some((pics, _)) = &self.scott_saga_atari {
+            let file_offset = atari_overlay_offset(name)?;
+            let pic =
+                scott::saga_atari::decode_table_picture(&pics.side_b_spliced, file_offset, pics.scheme)?;
+            return Some(OverlayRecord::Strips(pic));
+        }
         if let Some((files, release)) = &self.scott_saga {
             let record = files.record(name)?;
             return match release.platform {
@@ -1345,6 +1452,29 @@ impl PictSource {
                         let name = scott::room_picture_file_name(release, resnum as usize)?;
                         let record = files.record(&name)?;
                         scott_saga_image(record, release.platform)
+                    })
+                }
+                // SQ-1496: the Atari companion side has no name to look up at
+                // all, so `resnum` is resolved through the picture table
+                // instead. `INVENTORY_PICTURE` (98) is the one index the
+                // table itself leaves unused — the real inventory backdrop is
+                // a fixed pointer elsewhere on side A (see the table's own
+                // doc) — so it is special-cased here rather than in the
+                // table reader, exactly as every other index is resolved by
+                // asking the table for (Room, resnum).
+                None if self.scott_saga_atari.is_some() => {
+                    self.scott_saga_atari.as_ref().and_then(|(pics, _)| {
+                        let file_offset = if resnum as usize == scott::saga_us::INVENTORY_PICTURE {
+                            pics.table.inventory_backdrop_file_offset()?
+                        } else {
+                            pics.table.find(scott::PictureUsage::Room, resnum as u16)?
+                        };
+                        let pic = scott::saga_atari::decode_table_picture(
+                            &pics.side_b_spliced,
+                            file_offset,
+                            pics.scheme,
+                        )?;
+                        Some(picture_to_image(&pic))
                     })
                 }
                 // SQ-1463: room n's picture is `pictures[n - 1]` (the decoder's
@@ -2532,6 +2662,15 @@ pub struct ScottPictureSources {
     /// *Voodoo Castle* and *The Count* on the Apple II, which are the only two
     /// with any rows.
     pub look_table: Option<scott::AppleLookTable>,
+    /// An Atari 8-bit US S.A.G.A. release's own companion picture SIDE, read
+    /// whole (SQ-1496) — `saga_pictures` is always empty for this platform
+    /// (there is no filesystem on the companion side to walk, §12.10), so the
+    /// pictures travel this way instead:
+    /// [`crate::graphics::PictSource::from_scott_saga_atari`] reads side A's
+    /// own (usage, index) table against this buffer. `None` for every other
+    /// release, and for an Atari release whose companion side is missing or
+    /// unpaired ([`crate::hints::saga_atari_companion_side`]).
+    pub atari_side_b: Option<Vec<u8>>,
 }
 
 impl ScottPictureSources {
@@ -2548,6 +2687,7 @@ impl ScottPictureSources {
             resolution: ScottPictureResolution::default(),
             saga_pictures: Vec::new(),
             look_table: None,
+            atari_side_b: None,
         }
     }
 
@@ -2578,6 +2718,12 @@ impl ScottPictureSources {
     /// Set a scrambled Apple II release's LOOK close-up table (SQ-1499).
     pub fn with_look_table(mut self, look_table: Option<scott::AppleLookTable>) -> Self {
         self.look_table = look_table;
+        self
+    }
+
+    /// Set an Atari 8-bit release's companion picture side, whole (SQ-1496).
+    pub fn with_atari_side_b(mut self, atari_side_b: Option<Vec<u8>>) -> Self {
+        self.atari_side_b = atari_side_b;
         self
     }
 
@@ -2628,7 +2774,15 @@ impl ScottPictureSources {
         // release actually is one of the three, because
         // `saga_apple_look_table` reads `M2` and refuses everything else.
         let look_table = crate::hints::saga_apple_look_table(story_path);
-        Self { pict_blorb, char_px, resolution, saga_pictures, look_table }
+        // SQ-1496: and, for an Atari 8-bit release, its whole companion
+        // picture side — there is no per-file walk to do on this platform at
+        // all (`saga_pictures` above is always empty for it), so the side
+        // travels whole and `PictSource::from_scott_saga_atari` reads its
+        // (usage, index) table directly.
+        let atari_side_b = matches!(scott::detect_saga_us(bytes), Some(scott::SagaPlatform::Atari8Bit))
+            .then(|| crate::hints::saga_atari_companion_side(story_path))
+            .flatten();
+        Self { pict_blorb, char_px, resolution, saga_pictures, look_table, atari_side_b }
     }
 }
 

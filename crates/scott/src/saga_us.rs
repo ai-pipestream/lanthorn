@@ -289,15 +289,32 @@ impl SagaUs {
     /// in room 14 would put a full-window doll over the Chimney for the rest
     /// of the game.
     ///
-    /// **On the other two platforms it still cannot fire on any specimen this
-    /// crate can open**, and that is a fact about the picture sets rather than
-    /// about this table: the Atari 8-bit sides carry no (usage, index) for a
-    /// record at all (`crate::saga_atari`'s module docs), and the Commodore 64
-    /// release of neither title is in the archive. The rule stays for the
-    /// release that finally supplies one.
+    /// **The numbers below are not the Atari's.** SQ-1496's picture-table
+    /// investigation measured the Atari 8-bit numbering directly (the table
+    /// at side A file offset 0x9593, cross-checked against what each record
+    /// actually draws) and it disagrees with the numbers §12.11 states — *The
+    /// Count*'s Atari table has 80→room 8 (agreeing), 82→room 18, 83→room 9
+    /// and a fourth, 84→room 21, that §12.11 does not mention at all; *Voodoo
+    /// Castle*'s is 70→room 14, not 80. The match below is therefore
+    /// evaluated only for **the Commodore 64**, which this crate has no
+    /// specimen of either title on — the numbers stay as §12.11 states them,
+    /// unverified, until one turns up. See the SQ-1496 investigation note for
+    /// the measurement (`docs/internals/` does not carry it; the quest does).
     pub fn room_overlay(&self, room: usize) -> Option<usize> {
         if matches!(self.platform, SagaPlatform::AppleII) {
             return None;
+        }
+        if matches!(self.platform, SagaPlatform::Atari8Bit) {
+            return match (self.version, self.adventure, room) {
+                // *The Count* (§12.12: version 115, adventure 5).
+                (115, 5, 8) => Some(80),
+                (115, 5, 18) => Some(82),
+                (115, 5, 9) => Some(83),
+                (115, 5, 21) => Some(84),
+                // *Voodoo Castle* (version 119, adventure 4).
+                (119, 4, 14) => Some(70),
+                _ => None,
+            };
         }
         match (self.version, self.adventure, room) {
             // *The Count* (§12.12: version 115, adventure 5).
@@ -1971,14 +1988,16 @@ mod tests {
         }
     }
 
-    /// §12.11's other shape of override, keyed on the ROOM: *The Count* draws
-    /// 80, 81 and 82 only in rooms 8, 18 and 9, *Voodoo Castle* 80 only in
-    /// room 14, and no other release draws any (SQ-1482) — and neither of
+    /// §12.11's other shape of override, keyed on the ROOM, on the
+    /// **Commodore 64** — no specimen of either title exists to measure
+    /// against, so this is still §12.11's stated numbers exactly: *The Count*
+    /// draws 80, 81 and 82 only in rooms 8, 18 and 9, *Voodoo Castle* 80 only
+    /// in room 14, and no other release draws any (SQ-1482) — and neither of
     /// them on the Apple II, where those indices are LOOK close-ups keyed on
     /// an item (SQ-1499).
     #[test]
-    fn the_count_and_voodoo_castle_room_keyed_overlays() {
-        let count = SagaUs { version: 115, adventure: 5, platform: SagaPlatform::Atari8Bit };
+    fn the_count_and_voodoo_castle_room_keyed_overlays_on_the_commodore_64() {
+        let count = SagaUs { version: 115, adventure: 5, platform: SagaPlatform::Commodore64 };
         assert_eq!(count.room_overlay(8), Some(80));
         assert_eq!(count.room_overlay(18), Some(81));
         assert_eq!(count.room_overlay(9), Some(82));
@@ -1986,7 +2005,7 @@ mod tests {
             assert_eq!(count.room_overlay(room), None, "room {room}");
         }
 
-        let voodoo = SagaUs { version: 119, adventure: 4, platform: SagaPlatform::Atari8Bit };
+        let voodoo = SagaUs { version: 119, adventure: 4, platform: SagaPlatform::Commodore64 };
         assert_eq!(voodoo.room_overlay(14), Some(80));
         for room in [0usize, 8, 9, 13, 15, 18] {
             assert_eq!(voodoo.room_overlay(room), None, "room {room}");
@@ -2007,12 +2026,40 @@ mod tests {
 
         // *Strange Odyssey* shares Voodoo Castle's version number and is a
         // different adventure — the pair is load-bearing here too.
-        let odyssey = SagaUs { version: 119, adventure: 6, platform: SagaPlatform::Atari8Bit };
+        let odyssey = SagaUs { version: 119, adventure: 6, platform: SagaPlatform::Commodore64 };
         assert_eq!(odyssey.room_overlay(14), None, "version alone does not name a title");
 
         let hulk = SagaUs { version: 127, adventure: 1, platform: SagaPlatform::Commodore64 };
         for room in 0..=20 {
             assert_eq!(hulk.room_overlay(room), None, "the Hulk's overrides are item-keyed");
         }
+    }
+
+    /// The SAME override, on the **Atari 8-bit**, with the numbers SQ-1496's
+    /// picture-table investigation actually measured — which disagree with
+    /// §12.11's (see this method's own doc): *The Count* draws 80, 82, 83
+    /// and 84 in rooms 8, 18, 9 and 21, *Voodoo Castle* draws 70 (not 80) in
+    /// room 14.
+    #[test]
+    fn the_count_and_voodoo_castle_room_keyed_overlays_on_the_atari() {
+        let count = SagaUs { version: 115, adventure: 5, platform: SagaPlatform::Atari8Bit };
+        assert_eq!(count.room_overlay(8), Some(80));
+        assert_eq!(count.room_overlay(18), Some(82));
+        assert_eq!(count.room_overlay(9), Some(83));
+        assert_eq!(count.room_overlay(21), Some(84));
+        for room in [0usize, 1, 7, 10, 14, 17, 19, 22] {
+            assert_eq!(count.room_overlay(room), None, "room {room}");
+        }
+
+        let voodoo = SagaUs { version: 119, adventure: 4, platform: SagaPlatform::Atari8Bit };
+        assert_eq!(voodoo.room_overlay(14), Some(70));
+        for room in [0usize, 8, 9, 13, 15, 18, 21] {
+            assert_eq!(voodoo.room_overlay(room), None, "room {room}");
+        }
+
+        // *Strange Odyssey* shares Voodoo Castle's version number and is a
+        // different adventure — the pair is load-bearing here too.
+        let odyssey = SagaUs { version: 119, adventure: 6, platform: SagaPlatform::Atari8Bit };
+        assert_eq!(odyssey.room_overlay(14), None, "version alone does not name a title");
     }
 }

@@ -26,6 +26,8 @@ Absolute URLs or no link.
 - **US Adventure International releases (Questprobe featuring The Hulk and its
   siblings) now open on their real title card** instead of jumping straight to
   room one, matching the original disks.
+- **Atari 8-bit Voodoo Castle, The Count, and The Sorcerer of Claymorgue
+  Castle now show their room and object artwork instead of none.**
 
 ### Fixed
 

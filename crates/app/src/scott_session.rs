@@ -265,6 +265,7 @@ impl ScottSession {
             resolution: picture_resolution,
             saga_pictures,
             look_table,
+            atari_side_b,
         } = pictures;
         // `Database::parse` takes raw bytes (SQ-1412), so a Latin-1 or
         // otherwise non-UTF-8 `.dat` loads here instead of being rejected by
@@ -316,7 +317,12 @@ impl ScottSession {
         // its picture files after the adventure number too — and read off the
         // database the VM is already holding rather than re-sniffed from the
         // bytes.
-        let saga_release = (!saga_pictures.is_empty())
+        // SQ-1496: `saga_pictures` is always empty for an Atari release (no
+        // filesystem on the companion side to walk at all, §12.10) — its
+        // pictures travel as `atari_side_b` instead, so the gate below has to
+        // consider that too or the whole Atari picture source is skipped
+        // before the platform check further down ever runs.
+        let saga_release = (!saga_pictures.is_empty() || atari_side_b.is_some())
             .then(|| vm.database().saga_us)
             .flatten();
         // SQ-1477: family E — the MS-DOS *Questprobe* release. Its database
@@ -339,6 +345,20 @@ impl ScottSession {
         // first, and neither ever fires for the other's files.
         let mut picts = if pict_blorb.is_some() {
             PictSource::new(pict_blorb)
+        } else if let Some(release) =
+            saga_release.filter(|r| r.platform == scott::SagaPlatform::Atari8Bit)
+        {
+            // SQ-1496: the Atari has no filesystem on its companion side to
+            // walk (`saga_pictures` is always empty for it) — the (usage,
+            // index) association is a table on side A instead, read against
+            // the whole companion side `ScottPictureSources` paired in.
+            // Falls back to no pictures, the same honest-empty shape the
+            // general `saga_release` arm below answers with when its own
+            // disk carries none: a missing/unpaired companion side, or a
+            // table this crate's own marker check refuses.
+            atari_side_b
+                .and_then(|side_b| PictSource::from_scott_saga_atari(&bytes, &side_b, release))
+                .unwrap_or_else(|| PictSource::new(None))
         } else if let Some(release) = saga_release {
             PictSource::from_scott_saga(saga_pictures, release)
         } else if let Some(release) = dos_release {

@@ -475,40 +475,17 @@ fn side_a(file: &str) -> Option<Vec<u8>> {
     Some(raw)
 }
 
-/// Where a two-byte table entry points on side B, as a FILE offset.
-///
-/// Measured on all three bitmap titles (SQ-1496): entry `[a, s]` names the
-/// 1-based 128-byte sector `((a & 3) << 8) | s` and the byte `(a >> 3) * 7`
-/// within it — every one of the 241 records starts at a multiple of seven
-/// bytes into its sector, which is what the nought-to-six bytes of filler
-/// between records are for. Bit 2 of `a` is a flag, set on the object
-/// entries that are drawn on the inventory screen rather than in a room.
-fn table_entry_file_offset(a: u8, s: u8) -> usize {
-    let sector = (usize::from(a & 3) << 8) | usize::from(s);
-    16 + (sector - 1) * 128 + usize::from(a >> 3) * 7
-}
-
-/// A side-B file offset in the spliced coordinates [`scan_picture_side`] uses.
-fn spliced_of(file_offset: usize) -> usize {
-    if file_offset < scott::saga_atari::VTOC_OFFSET {
-        file_offset
-    } else {
-        file_offset - scott::saga_atari::VTOC_LEN
-    }
-}
-
-/// Side A file offset of the picture table: two-byte entries for room-usage
-/// pictures 0-99 and then for object pictures 0-89, identical in position on
-/// all three bitmap titles. Ninety object slots, not a hundred: on *Voodoo
-/// Castle* non-table bytes begin at `0x970F`, which is entry 190.
-const PICTURE_TABLE: usize = 0x9593;
-
-/// How many two-byte entries the table holds.
-const PICTURE_TABLE_ENTRIES: usize = 190;
-
-/// Side A file offset of the one entry outside the table: the inventory
-/// backdrop, the same three-bar card on all three titles.
-const INVENTORY_ENTRY: usize = 0x984F;
+// The arithmetic that turns a two-byte table entry into a side-B FILE offset
+// (`table_entry_file_offset`) and that turns a side-B FILE offset into the
+// spliced coordinates `record_at`/`scan_picture_side` use (`spliced_of`) is
+// now production code — promoted from this test's own hand-rolled copies once
+// SQ-1496 wired the table into `PictSource` — so this suite calls
+// `scott::saga_atari`'s versions rather than maintaining a second copy that
+// could drift from them. Likewise the table's own layout constants.
+use scott::saga_atari::{
+    spliced_of, table_entry_file_offset, INVENTORY_BACKDROP_ENTRY, PICTURE_TABLE_ENTRIES,
+    PICTURE_TABLE_OFFSET as PICTURE_TABLE,
+};
 
 /// Per title: side A, side B, the room count, and how many table entries the
 /// walk must resolve to a located record (room usage, object usage) — the
@@ -563,10 +540,11 @@ fn side_a_carries_the_picture_table_and_every_entry_names_a_located_record() {
         }
         assert_eq!((room_hits, object_hits), (want_rooms, want_objects), "{a_file}: resolved entries");
         // §8.6's reserved 99 is present and 98 is not — the inventory backdrop
-        // is reached through INVENTORY_ENTRY instead.
+        // is reached through INVENTORY_BACKDROP_ENTRY instead.
         assert_ne!(a[PICTURE_TABLE + 198], 0, "{a_file}: no title picture");
         assert_eq!(&a[PICTURE_TABLE + 196..PICTURE_TABLE + 198], &[0, 0], "{a_file}: slot 98 is unused");
-        let inv = table_entry_file_offset(a[INVENTORY_ENTRY], a[INVENTORY_ENTRY + 1]);
+        let inv =
+            table_entry_file_offset(a[INVENTORY_BACKDROP_ENTRY], a[INVENTORY_BACKDROP_ENTRY + 1]);
         let card = found
             .iter()
             .find(|r| r.offset() == spliced_of(inv))
@@ -597,4 +575,131 @@ fn the_counts_two_unreadable_records_each_lost_exactly_one_sector() {
     assert_eq!(0xF72C + 3344, 0x1043C, "the record ends five filler bytes before room 17's header at 0x10441");
     assert!(sector(498).iter().all(|&x| x == 0), "sector 498 is unwritten");
     assert!(sector(497).iter().any(|&x| x != 0) && sector(499).iter().any(|&x| x != 0));
+}
+
+// ── Promoted to production (SQ-1496/SQ-1498) ────────────────────────────────
+
+/// [`scott::saga_atari::read_picture_table`] end to end, cross-checked
+/// against the lower-level walk above rather than duplicating it: same entry
+/// counts, and the inventory backdrop it finds is the same record the
+/// hand-rolled walk finds by the same arithmetic.
+#[test]
+fn read_picture_table_resolves_the_same_entries_the_hand_rolled_walk_does() {
+    for (a_file, b_file, _rooms, want_rooms, want_objects) in TABLE_TITLES {
+        let (Some(a), Some(b)) = (side_a(a_file), side_b(b_file)) else { continue };
+        let scheme = scheme_of(b_file);
+        let spliced = splice_vtoc(&b);
+        let adventure = if a_file.contains("Count") {
+            5
+        } else if a_file.contains("Voodoo") {
+            4
+        } else {
+            13
+        };
+        let table = scott::saga_atari::read_picture_table(&a, &spliced, scheme, adventure)
+            .unwrap_or_else(|| panic!("{a_file}: the table's own marker should verify"));
+        let rooms = table.entries().iter().filter(|e| e.usage == scott::PictureUsage::Room).count();
+        let objects = table.entries().len() - rooms;
+        assert_eq!((rooms, objects), (want_rooms, want_objects), "{a_file}: production table entries");
+        // The title card (99) resolves to a real, decodable picture.
+        let title_offset = table
+            .find(scott::PictureUsage::Room, 99)
+            .unwrap_or_else(|| panic!("{a_file}: no title picture in the production table"));
+        assert!(
+            scott::saga_atari::decode_table_picture(&spliced, title_offset, scheme).is_some(),
+            "{a_file}: the title picture should decode"
+        );
+        // The inventory backdrop resolves and decodes too.
+        let inv_offset = table
+            .inventory_backdrop_file_offset()
+            .unwrap_or_else(|| panic!("{a_file}: no inventory backdrop in the production table"));
+        assert!(
+            scott::saga_atari::decode_table_picture(&spliced, inv_offset, scheme).is_some(),
+            "{a_file}: the inventory backdrop should decode"
+        );
+    }
+}
+
+/// A garbage table entry is refused, not drawn (SQ-1496's own caution about
+/// *Voodoo Castle*'s table running short past 0x970F) — a synthetic side A
+/// with one entry pointing at a spliced offset no record starts at must not
+/// appear in [`scott::saga_atari::read_picture_table`]'s output.
+///
+/// This is the deliberate falsification for the table reader: an entry whose
+/// arithmetic is wrong (or that names a region the scan never located) must
+/// be dropped rather than surfaced as a resolvable picture.
+#[test]
+fn a_table_entry_pointing_at_no_record_is_refused() {
+    let Some(a_real) = side_a("SAGA #5 - The Count [side A].atr") else { return };
+    let Some(b) = side_b("SAGA #5 - The Count [side B].atr") else { return };
+    let scheme = scheme_of("SAGA #5 - The Count [side B].atr");
+    let spliced = splice_vtoc(&b);
+
+    // A real table, then one entry corrupted to point at an offset that is
+    // never a record's own header — room 5's slot, overwritten with a
+    // plainly-off-grid (sector, byte) pair.
+    let mut a = a_real.clone();
+    a[PICTURE_TABLE + 2 * 5] = 0xFF;
+    a[PICTURE_TABLE + 2 * 5 + 1] = 0xFF;
+    let table = scott::saga_atari::read_picture_table(&a, &spliced, scheme, 5)
+        .expect("the marker is untouched, so the table itself still reads");
+    assert!(
+        table.find(scott::PictureUsage::Room, 5).is_none(),
+        "the corrupted entry must not resolve to any record"
+    );
+    // And every other entry is unaffected.
+    assert!(table.find(scott::PictureUsage::Room, 1).is_some(), "room 1's own entry still resolves");
+}
+
+/// The marker in front of the table is checked, not trusted: flip one byte of
+/// it and [`scott::saga_atari::read_picture_table`] must refuse the whole
+/// table rather than read three garbage bytes as if they were real.
+#[test]
+fn a_wrong_marker_refuses_the_whole_table() {
+    let Some(a_real) = side_a("SAGA #5 - The Count [side A].atr") else { return };
+    let Some(b) = side_b("SAGA #5 - The Count [side B].atr") else { return };
+    let scheme = scheme_of("SAGA #5 - The Count [side B].atr");
+    let spliced = splice_vtoc(&b);
+    let mut a = a_real;
+    a[scott::saga_atari::PICTURE_TABLE_MARKER] = 0xFF;
+    assert!(
+        scott::saga_atari::read_picture_table(&a, &spliced, scheme, 5).is_none(),
+        "a corrupted marker must refuse the table rather than read past it"
+    );
+}
+
+/// **SQ-1498's fallback recovers a real picture for both damaged records.**
+/// [`scott::saga_atari::decode_table_picture`] tries the ordinary path first
+/// and falls back to [`scott::saga_atari::decode_record_with_bad_sector_fallback`]
+/// only when that refuses — exactly what happens for *The Count*'s room 6 and
+/// room 16, at the file offsets the picture table itself names for them.
+#[test]
+fn the_counts_two_damaged_records_decode_through_the_sq_1498_fallback() {
+    let Some(b) = side_b("SAGA #5 - The Count [side B].atr") else { return };
+    let scheme = scheme_of("SAGA #5 - The Count [side B].atr");
+    let spliced = splice_vtoc(&b);
+    for (file_offset, what) in [(0x7CBA, "room 6 (CRYPT)"), (0xF72C, "room 16 (Dungeon)")] {
+        // The ordinary path refuses these two, which is the premise of the
+        // fallback existing at all.
+        assert!(
+            scott::saga_atari::record_at(&spliced, spliced_of(file_offset), scheme).is_none(),
+            "{what}: record_at should still refuse this, unchanged"
+        );
+        let pic = scott::saga_atari::decode_table_picture(&spliced, file_offset, scheme)
+            .unwrap_or_else(|| panic!("{what}: the SQ-1498 fallback should recover a picture"));
+        // Non-vacuity, the same bar `one_picture_per_title_is_pinned_by_geometry_and_by_pixels`
+        // uses: real art uses several of the four pixel values and is not
+        // overwhelmingly one of them.
+        let mut seen = [0usize; 4];
+        for &v in pic.pixels() {
+            seen[usize::from(v)] += 1;
+        }
+        let total: usize = seen.iter().sum();
+        let used = seen.iter().filter(|&&n| n > 0).count();
+        assert!(used >= 3, "{what}: the fallback decode uses only {used} of the four pixel values");
+        assert!(
+            seen.iter().all(|&n| n * 10 < total * 9),
+            "{what}: the fallback decode is nine-tenths one colour, so it did not really recover anything"
+        );
+    }
 }

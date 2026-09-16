@@ -114,6 +114,9 @@ mod scott_saga_pictures;
 #[path = "suites/scott_saga_dos_pictures.rs"]
 mod scott_saga_dos_pictures;
 
+#[path = "suites/scott_saga_atari_pictures.rs"]
+mod scott_saga_atari_pictures;
+
 #[path = "suites/scott_c64_picture_colours.rs"]
 mod scott_c64_picture_colours;
 

@@ -205,12 +205,34 @@ impl StripPaint {
 /// indistinguishable from not reading them — or when `data` runs out, which is
 /// how a truncated record decodes to what it has instead of refusing.
 pub fn paint_strips(data: &[u8], layout: &StripLayout, scheme: FamilyCScheme) -> StripPaint {
+    paint_strips_from(data, layout, scheme, 0)
+}
+
+/// [`paint_strips`], but painting begins at pair index `start_pair` rather
+/// than 0 — the column and row the first pair lands at are computed as
+/// though `start_pair` earlier pairs had already been placed, so a caller
+/// with an intact TAIL of a record's data (but not its head) can paint that
+/// tail at the position it would occupy in the whole region instead of at
+/// the region's own top-left corner.
+///
+/// The one caller today is
+/// [`crate::saga_atari::decode_record_with_bad_sector_fallback`] (SQ-1498),
+/// anchoring an intact tail at the END of a damaged record's own region;
+/// every other caller reaches this through [`paint_strips`] with
+/// `start_pair` 0, which is exactly the walk this function has always done.
+pub(crate) fn paint_strips_from(
+    data: &[u8],
+    layout: &StripLayout,
+    scheme: FamilyCScheme,
+    start_pair: usize,
+) -> StripPaint {
     let need = layout.pair_count();
     let mut pixels = vec![0u8; CANVAS_WIDTH * CANVAS_HEIGHT];
     let mut box_ = PaintedBox::default();
-    let mut emitted = 0usize;
-    let mut x = layout.left;
-    let mut k = 0i32;
+    let mut emitted = start_pair.min(need);
+    let pairs = layout.pairs.max(1);
+    let mut x = layout.left + (emitted as i32 / pairs) * 8;
+    let mut k = emitted as i32 % pairs;
     let mut i = 0usize;
 
     while emitted < need && i < data.len() {

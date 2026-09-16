@@ -13,8 +13,11 @@
 //! what a shared render path actually promises. Both are gitignored commercial
 //! fixtures and every case here skips vacuously without them.
 //!
-//! The Atari case is deliberately the *absence* of pictures; see
-//! [`an_atari_saga_side_a_reports_no_pictures_because_the_sides_are_not_paired`].
+//! The Atari case pinned here is deliberately the *absence* of pictures — a
+//! LINE-ART title, still unwired (SQ-1497); see
+//! [`an_atari_line_art_side_a_reports_no_pictures_even_through_the_by_name_walk`].
+//! The three Atari titles that DO show pictures now (SQ-1496's family-C
+//! table) have their own suite, `scott_saga_atari_pictures.rs`.
 
 use app::engine::{Engine, GraphicsWindow, WinNode};
 use app::render::graphics::{kitty_picker, GraphicsRender};
@@ -259,20 +262,29 @@ fn the_hulks_room_one_is_a_drawing_and_not_a_flat_fill() {
     }
 }
 
-/// An Atari US S.A.G.A. side A opens and plays, and reports **no pictures**.
+/// An Atari US S.A.G.A. side A opens and plays, and — with only the
+/// catalogue-based `saga_pictures` handed over, no companion side — reports
+/// **no pictures**.
 ///
-/// That is the correct answer today and worth pinning as one: §8.3 puts the
-/// Atari's pictures on the companion picture side, reached by hard-coded byte
-/// offsets rather than through a catalogue, and §12.10 says those per-title
-/// lists "are not recoverable from the database". `cli_host::disk_set` pairs
-/// disks by FILENAME for the multi-disk Z-machine releases, and nothing pairs
-/// a S.A.G.A. side A with its side B — so the picture side is not even
-/// mounted, let alone indexed. A future lane that wires the pairing and the
-/// offset lists will change this case; until then the honest report is "the
-/// pictures are not on this file", not a blank band that reads as a text-only
-/// game.
+/// §8.3 puts the Atari's pictures on the companion picture side, reached by
+/// hard-coded byte offsets rather than through a catalogue, so a caller that
+/// only gathers `saga_pictures` (§8.3's `R01nnn`-style catalogue walk, which
+/// the Atari has none of) finds nothing — the honest report is "the pictures
+/// are not on this file", not a blank band that reads as a text-only game.
+/// `crate::scott_saga_atari_pictures` is where the WIRED path lives now
+/// (SQ-1496): boot through `ScottPictureSources::resolve`, which pairs side A
+/// with its side B and reads the picture table `scott::saga_atari` describes,
+/// for the three titles that are family-C bitmaps
+/// (`scott::AtariPictureFormat::FamilyCBitmap`) — *Voodoo Castle*, *The
+/// Count*, *Claymorgue Castle*. **This title is not one of them**:
+/// *Adventureland* is a line-drawing side (`AtariPictureFormat::LineArt`,
+/// SQ-1497), which stays unwired regardless of pairing because nothing
+/// settles which index its records answer to — so it is still the right
+/// title to pin the "no pictures" case with, and the second half of this case
+/// (below) checks that pairing its side B in through the full `resolve` path
+/// changes nothing for it.
 #[test]
-fn an_atari_saga_side_a_reports_no_pictures_because_the_sides_are_not_paired() {
+fn an_atari_line_art_side_a_reports_no_pictures_even_through_the_by_name_walk() {
     let path = fixture_path("scott-dialects/atari/SAGA #1 - Adventureland [side A].atr");
     if !path.exists() {
         eprintln!("SKIP: needs stories/scott-dialects/atari/ (gitignored commercial fixtures)");
@@ -293,10 +305,14 @@ fn an_atari_saga_side_a_reports_no_pictures_because_the_sides_are_not_paired() {
         "premise: it really is a US S.A.G.A. database on the Atari"
     );
     let session = ScottSession::new_with_options(
-        bytes,
+        bytes.clone(),
         false,
         None,
         scott::Options::default(),
+        // Deliberately built without `atari_side_b`, unlike the full
+        // `ScottPictureSources::resolve` path — this is the "gathered files
+        // by name only" shape a bare `.none().with_saga_pictures(...)` caller
+        // gets, which the Atari has nothing to offer either way.
         app::graphics::ScottPictureSources::none().with_saga_pictures(mounted.saga_pictures),
     )
     .expect("Adventureland boots off its own side A");
@@ -305,6 +321,22 @@ fn an_atari_saga_side_a_reports_no_pictures_because_the_sides_are_not_paired() {
     assert!(
         dump.contains("a S.A.G.A. release with no picture files on this file"),
         "the dump distinguishes this from a text-only game:\n{dump}"
+    );
+
+    // And pairing the side properly in, through the real `resolve` path,
+    // changes nothing for a LINE-ART title — SQ-1496's table read refuses a
+    // side that is not the family-C bitmap shape (its own marker bytes are
+    // not there to match), so this still shows no band rather than guessing.
+    let game_dir = path.parent().expect("a directory").to_path_buf();
+    let pictures =
+        app::graphics::ScottPictureSources::resolve(&path, &bytes, &game_dir, None, None, None);
+    assert!(pictures.atari_side_b.is_some(), "the companion side pairs fine — it is just the wrong shape");
+    let paired_session =
+        ScottSession::new_with_options(bytes, false, None, scott::Options::default(), pictures)
+            .expect("Adventureland boots off its own side A, paired side B and all");
+    assert!(
+        picture_band(&paired_session.screen()).is_none(),
+        "a line-art side must not be read as a family-C table"
     );
 }
 

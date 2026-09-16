@@ -1686,6 +1686,27 @@ pub fn saga_companion_side(path: &Path) -> Option<PathBuf> {
     found
 }
 
+/// The whole companion **picture side** of an Atari 8-bit US S.A.G.A.
+/// release mounted at `path` (side A), read raw (SQ-1496).
+///
+/// [`saga_companion_side`] does the actual pairing — the same `side A`/`side
+/// B` rule every other two-sided release here uses, Apple II included — this
+/// just reads the sibling it finds whole rather than walking it for named
+/// files, because the Atari companion side has no filesystem at all (§12.10):
+/// the (usage, index) association is a table on side A
+/// (`scott::saga_atari::read_picture_table`) and the records themselves are
+/// found on side B by header (`scott::saga_atari::scan_picture_side`), not by
+/// name, so there is nothing here for [`saga_picture_files`]'s by-name walk
+/// to find.
+///
+/// `None` when the pairing fails — no sibling, an ambiguous one, or one that
+/// will not read — the same honest-empty shape every other picture lookup
+/// here answers with.
+pub fn saga_atari_companion_side(path: &Path) -> Option<Vec<u8>> {
+    let side = saga_companion_side(path)?;
+    std::fs::read(&side).ok()
+}
+
 /// Load story bytes from `path`, restricted to **Z-code** images.
 ///
 /// Convenience wrapper over [`load_story`] for the Z-machine-only call sites

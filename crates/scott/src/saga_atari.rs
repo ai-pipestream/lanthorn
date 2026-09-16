@@ -75,17 +75,35 @@
 //! coherent picture; the declared size exceeds the decoded length by 0 on 198
 //! of them and by exactly 1 on the other 43, and never by more.
 //!
-//! # The one thing still missing
+//! # Which picture index a record answers to (SQ-1496)
 //!
-//! **Which picture index a record answers to is not determined**, and it is
-//! not in the data. §8.6 needs a (usage, index) pair per record and §12.10
-//! says the database has none; measured here, the disk's own order is not it
-//! either — *The Count*'s twenty-five full-canvas records include its darkness
-//! card (§8.6's reserved index 0) and its room 1 next to each other and in
-//! that order, but the record *before* them is room 2's picture, and no table
-//! keyed by record offset or by sector appears on either side of the release.
-//! Until that is settled a host can decode these records but cannot say which
-//! room wants which, so nothing here is wired into the picture band yet.
+//! It is not in the disk's own order — *The Count*'s twenty-five full-canvas
+//! records include its darkness card (§8.6's reserved index 0) and its room 1
+//! next to each other and in that order, but the record *before* them is room
+//! 2's picture — and it is not in the database (§12.10 is right that "cannot
+//! be recovered from the database" is about the database). **It is on side A
+//! all the same**, in a table the game program reads rather than the database
+//! parser does: [`read_picture_table`] walks 190 two-byte entries at
+//! [`PICTURE_TABLE_OFFSET`], validating each against a record this module's
+//! own scan (or [`decode_record_with_bad_sector_fallback`]'s SQ-1498
+//! fallback) can actually decode, plus one more fixed entry at
+//! [`INVENTORY_BACKDROP_ENTRY`] for the picture §12.11's inventory command
+//! draws behind the carried items. See that section for the table's layout
+//! and for the investigation note's per-title tables in the quest itself
+//! (SQ-1496).
+//!
+//! # SQ-1498: two damaged records on *The Count*
+//!
+//! Two of the 241 records this module's scan locates are not really
+//! unreadable — they are ordinary well-formed records each missing exactly
+//! one 128-byte sector on the one specimen this crate has (a stale duplicate
+//! sector for room 6, an unwritten all-zero one for room 16). The strict scan
+//! still refuses both, correctly — a damaged record is not a well-formed one
+//! — but [`decode_record_with_bad_sector_fallback`] gives
+//! [`decode_table_picture`] a documented, specimen-specific second path that
+//! recovers a recognisable (if slightly marred) picture for the two records
+//! the picture table names there. See that function's own doc for the
+//! recipe.
 //!
 //! # The volume table of contents
 //!
@@ -138,10 +156,10 @@
 
 use crate::apple_pictures;
 use crate::saga_pictures::{
-    atari_colour, paint_strips, resolve_palette, FamilyCScheme, Picture, PictureError, StripLayout,
-    CANVAS_HEIGHT, CANVAS_WIDTH,
+    atari_colour, paint_strips, paint_strips_from, resolve_palette, FamilyCScheme, Painted, Picture,
+    PictureError, StripLayout, CANVAS_HEIGHT, CANVAS_WIDTH,
 };
-use crate::saga_us::SagaPlatform;
+use crate::saga_us::{PictureUsage, SagaPlatform};
 
 /// File offset of sector 360, the volume table of contents (§7.3).
 ///
@@ -448,6 +466,337 @@ pub fn decode_record(
         // own region reports what it really covered (SQ-1487's rectangle).
         painted: strips.bounds,
     })
+}
+
+// ── The (usage, index) table on side A (SQ-1496) ───────────────────────────
+//
+// §12.10 is right that the DATABASE has no (usage, index) association for a
+// picture record — but the program area of the same side does. Measured
+// identically on all three bitmap titles (module docs' investigation note):
+// side A file offset 0x9593 holds 190 two-byte entries, preceded at 0x9590 by
+// three copies of the release's own Adventure International number. Entries
+// [0..99] are ROOM-usage picture indices, [100..189] are OBJECT picture
+// indices (entry `i` names item `i - 100`), and an all-zero entry means "no
+// picture". One more entry, at 0x984F, is not part of the table: the
+// inventory backdrop, reached by a fixed pointer rather than by index 98
+// (which is unused in the table itself).
+
+/// Side A file offset of the marker in front of the picture table: three
+/// copies of the release's own Adventure International number (`04` Voodoo
+/// Castle, `05` The Count, `0D` Claymorgue Castle) — read and checked rather
+/// than trusted, so a differently-mastered disk is refused instead of read
+/// through a table that is not really there.
+pub const PICTURE_TABLE_MARKER: usize = 0x9590;
+
+/// Side A file offset of the picture table itself, immediately after
+/// [`PICTURE_TABLE_MARKER`]'s three bytes.
+pub const PICTURE_TABLE_OFFSET: usize = 0x9593;
+
+/// How many two-byte entries the table holds — see the section docs above.
+pub const PICTURE_TABLE_ENTRIES: usize = 190;
+
+/// Side A file offset of the one entry outside the table proper: the
+/// inventory backdrop, the same three-colour-bar card on all three titles.
+pub const INVENTORY_BACKDROP_ENTRY: usize = 0x984F;
+
+/// Where a two-byte table entry `[a, s]` points, as a FILE offset into side B
+/// (measured identical on all three bitmap titles).
+///
+/// `s` and the low two bits of `a` are a 1-based, 128-byte Atari sector
+/// number; bits 3-7 of `a`, times 7, are the byte within that sector. Every
+/// one of the 241 records this module's scan locates starts at a multiple of
+/// seven bytes into its sector — that is what the nought-to-six bytes of
+/// filler between records are for — which is what settles the `* 7`. Bit 2 of
+/// `a` is a flag, set only on the object entries drawn on the inventory
+/// screen rather than in a room.
+pub fn table_entry_file_offset(a: u8, s: u8) -> usize {
+    let sector = (usize::from(a & 3) << 8) | usize::from(s);
+    16 + sector.saturating_sub(1) * 128 + usize::from(a >> 3) * 7
+}
+
+/// A side-B FILE offset in the SPLICED coordinates [`record_at`] and
+/// [`scan_picture_side`] use — see [`splice_vtoc`].
+pub fn spliced_of(file_offset: usize) -> usize {
+    if file_offset < VTOC_OFFSET {
+        file_offset
+    } else {
+        file_offset - VTOC_LEN
+    }
+}
+
+/// One resolved (usage, index) → record association, read off side A's
+/// picture table (SQ-1496).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PictureTableEntry {
+    /// What the named record is for.
+    pub usage: PictureUsage,
+    /// The picture index — a room number for [`PictureUsage::Room`], an item
+    /// number otherwise (§8.6's three reserved values apply here exactly as
+    /// they do to a named picture file on another platform).
+    pub index: u16,
+    /// The record's offset into the whole `.atr` FILE, not the spliced side —
+    /// pass through [`spliced_of`] before calling [`record_at`] directly, or
+    /// hand it straight to [`decode_table_picture`], which does that already.
+    pub file_offset: usize,
+}
+
+/// Side A's whole picture table (SQ-1496): every (usage, index) association
+/// [`read_picture_table`] could verify against a record [`scan_picture_side`]
+/// (or [`decode_record_with_bad_sector_fallback`]'s SQ-1498 fallback) can
+/// actually locate, plus the fixed inventory-backdrop pointer.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct AtariPictureTable {
+    entries: Vec<PictureTableEntry>,
+    inventory_backdrop_file_offset: Option<usize>,
+}
+
+impl AtariPictureTable {
+    /// Every resolved (usage, index) association, in table order.
+    pub fn entries(&self) -> &[PictureTableEntry] {
+        &self.entries
+    }
+
+    /// The record a picture with this `usage` and `index` names, as a FILE
+    /// offset — pass to [`decode_table_picture`] — or `None` when the table
+    /// carries no such entry.
+    pub fn find(&self, usage: PictureUsage, index: u16) -> Option<usize> {
+        self.entries
+            .iter()
+            .find(|e| e.usage == usage && e.index == index)
+            .map(|e| e.file_offset)
+    }
+
+    /// The inventory backdrop's record, as a FILE offset (§12.11's index 98
+    /// on every other platform; the Atari reaches it through
+    /// [`INVENTORY_BACKDROP_ENTRY`] instead — see the section docs). `None`
+    /// when the entry is zero or does not resolve to a record this crate can
+    /// decode.
+    pub fn inventory_backdrop_file_offset(&self) -> Option<usize> {
+        self.inventory_backdrop_file_offset
+    }
+}
+
+/// Read side A's picture table (SQ-1496).
+///
+/// `side_a` is the whole database side, raw. `side_b_spliced` is the
+/// companion picture side with the volume table of contents already excised
+/// ([`splice_vtoc`]) — every entry is validated against a record
+/// [`decode_table_picture`] can actually decode before it is trusted, so a
+/// table entry pointing at garbage (measured on *Voodoo Castle*, whose table
+/// runs short and reads leftover picture data past its real extent) is
+/// refused rather than kept. `adventure` is the release's own AI series
+/// number ([`crate::saga_us::SagaUs::adventure`]) — checked against
+/// [`PICTURE_TABLE_MARKER`] before the table is trusted at all.
+///
+/// `None` when the marker does not match (a differently-mastered disk, or a
+/// side A this table's offset does not describe) or when `side_a` is too
+/// short to hold the table.
+pub fn read_picture_table(
+    side_a: &[u8],
+    side_b_spliced: &[u8],
+    scheme: FamilyCScheme,
+    adventure: u16,
+) -> Option<AtariPictureTable> {
+    let marker = side_a.get(PICTURE_TABLE_MARKER..PICTURE_TABLE_MARKER + 3)?;
+    let want = adventure as u8;
+    if marker != [want, want, want] {
+        return None;
+    }
+    let mut entries = Vec::new();
+    for i in 0..PICTURE_TABLE_ENTRIES {
+        let at = PICTURE_TABLE_OFFSET + 2 * i;
+        let pair = side_a.get(at..at + 2)?;
+        let (lo, hi) = (pair[0], pair[1]);
+        if lo == 0 && hi == 0 {
+            continue;
+        }
+        let file_offset = table_entry_file_offset(lo, hi);
+        if decode_table_picture(side_b_spliced, file_offset, scheme).is_none() {
+            // Refused rather than drawn — see the doc above.
+            continue;
+        }
+        let (usage, index) = if i < 100 {
+            (PictureUsage::Room, i as u16)
+        } else if lo & 4 != 0 {
+            (PictureUsage::ObjectInInventory, (i - 100) as u16)
+        } else {
+            (PictureUsage::ObjectInRoom, (i - 100) as u16)
+        };
+        entries.push(PictureTableEntry { usage, index, file_offset });
+    }
+    let inv = side_a.get(INVENTORY_BACKDROP_ENTRY..INVENTORY_BACKDROP_ENTRY + 2)?;
+    let inventory_backdrop_file_offset = if inv == [0, 0] {
+        None
+    } else {
+        let file_offset = table_entry_file_offset(inv[0], inv[1]);
+        decode_table_picture(side_b_spliced, file_offset, scheme).map(|_| file_offset)
+    };
+    Some(AtariPictureTable { entries, inventory_backdrop_file_offset })
+}
+
+/// Decode the record a `file_offset` (from [`AtariPictureTable`]) names,
+/// trying the ordinary [`record_at`]/[`decode_record`] path first and falling
+/// back to [`decode_record_with_bad_sector_fallback`] only when that refuses
+/// it — SQ-1498's two named exceptions on *The Count*, and nothing else on
+/// any other specimen this crate has measured.
+pub fn decode_table_picture(
+    spliced_side_b: &[u8],
+    file_offset: usize,
+    scheme: FamilyCScheme,
+) -> Option<Picture> {
+    let at = spliced_of(file_offset);
+    if let Some(rec) = record_at(spliced_side_b, at, scheme) {
+        return decode_record(spliced_side_b, &rec, scheme).ok();
+    }
+    decode_record_with_bad_sector_fallback(spliced_side_b, at, scheme)
+}
+
+// ── SQ-1498: the two damaged Count records ──────────────────────────────────
+
+/// Atari sector boundaries are 128-byte aligned starting at file offset 16
+/// (§7.3: `file_offset = 16 + (sector - 1) * 128`). Because [`splice_vtoc`]
+/// removes exactly one whole sector-aligned 128-byte span ([`VTOC_LEN`]), this
+/// congruence holds in SPLICED coordinates too — every offset behind the
+/// splice point shifts by exactly one sector, which does not move it off the
+/// grid — so the functions below use spliced offsets throughout with no
+/// special case for the splice.
+const SECTOR_BASE: usize = 16;
+const SECTOR_LEN: usize = 128;
+
+/// The first sector-aligned offset at or after `off`.
+fn sector_boundary_at_or_after(off: usize) -> usize {
+    if off <= SECTOR_BASE {
+        return SECTOR_BASE;
+    }
+    let rem = (off - SECTOR_BASE) % SECTOR_LEN;
+    if rem == 0 {
+        off
+    } else {
+        off + (SECTOR_LEN - rem)
+    }
+}
+
+/// Find the first 128-byte-aligned sector inside `[start, end)` that is
+/// either entirely zero or a byte-for-byte duplicate of an EARLIER
+/// 128-byte-aligned sector inside `[start, end)` — the two damage shapes
+/// SQ-1498 measured on *The Count*'s side B (a stale duplicate sector for
+/// room 6, an unwritten all-zero one for room 16). Returns the sector's own
+/// `[start, end)` span, in the same (spliced) coordinates as its arguments.
+fn find_bad_sector(spliced: &[u8], start: usize, end: usize) -> Option<(usize, usize)> {
+    let mut boundaries = Vec::new();
+    let mut b = sector_boundary_at_or_after(start);
+    while b + SECTOR_LEN <= end {
+        boundaries.push(b);
+        b += SECTOR_LEN;
+    }
+    for (n, &b) in boundaries.iter().enumerate() {
+        let span = spliced.get(b..b + SECTOR_LEN)?;
+        if span.iter().all(|&x| x == 0) {
+            return Some((b, b + SECTOR_LEN));
+        }
+        if boundaries[..n].iter().any(|&a| spliced.get(a..a + SECTOR_LEN) == Some(span)) {
+            return Some((b, b + SECTOR_LEN));
+        }
+    }
+    None
+}
+
+/// A best-effort decode of a table-named record [`record_at`] could not
+/// verify because exactly one 128-byte sector of its data is damaged
+/// (SQ-1498) — reached only from [`decode_table_picture`], for a
+/// `record_offset` the picture table names but the ordinary scan refuses.
+/// **Not a relaxation of [`record_at`]'s own check**, which is untouched and
+/// stays exactly as strict for every other record on every other disk; this
+/// is a second, explicitly-named path taken only after the first one fails.
+///
+/// The recipe (measured on the one specimen this crate has, *The Count*'s
+/// side B, SQ-1498's own investigation note): parse the header exactly as
+/// [`record_at`] does; find the first bad sector in the record's data
+/// ([`find_bad_sector`]); decode the bytes BEFORE it forward from pair 0,
+/// which is the intact head painted at its own correct position; decode the
+/// bytes AFTER it forward too, but ANCHORED so its own pairs land at the END
+/// of the region ([`paint_strips_from`] with a `start_pair` computed from how
+/// many pairs the tail itself holds) — the run-length stream's control-byte
+/// phase resumes cleanly right after the missing sector on this specimen, so
+/// the tail decodes correctly once it is placed at the position it would
+/// have painted had the sector not been lost, not the position it happens to
+/// start at. The two decodes are composited onto one canvas the same way
+/// [`crate::graphics`]'s own object-overlay compositor works: the tail's own
+/// painted rectangle is copied over the head's canvas, nothing more. The gap
+/// between them — the lost sector's own pairs, which cannot be recovered —
+/// renders as a black stripe a few columns wide, the honest artifact of one
+/// missing sector rather than a defect in the reading.
+pub fn decode_record_with_bad_sector_fallback(
+    spliced: &[u8],
+    offset: usize,
+    scheme: FamilyCScheme,
+) -> Option<Picture> {
+    let head = spliced.get(offset..offset + 10)?;
+    let size = usize::from(u16::from_le_bytes([head[0], head[1]]));
+    if !(13..=MAX_RECORD).contains(&size) || offset + size > spliced.len() {
+        return None;
+    }
+    if head[2] > MAX_COLUMN || head[4] > MAX_COLUMN || head[5] > MAX_ROW {
+        return None;
+    }
+    let layout = StripLayout::resolve(
+        i32::from(head[2]),
+        i32::from(head[3]),
+        i32::from(head[4]),
+        i32::from(head[5]),
+        scheme,
+    )
+    .ok()?;
+    if layout.pair_count() > MAX_PAIRS {
+        return None;
+    }
+    if layout.left + layout.cols * 8 <= 0 || layout.left >= CANVAS_WIDTH as i32 {
+        return None;
+    }
+
+    let data_start = offset + 10;
+    let data_end = offset + size;
+    let (bad_start, bad_end) = find_bad_sector(spliced, data_start, data_end)?;
+    let prefix = &spliced[data_start..bad_start];
+    let suffix = &spliced[bad_end..data_end];
+
+    let prefix_paint = paint_strips(prefix, &layout, scheme);
+
+    // Measure the tail's own pair count with a probe layout that never caps
+    // or wraps (one column, an effectively unbounded pair count), then decode
+    // it again, for real, anchored so its own pairs land at the end of the
+    // region rather than at the start.
+    let probe = StripLayout { left: 0, top: 0, cols: 1, pairs: i32::MAX };
+    let tail_pairs = paint_strips(suffix, &probe, scheme).emitted;
+    let need = layout.pair_count();
+    let anchor = need.saturating_sub(tail_pairs);
+    let suffix_paint = paint_strips_from(suffix, &layout, scheme, anchor);
+
+    let mut pixels = prefix_paint.pixels;
+    if let Some(area) = suffix_paint.bounds {
+        for y in area.top()..=area.bottom() {
+            for x in area.left()..=area.right() {
+                pixels[y * CANVAS_WIDTH + x] = suffix_paint.pixels[y * CANVAS_WIDTH + x];
+            }
+        }
+    }
+    let painted = match (prefix_paint.bounds, suffix_paint.bounds) {
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+        (Some(a), Some(b)) => Some(Painted {
+            left: a.left().min(b.left()),
+            top: a.top().min(b.top()),
+            right: a.right().max(b.right()),
+            bottom: a.bottom().max(b.bottom()),
+        }),
+    };
+    let colour_bytes = [head[6], head[7], head[8], head[9]];
+    let (palette, unrecognised_colours) =
+        resolve_palette(colour_bytes, |stored| Some(atari_colour(stored)));
+    Some(Picture { width: CANVAS_WIDTH, height: CANVAS_HEIGHT, pixels, palette, colour_bytes, unrecognised_colours, painted })
 }
 
 #[cfg(test)]
