@@ -1036,6 +1036,24 @@ show_map = true
 expect = ["Golden Baton"]
 expect_art_cells = 200
 
+[[shots]]
+id = "scott-c64-native-graphics"
+title = "Golden Baton"
+press = "Commodore 64 Mysterious Adventures compilation disk (.D64), \"BATON\""
+media = "stories/scott-dialects/c64/MYSTADV1.D64"
+args = ["--story", "BATON"]
+caption = """
+The same game as the Blorb row above, drawn from a different release: this is the \
+C64 compilation disk's own family-B display list, decoded off the mounted image \
+and rasterised straight into the picture band — no PNG, no Blorb, nothing bundled \
+beside the story. The band geometry is the one the Blorb row draws through too; \
+only the artwork's source differs."""
+keys = "wait:2500,cr,wait:1500,text:look,cr,wait:2500"
+size = "150x44"
+show_map = true
+expect = ["Golden Baton"]
+expect_art_cells = 200
+
 # ── The composite: one story, six machines (SQ-1165) ─────────────────────────
 #
 # THE ONE SHOT KIND THAT RENDERS MORE THAN ONE FRAME. `machines` names a list of

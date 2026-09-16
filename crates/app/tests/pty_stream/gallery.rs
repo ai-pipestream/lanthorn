@@ -459,6 +459,12 @@ impl Shot {
                      rendition of artwork inside a story the picker has not opened"
                 ));
             }
+            if self.story_pick().is_some() {
+                return Err(format!(
+                    "gallery manifest: `{who}` is a library shot passing `--story` — that names a \
+                     story on a container the picker has not opened yet"
+                ));
+            }
             if self.expect_prose_cells > 0 {
                 return Err(format!(
                     "gallery manifest: `{who}` is a library shot with `expect_prose_cells` — that \
@@ -790,6 +796,18 @@ impl Shot {
         let i = self.args.iter().position(|a| a == "--pictures")?;
         self.args.get(i + 1).map(String::as_str)
     }
+
+    /// The story this shot names with `--story`, if it names one.
+    ///
+    /// Read back out of `args`, the same way [`Shot::pictures`] is: a container
+    /// that holds several stories — a Commodore *Mysterious Adventures*
+    /// compilation disk, say — has no tiebreak a provenance read can fall back
+    /// on, and [`Provenance::read`] needs to open the SAME story the launch does
+    /// or its release/serial/medium describe a game this shot never booted.
+    pub fn story_pick(&self) -> Option<&str> {
+        let i = self.args.iter().position(|a| a == "--story")?;
+        self.args.get(i + 1).map(String::as_str)
+    }
 }
 
 // ── Provenance ────────────────────────────────────────────────────────────────
@@ -853,9 +871,14 @@ pub struct StoryProvenance {
 impl Provenance {
     /// The provenance of whatever this shot points at — a mounted story, or the
     /// library a library shot opens the picker on.
-    pub fn of(subject: &Subject<'_>, pictures: Option<&str>) -> Result<Provenance, String> {
+    ///
+    /// `story` is the shot's `--story` pick, if it names one — which of a
+    /// container's several stories the launch actually opens. Without it, a
+    /// multi-story disk falls back to the container's own tiebreak, which for a
+    /// compilation disk offering more than one candidate is no story at all.
+    pub fn of(subject: &Subject<'_>, pictures: Option<&str>, story: Option<&str>) -> Result<Provenance, String> {
         match subject {
-            Subject::Medium(path) => Provenance::read(path, pictures).map(Provenance::Story),
+            Subject::Medium(path) => Provenance::read(path, pictures, story).map(Provenance::Story),
             Subject::Library(l) => Ok(Provenance::Library {
                 id: l.id.clone(),
                 from: l.from.clone(),
@@ -880,8 +903,8 @@ impl Provenance {
     /// Zork Zero's Macintosh disk is the case that shows it — `CPic.data` is
     /// 320x200 doubled to 640x400, its monochrome `Pic.data` is 480x300 at 1:1,
     /// and the two want different pane sizes to magnify by a whole number.
-    pub fn read(path: &Path, pictures: Option<&str>) -> Result<StoryProvenance, String> {
-        let (loaded, image) = app::hints::load_mounted_story(path)
+    pub fn read(path: &Path, pictures: Option<&str>, story: Option<&str>) -> Result<StoryProvenance, String> {
+        let (loaded, image) = app::hints::load_mounted_story_from(path, story)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let bytes = loaded.bytes();
         if bytes.len() < 0x18 {

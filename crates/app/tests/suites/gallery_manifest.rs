@@ -234,7 +234,7 @@ fn every_v6_shot_magnifies_by_a_whole_number() {
             continue;
         }
         any_present = true;
-        let Ok(p) = Provenance::read(&path, s.pictures()) else { continue };
+        let Ok(p) = Provenance::read(&path, s.pictures(), s.story_pick()) else { continue };
         // A story with no pixel screen has no magnification, and the map shot's
         // pane is a split this file deliberately does not restate.
         let (Some(native), Some(mag)) = (p.native, p.native.and_then(|n| s.magnification(n))) else {

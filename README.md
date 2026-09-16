@@ -110,6 +110,10 @@ bring up the story info panel.
 |:--|
 | *A Scott Adams adventure with its Blorb artwork and a live map, like every other engine.* |
 
+| ![The same Scott Adams adventure off its original Commodore 64 compilation disk, its own vector line art decoded and rasterised straight off the disk image with no bundled PNG](docs/scott-c64-native-graphics.png) |
+|:--|
+| *The same adventure off its original C64 disk: the game's own vector art, decoded from the disk image directly.* |
+
 | ![The story picker's list view: a sortable, badged catalogue beside the info panel](docs/story-list.png) |
 |:--|
 | *List view: a sortable, badged catalogue beside the info panel.* |

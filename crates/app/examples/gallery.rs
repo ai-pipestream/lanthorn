@@ -184,7 +184,7 @@ fn main() -> std::process::ExitCode {
                 continue;
             }
         };
-        let provenance = match gallery::Provenance::of(&subject, shot.pictures()) {
+        let provenance = match gallery::Provenance::of(&subject, shot.pictures(), shot.story_pick()) {
             Ok(p) => p,
             Err(e) => {
                 println!("SKIP  {e}");
