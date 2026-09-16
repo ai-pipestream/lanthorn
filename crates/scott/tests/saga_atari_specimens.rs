@@ -411,6 +411,13 @@ fn the_counts_room_one_draws_the_brass_bed_its_text_describes() {
 /// different games cannot share one room's picture), which is exactly why
 /// `crate::saga_atari`'s module docs stop here rather than claiming it answers
 /// for a room or for the boot title card.
+///
+/// **SQ-1524 settled what it is**: not a picture at all but the *tail* of the
+/// shared darkness card (`IT'S TOO DARK!`), read from the middle of its
+/// stream — the card's record starts at `0x590`, index 0 of the table
+/// [`line_art_table_entries`] below reads, and `0x1000` falls inside it. The
+/// bytes stay identical and the numbers here stay pinned; what they mean is
+/// stated there.
 #[test]
 fn the_line_art_opening_is_the_same_small_picture_on_every_title() {
     for file in LINE_ART_TITLES {
@@ -701,5 +708,284 @@ fn the_counts_two_damaged_records_decode_through_the_sq_1498_fallback() {
             seen.iter().all(|&n| n * 10 < total * 9),
             "{what}: the fallback decode is nine-tenths one colour, so it did not really recover anything"
         );
+    }
+}
+
+// ── The line-art sides' own picture table (SQ-1524, investigation findings) ──
+//
+// The four `AtariPictureFormat::LineArt` titles carry their (usage, index)
+// table ON SIDE B — not on side A, where the three bitmap titles keep theirs
+// (SQ-1496): side A of these four holds no `[adv, adv, adv]` marker anywhere
+// near 0x9590, and side B holds one at 0x290, right where the bitmap sides
+// carry the same three bytes in front of their first record. The table has
+// the bitmap table's shape — 100 room-usage slots then object slots, two
+// bytes `[A, S]` each, all-zero for "no picture" — but NOT its arithmetic:
+// the byte within the sector is `(A >> 2) * 3`, because a line-art record is
+// laid on a three-byte grid (its tokens are three bytes each), where a bitmap
+// record is laid on a seven-byte one. There is no inventory flag bit, because
+// an object picture serves both uses — exactly as the same four titles'
+// Apple II `B<aa><nnn>` files do, one file per object, no R/I suffix.
+//
+// What settles the arithmetic is the walk below: every entry lands on a
+// record whose three-byte tokens all keep to the 160 x 96 GRAPHICS 7 canvas,
+// whose `0x00` end byte falls 0-2 zero bytes before the next entry's own
+// offset, and whose picture is what the index says it is (entry 0 spells
+// `IT'S TOO DARK!`, 99 the Adventure International globe, 98 `INVENTORY`,
+// Adventureland's 24 a devil in flames for "...Oh Hell!"). Read the same
+// entries with the bitmap arithmetic and most land mid-stream.
+//
+// Note what this ALSO says about `decode_line_art_opening`'s premise: the
+// tokens here are on a 160 x 96 canvas with fixed three-byte width, not the
+// Apple's 280 x 192 mixed-width grammar, so that function's decode is a
+// misreading — see the SQ-1524 investigation note.
+
+/// Side B file offset of the three-byte marker (`01 01 01` on Adventureland,
+/// `02 02 02` on Pirate Adventure, and so on) in front of the table.
+const LINE_ART_TABLE_MARKER: usize = 0x290;
+
+/// Side B file offset of the table itself: 100 room-usage slots at
+/// `LINE_ART_TABLE + 2 * i`, then object slots for item `i - 100`.
+const LINE_ART_TABLE: usize = 0x293;
+
+/// How many two-byte slots the table holds: 100 rooms and 90 objects, which
+/// with the marker fills exactly three 128-byte sectors (6, 7 and 8).
+const LINE_ART_TABLE_ENTRIES: usize = 190;
+
+/// Where a line-art table entry `[a, s]` points, as a FILE offset into side
+/// B: `s` and the low two bits of `a` are a 1-based 128-byte sector, and the
+/// top six bits of `a`, times three, are the byte within it.
+fn line_art_entry_file_offset(a: u8, s: u8) -> usize {
+    let sector = (usize::from(a & 3) << 8) | usize::from(s);
+    16 + sector.saturating_sub(1) * 128 + usize::from(a >> 2) * 3
+}
+
+/// The GRAPHICS 7 canvas every drawing token keeps to, measured over all
+/// four titles' 310 records: no `x` above 159, no `y` above 95.
+const LINE_ART_WIDTH: u8 = 160;
+const LINE_ART_HEIGHT: u8 = 96;
+
+/// Walk one line-art record in fixed three-byte tokens from its first byte.
+/// Returns how many drawing tokens (top bit set) fell off the canvas and the
+/// offset of the `0x00`-class end byte, or `None` if the walk ran out first.
+fn walk_line_art_record(rec: &[u8]) -> (usize, Option<usize>) {
+    let mut off_canvas = 0;
+    let mut t = 0;
+    while t + 3 <= rec.len() {
+        let c = rec[t];
+        if c & 0xE0 == 0 {
+            return (off_canvas, Some(t));
+        }
+        if c & 0x80 != 0 && (rec[t + 1] >= LINE_ART_WIDTH || rec[t + 2] >= LINE_ART_HEIGHT) {
+            off_canvas += 1;
+        }
+        t += 3;
+    }
+    // A record whose end byte is the last byte of the slice, or the last but
+    // one, has no full token left to read; look for it in the remainder.
+    match rec[t..].iter().position(|&b| b & 0xE0 == 0) {
+        Some(p) => (off_canvas, Some(t + p)),
+        None => (off_canvas, None),
+    }
+}
+
+/// Every non-zero table entry on a line-art side, as `(slot, a, s, file offset)`.
+fn line_art_table_entries(side_b: &[u8]) -> Vec<(usize, u8, u8, usize)> {
+    (0..LINE_ART_TABLE_ENTRIES)
+        .filter_map(|i| {
+            let at = LINE_ART_TABLE + 2 * i;
+            let (a, s) = (side_b[at], side_b[at + 1]);
+            (a != 0 || s != 0).then(|| (i, a, s, line_art_entry_file_offset(a, s)))
+        })
+        .collect()
+}
+
+/// Per title: the side-B file, its adventure number, and the room and
+/// object picture indices its table names — which are, slot for slot, the
+/// `R<aa><nn>` and `B<aa><nnn>` files the SAME title's Apple II release
+/// catalogues (`apple_pictures_specimens` walks those), gaps included:
+/// *Mission Impossible* has no room 1 on either machine, *Strange Odyssey*
+/// no room 16 and none of 25-34, and each title's object subset is the
+/// same 44, 48, 29 and 31 items. Two independent releases agreeing on which
+/// of sixty-odd items have artwork is the cross-platform anchor SQ-1496
+/// leaned on, in a form that needs no picture decoded at all.
+const LINE_ART_TABLES: [(&str, u8, &[usize], &[usize]); 4] = [
+    (
+        "SAGA #1 - Adventureland [side B].atr",
+        1,
+        &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32, 33, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 98, 99,
+        ],
+        &[
+            0, 2, 4, 7, 8, 9, 10, 11, 12, 13, 14, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31,
+            35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 52, 55, 56, 60, 61,
+        ],
+    ),
+    (
+        "SAGA #2 - Pirate Adventure [side B].atr",
+        2,
+        &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 80, 81, 82, 83, 84, 85, 86, 87, 90, 91, 98, 99,
+        ],
+        &[
+            3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+            29, 30, 31, 32, 33, 37, 41, 42, 44, 45, 46, 47, 48, 49, 50, 52, 53, 54, 57, 58, 60, 61,
+            62, 63,
+        ],
+    ),
+    (
+        "SAGA #3 - Mission Impossible [side B].atr",
+        3,
+        &[
+            0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 80, 81,
+            82, 83, 84, 85, 88, 89, 98, 99,
+        ],
+        &[
+            0, 1, 2, 3, 7, 8, 9, 10, 11, 12, 16, 17, 19, 21, 22, 23, 24, 26, 27, 28, 30, 36, 37, 39,
+            40, 41, 42, 43, 49,
+        ],
+    ),
+    (
+        "SAGA #6 - Strange Odyssey [side B].atr",
+        6,
+        &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 24, 35,
+            81, 82, 83, 84, 85, 86, 87, 88, 91, 92, 93, 98, 99,
+        ],
+        &[
+            6, 7, 10, 12, 13, 19, 21, 23, 24, 27, 28, 29, 30, 31, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+            43, 44, 47, 48, 50, 51, 53, 55,
+        ],
+    ),
+];
+
+/// **The line-art sides carry their own picture table**, behind the
+/// adventure marker at [`LINE_ART_TABLE_MARKER`] (SQ-1524). Every non-zero
+/// entry, read with [`line_art_entry_file_offset`], is the first byte of a
+/// record that walks cleanly in three-byte tokens to a `0x00` end byte lying
+/// 0-2 zero bytes before the next entry's own offset — so the table
+/// accounts for the whole side, end to end, with nothing between records but
+/// grid padding — and the indices it names are the Apple II catalogue's.
+#[test]
+fn each_line_art_side_carries_its_own_picture_table_and_every_entry_starts_a_record() {
+    for (file, adventure, want_rooms, want_objects) in LINE_ART_TABLES {
+        let Some(raw) = side_b(file) else { continue };
+        assert_eq!(
+            &raw[LINE_ART_TABLE_MARKER..LINE_ART_TABLE_MARKER + 3],
+            &[adventure, adventure, adventure],
+            "{file}: the adventure marker in front of the table",
+        );
+        let entries = line_art_table_entries(&raw);
+        let rooms: Vec<usize> = entries.iter().map(|e| e.0).filter(|&i| i < 100).collect();
+        let objects: Vec<usize> = entries.iter().map(|e| e.0).filter(|&i| i >= 100).map(|i| i - 100).collect();
+        assert_eq!(rooms, want_rooms, "{file}: room indices with a picture");
+        assert_eq!(objects, want_objects, "{file}: object indices with a picture");
+
+        // In disk order the records lie end to end; walk each up to the next.
+        let spliced = splice_vtoc(&raw);
+        let mut by_offset = entries.clone();
+        by_offset.sort_by_key(|e| e.3);
+        for pair in by_offset.windows(2) {
+            let (slot, a, s, file_offset) = pair[0];
+            let next = spliced_of(pair[1].3);
+            let rec = &spliced[spliced_of(file_offset)..next];
+            assert!(
+                matches!(rec[0] & 0xE0, 0x60 | 0x80),
+                "{file}: slot {slot} ({a:02X} {s:02X}) at 0x{file_offset:05X} opens with {:02X}, not a paint or a move",
+                rec[0],
+            );
+            let (off_canvas, end) = walk_line_art_record(rec);
+            assert_eq!(off_canvas, 0, "{file}: slot {slot} at 0x{file_offset:05X} draws off the 160x96 canvas");
+            let end = end.unwrap_or_else(|| panic!("{file}: slot {slot} at 0x{file_offset:05X} never ends"));
+            assert_eq!(rec[end], 0x00, "{file}: slot {slot}'s end byte");
+            let pad = &rec[end + 1..];
+            assert!(
+                pad.len() <= 2 && pad.iter().all(|&b| b == 0),
+                "{file}: slot {slot} at 0x{file_offset:05X} is followed by {pad:02X?} before the next record",
+            );
+        }
+        // The last record, with nothing after it to bound it, still ends.
+        let (_, _, _, last) = by_offset[by_offset.len() - 1];
+        let rec = &spliced[spliced_of(last)..];
+        let (off_canvas, end) = walk_line_art_record(rec);
+        assert_eq!(off_canvas, 0, "{file}: the last record draws off the canvas");
+        assert!(end.is_some(), "{file}: the last record never ends");
+    }
+}
+
+/// The two cards every title shares are the same bytes on every side:
+/// index 0 (`IT'S TOO DARK!`, 2,854 bytes at 0x590 — which is where
+/// `LINE_ART_OFFSET` was reading from the middle of) and index 99 (the
+/// Adventure International globe, 2,428 bytes). Index 98 (`INVENTORY`) is
+/// shared by *Adventureland* and *Pirate Adventure* only; the other two
+/// redraw it.
+#[test]
+fn the_darkness_and_title_cards_are_the_same_bytes_on_every_line_art_side() {
+    /// (adventure, darkness card, title card, inventory card).
+    type Cards = (u8, Vec<u8>, Vec<u8>, Vec<u8>);
+    let mut cards: Vec<Cards> = Vec::new();
+    for (file, adventure, _, _) in LINE_ART_TABLES {
+        let Some(raw) = side_b(file) else { continue };
+        let spliced = splice_vtoc(&raw);
+        let record = |slot: usize| -> Vec<u8> {
+            let (_, _, _, at) = line_art_table_entries(&raw)
+                .into_iter()
+                .find(|e| e.0 == slot)
+                .unwrap_or_else(|| panic!("{file}: no entry for slot {slot}"));
+            let rec = &spliced[spliced_of(at)..];
+            let (_, end) = walk_line_art_record(rec);
+            rec[..=end.expect("the record ends")].to_vec()
+        };
+        cards.push((adventure, record(0), record(99), record(98)));
+    }
+    let Some(first) = cards.first() else { return };
+    assert_eq!(first.1.len(), 2854, "the darkness card's length");
+    assert_eq!(first.2.len(), 2428, "the title card's length");
+    for c in &cards[1..] {
+        assert_eq!(c.1, first.1, "adventure {}: the darkness card differs", c.0);
+        assert_eq!(c.2, first.2, "adventure {}: the title card differs", c.0);
+        assert_eq!(c.3 == first.3, matches!(c.0, 1 | 2), "adventure {}: the inventory card", c.0);
+    }
+}
+
+/// §7.3's splice is load-bearing here too: *Adventureland*'s object 27 (the
+/// sleeping dragon) starts at 0xB37C and runs across sector 360. Spliced, it
+/// walks clean; raw, its tokens read the volume table as coordinates and
+/// leave the canvas.
+#[test]
+fn a_line_art_record_spanning_the_volume_table_needs_the_splice() {
+    let Some(raw) = side_b("SAGA #1 - Adventureland [side B].atr") else { return };
+    let entries = line_art_table_entries(&raw);
+    let at = entries.iter().find(|e| e.0 == 127).map(|e| e.3).expect("object 27's entry");
+    assert_eq!(at, 0xB37C);
+    let next = entries.iter().map(|e| e.3).filter(|&o| o > at).min().expect("a record after it");
+    let spliced = splice_vtoc(&raw);
+    let (clean, end) = walk_line_art_record(&spliced[spliced_of(at)..spliced_of(next)]);
+    assert_eq!((clean, end.is_some()), (0, true), "spliced, the record walks to its end on the canvas");
+    let (dirty, _) = walk_line_art_record(&raw[at..next]);
+    assert!(dirty > 0, "raw, the volume table's bytes read as {dirty} off-canvas tokens");
+}
+
+/// The falsification: the bitmap sides' `(A >> 3) * 7` reading of the same
+/// two bytes (`table_entry_file_offset`, SQ-1496) lands most entries in the
+/// middle of a token stream, where they walk off the canvas or open on a
+/// byte that is neither a paint nor a move. Same table, other grid.
+#[test]
+fn the_bitmap_arithmetic_reads_the_line_art_table_as_noise() {
+    for (file, _, _, _) in LINE_ART_TABLES {
+        let Some(raw) = side_b(file) else { continue };
+        let spliced = splice_vtoc(&raw);
+        let entries = line_art_table_entries(&raw);
+        let mut wrong = 0;
+        for &(_, a, s, _) in &entries {
+            let at = spliced_of(table_entry_file_offset(a, s));
+            let rec = &spliced[at..(at + 4000).min(spliced.len())];
+            let (off_canvas, _) = walk_line_art_record(rec);
+            if off_canvas > 0 || !matches!(rec[0] & 0xE0, 0x60 | 0x80) {
+                wrong += 1;
+            }
+        }
+        assert!(wrong * 2 > entries.len(), "{file}: the seven-byte grid still read {} of {} entries", entries.len() - wrong, entries.len());
     }
 }
