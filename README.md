@@ -26,7 +26,7 @@
 | Atari ST | yes | — |
 | Apple II (`.dsk`) | yes | S.A.G.A. disks, with pictures |
 | Commodore 64/128 (`.d64`) | yes | S.A.G.A. disks and the *Mysterious Adventures* compilations, with pictures |
-| Atari 8-bit (`.atr`) | — | S.A.G.A. disks (text; pictures not yet) |
+| Atari 8-bit (`.atr`) | — | S.A.G.A. disks, with pictures |
 | ZX Spectrum (`.z80` snapshot) | — | *Mysterious Adventures*, with pictures |
 | TI-99/4A (`.fiad`) | — | the twelve Adventure International games |
 

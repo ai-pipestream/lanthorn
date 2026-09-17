@@ -6,7 +6,7 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.6.1`) versions every crate and every
+version in `Cargo.toml` (currently `0.7.0`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
@@ -19,7 +19,17 @@ Absolute URLs or no link.
 
 ---
 
-## Unreleased
+## v0.7.0 — 2026-09-17
+
+### Highlights
+
+**Atari 8-bit S.A.G.A. games now show their artwork.** *Adventureland*,
+*Pirate Adventure*, *Mission Impossible*, *Voodoo Castle*, *The Count*, and
+*The Sorcerer of Claymorgue Castle* draw their room and object pictures at
+higher resolution than the machine's native pixels, with colours checked
+against captures of the real hardware running under emulation. Some older
+cracked Commodore 64 disk images now open instead of reporting no story, and
+every US Adventure International release opens on its own title card.
 
 ### Added
 
