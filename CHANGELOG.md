@@ -19,6 +19,25 @@ Absolute URLs or no link.
 
 ---
 
+## Unreleased
+
+*This section is drained when a version is cut. README.md describes the
+RELEASED build; prose for a feature that is in `main` but not yet released
+goes into the README in place, at its normal destination, marked with the
+visible tag `*Next release:*`. `release.yml` refuses to cut a release
+while any such tag, or this Unreleased section, still exists.*
+
+### Fixed
+
+- **A Glulx game's side panel (Kerkerkruip and similar) no longer shows
+  washed-out, hard-to-read text in blank areas.** A panel with its own
+  background colour now uses its own text colour too, instead of falling
+  back to the theme's default — most visible right after restoring a Save
+  State, but reachable any time a panel has blank space nobody has
+  (re)printed since it was last redrawn.
+
+---
+
 ## v0.7.0 — 2026-09-17
 
 ### Highlights
