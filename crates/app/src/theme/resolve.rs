@@ -37,14 +37,16 @@ pub struct Roles {
 
 impl Roles {
     /// The spec's default (dark) role palette (design §1 / the `[roles]` example):
-    /// text = white on terminal bg, chrome = white on black, line/accent = cyan,
-    /// muted = dark-gray, alert = yellow, heading = white + bold.
+    /// text = white on terminal bg, chrome = white on black, line = cyan,
+    /// accent = blue (SQ-1531: matches the Glk spec's hyperlink convention,
+    /// §9.1 "blue underlined text is most likely"), muted = dark-gray, alert =
+    /// yellow, heading = white + bold.
     pub fn terminal_default() -> Roles {
         Roles {
             text: Style::default().fg(Color::White),
             chrome: Style::default().fg(Color::White).bg(Color::Black),
             line: Style::default().fg(Color::Cyan),
-            accent: Style::default().fg(Color::Cyan),
+            accent: Style::default().fg(Color::Blue),
             muted: Style::default().fg(Color::DarkGray),
             alert: Style::default().fg(Color::Yellow),
             heading: Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -112,7 +114,12 @@ impl Roles {
             text: Style::default().fg(fg),               // transcript = foreground
             chrome: Style::default().fg(fg).bg(bg),       // ink on a UI surface
             line: slot(6, fallback.line),   // cyan slot (focused_border/connector)
-            accent: slot(6, fallback.accent), // highlight = cyan slot
+            // highlight: SQ-1531 moved this to the blue slot (matching the
+            // template's `palette:4` suggestion and the Glk spec's hyperlink
+            // convention) — must stay index 4 so a configured scheme's own
+            // blue reaches it the same way `palette:4` would, and so
+            // `uncommented_template_resolves_to_registry_defaults` holds.
+            accent: slot(4, fallback.accent),
             muted: slot(8, fallback.muted),   // suggestion = bright-black slot
             alert: slot(3, fallback.alert),   // yellow slot (room_selected)
             heading: Style::default().fg(fg).add_modifier(Modifier::BOLD),
@@ -359,12 +366,25 @@ pub fn describe_theme_warnings(warnings: &[ThemeWarning]) -> Vec<String> {
 /// Layer a [`Delta`] onto a base [`Style`]: override fg/bg only where the delta
 /// sets them; add (never clear) the delta's modifier bits.
 fn apply_style(base: Style, d: &Delta) -> Style {
+    apply_style_channels(base, d, true)
+}
+
+/// [`apply_style`], but with the colour channels skippable (SQ-1169): when
+/// `apply_color` is `false`, `d.fg`/`d.bg` are ignored entirely and the base's
+/// own colours pass through untouched — modifiers still layer as normal. The
+/// registry-default step in [`resolve_row`] uses this to let a user `parent`
+/// re-root actually move a row's colours: a pinned `fg`/`bg` in the registry
+/// [`Delta`] applied on top of the NEW parent would otherwise silently restore
+/// the old pin, exactly as it did before this selector could be re-rooted at all.
+fn apply_style_channels(base: Style, d: &Delta, apply_color: bool) -> Style {
     let mut s = base;
-    if let Some(fg) = d.fg {
-        s = s.fg(fg);
-    }
-    if let Some(bg) = d.bg {
-        s = s.bg(bg);
+    if apply_color {
+        if let Some(fg) = d.fg {
+            s = s.fg(fg);
+        }
+        if let Some(bg) = d.bg {
+            s = s.bg(bg);
+        }
     }
     // Modifiers are tri-state (SQ-1171): `None` inherits, `Some(true)` adds,
     // `Some(false)` REMOVES. Add and remove are accumulated separately and the
@@ -422,10 +442,19 @@ fn apply_border(
 /// `layers` override in build order (lowest→highest). Each layer that carries a
 /// [`Delta`] for this selector overrides the running value AND advances the
 /// [`Provenance`] stamp, so the stamp reflects the highest layer that wrote it.
-fn resolve_row(row: &RegRow, parent: &Resolved, layers: &[(&Decls, Provenance)]) -> Resolved {
+///
+/// `rerooted` (SQ-1169) is whether some USER layer set a `parent` override for
+/// this row (see [`user_rerooted`]) — `parent` here is already that new parent's
+/// `Resolved`. When `true`, the registry default delta's `fg`/`bg` are skipped so
+/// the new parent's colours reach the row; a row whose default delta pins a
+/// colour would otherwise silently restore the old parent's pin on top of the
+/// re-root, making `parent = "…"` a no-op (or a half-op, for a delta pinning only
+/// one channel). The delta's non-colour channels (modifiers, glyph, border, …)
+/// are unaffected — a re-root moves ink, not weight or shape.
+fn resolve_row(row: &RegRow, parent: &Resolved, layers: &[(&Decls, Provenance)], rerooted: bool) -> Resolved {
     // 1. registry default delta on the parent.
     let d = &row.default_delta;
-    let mut style = apply_style(parent.style, d);
+    let mut style = apply_style_channels(parent.style, d, !rerooted);
     let mut glyph = apply_glyph(parent.glyph.clone(), d);
     let mut border = apply_border(parent.border, d);
     // Structural channels (SQ-0641): same set-wins-else-inherit rule as border.
@@ -479,6 +508,18 @@ fn effective_parent(row: &RegRow, layers: &[(&Decls, Provenance)]) -> Option<Str
     parent
 }
 
+/// Whether any user layer's decl for `row` sets `parent` at all (SQ-1169) —
+/// intent, not value: a re-root counts even when it names the row's own
+/// registry-default parent, because the point is that the USER chose it. Kept
+/// separate from [`effective_parent`], which resolves to a name rather than a
+/// yes/no, so [`resolve_row`] can tell "re-rooted onto the same name" apart
+/// from "no layer touched `parent` at all" — the two must not collapse, or a
+/// row's pinned colours would survive a re-root that happens to restate the
+/// default parent.
+fn user_rerooted(row: &RegRow, layers: &[(&Decls, Provenance)]) -> bool {
+    layers.iter().any(|(decls, _)| decls.get(row.name).is_some_and(|d| d.parent.is_some()))
+}
+
 /// Compute the flat theme map from the registry via single-level parent fallback.
 ///
 /// Roles resolve first (from `roles`); then each row resolves against its parent —
@@ -503,7 +544,9 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
         // A role row may still carry an explicit override.
         let row = REGISTRY.iter().find(|r| r.name == name);
         let resolved = match row {
-            Some(r) => resolve_row(r, &Resolved::bare(style), &layers),
+            // Roles are roots: they never consult `parent` (there is nothing to
+            // re-root onto), so `rerooted` is always `false` here.
+            Some(r) => resolve_row(r, &Resolved::bare(style), &layers, false),
             None => Resolved::bare(style),
         };
         map.insert(name.to_string(), resolved);
@@ -525,7 +568,8 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
                     None => return true, // parent not resolved yet; keep pending.
                 },
             };
-            let resolved = resolve_row(row, &parent, &layers);
+            let rerooted = user_rerooted(row, &layers);
+            let resolved = resolve_row(row, &parent, &layers, rerooted);
             map.insert(row.name.to_string(), resolved);
             false
         });
@@ -559,7 +603,10 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
                 let parent = registry_parent
                     .and_then(|p| map.get(&p).cloned())
                     .unwrap_or_else(|| Resolved::bare(Style::default()));
-                let resolved = resolve_row(row, &parent, &layers);
+                // The bad re-root is being IGNORED here (falling back to the
+                // REGISTRY parent, not the user's), so this is not a re-root as
+                // far as the registry default delta is concerned.
+                let resolved = resolve_row(row, &parent, &layers, false);
                 map.insert(row.name.to_string(), resolved);
             }
             break;
@@ -709,7 +756,7 @@ fn lower_decls(
     decls
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-theme"))]
 mod tests {
     use super::*;
 
@@ -1048,7 +1095,7 @@ mod tests {
         let roles = Roles::from_scheme(&gs);
         assert_eq!(roles.text.fg, Some(Color::Rgb(0xc5, 0xc8, 0xc6)), "fg-derived roles keep the scheme");
         assert_eq!(roles.line.fg, Some(Color::Cyan), "empty cyan slot → terminal-default line role");
-        assert_eq!(roles.accent.fg, Some(Color::Cyan));
+        assert_eq!(roles.accent.fg, Some(Color::Blue), "empty cyan slot → terminal-default accent role");
         assert_eq!(roles.muted.fg, Some(Color::DarkGray));
         assert_eq!(roles.alert.fg, Some(Color::Yellow));
 
@@ -1059,14 +1106,15 @@ mod tests {
 
     #[test]
     fn partially_filled_palette_uses_set_slots_and_falls_back_for_the_rest() {
-        // palette[6] (cyan slot) is set; 3 and 8 are not.
+        // palette[4] (blue/accent slot, SQ-1531) and palette[6] (cyan/line
+        // slot) are set; 3 and 8 are not.
         let gs = GhosttyScheme::parse(
-            "background = 1d1f21\nforeground = c5c8c6\npalette = 6=#70c0ba\n",
+            "background = 1d1f21\nforeground = c5c8c6\npalette = 4=#5566ee\npalette = 6=#70c0ba\n",
         )
         .unwrap();
         let roles = Roles::from_scheme(&gs);
         assert_eq!(roles.line.fg, Some(Color::Rgb(0x70, 0xc0, 0xba)), "set slot is used");
-        assert_eq!(roles.accent.fg, Some(Color::Rgb(0x70, 0xc0, 0xba)));
+        assert_eq!(roles.accent.fg, Some(Color::Rgb(0x55, 0x66, 0xee)), "accent's own slot is used");
         assert_eq!(roles.muted.fg, Some(Color::DarkGray), "unset slot falls back per-role");
         assert_eq!(roles.alert.fg, Some(Color::Yellow));
     }
@@ -1118,9 +1166,116 @@ mod tests {
         );
     }
 
+    // ── SQ-1169: a `parent` re-root must beat a row's pinned registry colours ─
+    //
+    // `resolve_row`'s step 1 used to apply the registry default `Delta` on top
+    // of the resolved parent unconditionally — so a row whose own `Delta` pins
+    // `fg`/`bg` restored that pin over whatever the user's `parent` override
+    // supplied, silently. `dialog.list_selected` and `transcript_search_highlight`
+    // pin BOTH channels (a total no-op); `status_header`, `dialog.shadow` and the
+    // three `debug.disasm_*` tiers pin ONE (a half-op: the other channel moves,
+    // which reads as fixed and is easy to mistake for it).
+
+    /// Every registry row whose default `Delta` pins `fg` and/or `bg`, gathered
+    /// from the registry itself rather than hand-listed, so a row added
+    /// tomorrow with a pinned colour is covered the moment it lands.
+    fn rows_pinning_a_colour() -> Vec<&'static RegRow> {
+        REGISTRY
+            .iter()
+            .filter(|r| r.default_delta.fg.is_some() || r.default_delta.bg.is_some())
+            .collect()
+    }
+
+    /// A re-root moves BOTH colour channels, for every row the registry pins
+    /// one or both on (SQ-1169) — not just the seven the quest named by hand.
+    /// `chrome` is the re-root target (`Roles::terminal_default().chrome` =
+    /// White on Black): distinct from every pinned colour in the registry, so
+    /// whichever channel stayed behind is caught.
+    ///
+    /// Falsifies against pre-fix `resolve_row`: every one of these rows keeps
+    /// at least the channel its own `Delta` pins — e.g. `debug.disasm_executed`
+    /// keeps `fg = Some(Color::Blue)` instead of following chrome's white, and
+    /// `dialog.list_selected` keeps the whole `Black`/`Cyan` pair.
+    #[test]
+    fn a_reroot_moves_both_colour_channels_for_every_row_that_pins_one() {
+        let roles = Roles::terminal_default();
+        let chrome = roles.chrome;
+        let rows = rows_pinning_a_colour();
+        assert!(!rows.is_empty(), "sanity: the registry must still have pinned-colour rows to test");
+
+        for row in rows {
+            let decls = one(row.name, Delta { parent: Some("chrome".to_string()), ..Delta::EMPTY });
+            let theme = resolve(&roles, &decls, &Decls::new(), &Decls::new());
+            let got = theme.get(row.name).style;
+            assert_eq!(
+                got.fg, chrome.fg,
+                "{:?}: re-rooting onto chrome must move fg to chrome's — a registry pin survived",
+                row.name
+            );
+            assert_eq!(
+                got.bg, chrome.bg,
+                "{:?}: re-rooting onto chrome must move bg to chrome's — a registry pin survived",
+                row.name
+            );
+        }
+    }
+
+    /// The seven rows SQ-1169 names explicitly, each with the exact pre-fix
+    /// failure it reproduces — the generic sweep above proves the same thing
+    /// mechanically; this spells out the specific report.
+    #[test]
+    fn seven_named_rows_move_both_channels_on_reroot() {
+        let roles = Roles::terminal_default();
+        let chrome = roles.chrome;
+        let cases: &[(&str, &str)] = &[
+            ("dialog.list_selected", "TOTAL no-op pre-fix: pinned Black+Cyan, both survived a re-root"),
+            ("transcript_search_highlight", "TOTAL no-op pre-fix: pinned Black+Yellow, both survived"),
+            ("status_header", "HALF pre-fix: bg pinned Black, stayed Black instead of following chrome"),
+            ("dialog.shadow", "HALF pre-fix: bg pinned DarkGray, stayed DarkGray instead of following chrome"),
+            ("debug.disasm_executed", "HALF pre-fix: fg pinned Blue, stayed Blue instead of following chrome"),
+            ("debug.disasm_rd", "HALF pre-fix: fg pinned Yellow, stayed Yellow instead of following chrome"),
+            ("debug.disasm_soft", "HALF pre-fix: fg pinned Red, stayed Red instead of following chrome"),
+        ];
+        for (name, why) in cases {
+            let decls = one(name, Delta { parent: Some("chrome".to_string()), ..Delta::EMPTY });
+            let theme = resolve(&roles, &decls, &Decls::new(), &Decls::new());
+            let got = theme.get(name).style;
+            assert_eq!(got.fg, chrome.fg, "{name}: {why}");
+            assert_eq!(got.bg, chrome.bg, "{name}: {why}");
+        }
+    }
+
+    /// No `parent` in the decl at all: the pinned/inherited pair is untouched.
+    /// A user who only flips `bold` off must still see the registry's exact
+    /// Black-on-Cyan — the re-root rule must not leak into the no-reroot case.
+    #[test]
+    fn no_reroot_still_pins_dialog_list_selected_colours() {
+        let roles = Roles::terminal_default();
+        let decls = one("dialog.list_selected", Delta { bold: Some(false), ..Delta::EMPTY });
+        let theme = resolve(&roles, &decls, &Decls::new(), &Decls::new());
+        let got = theme.get("dialog.list_selected").style;
+        assert_eq!(got.fg, Some(Color::Black), "no parent override: the registry pin still applies");
+        assert_eq!(got.bg, Some(Color::Cyan), "no parent override: the registry pin still applies");
+        assert!(!got.add_modifier.contains(Modifier::BOLD), "bold = false must still switch the weight off");
+    }
+
+    /// A re-root moves colours, not the registry delta's own modifiers:
+    /// `dialog.list_selected` is bold by default, and re-rooting it must keep
+    /// that bold even though its pinned fg/bg get skipped.
+    #[test]
+    fn reroot_of_dialog_list_selected_keeps_bold() {
+        let roles = Roles::terminal_default();
+        let decls = one("dialog.list_selected", Delta { parent: Some("chrome".to_string()), ..Delta::EMPTY });
+        let theme = resolve(&roles, &decls, &Decls::new(), &Decls::new());
+        assert!(
+            theme.get("dialog.list_selected").style.add_modifier.contains(Modifier::BOLD),
+            "a re-root must not strip the registry delta's own bold"
+        );
+    }
+
     /// The tooltip's default IS the menu highlight, not a look of its own.
     ///
-    /// `accent` cannot serve here however cyan it is: it is `fg(Cyan)` with no
+    /// `accent` cannot serve here however good its ink is: it is `fg(..)` with no
     /// background, so deriving a borderless card from it repaints SQ-1139. The
     /// pair comes from `dialog.list_selected`, which every modal list already
     /// uses — so retuning that highlight moves the tooltip with it.
@@ -1268,7 +1423,8 @@ mod tests {
     fn terminal_default_scheme() -> GhosttyScheme {
         let mut scheme = GhosttyScheme { foreground: Color::White, ..GhosttyScheme::default() };
         scheme.palette[3] = Color::Yellow; // alert slot (room_selected)
-        scheme.palette[6] = Color::Cyan; // border/accent slot (focused_border/connector)
+        scheme.palette[4] = Color::Blue; // accent slot (highlight/hyperlink, SQ-1531)
+        scheme.palette[6] = Color::Cyan; // line slot (border/focused_border/connector)
         scheme.palette[8] = Color::DarkGray; // muted slot (suggestion)
         scheme
     }
@@ -1283,9 +1439,26 @@ mod tests {
         assert_eq!(gs.foreground, Color::Reset, "no-scheme base is all-Reset");
         assert_eq!(Roles::from_scheme(&gs), Roles::terminal_default());
         let theme = resolve_theme(&gs, &ParsedStyle::default());
-        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Cyan));
-        assert_eq!(theme.get("panel.border").style.fg, Some(Color::Cyan));
+        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Blue), "map.connector parents accent");
+        assert_eq!(theme.get("panel.border").style.fg, Some(Color::Cyan), "panel.border parents line, untouched");
         assert_eq!(theme.get("transcript").style.fg, Some(Color::White));
+    }
+
+    /// SQ-1531 Part A, through the real `[roles]` override pipeline: with no
+    /// `scheme =` configured (`GhosttyScheme::default()`, exactly what
+    /// `resolve_base(None)` hands back — the common case, since the shipped
+    /// `style.toml` template ships `scheme =` commented out), writing
+    /// `accent = { fg = "palette:4" }` used to resolve to `Color::Reset`
+    /// (invisible) because `palette:N` handed the scheme's raw unset slot
+    /// straight back. Falsified by reverting Part A's fallback: this then
+    /// asserts `Some(Color::Reset)` and passes on the old code.
+    #[test]
+    fn palette_role_override_resolves_with_no_scheme_configured() {
+        let gs = crate::colors::GhosttyScheme::default();
+        let parsed = super::super::toml_schema::parse("[roles]\naccent = { fg = \"palette:4\" }\n")
+            .expect("valid style.toml");
+        let theme = resolve_theme(&gs, &parsed);
+        assert_eq!(theme.get("accent").style.fg, Some(Color::Blue));
     }
 
     // ── SQ-0510: a probe-seeded scheme takes `from_scheme`'s real branch ──────
@@ -1310,7 +1483,7 @@ mod tests {
         // The accents still come from the per-slot fallback — an all-Reset palette
         // must not drag the UI monochrome (SQ-0642's rule still holds here).
         assert_eq!(roles.line.fg, Some(Color::Cyan));
-        assert_eq!(roles.accent.fg, Some(Color::Cyan));
+        assert_eq!(roles.accent.fg, Some(Color::Blue));
         assert_eq!(roles.muted.fg, Some(Color::DarkGray));
         assert_eq!(roles.alert.fg, Some(Color::Yellow));
         // `text` keeps NO background, so the transcript still shows the terminal
@@ -1319,7 +1492,7 @@ mod tests {
 
         // …and every chrome-derived selector inherits the probed page.
         let theme = resolve_theme(&gs, &ParsedStyle::default());
-        for sel in ["upper_window", "status_bar", "story_info", "dialog.background", "glk.grid.normal"] {
+        for sel in ["upper_window", "status_bar", "story_info", "dialog.background", "glk.grid.normal", "glk.grid.background"] {
             assert_eq!(
                 theme.get(sel).style.bg,
                 Some(Color::Rgb(0xfd, 0xf6, 0xe3)),
@@ -1347,7 +1520,7 @@ mod tests {
         let theme = resolve_theme(&scheme, &ParsedStyle::default());
 
         assert_eq!(theme.get("transcript").style.fg, Some(Color::White));
-        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Cyan));
+        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Blue), "map.connector parents accent");
         assert_eq!(theme.get("map.connector_distorted").style.fg, Some(Color::Magenta));
         assert_eq!(theme.get("map.shared_path").style.fg, Some(Color::LightCyan));
         assert_eq!(theme.get("panel.border").style.fg, Some(Color::Cyan));
@@ -1358,6 +1531,8 @@ mod tests {
 
         assert!(theme.get("status_bar").style.add_modifier.contains(Modifier::REVERSED));
         assert!(theme.get("help_bar").style.add_modifier.contains(Modifier::REVERSED));
+        // SQ-1212: a Glk grid's ground is reversed chrome, the same spelling.
+        assert!(theme.get("glk.grid.background").style.add_modifier.contains(Modifier::REVERSED));
         assert_eq!(theme.get("suggestion").style.fg, Some(Color::DarkGray));
         assert!(theme.get("glk.buffer.header").style.add_modifier.contains(Modifier::BOLD));
     }

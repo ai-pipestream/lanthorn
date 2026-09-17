@@ -1,17 +1,23 @@
-// Z-machine object table — ZMSD §12.
-//
-// Attributes, parent/child/sibling tree, properties, short names.
-// v3: 1-byte object numbers, 32 attrs, 31-word default table, 9-byte entries.
-// v4+: 2-byte object numbers, 48 attrs, 63-word default table, 14-byte entries.
+//! Z-machine object table — ZMSD §12.
+//!
+//! Attributes, parent/child/sibling tree, properties, short names.
+//! v3: 1-byte object numbers, 32 attrs, 31-word default table, 9-byte entries.
+//! v4+: 2-byte object numbers, 48 attrs, 63-word default table, 14-byte entries.
 
+#[cfg(feature = "grammar")]
 use crate::dictionary;
+#[cfg(feature = "grammar")]
 use crate::grammar;
 use crate::memory::Memory;
 use crate::text::decode_string;
+#[cfg(feature = "grammar")]
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The shared answer type, re-exported so `zvm::objects::ObjectWords` names it
-/// — as `zvm::grammar` re-exports the rest of `grammar-model`.
+/// — as `zvm::grammar` re-exports the rest of `grammar-model`. Behind the
+/// `grammar` feature along with [`ParseNames`], the only reader that produces
+/// one.
+#[cfg(feature = "grammar")]
 pub use grammar_model::{Adjectives, ObjectWords};
 
 // ── Layout helpers ────────────────────────────────────────────────────────────
@@ -136,12 +142,31 @@ fn write_tree_ptr(mem: &mut Memory, obj: u16, which: u8, val: u16) {
     }
 }
 
+/// The object currently containing `obj` — its room, its container, whatever
+/// it sits inside — or 0 if `obj` has nothing above it in the tree (ZMSD §12.3's
+/// parent field).
 pub fn get_parent(mem: &Memory, obj: u16) -> u16 { read_tree_ptr(mem, obj, 0) }
+/// The next object in `obj`'s parent's child list after `obj` itself, or 0 if
+/// `obj` is the last child — ZMSD §12.3's sibling field, which threads a
+/// parent's children into a singly linked list rather than an array.
 pub fn get_sibling(mem: &Memory, obj: u16) -> u16 { read_tree_ptr(mem, obj, 1) }
+/// The first object `obj` directly contains, or 0 if `obj` holds nothing —
+/// ZMSD §12.3's child field. Walk [`get_sibling`] from this object to reach
+/// the rest of what `obj` contains.
 pub fn get_child(mem: &Memory, obj: u16) -> u16 { read_tree_ptr(mem, obj, 2) }
 
+/// Overwrites `obj`'s parent field (ZMSD §12.3) directly, without touching
+/// any sibling chain. This is the raw storage primitive [`insert_obj`] and
+/// [`remove_obj`] use to keep the tree consistent; a caller that wants a
+/// well-formed tree should go through those instead of calling this alone.
 pub fn set_parent(mem: &mut Memory, obj: u16, val: u16) { write_tree_ptr(mem, obj, 0, val); }
+/// Overwrites `obj`'s sibling field (ZMSD §12.3) directly. Like [`set_parent`],
+/// this does not maintain the rest of the tree on its own — it exists for
+/// [`insert_obj`] and [`remove_obj`] to build on.
 pub fn set_sibling(mem: &mut Memory, obj: u16, val: u16) { write_tree_ptr(mem, obj, 1, val); }
+/// Overwrites `obj`'s child field (ZMSD §12.3) directly. Like [`set_parent`],
+/// this does not maintain the rest of the tree on its own — it exists for
+/// [`insert_obj`] and [`remove_obj`] to build on.
 pub fn set_child(mem: &mut Memory, obj: u16, val: u16) { write_tree_ptr(mem, obj, 2, val); }
 
 // ── Tree manipulation ─────────────────────────────────────────────────────────
@@ -255,6 +280,221 @@ pub fn short_name(mem: &Memory, obj: u16) -> String {
     }
     let (s, _) = decode_string(mem, ptbl + 1);
     s
+}
+
+// ── The name the STORY prints ─────────────────────────────────────────────────
+
+/// What the story prints for object `obj` — its `short_name` PROPERTY when that
+/// property holds a string, and the object header's short name otherwise
+/// (SQ-1372).
+///
+/// [`short_name`] reads §12.4's header name and nothing else, which is what
+/// `@print_obj` prints. The Inform 6 library does not print objects that way:
+/// `parserm.h`'s `PrintShortName` runs
+///
+/// ```text
+/// if (obj provides short_name) i = PrintOrRun(obj, short_name, true);
+/// if (i == 0) print (object) obj;
+/// ```
+///
+/// so a `short_name` property WINS over the header name, and a story that gives
+/// one never has the header name printed at all. Graham Nelson's *Adventure* is
+/// the specimen: `Class MazeRoom with short_name "Maze"` and thirty-nine rooms
+/// declared `MazeRoom Alike_Maze_1` with no quoted name — the header name Inform
+/// compiles for those is the parenthesised IDENTIFIER, `(Alike_Maze_1)`, which
+/// no player ever sees. Reading only the header name renamed every maze room
+/// after its source identifier, and the automapper's `mentions_maze` test — and
+/// with it the whole maze-layer split — never fired.
+///
+/// **A `short_name` ROUTINE keeps the header name.** `PrintOrRun` calls it, and
+/// machine code cannot be read statically; SQ-1307's walker is where a computed
+/// name would have to come from. The routine case is *detected* rather than
+/// guessed: ZMSD §5.1 fixes a routine's first byte as its local count, 0..=15,
+/// and no Z-string's first byte can be that low unless its first Z-character is
+/// a space or an abbreviation — so a first byte above 15 at the address the
+/// value unpacks to as a ROUTINE proves the value is not one. Anything that
+/// fails that test falls back to the header name rather than printing the
+/// gibberish a routine decodes to.
+pub fn printed_name(mem: &Memory, obj: u16) -> String {
+    inform_short_name(mem, obj).unwrap_or_else(|| short_name(mem, obj))
+}
+
+/// The decoded `short_name` property of `obj`, or `None` where the story has no
+/// such property, this object does not provide it, or its value is not readable
+/// as a string. See [`printed_name`].
+fn inform_short_name(mem: &Memory, obj: u16) -> Option<String> {
+    // Discovered once per story and remembered: the scan below reads the whole
+    // image, and this is called for every object the location ladder considers,
+    // every turn.
+    let prop = (*mem.short_name_prop_memo().get_or_init(|| short_name_property(mem)))?;
+    let addr = get_prop_addr(mem, obj, prop);
+    if addr == 0 || get_prop_len(mem, addr) != 2 {
+        return None;
+    }
+    let packed = mem.read_word(addr as u32);
+    if packed == 0 {
+        return None;
+    }
+    // ZMSD §5.1: "A routine begins with one byte indicating the number of local
+    // variables it has (between 0 and 15 inclusive)." A first byte above 15
+    // therefore cannot start a routine. In v6/v7 the routine and string offsets
+    // differ (§1.2.3), so the test is applied where a ROUTINE would begin.
+    let rtn = mem.unpack_routine(packed);
+    if rtn as usize >= mem.len() || mem.without_fault_latch(|| mem.read_byte(rtn)) <= 15 {
+        return None;
+    }
+    let text = decoded_string_at(mem, mem.unpack_string(packed))?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Longest Z-string this module's speculative decodes will consider, in words.
+/// A printed short name is a room heading or an object's name; 48 words is 144
+/// Z-characters, well past any of them.
+const NAME_PROBE_MAX_WORDS: u32 = 48;
+
+/// Decode the Z-string at `addr`, or `None` when the bytes there are not one:
+/// out of bounds, or not terminated within [`NAME_PROBE_MAX_WORDS`].
+///
+/// Speculative by nature — the caller has guessed that a property word is a
+/// packed string address — so the decode runs under
+/// [`Memory::without_fault_latch`]: an abbreviation inside a mis-guessed string
+/// can point anywhere, and a read that lands out of bounds must answer "not a
+/// string" rather than fault the story (the rule `location.rs`'s room-text probe
+/// has followed since SQ-0724).
+fn decoded_string_at(mem: &Memory, addr: u32) -> Option<String> {
+    let terminated = (0..NAME_PROBE_MAX_WORDS)
+        .map(|i| addr + i * 2)
+        .take_while(|&at| at as usize + 1 < mem.len())
+        .any(|at| mem.read_word(at) & 0x8000 != 0);
+    terminated.then(|| mem.without_fault_latch(|| decode_string(mem, addr).0))
+}
+
+/// The property number this story gives Inform's `short_name`, read out of the
+/// story's OWN symbol table (SQ-1372). `None` for a story that carries no such
+/// table — a ZIL game, or an Inform 6 compile with `$OMIT_SYMBOL_TABLE=1`.
+///
+/// The number cannot be assumed. Inform 6 hardwires exactly one property
+/// number, `name` = 1 (`Inform6/src/objects.c`); everything else is numbered in
+/// declaration order, so `short_name` is whatever the LIBRARY's declaration
+/// order made it — 46 in `advent.z6` (Inform 6.21), 45 in the Glulx build of the
+/// same game. A constant here would be right for one library release and
+/// silently wrong for the next.
+///
+/// So it is read rather than assumed. The story carries its own symbol table:
+/// Inform's *Table of Identifier Names*, which `#identifiers_table` names and
+/// `$OMIT_SYMBOL_TABLE=1` is the switch for leaving OUT — so it is there unless
+/// a story went out of its way. `Inform6/tables.c`, `construct_storyfile`,
+/// writes it as
+///
+/// ```text
+/// identifier_names_offset:
+///     word  no_individual_properties                  (the count)
+///     word  individual_name_strings[i]  for i = 1 …   (packed string address)
+/// ```
+///
+/// — one packed string address per property number, indexed BY that number.
+/// The scan looks for a table whose entry **1** decodes to exactly `"name"` (the
+/// one number the compiler fixes, which is what makes the table identifiable at
+/// all) and returns the index whose entry decodes to `"short_name"`.
+///
+/// Only dynamic memory is searched, and only above the object table: the same
+/// function writes the class-numbers table, this one and the individuals table
+/// straight after the object tables, and sets `static_memory_offset =
+/// grammar_table_at`, which comes later still — so this table is always inside
+/// `[object_table, static_mem_base)`.
+///
+/// The search stops at the highest COMMON property number (ZMSD §12.2: 31 in
+/// v3, 63 in v4+). `short_name` is declared `Property short_name` in the
+/// library, so it is a common property; the table continues past that point
+/// with individual property names, and an index taken from there would name a
+/// property `get_prop_addr` cannot read.
+///
+/// **`"name"` alone is not enough of an anchor**, and a game has already proved
+/// it: `Facility.z8` has a run of bytes whose word 1 unpacks to a string
+/// reading `name` and whose other entries decode to prose and to fragments of
+/// prose starting mid-word. Taking that table gave property 21 and renamed 169
+/// objects to things like `"regexp too complex"`. So every entry the search
+/// reads must be an IDENTIFIER (see `is_inform_identifier`) or zero — which
+/// is what an identifiers table holds by definition — and enough of them must
+/// be named to make a coincidence implausible.
+pub fn short_name_property(mem: &Memory) -> Option<u8> {
+    let len = mem.len() as u32;
+    let max_prop = prop_defaults_count(mem.version());
+    let entry = |a: u32| -> Option<String> {
+        let packed = mem.read_word(a);
+        if packed == 0 {
+            return None;
+        }
+        decoded_string_at(mem, mem.unpack_string(packed))
+    };
+    let window = mem.object_table() as u32..(mem.static_mem_base() as u32).min(len);
+    'table: for base in window {
+        // A table too short to hold a property name, or one that would run off
+        // the end of the story, is not the identifiers table.
+        let count = mem.read_word(base) as u32;
+        if count < 2 || base + 2 + count * 2 > len {
+            continue;
+        }
+        if entry(base + 2).as_deref() != Some("name") {
+            continue;
+        }
+        let mut found = None;
+        let mut named = 0;
+        let mut library = false;
+        for prop in 2..=count.min(max_prop) {
+            let Some(text) = entry(base + prop * 2) else { continue };
+            if !is_inform_identifier(&text) {
+                continue 'table; // prose where a symbol should be: not the table
+            }
+            named += 1;
+            match text.as_str() {
+                "short_name" => found = u8::try_from(prop).ok(),
+                EXIT_PROPERTY => library = true,
+                _ => {}
+            }
+        }
+        if library && named >= MIN_IDENTIFIERS {
+            if let Some(prop) = found {
+                return Some(prop);
+            }
+        }
+    }
+    None
+}
+
+/// The Inform 6 library property whose presence in the identifiers table says
+/// this story is built on that library — declared in `linklpa.h` beside
+/// `short_name` itself, and absent from Inform 7's template, which puts its map
+/// in `Map_Storage` arrays instead.
+///
+/// The gate exists because of `Facility.z8`, an Inform 7 story whose symbol
+/// table is genuine and DOES name a `short_name` at property 21 — I7 borrows
+/// much of the library's property vocabulary — but whose values are neither
+/// strings nor routines. Decoding one gave `"regexp too complex"`, and 169
+/// objects were renamed to fragments of the runtime's error messages. On the
+/// Z-machine a property word is just a word: ZMSD §5.1 proves the value is not
+/// a ROUTINE (see [`printed_name`]) and nothing proves it is a STRING, so the
+/// only safe reading of a bare word is one made under a convention we can name.
+/// That convention is `parserm.h`'s `PrintShortName`, and this is how the story
+/// says it is the library that defines it. Glulx needs no such gate: §1.6.1
+/// tags every object in memory, so `gvm` can simply ask whether the value IS a
+/// string.
+const EXIT_PROPERTY: &str = "n_to";
+
+/// How many named entries a candidate identifiers table must carry before it is
+/// believed. The Inform 6 library declares dozens of common properties before a
+/// story's own; a handful of accidental identifier-shaped decodes in a row is
+/// not a symbol table.
+const MIN_IDENTIFIERS: usize = 8;
+
+/// Whether `s` is shaped like a compiler symbol — what every entry of Inform's
+/// identifier-names table is, and what a mis-guessed address decoded as text
+/// virtually never is.
+fn is_inform_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 40
+        && s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The byte span `[start, end)` of object `obj`'s short-name Z-text.
@@ -490,17 +730,29 @@ pub fn property_numbers(mem: &Memory, obj: u16) -> Vec<u8> {
 
 /// Stable per-object identity for the automapper.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ObjectSnapshot {
+    /// This object's own number in the story's object table — stable for the
+    /// life of the session, so the automapper can use it as a key.
     pub number: u16,
+    /// What contained this object at the moment of the snapshot (see
+    /// [`get_parent`]); 0 if it had nothing above it in the tree.
     pub parent: u16,
+    /// The object's display name as the story itself would print it
+    /// ([`printed_name`]), not necessarily the header's [`short_name`] — see
+    /// the note below on why an Inform 6 `short_name` property wins (SQ-1372).
     pub name: String,
 }
 
+/// The snapshot carries [`printed_name`], not [`short_name`]: what the mapper
+/// puts on the map is what the STORY calls the room, which for an Inform 6 game
+/// with a `short_name` property is that property and not the header name
+/// (SQ-1372).
 pub fn object_snapshot(mem: &Memory, obj: u16) -> ObjectSnapshot {
     ObjectSnapshot {
         number: obj,
         parent: get_parent(mem, obj),
-        name: short_name(mem, obj),
+        name: printed_name(mem, obj),
     }
 }
 
@@ -592,15 +844,18 @@ pub fn object_snapshot(mem: &Memory, obj: u16) -> ObjectSnapshot {
 // list mean two things (SQ-1120).
 
 /// Inform's `name` property, on every Inform story and both back-ends.
+#[cfg(feature = "grammar")]
 pub const INFORM_NAME_PROPERTY: u8 = 1;
 
 /// A property must be an array of dictionary addresses on at least this many
 /// objects before it is believed to be a parse-name property. Below it there is
 /// no story here, only coincidence.
+#[cfg(feature = "grammar")]
 const MIN_AGREEING_OBJECTS: usize = 4;
 
 /// …or, where the runner-up is not the adjectives, the leader must beat it by
 /// this factor to be a story-wide convention rather than a coincidence.
+#[cfg(feature = "grammar")]
 const REQUIRED_MARGIN: usize = 2;
 
 /// How many objects the object-entry table holds.
@@ -638,6 +893,7 @@ pub fn object_count(mem: &Memory) -> u16 {
 /// belong to, and one holding the name without the words is offering a player
 /// something the parser never agreed to accept.
 #[derive(Debug, Clone)]
+#[cfg(feature = "grammar")]
 pub struct ParseNames {
     property: u8,
     adjective_property: Option<u8>,
@@ -645,6 +901,7 @@ pub struct ParseNames {
     words: BTreeMap<u32, String>,
 }
 
+#[cfg(feature = "grammar")]
 impl ParseNames {
     /// Work out where this story keeps its parse names, and refuse if it does
     /// not keep them anywhere readable.
@@ -653,7 +910,7 @@ impl ParseNames {
     /// Infocom's is found by tallying, over the whole object table, which
     /// properties hold an array of dictionary addresses, and then taking the
     /// one whose objects **contain** every other candidate's — see
-    /// [`candidate_properties`] for why that test and not a bigger count.
+    /// `candidate_properties` for why that test and not a bigger count.
     ///
     /// `None` for a story with no parse names to read, which is a real answer
     /// and not only a failure. Journey and Scopa have no parser and no word
@@ -729,7 +986,7 @@ impl ParseNames {
 
     /// Which property the ADJECTIVES are read from, and `None` where this story
     /// keeps none that can be read — see [`Adjectives`] for what that means and
-    /// [`infocom_properties`] for how it is decided.
+    /// `infocom_properties` for how it is decided.
     pub fn adjective_property(&self) -> Option<u8> {
         self.adjective_property
     }
@@ -739,7 +996,7 @@ impl ParseNames {
     /// found somewhere to read them.
     ///
     /// `None` when the NOUNS cannot be read: see
-    /// [`word_array`](ParseNames::word_array) for exactly when that is. An
+    /// `word_array` for exactly when that is. An
     /// object whose adjectives cannot be read still answers — with an empty
     /// adjective list, which is a different claim from the
     /// [`Adjectives::Unavailable`] a story that keeps none reports.
@@ -818,6 +1075,7 @@ impl ParseNames {
 }
 
 /// The dictionary, indexed the way a parse-name property refers to it.
+#[cfg(feature = "grammar")]
 struct DictionaryIndex {
     by_address: BTreeMap<u32, String>,
     key_chars: usize,
@@ -825,6 +1083,7 @@ struct DictionaryIndex {
 
 /// Which objects hold an array of dictionary addresses under each property
 /// number.
+#[cfg(feature = "grammar")]
 fn candidate_properties(
     mem: &Memory,
     by_address: &BTreeMap<u32, String>,
@@ -893,6 +1152,7 @@ fn candidate_properties(
 /// [`MIN_AGREEING_OBJECTS`] floor is a second guard on the same point rather
 /// than a load-bearing one — every real V4+ adjective property covers 103
 /// objects or more.
+#[cfg(feature = "grammar")]
 fn infocom_properties(
     candidates: &BTreeMap<u8, BTreeSet<u16>>,
     version: u8,
@@ -1664,6 +1924,160 @@ mod tests {
         assert_eq!(m.read_byte(addr15 as u32 - 1), 0x80, "second size byte for prop 15");
         // get_prop_len: second size byte = 0x80; 0x80 & 0x3F = 0 → returns 64.
         assert_eq!(get_prop_len(&m, addr15), 64, "escape two-byte prop len should be 64");
+    }
+
+    // ── The name the story PRINTS (SQ-1372) ──────────────────────────────────
+    //
+    // A v5 story with Inform's own two tables in it: an identifier-names table
+    // (`Inform6/tables.c`: a word count, then one packed string address per
+    // property number) and two objects using the `short_name` property it
+    // names — one holding a STRING, one holding a ROUTINE.
+
+    /// Where the hand-built v5 story's pieces go. Dynamic memory ends at
+    /// `static_mem_base` = 0x0400 (`sample_story`), and the identifiers table
+    /// must be inside `[object_table, static_mem_base)` exactly as Inform puts
+    /// it, so it goes at 0x0350; the strings go above, where a packed address
+    /// (v5: `4 * p`, ZMSD §1.2.3) can reach them.
+    const IDENT_TABLE: u32 = 0x0350;
+    /// How many identifier entries the table claims.
+    const IDENT_COUNT: u32 = 40;
+    /// The property number this story gives `short_name` — deliberately NOT the
+    /// 46 `advent.z6` uses, since the whole point is that it is read.
+    const SHORT_NAME_PROP: u32 = 30;
+    const V5_OBJ_ENTRIES: u32 = 0x0100 + 63 * 2;
+    const V5_PROPS_1: u32 = 0x0200;
+    const V5_PROPS_2: u32 = 0x0220;
+    const V5_STRINGS: u32 = 0x0400;
+
+    /// Encode `text` as a Z-string (ZMSD §3.2): three 5-bit Z-characters per
+    /// word, 0x8000 on the last. Written from the spec rather than through
+    /// [`encode_word`], which pads to the DICTIONARY's fixed length.
+    fn z_string(text: &str) -> Vec<u8> {
+        let mut z: Vec<u8> = Vec::new();
+        for ch in text.bytes() {
+            if let Some(i) = crate::text::A0.iter().position(|&c| c == ch) {
+                z.push(6 + i as u8);
+            } else if let Some(i) = crate::text::A1.iter().position(|&c| c == ch) {
+                z.push(4);
+                z.push(6 + i as u8);
+            } else if let Some(i) = crate::text::A2.iter().position(|&c| c == ch) {
+                z.push(5);
+                z.push(6 + i as u8);
+            } else {
+                panic!("z_string cannot encode {ch:?}");
+            }
+        }
+        while !z.len().is_multiple_of(3) {
+            z.push(5); // §3.6.1's padding: a shift with nothing after it
+        }
+        let mut out = Vec::new();
+        let words = z.len() / 3;
+        for (w, c) in z.chunks(3).enumerate() {
+            let mut word = ((c[0] as u16) << 10) | ((c[1] as u16) << 5) | c[2] as u16;
+            if w + 1 == words {
+                word |= 0x8000;
+            }
+            out.extend_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+
+    /// A v5 story whose objects and identifier names are laid out per the ZMSD
+    /// and per `Inform6/tables.c`. Object 1 has an EMPTY header name and a
+    /// string `short_name`; object 2 has a header name and a ROUTINE one.
+    fn build_short_name_story() -> Vec<u8> {
+        let mut buf = sample_story(5);
+        buf.resize(0x0600, 0);
+
+        // Strings, four-byte aligned so a packed address reaches them.
+        let mut next = V5_STRINGS;
+        let mut put_string = |buf: &mut Vec<u8>, text: &str| -> u16 {
+            let at = next;
+            let bytes = z_string(text);
+            buf[at as usize..at as usize + bytes.len()].copy_from_slice(&bytes);
+            next += (bytes.len() as u32).div_ceil(4) * 4;
+            (at / 4) as u16
+        };
+        // The identifier names: property 1 is `name` (the compiler's own fixed
+        // number), the library's `n_to` is what says this is that library, and
+        // the rest are filler so the table is a table.
+        let mut identifiers: Vec<(u32, u16)> = vec![(1, put_string(&mut buf, "name"))];
+        for (i, id) in
+            ["before", "after", "life", "n_to", "s_to", "e_to", "w_to", "description", "capacity"]
+                .iter()
+                .enumerate()
+        {
+            identifiers.push((4 + i as u32, put_string(&mut buf, id)));
+        }
+        identifiers.push((SHORT_NAME_PROP, put_string(&mut buf, "short_name")));
+        let maze = put_string(&mut buf, "Maze");
+        let cave = z_string("cave");
+
+        // A "routine": ZMSD §5.1's first byte is the local count, 0..=15.
+        let routine = next;
+        buf[routine as usize] = 3;
+        let routine_packed = (routine / 4) as u16;
+
+        // ── The identifiers table ────────────────────────────────────────────
+        put_word(&mut buf, IDENT_TABLE as usize, IDENT_COUNT as u16);
+        for (prop, packed) in identifiers {
+            put_word(&mut buf, (IDENT_TABLE + prop * 2) as usize, packed);
+        }
+
+        // ── Object 1: no header name, `short_name` is a string ───────────────
+        put_word(&mut buf, (V5_OBJ_ENTRIES + 12) as usize, V5_PROPS_1 as u16);
+        buf[V5_PROPS_1 as usize] = 0; // zero words of header name
+        // ZMSD §12.4.2's one-byte form: bit 6 set = two bytes of data.
+        buf[V5_PROPS_1 as usize + 1] = 0x40 | SHORT_NAME_PROP as u8;
+        put_word(&mut buf, V5_PROPS_1 as usize + 2, maze);
+        buf[V5_PROPS_1 as usize + 4] = 0; // end of the property table
+
+        // ── Object 2: a header name, `short_name` is a routine ───────────────
+        let entry2 = V5_OBJ_ENTRIES + entry_size(5);
+        put_word(&mut buf, (entry2 + 12) as usize, V5_PROPS_2 as u16);
+        buf[V5_PROPS_2 as usize] = (cave.len() / 2) as u8;
+        buf[V5_PROPS_2 as usize + 1..V5_PROPS_2 as usize + 1 + cave.len()].copy_from_slice(&cave);
+        let after_name = V5_PROPS_2 as usize + 1 + cave.len();
+        buf[after_name] = 0x40 | SHORT_NAME_PROP as u8;
+        put_word(&mut buf, after_name + 1, routine_packed);
+        buf[after_name + 3] = 0;
+        buf
+    }
+
+    #[test]
+    fn short_name_property_number_is_read_from_the_storys_own_symbol_table() {
+        let m = Memory::new(build_short_name_story()).unwrap();
+        assert_eq!(
+            short_name_property(&m),
+            Some(SHORT_NAME_PROP as u8),
+            "the number comes from the identifiers table, not from a constant"
+        );
+    }
+
+    #[test]
+    fn a_story_with_no_symbol_table_names_no_short_name_property() {
+        let m = Memory::new(sample_story(5)).unwrap();
+        assert_eq!(short_name_property(&m), None);
+        assert_eq!(printed_name(&m, 1), short_name(&m, 1), "and printed_name is the header name");
+    }
+
+    #[test]
+    fn printed_name_prefers_a_string_short_name_over_the_header_name() {
+        let m = Memory::new(build_short_name_story()).unwrap();
+        assert_eq!(short_name(&m, 1), "", "object 1's header name is empty, as Inform compiles it");
+        assert_eq!(printed_name(&m, 1), "Maze", "the story prints its short_name property");
+        assert_eq!(object_snapshot(&m, 1).name, "Maze", "and the mapper's snapshot carries it");
+    }
+
+    #[test]
+    fn printed_name_keeps_the_header_name_when_short_name_is_a_routine() {
+        let m = Memory::new(build_short_name_story()).unwrap();
+        assert_eq!(short_name(&m, 2), "cave");
+        assert_eq!(
+            printed_name(&m, 2),
+            "cave",
+            "a routine cannot be read statically, so the header name stands"
+        );
     }
 
     // ── Fixture test ──────────────────────────────────────────────────────────

@@ -10,17 +10,17 @@ lanthorn is a playable interactive-fiction interpreter for the terminal with liv
 
 ```sh
 cargo build --workspace                 # build everything
-cargo run -p app -- stories/foo.z5      # run the TUI (binary name: lanthorn)
-cargo nextest run -p app v6_arthur_status            # one integration-test suite
-cargo nextest run -p app v6_arthur_status::some_case # one test within it
-cargo test -p app --test v6_arthur_advent            # one whole group binary
+cargo run -p lanthorn -- stories/foo.z5      # run the TUI (binary name: lanthorn)
+cargo nextest run -p lanthorn v6_arthur_status            # one integration-test suite
+cargo nextest run -p lanthorn v6_arthur_status::some_case # one test within it
+cargo test -p lanthorn --test v6_arthur_advent            # one whole group binary
 ```
 
 The app's integration suites live in `crates/app/tests/suites/`, which cargo does
 **not** auto-build; each is pulled in as a module by one of the ~14 group binaries
 at `crates/app/tests/*.rs` (`#[path = "suites/v6_arthur_status.rs"] mod …`). One
 link per group instead of one per suite: a `touch crates/blorb/src/lib.rs`
-rebuild of `--tests -p app` went from 11.2s to 4.0s, and app's share of `target/`
+rebuild of `--tests -p lanthorn` went from 11.2s to 4.0s, and app's share of `target/`
 from 4.3 GiB to 2.8 GiB (SQ-0786). Adding a suite means adding the file under
 `suites/` **and** a `mod` line in the group that should carry it — a suite no
 group names is never built. Reaching one suite costs nothing extra, because the
@@ -30,7 +30,7 @@ above, rather than by `--test`.
 **Which tests to run when.** COMPILATION dominates turnaround here, not the tests.
 Measured at 12 cores: a warm targeted suite is **5.8s** and the full gate **170s**,
 but the REBUILD after touching `app` is **151s** and after `zvm` **277s** — and a
-filtered run pays that too, because `-p app` links all fourteen group binaries
+filtered run pays that too, because `-p lanthorn` links all fourteen group binaries
 whatever the filter selects. So selection roughly halves the loop (321s → 157s) and
 cannot do better than the build. The linker is already Apple's fast `ld-1267` and the
 volume is an SSD; neither is worth chasing.
@@ -54,14 +54,79 @@ CI is exempt — both workflows export `CARGO_BUILD_JOBS` from the runner's own 
 count before installing Rust, because a 3-4 core runner running six or eight rustc
 processes is slower AND puts a crate the size of `app` near the memory ceiling.
 
+**`app`'s ~3,271 in-crate `#[test]`s (SQ-1242) sit behind `t-*` Cargo features, not
+bare `cfg(test)`.** `crates/app/Cargo.toml`'s `[features]` table names nine groups
+following the module tree (`t-input`, `t-render`, `t-picker`, `t-session`,
+`t-guidance`, `t-persist`, `t-theme`, `t-state`, `t-misc`, plus `t-all` listing all
+nine) so a developer can guess a file's group on sight, and every `#[cfg(test)] mod`
+under `crates/app/src/` was rewritten to `#[cfg(all(test, feature = "t-<group>"))]`.
+Measured on a quiet machine, warm: `cargo check -p lanthorn --lib --tests` with no
+features is **~2.3s** (was 33s even bare-`--lib`, because now it type-checks NO
+in-crate test code at all); `--features t-input` (input.rs's 334 cases plus its
+group siblings) is **~2.1s**; `--features t-all` (everything, matching CI's
+`--all-features`) is **~2.7s** — all three down from the unguarded **5m19s**. Run one
+group under nextest: `cargo nextest run -p lanthorn --lib --features t-input input`
+(334 tests, 0.7s warm). Nextest's own config has no per-package default-features
+knob (see `.config/nextest.toml`), so the feature has to be spelled on every
+invocation — omitting it compiles zero of the in-crate tests, which is the point.
+`test_feature_gating` (`crates/app/tests/suites/`) fails the build if a `mod` is
+left ungated, if a `feature = "t-…"` cfg names something `Cargo.toml` doesn't
+declare, or if `t-all` drops a group.
+
 - **While iterating**, run the suites that cover what you touched — by NAME under
-  nextest (`cargo nextest run -p app v6_arthur_status`), never by `--test`, since the
-  module path still carries the old filename.
+  nextest (`cargo nextest run -p lanthorn v6_arthur_status`), never by `--test`, since the
+  module path still carries the old filename. For `app`'s in-crate unit tests, name
+  the `t-*` group too: `cargo nextest run -p lanthorn --lib --features t-render render`.
 - **Before you PUSH**, run `cargo check --all-targets` on the tree you are about to
   push — **not** the full gate. CI is the backstop (see below), and a merged-tree
   `cargo check` is what catches the one thing CI would catch too late and nothing
   else local can see: a SEMANTIC merge conflict between parallel lanes, textually
-  clean and non-compiling. It costs under a minute where the gate costs many.
+  clean and non-compiling. It costs minutes (see Disk hygiene for the measured
+  numbers) where the gate costs many more.
+  **Since SQ-1242, this catches PRODUCTION code only** — with no `t-*` feature on,
+  none of `app`'s in-crate tests compile, so a merge conflict confined to test code
+  is invisible to it. CI's `cargo check`-equivalent is the `--all-features` test
+  build (see below), which is where that half is caught; add `--all-features` here
+  too if you want the in-crate tests covered locally before pushing.
+- **A change to an engine crate's public struct or its crate-level docs needs
+  `cargo test --doc -p <crate>`** — nextest never runs doctests (every crate sets
+  `doctest = false`, see below), but CI's `cargo test` does, so a doc example that
+  hand-builds a struct silently rots the moment a field is added. Main went red
+  on all three CI platforms this way (SQ-1414): the C64 Mysterious Adventures
+  loader added `Database::mysterious`, and the crate-doc example at
+  `crates/scott/src/lib.rs:145` — the only place left spelling every field of
+  `Database` by hand — missed it.
+- **When a merge touches anything `app` depends on** — an engine crate's public
+  API, a name rule, a type's fields — the integrator's merged-tree run must
+  include the in-crate tests, not only the integration filter: `cargo nextest
+  run -p lanthorn --lib --bins --features t-all <filter>`. A filter with no
+  `--features` compiles zero of `app`'s in-crate tests and reads as a pass
+  regardless of what broke. SQ-1416 reached CI red this way — two production
+  regressions in `glulx_session.rs`'s in-crate tests, because both the lane
+  and the merge check filtered by name without the feature.
+  **`--bins` is not optional: some in-crate tests live only in the `lanthorn`
+  binary target, not the library, and `--lib` alone cannot see them.**
+  `picker_ui.rs` is a module of `main.rs`, not `lib.rs` — `grep -n "mod
+  picker_ui" crates/app/src/main.rs crates/app/src/lib.rs` finds it only in
+  the former — so its ~230 tests compile solely into the bin-target test
+  binary. SQ-1458 added three `DiskImage` rows whose picker-column label
+  overflowed the TYPE column's fixed width, panicking
+  `picker_ui::tests::interp_label_names_the_disk_image_container` at
+  `picker_ui.rs:4433`; the integrator's `cargo nextest run -p lanthorn --lib
+  --features t-all` printed 3,377 passed and could not see it, and only CI's
+  `cargo test --workspace --all-features` caught it, reaching red on all three
+  platforms after the merge had already landed.
+  **Even with the feature on, prefer no filter at all**: `cargo nextest run -p
+  lanthorn --lib --bins --features t-all` — a name filter only covers the
+  group you guessed, and the group that reads a changed seam is rarely the one
+  you guessed. SQ-1422 widened the story sniffer to accept Z-machine Versions 1
+  and 2; the merge check ran the `t-guidance` filter, but the assumption that
+  broke lived in `t-picker`, so CI went red on all three platforms on a check
+  that had printed a pass. Measured warm: the whole unfiltered `t-all`
+  in-crate suite is **3,377 tests / ~23s** with `--lib` alone versus **3,607
+  tests / ~25s** with `--lib --bins` — the extra ~230 tests (`picker_ui`
+  included) cost about two seconds, cheap enough that dropping `--bins` to
+  save time buys nothing worth the risk.
 - **Never put the full gate in a parallel lane's brief.** A three-lane wave that
   gates each lane AND the combination pays four full builds — plus four clippy
   builds, which share no fingerprints with them — for one merge. Lanes run
@@ -75,7 +140,7 @@ processes is slower AND puts a crate the size of `app` near the memory ceiling.
 - **A change that compiles nothing needs no gate.** README prose, a doc under
   `docs/`, a committed PNG, a `gallery.toml` key spec — none of it is Rust, and
   the only question worth asking is whether the one suite that READS it still
-  passes (`cargo nextest run -p app gallery_manifest` is 23 cases in 0.13s warm).
+  passes (`cargo nextest run -p lanthorn gallery_manifest` is 23 cases in 0.13s warm).
   The full gate exists for the two things that have ever justified it — a semantic
   merge conflict between parallel lanes, and the shared-process palette races —
   and a line of README prose cannot reach either. Running it anyway costs minutes
@@ -95,31 +160,44 @@ processes is slower AND puts a crate the size of `app` near the memory ceiling.
   structurally cannot (see the palette section below).
 
 Where to look, by what you changed. Prefer more than the obvious one; these are the
-floor, not the ceiling:
+floor, not the ceiling. **A bare name in the table below is a test suite and works as a nextest name filter; a `-E 'binary(…)'` entry is one of the ~14 group binaries, which a bare name filter matches ZERO tests of.** The failure mode is a step that prints a pass having run exactly one test (SQ-1481). Check that a filter matched what you meant before trusting it: `cargo nextest list -p lanthorn <filter>` enumerates the tests it selected, and the first line names the binaries it found.
 
 | changed | run at least |
 |---|---|
-| `crates/zvm/**` | `-p zvm`, plus the presses you touched (`v6_arthur_advent`, `v6_journey`, `v6_shogun`, `v6_zork0`) |
-| `crates/app/src/render/screen.rs` | `v6_render`, `v6_windows`, `zmachine_screen`, `zork_classic` |
-| `crates/app/src/render/v6_layout.rs` | `v6_render`, `v6_arthur_advent`, `v6_journey`, `v6_scopa` |
-| `crates/app/src/render/transcript.rs` | `zork_classic`, `zmachine_screen`, `-p app --lib` |
-| `crates/app/src/native_font.rs`, `crates/blorb/**` | `-p blorb`, `engines`, `v6_zork0` |
-| `crates/mapper/**` | `-p mapper`, `mapper_ui` |
-| anything touching the PALETTE | the gate **and** `cargo test --workspace` |
-| a test that WRITES TO DISK | the gate **and** `cargo test --workspace`, twice |
+| `crates/zvm/**` | `-p lanthorn-zvm`, plus the presses you touched (`-E 'binary(v6_arthur_advent)'`, `-E 'binary(v6_journey)'`, `-E 'binary(v6_shogun)'`, `-E 'binary(v6_zork0)'`) |
+| `crates/app/src/render/screen.rs` | `-E 'binary(v6_render)'`, `-E 'binary(v6_windows)'`, `-E 'binary(zmachine_screen)'`, `-E 'binary(zork_classic)'` |
+| `crates/app/src/render/v6_layout.rs` | `-E 'binary(v6_render)'`, `-E 'binary(v6_arthur_advent)'`, `-E 'binary(v6_journey)'`, `-E 'binary(v6_scopa)'` |
+| `crates/app/src/render/transcript.rs` | `-E 'binary(zork_classic)'`, `-E 'binary(zmachine_screen)'`, `-p lanthorn --lib` |
+| `crates/app/src/native_font.rs`, `crates/blorb/**` | `-p lanthorn-blorb`, `-E 'binary(engines)'`, `-E 'binary(v6_zork0)'` |
+| `crates/mapper/**` | `-p lanthorn-mapper`, `-E 'binary(mapper_ui)'` |
+| `crates/verb-synonyms/**`, `crates/app/src/vocab.rs` | `-p lanthorn --lib vocab`, `adult_words`, `vocabulary_offer`, `vocabulary_vetting`, `assist_voice`, `word_reveal`, `command_band`, `scope_completion`, `story_word_scrape` |
+| anything touching PROCESS-GLOBAL state (see below) | the gate **and** `cargo test --workspace --all-features` |
+| a test that WRITES TO DISK | the gate **and** `cargo test --workspace --all-features`, twice |
+
+**The guidance suites are where a `stories/`-only case hides** (SQ-1251). Seven of
+the nine above boot a real commercial story and skip vacuously without it, so CI —
+which has no `stories/` — cannot fail on any of them, and the local gate is the ONLY
+thing that can. Regenerating `synonym_groups.tsv` or changing which members count as
+known moves what the Guiding Light says on Zork I, Curses and the rest, and the
+pinned offer lines are the only record of it. SQ-1234's table regeneration and
+SQ-1238's phrasal members each broke one pinned line and neither lane ran the suite
+that held it; the failure sat on green main for a day. **Symlink `stories/` into the
+worktree and run these by name — a vacuous skip reads exactly like a pass.**
 
 **Two things have justified the full gate**: a SEMANTIC merge conflict between two
 parallel lanes that was textually clean (one lane calling a signature the other had
-replaced), and the shared-process palette races of SQ-0904. Note what each actually
-needs — the first is a COMPILE failure, so `cargo check --all-targets` on the merged
-tree catches it in under a minute; the second is invisible to nextest by
-construction and only `cargo test` sees it, which CI runs anyway. Neither is an
-argument for running the full test gate locally before a push.
+replaced), and a shared-process race — the palette's (SQ-0904, and the palette is
+no longer process-global at all; see below), the filesystem's (SQ-1131), the audio
+device's (SQ-1162). Note what each actually needs — the first is a COMPILE failure,
+so `cargo check --all-targets` on the merged tree catches it in under a minute; the
+second is invisible to nextest by construction and only `cargo test` sees it, which
+CI runs anyway. Neither is an argument for running the full test gate locally
+before a push.
 
 **So the full gate below is CI's job, not the inner loop's** (user decision,
 2026-08-30: "no need for full local gate, we catch that with the CI later. we just
 need to keep an eye for CI failures"). Run it locally when you actually want it —
-a release, a change you distrust, a palette or on-disk change per the table above —
+a release, a change you distrust, a process-global or on-disk change per the table above —
 not as a reflex before every push.
 
 **The duty that replaces it: WATCH THE CI RUN.** Trading the local gate for CI makes
@@ -129,10 +207,15 @@ report a failure promptly rather than waiting to be asked.
 **Full test gate** (CI runs this; run it locally only when you mean to):
 
 ```sh
-cargo nextest run --workspace 2>&1 | grep -acE "^error(\[|:)| [1-9][0-9]* failed"
+cargo nextest run --workspace --all-features 2>&1 | grep -acE "^error(\[|:)| [1-9][0-9]* failed"
 ```
 
 This must **print 0**. Note: grep exits 1 when it finds zero matches — that exit code IS the pass, so never chain this with `&&` or treat a nonzero exit as failure. (`-a` because a panicking test can emit a NUL byte, after which grep treats the stream as binary and reports nothing.)
+
+`--all-features` is load-bearing since SQ-1242: without it, none of `app`'s ~3,271
+in-crate `#[test]`s (gated behind `t-*` Cargo features, see above) compile or run,
+and the gate would silently stop covering them — the same failure mode `--workspace`
+already guards against for whole crates, now possible within one.
 
 `--workspace`, not a list of `-p` flags. The gate named five crates for months — `blorb`, `zvm`, `gvm`, `scott`, `app` — and every crate outside that list was invisible to it: `mapper`, `audio` and the CLI crates were hundreds of tests the gate could not fail on. A mapper regression could not fail it at all. SQ-0826 found this by removing eleven tests and watching the count drop by one. Naming crates means the gate silently stops covering each new one; `--workspace` cannot go stale, and costs ~30s more. (Deliberately no totals here — a count of what the workspace holds today is an inventory that rots into misinformation, where the line below is a check that recomputes itself every run.)
 
@@ -142,46 +225,46 @@ Cross-check completeness against nextest's own summary rather than by counting l
 
 Three consequences of nextest's model worth knowing: it runs **each test in its own process**, so a test that depends on state left behind by another test in the same binary will fail under it (that is a defect, not an incompatibility); and it does not run doctests, which costs us nothing because every crate sets `doctest = false` — if you ever add a real doctest, remove that setting and run `cargo test --doc` alongside.
 
-**And the gate cannot see a shared-process race, because CI runs `cargo test` and the gate does not.** Per-test processes mean no test can observe another's global state, so a race on one is *structurally invisible* to `cargo nextest run` — while `cargo test` gives a binary's tests one process and many threads and hits it. This turned main red four times running (SQ-0904): `zvm::screen::set_palette` is process-global, and twenty-three integration suites each declared their **own** `static PALETTE` mutex, every one documented as "no two cases here may boot at once". True within a suite; meaningless across them, since `tests/suites/*.rs` are modules sharing a group binary's process. Under nextest twenty-three locks are indistinguishable from one, under `cargo test` from zero. They now all take one shared lock, and a source-level case — `palette_lock_discipline` — fails if a suite under `tests/suites/` sets the palette without it, because the *next* such suite is written by someone with no reason to know any of this and the gate cannot catch them (SQ-0905). **When you touch process-global state — the palette is the one we have — verify with `cargo test --workspace` as well as the gate; it is the only command that can answer the question.**
+**And the gate cannot see a shared-process race, because CI runs `cargo test` and the gate does not.** Per-test processes mean no test can observe another's global state, so a race on one is *structurally invisible* to `cargo nextest run` — while `cargo test` gives a binary's tests one process and many threads and hits it. The PALETTE was the exemplar for a year: `zvm::screen` held it in a process-wide atomic, and containing what that caused took a private mutex, a panicking setter, a guard that restored the default on drop and a source-scanning suite (SQ-0904, SQ-0905, SQ-0958, SQ-0959, SQ-0987). **SQ-1393 ended it at the cause**: the palette and the interpreter version are `Machine` fields now, carried in by `MachineBoot` and read back off the session — or off the `ColorScheme` — being rendered. There is no process-global palette, no lock, no guard and no discipline suite, and a test cannot install a table another test can see. **The two classes below are unchanged and still bite exactly as described.**
 
-**The palette is not the only process-global thing: so is the filesystem** (SQ-1131). A scratch directory named from `std::process::id()` alone is unique per PROCESS, which under nextest is the same as unique per test and under `cargo test` is unique per *binary* — so every caller of a pid-keyed helper gets the same directory, `fs::write` truncates, and a case's closing `remove_dir_all` deletes what a neighbour is halfway through reading. That is a correct fixture failing its own assertion, somewhere else, intermittently, and it cost eight consecutive red CI runs against a local gate that printed 0 every time (`verb-synonyms-gen`'s `scratch()`, one directory shared by every caller of `wordnet_fixture()`). Inside `app`, take `app::scratch_dir("a-tag")`, which is unique per CALL by construction; in `zvm`/`gvm`/`scott`, which take no dependencies, spell an `AtomicUsize` beside the pid. `scratch_path_discipline` scans every `.rs` file under `crates/` — `src/` `#[cfg(test)]` modules included, which is where most of these live — and asks a helper for the COUNTER, not for a distinguishing name: a scratch path built outside a `#[test]` must have an `AtomicUsize` in the same function (SQ-1163). **A `tag` parameter is not a fix.** It looks like one, because every caller passes a different string, but that is an invariant maintained by hand across call sites in different files, and the moment two spell one the same way it is the bare form again; fifty-one helpers were relying on it, two of them literally `bm-{tag}-{pid}`. The guard still cannot see two `#[test]` bodies that build the same name by different routes — **so a change that adds a test writing to disk wants `cargo test --workspace` too, and wants it twice, because a race that has been fixed passes once by luck as well.**
+**The palette was not the only process-global thing, and the filesystem still is** (SQ-1131). A scratch directory named from `std::process::id()` alone is unique per PROCESS, which under nextest is the same as unique per test and under `cargo test` is unique per *binary* — so every caller of a pid-keyed helper gets the same directory, `fs::write` truncates, and a case's closing `remove_dir_all` deletes what a neighbour is halfway through reading. That is a correct fixture failing its own assertion, somewhere else, intermittently, and it cost eight consecutive red CI runs against a local gate that printed 0 every time (`verb-synonyms-gen`'s `scratch()`, one directory shared by every caller of `wordnet_fixture()`). Inside `app`, take `app::scratch_dir("a-tag")`, which is unique per CALL by construction; in `zvm`/`gvm`/`scott`, which take no dependencies, spell an `AtomicUsize` beside the pid. `scratch_path_discipline` scans every `.rs` file under `crates/` — `src/` `#[cfg(test)]` modules included, which is where most of these live — and asks a helper for the COUNTER, not for a distinguishing name: a scratch path built outside a `#[test]` must have an `AtomicUsize` in the same function (SQ-1163). **A `tag` parameter is not a fix.** It looks like one, because every caller passes a different string, but that is an invariant maintained by hand across call sites in different files, and the moment two spell one the same way it is the bare form again; fifty-one helpers were relying on it, two of them literally `bm-{tag}-{pid}`. The guard still cannot see two `#[test]` bodies that build the same name by different routes — **so a change that adds a test writing to disk wants `cargo test --workspace --all-features` too, and wants it twice, because a race that has been fixed passes once by luck as well.** (`--all-features`: most of the scratch sites this file scans for live inside `app`'s in-crate `t-*`-gated tests, invisible to `cargo test` without it.)
 
-**And a third process-global class, the nastiest of the three: THREAD-AFFINE OS HANDLES** (SQ-1162). An audio device is not a value you can hold twice — cpal keeps a process-global `static ENUMERATOR` on Windows while initialising COM in a `thread_local` whose `Drop` calls `CoUninitialize()`, so a finished libtest thread can unload MMDevAPI out from under that global pointer. The symptom is not an assertion: the whole binary dies with `0xc0000005 STATUS_ACCESS_VIOLATION` and NO test reports failure, so the printed tail is scheduling rather than causation and naming the culprit needs `--test-threads=1`. On macOS the same shape merely crawls — four cases went from 0.76s serial to **491.54s** in parallel, real CoreAudio streams torn down on threads that never opened them.
+**And a third process-global class, the nastiest of them: THREAD-AFFINE OS HANDLES** (SQ-1162). An audio device is not a value you can hold twice — cpal keeps a process-global `static ENUMERATOR` on Windows while initialising COM in a `thread_local` whose `Drop` calls `CoUninitialize()`, so a finished libtest thread can unload MMDevAPI out from under that global pointer. The symptom is not an assertion: the whole binary dies with `0xc0000005 STATUS_ACCESS_VIOLATION` and NO test reports failure, so the printed tail is scheduling rather than causation and naming the culprit needs `--test-threads=1`. On macOS the same shape merely crawls — four cases went from 0.76s serial to **491.54s** in parallel, real CoreAudio streams torn down on threads that never opened them.
 
-**Nextest is structurally blind to it, exactly as with the palette**: one process per test is never two threads. It reddened Windows CI while the local gate was green.
+**Nextest is structurally blind to it, exactly as it was to the palette**: one process per test is never two threads. It reddened Windows CI while the local gate was green.
 
 The trap is that the offending call is INVISIBLE at the call site. `Action::ConfigSave` builds an `AudioBackend` whenever `enable_sound` is on and the state holds none — which is every `AppState::default()` — so a *settings* case opens a real device without the word "audio" appearing in its body. The `audio` crate's own rule ("call `disable_output_for_tests()` in any test that constructs a backend") could not be followed by someone who did not know they were constructing one. It is therefore said ONCE, in `AppState::default()` under `#[cfg(test)]`: the lazy construction still runs and is still asserted on, only the device open is skipped, and the shipped binary never compiles the line. **Do not push that rule back out to the call sites** — that is the arrangement that failed.
 
-**The rule has a reader half too: no test may assume a palette it did not write** (SQ-0958). A suite that never sets one still *resolves* colour numbers, through whatever the last suite in its group binary left behind — which is `Standard` under nextest always, and a machine's table under `cargo test` as soon as a sibling boots a press. `v6_shogun_gameplay` asserted §8.3.1 white while `v6_shogun_title_header` booted the same story as an IBM PC, and read `Rgb(173, 173, 173)` instead; main was red on it for exactly as long as the local gate said 0. So every suite that asserts a colour states its palette in one call that also takes the lock — `let _g = app::v6_palette(zvm::screen::Palette::Standard);`, held for the whole case — and assuming the default is as much an assumption as any other. `palette_lock_discipline`'s second case enforces it; a writer is a call and easy to see, a reader is an ABSENCE, so that case matches on booting/rendering **plus** asserting a colour, by literal (`Rgb(`, `Rgba(`) or by painted surface (`RgbaImage`, `paint_surface`, …). The surface half is not theoretical: a suite comparing two grounds names no colour at all and still broke the moment a sibling flipped the table between them.
-
-**And the guard puts `Standard` back when it drops** (SQ-0959), so a case that names a palette leaves the process on the default rather than on the last machine it booted — which is the table nextest's fresh process would have given the next case. It restores the DEFAULT, not the value it displaced, because restore-previous is only meaningful if every writer restores.
-
-**Every writer now does, and there is no other way to write** (SQ-0987). Three locks on one route, and you only ever meet the first one that catches you: the shared lock is **private to `app`**, so a suite cannot take it raw — that is a compile error, not a convention; `app::v6_set_palette` is the only reachable setter and **panics** unless the calling thread holds a guard; and `palette_lock_discipline` fails any file under `tests/suites/` that reaches `zvm::screen::set_palette` directly, which is the one spelling the other two cannot see. So the two ways in are `let _g = app::v6_palette(p);` when the case can name its table at the lock site, and `let _g = app::v6_palette_at_boot();` when it cannot — thirty harnesses resolve an `InterpreterProfile` from a medium deep inside their own `boot()` and set `profile.palette()` there, several rows below where the lock is taken. `v6_palette_at_boot` is exactly `v6_palette(Standard)` with permission to name another table later: it still installs a known palette rather than leaving whatever was there, because "leave whatever was there" is how SQ-0958 happened. **Do not add a "lock now, set later" helper that skips that** — the pairing is the rule. The invariant this buys is that the palette outside the lock is always `Standard`, so the table a case inherits under `cargo test` is the one nextest's fresh process would have given it.
+**The reader half of that rule outlived its apparatus** (SQ-0958, SQ-1393). A case that asserts a resolved colour still has to say which machine's table it read through — it just says it by building the session and the `ColorScheme` from the same `zvm::screen::Palette`, rather than by installing one for the process. `ColorScheme::terminal_default_in(p)` is that door, and plain `terminal_default()` is `Palette::Standard`, which is what a bare story with no medium actually presents. `v6_shogun_gameplay` asserting §8.3.1 white while its binary-mate booted the same story as an IBM PC is the failure this shape makes unreachable rather than merely detectable.
 
 **Clippy gate** — CI's, not the inner loop's, for the same reason as the test gate:
-`cargo clippy --workspace --all-targets -- -D warnings` must be clean, and CI runs
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` must be clean, and CI runs
 exactly that on every push. It costs ~149s the first time after a test build
 (separate fingerprints, so it shares NOTHING with it — running the test gate and
 then clippy is two complete builds of the same code) and ~0.3s when already warm.
-Locally, narrow it to the crate you edited if you run it at all.
+Locally, narrow it to the crate you edited if you run it at all. `--all-features` also
+lints `app`'s `t-*`-gated test code, so a lane that touched in-crate tests must run
+`cargo clippy -p lanthorn --all-targets --all-features -- -D warnings`, not the plain
+form — SQ-1493 reached CI red this way (2026-09-10).
 
-**But do NOT reach for the workspace sweep in the inner loop — narrow it to what you touched.** CI runs exactly `cargo clippy --workspace --all-targets -- -D warnings` on every push (`.github/workflows/test.yml`, Linux only, because clippy's result does not vary meaningfully by OS), so the full sweep already has a backstop and running it locally per iteration buys very little for minutes a time.
+**But do NOT reach for the workspace sweep in the inner loop — narrow it to what you touched.** CI runs exactly `cargo clippy --workspace --all-targets --all-features -- -D warnings` on every push (`.github/workflows/test.yml`, Linux only, because clippy's result does not vary meaningfully by OS), so the full sweep already has a backstop and running it locally per iteration buys very little for minutes a time.
 
 **Clippy cannot take a list of FILES, and never will.** It is a rustc driver, and Rust's compilation unit is the crate: to lint one module it must parse, macro-expand, name-resolve and type-check the whole crate, because what code in one file means depends on every other file in it. The only granularity on offer is the package (`-p`) and the target within it:
 
 | scope | what it covers | measured here |
 |---|---|---|
 | `--workspace --all-targets` | everything, incl. all fourteen of `app`'s test group binaries | ~150s+ |
-| `-p app --all-targets` | one package, still all its test binaries | most of that |
-| **`-p app --lib`** | one package, library target only | **62s** |
+| `-p lanthorn --all-targets` | one package, still all its test binaries | most of that |
+| **`-p lanthorn --lib`** | one package, library target only | **62s** |
 
-So for a change confined to `crates/app/src/`, `cargo clippy -p app --lib` is the local gate and CI is the sweep. Match the `-p` to the crate you edited; add `--all-targets` only when you actually changed something under `tests/`.
+So for a change confined to `crates/app/src/`, `cargo clippy -p lanthorn --lib` is the local gate and CI is the sweep. Match the `-p` to the crate you edited; add `--all-targets` only when you actually changed something under `tests/`.
 
 And note WHY even the narrow run costs a minute: at 62s wall it burned 2.75s of CPU at 33% utilisation. Almost none of that is lint work — it is rebuilding `app` under clippy's own fingerprints, which share nothing with the test build. Running the test gate and then clippy is two full builds of the same code, and no amount of scoping changes that; only doing it once, at the end, does.
 
 ## Hard rules
 
 - **`zvm`, `gvm`, and `scott` take ZERO external dependencies.** All parsing, text codecs, and Quetzal/save handling are hand-rolled. CLI crates and `app` may add deps (crossterm, ratatui, etc.).
+- **No code derived from GPL sources.** lanthorn is BSD-3-Clause (see `[workspace.package] license` in `Cargo.toml`). Never port, transcribe or paraphrase code, constants or tables from a GPL interpreter — Frotz, ScottFree, ScottKit, and GPL-licensed parts of Gargoyle (its `terps/scott` is ScottFree-derived; other parts, including some of `garglk/` and its bundled `terps/glulxe`, carry MIT terms — read the LICENSE or file header for the exact path before deciding). A GPL interpreter may be used only as a BLACK BOX: run the binary and compare its output (the dfrotz interop suites and the ScottFree parity suite are that shape). Permissive references are fine after the LICENSE at the commit you read is checked and recorded in the comment that cites it: the standards (ZMSD, Glulx, Glk), glulxe (MIT). Facts about a file format (signatures, layouts) come from independent format documentation or from experiment on a specimen, never from an offset table in GPL code. Every lane brief that names a reference implementation must state its licence and whether it may be read. (User rule, 2026-09-09; raised when a scott-dialect brief pointed a lane at Gargoyle's `gameinfo.c`.)
 - **Stage files explicitly by path.** Never `git add -A` / `git add .` — the working tree routinely carries untracked scratch files and gitignored fixtures that must not be committed. Delete any `scratch_*.rs` test files before committing.
 - **No GitHub PRs.** Workflow is: work on main for routine changes (a feature branch + local merge for major work), then `git push origin HEAD:main`.
 - **Commit trailers**: a git hook requires a quest trailer on every commit — `Quest: SQ-xxxx` (work in progress), `Completes: SQ-xxxx` (closes it), `Confirm: SQ-xxxx` (done but awaiting user verification), or `Quest: none`. Quests are tracked with the side-quest MCP tools / `side-quest` CLI, not files.
@@ -229,7 +312,7 @@ two that exist. Prefer adding a fact to one of those over adding a parameter.
 
 **Corollary — a guard beats a convention.** Where the wrong spelling cannot be
 made unreachable, add a source-level case that fails it, the way
-`palette_lock_discipline` and
+`scratch_path_discipline` and
 `render::screen::tests::no_bare_v6_cell_literals_in_native_pixel_arithmetic` do.
 The next person to write `py + 16` has no reason to know any of this.
 
@@ -247,7 +330,15 @@ named-archive link). Convert the awkward remainder by hand.
 
 Cargo has no garbage collection for `target/`: every hash change writes a new artifact beside the old one and orphans it forever (`-Zgc` is nightly and reclaims the *registry* cache, not build output). Two things dominate, and neither needs a tool:
 
-- **`target/debug/incremental`** is a pure cache — delete it freely; the only cost is a slower next build.
+- **The build directory is `target.noindex/`, not `target/`** (`.cargo/config.toml`
+  sets `target-dir`), because Spotlight indexes everything on this volume except a
+  directory whose name ends in `.noindex`, and it was indexing every build:
+  `corespotlightd` at 200% CPU behind a `cargo check --all-targets` that took
+  15–28 minutes during a wave of merges (2026-09-02). CI and the Dockerfile set
+  `CARGO_TARGET_DIR=target` so their `target/...` paths still hold. Anything that
+  walks the repo tree must skip every directory whose name STARTS with `target`.
+- **`target.noindex/debug/incremental`** is a pure cache — delete it freely; the only cost is a slower next build. It reached 48 GB (2,020 sessions) after one day of eleven lanes; deleting it changed nothing about check time, which is the point below.
+- **A merged-tree `cargo check --all-targets` is not "under a minute" for this crate any more.** Measured on a quiet machine with a fresh cache (2026-09-02): `-p lanthorn --lib` 33s, `-p lanthorn --lib --tests` 5m19s, `--all-targets` after touching `app` 11m. The cost is `app`'s library test module — ~3,000 unit tests compiled as one unit with the lib — plus the fourteen group binaries. Only a crate split moves it.
 - **Merged worktrees** — see the hard rule above.
 
 For the orphaned artifacts themselves there is `cargo sweep`, but **do not run it routinely here** — build speed beats disk, and an occasional manual `cargo clean` is the preferred trade. Measured on this workspace: `cargo sweep --dry-run --time 7` would have removed 28 GiB from a 22 GB `target/`, i.e. effectively everything. That is not orphan sediment; almost all of it is third-party dependency rlibs compiled weeks ago and still very much in use, because the workspace's own artifacts are always freshly rebuilt. Age is a poor proxy for obsolete when your own crates churn daily and your dependencies never do.
@@ -263,11 +354,13 @@ The `--file` form claims to remove exactly what a build did not touch, but note 
 
 `stories/` is **gitignored** (commercial game files). Real-game integration tests must skip vacuously when their fixture is absent (see `any_v6_story_present()` in `crates/app/tests/suites/zmsd_screen_compliance.rs` for the CI-safe pattern). Freely redistributable fixtures live in `unit_tests/`. Git worktrees lack `stories/` — symlink it from the main checkout when smoke tests matter there.
 
-**A disk image is a different release, not the same story on other media.** `stories/journey.z6` is release 83 / serial 890706; `Journey - The Quest Begins.adf` is release **30** / serial 890322, and the two differ in behaviour (r83 narrates through window 0, r30 through window 2 — which was the whole of SQ-0755). `InterpreterProfile::resolve` reads the medium, so "the Amiga build" means a different build of the game, not merely a different profile. Name the exact fixture and release in any finding, and when a defect is reported on a disk image, reproduce it on that image — a clean result off the bare story file proves nothing about it (SQ-0760). The release every medium in `stories/` carries is pinned in `crates/app/tests/suites/real_media_releases.rs` and tabulated in `docs/features/interpreter.md`; drive the floppy there before claiming a suite covers "the Amiga profile".
+**The freely-downloadable subset is FETCHED, not committed** (SQ-1015): `scripts/fixtures.manifest` pins 44 files by SHA-256 with their upstream URL and licence basis, `scripts/fetch-fixtures.sh` populates `crates/app/tests/fixtures/stories/` from it (and `--verify-only` checks a populated one), and `.github/workflows/test.yml` runs it before `cargo test` so 49 suites that used to skip on CI now run. Reach it through `fixture_paths::fixture_path`, never a private `stories_dir()`; on CI `LANTHORN_FIXTURES_REQUIRED=1` makes that helper panic instead of answering with a manifest fixture's missing path, so a half-failed fetch cannot read as a green run. **Fetch, do not vendor** — the IF Archive presumes material with no attached licence is licensed for personal use, which covers downloading it and not republishing it here. `docs/internals/ci-fixture-coverage.md` has the reasoning and what is deliberately left out.
+
+**A disk image is a different release, not the same story on other media.** `stories/journey.z6` is release 83 / serial 890706; `Journey - The Quest Begins.adf` is release **30** / serial 890322, and the two differ in behaviour (r83 narrates through window 0, r30 through window 2 — which was the whole of SQ-0755). `InterpreterProfile::resolve` reads the medium, so "the Amiga build" means a different build of the game, not merely a different profile. Name the exact fixture and release in any finding, and when a defect is reported on a disk image, reproduce it on that image — a clean result off the bare story file proves nothing about it (SQ-0760). The release every medium in `stories/` carries is pinned in `crates/app/tests/suites/real_media_releases.rs` and tabulated in `docs/internals/interpreter.md`; drive the floppy there before claiming a suite covers "the Amiga profile".
 
 ## Architecture
 
-Full detail in `docs/architecture.md`; docs under `docs/features/` track the code (README tracks the released build). Big picture:
+Full detail in `docs/internals/architecture.md`; docs under `docs/internals/` track the code (README tracks the released build). Big picture:
 
 - **`crates/zvm` / `gvm` / `scott`** — pure, headless VM cores (Z-machine, Glulx, Scott Adams). No I/O policy; they expose sessions the app drives. `zvm-cli` / `gvm-cli` / `scott-cli` are minimal terminal front-ends useful for debugging an engine without the TUI.
 - **`crates/app`** — the lanthorn TUI. Talks to every engine through the engine-neutral `Engine` trait (`src/engine.rs`); `session.rs` (Z-machine), `glulx_session.rs`, and `scott_session.rs` adapt each VM into it. Glk exists only inside the Glulx adapter — it never leaks into shared app types.
@@ -310,6 +403,6 @@ machine, a release and a moment in the game, exactly like a frame capture.
 - **Restore tests must perturb before asserting.** Restore bugs surface one action *after* the restore, when the game next repaints, changes palette, splits, or resizes — asserting the frame immediately after a restore is when everything still looks correct. Restore, then make a move, then assert (`v6_restore_palette_replay.rs` is the pattern). Cover restoring into a *different* terminal size and a different graphics backend; both are common in the field and neither is visible to a same-session round-trip.
 - Headless render harnesses live in the app integration tests (see `crates/app/tests/suites/v6_*.rs` for the pattern: drive a real story, render to a buffer, assert on cells/geometry).
 - **Editor diagnostics that arrive while an agent is working are snapshots of an unfinished edit, not findings.** A half-written file genuinely has unbalanced parens, and a new call site genuinely outruns its `pub` export by a few seconds — both resolve themselves. `cargo check --all-targets` and the gate are the only authority; never act on a diagnostic without reproducing it there first. Multi-file lanes (render-path work especially) are quieter in a worktree, where the checkout the editor watches never sees the churn — symlink `stories/` into it or every real-game smoke skips vacuously into a false green.
-- **Boot a harness the way `startup.rs` boots, or you measure a screen the app never draws.** The full chain is the profile (`InterpreterProfile::resolve`, from the medium the *mount* returned — not re-derived from the path) supplying palette, interpreter number and default colours, and the screen size `picts.std_window() → named archive → picts.native_std_window() → profile.std_window()` with `art_scale` alongside. Skip any step and the **game** lays its own windows out differently, so every rect measured afterwards is of a screen the player never sees, and the numbers look entirely self-consistent. Measured: `ring_scout` and `v6_side_border_tiling`'s `boot()` both omitted `native_std_window`, so Journey r77 and Arthur r63 — **560x384** presses — were booted at 640x400. That produced a fabricated Arthur frame ("a single illustration clear of both edges") which a whole quest was fixed and tested against, and hid two real defects for two rounds (SQ-0901, SQ-0883, SQ-0899). Print the profile, release and screen size the harness booted, and check them against a `/dump-windows` capture before trusting a measurement on disk media.
+- **Boot a harness the way `startup.rs` boots, or you measure a screen the app never draws.** The full chain is now two values and nothing to remember: resolve the profile (`InterpreterProfile::resolve`, from the medium the *mount* returned — not re-derived from the path) and hand it to `MachineBoot::resolve`, which derives the standard window, the art scale and the cell; then `MachineBoot::boot_config(…)` turns those into `zvm::cpu::exec::BootConfig`, which `Machine::boot` applies in the one correct order (SQ-1396). Reach for `GameSession::new_for_machine`, which is that pair spelled once. Assemble the facts by hand instead and the **game** lays its own windows out differently, so every rect measured afterwards is of a screen the player never sees, and the numbers look entirely self-consistent — `ring_scout` and `v6_side_border_tiling` each dropped a link and measured Journey r77 and Arthur r63, **560x384** presses, at 640x400, which fabricated an Arthur frame a whole quest was then fixed against (SQ-0901, SQ-0883, SQ-0899, SQ-1020, SQ-1021, SQ-1022). Print the profile, release and screen size the harness booted, and check them against a `/dump-windows` capture before trusting a measurement on disk media.
 - **A frame is a fixture. Name the turn count and how you got there.** Real-game harnesses drive blank lines and single keys, which reaches an intro card and often nothing else — Arthur's ProDOS press renders identically at 6 and 40 keypresses because it never answers the restore question. SQ-0883 reproduces on the **menu** frame two turns in and was invisible in a case pinned to the gameplay frame four turns in. Put the turn count in the specimen table alongside the release, and give any case that depends on a frame's *shape* a non-vacuity guard asserting that shape — that guard is what caught the fabricated Arthur frame above.
-- **Three render-testing layers; escalate only when the cheaper one can't explain the symptom.** Cell-buffer harnesses (`crates/app/tests/suites/v6_*.rs`) assert on lanthorn's INTERNAL model — always the first stop, but blind to a defect that's correct in the model and wrong on the user's screen. The emitted-stream harness (`crates/app/tests/pty_stream/`, SQ-0762; ad hoc via `cargo run -p app --example pty_capture`) runs the real binary under a pty and keeps every byte it emits — the pty must answer the terminal queries convincingly as kitty, or the capture silently measures the half-block backend and every number in it is worthless. Reach for it when the model looks right and the screen doesn't; it's the only layer that tells an image PLACEMENT apart from a background PAINTED into cells, indistinguishable on screen, different bugs. The placement oracle (`pty_stream/oracle.rs`, SQ-0764; dev-dep `qwertty-term-vt`) resolves those same bytes the way a real terminal does instead of through our hand-rolled decoder — reach for it when the stream also looks right and the screen is still wrong (placement lifetime, z-order, overlap, stale placements, unicode-placeholder continuation). It is a faithful **port** of Ghostty's core, not Ghostty itself — see `docs/architecture.md` for its caveats (an id-encoding mismatch between the two decoders, the SQ-0772 image-coverage gap, and the libghostty-vt ground-truth escalation that exists but isn't built).
+- **Three render-testing layers; escalate only when the cheaper one can't explain the symptom.** Cell-buffer harnesses (`crates/app/tests/suites/v6_*.rs`) assert on lanthorn's INTERNAL model — always the first stop, but blind to a defect that's correct in the model and wrong on the user's screen. The emitted-stream harness (`crates/app/tests/pty_stream/`, SQ-0762; ad hoc via `cargo run -p lanthorn --example pty_capture`) runs the real binary under a pty and keeps every byte it emits — the pty must answer the terminal queries convincingly as kitty, or the capture silently measures the half-block backend and every number in it is worthless. Reach for it when the model looks right and the screen doesn't; it's the only layer that tells an image PLACEMENT apart from a background PAINTED into cells, indistinguishable on screen, different bugs. The placement oracle (`pty_stream/oracle.rs`, SQ-0764; dev-dep `qwertty-term-vt`) resolves those same bytes the way a real terminal does instead of through our hand-rolled decoder — reach for it when the stream also looks right and the screen is still wrong (placement lifetime, z-order, overlap, stale placements, unicode-placeholder continuation). It is a faithful **port** of Ghostty's core, not Ghostty itself — see `docs/internals/architecture.md` for its caveats (an id-encoding mismatch between the two decoders, the SQ-0772 image-coverage gap, and the libghostty-vt ground-truth escalation that exists but isn't built).

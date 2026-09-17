@@ -42,9 +42,9 @@
 //     header and has nothing to report either.
 //   * `GrammarError` — both engines name one, and the refusals differ down to
 //     the last variant (`BadTableSize` is a Z-machine grammar-version check;
-//     `TablesNotFound` and `UnicodeDictionary` belong to a locator that has to
-//     close a chain). Sharing the enum would mean each engine carrying variants
-//     it can never return.
+//     `TablesNotFound` belongs to a locator that has to close a chain).
+//     Sharing the enum would mean each engine carrying variants it can never
+//     return.
 //
 // A few things below are likewise produced by exactly one engine —
 // [`Token::InfocomObject`], [`RoutineRef::Index`], [`WordRoles::special`] — and
@@ -62,7 +62,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// The parser's built-in noun slots.
 ///
@@ -787,6 +787,154 @@ impl ObjectWords {
     }
 }
 
+/// The words no single typed token can refer to a thing THROUGH, however many
+/// `name` arrays hold them: English's articles, as the Inform parser itself
+/// spells them.
+///
+/// They get into `name` arrays because Inform 7 compiles a multi-word name
+/// word by word — *Dr Ludwig and the Devil*'s "back of the tavern" holds
+/// `back`, `of`, `the`, `tavern` — so the parser can match the whole phrase.
+/// But a phrase and a lone token are different questions. The parser consumes
+/// descriptors BEFORE it matches names: `parserm` stage (C) — "First, we
+/// parse any descriptive words (like ~the~, ~five~ or ~every~): l =
+/// Descriptors(...)" — runs ahead of stage (D) "Parse an object name", and
+/// the English language definition's `LanguageDescriptors` table files `the`
+/// as `DEFART_PK` and `a//`/`an`/`some` as `INDEFART_PK` (Inform 6 library,
+/// `parser.h` §C/§D and `english.h`; Inform 7's `Parser.i6t` is the same
+/// parser). So a typed `the` is spent as an article and never reaches the
+/// name arrays — "x the" cannot match the tavern's back, and the game's own
+/// reply is "no such thing" (measured, Dr Ludwig r2/s250306).
+///
+/// [`ObjectWordSet`] therefore leaves these four out (SQ-1210): its callers
+/// ask "would typing this one word name a thing", and for an article the
+/// story's own parser answers no. Only the ARTICLE rows are excluded — the
+/// other descriptors (`my`, `lit`, …) genuinely select objects. Per-object
+/// [`ObjectWords::refers_to`] keeps answering `true` for an article in a
+/// name, because there it means "part of a phrase that names this thing",
+/// which is true and is what display and phrase matching want.
+pub const ARTICLES: [&str; 4] = ["the", "a", "an", "some"];
+
+/// The glue words English's own multi-word object names ride into a `name`
+/// array, curated by hand rather than read from the dictionary (SQ-1216).
+///
+/// Unlike [`ARTICLES`], there is no format fact to read here — the parser
+/// really does accept a lone `of` or `in` as a typed word that reaches a
+/// `name` array (`x of` disambiguates among the of-named things, exactly as
+/// SQ-1210 first found), so [`ObjectWordSet`] cannot exclude them on the
+/// ARTICLES reasoning. It excludes them anyway, because the reveal's own
+/// promise (`crates/app/src/reveal.rs`, "never a verb, article or
+/// preposition") is a *linguistic* claim about what a word IS, not a claim
+/// about what the parser will accept — and Inform's dictionary has no bit for
+/// the linguistic question. `PREP_DFLAG` (bit 3, Inform's own `header.h`:
+/// `#define PREP_DFLAG 8 /* used as a preposition (in verb grammar) */`) is
+/// set by `dictionary_add(token_text, PREP_DFLAG, 0, 0)` for **every literal
+/// quoted token in every grammar line** (`Inform6/src/verbs.c`,
+/// `make_adjective_v1` and `make_adjective_v3`, the GV1/GV2 and GV3 paths —
+/// GV3 is what Glulx compiles to), with no distinction between a true
+/// preposition (`'in'`) and an arbitrary noun used as a fixed disambiguator
+/// (`'label'` in `Verb 'read' 'label' -> ReadLabel`). Measured directly: in
+/// *King of Shreds and Patches*, `bed`, `guard`, `warden`, `home`, `page`,
+/// `rudder` and `top` all carry `PREP_DFLAG` and are all real single-word
+/// object names — a filter keyed on the bit would darken them. The bit
+/// answers "is this word ever used literally in this game's grammar", never
+/// "is this word a preposition", and the two questions have no shared answer
+/// in the story's own data (SQ-1216's investigation, which stopped short of a
+/// flag-based fix for exactly this reason).
+///
+/// So this list is English, named by hand, and stops being true the moment a
+/// story's `name` arrays are not English — the same caveat [`ARTICLES`]
+/// would carry if Inform's own descriptor table were not equally hand-picked
+/// by language. Every entry is evidenced as real glue in at least one
+/// retail I7/Glulx title's own object list (SQ-1216, 29-fixture scan of
+/// `stories/*.gblorb`): `of` (805 hits, e.g. *Dr Ludwig and the Devil*'s
+/// "back of the tavern"), `to` (46, "note to van der wyck"), `in` (48, "the
+/// king in yellow"), `on` (10, "afloat on the thames"), `for` (15), `from`
+/// (7), `at` (7), `under` (5), `with` (5), `by` (3), `over` (2) — none of the
+/// eleven were left out for want of a real name array to point at. A word a
+/// caller expects here and does not find was deliberately left off rather
+/// than guessed onto the list; if a story genuinely needs it (a room
+/// literally named "Under", say), file the specimen and it can be added with
+/// evidence, the same way this list was built. And the trade runs both ways,
+/// as it does for [`ARTICLES`]: a story with an object truly and *only*
+/// named `in` (an inn abbreviated at the dictionary's own truncation, in
+/// principle) loses that one light rather than gaining eleven wrong ones —
+/// judged the safer side of the fail-safe rule because no such object turned
+/// up as the sole name of anything across the scan.
+pub const GLUE: [&str; 11] =
+    ["of", "on", "in", "at", "to", "with", "from", "for", "by", "under", "over"];
+
+/// "Does ANY object answer to this word?" — [`ObjectWords::refers_to`] asked of
+/// a whole story at once, as one membership set.
+///
+/// The bulk callers — a reveal that lights every word on screen, a per-turn
+/// sweep of freshly printed prose — ask that question tokens × objects × words
+/// times, and `refers_to` allocates a lowercased copy of the query *and* a
+/// truncated copy of every stored word on every call. Building this set pays
+/// the truncation once per stored word; a query then costs one lowercase and
+/// one truncation per distinct truncation rule (one rule per engine in
+/// practice), not one per object.
+///
+/// It answers only the ANY question. A caller that needs to know *which*
+/// object a word names still walks the objects with `refers_to` — and with
+/// two deliberate divergences from `any(refers_to)`: the articles
+/// ([`ARTICLES`]) are left out because no Inform parser lets an article stand
+/// as a lone typed word, and the curated glue words ([`GLUE`]) are left out
+/// because they are not nouns or adjectives even where the parser WOULD
+/// accept them alone. See each constant for its own sources.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectWordSet {
+    /// One entry per distinct truncation rule among the objects it was built
+    /// from — [`ObjectWords::truncated_at`] is per object, so a query must be
+    /// truncated the way each stored word was, not once globally. Every object
+    /// of one engine shares one rule (six characters on a v1–3 Z-machine, nine
+    /// on v4+, the header's word length on Scott Adams), so this holds a single
+    /// entry in practice and `contains` stays O(1).
+    keys: Vec<(Option<usize>, HashSet<String>)>,
+}
+
+impl ObjectWordSet {
+    /// Fold a story's objects into the set. Nouns and adjectives both count,
+    /// exactly as [`ObjectWords::refers_to`] counts them: each stored word is
+    /// kept truncated by its own object's rule, verbatim otherwise — except
+    /// the [`ARTICLES`] and the curated [`GLUE`] words, which are dropped
+    /// (see each for why and for the sources).
+    pub fn build<'a>(objects: impl IntoIterator<Item = &'a ObjectWords>) -> ObjectWordSet {
+        let mut keys: Vec<(Option<usize>, HashSet<String>)> = Vec::new();
+        for o in objects {
+            let set = match keys.iter().position(|(n, _)| *n == o.truncated_at) {
+                Some(i) => &mut keys[i].1,
+                None => {
+                    keys.push((o.truncated_at, HashSet::new()));
+                    &mut keys.last_mut().expect("just pushed").1
+                }
+            };
+            for w in o.words.iter().chain(o.adjectives.words()) {
+                if ARTICLES.iter().any(|a| a.eq_ignore_ascii_case(w))
+                    || GLUE.iter().any(|g| g.eq_ignore_ascii_case(w))
+                {
+                    continue;
+                }
+                set.insert(o.truncate(w));
+            }
+        }
+        ObjectWordSet { keys }
+    }
+
+    /// True exactly when `objects.iter().any(|o| o.refers_to(word))` would be
+    /// true of the objects this set was built from: the query is trimmed and
+    /// lowercased once, then truncated per stored rule and looked up.
+    pub fn contains(&self, word: &str) -> bool {
+        if self.keys.is_empty() {
+            return false;
+        }
+        let lower = word.trim().to_lowercase();
+        self.keys.iter().any(|(rule, set)| match rule {
+            Some(n) => set.contains(&lower.chars().take(*n).collect::<String>()),
+            None => set.contains(&lower),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,6 +1111,76 @@ mod tests {
             None
         );
         assert_eq!(o.describe(), "brass lantern [lamp, lanter, light]");
+    }
+
+    /// The set is `any(refers_to)` with two stated exceptions (the articles
+    /// and the curated glue words, tested separately below) — same
+    /// truncation, same lowercasing, adjectives counted, and mixed rules kept
+    /// apart.
+    #[test]
+    fn the_word_set_answers_exactly_as_any_object_refers_to_answers() {
+        let zork = ObjectWords {
+            id: 102,
+            printed_name: "brass lantern".into(),
+            words: vec!["lamp".into(), "lanter".into(), "light".into()],
+            property: Some(18),
+            truncated_at: Some(6),
+            adjectives: Adjectives::Unavailable,
+        };
+        // A second rule in the same set, and an adjective list that counts.
+        let scott = ObjectWords::new(9, "a jewelled crown".into(), vec!["crown".into()], None, Some(3))
+            .with_adjectives(vec!["jewelled".into()], 2);
+        let objects = [zork, scott];
+        let set = ObjectWordSet::build(&objects);
+
+        for probe in
+            ["lanter", "lantern", "LAMP", "lan", "sword", "crown", "crowns", "cro", "cr", "jewelled", "jew", "  light "]
+        {
+            assert_eq!(
+                set.contains(probe),
+                objects.iter().any(|o| o.refers_to(probe)),
+                "set and refers_to disagree on {probe:?}"
+            );
+        }
+        // And the spot answers those comparisons encode, so a shared wrong
+        // answer cannot slip through the equivalence loop.
+        assert!(set.contains("lantern") && set.contains("crowns") && set.contains("jewelled"));
+        // The rules stay apart: `lan` is short of the six-character rule and
+        // must not match through the three-character one.
+        assert!(!set.contains("sword") && !set.contains("lan"));
+
+        assert!(!ObjectWordSet::default().contains("anything"));
+        assert!(!ObjectWordSet::build([].into_iter()).contains("lamp"));
+    }
+
+    /// The two deliberate divergences from `any(refers_to)`, on the exact
+    /// specimen both were found on: an article in a `name` array (Inform 7's
+    /// word-by-word "back of the tavern") stays out of the SET because no
+    /// lone typed article reaches name matching (SQ-1210), and `of` stays out
+    /// too even though a lone `of` DOES reach name matching (SQ-1216) — it is
+    /// glue, not a noun. The object itself keeps answering `refers_to` for
+    /// both, because there each word is part of a phrase that names the
+    /// thing.
+    #[test]
+    fn articles_and_glue_in_a_name_array_stay_out_of_the_set_but_not_out_of_the_phrase() {
+        let back = ObjectWords::new(
+            0x10d529,
+            String::new(),
+            vec!["back".into(), "of".into(), "the".into(), "tavern".into()],
+            Some(1),
+            Some(9),
+        );
+        let objects = [back];
+        let set = ObjectWordSet::build(&objects);
+        for article in ARTICLES {
+            assert!(!set.contains(article), "{article:?} cannot stand as a typed name");
+            assert!(!objects[0].refers_to(article) || article == "the", "sanity: only `the` is in this name");
+        }
+        assert!(objects[0].refers_to("the"), "in the phrase, `the` still counts");
+        assert!(!set.contains("of"), "`of` is curated glue (SQ-1216) and must not stand as a typed name");
+        assert!(objects[0].refers_to("of"), "in the phrase, `of` still counts");
+        // The real nouns in the same name array are untouched by either filter.
+        assert!(set.contains("tavern") && set.contains("back"));
     }
 
     #[test]

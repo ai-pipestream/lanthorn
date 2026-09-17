@@ -34,12 +34,12 @@
 //!   content-carved ring is read against — not the ring itself.
 //!
 //! ```sh
-//! cargo run -q -p app --example ring_scout -- --story stories/zork0-r393-s890714.z6
-//! cargo run -q -p app --example ring_scout -- --all --size 100x40
-//! cargo run -q -p app --example ring_scout -- --story "stories/James Clavell's Shogun.adf" --taps 1 --runs
-//! cargo run -q -p app --example ring_scout -- --story stories/arthur-r74-s890714.z6 \
+//! cargo run -q -p lanthorn --example ring_scout -- --story stories/zork0-r393-s890714.z6
+//! cargo run -q -p lanthorn --example ring_scout -- --all --size 100x40
+//! cargo run -q -p lanthorn --example ring_scout -- --story "stories/James Clavell's Shogun.adf" --taps 1 --runs
+//! cargo run -q -p lanthorn --example ring_scout -- --story stories/arthur-r74-s890714.z6 \
 //!     --keys n --taps 12 --bands --size 70x19
-//! cargo run -q -p app --example ring_scout -- --story stories/InfocomMasterpieces.img \
+//! cargo run -q -p lanthorn --example ring_scout -- --story stories/InfocomMasterpieces.img \
 //!     --entry arthur --keys n
 //! ```
 //!
@@ -273,7 +273,6 @@ fn scout(
     // No tier-3 archive is named here, so the machine comes from the medium alone.
     let (profile, profile_source) =
         app::interpreter::InterpreterProfile::resolve_with_source(p, None, None, disk_image);
-    zvm::screen::set_palette(profile.palette());
     let dims = picts.all_pict_dims();
     // The screen size the game is TOLD it has, by `startup.rs`'s own chain. The
     // `native_std_window` step is not optional decoration: it is the archive's own
@@ -310,6 +309,10 @@ fn scout(
             art_scale: picts.art_scale(),
             disks: Some(&app::system_fonts::UserDisks::new("")),
         }),
+        // SQ-1393: the machine's own colour table, which this instrument used to set
+        // process-wide before the constructor and now hands to the boot like the rest.
+        profile.palette(),
+        None,
     );
     let (std_win, art_scale) = (boot.screen_px, boot.art_scale);
     println!(

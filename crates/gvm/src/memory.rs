@@ -1,16 +1,17 @@
-// Glulx memory model — GLULX_NOTES.md §2.
-//
-// The full ENDMEM span is allocated as a `Vec<u8>`. `[0, EXTSTART)` is copied
-// from the image; `[EXTSTART, ENDMEM)` is zero-initialized. All multi-byte
-// accesses are big-endian. Every access is bounds-checked: out-of-range reads
-// return `None` and out-of-range writes return `Err`, so malformed programs
-// never panic.
+//! Glulx memory model — GLULX_NOTES.md §2.
+//!
+//! The full ENDMEM span is allocated as a `Vec<u8>`. `[0, EXTSTART)` is copied
+//! from the image; `[EXTSTART, ENDMEM)` is zero-initialized. All multi-byte
+//! accesses are big-endian. Every access is bounds-checked: out-of-range reads
+//! return `None` and out-of-range writes return `Err`, so malformed programs
+//! never panic.
 
 use crate::error::GError;
 use crate::header::{parse_header, Header};
 
 /// Why a write was refused.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WriteFault {
     /// The target address is below RAMSTART (ROM). The write is a no-op.
     Rom,
@@ -71,6 +72,18 @@ impl Memory {
     pub fn decode_table(&self) -> u32 {
         self.header.decode_table
     }
+    /// The whole-image checksum word stored in the header (bytes 0x20-0x23 —
+    /// GLULX_NOTES.md §"Header field layout" / Glulx spec §1.4: "the sum of the
+    /// whole initial memory as 32-bit ints"), exactly as the compiler wrote it.
+    /// Not itself a validity check — see `Self::checksum_ok` for that — just
+    /// the raw field, which a host can use as part of an identity for the image
+    /// that produced a piece of state it persists across runs (e.g. lanthorn's
+    /// Glulx room-lock sidecar, SQ-1305: a story rebuilt under the same
+    /// filename gets a different checksum, so stale host state keyed to the old
+    /// build is never mistaken for the new one's).
+    pub fn checksum(&self) -> u32 {
+        self.header.checksum
+    }
 
     // ── size ──────────────────────────────────────────────────────────────────
 
@@ -104,6 +117,20 @@ impl Memory {
         self.orig.get(addr as usize).copied().unwrap_or(0)
     }
 
+    /// The whole current memory map as one slice — the fast path for whole-RAM
+    /// operations (`CMem` compression), where a bounds-checked `read8` per byte
+    /// is pure call overhead (SQ-1177).
+    pub(crate) fn raw_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The original image `[0, EXTSTART)` as one slice — the diff base
+    /// [`Self::orig_byte`] reads one byte at a time. Bytes at and above EXTSTART
+    /// are zero by definition and are NOT in this slice.
+    pub(crate) fn orig_bytes(&self) -> &[u8] {
+        &self.orig
+    }
+
     /// Write one byte directly, bypassing the ROM/range checks. The caller
     /// guarantees `addr` is in range; used only by save-state restore to lay
     /// down the reconstructed RAM image.
@@ -113,14 +140,31 @@ impl Memory {
 
     /// Reset RAM to the initial image: restore `[RAMSTART, EXTSTART)` from
     /// `orig`, zero `[EXTSTART, ENDMEM)`, and shrink back to the original
-    /// ENDMEM floor. Used by the `@restart` opcode.
-    pub(crate) fn reset_ram(&mut self) {
+    /// ENDMEM floor — except for any byte within `protect`
+    /// (`(protect_start, protect_len)`), which is left untouched. Used by the
+    /// `@restart` opcode: Glulx spec §2.9 and glulxe's `vm.c` `vm_restart` both
+    /// reload the game file while skipping `[protectstart, protectend)` and
+    /// its comment notes "we do not reset the protection range" — passing
+    /// `(0, 0)` reproduces the unprotected reset exactly. The caller owns
+    /// `self.protect` itself; this only guards the copy.
+    pub(crate) fn reset_ram(&mut self, protect: (u32, u32)) {
         let ramstart = self.header.ramstart as usize;
         let extstart = self.header.extstart as usize;
         let endmem = self.endmem_floor as usize;
         self.bytes.resize(endmem, 0);
-        self.bytes[ramstart..extstart].copy_from_slice(&self.orig[ramstart..extstart]);
-        self.bytes[extstart..endmem].fill(0);
+        let (pstart, plen) = protect;
+        let pstart = pstart as usize;
+        let pend = pstart.saturating_add(plen as usize);
+        for a in ramstart..extstart {
+            if a < pstart || a >= pend {
+                self.bytes[a] = self.orig[a];
+            }
+        }
+        for a in extstart..endmem {
+            if a < pstart || a >= pend {
+                self.bytes[a] = 0;
+            }
+        }
     }
 
     /// True if the stored header checksum (field 0x20) matches the sum of the
@@ -331,10 +375,23 @@ mod tests {
         mem.write32(0x280, 0x1234_5678).unwrap();
         assert_eq!(mem.mem_size(), 0x300);
         // reset_ram should shrink back to 0x200 and zero out RAM.
-        mem.reset_ram();
+        mem.reset_ram((0, 0));
         assert_eq!(mem.mem_size(), 0x200, "shrinks to endmem_floor");
         assert_eq!(mem.read32(0x100).unwrap(), 0, "RAM zeroed at RAMSTART");
         assert_eq!(mem.read32(0x1FC).unwrap(), 0, "last word in RAM zeroed");
         assert_eq!(mem.read8(0x280), None, "grown region removed");
+    }
+
+    #[test]
+    fn reset_ram_preserves_protected_range() {
+        // RAMSTART=0x100, EXTSTART=0x100 (all RAM is in the zeroed ext zone).
+        let img = asm::image_with_map(0x100, 0x100, 0x200, 0x400, 0x40, 0);
+        let mut mem = Memory::new(img).unwrap();
+        mem.write32(0x100, 0xDEAD_BEEF).unwrap();
+        mem.write32(0x180, 0x1111_1111).unwrap();
+        // Protect [0x180, 0x188).
+        mem.reset_ram((0x180, 8));
+        assert_eq!(mem.read32(0x100).unwrap(), 0, "unprotected RAM zeroed");
+        assert_eq!(mem.read32(0x180).unwrap(), 0x1111_1111, "protected RAM kept");
     }
 }

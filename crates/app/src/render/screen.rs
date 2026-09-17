@@ -13,7 +13,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use crate::colors::ColorScheme;
-use crate::engine::{BorderPref, BufferWindow, Introspect, PositionedWindow, ScreenModel, StatusModel, WinNode};
+use crate::engine::{BorderPref, BufferWindow, Introspect, PositionedWindow, ScreenModel, StatusModel, WinKind, WinNode};
 use crate::render::TextInk;
 use crate::render::transcript::{draw_str_runs, render_transcript, visible_wrapped_lines_kinded};
 use crate::render::upper_window::{draw_grid, draw_grid_transparent, draw_upper_window};
@@ -52,11 +52,20 @@ pub struct StoryPaneMetrics {
     /// such frames: measuring "rows added" against a picture frame's zero total
     /// re-paged the ENTIRE backlog when the normal frame returned (SQ-0578).
     pub transcript_surface: bool,
+    /// Every Glk-identified leaf's ACTUAL drawn rect this frame, as `(win id,
+    /// kind, absolute screen rect)`. gvm's own layout rect reserves a 1-cell
+    /// border gutter per split whether or not the theme draws a rule there
+    /// (`upper_window_border` defaults to `None`, SQ-0821), so a mouse/hyperlink
+    /// hit-test against gvm's rect skews by every collapsed gutter between the
+    /// pane origin and the window. Recording what was actually painted — "ask
+    /// the drawing where it put the text" — is the fix (SQ-1203). Empty for the
+    /// Z-machine/Scott simple path (no Glk ids to record).
+    pub win_rects: Vec<(u32, WinKind, Rect)>,
 }
 
 /// Tally `(grids, buffers, others)` leaf windows in the tree. Used only by tests
 /// now that [`is_simple`] classifies structurally (SQ-0325).
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 fn count_leaves(node: &WinNode) -> (u32, u32, u32) {
     match node {
         WinNode::Grid(_) => (1, 0, 0),
@@ -323,6 +332,10 @@ fn render_story_pane_frame(
         let tarea = reserve_text_margin(tarea, state, margin_style(model, state), buf);
         let mut t = render_transcript(&model.status, introspect, state, tarea, buf, gi);
         links.append(&mut t.links);
+        // Unlike the multi-window path below, this one never opens a graphics
+        // window — but an inline transcript image's eviction still queues a
+        // delete here (SQ-1190), so it needs the same flush.
+        state.graphics_render.borrow_mut().flush_kitty_deletes(area, buf);
         return StoryPaneMetrics {
             scrollbar: t.scrollbar,
             max_scroll: t.max_scroll,
@@ -331,20 +344,24 @@ fn render_story_pane_frame(
             total_rows: t.total_rows,
             links,
             transcript_surface: true,
+            win_rects: Vec::new(),
         };
     }
 
     // Generic multi-window path. Grid windows push their hyperlink cells into
     // `grid_links`; the primary buffer's own links ride on its metrics. (SQ-0258)
     //
-    // Clamp the composite to gvm's content bounding box: gvm snaps proportional
-    // splits to whole cells and leaves a blank margin, so walking the tree into the
-    // FULL pane would let the last right-spine leaf balloon to absorb the surplus
-    // width. Render into the box and keep the margin blank (SQ-0303).
+    // Clamp the composite to gvm's content bounding box (SQ-0303). Since SQ-1220
+    // a Glulx tree covers the whole pane, so this is a no-op there; what a
+    // proportional split cannot divide is now an interior gutter cell, and
+    // `split_area_bordered` hands it to the trailing child exactly as it already
+    // hands over a separator the theme declined to draw (SQ-0821/SQ-1203) — so a
+    // gutter is filled with the ground of the window beside it.
     let inner = content_bounds(model, area);
     let mut grid_links: Vec<((u16, u16), u32)> = Vec::new();
+    let mut win_rects: Vec<(u32, WinKind, Rect)> = Vec::new();
     let gc = grid_scheme(state, model);
-    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, inner, buf, gi, &mut grid_links, &gc);
+    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, inner, buf, gi, &mut grid_links, &mut win_rects, &gc);
     // Keep gvm's snap-margin (the strips of `area` outside `inner`) clean, so no
     // stale cells from a prior frame or the map remain beside the window tree.
     fill_margin(area, inner, model, state, buf);
@@ -370,17 +387,19 @@ fn render_story_pane_frame(
         total_rows: 0,
         links: Vec::new(),
         transcript_surface: false,
+        win_rects: Vec::new(),
     });
     m.links.extend(grid_links);
+    m.win_rects.extend(win_rects);
     m
 }
 
 /// The sub-rect of the story pane that gvm's window tree actually covers: the
 /// top-left corner of `area` sized to `model.content_size`, clamped to `area`.
-/// gvm snaps proportional splits to whole cells and leaves a blank margin
-/// (SQ-0303); clamping the composite (and the graphics-rect walk, so
-/// `dialog_bounds` agrees with what's drawn) to this keeps the margin blank
-/// instead of ballooning the last right-spine window. Falls back to the full
+/// It bounds the composite (and the graphics-rect walk, so `dialog_bounds`
+/// agrees with what's drawn) to what gvm actually laid out (SQ-0303). Since
+/// SQ-1220 a Glulx tree covers the whole pane, so for Glulx this is the pane;
+/// the clamp still holds any future tree that does not. Falls back to the full
 /// `area` when `content_size` is `(0, 0)` (the simple/Z-machine paths — no margin).
 pub fn content_bounds(model: &ScreenModel, area: Rect) -> Rect {
     // A v6 Layered root is PIXEL content: the raster/hybrid paths scale the
@@ -594,6 +613,7 @@ fn render_node(
     buf: &mut Buffer,
     game_input: Option<ratatui::style::Style>,
     links: &mut Vec<((u16, u16), u32)>,
+    win_rects: &mut Vec<(u32, WinKind, Rect)>,
     grid_colors: &ColorScheme,
 ) -> Option<StoryPaneMetrics> {
     if area.width == 0 || area.height == 0 {
@@ -607,7 +627,7 @@ fn render_node(
             let sep_style = border.then(|| separator_style(*vertical, grid_colors)).flatten();
             let (a1, sep, a2) =
                 split_area_bordered(area, *vertical, split.fixed, u16::from(sep_style.is_some()));
-            let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links, grid_colors);
+            let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links, win_rects, grid_colors);
             // Only rule between two VISIBLE siblings. A border before a collapsed
             // (zero-extent) window — e.g. Counterfeit Monkey's image pane before it
             // shows a letter — would otherwise draw a stray rule with nothing beyond
@@ -628,7 +648,7 @@ fn render_node(
                     if state.config.honor_game_colours { (*key_fg, *key_bg) } else { (None, None) };
                 draw_window_separator(sep, *vertical, bs, kf, kb, grid_colors, buf);
             }
-            let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links, grid_colors);
+            let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links, win_rects, grid_colors);
             m1.or(m2)
         }
         WinNode::Grid(g) => {
@@ -643,11 +663,21 @@ fn render_node(
             let mut frameless = g.clone();
             frameless.border = BorderPref::NoBorder;
             draw_grid(&frameless, frameless.active_rows, frameless.cursor, show_cursor, grid_colors, area, buf, state.config.honor_game_colours, links);
+            // Record the rect this grid was ACTUALLY drawn at (SQ-1203): a
+            // Glk-identified grid's own click/hyperlink hit-test uses this, not
+            // gvm's layout rect, which reserves a border gutter the theme may
+            // draw thinner (or not at all, SQ-0821).
+            if g.win != 0 {
+                win_rects.push((g.win, WinKind::Grid, area));
+            }
             None
         }
         WinNode::Buffer(b) => {
             if b.primary {
                 let area = reserve_text_margin(area, state, state.colors.theme.get("transcript").style, buf);
+                if b.win != 0 {
+                    win_rects.push((b.win, WinKind::Buffer, area));
+                }
                 let t = render_transcript(status, introspect, state, area, buf, game_input);
                 Some(StoryPaneMetrics {
                     scrollbar: t.scrollbar,
@@ -657,9 +687,13 @@ fn render_node(
                     total_rows: t.total_rows,
                     links: t.links,
                     transcript_surface: true,
+                    win_rects: Vec::new(),
                 })
             } else {
-                render_inline_buffer(b, state, area, buf);
+                render_inline_buffer(b, state, area, buf, links);
+                if b.win != 0 {
+                    win_rects.push((b.win, WinKind::Buffer, area));
+                }
                 None
             }
         }
@@ -672,14 +706,17 @@ fn render_node(
             // bars, backgrounds) render directly as cell backgrounds — exact,
             // grid-aligned, and legible even without an image protocol. A detailed
             // canvas falls through to the image protocol (or a plain fill). (SQ-0332)
-            if crate::render::graphics::render_graphics_as_cells(gw, area, buf, false) {
+            if state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, false) {
                 // painted as cells
             } else if let Some(picker) = state.game_picker.as_ref() {
                 state.graphics_render.borrow_mut().render(picker, gw, area, state.colors.theme.get("graphics").style, buf);
             } else {
                 // No image protocol: approximate the detailed canvas as colour
                 // cells rather than blanking it (SQ-0520).
-                crate::render::graphics::render_graphics_as_cells(gw, area, buf, true);
+                state.graphics_render.borrow_mut().render_as_cells(gw, area, buf, true);
+            }
+            if gw.win != 0 {
+                win_rects.push((gw.win, WinKind::Graphics, area));
             }
             None
         }
@@ -881,1149 +918,52 @@ fn render_node(
                                 state.v6_story_page.set(Some((p[0], p[1], p[2])));
                             }
                         }
+                        // SQ-1187: THE HYBRID FRAME GATE. Everything the ring derives —
+                        // the two native canvases, the layout plans, the strip carving,
+                        // the flank probes — is a pure function of inputs `v6_hybrid_gen`
+                        // folds into one key. On a match the cached `HybridFrame` is
+                        // replayed: no canvas is rebuilt, no scan runs, and the band
+                        // draws below reuse their stored content hashes (see
+                        // `set_band_replay`). This is the raster arm's SQ-0469 gate,
+                        // finally built for the shipped default mode: the compute half
+                        // cost 3-8 ms per redraw on a 640x400 press and was paid per
+                        // keystroke and per frame of any animation.
+                        let hkey = v6_hybrid_gen(items, state, area, picker, story);
+                        let cached = state.graphics_render.borrow_mut().hybrid.take().filter(|f| f.key == hkey);
+                        let replayed = cached.is_some();
+                        let frame = match cached {
+                            Some(f) => f,
+                            None => {
+                                state.graphics_render.borrow_mut().hybrid_builds += 1;
+                                build_hybrid_frame(hkey, &layout, story, native, area, picker, default_fg, default_bg, state)
+                            }
+                        };
                         let fs = picker.font_size();
                         let cell_px = (fs.width, fs.height);
-                        let pane_dev = (
-                            area.width as u32 * fs.width.max(1) as u32,
-                            area.height as u32 * fs.height.max(1) as u32,
-                        );
-                        // SQ-0936: one global letterbox factor for the whole native
-                        // screen, quantized to the artwork's own ladder when the
-                        // player has asked for it (`v6_pixel_lock`, default off).
-                        // GLOBAL rather than per-picture, and Journey is what settles
-                        // that: its picture sits in its own window beside a drawn
-                        // divider rule, so a per-picture rung would stop the art short
-                        // of its own frame and open a gap. A pane too small for even
-                        // the smallest rung falls back to free scaling and says so as
-                        // a diagnostic, never on the game screen.
-                        //
-                        // SQ-0978: and the ladder is quantized in DEVICE pixels, which
-                        // is a unit half-blocks does not have — see
-                        // `crate::render::graphics::v6_pixel_lock_applies` for the
-                        // measurement. The lock is inert on that backend, reported as
-                        // inert, and never dressed up as a snap that happened.
-                        let lock_applies = crate::render::graphics::v6_pixel_lock_applies(picker);
-                        state.v6_scale_lock_inapplicable.set(state.config.v6_pixel_lock && !lock_applies);
-                        let (scale_center, lock_fallback) =
-                            v6::FrameGeometry::new(native, state.v6_art_scale, state.v6_text.cell())
-                                .fitted_scale(pane_dev, state.config.v6_pixel_lock && lock_applies);
-                        state.v6_scale_lock_fallback.set(lock_fallback);
-                        // Publish the letterbox factor — the magnification the ART
-                        // is drawn at, and since SQ-1002 nothing else. The scale
-                        // FACTOR is unchanged by the SQ-0505 anchoring below (only
-                        // the vertical offset moves), so publish it now.
-                        //
-                        // Inline story pictures used to be scaled by it, to "match
-                        // the chrome ring". They must not: a drop-cap is drawn
-                        // INSIDE the text flow, and in hybrid the text is glyphs at
-                        // one native cell per terminal cell while the ring is pixels
-                        // at `s`. Matching the ring made Zork Zero's cap twice the
-                        // height of the paragraph it opens. `render_transcript` reads
-                        // the flag instead and sizes them at the TEXT's rate.
-                        state.v6_image_scale.set(scale_center.s);
-                        state.v6_hybrid_ring.set(true);
-                        // SQ-0896: TWO art canvases, and the difference between them is
-                        // the whole of this quest.
-                        //
-                        // `frame_art` is the chrome-only artwork — the frame the game drew
-                        // AROUND its story window — and it is the oracle the inset must
-                        // use: `story_clear_native` walks the window's edges in until none
-                        // of them touches an opaque pixel, and measuring that against
-                        // anything carrying the story's own plate would inset the window
-                        // out of its own backdrop (fmvpoker's hollow table comes back
-                        // width 0). Rasterised glyphs are excluded for the same reason
-                        // they always were (SQ-0500/0728): opaque is not artwork.
-                        //
-                        // `gfx` is that PLUS the story window's own plate, and it is what
-                        // every downstream stage asks "is there art here?" of. It has to
-                        // carry the plate, because the bands that now cover the plate exist
-                        // only by the viewport having given those cells up — and an Art
-                        // strip whose oracle says there is nothing behind it is skipped and
-                        // never drawn (`strip_has_art`). Without this the ring would lose
-                        // the prose area AND still draw no picture.
-                        let frame_art = v6::build_graphics_canvas(&layout.chrome, native);
-                        // Step (b) of the user's ordering, for the region the ring never
-                        // owned: the story viewport is cut from what the ART leaves, not
-                        // from the raw window box. `None` = the plate owns the screen and
-                        // no prose belongs on this frame (SQ-0707), which for the ring
-                        // means the whole pane is chrome.
-                        let vp_native = v6::story_text_native(Some(story), &frame_art, layout.story_gfx, state.v6_text.cell());
-                        let plate_owns_screen = vp_native.is_none();
-                        // Fall back to the declared box so every stage below still has a
-                        // native rectangle to reason about; the empty viewport is applied
-                        // once, after the plans and the overlay push, so a plan cannot
-                        // divide by a zero-height story region on the way there.
-                        let vp_native = vp_native.unwrap_or((
-                            story.x_px as u32,
-                            story.y_px as u32,
-                            story.w_px as u32,
-                            story.h_px as u32,
-                        ));
-                        let mut gfx = frame_art;
-                        v6::blit_story_gfx(&mut gfx, layout.story_gfx);
-                        let gfx = gfx;
-                        let chrome_runs: Vec<&crate::engine::PxText> = paint_runs(&layout.chrome).collect();
-                        // SQ-0505 dynamic hybrid layout: reclaim the letterbox dead
-                        // space below the story when the bottom edge is text-only
-                        // (Journey's command menu) or empty (Arthur — header art +
-                        // side borders, open below). A game whose frame encloses the
-                        // story to the native bottom (Zork0) keeps today's centred
-                        // letterbox. `slack` is the vertical letterbox margin in
-                        // device pixels (zero when the pane is at/below the scaled
-                        // native height — nothing to reclaim, degrade to centred).
-                        let scaled_h = (native.1 as f32 * scale_center.s).round() as u32;
-                        let slack = pane_dev.1.saturating_sub(scaled_h);
-                        let plan = hybrid_bottom_plan(story, &gfx, &layout.chrome, native, slack, state.v6_text.cell());
-                        let reclaim = !matches!(plan, BottomPlan::Letterbox);
-                        // Resolve the story scale, the story viewport, and an
-                        // optional bottom-anchored menu scale.
-                        //   Letterbox → centred (today's behaviour, unchanged).
-                        //   Extend    → top-anchor (off_y = 0), story grows to the
-                        //               pane bottom; flanks below the side art blank.
-                        //   Menu      → top-anchor the story + chrome, bottom-anchor
-                        //               the command strip to the pane bottom, story
-                        //               fills between at constant width.
-                        let top_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: 0 };
-                        let (scale, viewport, menu) = match plan {
-                            BottomPlan::Letterbox => {
-                                let vp = v6::native_viewport_box(Some(vp_native), &scale_center, (area.width, area.height), cell_px);
-                                (scale_center, Rect::new(area.x + vp.x, area.y + vp.y, vp.width, vp.height), None)
-                            }
-                            // Extend (Arthur) and Frame (Zork0/Shogun) top-anchor the
-                            // story and grow it to the pane bottom identically; they
-                            // differ only in how the flanks below the side art are
-                            // treated — Extend blanks them, Frame stretches them (the
-                            // reclaim block below branches on the plan).
-                            BottomPlan::Extend | BottomPlan::Frame => {
-                                let vp = v6::native_viewport_box(Some(vp_native), &top_scale, (area.width, area.height), cell_px);
-                                let (x, y) = (area.x + vp.x, area.y + vp.y);
-                                // SQ-1008: the reclaim takes the letterbox slack below the
-                                // story — and it may not take a row the GAME is still using.
-                                //
-                                // Both arms reach here on the premise that nothing lives
-                                // below the story window: `Extend`'s by elimination, and
-                                // this pair's enclosed-frame arm by the story reaching
-                                // "within one native text row of the screen bottom". That
-                                // second premise is one row loose, and Arthur spends the row
-                                // it forgives. `Arthur - The Quest for Excalibur.adf`
-                                // (release 54 / serial 890606) answers `hint` in play by
-                                // laying window 3 across native `(28, 384, 584, 16)` — the
-                                // LAST text row of a 640x400 screen, with window 0 ending at
-                                // 384 — and printing *"If only you had a crystal ball...."*
-                                // into it. `menu_strip_below_story` never sees it, because
-                                // its own `native.1 <= story_bottom + cell.h` guard returns
-                                // false before it looks; so the plan is `Frame` (his poles
-                                // flank the story full height), the viewport grew to
-                                // `area.bottom()`, and `content_ring_bands` carved
-                                // `pane − viewport` and found no bottom band to put the box
-                                // in. MEASURED, same frame, sixteen turns in: viewport 11
-                                // rows at 80x25 and 100x25 with the box drawn on row 24;
-                                // 17 rows at 100x34, 21 at 80x34, 35 at 80x48 with the box
-                                // drawn nowhere. Any v6 window below the story window was
-                                // invisible at any terminal taller than the game's own
-                                // screen, which is most terminals.
-                                //
-                                // The extra rows are not the defect and are not clamped
-                                // here: they are the transcript's, and window 0 is a
-                                // SCROLLING buffer whose history the player reads far past
-                                // its eleven native rows. What they may not include is the
-                                // game's own bottom-anchored content. So take the rows that
-                                // content needs off the pane's bottom and hand back the
-                                // bottom-anchored scale for them — which is exactly what the
-                                // `Menu` arm below does for Journey's command strip, reused
-                                // rather than restated so the two cannot drift. `rows` is 0
-                                // on every frame with nothing below the story, which is
-                                // every frame in the corpus but this one, and the arm is
-                                // then byte-identical to what it was.
-                                let rows = menu_band_rows(&menu_band_runs(&chrome_runs, story), state.v6_text.cell());
-                                if rows == 0 {
-                                    (top_scale, Rect::new(x, y, vp.width, area.bottom().saturating_sub(y)), None)
-                                } else {
-                                    let bottom_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
-                                    let band_top = area.bottom().saturating_sub(rows).clamp(y + 1, area.bottom());
-                                    (top_scale, Rect::new(x, y, vp.width, band_top.saturating_sub(y)), Some(bottom_scale))
-                                }
-                            }
-                            BottomPlan::Menu => {
-                                let menu_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
-                                let vp = v6::native_viewport_box(Some(vp_native), &top_scale, (area.width, area.height), cell_px);
-                                let (x, y) = (area.x + vp.x, area.y + vp.y);
-                                // SQ-0765: the MENU is the fixed-height window here, and the
-                                // art and the story take what is left above it — the
-                                // inverse of every other v6 title, where the fixed window is
-                                // the status band at the top. So the band's height is the
-                                // menu's OWN height and nothing else's leftover:
-                                // [`menu_band_rows`] counts the game text rows it carries,
-                                // because hybrid draws chrome text one game row per terminal
-                                // row (SQ-0543), and the band is bottom-anchored to that.
-                                //
-                                // It used to be the other way round. `menu_top` was the
-                                // first terminal row carrying a menu run through the
-                                // bottom-anchored menu SCALE, so the story viewport was the
-                                // scale-derived quantity and the band was the remainder —
-                                // measured off the user's own dumps, 9 rows at pane height
-                                // 61/scale 1.43 and 11 at 61/1.96, for a menu whose content
-                                // stayed a constant 7 game rows. The rows the content never
-                                // reached were painted by nothing, which put the frame's own
-                                // bottom border three rows above the pane's last row
-                                // (SQ-0754), and at a short pane the reverse: the band came
-                                // out SHORTER than its content and clipped the last menu
-                                // line off the screen entirely.
-                                //
-                                // SQ-0548 (a run-less leftover row inside the band redrawing
-                                // a squashed slice of the frame's bottom edge) cannot recur
-                                // here by construction: the band is exactly the menu's own
-                                // rows, and `menu_band_strips` gives it to the cell path
-                                // whole, so there is no leftover row to misclassify.
-                                let menu_rows = menu_band_rows(&menu_band_runs(&chrome_runs, story), state.v6_text.cell());
-                                let menu_top = area.bottom().saturating_sub(menu_rows).clamp(y + 1, area.bottom());
-                                (top_scale, Rect::new(x, y, vp.width, menu_top.saturating_sub(y)), Some(menu_scale))
-                            }
-                        };
-                        // SQ-0582: a status bar the game OVERLAYS on its story window
-                        // (advent.z6) leaves no chrome ring to carry it. Reserve its
-                        // rows off the top of the story viewport, so the band below
-                        // decomposes it exactly like a game that reserved the space
-                        // itself — a solid full-width Text strip, with the transcript
-                        // starting under it instead of scrolling through it. Measured
-                        // from the strip's own runs, not its declared height: a 20px
-                        // window is 1.25 cells tall but carries a single text row.
-                        let overlay_strip = overlaid_status_strip(&layout.chrome, story, native.0, state.v6_text.cell());
-                        // The overlaid strip's native bottom, so `decompose_chrome_strips`
-                        // counts its runs as band content: they sit INSIDE the story box,
-                        // which its above/below test rejects.
-                        let overlay_bottom =
-                            overlay_strip.map(|s| s.y_px.saturating_add(s.h_px) as i32).unwrap_or(0);
-                        let viewport = match overlay_strip {
-                            Some(strip) => {
-                                let last = match &strip.node {
-                                    WinNode::Grid(g) => {
-                                        let bound = strip_rows(strip, g, state.v6_text.cell());
-                                        g.px_texts
-                                            .iter()
-                                            .filter(|t| !t.text.trim().is_empty())
-                                            .filter(|t| {
-                                                bound.is_some_and(|b| state.v6_text.cell().row_of(t.y) <= b)
-                                            })
-                                            .map(|t| run_cell(t, &scale, cell_px, area, state.v6_text.cell()).1)
-                                            .max()
-                                    }
-                                    _ => None,
-                                };
-                                match last {
-                                    Some(r) if r >= area.y as i32 => {
-                                        let top = (r as u16).saturating_add(1).min(area.bottom());
-                                        let y = viewport.y.max(top);
-                                        Rect::new(viewport.x, y, viewport.width, viewport.bottom().saturating_sub(y))
-                                    }
-                                    _ => viewport,
-                                }
-                            }
-                            None => viewport,
-                        };
-                        // SQ-0896: the plate owns the screen — no prose box survives it, so
-                        // there is no story region at all and the ring gets the whole pane.
-                        // An empty viewport is not a special case for anything downstream:
-                        // `content_ring_bands` carves `pane − viewport` and a zero-height
-                        // viewport makes that the pane, which then decomposes into Art and
-                        // Text strips by exactly the rules a top band already uses. The one
-                        // thing that must not happen is rendering a transcript into it; see
-                        // the guard on `render_node` below, which mirrors raster returning
-                        // no scroll metrics for the same frame.
-                        let viewport = if plate_owns_screen {
-                            Rect::new(area.x, area.y, area.width, 0)
-                        } else {
-                            viewport
-                        };
-                        // SQ-0500: a full-width chrome band (top/bottom) is carved
-                        // into horizontal strips — an ART strip (opaque frame
-                        // graphics behind it) keeps the scaled pixel RING; a
-                        // TEXT-ONLY strip (no graphics behind, just status/menu
-                        // runs) paints as crisp terminal CELLS. Journey's bottom
-                        // command menu becomes text while its left picture column
-                        // (a narrow side band) stays ring; Arthur's status row
-                        // becomes text between the art panel above and the story
-                        // below; Zork0's status sits ON banner art so every strip
-                        // stays ring. The graphics-only canvas answers "art behind
-                        // this strip?" — the full chrome canvas can't, since its
-                        // rasterized text is itself opaque.
-                        // Cell rects of the secondary prose windows: the ring leaves
-                        // those rows to them (SQ-0585). Computed HERE rather than just
-                        // before `decompose_chrome_strips` because the content-built ring
-                        // needs them too — a flank must not extend across a row a prose
-                        // panel draws itself.
-                        let panel_rects: Vec<Rect> = layout
-                            .chrome
-                            .iter()
-                            .filter(|pw| matches!(&pw.node, WinNode::Buffer(b) if !b.primary && !b.lines.is_empty()))
-                            .map(|pw| px_rect_to_cells(pw, &scale, cell_px, area, 0))
-                            .collect();
-                        // SQ-0894, step (b) becoming live: the FLANK claims its columns
-                        // first and the text region is what is left. A flank is a column of
-                        // the frame's own side artwork at the pane's edge whether or not the
-                        // story window happened to leave room for it, so where the art runs
-                        // past the story box the box gives those columns up.
-                        //
-                        // Not via `story_clear_native`, which is the other half of step (b)
-                        // and measures OVERLAP: on the frame that motivates this the art and
-                        // the story box are ADJACENT, not overlapping (Shogun's Amiga credits
-                        // screen paints its ornaments down to native y=335 and puts window 0
-                        // at y=336), so the overlap test correctly finds nothing to inset and
-                        // the columns still have to come from somewhere. They come from here.
-                        let (art_left, art_right) = flank_art_columns(&gfx, &scale, cell_px, area, state.v6_text.cell());
-                        let viewport = {
-                            let x = viewport.x.max(art_left).min(viewport.right());
-                            let r = viewport.right().min(art_right).max(x);
-                            if r > x {
-                                Rect::new(x, viewport.y, r - x, viewport.height)
-                            } else {
-                                viewport
-                            }
-                        };
-                        // Which native rows are BARS the game draws edge to edge (SQ-0515).
-                        // Only the keys are read here, so the style arguments are
-                        // immaterial — the styles themselves belong to the cell path, which
-                        // resolves them against its own theme base.
-                        let bar_rows: std::collections::HashSet<u16> = full_width_flood_rows(
-                            &layout.chrome,
-                            native.0,
-                            ratatui::style::Style::default(),
-                            TextInk::of(state),
-                            state.v6_text.cell(),
-                        )
-                        .into_keys()
-                        .collect();
-                        // …and how far the chrome text on each native row can REACH: the
-                        // native columns its own windows span (SQ-0949). A ribbon is as
-                        // wide as its window and no wider, and the flank veto has to know
-                        // that — Arthur's status window is 584 of 640 native columns, so it
-                        // reads as a bar and still stops 28 columns short of each edge,
-                        // which is exactly where his poles stand.
-                        let row_spans: std::collections::HashMap<u16, (u16, u16)> = {
-                            let mut m: std::collections::HashMap<u16, (u16, u16)> = Default::default();
-                            for pw in &layout.chrome {
-                                let WinNode::Grid(g) = &pw.node else { continue };
-                                let span = (pw.x_px, pw.x_px.saturating_add(pw.w_px));
-                                for t in &g.px_texts {
-                                    let row = state.v6_text.cell().row_of(t.y);
-                                    let e = m.entry(row).or_insert(span);
-                                    e.0 = e.0.min(span.0);
-                                    e.1 = e.1.max(span.1);
-                                }
-                            }
-                            m
-                        };
-                        // SQ-0894: the ring is carved by what the chrome CONTAINS, not as
-                        // the story viewport's complement, so each flank is one column over
-                        // every contiguous row of art it may own.
-                        let row_oracle = ChromeRowOracle {
-                            v6_cell: state.v6_text.cell(),
-                            pane: area,
-                            scale: &scale,
-                            cell_px,
-                            story_native: vp_native,
-                            overlay_bottom,
-                            panels: &panel_rects,
-                            gfx: &gfx,
-                            runs: &chrome_runs,
-                            bar_rows: &bar_rows,
-                            row_spans: &row_spans,
-                        };
-                        let bands = content_ring_bands(area, viewport, menu.is_some(), &row_oracle);
-                        // SQ-0505: in the Menu plan the bottom band IS the command
-                        // strip — decompose it through the bottom-anchored `menu`
-                        // scale, and the top+side ring bands through the story
-                        // `scale`. Each strip is later drawn through the scale it was
-                        // classified with, so the menu lands at the pane bottom while
-                        // the story/top/sides stay top-anchored.
-                        let mut ring_bands = bands;
-                        let menu_bands: Vec<Rect> = if menu.is_some() {
-                            // The menu band IS the bottom band — asked by role, not by
-                            // recognising its shape (SQ-0894). The old test was
-                            // `width == area.width && y == viewport.bottom()`, which is a
-                            // description of where `chrome_bands` happened to put it.
-                            let m: Vec<Rect> = ring_bands
-                                .iter()
-                                .filter(|(role, _)| *role == v6::BandRole::Bottom)
-                                .map(|(_, r)| *r)
-                                .collect();
-                            ring_bands.retain(|(role, _)| *role != v6::BandRole::Bottom);
-                            m
-                        } else {
-                            Vec::new()
-                        };
-                        // SQ-0511: the Frame/Menu plans STRETCH the side flank bands to
-                        // fill the reclaimed space (drawn below); the whole flank band
-                        // survives here so the stretch has a full-height target. The
-                        // Extend plan (Arthur) instead CLIPS the ring bands to the chrome
-                        // art's actual vertical extent (its lowest opaque native row,
-                        // mapped through the story scale) so the flanks BELOW its side
-                        // art stay the theme backdrop — no art stretching or tiling there.
-                        // Letterbox is untouched (its bands lie within the scaled canvas).
-                        let stretch_flanks = matches!(plan, BottomPlan::Frame | BottomPlan::Menu);
-                        state.v6_ring_plan.set(match plan {
-                            BottomPlan::Letterbox => "letterbox",
-                            BottomPlan::Extend => "extend",
-                            BottomPlan::Frame => "frame",
-                            BottomPlan::Menu => "menu",
-                        });
-                        state.v6_ring_clip.set(None);
-                        if reclaim && !stretch_flanks {
-                            let ch = cell_px.1.max(1) as f32;
-                            let art_bottom_px =
-                                (0..gfx.height()).rev().find(|&y| (0..gfx.width()).any(|x| gfx.get_pixel(x, y)[3] >= 128));
-                            let clip_row = match art_bottom_px {
-                                Some(y) => area.y + ((scale.off_y as f32 + (y + 1) as f32 * scale.s) / ch).ceil() as u16,
-                                None => area.y,
-                            };
-                            // SQ-0571: the clip must never guillotine a chrome TEXT row
-                            // that sits between the art and the story — Arthur's status
-                            // bar. The clip rounds the art's native bottom UP through the
-                            // scale; `run_cell` maps a run's native top by ROUNDing. Both
-                            // read the same native boundary (Arthur's art ends at 192, its
-                            // status row starts at 192), so whenever `192·s/cell_h` has a
-                            // fraction >= 0.5 the two agree and the clip lands exactly ON
-                            // the status row, evicting it from the band. With no Text strip
-                            // covering it the run is never cleared from the band canvas
-                            // (`clear_text_rows` below), so the status painted as a squashed
-                            // raster slice of the frame instead of crisp cells — the
-                            // width-dependent "corrupted location bar" (broken at 96..=99
-                            // columns on an 8x17 cell, clean at 95 and 100).
-                            //
-                            // Raise the clip past the LAST pure-text chrome row above the
-                            // story. Deliberately only text rows: a run-less row below the
-                            // art still gets clipped (it would otherwise coalesce into an
-                            // Art strip and redraw a squashed slice of the frame's edge,
-                            // the SQ-0548 defect), and a run OVER art is already ring
-                            // content that the unraised clip places correctly.
-                            let story_top = story.y_px as i32;
-                            // SQ-1020: `over_art` is the oracle's own predicate and
-                            // this used to be a second copy of it — same question,
-                            // written twice, and only one of them was converted when
-                            // the Version 6 cell stopped being 8x16 everywhere. The
-                            // copy passed `run_px(...)` for the width and a bare `16`
-                            // for the height, in the SAME call. One authority now.
-                            let text_above = chrome_runs
-                                .iter()
-                                .filter(|t| {
-                                    !t.text.trim().is_empty()
-                                        && state.v6_text.cell().bottom_px(t.y) as i32 <= story_top
-                                        && !row_oracle.over_art(t)
-                                })
-                                .map(|t| run_cell(t, &scale, cell_px, area, state.v6_text.cell()).1)
-                                .max();
-                            let clip_row = match text_above {
-                                Some(r) if r >= 0 => clip_row.max((r as u16).saturating_add(1)),
-                                _ => clip_row,
-                            };
-                            // SQ-0582: never clip above the story viewport. The rule
-                            // above only spares text that sits above the story WINDOW,
-                            // so a bar the game overlays on the story instead (advent.z6)
-                            // matched neither test — with no art either, the clip landed
-                            // at the pane top and dropped the very band the inset above
-                            // just reserved for it. Whatever is above the viewport is
-                            // chrome by construction; it survives.
-                            let clip_row = clip_row.max(viewport.y);
-                            // Record what clipped the ring (SQ-0587). Arthur's side
-                            // borders live in the flank bands, and this clip is what
-                            // drops them: it trims the ring to the graphics canvas's
-                            // lowest opaque row, so a canvas that lost its lower art
-                            // takes the side borders with it.
-                            state.v6_ring_clip.set(Some((
-                                art_bottom_px.map(|y| y as u16).unwrap_or(u16::MAX),
-                                clip_row,
-                            )));
-                            // SQ-0698: …and a flank whose art we know how to EXTEND is
-                            // spared that trim. The clip is what dropped Arthur's side
-                            // poles at the row his artwork happens to stop — native 379
-                            // of 400, terminal row 31 of a 64-row pane — leaving the
-                            // frame open down its whole lower half. Tiling gives that
-                            // band something to draw all the way to the story viewport's
-                            // bottom, so the band must survive to be drawn. Reserved to a
-                            // RECOGNISED flank (`v6_border::recognize`): a game with no
-                            // side art, or side art of a shape this code does not know,
-                            // is clipped exactly as before.
-                            for (role, b) in &mut ring_bands {
-                                // Asked by role (SQ-0894): `b.width < area.width` meant
-                                // "a flank" only while the top and bottom bands spanned
-                                // the pane.
-                                //
-                                // SQ-0894 measured this exemption for removal — §4 of the
-                                // pipeline document calls it "a patch on a patch" — and
-                                // KEPT it. Deleting it fails
-                                // `arthur_hybrid_tall_pane_extends_story_to_bottom`: the
-                                // clip trims the ring to the art's lowest opaque row, and
-                                // a content-built flank is still a band the clip can cut.
-                                // Owning the right ROWS does not exempt a flank from a
-                                // later stage shortening it; that is a separate decision
-                                // and it still has to be made here.
-                                if role.is_flank() && flank_border_art(*b, area, &scale, cell_px, native, &gfx).is_some() {
-                                    continue;
-                                }
-                                if b.y >= clip_row {
-                                    b.height = 0;
-                                } else {
-                                    b.height = b.height.min(clip_row - b.y);
-                                }
-                            }
-                            ring_bands.retain(|(_, b)| b.height > 0 && b.width > 0);
-                        }
-                        // SQ-0944: `over_art_runs` is the text the game printed ON its
-                        // artwork. Empty unless this backend can show a glyph in a cell
-                        // an image covers — see `backend_layers_glyphs_over_art`, which
-                        // is the whole gate: everywhere else these runs stay pixels and
-                        // every line below this one behaves exactly as it did.
-                        let (mut strips, over_art_runs) = decompose_chrome_strips(&ring_bands, &row_oracle);
-                        let over_art_runs: Vec<&crate::engine::PxText> =
-                            if backend_layers_glyphs_over_art(picker) { over_art_runs } else { Vec::new() };
-                        // An ART strip with no actual art behind it draws a rasterized
-                        // slice of the chrome canvas — which carries TEXT too, so on a
-                        // text-only v6 story (advent) that is pure noise painted over the
-                        // pane. Under a graphics protocol the image composites ABOVE the
-                        // cells, so it cannot even be overdrawn. Skip those, and let
-                        // `/dump-windows` say which ones were skipped. (SQ-0585)
-                        // SQ-0750: the question is whether art lies behind THIS STRIP, so
-                        // the test is its own native REGION — both axes. It used to ask
-                        // only about the strip's rows, across the canvas's whole width,
-                        // which is the same question for a full-width top/bottom band and
-                        // a different one for a side flank: Journey's right-hand flank is
-                        // eight native pixels of frame border with no artwork in it at
-                        // all, and it was drawn as a band anyway because the LEFT flank's
-                        // picture shares its rows. That band is a bitmap of a `│` the game
-                        // printed as a character — 16x900 px per frame to draw one rule.
-                        // Classify a strip by what is in it, not by where it sits.
-                        // …and it asks the ORACLE, rather than carrying its own copy
-                        // of the inverse (SQ-1059). `ChromeRowOracle::region_has_art`
-                        // is that same mapping, built from the same `area`, `scale`,
-                        // `cell_px` and `gfx` this closure captured — and its doc has
-                        // always claimed to be "shared with the caller's art test so
-                        // the two do not drift", which was false in the commit that
-                        // wrote it: SQ-0894 pasted this body into the oracle instead
-                        // of calling it, in a commit whose own message said "the fix
-                        // should not add a fourth instance of it". Nothing in the
-                        // language kept the two equal; they simply had not diverged
-                        // yet, which is what SQ-1020 is in this same file.
-                        let strip_has_art = |r: &Rect| -> bool { row_oracle.region_has_art(*r) };
-                        // SQ-0894 MEASURED THIS FOR REMOVAL AND KEPT IT. The
-                        // content-built ring was expected to subsume the walk: a flank
-                        // now owns its rows by what is in its own columns, so the
-                        // remainder row beside the viewport should need no handing back.
-                        // For every flank whose border is ART that is exactly what
-                        // happens, and the walk no longer fires on Zork Zero, Arthur or
-                        // Shogun.
-                        //
-                        // It is still load-bearing for ONE case, and deleting it fails
-                        // `journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack`
-                        // with the original symptom — Journey's Amiga press at a 96x26
-                        // pane, "row 1 of the rule's span (1, 2, 2, 17) holds '│' in 0
-                        // column(s), not 1". The reason is that Journey's side rule is a
-                        // CHARACTER the game printed, not artwork: the graphics-only
-                        // canvas is empty across those columns by construction (that is
-                        // the whole of SQ-0750), so the ring's art test cannot see the
-                        // border and the flank declines the remainder row. The walk
-                        // reaches it by geometry instead, which is the one thing content
-                        // classification cannot do for content that is not pixels.
-                        //
-                        // So it stays, narrowed in purpose rather than in code. Removing
-                        // it needs the flank's row test to accept the game's own border
-                        // GLYPHS alongside art — a change to the glyph-border machinery,
-                        // not to this walk.
-                        // SQ-0747: the QUANTIZATION REMAINDER beside the story viewport belongs
-                        // to the flanks, not to the full-width band and not to nothing —
-                        // ABOVE the viewport and BELOW it alike.
-                        //
-                        // `story_viewport_box` quantizes the story's top edge OUTWARD to a
-                        // whole cell, while the top band runs down to that quantized row. So
-                        // a terminal row can fall between the frame's top rule and the first
-                        // prose row whose own native span is already INSIDE the story box —
-                        // it is the half-cell the viewport rounded away, not chrome. The
-                        // full-width band draws it either way, and both outcomes are wrong:
-                        // with nothing behind it the row classifies Empty → Art → skipped and
-                        // is never written at all (terminal row 2 of the captured 115-column
-                        // frame, across every column: a bare stripe through the picture panel
-                        // and a one-row hole where the frame's top rule meets its two side
-                        // rules), and with the picture's first pixels behind it the band
-                        // paints a one-row squashed slice of the WHOLE canvas across the pane
-                        // — the picture's top standing above its own panel, which is the other
-                        // half of this quest.
-                        //
-                        // The flanks own those columns and have real content in them (their
-                        // borders, their panel ground), so the strip goes to them; the story's
-                        // own columns keep the story's ground, which is what stands beside the
-                        // prose one row lower.
-                        //
-                        // Bounded by CONTENT, and WHOLE STRIPS only. A band that carries the
-                        // game's chrome art down to the viewport — Zork Zero's and Shogun's
-                        // banners, Arthur's header — is one tall strip whose first row is
-                        // above the story box, so neither test below holds for it and it is
-                        // untouched. Trimming a row off such a strip instead of leaving it
-                        // alone would take a row of banner away, which is why this walks
-                        // strips rather than rows.
-                        //
-                        // SQ-0747, second pass: and the story box has TWO quantized edges, so
-                        // there is a remainder under it as well. `story_viewport_box` rounds
-                        // the bottom in too, and the row it rounds away is a full-width band
-                        // exactly like the one above — measured off `Journey - The Quest
-                        // Begins.adf` (release 30 / serial 890322) at a 121x36 terminal: the
-                        // picture ran to row 23, the menu began at row 25, and between them a
-                        // 119-column one-row band painted a squashed slice of the whole canvas
-                        // straight across BOTH of the frame's side rules. At a 236x68 terminal
-                        // the same row has no art behind it, classifies skipped, and reaches
-                        // the screen unwritten — the two halves of the very same defect the
-                        // walk above already knows by name. One rule, expressed once: a
-                        // full-width Art strip that is the remainder of the picture's own box
-                        // belongs to the flanks, whichever side of the viewport it falls.
-                        let flank_at = |strips: &[ChromeStrip], edge: u16, top: bool| {
-                            strips.iter().any(
-                                |s| matches!(s, ChromeStrip::Art(role, r) if role.is_flank() && (if top { r.y } else { r.bottom() }) == edge),
-                            )
-                        };
-                        {
-                            let ch = cell_px.1.max(1) as f32;
-                            let sc = scale.s.max(0.001);
-                            let inv_y = |row: u16| ((row.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32) / sc;
-                            // SQ-0896: the walk is about the QUANTIZATION REMAINDER of the
-                            // rect the viewport was cut from, so it reads `vp_native` and
-                            // not the declared window box. On every corpus frame the two
-                            // are the same rectangle; where a plate or frame art has moved
-                            // the viewport, the remainder is beside the viewport's own edge
-                            // and nowhere else.
-                            let story_bottom = (vp_native.1 + vp_native.3) as f32;
-                            let mut gap_top = viewport.y;
-                            if flank_at(&strips, viewport.y, true) {
-                                while gap_top > area.y {
-                                    let Some(i) = strips.iter().position(|s| {
-                                        matches!(s, ChromeStrip::Art(role, r) if !role.is_flank() && r.bottom() == gap_top)
-                                    }) else {
-                                        break;
-                                    };
-                                    let ChromeStrip::Art(_, r) = strips[i] else { unreachable!() };
-                                    // Either half of the remainder qualifies, and which one it is
-                                    // moves with the pane by fractions of a cell: the strip's own
-                                    // native span is already inside the story box (so the band
-                                    // would paint a squashed slice of the whole canvas over the
-                                    // panel), or the band draws nothing there at all (so the rows
-                                    // reach the screen unwritten). Anything else is real chrome and
-                                    // stops the walk, as does a TEXT strip, whose runs are the
-                                    // game's own.
-                                    let remainder = (inv_y(r.y) + inv_y(r.y + 1)) / 2.0 >= vp_native.1 as f32;
-                                    if !remainder && strip_has_art(&r) {
-                                        break;
-                                    }
-                                    strips.remove(i);
-                                    gap_top = r.y;
-                                }
-                                if gap_top < viewport.y {
-                                    for s in &mut strips {
-                                        if let ChromeStrip::Art(_, r) = s {
-                                            if r.width < area.width && r.y == viewport.y {
-                                                r.height += viewport.y - gap_top;
-                                                r.y = gap_top;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            // …and downward, by the same test read from the other end. The
-                            // strip's LAST row is what is asked about here, so a tall band
-                            // carrying the game's own chrome (a menu's art, a bottom rule)
-                            // cannot be swallowed by having merely begun inside the box.
-                            let mut gap_bottom = viewport.bottom();
-                            if flank_at(&strips, viewport.bottom(), false) {
-                                while gap_bottom < area.bottom() {
-                                    let Some(i) = strips.iter().position(|s| {
-                                        matches!(s, ChromeStrip::Art(role, r) if !role.is_flank() && r.y == gap_bottom)
-                                    }) else {
-                                        break;
-                                    };
-                                    let ChromeStrip::Art(_, r) = strips[i] else { unreachable!() };
-                                    let remainder = (inv_y(r.bottom() - 1) + inv_y(r.bottom())) / 2.0 <= story_bottom;
-                                    // Bounded by CONTENT on both counts, and the second one is
-                                    // what keeps the corpus still. Above the story a band that
-                                    // carries the game's chrome is a TALL strip and fails the
-                                    // remainder test on its own; below it, a game whose frame
-                                    // closes along the pane's last row draws that row INSIDE its
-                                    // own story box — Zork Zero's does, at 236x68 and 121x36 —
-                                    // so the remainder test alone would swallow the bottom of its
-                                    // frame into two flanks that only cover the sides. Ask what
-                                    // is BETWEEN the flanks: the columns the band alone would
-                                    // draw. Artwork there is the game's chrome and stops the
-                                    // walk; nothing there means the band is drawing a squashed
-                                    // slice of the story's own ground, or nothing at all.
-                                    let middle = Rect::new(viewport.x, r.y, viewport.width, r.height);
-                                    if !remainder || strip_has_art(&middle) {
-                                        break;
-                                    }
-                                    strips.remove(i);
-                                    gap_bottom = r.bottom();
-                                }
-                                if gap_bottom > viewport.bottom() {
-                                    for s in &mut strips {
-                                        if let ChromeStrip::Art(_, r) = s {
-                                            if r.width < area.width && r.bottom() == viewport.bottom() {
-                                                r.height += gap_bottom - viewport.bottom();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        let menu_strips = match &menu {
-                            Some(_) => menu_band_strips(&menu_bands, story, &chrome_runs),
-                            None => Vec::new(),
-                        };
-                        // SQ-0504: rows drawn as terminal CELLS (pure-text strips)
-                        // must not ALSO reach the pixel bands. Carve every text-strip
-                        // run's native rows out of the band canvas: excludes the
-                        // rasterized menu/status from every uploaded band image (a
-                        // sub-cell letterbox boundary otherwise bleeds the raster bar
-                        // behind the cells) and decouples each art band's hash from
-                        // the menu text (navigating the menu re-encodes only changed
-                        // art, not every band). Beside-story runs — Journey's vertical
-                        // picture/text divider — are NOT text strips, so they stay in
-                        // the side band's ring untouched.
-                        // SQ-0894: over the strip's OWN native columns. A strip that spans
-                        // the pane still carves the whole row (every strip on the corpus
-                        // does, so this is byte-identical there); one a flank has narrowed
-                        // must not erase the flank's source pixels beside it.
-                        let strip_native_cols = |r: Rect| -> (u32, u32) {
-                            if r.x <= area.x && r.right() >= area.right() {
-                                return (0, u32::MAX);
-                            }
-                            let inv = |c: u16| {
-                                ((c.saturating_sub(area.x) as f32 * cell_px.0.max(1) as f32
-                                    - scale.off_x as f32)
-                                    / scale.s.max(0.001))
-                                .max(0.0) as u32
-                            };
-                            (inv(r.x), inv(r.right()))
-                        };
-                        let text_run_tops: Vec<(u16, u32, u32)> = strips
-                            .iter()
-                            .chain(menu_strips.iter())
-                            .flat_map(|s| match s {
-                                ChromeStrip::Text(r, runs) => {
-                                    let (x0, x1) = strip_native_cols(*r);
-                                    runs.iter().map(|t| (t.y.max(1) - 1, x0, x1)).collect::<Vec<_>>()
-                                }
-                                ChromeStrip::Art(..) => Vec::new(),
-                            })
-                            .collect();
-                        // ── the chrome CANVAS, built here rather than 650 lines up ──
-                        //
-                        // SQ-0903. Every classification above — the viewport, the
-                        // strips, the ring bands, which rows the ring will draw as
-                        // GLYPHS — is computed from `layout` and the ART canvases and
-                        // never reads this one. That was not obvious while the canvas
-                        // was built first: it looked like an ordering constraint, and
-                        // the rasterise-then-carve sequence below looked like the price
-                        // of one. It is not. Only seven statements in the 700 lines
-                        // between the old site and the first read touched `canvas`, and
-                        // all seven are these.
-                        //
-                        // Building it here means `text_run_tops` — the rows the ring has
-                        // just decided to draw with glyphs — is known BEFORE a pixel is
-                        // rasterised, so those rows are never painted instead of being
-                        // painted and then carved back out.
-                        // SQ-0903: the rows the ring has just decided to draw with
-                        // GLYPHS. `text_run_tops` is that decision, taken a few lines
-                        // up and reaching the canvas builder before it paints rather
-                        // than reaching a carve afterwards.
-                        // SQ-0934: the chrome the CANVAS is built from excludes the
-                        // promoted story grid — the menu the game printed into the
-                        // ring's clear middle after withdrawing its buffer.
-                        //
-                        // It is in `chrome` because its runs must reach `chrome_runs`,
-                        // but it is the STORY SURFACE, and rasterising a story surface
-                        // is the thing hybrid exists not to do. Leaving it in put the
-                        // menu's pixels — its text AND the reverse-video bar under the
-                        // selected item — into the canvas the ring bands are cropped
-                        // from, so fragments of the menu came back out inside the ring:
-                        // a sliver of the first text column showing at the flank's inner
-                        // edge, and the selection bar's two ends appearing IN the left
-                        // and right flanks, level with the selection and then again
-                        // wherever a flank band tiles (SQ-0894). "Mirrored top and
-                        // bottom, and overrunning the frame", as reported, is a tiled
-                        // repeat of a strip that should never have carried text.
-                        //
-                        // The middle is drawn as terminal cells by `render_node` above,
-                        // which is the whole point of hybrid; the canvas only has to
-                        // carry what the bands ship, and the bands are the frame.
-                        let ring_chrome: Vec<&crate::engine::PositionedWindow> = layout
-                            .chrome
-                            .iter()
-                            .copied()
-                            .filter(|it| !layout.story.is_some_and(|st| std::ptr::eq(*it, st)))
-                            .collect();
-                        let mut glyph_rows: std::collections::HashSet<u16> =
-                            text_run_tops.iter().map(|&(top, _, _)| top).collect();
-                        // SQ-0944: …and the rows of text the game printed ON its
-                        // artwork, when this backend can draw a glyph in a cell the
-                        // art covers. `over_art_runs` is already empty on every
-                        // backend that cannot, so this adds nothing there and the
-                        // canvas keeps rasterising them exactly as before.
-                        //
-                        // Pass 1 of `build_chrome_canvas` — the ARTWORK — is never
-                        // skipped, so the band still ships the picture these glyphs
-                        // will sit on. Only the TEXT layer stops being painted, which
-                        // is what stops the crisp glyph landing on a blurred copy of
-                        // itself and, worse, what stops the ground sampled from under
-                        // it being a sample of the rasterised text.
-                        glyph_rows.extend(over_art_runs.iter().map(|t| t.y.max(1) - 1));
-
-                        // SQ-0937: …and the rows the ring is about to stamp INSIDE the
-                        // story box, which are glyph rows for exactly the same reason and
-                        // had never been counted as such.
-                        //
-                        // `text_run_tops` collects from the ring's STRIPS, and the story
-                        // box is not a strip — so a chrome run landing in the box was
-                        // rasterised into the canvas AND stamped as a glyph a few hundred
-                        // lines below. Both, one over the other, and the rasterised copy
-                        // then travelled wherever the bands crop and tile from this canvas.
-                        //
-                        // The Macintosh press is where it shows, because it is the release
-                        // that KEEPS its primary buffer for the hint screen: its menu is
-                        // chrome runs inside the box, so it takes this path, while Blorb
-                        // and Amiga withdraw the buffer and have their menu grid promoted
-                        // to the story surface instead (SQ-0934), which is excluded from
-                        // this canvas outright.
-                        //
-                        // Same predicate as the packing below, deliberately — if the two
-                        // ever disagree about which runs are stamped, the difference is
-                        // drawn twice or not at all.
-                        for it in &ring_chrome {
-                            let WinNode::Grid(g) = &it.node else { continue };
-                            for t in &g.px_texts {
-                                let px = u32::from(t.x.max(1)) - 1;
-                                let py = u32::from(t.y.max(1)) - 1;
-                                if px >= vp_native.0
-                                    && px < vp_native.0 + vp_native.2
-                                    && py >= vp_native.1
-                                    && py < vp_native.1 + vp_native.3
-                                {
-                                    glyph_rows.insert(t.y.max(1) - 1);
-                                }
-                            }
-                        }
-                        let mut canvas = v6::build_chrome_canvas(&ring_chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows), &state.v6_text);
-                        // SQ-0896: …and the STORY window's own plate, which the chrome
-                        // canvas excludes by construction — `classify_windows` sets a
-                        // `win == 0` Graphics aside as `story_gfx` so the ring does not
-                        // carry it. That was right while the ring could only draw outside
-                        // the story window; now the viewport is cut from what the art
-                        // leaves, the ring covers the plate's cells and needs its pixels
-                        // to crop. Blitted with the chrome ART layer, before the painted
-                        // ground and before any window's page, which is the painter's
-                        // order the game itself used (SQ-0706): the plate is something the
-                        // game DREW, and a page is a colour it was told to present on.
-                        v6::blit_story_gfx(&mut canvas, layout.story_gfx);
-                        // SQ-0704: a chrome window that named its own page paints it
-                        // into its unpainted pixels here (ZMSD §8.8.3.2), so the ring
-                        // bands ship self-contained instead of leaving the icons'
-                        // clear ground for the terminal to colour in (Zork Zero's
-                        // room icons came out on an opaque black box). Same live
-                        // `honor_game_colours` gate as the pane flood above.
-                        // The painted ground goes under the ring's art and glyphs
-                        // and before the pages claim the rest (SQ-0706).
-                        v6::blit_paint_ground(
-                            &mut canvas,
-                            state.v6_paint.borrow().as_deref(),
-                            v6::TextLayer::SkipGlyphRows(&glyph_rows),
-                            state.v6_text.cell(),
-                        );
-                        // SQ-0883: the INK layer, frozen — art, glyph ink and painted
-                        // ground, before any window's PAGE floods the rest. The border
-                        // probe below reads THIS: a page is a colour a window was told
-                        // to present on, not something the game drew, and a probe that
-                        // cannot tell the two apart measures a flank's whole width as
-                        // its border rule. `build_chrome_canvas` freezes its own art
-                        // layer one step earlier for the same reason (SQ-0727/0500):
-                        // opaque is not painted.
-                        let ink = canvas.clone();
-                        if state.config.honor_game_colours {
-                            v6::fill_window_pages(
-                                &mut canvas,
-                                &ring_chrome,
-                                layout.story,
-                                &state.colors,
-                                v6::TextLayer::SkipGlyphRows(&glyph_rows),
-                                state.v6_text.cell(),
-                            );
-                            // …and the story window's own page under the pixels the
-                            // ring bands ship (SQ-0704, hybrid half). Raster flattens
-                            // its whole canvas opaque before shipping; hybrid ships
-                            // only these bands, and they overlap the story box — the
-                            // sliver under a top banner, and the flanks. A pixel left
-                            // transparent there is the TERMINAL's to resolve, which is
-                            // why the icons kept coming out on the terminal background
-                            // after the chrome half of this fix landed.
-                            v6::fill_story_page_clear(&mut canvas, layout.story, &state.colors);
-                        } else {
-                            // SQ-0716: colours declined, but a window the game has
-                            // PAINTED INTO still gets its page — that page is the
-                            // ground its own drawing sits on, not a palette
-                            // preference. See `fill_painted_window_pages`.
-                            v6::fill_painted_window_pages(
-                                &mut canvas,
-                                &layout.chrome,
-                                layout.story,
-                                &state.colors,
-                                state.v6_paint.borrow().as_deref(),
-                                state.v6_text.cell(),
-                            );
-                        }
-                        // SQ-0903: the carve that used to be here is GONE, and the
-                        // proof it is safe is that it had already stopped removing
-                        // anything: `build_chrome_canvas` is now told which rows the
-                        // ring claimed (`glyph_rows`, above) and never paints them, so
-                        // there is nothing left on them to erase. Measured across the
-                        // corpus with the carve still in place — zork0, arthur, shogun,
-                        // journey, advent and mysterious01 all reported **0** pixels
-                        // removed, which is the oracle SQ-0903 asked for.
-                        //
-                        // What it used to do is worth keeping in view, because the rule
-                        // survives even though the code does not: on a row the ring
-                        // draws with GLYPHS, this canvas keeps artwork and nothing else
-                        // (SQ-0750). It is enforced a step earlier now, by not painting,
-                        // rather than a step later by erasing.
-                        let base = v6_machine_page(state, state.colors.theme.get("upper_window").style);
-                        // SQ-0511 fix: in the Menu plan the side flanks are drawn at the
-                        // UNIFORM scale (aspect preserved — Journey's left picture column
-                        // is NOT vertically stretched); only each flank's full-height
-                        // divider/border column is extended down through the reclaimed gap
-                        // to the bottom-anchored menu. Compute those narrow extension bands
-                        // up front so their cache keys join the live set (else they'd be
-                        // pruned and re-encoded every frame). The Frame plan (Zork0/Shogun)
-                        // still stretches its whole flank (border art, no story picture).
-                        // SQ-0758: BOTH of a flank's border columns, per flank strip —
-                        // `(strip, inner rule, outer border)`. One probe, run from each
-                        // side, so the panel's extent and the two borders that bound it
-                        // come out of the same calculation instead of the band's rect.
-                        // SQ-0779: and under every OTHER plan too — but only for a border
-                        // the game printed as a CHARACTER. The extension used to be a
-                        // Menu-plan privilege, so a pane short enough to leave no letterbox
-                        // slack (`slack == 0` → `Letterbox`, i.e. any pane whose rows are
-                        // at or below the scaled native height) got no border columns at
-                        // all: Journey's Amiga frame lost BOTH of its left flank's rules
-                        // into the picture band that spans them, and its right-hand flank —
-                        // one rule wide, with no art in it — classified art-less and was
-                        // skipped, so the frame simply had no sides between its `┌─┐` and
-                        // its `└─┘`. Reported at a 121x36 terminal, correct at 117x64;
-                        // the discriminator is the pane's ASPECT, not its width.
-                        //
-                        // Reserved to the GLYPH ink outside the Menu plan, which is what
-                        // keeps the corpus still: an artwork flank (Zork Zero's, Shogun's,
-                        // Arthur's side columns) comes back `Band` here and is dropped, so
-                        // those frames draw exactly the bands they drew before. The
-                        // extension's bottom is the flank strip's own, since outside the
-                        // Menu plan there is no bottom-anchored strip to reach down to.
-                        //
-                        // SQ-0830 took Journey back out of this arm: it holds the Menu plan
-                        // at every aspect now, so the 121x36 pane above is a menu plan and
-                        // its rules come from where they always came from at a tall one. The
-                        // generalisation stands on its own merits — a glyph border under any
-                        // other plan is still a character the game printed, and still must
-                        // not be shipped as a bitmap of itself.
-                        let glyph_borders_only = !matches!(plan, BottomPlan::Menu);
-                        let flank_borders: Vec<(Rect, Option<FlankBorderExt>, Option<FlankBorderExt>)> = strips
-                            .iter()
-                            .filter_map(|s| match s {
-                                ChromeStrip::Art(role, r) if role.is_flank() => {
-                                    let bottom = if glyph_borders_only { r.bottom() } else { viewport.bottom() };
-                                    let ext = |which| {
-                                        flank_border_extension(
-                                            *r, area, viewport, &scale, cell_px, story, native, &ink, &gfx,
-                                            &chrome_runs, bottom, which,
-                                            state.v6_text.cell(),
-                                        )
-                                        .filter(|(_, ink)| !glyph_borders_only || matches!(ink, BorderInk::Glyph { .. }))
-                                    };
-                                    let inner = ext(FlankBorder::Inner);
-                                    // A flank only one border wide — Journey's
-                                    // right-hand column is exactly that — finds
-                                    // the SAME run from both sides. Drawing it
-                                    // twice would put two bands on one cache key.
-                                    let outer = ext(FlankBorder::Outer)
-                                        .filter(|(o, _)| inner.is_none_or(|(i, _)| i != *o));
-                                    Some((*r, inner, outer))
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        // SQ-0779, second pass: and it must not overlap it in the SOURCE
-                        // either. A band's crop is its destination rect mapped back through
-                        // the letterbox scale, so trimming the destination by whole terminal
-                        // columns lands the crop's edge inside the border's own 8-pixel text
-                        // cell — the game's rule was still in the picture, moved one column
-                        // in rather than removed. `clear_text_rows` has always carved a text
-                        // strip's native ROWS out of this canvas for exactly this reason; a
-                        // stamped border COLUMN needs the same carve, and gets it here. Only
-                        // over the story's own native rows, which is the span the glyph
-                        // path's content test proved carries no artwork.
-                        {
-                            let cols: Vec<(u32, u32)> = flank_borders
-                                .iter()
-                                .flat_map(|(_, i, o)| i.iter().chain(o.iter()))
-                                .filter_map(|(_, ink)| match ink {
-                                    BorderInk::Glyph { native, .. } => Some(*native),
-                                    BorderInk::Band(_) => None,
-                                })
-                                .collect();
-                            let rows = (story.y_px as u32, story.y_px as u32 + story.h_px as u32);
-                            v6::clear_text_columns(&mut canvas, &cols, rows);
-                        }
-                        // SQ-0779, the user's ruling: **if a game draws a border, the
-                        // artwork should not overlap it.** A flank strip runs the whole
-                        // width of the flank, borders included, and outside the Menu plan
-                        // that whole strip is one uploaded band — so the picture's own
-                        // placement rect covered the columns the frame's rules stand in.
-                        // The rules were then unstampable (a glyph must not be written
-                        // over an image that composites above the cells) and reached the
-                        // screen, if at all, as a resampled bitmap of themselves, which is
-                        // the thing hybrid exists not to do.
-                        //
-                        // So the LAYOUT stops short of them: the art's allocated span is
-                        // trimmed to end where the border column begins, and the border is
-                        // stamped as the character the game printed. No pixel is lost —
-                        // the glyph path's content test has already established that the
-                        // graphics-only canvas is clear across those native columns — and
-                        // the Menu plan needs none of it, since its panel fill and its art
-                        // rect are already bounded by the two rules (SQ-0747/0758).
-                        if glyph_borders_only {
-                            for s in &mut strips {
-                                let ChromeStrip::Art(role, r) = s else { continue };
-                                if !role.is_flank() {
-                                    continue;
-                                }
-                                let Some((_, inner, outer)) = flank_borders.iter().find(|(sr, _, _)| sr == r) else {
-                                    continue;
-                                };
-                                // Which rule stands on which side: a LEFT flank is bounded
-                                // by its outer border on the left and the story-side rule
-                                // on the right; a right flank the other way about.
-                                let (lo, hi) = if r.x < viewport.x { (outer, inner) } else { (inner, outer) };
-                                let (mut x0, mut x1) = (r.x, r.right());
-                                if let Some((e, _)) = lo.filter(|(e, _)| (x0..x1).contains(&e.x)) {
-                                    x0 = e.right();
-                                }
-                                if let Some((e, _)) = hi.filter(|(e, _)| (x0..x1).contains(&e.x)) {
-                                    x1 = e.x;
-                                }
-                                *r = Rect::new(x0, r.y, x1.saturating_sub(x0), r.height);
-                            }
-                            strips.retain(|s| !matches!(s, ChromeStrip::Art(_, r) if r.width == 0));
-                        }
-                        let strips = strips;
-                        let divider_exts: Vec<FlankBorderExt> = flank_borders
-                            .iter()
-                            .flat_map(|(_, i, o)| i.iter().chain(o.iter()).copied())
-                            .collect();
-                        // SQ-0747: and the rects the flank PANELS are drawn at, for the
-                        // same reason. A Menu-plan flank's art goes to `menu_flank_panel`'s
-                        // DEST rect, not to the strip's own rect, and the band cache is
-                        // keyed on the rect a band is drawn at — so the strip rect alone in
-                        // the live set left the panel's key unclaimed. `retain_chrome_bands`
-                        // evicted it every frame, and one eviction clears the WHOLE cache,
-                        // so every band re-encoded and re-uploaded on every frame (three
-                        // uploads a frame on Journey's menu, for pixels the terminal already
-                        // had — the user's `band uploads since launch: 78` over 26 ring
-                        // frames). Resolved once, up here, and reused by the draw below.
-                        let flank_panels: Vec<(Rect, FlankPanel)> = if matches!(plan, BottomPlan::Menu) {
-                            strips
-                                .iter()
-                                .filter_map(|s| match s {
-                                    ChromeStrip::Art(role, r) if role.is_flank() && strip_has_art(r) => {
-                                        // BOTH of the flank's borders: the inner rule is
-                                        // what the art insets away from, and the two
-                                        // together are what the panel fill stops short of
-                                        // (SQ-0747). The old lookup took the first
-                                        // extension inside the strip, which is the OUTER
-                                        // border now that one is produced.
-                                        let bord = flank_borders.iter().find(|(sr, _, _)| sr == r);
-                                        let inner = bord.and_then(|(_, i, _)| i.map(|(e, _)| e));
-                                        let outer = bord.and_then(|(_, _, o)| o.map(|(e, _)| e));
-                                        menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, inner, outer)
-                                            // SQ-0946: and the panel's ground stops at the
-                                            // game SCREEN's edge. `menu_flank_panel` bounds
-                                            // the fill by the flank's two BORDER columns and
-                                            // falls back to the band when a border is not
-                                            // found — which is Journey's IBM PC press, whose
-                                            // outer rule is a reverse-video space the border
-                                            // probe does not return. The band runs to the
-                                            // pane edge, so the fill ran into the letterbox
-                                            // margin: nine columns of panel colour down the
-                                            // left of a 98x37 pane with `v6_pixel_lock` on,
-                                            // against a bare right margin. That asymmetry IS
-                                            // the report; the art itself was centred to the
-                                            // cell at every width measured.
-                                            .map(|(bg, fill, dest, crop)| {
-                                                let (lo, hi) = v6::screen_cols(&scale, native.0, cell_px, area);
-                                                let x = fill.x.max(lo);
-                                                let w = fill.right().min(hi).saturating_sub(x);
-                                                (*r, (bg, Rect::new(x, fill.y, w, fill.height), dest, crop))
-                                            })
-                                    }
-                                    _ => None,
-                                })
-                                .collect()
-                        } else {
-                            Vec::new()
-                        };
-                        // SQ-0698/SQ-0781: the side flanks of Arthur, Shogun and Zork
-                        // Zero, TILED down to the band instead of stretched to it. The
-                        // source is composed in native pixels at the uniform scale, so
-                        // the flank keeps the top plate's horizontal factor and gains no
-                        // vertical one — the whole point, since the stretch it replaces
-                        // ran to 2.2x (Zork Zero) and 3.0x (Shogun) of the horizontal at
-                        // a 117x64 terminal. The Menu plan is excluded: Journey's frame
-                        // is glyphs, not artwork (SQ-0750), and its flank is a picture
-                        // column centred in a panel rather than a border to extend.
-                        let tiled_flanks: Vec<(Rect, TiledFlank)> = if matches!(plan, BottomPlan::Menu) {
-                            Vec::new()
-                        } else {
-                            strips
-                                .iter()
-                                .filter_map(|s| match s {
-                                    ChromeStrip::Art(role, r) if role.is_flank() => {
-                                        flank_tiled_source(*r, area, &scale, cell_px, native, &canvas, &gfx)
-                                            .map(|img| (*r, img))
-                                    }
-                                    _ => None,
-                                })
-                                .collect()
-                        };
-                        // SQ-0818: how finely a FULL-WIDTH art strip's upload is cut.
-                        //
-                        // Granularity is backend-conditional, and only this side of the
-                        // renderer knows the picker. Kitty and iterm2 tile: the extra cost
-                        // is one control block and a rounded-up last chunk per tile, and
-                        // the payload is byte for byte the same pixels. SIXEL DOES NOT —
-                        // every sixel image carries its own palette definition, so N tiles
-                        // would mean N palettes where the strip had one, a real first-frame
-                        // regression for no gain. Halfblocks does not care either way:
-                        // ratatui's own cell diff already sends it only the dirty cells.
-                        let tile_cols = match picker.protocol_type() {
-                            ratatui_image::picker::ProtocolType::Kitty
-                            | ratatui_image::picker::ProtocolType::Iterm2 => BAND_TILE_COLS,
-                            ratatui_image::picker::ProtocolType::Sixel
-                            | ratatui_image::picker::ProtocolType::Halfblocks => 0,
-                        };
-                        // …and only a strip that is NOT a flank, which is asked by role
-                        // rather than inferred from the draw: `flank_panels` and
-                        // `tiled_flanks` each compose their own source image from geometry
-                        // that is not a straight sub-rect of the scaled canvas, and a flank
-                        // the plain crop draws (SQ-0898 removed the stretch arm, so a piece
-                        // needing no extension lands here) is tall and thin — column tiles
-                        // would buy it nothing.
+                        let canvas = &frame.canvas;
+                        let gfx = &frame.gfx;
+                        let scale = frame.scale;
+                        let menu = frame.menu;
+                        let viewport = frame.viewport;
+                        let vp_native = frame.vp_native;
+                        let strip_has_art = |r: &Rect| frame.art_backed.contains(&(r.x, r.y, r.width, r.height));
                         let art_tiles = |role: v6::BandRole, r: Rect| -> Vec<Rect> {
-                            if role.is_flank() {
-                                vec![r]
-                            } else {
-                                band_tiles(r, tile_cols)
-                            }
+                            if role.is_flank() { vec![r] } else { band_tiles(r, frame.tile_cols) }
                         };
+                        let base = v6_machine_page(state, state.colors.theme.get("upper_window").style);
+                        state.v6_scale_lock_inapplicable.set(frame.lock_inapplicable);
+                        state.v6_scale_lock_fallback.set(frame.lock_fallback);
+                        state.v6_image_scale.set(frame.image_scale);
+                        state.v6_hybrid_ring.set(true);
+                        state.v6_ring_plan.set(frame.ring_plan);
+                        state.v6_ring_clip.set(frame.ring_clip);
                         {
                             let mut gr = state.graphics_render.borrow_mut();
+                            // SQ-1187: tell the band draws whether this frame replays an
+                            // unchanged HybridFrame — their content hashes are then read
+                            // from the cache instead of recomputed. `begin_band_log`
+                            // (above) already reset it for the frame.
+                            gr.set_band_replay(replayed);
                             // SQ-0944: on a backend that resolves an image's alpha to
                             // BLACK, the ring's bands stop shipping alpha and resolve it
                             // here instead, onto the same page the raster composite has
@@ -2045,42 +985,8 @@ fn render_node(
                                 backend_flattens_alpha_to_black(picker)
                                     .then(|| v6_composite_page(layout.story, default_bg, state)),
                             );
-                            // An Art strip with no art behind it is skipped below and never
-                            // drawn, so its key must NOT be claimed here: a live key nothing
-                            // re-places keeps a cached upload the terminal is no longer being
-                            // pointed at, which is the stale-placement shape SQ-0587 records
-                            // (SQ-0747). Only `strips` is filtered — the menu strips below
-                            // draw unconditionally.
-                            // SQ-0818: a tiled strip claims its TILES' keys, never the whole
-                            // strip's — a live key nothing re-places is a stale placement
-                            // (SQ-0587), and a key the draw claims that the live set does
-                            // not is evicted every frame, which clears the WHOLE cache.
-                            let live: std::collections::HashSet<_> = strips
-                                .iter()
-                                .filter(|s| !matches!(s, ChromeStrip::Art(_, r) if !strip_has_art(r)))
-                                .filter_map(|s| match s {
-                                    ChromeStrip::Art(role, r) => Some((*role, *r)),
-                                    ChromeStrip::Text(..) => None,
-                                })
-                                .flat_map(|(role, r)| art_tiles(role, r))
-                                // The menu's own strips are drawn whole, below.
-                                .chain(menu_strips.iter().filter_map(|s| match s {
-                                    ChromeStrip::Art(_, r) => Some(*r),
-                                    ChromeStrip::Text(..) => None,
-                                }))
-                                .map(|r| (crate::render::graphics::BandSlot::Art as u8, r.x, r.y, r.width, r.height))
-                                // A GLYPH border (SQ-0750) uploads nothing, so it claims no
-                                // cache key: a live key nothing re-places is the stale
-                                // placement SQ-0587 records.
-                                .chain(divider_exts.iter().filter(|(_, ink)| matches!(ink, BorderInk::Band(_))).map(|(r, _)| {
-                                    (crate::render::graphics::BandSlot::DividerExtension as u8, r.x, r.y, r.width, r.height)
-                                }))
-                                .chain(flank_panels.iter().map(|(_, (_, _, d, _))| {
-                                    (crate::render::graphics::BandSlot::Art as u8, d.x, d.y, d.width, d.height)
-                                }))
-                                .collect();
-                            gr.retain_chrome_bands(&live);
-                            for strip in &strips {
+                            gr.retain_chrome_bands(&frame.live);
+                            for strip in &frame.strips {
                                 if let ChromeStrip::Art(_, r) = strip {
                                     if !strip_has_art(r) {
                                         continue;
@@ -2113,19 +1019,19 @@ fn render_node(
                                         // The divider extension below re-draws over this fill, and
                                         // the frame bands stay wherever their own strips put them.
                                         // Resolved above so the dest rect could join the live set.
-                                        let panel = flank_panels.iter().find(|(sr, _)| sr == r).map(|(_, p)| *p);
+                                        let panel = frame.flank_panels.iter().find(|(sr, _)| sr == r).map(|(_, p)| *p);
                                         if let Some((bg, fill, dest, crop)) = panel {
                                             fill_pane_page(fill, bg, buf);
                                             gr.draw_chrome_band_stretched(
                                                 picker,
-                                                &canvas,
+                                                canvas,
                                                 dest,
                                                 crop,
                                                 crate::render::graphics::BandSlot::Art,
                                                 crate::render::graphics::BandFit::MenuPanel,
                                                 buf,
                                             );
-                                        } else if let Some((img, dest)) = tiled_flanks.iter().find(|(sr, _)| sr == r).map(|(_, i)| i) {
+                                        } else if let Some((img, dest)) = frame.tiled_flanks.iter().find(|(sr, _)| sr == r).map(|(_, i)| i) {
                                             // SQ-0698: a recognised side border, tiled to
                                             // the band's own height at the uniform scale —
                                             // and placed at the device rect its native box
@@ -2177,14 +1083,17 @@ fn render_node(
                                             // `art_tiles` is the identity on a side flank,
                                             // and on every backend that does not tile.
                                             for t in art_tiles(*role, *r) {
-                                                gr.draw_chrome_band(picker, &canvas, &scale, area, t, buf);
+                                                gr.draw_chrome_band(picker, canvas, &scale, area, t, buf);
                                             }
                                         }
                                     }
-                                    ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
-                                        runs, *r, &scale, cell_px, area, native, base, TextInk::of(state), buf,
-                                        state.v6_text.cell(),
-                                    ),
+                                    ChromeStrip::Text(r, runs) => {
+                                        let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+                                        draw_chrome_text_strip(
+                                            &refs, *r, &scale, cell_px, area, native, base, TextInk::of(state), buf,
+                                            state.v6_text.cell(),
+                                        )
+                                    }
                                 }
                             }
                             // SQ-0511 fix: extend each Menu flank's divider/border column
@@ -2199,11 +1108,11 @@ fn render_node(
                             // medium changes, so it now matches the frame's top and bottom
                             // rules (font glyphs both) instead of standing beside them as a
                             // resampled image of the same `│`.
-                            for (ext, ink) in &divider_exts {
+                            for (ext, ink) in &frame.divider_exts {
                                 match ink {
                                     BorderInk::Band(crop) => gr.draw_chrome_band_stretched(
                                         picker,
-                                        &canvas,
+                                        canvas,
                                         *ext,
                                         *crop,
                                         crate::render::graphics::BandSlot::DividerExtension,
@@ -2231,13 +1140,16 @@ fn render_node(
                                 }
                             }
                             if let Some(ms) = &menu {
-                                for strip in &menu_strips {
+                                for strip in &frame.menu_strips {
                                     match strip {
-                                        ChromeStrip::Art(_, r) => gr.draw_chrome_band(picker, &canvas, ms, area, *r, buf),
-                                        ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
-                                            runs, *r, ms, cell_px, area, native, base, TextInk::of(state), buf,
-                                            state.v6_text.cell(),
-                                        ),
+                                        ChromeStrip::Art(_, r) => gr.draw_chrome_band(picker, canvas, ms, area, *r, buf),
+                                        ChromeStrip::Text(r, runs) => {
+                                            let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+                                            draw_chrome_text_strip(
+                                                &refs, *r, ms, cell_px, area, native, base, TextInk::of(state), buf,
+                                                state.v6_text.cell(),
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -2250,8 +1162,11 @@ fn render_node(
                             // `over_art_runs` is empty unless the backend can layer a
                             // glyph over art, so on kitty, sixel and iTerm2 this is a
                             // walk over nothing.
-                            if !over_art_runs.is_empty() {
-                                let art_rects: Vec<Rect> = strips
+                            if !frame.over_art_runs.is_empty() {
+                                let over_art_refs: Vec<&crate::engine::PxText> =
+                                    frame.over_art_runs.iter().collect();
+                                let art_rects: Vec<Rect> = frame
+                                    .strips
                                     .iter()
                                     .filter_map(|s| match s {
                                         ChromeStrip::Art(_, r) => Some(*r),
@@ -2259,138 +1174,23 @@ fn render_node(
                                     })
                                     .collect();
                                 stamp_runs_over_art(
-                                    &over_art_runs, &art_rects, &scale, cell_px, area, &gfx,
+                                    &over_art_refs, &art_rects, &scale, cell_px, area, gfx,
                                     default_fg, default_bg, &state.colors, buf,
                                     state.v6_text.cell(),
                                 );
                             }
-                            // Record the letterbox geometry for click→game-pixel
-                            // mapping (Lane M): the chrome ring shares this scale. In
-                            // the Menu plan the interactive read_char region IS the
-                            // bottom-anchored command strip, so record ITS scale — a
-                            // single V6ClickMap is one linear transform, and the menu
-                            // is where clicks are meaningful (story-region clicks map
-                            // through the menu offset, but the game reads only the
-                            // menu pixels). Extend/Letterbox use one scale everywhere.
-                            //
-                            // Asked of the PLAN and not of `menu.is_some()` since SQ-1008,
-                            // which gave the Extend/Frame plans a bottom-anchored band of
-                            // their own for content the game keeps below the story window
-                            // (Arthur's boxed `hint` message). That band is paint, not a
-                            // picker: the interactive region on those frames is still the
-                            // story, so they must keep inverting through the story scale.
-                            // Byte-identical for all four plans as they stood — `menu` was
-                            // `Some` under exactly the `Menu` plan and nowhere else.
+                            // Record the letterbox geometry for click→game-pixel mapping
+                            // (Lane M). The regions themselves (`frame.packed_text`) are part
+                            // of the cached hybrid frame — see `build_hybrid_frame`, where the
+                            // full derivation (and its history) now lives.
                             let click_scale =
-                                if matches!(plan, BottomPlan::Menu) { menu.as_ref().unwrap_or(&scale) } else { &scale };
-                            // SQ-0550: that scale alone inverts the menu WRONG. The menu
-                            // is a TEXT strip, and `draw_chrome_text_strip` packs its game
-                            // rows onto CONSECUTIVE terminal rows from the strip's top
-                            // (SQ-0543) rather than placing them through the scale — so the
-                            // linear inverse drifts by the difference between the two row
-                            // pitches, and Journey's player had to click one line below the
-                            // command they wanted (two by the bottom row). Hand the map the
-                            // strip's row mapping so clicks inside it invert by row index.
-                            // The count is the strip's GAME rows, which can be fewer than
-                            // its classified height: the classifier places runs through the
-                            // scale (leaving gaps the bridge rule absorbs) while the draw
-                            // packs them tight, so anything past the last packed row falls
-                            // through to the letterbox.
-                            //
-                            // SQ-0747: and the menu is not always a `menu_strips` strip. Only
-                            // the reclaim plans anchor one to the pane's bottom; under the
-                            // `Letterbox` plan — any pane with no vertical slack, which is
-                            // where this quest's report comes from — the very same command
-                            // menu is an ordinary TEXT strip of the RING, drawn by the very
-                            // same packing function, and `menu_strips` is empty. The map then
-                            // got `None` and inverted the whole pane linearly, which is
-                            // SQ-0550's defect one plan over: measured off `Journey - The
-                            // Quest Begins.adf` (release 30 / serial 890322), clicking `Cast`
-                            // exactly where it is drawn is ACCEPTED at 119x34 (menu plan) and
-                            // MISSED at 115x31, 150x41 and 234x65 (letterbox). So fall back to
-                            // the ring's own bottom-most text strip below the story viewport,
-                            // which is the same strip by another name.
-                            //
-                            // SQ-0830 removed the case that motivated this: a game with a menu
-                            // strip now takes the `Menu` plan at any pane aspect, so those three
-                            // sizes are menu plans today and `menu_strips` carries the band. The
-                            // fallback stays because it is not about Journey — any plan can leave
-                            // a text strip below the viewport, and packing is how every one of
-                            // them is drawn.
-                            //
-                            // The third element is the native PIXEL top of the row drawn
-                            // at the strip's first terminal row — the run's own `y`, not
-                            // its row index times 16 (SQ-0951). They agree wherever the
-                            // game prints on the 16px grid, which Journey does; they do
-                            // not where it prints off it, and the index then names a slot
-                            // the text is not in.
-                            let packed = |r: &Rect, runs: &[&crate::engine::PxText]| {
-                                let rows = runs.iter().map(|t| state.v6_text.cell().row_of(t.y));
-                                let first = rows.clone().min()?;
-                                let last = rows.max()?;
-                                let first_top = runs.iter().map(|t| t.y.max(1) - 1).min()?;
-                                Some((r.y, r.height.min(last - first + 1), first_top))
-                            };
-                            let mut packed_text: Vec<crate::render::graphics::PackedText> = Vec::new();
-                            if let Some(rows) = menu_strips
-                                .iter()
-                                .find_map(|s| match s {
-                                    ChromeStrip::Text(r, runs) => packed(r, runs),
-                                    ChromeStrip::Art(..) => None,
-                                })
-                                .or_else(|| {
-                                    strips.iter().rev().find_map(|s| match s {
-                                        ChromeStrip::Text(r, runs) if r.y >= viewport.bottom() => packed(r, runs),
-                                        _ => None,
-                                    })
-                                })
-                            {
-                                // A chrome text strip packs its ROWS and still places
-                                // its columns through the scale, so it publishes no
-                                // column mapping and x keeps the proportional inverse.
-                                packed_text.push(crate::render::graphics::PackedText { rows, cols: None });
-                            }
-                            // SQ-0938: and the STORY BOX, which packs BOTH axes.
-                            //
-                            // The in-box run packing draws one terminal cell per native
-                            // text cell — rows from the box's top since SQ-0892, columns
-                            // from its left since SQ-0937 — so a click inside it has to
-                            // invert the same way or it lands on a different line than
-                            // the one under the pointer. Zork Zero's and Shogun's hint
-                            // menus say "(Or use mouse.)", so this is the screen working,
-                            // not a nicety.
-                            //
-                            // Recorded from the SAME numbers the drawing used
-                            // (`viewport`, `vp_native`), because a click map derived
-                            // independently of the draw is a second implementation of the
-                            // same geometry and will drift from it.
-                            //
-                            // SQ-0951: which is exactly what the COLUMN span had become.
-                            // A promoted story GRID — Zork Zero's and Shogun's InvisiClues
-                            // topic list — was not drawn by the in-box run packing at all:
-                            // `render_node` handed it to `draw_grid`, which placed the
-                            // GAME's screen (`cols` wide) CENTRED in the pane rather than
-                            // flush to the viewport's left edge. At a 190x60 pane that is a
-                            // 58-column grid in a 138-column viewport, so every topic was
-                            // drawn forty columns right of where this map claimed it was,
-                            // and the player had to click far to the LEFT of a topic to
-                            // select it. SQ-0951 taught the map to follow that centring.
-                            //
-                            // SQ-1074 removed the centring — a v6 window has an absolute
-                            // native origin and is drawn where the ring put it — so the two
-                            // arms collapse back into one and the map is once again the
-                            // viewport's own first column, for prose and grid alike. That
-                            // is what SQ-0951 wanted in the first place: "recorded from the
-                            // SAME numbers the drawing used", rather than a second
-                            // implementation that has to chase the first.
-                            if viewport.width > 0 && viewport.height > 0 {
-                                let (left, cols) = (viewport.x, viewport.width);
-                                packed_text.push(crate::render::graphics::PackedText {
-                                    rows: (viewport.y, viewport.height, vp_native.1 as u16),
-                                    cols: Some((left, cols, vp_native.0 as u16)),
-                                });
-                            }
-                            gr.record_hybrid_click_map(area, click_scale, native, cell_px, packed_text);
+                                if frame.plan_is_menu { menu.as_ref().unwrap_or(&scale) } else { &scale };
+                            gr.record_hybrid_click_map(area, click_scale, native, cell_px, frame.packed_text.clone());
+                            // SQ-1188: hand this frame's changed-band encodes to the
+                            // background worker in one batch. Every band above kept
+                            // its old upload placed; the results land via
+                            // `poll_v6_job` and the next redraw places them.
+                            gr.spawn_band_jobs(picker);
                         }
                         // The story window as real terminal text (primary-Buffer path).
                         //
@@ -2441,7 +1241,7 @@ fn render_node(
                             // before: there is no transcript on this frame.
                             None
                         } else {
-                            render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors)
+                            render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, win_rects, grid_colors)
                         };
                         // SQ-0584: a chrome window the game ERASED more recently than it
                         // printed prose is an opaque panel over the story — advent.z6's
@@ -2503,7 +1303,7 @@ fn render_node(
                                 };
                                 map.push(rec(kind, (pw.x_px, pw.y_px, pw.w_px, pw.h_px), r));
                             }
-                            for strip in &strips {
+                            for strip in &frame.strips {
                                 match strip {
                                     ChromeStrip::Art(_, r) => {
                                         let label = if strip_has_art(r) {
@@ -2522,7 +1322,7 @@ fn render_node(
                             // are classified through a DIFFERENT scale from the ring's and
                             // were absent from this dump entirely, so the rows between the
                             // menu and the pane bottom could not be accounted for at all.
-                            for strip in &menu_strips {
+                            for strip in &frame.menu_strips {
                                 match strip {
                                     ChromeStrip::Art(_, r) => map.push(rec("menu:art", (0, 0, 0, 0), *r)),
                                     ChromeStrip::Text(r, runs) => {
@@ -2543,7 +1343,7 @@ fn render_node(
                             // are the two edges the panel is bounded by, and "the outer
                             // one is missing" is a sentence this dump could not say
                             // before (SQ-0758).
-                            for (_, inner, outer) in &flank_borders {
+                            for (_, inner, outer) in &frame.flank_borders {
                                 for (label, e) in
                                     [("flank-divider", inner), ("flank-border", outer)]
                                 {
@@ -2572,7 +1372,7 @@ fn render_node(
                             }
                             // …and the panel FILL, which is the band clipped to the
                             // panel's own extent rather than the band itself (SQ-0747).
-                            for (_, (_, fill, dest, _)) in &flank_panels {
+                            for (_, (_, fill, dest, _)) in &frame.flank_panels {
                                 map.push(rec("flank-panel", (0, 0, 0, 0), *fill));
                                 map.push(rec("flank-art", (0, 0, 0, 0), *dest));
                             }
@@ -2594,7 +1394,7 @@ fn render_node(
                             &fill_chrome, viewport, buf, base, TextInk::of(state),
                             &|pw: &PositionedWindow| px_rect_to_cells(pw, &scale, cell_px, area, 0),
                         );
-                        draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
+                        draw_secondary_buffers(&layout.chrome, area, buf, state, links, &|pw: &PositionedWindow| {
                             px_rect_to_cells(pw, &scale, cell_px, area, 0)
                         });
                         // Chrome text runs that fall INSIDE the story box paint
@@ -2806,6 +1606,9 @@ fn render_node(
                                 }
                             }
                         }
+                        // SQ-1187: park the frame for the next redraw's gate. Stored
+                        // last, after every borrow of its canvases has ended.
+                        state.graphics_render.borrow_mut().hybrid = Some(frame);
                         return metrics;
                     }
                     // Hint menu open (no streaming story window, SQ-0477): present
@@ -2937,7 +1740,7 @@ fn render_node(
                     // arm asks the same question the ring does, of the same picker.
                     let lock_applies = crate::render::graphics::v6_pixel_lock_applies(picker);
                     state.v6_scale_lock_inapplicable.set(state.config.v6_pixel_lock && !lock_applies);
-                    // SQ-1032: the Extended mode asks for a taller canvas at a whole
+                    // SQ-1032: the Extended mode asks for a taller canvas at a
                     // magnification; every other mode asks for the game's own screen,
                     // which is what `RasterFrame::native` is and what every line below
                     // then does exactly as before.
@@ -2948,6 +1751,12 @@ fn render_node(
                     // hardcoded 10x20 that the encoder then throws away, so a canvas
                     // height measured in those pixels is a number nobody chose.
                     // Half-blocks keeps today's raster composite.
+                    //
+                    // `state.config.v6_pixel_lock` is threaded through as `extended`'s
+                    // own `lock` (SQ-1239): the magnification it pins to is whole only
+                    // when the player asked for the lock, exactly as `Raster`/`Hybrid`
+                    // do via `FrameGeometry::fitted_scale` — Extended used to floor to
+                    // a whole rung unconditionally, so the toggle did nothing here.
                     let want = if state.config.v6_render == crate::config::V6RenderMode::Extended
                         && lock_applies
                     {
@@ -2956,6 +1765,7 @@ fn render_node(
                             pane_dev,
                             state.v6_text.cell(),
                             crate::render::graphics::v6_upscale_cap(picker),
+                            state.config.v6_pixel_lock,
                         )
                     } else {
                         v6::RasterFrame::native(native)
@@ -2964,11 +1774,13 @@ fn render_node(
                     // Cache the fresh metrics for skipped frames, then hand the
                     // built canvas to the off-thread resize+encode worker.
                     state.v6_raster_metrics.set(raster_metrics);
-                    // An extended frame carries its own whole magnification — one
-                    // device pixel per native pixel, times a whole number — which is
-                    // strictly finer than any `v6_pixel_lock` rung, so it satisfies the
-                    // lock as well. A frame that DECLINED the extension carries none,
-                    // and falls back to exactly what `Raster` pins.
+                    // An extended frame carries its own magnification — one device
+                    // pixel per native pixel, times a whole number when
+                    // `v6_pixel_lock` is on (strictly finer than any lock rung, so it
+                    // satisfies the lock too) or the same fractional scale
+                    // `Raster`/`Hybrid` draw at when the lock is off. A frame that
+                    // DECLINED the extension carries none, and falls back to exactly
+                    // what `Raster` pins.
                     let lock = built.lock.or_else(|| {
                         (state.config.v6_pixel_lock && lock_applies)
                             .then(|| v6::FrameGeometry::new(native, state.v6_art_scale, state.v6_text.cell()).locked_scale(pane_dev))
@@ -3023,6 +1835,7 @@ fn render_node(
                         total_rows: rm.total_rows,
                         links: Vec::new(),
                         transcript_surface: true,
+                        win_rects: Vec::new(),
                     });
                 }
                 return None;
@@ -3216,7 +2029,7 @@ fn render_node(
                     for s in &sides {
                         let w = s.w.min(area.right().saturating_sub(s.x));
                         let rect = Rect::new(s.x, mid_y, w, mid_h);
-                        render_node(&s.win.node, status, char_mode, introspect, state, rect, buf, game_input, links, grid_colors);
+                        render_node(&s.win.node, status, char_mode, introspect, state, rect, buf, game_input, links, win_rects, grid_colors);
                     }
                     let story_area = Rect::new(story_x, mid_y, story_right.saturating_sub(story_x), mid_h);
                     {
@@ -3246,7 +2059,7 @@ fn render_node(
                             cells: (story_area.x, story_area.y, story_area.width, story_area.height),
                         });
                     }
-                    let m = render_node(&story.node, status, char_mode, introspect, state, story_area, buf, game_input, links, grid_colors);
+                    let m = render_node(&story.node, status, char_mode, introspect, state, story_area, buf, game_input, links, win_rects, grid_colors);
                     // SQ-0584: erase fields go down over the transcript first — this is
                     // where a painted MENU screen lands (SQ-0484 routes it here out of
                     // hybrid), so without them the menu's text floats over the story it
@@ -3262,7 +2075,7 @@ fn render_node(
                             story_shift,
                         ),
                     );
-                    draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
+                    draw_secondary_buffers(&layout.chrome, area, buf, state, links, &|pw: &PositionedWindow| {
                         px_rect_to_cells(pw, &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 }, (8, 16), area, story_shift)
                     });
                     // Chrome text ABOVE the story, as a classic full-width status
@@ -3330,7 +2143,7 @@ fn render_node(
                         // background window) shows through the empty text areas rather
                         // than being painted over by the buffer's opaque bg fill.
                         let mut scratch = Buffer::empty(sub);
-                        let m = render_node(&item.node, status, char_mode, introspect, state, sub, &mut scratch, game_input, links, grid_colors);
+                        let m = render_node(&item.node, status, char_mode, introspect, state, sub, &mut scratch, game_input, links, win_rects, grid_colors);
                         result = result.or(m);
                         for yy in sub.top()..sub.bottom() {
                             for xx in sub.left()..sub.right() {
@@ -3353,10 +2166,10 @@ fn render_node(
                         // transparency (no grey letterbox, empty canvas paints
                         // nothing) so overlapping v6 windows and the text beneath
                         // stay visible.
-                        crate::render::graphics::render_graphics_as_cells(gw, sub, buf, true);
+                        state.graphics_render.borrow_mut().render_as_cells(gw, sub, buf, true);
                     }
                     _ => {
-                        let m = render_node(&item.node, status, char_mode, introspect, state, sub, buf, game_input, links, grid_colors);
+                        let m = render_node(&item.node, status, char_mode, introspect, state, sub, buf, game_input, links, win_rects, grid_colors);
                         result = result.or(m);
                     }
                 }
@@ -3667,17 +2480,37 @@ fn draw_window_separator(
     }
 }
 
-/// Draw an inline (non-primary) buffer window's wrapped, styled lines.
-fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mut Buffer) {
+/// Draw an inline (non-primary) buffer window's wrapped, styled lines, recording
+/// each drawn row's Glk hyperlink cells into `links`.
+///
+/// `links` is not optional, and that is the point (SQ-1514). A non-primary buffer
+/// is where a Glulx game puts its SIDE PANELS, and a game that presents its UI as
+/// clickable text puts most of its links there: Kerkerkruip arms
+/// `glk_request_hyperlink_event` on eight windows at once and only one of them is
+/// the primary — its "[detailed status report]" link, its inventory and its
+/// powers panel all live in windows this function draws. Recording links only in
+/// `render_transcript` left every one of them painted, hit-testable by
+/// `glk_hyperlink_window` (its rect IS recorded), and unreachable, because
+/// `main.rs`'s click arm looks the cell up in the frame's cell→link map first and
+/// found nothing there. Same shape as SQ-1503 one level out: the link was
+/// recorded on one of the routes a link reaches the screen by, and the reported
+/// one was the other.
+fn render_inline_buffer(
+    b: &BufferWindow,
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+    links: &mut Vec<((u16, u16), u32)>,
+) {
     // This window's own Normal-style background (Glulx window colour, SQ-0328)
     // replaces the theme transcript bg when the game set one; `None` keeps the
     // theme background (today's behaviour).
     let base = match (b.panel, b.bg) {
         // A game-set window colour always wins.
         (_, Some(rgb)) => state.colors.theme.get("transcript").style.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), &state.colors)),
-        // A chrome panel (Scott room panel) uses the themed `room_panel` colour so
-        // the split's top and bottom read as distinct regions.
-        (true, None) => state.colors.theme.get("room_panel").style,
+        // A chrome panel (Scott room panel) uses the themed `scott_room_panel`
+        // colour so the split's top and bottom read as distinct regions.
+        (true, None) => state.colors.theme.get("scott_room_panel").style,
         (false, None) => state.colors.theme.get("transcript").style,
     };
     fill_style(area, buf, base);
@@ -3715,11 +2548,20 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
     for (i, wr) in rows.iter().enumerate() {
         let row_y = area.y + i as u16;
         // Inline-image band row: blit the strip for this row instead of text
-        // (same branch as the transcript draw loop, Task 8).
+        // (same branch as the transcript draw loop, Task 8). A linked picture in
+        // a side panel is clickable for the same reason one in the transcript is
+        // (SQ-1503), through the same recorder.
         if crate::render::inline_image::try_blit_band_row(state, wr, area.x, area.width, row_y, buf) {
+            crate::render::transcript::record_band_links(links, wr.band.as_ref(), area, row_y);
             continue;
         }
         draw_str_runs(buf, area.x, row_y, &wr.text, wr.style, &wr.runs, None, area, TextInk::of(state));
+        crate::render::transcript::record_run_links(links, &wr.runs, &wr.text, area.x, area, row_y);
+        // No `float` arm here, unlike the transcript's: `visible_wrapped_lines_kinded`
+        // wraps a secondary window with `left_float = false`, so a margin picture
+        // arrives as a band (above) and never as a float strip — and this loop
+        // draws no float, so recording one's cells would claim cells nothing
+        // painted.
     }
 }
 
@@ -4416,6 +3258,1535 @@ fn fill_pane_page(area: Rect, page: image::Rgba<u8>, buf: &mut Buffer) {
     }
 }
 
+/// SQ-1187: the generation key for the whole hybrid chrome ring — the twin of
+/// [`v6_raster_gen`], covering every input `build_hybrid_frame` reads. When it
+/// is unchanged the entire ring compute (both native canvases, the layout
+/// plans, the strip carving, the flank probes) is skipped and the cached
+/// [`HybridFrame`] is replayed.
+///
+/// **A missed input here is a stale-frame bug that looks entirely
+/// self-consistent** — this repo's signature defect — so the coverage is
+/// deliberately generous: the model's render fields are observed directly
+/// (never a hand-maintained mutation counter), and everything the compute
+/// resolves through a global (the zvm palette) or through the theme (the
+/// default pair, the ANSI palette) is folded in by VALUE.
+///
+/// Deliberate exclusions, each because the draw half re-reads it live on every
+/// frame (cached or not), so the composed output cannot go stale on it:
+/// - transcript content/generation, the input line, scroll, focus, the pager,
+///   the reveal, `char_mode`: the story viewport is drawn as live terminal
+///   cells by `render_node`/`render_transcript` each frame; none of them
+///   reaches the ring compute.
+/// - `config.v6_render`: the gate lives inside the Hybrid branch — a mode
+///   change re-routes above it before this key is ever computed.
+/// - modal overlays and the menu-takeover routing: decided upstream of the
+///   gate, per frame.
+/// - Buffer erase/fill freshness (`draw_erase_fills`) and secondary-buffer
+///   text placement: drawn per frame from the live model (non-primary LINES
+///   are keyed, because the ring's panel rects depend on their emptiness).
+/// - theme selectors beyond the default pair + ANSI palette: `upper_window`
+///   (via `base`), `TextInk`, separators — all resolved in the draw half per
+///   frame; the canvas itself resolves colours only through the keyed pair,
+///   the fixed §8.3.1 tables, the keyed zvm palette and the keyed theme
+///   palette.
+/// - face BITMAPS beyond `wrap_fingerprint` + the cell: faces are resolved at
+///   mount and only replaced wholesale; the metric fingerprint covers the
+///   advances (the raster key carries no face fact at all — this carries more).
+/// - `GraphicsWindow::upscale`: a Scott/Glulx rendering hint the v6 layered
+///   path never reads.
+pub fn v6_hybrid_gen(
+    items: &[PositionedWindow],
+    state: &AppState,
+    area: Rect,
+    picker: &ratatui_image::picker::Picker,
+    story: &PositionedWindow,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Pane geometry + device cell + backend. The backend decides tile shape,
+    // glyph-over-art layering, alpha flattening and the pixel-lock ladder.
+    (area.x, area.y, area.width, area.height).hash(&mut h);
+    let fs = picker.font_size();
+    (fs.width, fs.height).hash(&mut h);
+    (picker.protocol_type() as u8).hash(&mut h);
+    // The v6 window model: every window's box geometry plus its render content
+    // — graphics by version stamp (not pixels), text by its positioned runs and
+    // colours. This observes the composited output, so any paint/erase/scroll
+    // or colour change on the zvm side is captured without a bespoke counter.
+    for pw in items {
+        (pw.x, pw.y, pw.w, pw.h, pw.x_px, pw.y_px, pw.w_px, pw.h_px, pw.left_margin, pw.right_margin).hash(&mut h);
+        match &pw.node {
+            WinNode::Graphics(g) => {
+                g.win.hash(&mut h);
+                g.version.hash(&mut h);
+                (g.canvas.width(), g.canvas.height()).hash(&mut h);
+            }
+            WinNode::Grid(g) => {
+                (g.bg, g.fg, g.cursor, g.cursor_active).hash(&mut h);
+                for t in &g.px_texts {
+                    (t.x, t.y, t.style, t.fg, t.bg, t.grow, t.gcol).hash(&mut h);
+                    t.text.hash(&mut h);
+                }
+            }
+            WinNode::Buffer(b) => {
+                (b.bg, b.fg, b.primary).hash(&mut h);
+                // A SECONDARY prose window's lines decide the ring's panel
+                // rects (and are drawn by the ring's neighbours), so a change
+                // to them must rebuild.
+                if !b.primary {
+                    b.lines.hash(&mut h);
+                }
+            }
+            _ => {}
+        }
+    }
+    // The painted ground (SQ-0706), hashed by CONTENT exactly as the raster key
+    // does: it is blitted into the chrome canvas and described by no window.
+    match state.v6_paint.borrow().as_deref() {
+        Some(ground) => {
+            1u8.hash(&mut h);
+            ground.dimensions().hash(&mut h);
+            ground.as_raw().hash(&mut h);
+        }
+        None => 0u8.hash(&mut h),
+    }
+    // The MACHINE's colour table: packed Standard colours rasterise through it
+    // (`standard_pixel_rgb` → `true_colour_in`), so an `InterpreterProfile`
+    // palette swap must rebuild the canvas. Read off the scheme being drawn with
+    // rather than a process-wide global (SQ-1393).
+    (state.colors.machine_palette as u8).hash(&mut h);
+    // The machine pair and the RESOLVED host pair: the fallback ink/page every
+    // packed colour resolves onto, which also folds in the theme's transcript
+    // style and the terminal defaults.
+    state.v6_page_pair.get().hash(&mut h);
+    let (dfg, dbg) = v6_host_pair(state);
+    (dfg.0, dbg.0).hash(&mut h);
+    // The theme's ANSI palette, resolved to RGB: `resolve_zcolour` maps the
+    // few Standard colours the fixed tables don't catch through it.
+    for c in &state.colors.palette {
+        crate::render::v6_layout::color_to_rgba(*c, image::Rgba([0, 0, 0, 255])).0.hash(&mut h);
+    }
+    // Live config the compute branches on.
+    state.config.honor_game_colours.hash(&mut h);
+    state.config.v6_pixel_lock.hash(&mut h);
+    // Art density and the text metric (cell + advances), per CLAUDE.md's
+    // art-vs-text density rule: both feed `FrameGeometry` and the canvases.
+    state.v6_art_scale.hash(&mut h);
+    state.v6_text.wrap_fingerprint().hash(&mut h);
+    (state.v6_text.cell().w(), state.v6_text.cell().h()).hash(&mut h);
+    // The band ground under an alpha-flattening backend: it is baked into every
+    // shipped band, and on a replay frame the per-band content hashes are NOT
+    // recomputed — so it must invalidate here.
+    match backend_flattens_alpha_to_black(picker).then(|| v6_composite_page(Some(story), dbg, state)) {
+        Some(p) => {
+            1u8.hash(&mut h);
+            p.0.hash(&mut h);
+        }
+        None => 0u8.hash(&mut h),
+    }
+    h.finish()
+}
+
+/// SQ-1187: the cached product of one hybrid-ring COMPUTE — everything the
+/// draw half needs to replay the frame without rebuilding a canvas or running a
+/// layout scan. Owned throughout (the window MODEL is deep-cloned fresh each
+/// frame, so nothing here may borrow it); stored in
+/// [`crate::render::graphics::GraphicsRender`]'s `hybrid` slot and keyed by
+/// [`v6_hybrid_gen`].
+pub(crate) struct HybridFrame {
+    pub(crate) key: u64,
+    /// The finished chrome canvas (art + rasterised non-glyph text + pages),
+    /// the source every band crop and stretch reads.
+    canvas: image::RgbaImage,
+    /// The graphics-only canvas + story plate: the "is there art here?" oracle
+    /// surface, still needed by `stamp_runs_over_art` at draw time.
+    gfx: image::RgbaImage,
+    scale: crate::render::v6_layout::Scale,
+    menu: Option<crate::render::v6_layout::Scale>,
+    plan_is_menu: bool,
+    ring_plan: &'static str,
+    ring_clip: Option<(u16, u16)>,
+    image_scale: f32,
+    lock_inapplicable: bool,
+    lock_fallback: bool,
+    viewport: Rect,
+    vp_native: (u32, u32, u32, u32),
+    strips: Vec<ChromeStrip>,
+    menu_strips: Vec<ChromeStrip>,
+    /// Art strips with real art behind them (`ChromeRowOracle::region_has_art`),
+    /// keyed by rect — the draw half's replacement for the oracle's borrow.
+    art_backed: std::collections::HashSet<(u16, u16, u16, u16)>,
+    flank_borders: Vec<(Rect, Option<FlankBorderExt>, Option<FlankBorderExt>)>,
+    divider_exts: Vec<FlankBorderExt>,
+    flank_panels: Vec<(Rect, FlankPanel)>,
+    tiled_flanks: Vec<(Rect, TiledFlank)>,
+    tile_cols: u16,
+    live: std::collections::HashSet<crate::render::graphics::BandKey>,
+    packed_text: Vec<crate::render::graphics::PackedText>,
+    over_art_runs: Vec<crate::engine::PxText>,
+}
+
+/// SQ-1187: one COMPUTE of the hybrid chrome ring — every layout decision,
+/// canvas build and band classification the ring needs, packaged as an owned
+/// value the draw half can replay on any later frame whose [`v6_hybrid_gen`]
+/// key matches. Nothing in here may touch the terminal buffer, the graphics
+/// renderer or any published `Cell` — those all belong to the draw half, which
+/// runs every frame (cached or not).
+#[allow(clippy::too_many_arguments)]
+fn build_hybrid_frame(
+    hkey: u64,
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    story: &crate::engine::PositionedWindow,
+    native: (u16, u16),
+    area: Rect,
+    picker: &ratatui_image::picker::Picker,
+    default_fg: image::Rgba<u8>,
+    default_bg: image::Rgba<u8>,
+    state: &AppState,
+) -> HybridFrame {
+    use crate::render::v6_layout as v6;
+    let fs = picker.font_size();
+    let cell_px = (fs.width, fs.height);
+    let pane_dev = (
+        area.width as u32 * fs.width.max(1) as u32,
+        area.height as u32 * fs.height.max(1) as u32,
+    );
+    // SQ-0936: one global letterbox factor for the whole native
+    // screen, quantized to the artwork's own ladder when the
+    // player has asked for it (`v6_pixel_lock`, default off).
+    // GLOBAL rather than per-picture, and Journey is what settles
+    // that: its picture sits in its own window beside a drawn
+    // divider rule, so a per-picture rung would stop the art short
+    // of its own frame and open a gap. A pane too small for even
+    // the smallest rung falls back to free scaling and says so as
+    // a diagnostic, never on the game screen.
+    //
+    // SQ-0978: and the ladder is quantized in DEVICE pixels, which
+    // is a unit half-blocks does not have — see
+    // `crate::render::graphics::v6_pixel_lock_applies` for the
+    // measurement. The lock is inert on that backend, reported as
+    // inert, and never dressed up as a snap that happened.
+    let lock_applies = crate::render::graphics::v6_pixel_lock_applies(picker);
+    let lock_inapplicable = state.config.v6_pixel_lock && !lock_applies;
+    let (scale_center, lock_fallback) =
+        v6::FrameGeometry::new(native, state.v6_art_scale, state.v6_text.cell())
+            .fitted_scale(pane_dev, state.config.v6_pixel_lock && lock_applies);
+    // Publish the letterbox factor — the magnification the ART
+    // is drawn at, and since SQ-1002 nothing else. The scale
+    // FACTOR is unchanged by the SQ-0505 anchoring below (only
+    // the vertical offset moves), so publish it now.
+    //
+    // Inline story pictures used to be scaled by it, to "match
+    // the chrome ring". They must not: a drop-cap is drawn
+    // INSIDE the text flow, and in hybrid the text is glyphs at
+    // one native cell per terminal cell while the ring is pixels
+    // at `s`. Matching the ring made Zork Zero's cap twice the
+    // height of the paragraph it opens. `render_transcript` reads
+    // the flag instead and sizes them at the TEXT's rate.
+    let image_scale = scale_center.s;
+    // SQ-0896: TWO art canvases, and the difference between them is
+    // the whole of this quest.
+    //
+    // `frame_art` is the chrome-only artwork — the frame the game drew
+    // AROUND its story window — and it is the oracle the inset must
+    // use: `story_clear_native` walks the window's edges in until none
+    // of them touches an opaque pixel, and measuring that against
+    // anything carrying the story's own plate would inset the window
+    // out of its own backdrop (fmvpoker's hollow table comes back
+    // width 0). Rasterised glyphs are excluded for the same reason
+    // they always were (SQ-0500/0728): opaque is not artwork.
+    //
+    // `gfx` is that PLUS the story window's own plate, and it is what
+    // every downstream stage asks "is there art here?" of. It has to
+    // carry the plate, because the bands that now cover the plate exist
+    // only by the viewport having given those cells up — and an Art
+    // strip whose oracle says there is nothing behind it is skipped and
+    // never drawn (`strip_has_art`). Without this the ring would lose
+    // the prose area AND still draw no picture.
+    let frame_art = v6::build_graphics_canvas(&layout.chrome, native);
+    // Step (b) of the user's ordering, for the region the ring never
+    // owned: the story viewport is cut from what the ART leaves, not
+    // from the raw window box. `None` = the plate owns the screen and
+    // no prose belongs on this frame (SQ-0707), which for the ring
+    // means the whole pane is chrome.
+    let vp_native = v6::story_text_native(Some(story), &frame_art, layout.story_gfx, state.v6_text.cell());
+    let plate_owns_screen = vp_native.is_none();
+    // Fall back to the declared box so every stage below still has a
+    // native rectangle to reason about; the empty viewport is applied
+    // once, after the plans and the overlay push, so a plan cannot
+    // divide by a zero-height story region on the way there.
+    let vp_native = vp_native.unwrap_or((
+        story.x_px as u32,
+        story.y_px as u32,
+        story.w_px as u32,
+        story.h_px as u32,
+    ));
+    let mut gfx = frame_art;
+    v6::blit_story_gfx(&mut gfx, layout.story_gfx);
+    let gfx = gfx;
+    let chrome_runs: Vec<&crate::engine::PxText> = paint_runs(&layout.chrome).collect();
+    // SQ-0505 dynamic hybrid layout: reclaim the letterbox dead
+    // space below the story when the bottom edge is text-only
+    // (Journey's command menu) or empty (Arthur — header art +
+    // side borders, open below). A game whose frame encloses the
+    // story to the native bottom (Zork0) keeps today's centred
+    // letterbox. `slack` is the vertical letterbox margin in
+    // device pixels (zero when the pane is at/below the scaled
+    // native height — nothing to reclaim, degrade to centred).
+    let scaled_h = (native.1 as f32 * scale_center.s).round() as u32;
+    let slack = pane_dev.1.saturating_sub(scaled_h);
+    let plan = hybrid_bottom_plan(story, &gfx, &layout.chrome, native, slack, state.v6_text.cell());
+    let reclaim = !matches!(plan, BottomPlan::Letterbox);
+    // Resolve the story scale, the story viewport, and an
+    // optional bottom-anchored menu scale.
+    //   Letterbox → centred (today's behaviour, unchanged).
+    //   Extend    → top-anchor (off_y = 0), story grows to the
+    //               pane bottom; flanks below the side art blank.
+    //   Menu      → top-anchor the story + chrome, bottom-anchor
+    //               the command strip to the pane bottom, story
+    //               fills between at constant width.
+    let top_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: 0 };
+    let (scale, viewport, menu) = match plan {
+        BottomPlan::Letterbox => {
+            let vp = v6::native_viewport_box(Some(vp_native), &scale_center, (area.width, area.height), cell_px);
+            (scale_center, Rect::new(area.x + vp.x, area.y + vp.y, vp.width, vp.height), None)
+        }
+        // Extend (Arthur) and Frame (Zork0/Shogun) top-anchor the
+        // story and grow it to the pane bottom identically; they
+        // differ only in how the flanks below the side art are
+        // treated — Extend blanks them, Frame stretches them (the
+        // reclaim block below branches on the plan).
+        BottomPlan::Extend | BottomPlan::Frame => {
+            let vp = v6::native_viewport_box(Some(vp_native), &top_scale, (area.width, area.height), cell_px);
+            let (x, y) = (area.x + vp.x, area.y + vp.y);
+            // SQ-1008: the reclaim takes the letterbox slack below the
+            // story — and it may not take a row the GAME is still using.
+            //
+            // Both arms reach here on the premise that nothing lives
+            // below the story window: `Extend`'s by elimination, and
+            // this pair's enclosed-frame arm by the story reaching
+            // "within one native text row of the screen bottom". That
+            // second premise is one row loose, and Arthur spends the row
+            // it forgives. `Arthur - The Quest for Excalibur.adf`
+            // (release 54 / serial 890606) answers `hint` in play by
+            // laying window 3 across native `(28, 384, 584, 16)` — the
+            // LAST text row of a 640x400 screen, with window 0 ending at
+            // 384 — and printing *"If only you had a crystal ball...."*
+            // into it. `menu_strip_below_story` never sees it, because
+            // its own `native.1 <= story_bottom + cell.h` guard returns
+            // false before it looks; so the plan is `Frame` (his poles
+            // flank the story full height), the viewport grew to
+            // `area.bottom()`, and `content_ring_bands` carved
+            // `pane − viewport` and found no bottom band to put the box
+            // in. MEASURED, same frame, sixteen turns in: viewport 11
+            // rows at 80x25 and 100x25 with the box drawn on row 24;
+            // 17 rows at 100x34, 21 at 80x34, 35 at 80x48 with the box
+            // drawn nowhere. Any v6 window below the story window was
+            // invisible at any terminal taller than the game's own
+            // screen, which is most terminals.
+            //
+            // The extra rows are not the defect and are not clamped
+            // here: they are the transcript's, and window 0 is a
+            // SCROLLING buffer whose history the player reads far past
+            // its eleven native rows. What they may not include is the
+            // game's own bottom-anchored content. So take the rows that
+            // content needs off the pane's bottom and hand back the
+            // bottom-anchored scale for them — which is exactly what the
+            // `Menu` arm below does for Journey's command strip, reused
+            // rather than restated so the two cannot drift. `rows` is 0
+            // on every frame with nothing below the story, which is
+            // every frame in the corpus but this one, and the arm is
+            // then byte-identical to what it was.
+            let rows = menu_band_rows(&menu_band_runs(&chrome_runs, story), state.v6_text.cell());
+            if rows == 0 {
+                (top_scale, Rect::new(x, y, vp.width, area.bottom().saturating_sub(y)), None)
+            } else {
+                let bottom_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
+                let band_top = area.bottom().saturating_sub(rows).clamp(y + 1, area.bottom());
+                (top_scale, Rect::new(x, y, vp.width, band_top.saturating_sub(y)), Some(bottom_scale))
+            }
+        }
+        BottomPlan::Menu => {
+            let menu_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
+            let vp = v6::native_viewport_box(Some(vp_native), &top_scale, (area.width, area.height), cell_px);
+            let (x, y) = (area.x + vp.x, area.y + vp.y);
+            // SQ-0765: the MENU is the fixed-height window here, and the
+            // art and the story take what is left above it — the
+            // inverse of every other v6 title, where the fixed window is
+            // the status band at the top. So the band's height is the
+            // menu's OWN height and nothing else's leftover:
+            // [`menu_band_rows`] counts the game text rows it carries,
+            // because hybrid draws chrome text one game row per terminal
+            // row (SQ-0543), and the band is bottom-anchored to that.
+            //
+            // It used to be the other way round. `menu_top` was the
+            // first terminal row carrying a menu run through the
+            // bottom-anchored menu SCALE, so the story viewport was the
+            // scale-derived quantity and the band was the remainder —
+            // measured off the user's own dumps, 9 rows at pane height
+            // 61/scale 1.43 and 11 at 61/1.96, for a menu whose content
+            // stayed a constant 7 game rows. The rows the content never
+            // reached were painted by nothing, which put the frame's own
+            // bottom border three rows above the pane's last row
+            // (SQ-0754), and at a short pane the reverse: the band came
+            // out SHORTER than its content and clipped the last menu
+            // line off the screen entirely.
+            //
+            // SQ-0548 (a run-less leftover row inside the band redrawing
+            // a squashed slice of the frame's bottom edge) cannot recur
+            // here by construction: the band is exactly the menu's own
+            // rows, and `menu_band_strips` gives it to the cell path
+            // whole, so there is no leftover row to misclassify.
+            let menu_rows = menu_band_rows(&menu_band_runs(&chrome_runs, story), state.v6_text.cell());
+            let menu_top = area.bottom().saturating_sub(menu_rows).clamp(y + 1, area.bottom());
+            (top_scale, Rect::new(x, y, vp.width, menu_top.saturating_sub(y)), Some(menu_scale))
+        }
+    };
+    // SQ-0582: a status bar the game OVERLAYS on its story window
+    // (advent.z6) leaves no chrome ring to carry it. Reserve its
+    // rows off the top of the story viewport, so the band below
+    // decomposes it exactly like a game that reserved the space
+    // itself — a solid full-width Text strip, with the transcript
+    // starting under it instead of scrolling through it. Measured
+    // from the strip's own runs, not its declared height: a 20px
+    // window is 1.25 cells tall but carries a single text row.
+    let overlay_strip = overlaid_status_strip(&layout.chrome, story, native.0, state.v6_text.cell());
+    // The overlaid strip's native bottom, so `decompose_chrome_strips`
+    // counts its runs as band content: they sit INSIDE the story box,
+    // which its above/below test rejects.
+    let overlay_bottom =
+        overlay_strip.map(|s| s.y_px.saturating_add(s.h_px) as i32).unwrap_or(0);
+    let viewport = match overlay_strip {
+        Some(strip) => {
+            let last = match &strip.node {
+                WinNode::Grid(g) => {
+                    let bound = strip_rows(strip, g, state.v6_text.cell());
+                    g.px_texts
+                        .iter()
+                        .filter(|t| !t.text.trim().is_empty())
+                        .filter(|t| {
+                            bound.is_some_and(|b| state.v6_text.cell().row_of(t.y) <= b)
+                        })
+                        .map(|t| run_cell(t, &scale, cell_px, area, state.v6_text.cell()).1)
+                        .max()
+                }
+                _ => None,
+            };
+            match last {
+                Some(r) if r >= area.y as i32 => {
+                    let top = (r as u16).saturating_add(1).min(area.bottom());
+                    let y = viewport.y.max(top);
+                    Rect::new(viewport.x, y, viewport.width, viewport.bottom().saturating_sub(y))
+                }
+                _ => viewport,
+            }
+        }
+        None => viewport,
+    };
+    // SQ-0896: the plate owns the screen — no prose box survives it, so
+    // there is no story region at all and the ring gets the whole pane.
+    // An empty viewport is not a special case for anything downstream:
+    // `content_ring_bands` carves `pane − viewport` and a zero-height
+    // viewport makes that the pane, which then decomposes into Art and
+    // Text strips by exactly the rules a top band already uses. The one
+    // thing that must not happen is rendering a transcript into it; see
+    // the guard on `render_node` below, which mirrors raster returning
+    // no scroll metrics for the same frame.
+    let viewport = if plate_owns_screen {
+        Rect::new(area.x, area.y, area.width, 0)
+    } else {
+        viewport
+    };
+    // SQ-0500: a full-width chrome band (top/bottom) is carved
+    // into horizontal strips — an ART strip (opaque frame
+    // graphics behind it) keeps the scaled pixel RING; a
+    // TEXT-ONLY strip (no graphics behind, just status/menu
+    // runs) paints as crisp terminal CELLS. Journey's bottom
+    // command menu becomes text while its left picture column
+    // (a narrow side band) stays ring; Arthur's status row
+    // becomes text between the art panel above and the story
+    // below; Zork0's status sits ON banner art so every strip
+    // stays ring. The graphics-only canvas answers "art behind
+    // this strip?" — the full chrome canvas can't, since its
+    // rasterized text is itself opaque.
+    // Cell rects of the secondary prose windows: the ring leaves
+    // those rows to them (SQ-0585). Computed HERE rather than just
+    // before `decompose_chrome_strips` because the content-built ring
+    // needs them too — a flank must not extend across a row a prose
+    // panel draws itself.
+    let panel_rects: Vec<Rect> = layout
+        .chrome
+        .iter()
+        .filter(|pw| matches!(&pw.node, WinNode::Buffer(b) if !b.primary && !b.lines.is_empty()))
+        .map(|pw| px_rect_to_cells(pw, &scale, cell_px, area, 0))
+        .collect();
+    // SQ-0894, step (b) becoming live: the FLANK claims its columns
+    // first and the text region is what is left. A flank is a column of
+    // the frame's own side artwork at the pane's edge whether or not the
+    // story window happened to leave room for it, so where the art runs
+    // past the story box the box gives those columns up.
+    //
+    // Not via `story_clear_native`, which is the other half of step (b)
+    // and measures OVERLAP: on the frame that motivates this the art and
+    // the story box are ADJACENT, not overlapping (Shogun's Amiga credits
+    // screen paints its ornaments down to native y=335 and puts window 0
+    // at y=336), so the overlap test correctly finds nothing to inset and
+    // the columns still have to come from somewhere. They come from here.
+    let (art_left, art_right) = flank_art_columns(&gfx, &scale, cell_px, area, state.v6_text.cell());
+    let viewport = {
+        let x = viewport.x.max(art_left).min(viewport.right());
+        let r = viewport.right().min(art_right).max(x);
+        if r > x {
+            Rect::new(x, viewport.y, r - x, viewport.height)
+        } else {
+            viewport
+        }
+    };
+    // Which native rows are BARS the game draws edge to edge (SQ-0515).
+    // Only the keys are read here, so the style arguments are
+    // immaterial — the styles themselves belong to the cell path, which
+    // resolves them against its own theme base.
+    let bar_rows: std::collections::HashSet<u16> = full_width_flood_rows(
+        &layout.chrome,
+        native.0,
+        ratatui::style::Style::default(),
+        TextInk::of(state),
+        state.v6_text.cell(),
+    )
+    .into_keys()
+    .collect();
+    // …and how far the chrome text on each native row can REACH: the
+    // native columns its own windows span (SQ-0949). A ribbon is as
+    // wide as its window and no wider, and the flank veto has to know
+    // that — Arthur's status window is 584 of 640 native columns, so it
+    // reads as a bar and still stops 28 columns short of each edge,
+    // which is exactly where his poles stand.
+    let row_spans: std::collections::HashMap<u16, (u16, u16)> = {
+        let mut m: std::collections::HashMap<u16, (u16, u16)> = Default::default();
+        for pw in &layout.chrome {
+            let WinNode::Grid(g) = &pw.node else { continue };
+            let span = (pw.x_px, pw.x_px.saturating_add(pw.w_px));
+            for t in &g.px_texts {
+                let row = state.v6_text.cell().row_of(t.y);
+                let e = m.entry(row).or_insert(span);
+                e.0 = e.0.min(span.0);
+                e.1 = e.1.max(span.1);
+            }
+        }
+        m
+    };
+    // SQ-0894: the ring is carved by what the chrome CONTAINS, not as
+    // the story viewport's complement, so each flank is one column over
+    // every contiguous row of art it may own.
+    let row_oracle = ChromeRowOracle {
+        v6_cell: state.v6_text.cell(),
+        pane: area,
+        scale: &scale,
+        cell_px,
+        story_native: vp_native,
+        overlay_bottom,
+        panels: &panel_rects,
+        gfx: &gfx,
+        runs: &chrome_runs,
+        bar_rows: &bar_rows,
+        row_spans: &row_spans,
+    };
+    let bands = content_ring_bands(area, viewport, menu.is_some(), &row_oracle);
+    // SQ-0505: in the Menu plan the bottom band IS the command
+    // strip — decompose it through the bottom-anchored `menu`
+    // scale, and the top+side ring bands through the story
+    // `scale`. Each strip is later drawn through the scale it was
+    // classified with, so the menu lands at the pane bottom while
+    // the story/top/sides stay top-anchored.
+    let mut ring_bands = bands;
+    let menu_bands: Vec<Rect> = if menu.is_some() {
+        // The menu band IS the bottom band — asked by role, not by
+        // recognising its shape (SQ-0894). The old test was
+        // `width == area.width && y == viewport.bottom()`, which is a
+        // description of where `chrome_bands` happened to put it.
+        let m: Vec<Rect> = ring_bands
+            .iter()
+            .filter(|(role, _)| *role == v6::BandRole::Bottom)
+            .map(|(_, r)| *r)
+            .collect();
+        ring_bands.retain(|(role, _)| *role != v6::BandRole::Bottom);
+        m
+    } else {
+        Vec::new()
+    };
+    // SQ-0511: the Frame/Menu plans STRETCH the side flank bands to
+    // fill the reclaimed space (drawn below); the whole flank band
+    // survives here so the stretch has a full-height target. The
+    // Extend plan (Arthur) instead CLIPS the ring bands to the chrome
+    // art's actual vertical extent (its lowest opaque native row,
+    // mapped through the story scale) so the flanks BELOW its side
+    // art stay the theme backdrop — no art stretching or tiling there.
+    // Letterbox is untouched (its bands lie within the scaled canvas).
+    let stretch_flanks = matches!(plan, BottomPlan::Frame | BottomPlan::Menu);
+    let ring_plan = match plan {
+        BottomPlan::Letterbox => "letterbox",
+        BottomPlan::Extend => "extend",
+        BottomPlan::Frame => "frame",
+        BottomPlan::Menu => "menu",
+    };
+    let mut ring_clip: Option<(u16, u16)> = None;
+    if reclaim && !stretch_flanks {
+        let ch = cell_px.1.max(1) as f32;
+        let art_bottom_px =
+            (0..gfx.height()).rev().find(|&y| (0..gfx.width()).any(|x| gfx.get_pixel(x, y)[3] >= 128));
+        let clip_row = match art_bottom_px {
+            Some(y) => area.y + ((scale.off_y as f32 + (y + 1) as f32 * scale.s) / ch).ceil() as u16,
+            None => area.y,
+        };
+        // SQ-0571: the clip must never guillotine a chrome TEXT row
+        // that sits between the art and the story — Arthur's status
+        // bar. The clip rounds the art's native bottom UP through the
+        // scale; `run_cell` maps a run's native top by ROUNDing. Both
+        // read the same native boundary (Arthur's art ends at 192, its
+        // status row starts at 192), so whenever `192·s/cell_h` has a
+        // fraction >= 0.5 the two agree and the clip lands exactly ON
+        // the status row, evicting it from the band. With no Text strip
+        // covering it the run is never cleared from the band canvas
+        // (`clear_text_rows` below), so the status painted as a squashed
+        // raster slice of the frame instead of crisp cells — the
+        // width-dependent "corrupted location bar" (broken at 96..=99
+        // columns on an 8x17 cell, clean at 95 and 100).
+        //
+        // Raise the clip past the LAST pure-text chrome row above the
+        // story. Deliberately only text rows: a run-less row below the
+        // art still gets clipped (it would otherwise coalesce into an
+        // Art strip and redraw a squashed slice of the frame's edge,
+        // the SQ-0548 defect), and a run OVER art is already ring
+        // content that the unraised clip places correctly.
+        let story_top = story.y_px as i32;
+        // SQ-1020: `over_art` is the oracle's own predicate and
+        // this used to be a second copy of it — same question,
+        // written twice, and only one of them was converted when
+        // the Version 6 cell stopped being 8x16 everywhere. The
+        // copy passed `run_px(...)` for the width and a bare `16`
+        // for the height, in the SAME call. One authority now.
+        let text_above = chrome_runs
+            .iter()
+            .filter(|t| {
+                !t.text.trim().is_empty()
+                    && state.v6_text.cell().bottom_px(t.y) as i32 <= story_top
+                    && !row_oracle.over_art(t)
+            })
+            .map(|t| run_cell(t, &scale, cell_px, area, state.v6_text.cell()).1)
+            .max();
+        let clip_row = match text_above {
+            Some(r) if r >= 0 => clip_row.max((r as u16).saturating_add(1)),
+            _ => clip_row,
+        };
+        // SQ-0582: never clip above the story viewport. The rule
+        // above only spares text that sits above the story WINDOW,
+        // so a bar the game overlays on the story instead (advent.z6)
+        // matched neither test — with no art either, the clip landed
+        // at the pane top and dropped the very band the inset above
+        // just reserved for it. Whatever is above the viewport is
+        // chrome by construction; it survives.
+        let clip_row = clip_row.max(viewport.y);
+        // Record what clipped the ring (SQ-0587). Arthur's side
+        // borders live in the flank bands, and this clip is what
+        // drops them: it trims the ring to the graphics canvas's
+        // lowest opaque row, so a canvas that lost its lower art
+        // takes the side borders with it.
+        ring_clip = Some((
+            art_bottom_px.map(|y| y as u16).unwrap_or(u16::MAX),
+            clip_row,
+        ));
+        // SQ-0698: …and a flank whose art we know how to EXTEND is
+        // spared that trim. The clip is what dropped Arthur's side
+        // poles at the row his artwork happens to stop — native 379
+        // of 400, terminal row 31 of a 64-row pane — leaving the
+        // frame open down its whole lower half. Tiling gives that
+        // band something to draw all the way to the story viewport's
+        // bottom, so the band must survive to be drawn. Reserved to a
+        // RECOGNISED flank (`v6_border::recognize`): a game with no
+        // side art, or side art of a shape this code does not know,
+        // is clipped exactly as before.
+        for (role, b) in &mut ring_bands {
+            // Asked by role (SQ-0894): `b.width < area.width` meant
+            // "a flank" only while the top and bottom bands spanned
+            // the pane.
+            //
+            // SQ-0894 measured this exemption for removal — §4 of the
+            // pipeline document calls it "a patch on a patch" — and
+            // KEPT it. Deleting it fails
+            // `arthur_hybrid_tall_pane_extends_story_to_bottom`: the
+            // clip trims the ring to the art's lowest opaque row, and
+            // a content-built flank is still a band the clip can cut.
+            // Owning the right ROWS does not exempt a flank from a
+            // later stage shortening it; that is a separate decision
+            // and it still has to be made here.
+            if role.is_flank() && flank_border_art(*b, area, &scale, cell_px, native, &gfx).is_some() {
+                continue;
+            }
+            if b.y >= clip_row {
+                b.height = 0;
+            } else {
+                b.height = b.height.min(clip_row - b.y);
+            }
+        }
+        ring_bands.retain(|(_, b)| b.height > 0 && b.width > 0);
+    }
+    // SQ-0944: `over_art_runs` is the text the game printed ON its
+    // artwork. Empty unless this backend can show a glyph in a cell
+    // an image covers — see `backend_layers_glyphs_over_art`, which
+    // is the whole gate: everywhere else these runs stay pixels and
+    // every line below this one behaves exactly as it did.
+    let (mut strips, over_art_runs) = decompose_chrome_strips(&ring_bands, &row_oracle);
+    let over_art_runs: Vec<crate::engine::PxText> = if backend_layers_glyphs_over_art(picker) {
+        over_art_runs.into_iter().cloned().collect()
+    } else {
+        Vec::new()
+    };
+    // An ART strip with no actual art behind it draws a rasterized
+    // slice of the chrome canvas — which carries TEXT too, so on a
+    // text-only v6 story (advent) that is pure noise painted over the
+    // pane. Under a graphics protocol the image composites ABOVE the
+    // cells, so it cannot even be overdrawn. Skip those, and let
+    // `/dump-windows` say which ones were skipped. (SQ-0585)
+    // SQ-0750: the question is whether art lies behind THIS STRIP, so
+    // the test is its own native REGION — both axes. It used to ask
+    // only about the strip's rows, across the canvas's whole width,
+    // which is the same question for a full-width top/bottom band and
+    // a different one for a side flank: Journey's right-hand flank is
+    // eight native pixels of frame border with no artwork in it at
+    // all, and it was drawn as a band anyway because the LEFT flank's
+    // picture shares its rows. That band is a bitmap of a `│` the game
+    // printed as a character — 16x900 px per frame to draw one rule.
+    // Classify a strip by what is in it, not by where it sits.
+    // …and it asks the ORACLE, rather than carrying its own copy
+    // of the inverse (SQ-1059). `ChromeRowOracle::region_has_art`
+    // is that same mapping, built from the same `area`, `scale`,
+    // `cell_px` and `gfx` this closure captured — and its doc has
+    // always claimed to be "shared with the caller's art test so
+    // the two do not drift", which was false in the commit that
+    // wrote it: SQ-0894 pasted this body into the oracle instead
+    // of calling it, in a commit whose own message said "the fix
+    // should not add a fourth instance of it". Nothing in the
+    // language kept the two equal; they simply had not diverged
+    // yet, which is what SQ-1020 is in this same file.
+    let strip_has_art = |r: &Rect| -> bool { row_oracle.region_has_art(*r) };
+    // SQ-0894 MEASURED THIS FOR REMOVAL AND KEPT IT. The
+    // content-built ring was expected to subsume the walk: a flank
+    // now owns its rows by what is in its own columns, so the
+    // remainder row beside the viewport should need no handing back.
+    // For every flank whose border is ART that is exactly what
+    // happens, and the walk no longer fires on Zork Zero, Arthur or
+    // Shogun.
+    //
+    // It is still load-bearing for ONE case, and deleting it fails
+    // `journeys_frame_side_rules_survive_a_pane_with_no_letterbox_slack`
+    // with the original symptom — Journey's Amiga press at a 96x26
+    // pane, "row 1 of the rule's span (1, 2, 2, 17) holds '│' in 0
+    // column(s), not 1". The reason is that Journey's side rule is a
+    // CHARACTER the game printed, not artwork: the graphics-only
+    // canvas is empty across those columns by construction (that is
+    // the whole of SQ-0750), so the ring's art test cannot see the
+    // border and the flank declines the remainder row. The walk
+    // reaches it by geometry instead, which is the one thing content
+    // classification cannot do for content that is not pixels.
+    //
+    // So it stays, narrowed in purpose rather than in code. Removing
+    // it needs the flank's row test to accept the game's own border
+    // GLYPHS alongside art — a change to the glyph-border machinery,
+    // not to this walk.
+    // SQ-0747: the QUANTIZATION REMAINDER beside the story viewport belongs
+    // to the flanks, not to the full-width band and not to nothing —
+    // ABOVE the viewport and BELOW it alike.
+    //
+    // `story_viewport_box` quantizes the story's top edge OUTWARD to a
+    // whole cell, while the top band runs down to that quantized row. So
+    // a terminal row can fall between the frame's top rule and the first
+    // prose row whose own native span is already INSIDE the story box —
+    // it is the half-cell the viewport rounded away, not chrome. The
+    // full-width band draws it either way, and both outcomes are wrong:
+    // with nothing behind it the row classifies Empty → Art → skipped and
+    // is never written at all (terminal row 2 of the captured 115-column
+    // frame, across every column: a bare stripe through the picture panel
+    // and a one-row hole where the frame's top rule meets its two side
+    // rules), and with the picture's first pixels behind it the band
+    // paints a one-row squashed slice of the WHOLE canvas across the pane
+    // — the picture's top standing above its own panel, which is the other
+    // half of this quest.
+    //
+    // The flanks own those columns and have real content in them (their
+    // borders, their panel ground), so the strip goes to them; the story's
+    // own columns keep the story's ground, which is what stands beside the
+    // prose one row lower.
+    //
+    // Bounded by CONTENT, and WHOLE STRIPS only. A band that carries the
+    // game's chrome art down to the viewport — Zork Zero's and Shogun's
+    // banners, Arthur's header — is one tall strip whose first row is
+    // above the story box, so neither test below holds for it and it is
+    // untouched. Trimming a row off such a strip instead of leaving it
+    // alone would take a row of banner away, which is why this walks
+    // strips rather than rows.
+    //
+    // SQ-0747, second pass: and the story box has TWO quantized edges, so
+    // there is a remainder under it as well. `story_viewport_box` rounds
+    // the bottom in too, and the row it rounds away is a full-width band
+    // exactly like the one above — measured off `Journey - The Quest
+    // Begins.adf` (release 30 / serial 890322) at a 121x36 terminal: the
+    // picture ran to row 23, the menu began at row 25, and between them a
+    // 119-column one-row band painted a squashed slice of the whole canvas
+    // straight across BOTH of the frame's side rules. At a 236x68 terminal
+    // the same row has no art behind it, classifies skipped, and reaches
+    // the screen unwritten — the two halves of the very same defect the
+    // walk above already knows by name. One rule, expressed once: a
+    // full-width Art strip that is the remainder of the picture's own box
+    // belongs to the flanks, whichever side of the viewport it falls.
+    let flank_at = |strips: &[ChromeStrip], edge: u16, top: bool| {
+        strips.iter().any(
+            |s| matches!(s, ChromeStrip::Art(role, r) if role.is_flank() && (if top { r.y } else { r.bottom() }) == edge),
+        )
+    };
+    {
+        let ch = cell_px.1.max(1) as f32;
+        let sc = scale.s.max(0.001);
+        let inv_y = |row: u16| ((row.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32) / sc;
+        // SQ-0896: the walk is about the QUANTIZATION REMAINDER of the
+        // rect the viewport was cut from, so it reads `vp_native` and
+        // not the declared window box. On every corpus frame the two
+        // are the same rectangle; where a plate or frame art has moved
+        // the viewport, the remainder is beside the viewport's own edge
+        // and nowhere else.
+        let story_bottom = (vp_native.1 + vp_native.3) as f32;
+        let mut gap_top = viewport.y;
+        if flank_at(&strips, viewport.y, true) {
+            while gap_top > area.y {
+                let Some(i) = strips.iter().position(|s| {
+                    matches!(s, ChromeStrip::Art(role, r) if !role.is_flank() && r.bottom() == gap_top)
+                }) else {
+                    break;
+                };
+                let ChromeStrip::Art(_, r) = strips[i] else { unreachable!() };
+                // Either half of the remainder qualifies, and which one it is
+                // moves with the pane by fractions of a cell: the strip's own
+                // native span is already inside the story box (so the band
+                // would paint a squashed slice of the whole canvas over the
+                // panel), or the band draws nothing there at all (so the rows
+                // reach the screen unwritten). Anything else is real chrome and
+                // stops the walk, as does a TEXT strip, whose runs are the
+                // game's own.
+                let remainder = (inv_y(r.y) + inv_y(r.y + 1)) / 2.0 >= vp_native.1 as f32;
+                if !remainder && strip_has_art(&r) {
+                    break;
+                }
+                strips.remove(i);
+                gap_top = r.y;
+            }
+            if gap_top < viewport.y {
+                for s in &mut strips {
+                    if let ChromeStrip::Art(_, r) = s {
+                        if r.width < area.width && r.y == viewport.y {
+                            r.height += viewport.y - gap_top;
+                            r.y = gap_top;
+                        }
+                    }
+                }
+            }
+        }
+        // …and downward, by the same test read from the other end. The
+        // strip's LAST row is what is asked about here, so a tall band
+        // carrying the game's own chrome (a menu's art, a bottom rule)
+        // cannot be swallowed by having merely begun inside the box.
+        let mut gap_bottom = viewport.bottom();
+        if flank_at(&strips, viewport.bottom(), false) {
+            while gap_bottom < area.bottom() {
+                let Some(i) = strips.iter().position(|s| {
+                    matches!(s, ChromeStrip::Art(role, r) if !role.is_flank() && r.y == gap_bottom)
+                }) else {
+                    break;
+                };
+                let ChromeStrip::Art(_, r) = strips[i] else { unreachable!() };
+                let remainder = (inv_y(r.bottom() - 1) + inv_y(r.bottom())) / 2.0 <= story_bottom;
+                // Bounded by CONTENT on both counts, and the second one is
+                // what keeps the corpus still. Above the story a band that
+                // carries the game's chrome is a TALL strip and fails the
+                // remainder test on its own; below it, a game whose frame
+                // closes along the pane's last row draws that row INSIDE its
+                // own story box — Zork Zero's does, at 236x68 and 121x36 —
+                // so the remainder test alone would swallow the bottom of its
+                // frame into two flanks that only cover the sides. Ask what
+                // is BETWEEN the flanks: the columns the band alone would
+                // draw. Artwork there is the game's chrome and stops the
+                // walk; nothing there means the band is drawing a squashed
+                // slice of the story's own ground, or nothing at all.
+                let middle = Rect::new(viewport.x, r.y, viewport.width, r.height);
+                if !remainder || strip_has_art(&middle) {
+                    break;
+                }
+                strips.remove(i);
+                gap_bottom = r.bottom();
+            }
+            if gap_bottom > viewport.bottom() {
+                for s in &mut strips {
+                    if let ChromeStrip::Art(_, r) = s {
+                        if r.width < area.width && r.bottom() == viewport.bottom() {
+                            r.height += gap_bottom - viewport.bottom();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let menu_strips = match &menu {
+        Some(_) => menu_band_strips(&menu_bands, story, &chrome_runs),
+        None => Vec::new(),
+    };
+    // SQ-0504: rows drawn as terminal CELLS (pure-text strips)
+    // must not ALSO reach the pixel bands. Carve every text-strip
+    // run's native rows out of the band canvas: excludes the
+    // rasterized menu/status from every uploaded band image (a
+    // sub-cell letterbox boundary otherwise bleeds the raster bar
+    // behind the cells) and decouples each art band's hash from
+    // the menu text (navigating the menu re-encodes only changed
+    // art, not every band). Beside-story runs — Journey's vertical
+    // picture/text divider — are NOT text strips, so they stay in
+    // the side band's ring untouched.
+    // SQ-0894: over the strip's OWN native columns. A strip that spans
+    // the pane still carves the whole row (every strip on the corpus
+    // does, so this is byte-identical there); one a flank has narrowed
+    // must not erase the flank's source pixels beside it.
+    let strip_native_cols = |r: Rect| -> (u32, u32) {
+        if r.x <= area.x && r.right() >= area.right() {
+            return (0, u32::MAX);
+        }
+        let inv = |c: u16| {
+            ((c.saturating_sub(area.x) as f32 * cell_px.0.max(1) as f32
+                - scale.off_x as f32)
+                / scale.s.max(0.001))
+            .max(0.0) as u32
+        };
+        (inv(r.x), inv(r.right()))
+    };
+    let text_run_tops: Vec<(u16, u32, u32)> = strips
+        .iter()
+        .chain(menu_strips.iter())
+        .flat_map(|s| match s {
+            ChromeStrip::Text(r, runs) => {
+                let (x0, x1) = strip_native_cols(*r);
+                runs.iter().map(|t| (t.y.max(1) - 1, x0, x1)).collect::<Vec<_>>()
+            }
+            ChromeStrip::Art(..) => Vec::new(),
+        })
+        .collect();
+    // ── the chrome CANVAS, built here rather than 650 lines up ──
+    //
+    // SQ-0903. Every classification above — the viewport, the
+    // strips, the ring bands, which rows the ring will draw as
+    // GLYPHS — is computed from `layout` and the ART canvases and
+    // never reads this one. That was not obvious while the canvas
+    // was built first: it looked like an ordering constraint, and
+    // the rasterise-then-carve sequence below looked like the price
+    // of one. It is not. Only seven statements in the 700 lines
+    // between the old site and the first read touched `canvas`, and
+    // all seven are these.
+    //
+    // Building it here means `text_run_tops` — the rows the ring has
+    // just decided to draw with glyphs — is known BEFORE a pixel is
+    // rasterised, so those rows are never painted instead of being
+    // painted and then carved back out.
+    // SQ-0903: the rows the ring has just decided to draw with
+    // GLYPHS. `text_run_tops` is that decision, taken a few lines
+    // up and reaching the canvas builder before it paints rather
+    // than reaching a carve afterwards.
+    // SQ-0934: the chrome the CANVAS is built from excludes the
+    // promoted story grid — the menu the game printed into the
+    // ring's clear middle after withdrawing its buffer.
+    //
+    // It is in `chrome` because its runs must reach `chrome_runs`,
+    // but it is the STORY SURFACE, and rasterising a story surface
+    // is the thing hybrid exists not to do. Leaving it in put the
+    // menu's pixels — its text AND the reverse-video bar under the
+    // selected item — into the canvas the ring bands are cropped
+    // from, so fragments of the menu came back out inside the ring:
+    // a sliver of the first text column showing at the flank's inner
+    // edge, and the selection bar's two ends appearing IN the left
+    // and right flanks, level with the selection and then again
+    // wherever a flank band tiles (SQ-0894). "Mirrored top and
+    // bottom, and overrunning the frame", as reported, is a tiled
+    // repeat of a strip that should never have carried text.
+    //
+    // The middle is drawn as terminal cells by `render_node` above,
+    // which is the whole point of hybrid; the canvas only has to
+    // carry what the bands ship, and the bands are the frame.
+    let ring_chrome: Vec<&crate::engine::PositionedWindow> = layout
+        .chrome
+        .iter()
+        .copied()
+        .filter(|it| !layout.story.is_some_and(|st| std::ptr::eq(*it, st)))
+        .collect();
+    let mut glyph_rows: std::collections::HashSet<u16> =
+        text_run_tops.iter().map(|&(top, _, _)| top).collect();
+    // SQ-0944: …and the rows of text the game printed ON its
+    // artwork, when this backend can draw a glyph in a cell the
+    // art covers. `over_art_runs` is already empty on every
+    // backend that cannot, so this adds nothing there and the
+    // canvas keeps rasterising them exactly as before.
+    //
+    // Pass 1 of `build_chrome_canvas` — the ARTWORK — is never
+    // skipped, so the band still ships the picture these glyphs
+    // will sit on. Only the TEXT layer stops being painted, which
+    // is what stops the crisp glyph landing on a blurred copy of
+    // itself and, worse, what stops the ground sampled from under
+    // it being a sample of the rasterised text.
+    glyph_rows.extend(over_art_runs.iter().map(|t| t.y.max(1) - 1));
+
+    // SQ-0937: …and the rows the ring is about to stamp INSIDE the
+    // story box, which are glyph rows for exactly the same reason and
+    // had never been counted as such.
+    //
+    // `text_run_tops` collects from the ring's STRIPS, and the story
+    // box is not a strip — so a chrome run landing in the box was
+    // rasterised into the canvas AND stamped as a glyph a few hundred
+    // lines below. Both, one over the other, and the rasterised copy
+    // then travelled wherever the bands crop and tile from this canvas.
+    //
+    // The Macintosh press is where it shows, because it is the release
+    // that KEEPS its primary buffer for the hint screen: its menu is
+    // chrome runs inside the box, so it takes this path, while Blorb
+    // and Amiga withdraw the buffer and have their menu grid promoted
+    // to the story surface instead (SQ-0934), which is excluded from
+    // this canvas outright.
+    //
+    // Same predicate as the packing below, deliberately — if the two
+    // ever disagree about which runs are stamped, the difference is
+    // drawn twice or not at all.
+    for it in &ring_chrome {
+        let WinNode::Grid(g) = &it.node else { continue };
+        for t in &g.px_texts {
+            let px = u32::from(t.x.max(1)) - 1;
+            let py = u32::from(t.y.max(1)) - 1;
+            if px >= vp_native.0
+                && px < vp_native.0 + vp_native.2
+                && py >= vp_native.1
+                && py < vp_native.1 + vp_native.3
+            {
+                glyph_rows.insert(t.y.max(1) - 1);
+            }
+        }
+    }
+    let mut canvas = v6::build_chrome_canvas(&ring_chrome, native, default_fg, default_bg, &state.colors, v6::TextLayer::SkipGlyphRows(&glyph_rows), &state.v6_text);
+    // SQ-0896: …and the STORY window's own plate, which the chrome
+    // canvas excludes by construction — `classify_windows` sets a
+    // `win == 0` Graphics aside as `story_gfx` so the ring does not
+    // carry it. That was right while the ring could only draw outside
+    // the story window; now the viewport is cut from what the art
+    // leaves, the ring covers the plate's cells and needs its pixels
+    // to crop. Blitted with the chrome ART layer, before the painted
+    // ground and before any window's page, which is the painter's
+    // order the game itself used (SQ-0706): the plate is something the
+    // game DREW, and a page is a colour it was told to present on.
+    v6::blit_story_gfx(&mut canvas, layout.story_gfx);
+    // SQ-0704: a chrome window that named its own page paints it
+    // into its unpainted pixels here (ZMSD §8.8.3.2), so the ring
+    // bands ship self-contained instead of leaving the icons'
+    // clear ground for the terminal to colour in (Zork Zero's
+    // room icons came out on an opaque black box). Same live
+    // `honor_game_colours` gate as the pane flood above.
+    // The painted ground goes under the ring's art and glyphs
+    // and before the pages claim the rest (SQ-0706).
+    v6::blit_paint_ground(
+        &mut canvas,
+        state.v6_paint.borrow().as_deref(),
+        v6::TextLayer::SkipGlyphRows(&glyph_rows),
+        state.v6_text.cell(),
+    );
+    // SQ-0883: the INK layer, frozen — art, glyph ink and painted
+    // ground, before any window's PAGE floods the rest. The border
+    // probe below reads THIS: a page is a colour a window was told
+    // to present on, not something the game drew, and a probe that
+    // cannot tell the two apart measures a flank's whole width as
+    // its border rule. `build_chrome_canvas` freezes its own art
+    // layer one step earlier for the same reason (SQ-0727/0500):
+    // opaque is not painted.
+    let ink = canvas.clone();
+    if state.config.honor_game_colours {
+        v6::fill_window_pages(
+            &mut canvas,
+            &ring_chrome,
+            layout.story,
+            &state.colors,
+            v6::TextLayer::SkipGlyphRows(&glyph_rows),
+            state.v6_text.cell(),
+        );
+        // …and the story window's own page under the pixels the
+        // ring bands ship (SQ-0704, hybrid half). Raster flattens
+        // its whole canvas opaque before shipping; hybrid ships
+        // only these bands, and they overlap the story box — the
+        // sliver under a top banner, and the flanks. A pixel left
+        // transparent there is the TERMINAL's to resolve, which is
+        // why the icons kept coming out on the terminal background
+        // after the chrome half of this fix landed.
+        v6::fill_story_page_clear(&mut canvas, layout.story, &state.colors);
+    } else {
+        // SQ-0716: colours declined, but a window the game has
+        // PAINTED INTO still gets its page — that page is the
+        // ground its own drawing sits on, not a palette
+        // preference. See `fill_painted_window_pages`.
+        v6::fill_painted_window_pages(
+            &mut canvas,
+            &layout.chrome,
+            layout.story,
+            &state.colors,
+            state.v6_paint.borrow().as_deref(),
+            state.v6_text.cell(),
+        );
+    }
+    // SQ-0903: the carve that used to be here is GONE, and the
+    // proof it is safe is that it had already stopped removing
+    // anything: `build_chrome_canvas` is now told which rows the
+    // ring claimed (`glyph_rows`, above) and never paints them, so
+    // there is nothing left on them to erase. Measured across the
+    // corpus with the carve still in place — zork0, arthur, shogun,
+    // journey, advent and mysterious01 all reported **0** pixels
+    // removed, which is the oracle SQ-0903 asked for.
+    //
+    // What it used to do is worth keeping in view, because the rule
+    // survives even though the code does not: on a row the ring
+    // draws with GLYPHS, this canvas keeps artwork and nothing else
+    // (SQ-0750). It is enforced a step earlier now, by not painting,
+    // rather than a step later by erasing.
+    // SQ-0511 fix: in the Menu plan the side flanks are drawn at the
+    // UNIFORM scale (aspect preserved — Journey's left picture column
+    // is NOT vertically stretched); only each flank's full-height
+    // divider/border column is extended down through the reclaimed gap
+    // to the bottom-anchored menu. Compute those narrow extension bands
+    // up front so their cache keys join the live set (else they'd be
+    // pruned and re-encoded every frame). The Frame plan (Zork0/Shogun)
+    // still stretches its whole flank (border art, no story picture).
+    // SQ-0758: BOTH of a flank's border columns, per flank strip —
+    // `(strip, inner rule, outer border)`. One probe, run from each
+    // side, so the panel's extent and the two borders that bound it
+    // come out of the same calculation instead of the band's rect.
+    // SQ-0779: and under every OTHER plan too — but only for a border
+    // the game printed as a CHARACTER. The extension used to be a
+    // Menu-plan privilege, so a pane short enough to leave no letterbox
+    // slack (`slack == 0` → `Letterbox`, i.e. any pane whose rows are
+    // at or below the scaled native height) got no border columns at
+    // all: Journey's Amiga frame lost BOTH of its left flank's rules
+    // into the picture band that spans them, and its right-hand flank —
+    // one rule wide, with no art in it — classified art-less and was
+    // skipped, so the frame simply had no sides between its `┌─┐` and
+    // its `└─┘`. Reported at a 121x36 terminal, correct at 117x64;
+    // the discriminator is the pane's ASPECT, not its width.
+    //
+    // Reserved to the GLYPH ink outside the Menu plan, which is what
+    // keeps the corpus still: an artwork flank (Zork Zero's, Shogun's,
+    // Arthur's side columns) comes back `Band` here and is dropped, so
+    // those frames draw exactly the bands they drew before. The
+    // extension's bottom is the flank strip's own, since outside the
+    // Menu plan there is no bottom-anchored strip to reach down to.
+    //
+    // SQ-0830 took Journey back out of this arm: it holds the Menu plan
+    // at every aspect now, so the 121x36 pane above is a menu plan and
+    // its rules come from where they always came from at a tall one. The
+    // generalisation stands on its own merits — a glyph border under any
+    // other plan is still a character the game printed, and still must
+    // not be shipped as a bitmap of itself.
+    let glyph_borders_only = !matches!(plan, BottomPlan::Menu);
+    let flank_borders: Vec<(Rect, Option<FlankBorderExt>, Option<FlankBorderExt>)> = strips
+        .iter()
+        .filter_map(|s| match s {
+            ChromeStrip::Art(role, r) if role.is_flank() => {
+                let bottom = if glyph_borders_only { r.bottom() } else { viewport.bottom() };
+                let ext = |which| {
+                    flank_border_extension(
+                        *r, area, viewport, &scale, cell_px, story, native, &ink, &gfx,
+                        &chrome_runs, bottom, which,
+                        state.v6_text.cell(),
+                    )
+                    .filter(|(_, ink)| !glyph_borders_only || matches!(ink, BorderInk::Glyph { .. }))
+                };
+                let inner = ext(FlankBorder::Inner);
+                // A flank only one border wide — Journey's
+                // right-hand column is exactly that — finds
+                // the SAME run from both sides. Drawing it
+                // twice would put two bands on one cache key.
+                let outer = ext(FlankBorder::Outer)
+                    .filter(|(o, _)| inner.is_none_or(|(i, _)| i != *o));
+                Some((*r, inner, outer))
+            }
+            _ => None,
+        })
+        .collect();
+    // SQ-0779, second pass: and it must not overlap it in the SOURCE
+    // either. A band's crop is its destination rect mapped back through
+    // the letterbox scale, so trimming the destination by whole terminal
+    // columns lands the crop's edge inside the border's own 8-pixel text
+    // cell — the game's rule was still in the picture, moved one column
+    // in rather than removed. `clear_text_rows` has always carved a text
+    // strip's native ROWS out of this canvas for exactly this reason; a
+    // stamped border COLUMN needs the same carve, and gets it here. Only
+    // over the story's own native rows, which is the span the glyph
+    // path's content test proved carries no artwork.
+    {
+        let cols: Vec<(u32, u32)> = flank_borders
+            .iter()
+            .flat_map(|(_, i, o)| i.iter().chain(o.iter()))
+            .filter_map(|(_, ink)| match ink {
+                BorderInk::Glyph { native, .. } => Some(*native),
+                BorderInk::Band(_) => None,
+            })
+            .collect();
+        let rows = (story.y_px as u32, story.y_px as u32 + story.h_px as u32);
+        v6::clear_text_columns(&mut canvas, &cols, rows);
+    }
+    // SQ-0779, the user's ruling: **if a game draws a border, the
+    // artwork should not overlap it.** A flank strip runs the whole
+    // width of the flank, borders included, and outside the Menu plan
+    // that whole strip is one uploaded band — so the picture's own
+    // placement rect covered the columns the frame's rules stand in.
+    // The rules were then unstampable (a glyph must not be written
+    // over an image that composites above the cells) and reached the
+    // screen, if at all, as a resampled bitmap of themselves, which is
+    // the thing hybrid exists not to do.
+    //
+    // So the LAYOUT stops short of them: the art's allocated span is
+    // trimmed to end where the border column begins, and the border is
+    // stamped as the character the game printed. No pixel is lost —
+    // the glyph path's content test has already established that the
+    // graphics-only canvas is clear across those native columns — and
+    // the Menu plan needs none of it, since its panel fill and its art
+    // rect are already bounded by the two rules (SQ-0747/0758).
+    if glyph_borders_only {
+        for s in &mut strips {
+            let ChromeStrip::Art(role, r) = s else { continue };
+            if !role.is_flank() {
+                continue;
+            }
+            let Some((_, inner, outer)) = flank_borders.iter().find(|(sr, _, _)| sr == r) else {
+                continue;
+            };
+            // Which rule stands on which side: a LEFT flank is bounded
+            // by its outer border on the left and the story-side rule
+            // on the right; a right flank the other way about.
+            let (lo, hi) = if r.x < viewport.x { (outer, inner) } else { (inner, outer) };
+            let (mut x0, mut x1) = (r.x, r.right());
+            if let Some((e, _)) = lo.filter(|(e, _)| (x0..x1).contains(&e.x)) {
+                x0 = e.right();
+            }
+            if let Some((e, _)) = hi.filter(|(e, _)| (x0..x1).contains(&e.x)) {
+                x1 = e.x;
+            }
+            *r = Rect::new(x0, r.y, x1.saturating_sub(x0), r.height);
+        }
+        strips.retain(|s| !matches!(s, ChromeStrip::Art(_, r) if r.width == 0));
+    }
+    let strips = strips;
+    let divider_exts: Vec<FlankBorderExt> = flank_borders
+        .iter()
+        .flat_map(|(_, i, o)| i.iter().chain(o.iter()).copied())
+        .collect();
+    // SQ-0747: and the rects the flank PANELS are drawn at, for the
+    // same reason. A Menu-plan flank's art goes to `menu_flank_panel`'s
+    // DEST rect, not to the strip's own rect, and the band cache is
+    // keyed on the rect a band is drawn at — so the strip rect alone in
+    // the live set left the panel's key unclaimed. `retain_chrome_bands`
+    // evicted it every frame, and one eviction clears the WHOLE cache,
+    // so every band re-encoded and re-uploaded on every frame (three
+    // uploads a frame on Journey's menu, for pixels the terminal already
+    // had — the user's `band uploads since launch: 78` over 26 ring
+    // frames). Resolved once, up here, and reused by the draw below.
+    let flank_panels: Vec<(Rect, FlankPanel)> = if matches!(plan, BottomPlan::Menu) {
+        strips
+            .iter()
+            .filter_map(|s| match s {
+                ChromeStrip::Art(role, r) if role.is_flank() && strip_has_art(r) => {
+                    // BOTH of the flank's borders: the inner rule is
+                    // what the art insets away from, and the two
+                    // together are what the panel fill stops short of
+                    // (SQ-0747). The old lookup took the first
+                    // extension inside the strip, which is the OUTER
+                    // border now that one is produced.
+                    let bord = flank_borders.iter().find(|(sr, _, _)| sr == r);
+                    let inner = bord.and_then(|(_, i, _)| i.map(|(e, _)| e));
+                    let outer = bord.and_then(|(_, _, o)| o.map(|(e, _)| e));
+                    menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, inner, outer)
+                        // SQ-0946: and the panel's ground stops at the
+                        // game SCREEN's edge. `menu_flank_panel` bounds
+                        // the fill by the flank's two BORDER columns and
+                        // falls back to the band when a border is not
+                        // found — which is Journey's IBM PC press, whose
+                        // outer rule is a reverse-video space the border
+                        // probe does not return. The band runs to the
+                        // pane edge, so the fill ran into the letterbox
+                        // margin: nine columns of panel colour down the
+                        // left of a 98x37 pane with `v6_pixel_lock` on,
+                        // against a bare right margin. That asymmetry IS
+                        // the report; the art itself was centred to the
+                        // cell at every width measured.
+                        .map(|(bg, fill, dest, crop)| {
+                            let (lo, hi) = v6::screen_cols(&scale, native.0, cell_px, area);
+                            let x = fill.x.max(lo);
+                            let w = fill.right().min(hi).saturating_sub(x);
+                            (*r, (bg, Rect::new(x, fill.y, w, fill.height), dest, crop))
+                        })
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // SQ-0698/SQ-0781: the side flanks of Arthur, Shogun and Zork
+    // Zero, TILED down to the band instead of stretched to it. The
+    // source is composed in native pixels at the uniform scale, so
+    // the flank keeps the top plate's horizontal factor and gains no
+    // vertical one — the whole point, since the stretch it replaces
+    // ran to 2.2x (Zork Zero) and 3.0x (Shogun) of the horizontal at
+    // a 117x64 terminal. The Menu plan is excluded: Journey's frame
+    // is glyphs, not artwork (SQ-0750), and its flank is a picture
+    // column centred in a panel rather than a border to extend.
+    let tiled_flanks: Vec<(Rect, TiledFlank)> = if matches!(plan, BottomPlan::Menu) {
+        Vec::new()
+    } else {
+        strips
+            .iter()
+            .filter_map(|s| match s {
+                ChromeStrip::Art(role, r) if role.is_flank() => {
+                    flank_tiled_source(*r, area, &scale, cell_px, native, &canvas, &gfx)
+                        .map(|img| (*r, img))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    // SQ-0818: how finely a FULL-WIDTH art strip's upload is cut.
+    //
+    // Granularity is backend-conditional, and only this side of the
+    // renderer knows the picker. Kitty and iterm2 tile: the extra cost
+    // is one control block and a rounded-up last chunk per tile, and
+    // the payload is byte for byte the same pixels. SIXEL DOES NOT —
+    // every sixel image carries its own palette definition, so N tiles
+    // would mean N palettes where the strip had one, a real first-frame
+    // regression for no gain. Halfblocks does not care either way:
+    // ratatui's own cell diff already sends it only the dirty cells.
+    let tile_cols = match picker.protocol_type() {
+        ratatui_image::picker::ProtocolType::Kitty
+        | ratatui_image::picker::ProtocolType::Iterm2 => BAND_TILE_COLS,
+        ratatui_image::picker::ProtocolType::Sixel
+        | ratatui_image::picker::ProtocolType::Halfblocks => 0,
+    };
+    // …and only a strip that is NOT a flank, which is asked by role
+    // rather than inferred from the draw: `flank_panels` and
+    // `tiled_flanks` each compose their own source image from geometry
+    // that is not a straight sub-rect of the scaled canvas, and a flank
+    // the plain crop draws (SQ-0898 removed the stretch arm, so a piece
+    // needing no extension lands here) is tall and thin — column tiles
+    // would buy it nothing.
+    let art_tiles = |role: v6::BandRole, r: Rect| -> Vec<Rect> {
+        if role.is_flank() {
+            vec![r]
+        } else {
+            band_tiles(r, tile_cols)
+        }
+    };
+
+    // SQ-1187: everything above is the frame's COMPUTE half — pure
+    // derivation from the window model, the pane, the config and the
+    // theme. It is entered only when `v6_hybrid_gen` says an input
+    // moved; the draw half replays this value otherwise.
+    // An Art strip with no art behind it is skipped below and never
+    // drawn, so its key must NOT be claimed here: a live key nothing
+    // re-places keeps a cached upload the terminal is no longer being
+    // pointed at, which is the stale-placement shape SQ-0587 records
+    // (SQ-0747). Only `strips` is filtered — the menu strips below
+    // draw unconditionally.
+    // SQ-0818: a tiled strip claims its TILES' keys, never the whole
+    // strip's — a live key nothing re-places is a stale placement
+    // (SQ-0587), and a key the draw claims that the live set does
+    // not is evicted every frame, which clears the WHOLE cache.
+    let live: std::collections::HashSet<_> = strips
+        .iter()
+        .filter(|s| !matches!(s, ChromeStrip::Art(_, r) if !strip_has_art(r)))
+        .filter_map(|s| match s {
+            ChromeStrip::Art(role, r) => Some((*role, *r)),
+            ChromeStrip::Text(..) => None,
+        })
+        .flat_map(|(role, r)| art_tiles(role, r))
+        // The menu's own strips are drawn whole, below.
+        .chain(menu_strips.iter().filter_map(|s| match s {
+            ChromeStrip::Art(_, r) => Some(*r),
+            ChromeStrip::Text(..) => None,
+        }))
+        .map(|r| (crate::render::graphics::BandSlot::Art as u8, r.x, r.y, r.width, r.height))
+        // A GLYPH border (SQ-0750) uploads nothing, so it claims no
+        // cache key: a live key nothing re-places is the stale
+        // placement SQ-0587 records.
+        .chain(divider_exts.iter().filter(|(_, ink)| matches!(ink, BorderInk::Band(_))).map(|(r, _)| {
+            (crate::render::graphics::BandSlot::DividerExtension as u8, r.x, r.y, r.width, r.height)
+        }))
+        .chain(flank_panels.iter().map(|(_, (_, _, d, _))| {
+            (crate::render::graphics::BandSlot::Art as u8, d.x, d.y, d.width, d.height)
+        }))
+        .collect();
+    // Record the letterbox geometry for click→game-pixel
+    // mapping (Lane M): the chrome ring shares this scale. In
+    // the Menu plan the interactive read_char region IS the
+    // bottom-anchored command strip, so record ITS scale — a
+    // single V6ClickMap is one linear transform, and the menu
+    // is where clicks are meaningful (story-region clicks map
+    // through the menu offset, but the game reads only the
+    // menu pixels). Extend/Letterbox use one scale everywhere.
+    //
+    // Asked of the PLAN and not of `menu.is_some()` since SQ-1008,
+    // which gave the Extend/Frame plans a bottom-anchored band of
+    // their own for content the game keeps below the story window
+    // (Arthur's boxed `hint` message). That band is paint, not a
+    // picker: the interactive region on those frames is still the
+    // story, so they must keep inverting through the story scale.
+    // Byte-identical for all four plans as they stood — `menu` was
+    // `Some` under exactly the `Menu` plan and nowhere else.
+    // SQ-0550: that scale alone inverts the menu WRONG. The menu
+    // is a TEXT strip, and `draw_chrome_text_strip` packs its game
+    // rows onto CONSECUTIVE terminal rows from the strip's top
+    // (SQ-0543) rather than placing them through the scale — so the
+    // linear inverse drifts by the difference between the two row
+    // pitches, and Journey's player had to click one line below the
+    // command they wanted (two by the bottom row). Hand the map the
+    // strip's row mapping so clicks inside it invert by row index.
+    // The count is the strip's GAME rows, which can be fewer than
+    // its classified height: the classifier places runs through the
+    // scale (leaving gaps the bridge rule absorbs) while the draw
+    // packs them tight, so anything past the last packed row falls
+    // through to the letterbox.
+    //
+    // SQ-0747: and the menu is not always a `menu_strips` strip. Only
+    // the reclaim plans anchor one to the pane's bottom; under the
+    // `Letterbox` plan — any pane with no vertical slack, which is
+    // where this quest's report comes from — the very same command
+    // menu is an ordinary TEXT strip of the RING, drawn by the very
+    // same packing function, and `menu_strips` is empty. The map then
+    // got `None` and inverted the whole pane linearly, which is
+    // SQ-0550's defect one plan over: measured off `Journey - The
+    // Quest Begins.adf` (release 30 / serial 890322), clicking `Cast`
+    // exactly where it is drawn is ACCEPTED at 119x34 (menu plan) and
+    // MISSED at 115x31, 150x41 and 234x65 (letterbox). So fall back to
+    // the ring's own bottom-most text strip below the story viewport,
+    // which is the same strip by another name.
+    //
+    // SQ-0830 removed the case that motivated this: a game with a menu
+    // strip now takes the `Menu` plan at any pane aspect, so those three
+    // sizes are menu plans today and `menu_strips` carries the band. The
+    // fallback stays because it is not about Journey — any plan can leave
+    // a text strip below the viewport, and packing is how every one of
+    // them is drawn.
+    //
+    // The third element is the native PIXEL top of the row drawn
+    // at the strip's first terminal row — the run's own `y`, not
+    // its row index times 16 (SQ-0951). They agree wherever the
+    // game prints on the 16px grid, which Journey does; they do
+    // not where it prints off it, and the index then names a slot
+    // the text is not in.
+    let packed = |r: &Rect, runs: &[crate::engine::PxText]| {
+        let rows = runs.iter().map(|t| state.v6_text.cell().row_of(t.y));
+        let first = rows.clone().min()?;
+        let last = rows.max()?;
+        let first_top = runs.iter().map(|t| t.y.max(1) - 1).min()?;
+        Some((r.y, r.height.min(last - first + 1), first_top))
+    };
+    let mut packed_text: Vec<crate::render::graphics::PackedText> = Vec::new();
+    if let Some(rows) = menu_strips
+        .iter()
+        .find_map(|s| match s {
+            ChromeStrip::Text(r, runs) => packed(r, runs),
+            ChromeStrip::Art(..) => None,
+        })
+        .or_else(|| {
+            strips.iter().rev().find_map(|s| match s {
+                ChromeStrip::Text(r, runs) if r.y >= viewport.bottom() => packed(r, runs),
+                _ => None,
+            })
+        })
+    {
+        // A chrome text strip packs its ROWS and still places
+        // its columns through the scale, so it publishes no
+        // column mapping and x keeps the proportional inverse.
+        packed_text.push(crate::render::graphics::PackedText { rows, cols: None });
+    }
+    // SQ-0938: and the STORY BOX, which packs BOTH axes.
+    //
+    // The in-box run packing draws one terminal cell per native
+    // text cell — rows from the box's top since SQ-0892, columns
+    // from its left since SQ-0937 — so a click inside it has to
+    // invert the same way or it lands on a different line than
+    // the one under the pointer. Zork Zero's and Shogun's hint
+    // menus say "(Or use mouse.)", so this is the screen working,
+    // not a nicety.
+    //
+    // Recorded from the SAME numbers the drawing used
+    // (`viewport`, `vp_native`), because a click map derived
+    // independently of the draw is a second implementation of the
+    // same geometry and will drift from it.
+    //
+    // SQ-0951: which is exactly what the COLUMN span had become.
+    // A promoted story GRID — Zork Zero's and Shogun's InvisiClues
+    // topic list — was not drawn by the in-box run packing at all:
+    // `render_node` handed it to `draw_grid`, which placed the
+    // GAME's screen (`cols` wide) CENTRED in the pane rather than
+    // flush to the viewport's left edge. At a 190x60 pane that is a
+    // 58-column grid in a 138-column viewport, so every topic was
+    // drawn forty columns right of where this map claimed it was,
+    // and the player had to click far to the LEFT of a topic to
+    // select it. SQ-0951 taught the map to follow that centring.
+    //
+    // SQ-1074 removed the centring — a v6 window has an absolute
+    // native origin and is drawn where the ring put it — so the two
+    // arms collapse back into one and the map is once again the
+    // viewport's own first column, for prose and grid alike. That
+    // is what SQ-0951 wanted in the first place: "recorded from the
+    // SAME numbers the drawing used", rather than a second
+    // implementation that has to chase the first.
+    if viewport.width > 0 && viewport.height > 0 {
+        let (left, cols) = (viewport.x, viewport.width);
+        packed_text.push(crate::render::graphics::PackedText {
+            rows: (viewport.y, viewport.height, vp_native.1 as u16),
+            cols: Some((left, cols, vp_native.0 as u16)),
+        });
+    }
+    // Which Art strips have real art behind them, asked of the oracle
+    // ONCE here so the draw half (which replays without the canvases'
+    // borrows) can skip artless strips by lookup (SQ-1187).
+    let art_backed: std::collections::HashSet<(u16, u16, u16, u16)> = strips
+        .iter()
+        .filter_map(|s| match s {
+            ChromeStrip::Art(_, r) if strip_has_art(r) => Some((r.x, r.y, r.width, r.height)),
+            _ => None,
+        })
+        .collect();
+    HybridFrame {
+        key: hkey,
+        canvas,
+        gfx,
+        scale,
+        menu,
+        plan_is_menu: matches!(plan, BottomPlan::Menu),
+        ring_plan,
+        ring_clip,
+        image_scale,
+        lock_inapplicable,
+        lock_fallback,
+        viewport,
+        vp_native,
+        strips,
+        menu_strips,
+        art_backed,
+        flank_borders,
+        divider_exts,
+        flank_panels,
+        tiled_flanks,
+        tile_cols,
+        live,
+        packed_text,
+        over_art_runs,
+    }
+}
+
 /// A cheap change key for the whole v6 raster composite (SQ-0469). It folds
 /// EVERY input the raster branch reads to build the native canvas — the v6 window
 /// model, the transcript, the live input line, scroll/pager/caret state, the pane
@@ -4904,6 +5275,7 @@ fn draw_secondary_buffers(
     area: Rect,
     buf: &mut Buffer,
     state: &AppState,
+    links: &mut Vec<((u16, u16), u32)>,
     to_cells: &dyn Fn(&PositionedWindow) -> Rect,
 ) {
     for pw in chrome {
@@ -4921,7 +5293,7 @@ fn draw_secondary_buffers(
         if clipped.width == 0 || clipped.height == 0 {
             continue;
         }
-        render_inline_buffer(b, state, clipped, buf);
+        render_inline_buffer(b, state, clipped, buf, links);
     }
 }
 
@@ -5029,7 +5401,7 @@ fn draw_painted_screen(
 /// `Art` (opaque frame graphics behind it — keep the scaled pixel ring) or `Text`
 /// (no graphics behind, only status/menu runs — paint as terminal cells). The
 /// runs carried by a `Text` strip are the chrome grid runs that map into it.
-enum ChromeStrip<'a> {
+enum ChromeStrip {
     /// A run of pixels from the chrome canvas, tagged with which part of the ring
     /// it belongs to (SQ-0894). Only `Art` needs the tag: a `Text` strip is never a
     /// flank, because a flank is emitted whole as one `Art` strip and never split
@@ -5043,7 +5415,7 @@ enum ChromeStrip<'a> {
     /// TOP band as a flank, which is how Journey's Amiga press grew a third
     /// `flank-divider` beside its real one.
     Art(crate::render::v6_layout::BandRole, Rect),
-    Text(Rect, Vec<&'a crate::engine::PxText>),
+    Text(Rect, Vec<crate::engine::PxText>),
 }
 
 /// SQ-0505 dynamic hybrid layout: how the vertical letterbox slack below the
@@ -5762,8 +6134,8 @@ fn flank_tiled_source(
 /// same thing until the composite extends: the rows copied verbatim off `canvas` are
 /// still the game's own screen (`frame.native.1`), and only the number of rows the
 /// band is asked to FILL changes (`frame.canvas_h`). `flank_source` has always taken
-/// those as separate arguments — "extend only when the pane is taller than the art" is
-/// Bocfel's own guard and it reads a desired height, not a screen — so an extended
+/// those as separate arguments — "extend only when the pane is taller than the art"
+/// reads a desired height, not a screen — so an extended
 /// frame tiles further down the same recipe rather than a new one.
 fn extend_raster_flanks(
     canvas: &mut image::RgbaImage,
@@ -6698,13 +7070,13 @@ fn menu_band_rows(menu: &[&crate::engine::PxText], cell: zvm::screen::V6Cell) ->
 /// leave run-less gaps inside the band (Art strips redrawing squashed slices of the
 /// frame's edge, SQ-0548) and, where the spread runs past the band's last row, drop
 /// the runs that landed outside it — the menu's own last line.
-fn menu_band_strips<'a>(
+fn menu_band_strips(
     bands: &[Rect],
     story: &crate::engine::PositionedWindow,
-    runs: &[&'a crate::engine::PxText],
-) -> Vec<ChromeStrip<'a>> {
+    runs: &[&crate::engine::PxText],
+) -> Vec<ChromeStrip> {
     let menu = menu_band_runs(runs, story);
-    bands.iter().map(|b| ChromeStrip::Text(*b, menu.clone())).collect()
+    bands.iter().map(|b| ChromeStrip::Text(*b, menu.iter().map(|t| (*t).clone()).collect())).collect()
 }
 
 /// One terminal row's class within the chrome ring.
@@ -7322,7 +7694,7 @@ fn content_ring_bands(
 fn decompose_chrome_strips<'a>(
     bands: &[(crate::render::v6_layout::BandRole, Rect)],
     oracle: &ChromeRowOracle<'_, 'a>,
-) -> (Vec<ChromeStrip<'a>>, Vec<&'a crate::engine::PxText>) {
+) -> (Vec<ChromeStrip>, Vec<&'a crate::engine::PxText>) {
     let mut out = Vec::new();
     let mut over_art: Vec<&'a crate::engine::PxText> = Vec::new();
     for (role, band) in bands {
@@ -7390,7 +7762,11 @@ fn decompose_chrome_strips<'a>(
                 j += 1;
             }
             let rect = Rect::new(band.x, band.y + i as u16, band.width, (j - i) as u16);
-            out.push(if text { ChromeStrip::Text(rect, text_runs) } else { ChromeStrip::Art(*role, rect) });
+            out.push(if text {
+                ChromeStrip::Text(rect, text_runs.iter().map(|t| (*t).clone()).collect())
+            } else {
+                ChromeStrip::Art(*role, rect)
+            });
             i = j;
         }
     }
@@ -8569,7 +8945,7 @@ fn place_anchored_row(
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     /// **The over-art question is the GLYPH's on the CELL path too** (SQ-1060).
     ///
@@ -9223,6 +9599,8 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginLeft,
             scaled: None,
             margin_px: Some(40),
+            rule: None,
+            link: 0,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -9257,6 +9635,8 @@ mod tests {
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None,
             margin_px: None,
+            rule: None,
+            link: 0,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -9291,6 +9671,8 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginRight,
             scaled: None,
             margin_px: None,
+            rule: None,
+            link: 0,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -10078,6 +10460,7 @@ mod tests {
 
     fn inline_buffer(line: &str) -> BufferWindow {
         BufferWindow {
+            win: 0,
             lines: vec![line.to_string()],
             runs: vec![Vec::new()],
             para: vec![crate::state::ParaFmt::default()],
@@ -10112,7 +10495,7 @@ mod tests {
             WinNode::Graphics(crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false })
         }
         fn buf(bg: u32, primary: bool) -> WinNode {
-            WinNode::Buffer(BufferWindow { lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None, panel: false, px_runs: Vec::new(), reads_input: false })
+            WinNode::Buffer(BufferWindow { win: 0, lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None, panel: false, px_runs: Vec::new(), reads_input: false })
         }
         fn grid(bg: u32) -> WinNode {
             let mut g = GridWindow::default();
@@ -10231,7 +10614,7 @@ mod tests {
         let mut colors = crate::colors::ColorScheme::terminal_default();
         colors.theme = theme_with_bg_overrides(&[
             ("transcript", Color::Rgb(9, 9, 9)),
-            ("room_panel", Color::Rgb(0, 0, 128)),
+            ("scott_room_panel", Color::Rgb(0, 0, 128)),
         ]);
         let mut state = AppState::default();
         state.colors = colors;
@@ -10660,7 +11043,7 @@ mod tests {
         state.colors = crate::colors::ColorScheme::terminal_default();
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = Buffer::empty(area);
-        render_inline_buffer(&b, &state, area, &mut buf);
+        render_inline_buffer(&b, &state, area, &mut buf, &mut Vec::new());
         assert_eq!(row_text(&buf, 0, 4), "abCD");
         // 'C' (col 2) carries the bold modifier.
         assert!(buf.cell((2, 0)).unwrap().modifier.contains(ratatui::style::Modifier::BOLD));
@@ -10681,8 +11064,10 @@ mod tests {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
+            rule: None, link: 0,
         };
         let b = BufferWindow {
+            win: 0,
             lines: vec!["a".to_string(), String::new(), "b".to_string()],
             runs: vec![Vec::new(), Vec::new(), Vec::new()],
             para: vec![crate::state::ParaFmt::default(); 3],
@@ -10700,10 +11085,81 @@ mod tests {
         state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
         let area = Rect::new(0, 0, 10, 8);
         let mut buf = Buffer::empty(area);
-        render_inline_buffer(&b, &state, area, &mut buf);
+        render_inline_buffer(&b, &state, area, &mut buf, &mut Vec::new());
         assert_eq!(row_text(&buf, 0, 1), "a", "first text line stays on row 0");
         let b_row = (0..8).find(|&y| row_text(&buf, y, 1).starts_with('b'));
         assert_eq!(b_row, Some(4), "\"b\" pushed below the 3-row image band");
+    }
+
+    /// SQ-1514: a linked span in a NON-PRIMARY buffer window must land in the
+    /// frame's cell→link map, on exactly the cells its glyphs were drawn in.
+    ///
+    /// Kerkerkruip's whole clickable UI lives in such windows — its side panels'
+    /// "[detailed status report]" link and every choice in its in-game menus —
+    /// and they were painted, hit-testable and dead, because only
+    /// `render_transcript` recorded links. `render_inline_buffer` draws them, so
+    /// `render_inline_buffer` records them, through the same
+    /// `transcript::record_run_links` the transcript uses.
+    #[test]
+    fn inline_buffer_records_a_linked_span_in_the_cell_link_map() {
+        let mut b = inline_buffer("go [here] now");
+        // "here" — chars 4..8 — is the link, as a game's own
+        // `glk_set_hyperlink(7)` around those glyphs would leave it.
+        b.runs = vec![vec![StyleRun { start: 4, end: 8, bits: 0, fg: 0, bg: 0, link: 7, glk_style: 0 }]];
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        let area = Rect::new(3, 2, 20, 3);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 30, 6));
+        let mut links: Vec<((u16, u16), u32)> = Vec::new();
+        render_inline_buffer(&b, &state, area, &mut buf, &mut links);
+        assert_eq!(row_text(&buf, 2, 30)[3..16], *"go [here] now", "sanity: the row drew where we measured it");
+        assert_eq!(
+            links,
+            vec![((7, 2), 7), ((8, 2), 7), ((9, 2), 7), ((10, 2), 7)],
+            "the link's four cells are the ones its glyphs were drawn in — `area.x` (3) \
+             plus char columns 4..8 — and nothing else on the row is recorded"
+        );
+    }
+
+    /// The same, for a linked PICTURE in a non-primary buffer: the band route
+    /// SQ-1503 fixed for the transcript reaches a side panel too.
+    #[test]
+    fn inline_buffer_records_a_linked_image_bands_cells() {
+        let mut px = image::RgbaImage::new(16, 48);
+        for p in px.pixels_mut() {
+            *p = image::Rgba([200, 40, 60, 255]);
+        }
+        let linked = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(px),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+            margin_px: None,
+            rule: None,
+            link: 11,
+        };
+        let b = BufferWindow {
+            win: 0,
+            lines: vec![String::new()],
+            runs: vec![Vec::new()],
+            para: vec![crate::state::ParaFmt::default()],
+            images: vec![Some(linked)],
+            scroll: 0,
+            primary: false,
+            bg: None,
+            fg: None,
+            panel: false,
+            px_runs: Vec::new(),
+            reads_input: false,
+        };
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        let area = Rect::new(0, 0, 10, 8);
+        let mut buf = Buffer::empty(area);
+        let mut links: Vec<((u16, u16), u32)> = Vec::new();
+        render_inline_buffer(&b, &state, area, &mut buf, &mut links);
+        assert!(!links.is_empty(), "the picture's own cells must be in the click map");
+        assert!(links.iter().all(|&(_, v)| v == 11), "every recorded cell carries the picture's link");
     }
 
     #[test]
@@ -11001,10 +11457,16 @@ mod tests {
     #[test]
     fn counterfeit_monkey_uses_the_generic_tree_path() {
         use crate::engine::Engine;
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../stories/CounterfeitMonkey-11.gblorb");
+        let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/CounterfeitMonkey-10.gblorb");
+        let path = if local.is_file() {
+            local
+        } else {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/stories/CounterfeitMonkey-10.gblorb")
+        };
         if !path.exists() {
-            eprintln!("SKIP: stories/CounterfeitMonkey-11.gblorb absent");
+            eprintln!("SKIP: CounterfeitMonkey-10.gblorb absent (stories/ and fetched fixtures)");
             return;
         }
         let blorb = blorb::Blorb::parse(std::fs::read(&path).unwrap()).expect("parse gblorb");
@@ -11610,6 +12072,7 @@ mod tests {
             x: 0, y: 6, w: 40, h: 1, x_px: 0, y_px: 96, w_px: 320, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
+                win: 0,
                 fill: None,
                 cols: 40, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
@@ -11632,8 +12095,9 @@ mod tests {
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
+        let mut win_rects = Vec::new();
         let metrics = render_node(
-            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &mut win_rects, &state.colors,
         );
         assert!(metrics.is_some(), "ring path taken (it returns inset metrics)");
         let screen: String = (0..area.height)
@@ -11665,8 +12129,9 @@ mod tests {
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
+        let mut win_rects = Vec::new();
         let m = render_node(
-            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &mut win_rects, &state.colors,
         );
         let m = m.expect("hybrid story viewport returns primary-buffer metrics");
         assert!(m.viewport_rows > 0, "story viewport has rows");
@@ -11716,6 +12181,7 @@ mod tests {
             x: 12, y: 8, w: 1, h: 3, x_px: 100, y_px: 129, w_px: 1, h_px: 48,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
+                win: 0,
                 fill: None,
                 cols: 1, rows: 3, cells: vec![], active_rows: 3, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
@@ -11733,8 +12199,9 @@ mod tests {
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
+        let mut win_rects = Vec::new();
         let _ = render_node(
-            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &mut win_rects, &state.colors,
         );
         // A menu screen publishes a full terminal transcript geometry (the cell
         // path), NOT a raster/hybrid image — so the transcript renders as real cells.
@@ -11783,6 +12250,7 @@ mod tests {
             x: 12, y: 8, w: 1, h: 3, x_px: 100, y_px: 129, w_px: 1, h_px: 48,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
+                win: 0,
                 fill: None,
                 cols: 1, rows: 3, cells: vec![], active_rows: 3, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
@@ -11800,8 +12268,9 @@ mod tests {
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
+        let mut win_rects = Vec::new();
         let _ = render_node(
-            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &mut win_rects, &state.colors,
         );
         let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
         assert_eq!(
@@ -11926,8 +12395,9 @@ mod tests {
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
+        let mut win_rects = Vec::new();
         let metrics = render_node(
-            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &mut win_rects, &state.colors,
         );
 
         // Non-vacuity: this frame must actually reach the ring. If a future change to
@@ -12032,6 +12502,7 @@ mod tests {
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
+                win: 0,
                 fill: None,
                 cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
@@ -12135,8 +12606,9 @@ mod tests {
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
+        let mut win_rects = Vec::new();
         let m = render_node(
-            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &mut win_rects, &state.colors,
         );
         let m = m.expect("raster path now reports story-box scroll metrics");
         assert_eq!(
@@ -12240,6 +12712,7 @@ mod tests {
             x: 0, y: 0, w: 40, h: 1, x_px: 0, y_px: 0, w_px: 320, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
+                win: 0,
                 fill: None,
                 cols: 40, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
@@ -12284,8 +12757,9 @@ mod tests {
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
+        let mut win_rects = Vec::new();
         let m = render_node(
-            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &mut win_rects, &state.colors,
         );
         let m = m.expect("the cell path returns the primary-buffer transcript metrics");
 
@@ -12330,8 +12804,9 @@ mod tests {
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
+        let mut win_rects = Vec::new();
         let _ = render_node(
-            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &mut win_rects, &state.colors,
         );
 
         let map = state

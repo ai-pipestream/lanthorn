@@ -8,7 +8,7 @@
 //! currently SITTING (SQ-0697/SQ-0729), and `retired` is the prose a `move_window` or
 //! `window_size` left frozen at coordinates the window no longer covers (ZMSD §15:
 //! "window_size does not change the current display"). Only the first of the three
-//! was in `screen.json`.
+//! was in `screen.bin`.
 //!
 //! What that cost, measured on the real corpus: fmvpoker.z6 two steps from boot is
 //! holding `[PxText { y: 247, x: 76, text: "Current Bet:" }, PxText { y: 265, x: 76,
@@ -184,7 +184,7 @@ const CASES: &[(&str, usize, usize)] = &[
 
 /// The defect itself, across the corpus and both colour modes.
 ///
-/// Falsified by reverting `ZWindowDto`'s `streamed`/`retired` to nothing (the
+/// Falsified by reverting the archived `ZWindow`'s `streamed`/`retired` to nothing (the
 /// pre-quest state, where the archive carried only `texts`):
 ///
 /// ```text
@@ -252,30 +252,13 @@ fn a_restore_brings_back_the_streamed_prose(honor: bool) {
     }
 }
 
-/// The palette this suite's colours resolve through, **stated rather than inherited**
-/// (SQ-0958).
-///
-/// Every story these cases drive is a bare file that names no machine — or, for the
-/// disk images, a machine whose table IS §8.3.1's — so the colour numbers behind
-/// every pixel asserted below resolve through the standard table. Until now nothing
-/// here said so, and the suite believed whatever the last suite in its group binary
-/// left behind. See [`app::v6_palette`], which is why this both names a palette and
-/// takes the shared lock; hold the guard for the whole case, because the two frames
-/// a repaint case compares are only comparable if the palette did not move between
-/// them.
-fn standard_palette() -> app::V6PaletteGuard {
-    app::v6_palette(zvm::screen::Palette::Standard)
-}
-
 #[test]
 fn a_restore_brings_back_the_streamed_prose_honouring_game_colours() {
-    let _g = standard_palette();
     a_restore_brings_back_the_streamed_prose(true);
 }
 
 #[test]
 fn a_restore_brings_back_the_streamed_prose_with_theme_colours() {
-    let _g = standard_palette();
     a_restore_brings_back_the_streamed_prose(false);
 }
 
@@ -309,7 +292,7 @@ fn render(session: &GameSession, honor: bool, kitty: bool, w: u16, h: u16) -> Bu
 /// session and a 200x80 one, neither of them the terminal that wrote the archive, and
 /// both are rendered through half-blocks and a kitty-sized picker.
 ///
-/// Falsified with the same reverted `ZWindowDto`:
+/// Falsified with the same reverted `ZWindow`:
 ///
 /// ```text
 /// fmvpoker.z6: the pixel runs restored into a Some((80, 24)) session are the ones
@@ -360,13 +343,11 @@ fn the_restored_runs_carry_no_terminal(honor: bool) {
 
 #[test]
 fn the_restored_runs_carry_no_terminal_honouring_game_colours() {
-    let _g = standard_palette();
     the_restored_runs_carry_no_terminal(true);
 }
 
 #[test]
 fn the_restored_runs_carry_no_terminal_with_theme_colours() {
-    let _g = standard_palette();
     the_restored_runs_carry_no_terminal(false);
 }
 
@@ -409,12 +390,10 @@ fn a_restored_pane_matches_a_natively_played_one(honor: bool) {
 
 #[test]
 fn a_restored_pane_matches_a_natively_played_one_honouring_game_colours() {
-    let _g = standard_palette();
     a_restored_pane_matches_a_natively_played_one(true);
 }
 
 #[test]
 fn a_restored_pane_matches_a_natively_played_one_with_theme_colours() {
-    let _g = standard_palette();
     a_restored_pane_matches_a_natively_played_one(false);
 }

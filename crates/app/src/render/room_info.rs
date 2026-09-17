@@ -37,7 +37,7 @@ fn dest_name(graph: &MapGraph, labels: &mapper::matrix::MatrixLabels, layer: map
             return row.to_string();
         }
     }
-    graph.room(id).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{id}"))
+    graph.room(id).map(|r| r.label().to_owned()).unwrap_or_else(|| crate::roomid::room_label_no(graph, id))
 }
 
 /// One card line for a direction: the glyph, and what it means spelled out.
@@ -49,6 +49,8 @@ fn card_detail(
     graph: &MapGraph,
     labels: &mapper::matrix::MatrixLabels,
     layer: mapper::layer::LayerId,
+    room_id: RoomId,
+    dir: Direction,
     cell: mapper::matrix::MatrixCell,
 ) -> (&'static str, String) {
     use mapper::matrix::MatrixCell as C;
@@ -63,11 +65,36 @@ fn card_detail(
         C::LeavesLayer { dest } => {
             // Cross-layer: `dest` has no row in THIS layer's `labels` to number it with, exactly
             // like the matrix's own `⇱out` footnote, which names the same way.
-            let raw = graph.room(dest).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{dest}"));
+            let raw = graph
+                .room(dest)
+                .map(|r| r.label().to_owned())
+                .unwrap_or_else(|| crate::roomid::room_label_no(graph, dest));
             ("⇱", format!("{} · {}", raw, graph.layer_name(graph.layer_of(dest))))
         }
         C::Probed => ("×", "tried, no way through".to_string()),
         C::Untried => ("·", String::new()),
+        C::Random { .. } => {
+            // Every distinct room this direction has actually been seen to land in (SQ-1261),
+            // named the same way every other cell here names a destination — falling back to
+            // `#id` for a room a shadow probe saw but the player never did, which has no row to
+            // number it with. Empty when nothing has been recorded yet, or when this move's
+            // record predates SQ-1261.
+            let dests = graph.random_destinations(room_id, dir);
+            if dests.is_empty() {
+                ("?", "destination varies".to_string())
+            } else {
+                // SQ-1269: a direction whose destinations include the room itself — a self-loop
+                // that a live landing elsewhere contradicted — pools the room ITSELF, since "back
+                // here" is a real destination this direction sometimes leads to. Naming it via
+                // `name(room_id)` would print the room's own label recursively; say what it means
+                // instead, the same words `MatrixCell::SelfLoop` uses.
+                let names: Vec<String> = dests
+                    .iter()
+                    .map(|&id| if id == room_id { "back here".to_string() } else { name(id) })
+                    .collect();
+                ("?", format!("destination varies: {}", names.join(", ")))
+            }
+        }
     }
 }
 
@@ -191,33 +218,33 @@ pub fn layout_card(entry_widths: &[usize], width: u16) -> CardLayout {
     CardLayout { rows: n, cols: vec![(0, avail)] }
 }
 
-/// Draw the room-info body into `area` — no chrome, no borders: the caller (the room dock) owns
-/// those.
-///
-/// - `graph`: the mapper graph for notes/exits.
-/// - `room_objects`: the objects located in this room, already queried from the
-///   engine's introspection (empty when introspection is unavailable, e.g. the
-///   map is in tidy-anim mode). Shown only when this is the current room.
-/// - `room_id`: the room to display.
-/// - `current_room`: the player's actual current room (used to gate object listing).
-/// - `theme`: for the shared `map.matrix.cell:frontier` dimming, so the card and the matrix agree.
-/// - `body` / `heading`: the styles for ordinary lines and for section labels.
+/// One logical row of the Info body's content, before scrolling picks a window of it (SQ-1280).
+/// A plain line of text, or one row of the exit card's grid — several pieces sharing a row at
+/// their own column offsets, which [`layout_card`] already laid out. Keeping the card's row as
+/// ONE `Row` (not one per cell) is what keeps a scroll from ever splitting its columns apart: the
+/// whole row scrolls into or out of view together.
+enum Row {
+    Line(String, Style),
+    Card(Vec<(u16, String, Style)>),
+}
+
+/// Build the Info body's full content as logical rows, top to bottom, at `width` — independent of
+/// how many of them a scrolled dock can actually show. [`draw_room_info_body`] windows this by
+/// `scroll_offset`; the row count is also the total this body needs, for the caller's scrollbar
+/// and [`crate::list_scroll::ListScroll`].
 #[allow(clippy::too_many_arguments)]
-pub fn draw_room_info_body(
+fn build_info_rows(
     graph: &MapGraph,
     room_objects: &[String],
     room_id: RoomId,
     current_room: Option<RoomId>,
-    area: Rect,
-    buf: &mut Buffer,
     theme: &Theme,
     body: Style,
     heading: Style,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let Some(room) = graph.room(room_id) else { return };
+    width: u16,
+) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let Some(room) = graph.room(room_id) else { return rows };
     // Computed once and threaded through every name in this body, so the card can never disagree
     // with the matrix table or its `⇲`/`⇱out` footnotes about what a room is numbered (SQ-0685):
     // both ultimately read the same `labels`.
@@ -232,7 +259,7 @@ pub fn draw_room_info_body(
         .iter()
         .map(|&d| {
             let (glyph, detail) =
-                card_detail(graph, &labels, layer, mapper::matrix::classify(graph, room_id, d));
+                card_detail(graph, &labels, layer, room_id, d, mapper::matrix::classify(graph, room_id, d));
             (d, glyph, detail)
         })
         .collect();
@@ -256,36 +283,32 @@ pub fn draw_room_info_body(
     let value_style = body;
     let section_style = heading;
 
-    let inner_x = area.x;
-    let inner_w = area.width;
-    let clip = area;
-    let mut row = area.y;
-    let max_y = area.bottom().saturating_sub(1);
-
     // Notes (if any), word-wrapped char/width-aware (SQ-0638): a raw byte-offset
     // slice panics on a multibyte note (e.g. one full of '€') since a slice
     // boundary can land mid-character.
-    if !room.notes.is_empty() && row <= max_y {
-        for line in crate::render::transcript::wrap_line(&room.notes, inner_w) {
-            if row > max_y { break; }
-            draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
-            row += 1;
+    if !room.notes.is_empty() {
+        for line in crate::render::transcript::wrap_line(&room.notes, width) {
+            rows.push(Row::Line(line, value_style));
         }
     }
 
-    // Objects (only for the current room) come BEFORE the card (SQ-0692). The card is a fixed
-    // thirteen-line block, so in a dock shortened past its natural height it is the section that
-    // runs off the bottom — and it degrades gracefully, because every one of its rows is the same
-    // shape and the ones that fit are still readable. A short "Here:" list buried underneath it
-    // was simply invisible at any dock height a normal terminal can spare.
-    if !objects.is_empty() && row <= max_y {
-        draw_str_clipped(buf, inner_x, row, "Here:", section_style, clip);
-        row += 1;
+    // "Also seen as: ..." (SQ-1257 Phase 3) — the other names the story has printed for this
+    // room, e.g. Lost Pig's gnome tunnels rerolling a fresh name on every step. Under the notes,
+    // above the exit card, shown only when the room actually has any.
+    if !room.aliases.is_empty() {
+        let aliases_style = theme.get("room_panel.aliases").style;
+        let line = format!("Also seen as: {}", room.aliases.join(", "));
+        for wrapped in crate::render::transcript::wrap_line(&line, width) {
+            rows.push(Row::Line(wrapped, aliases_style));
+        }
+    }
+
+    // Objects (only for the current room) come BEFORE the card (SQ-0692) — see
+    // [`draw_room_info_body`] for why a body that runs off the bottom still reads.
+    if !objects.is_empty() {
+        rows.push(Row::Line("Here:".to_string(), section_style));
         for name in &objects {
-            if row > max_y { break; }
-            let line = format!("  {}", name);
-            draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
-            row += 1;
+            rows.push(Row::Line(format!("  {}", name), value_style));
         }
     }
 
@@ -293,10 +316,10 @@ pub fn draw_room_info_body(
     // Untried and dead-end directions are dimmed with the same selector the matrix dims its
     // frontier cells with, so the two surfaces read alike.
     let frontier_style = theme.get("map.matrix.cell:frontier").style;
-    if row <= max_y {
-        draw_str_clipped(buf, inner_x, row, "Exits:", section_style, clip);
-        row += 1;
-    }
+    // The `?` random-exit glyph (SQ-1257) gets the matrix's own `map.matrix.cell:random` selector
+    // — not `frontier`, since a random exit is explored, not unexplored ground.
+    let random_style = theme.get("map.matrix.cell:random").style;
+    rows.push(Row::Line("Exits:".to_string(), section_style));
 
     // One entry per line of the card: the twelve travel directions, then the non-compass
     // passages, which are card lines of the same shape and belong in the same grid.
@@ -304,7 +327,13 @@ pub fn draw_room_info_body(
         .iter()
         .map(|(dir, glyph, detail)| {
             let line = format!("  {:<3} {} {}", dir_label(*dir), glyph, detail);
-            let style = if detail.is_empty() || *glyph == "×" { frontier_style } else { value_style };
+            let style = if *glyph == "?" {
+                random_style
+            } else if detail.is_empty() || *glyph == "×" {
+                frontier_style
+            } else {
+                value_style
+            };
             (line.trim_end().to_string(), style)
         })
         .chain(odd.iter().map(|dest| (format!("  ?   ⇢ {dest}"), value_style)))
@@ -312,26 +341,84 @@ pub fn draw_room_info_body(
 
     let widths: Vec<usize> =
         entries.iter().map(|(t, _)| crate::textwidth::str_cells(t)).collect();
-    let plan = layout_card(&widths, inner_w);
-    let card_top = row;
-    for (i, (text, style)) in entries.iter().enumerate() {
-        let (c, r) = (i / plan.rows.max(1), i % plan.rows.max(1));
-        let y = card_top + r as u16;
-        // A row past the bottom is simply not drawn: the grid degrades the way the single column
-        // did, and every row that fits still reads in full.
-        if y > max_y {
-            continue;
+    let plan = layout_card(&widths, width);
+    for r in 0..plan.rows {
+        let mut parts = Vec::with_capacity(plan.cols.len());
+        for (c, &(dx, w)) in plan.cols.iter().enumerate() {
+            let Some((text, style)) = entries.get(c * plan.rows + r) else { continue };
+            parts.push((dx as u16, crate::textwidth::truncate_to_cols(text, w).to_string(), *style));
         }
-        let Some(&(dx, w)) = plan.cols.get(c) else { continue };
-        draw_str_clipped(
-            buf,
-            inner_x + dx as u16,
-            y,
-            crate::textwidth::truncate_to_cols(text, w),
-            *style,
-            clip,
-        );
+        rows.push(Row::Card(parts));
     }
+
+    rows
+}
+
+/// Draw the room-info body into `area` — no chrome, no borders: the caller (the room dock) owns
+/// those.
+///
+/// - `graph`: the mapper graph for notes/exits.
+/// - `room_objects`: the objects located in this room, already queried from the
+///   engine's introspection (empty when introspection is unavailable, e.g. the
+///   map is in tidy-anim mode). Shown only when this is the current room.
+/// - `room_id`: the room to display.
+/// - `current_room`: the player's actual current room (used to gate object listing).
+/// - `theme`: for the shared `map.matrix.cell:frontier` dimming, so the card and the matrix agree.
+/// - `body` / `heading`: the styles for ordinary lines and for section labels.
+/// - `scroll_offset`: rows of content already scrolled past (SQ-1280) — the FIRST row drawn is
+///   `scroll_offset` rows into the body's full content, clamped here so a stale or out-of-range
+///   offset (the room just changed, say) can never draw garbage or leave a trailing gap. When
+///   the content overflows `area`, a themed scrollbar (`scrollbar` / `scrollbar_track`, the same
+///   selectors every other scrollable list in the app already uses) takes the rightmost column.
+///
+/// Returns the body's total row count — the Info card is no longer a fixed thirteen lines once
+/// notes, aliases and the objects list can push it past the dock's height, and the caller needs
+/// that total to keep its `ListScroll` in sync.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_room_info_body(
+    graph: &MapGraph,
+    room_objects: &[String],
+    room_id: RoomId,
+    current_room: Option<RoomId>,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    body: Style,
+    heading: Style,
+    scroll_offset: u16,
+) -> u16 {
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+    let rows = build_info_rows(graph, room_objects, room_id, current_room, theme, body, heading, area.width);
+    let total = rows.len() as u16;
+    let viewport = area.height;
+
+    let scrollbar_visible =
+        crate::render::scroll::needs_scrollbar(total as usize, viewport as usize) && area.width >= 2;
+    let text_w = if scrollbar_visible { area.width - 1 } else { area.width };
+    let clip = Rect::new(area.x, area.y, text_w, area.height);
+    let offset = scroll_offset.min(total.saturating_sub(viewport));
+
+    for (i, row) in rows.iter().enumerate().skip(offset as usize).take(viewport as usize) {
+        let y = area.y + (i as u16 - offset);
+        match row {
+            Row::Line(text, style) => draw_str_clipped(buf, area.x, y, text, *style, clip),
+            Row::Card(parts) => {
+                for (dx, text, style) in parts {
+                    draw_str_clipped(buf, area.x + dx, y, text, *style, clip);
+                }
+            }
+        }
+    }
+
+    if scrollbar_visible {
+        let sb_area = Rect::new(area.right() - 1, area.y, 1, area.height);
+        let look = crate::render::scroll::ScrollbarLook::from_theme(theme);
+        crate::render::scroll::draw_scrollbar(buf, sb_area, total as usize, viewport as usize, offset as usize, look);
+    }
+
+    total
 }
 
 /// List the display names of everything the player can see in room `room_id`.
@@ -378,8 +465,12 @@ pub(crate) fn list_room_objects_excluding(
     if crate::roomid::is_synthetic_room(room_id) {
         return Vec::new();
     }
+    // `is_synthetic_room` already returned above for anything that isn't a
+    // real Z-machine object number, so this always fits: `room_id` widened
+    // from a `u16` object number in the first place (SQ-1297).
+    let Ok(room_num) = u16::try_from(room_id) else { return Vec::new() };
     model
-        .visible_room_objects(mem, room_id, exclude)
+        .visible_room_objects(mem, room_num, exclude)
         .into_iter()
         .map(|o| crate::inventory::object_words(mem, names, o))
         // An object the story holds neither a printed name nor a parse name for
@@ -392,7 +483,7 @@ pub(crate) fn list_room_objects_excluding(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
     use mapper::graph::MapGraph;
@@ -438,7 +529,7 @@ mod tests {
         let theme = test_theme();
         draw_room_info_body(
             g, objects, room, current, area, &mut buf, &theme,
-            Style::default(), Style::default().fg(Color::Cyan),
+            Style::default(), Style::default().fg(Color::Cyan), 0,
         );
         (0..h)
             .map(|y| {
@@ -446,6 +537,34 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Like [`render_body`], but at a given scroll offset — for the SQ-1280 scroll tests. Returns
+    /// the buffer as text alongside the total row count `draw_room_info_body` reported.
+    #[allow(clippy::too_many_arguments)]
+    fn render_body_scrolled(
+        g: &MapGraph,
+        objects: &[String],
+        room: RoomId,
+        current: Option<RoomId>,
+        w: u16,
+        h: u16,
+        scroll_offset: u16,
+    ) -> (String, u16) {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        let theme = test_theme();
+        let total = draw_room_info_body(
+            g, objects, room, current, area, &mut buf, &theme,
+            Style::default(), Style::default().fg(Color::Cyan), scroll_offset,
+        );
+        let text = (0..h)
+            .map(|y| {
+                (0..w).map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" ")).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (text, total)
     }
 
     fn make_graph_with_rooms() -> (MapGraph, RoomId, RoomId) {
@@ -562,6 +681,72 @@ mod tests {
         assert!(!text.contains("West of House"), "the body does not repeat the header's name:\n{text}");
         assert!(text.contains("Exits:"), "it starts at the exit card:\n{text}");
         assert!(text.contains("Forest Path"), "…which names the destination");
+    }
+
+    /// SQ-1257 Phase 3: a room the story has renamed shows an "Also seen as: ..." line, under
+    /// the notes and above the exit card, listing every OTHER name in first-seen order — never
+    /// the current one.
+    #[test]
+    fn room_info_shows_also_seen_as_when_the_room_has_aliases() {
+        let (mut g, room1, _) = make_graph_with_rooms();
+        g.upsert_room(room1, "Confusing Passage".into());
+        g.upsert_room(room1, "Strange Place".into());
+        let text = render_body(&g, &[], room1, None, 60, 20);
+        assert!(
+            text.contains("Also seen as: West of House, Confusing Passage"),
+            "both older names appear, in first-seen order:\n{text}"
+        );
+        assert!(!text.contains("Strange Place,"), "the CURRENT name is never listed as an alias:\n{text}");
+    }
+
+    /// The companion case: a room with no rename shows no "Also seen as" line at all.
+    #[test]
+    fn room_info_shows_no_also_seen_as_line_without_aliases() {
+        let (g, room1, _) = make_graph_with_rooms();
+        let text = render_body(&g, &[], room1, None, 60, 20);
+        assert!(!text.contains("Also seen as"), "no aliases, so no line:\n{text}");
+    }
+
+    /// SQ-1261: a random exit with no recorded destinations yet reads exactly as it always has
+    /// — "destination varies", naming nothing.
+    #[test]
+    fn room_info_random_exit_with_no_recorded_destinations_names_none() {
+        let (mut g, room1, _) = make_graph_with_rooms();
+        g.mark_random_exit(room1, mapper::direction::Direction::N);
+        let text = render_body(&g, &[], room1, None, 60, 20);
+        assert!(text.contains("destination varies"), "the card still says the destination varies:\n{text}");
+        assert!(!text.contains("destination varies:"), "…but names nothing when nothing is recorded:\n{text}");
+    }
+
+    /// The companion case: once destinations have been recorded, the card names them — by the
+    /// same room-name rules every other exit-card destination follows — in first-seen order.
+    #[test]
+    fn room_info_random_exit_names_its_recorded_destinations() {
+        let (mut g, room1, _) = make_graph_with_rooms();
+        g.upsert_room(3, "Windy Cave".into());
+        g.mark_random_exit(room1, mapper::direction::Direction::N);
+        g.note_random_destination(room1, mapper::direction::Direction::N, 2); // Forest Path
+        g.note_random_destination(room1, mapper::direction::Direction::N, 3); // Windy Cave
+        let text = render_body(&g, &[], room1, None, 60, 20);
+        assert!(
+            text.contains("destination varies: Forest Path, Windy Cave"),
+            "both recorded destinations appear, in first-seen order:\n{text}"
+        );
+    }
+
+    /// A destination a shadow probe saw but the player never has no room in the graph to name it
+    /// from — the card falls back to `#id`, the same fallback every other destination lookup here
+    /// uses, rather than panicking or silently dropping it.
+    #[test]
+    fn room_info_random_exit_falls_back_to_bare_id_for_an_unknown_destination() {
+        let (mut g, room1, _) = make_graph_with_rooms();
+        g.mark_random_exit(room1, mapper::direction::Direction::N);
+        g.note_random_destination(room1, mapper::direction::Direction::N, 404); // no such room
+        let text = render_body(&g, &[], room1, None, 60, 20);
+        assert!(
+            text.contains("destination varies: #404"),
+            "an unmapped destination falls back to its bare id:\n{text}"
+        );
     }
 
     #[test]
@@ -738,7 +923,119 @@ mod tests {
         let theme = test_theme();
         draw_room_info_body(
             &g, &[], room1, None, Rect::new(0, 0, 0, 0), &mut buf, &theme,
-            Style::default(), Style::default(),
+            Style::default(), Style::default(), 0,
+        );
+    }
+
+    // ── Scrolling (SQ-1280) ───────────────────────────────────────────────────
+
+    /// A note that reliably word-wraps into `n` distinct, ONE-word-per-row lines at a 10-cell
+    /// width — each word is 7 cells (`note-NN`), so two of them plus their separating space (15)
+    /// never fit in 10, and each is numbered so a test can tell which row of a scrolled window
+    /// it is looking at without depending on exactly how `wrap_line` breaks a longer paragraph.
+    fn numbered_note(n: usize) -> String {
+        (0..n).map(|i| format!("note-{i:02}")).collect::<Vec<_>>().join(" ")
+    }
+
+    /// A body taller than the dock draws the first N rows at offset 0, and scrolling reveals the
+    /// LAST row at the maximum offset — never past it, and a stale/too-large offset clamps rather
+    /// than drawing garbage or leaving a blank window.
+    #[test]
+    fn scrolling_reveals_rows_below_the_fold_and_clamps_at_the_end() {
+        let (mut g, room1, _) = make_graph_with_rooms();
+        g.set_notes(room1, numbered_note(12));
+        let (width, height) = (10u16, 4u16);
+
+        // The twelve numbered note rows plus the exit card overflow a 4-row body.
+        let (top, total) = render_body_scrolled(&g, &[], room1, None, width, height, 0);
+        assert!(total > height, "the content is taller than the 4-row body: {total}");
+        assert!(top.contains("note-00"), "the first note row is visible at offset 0:\n{top}");
+        assert!(!top.contains("note-04"), "row 5 of 12 is still below the fold at offset 0:\n{top}");
+
+        // The maximum offset — total - viewport — puts the LAST row (the exit card's final
+        // direction, Out) on the bottom row, and never scrolls past it.
+        let max_offset = total - height;
+        let (bottom, total_again) = render_body_scrolled(&g, &[], room1, None, width, height, max_offset);
+        assert_eq!(total_again, total, "the same content reports the same total");
+        assert!(bottom.contains("Out"), "the card's last row reaches the bottom at the max offset:\n{bottom}");
+        assert!(!bottom.contains("note-00"), "the notes have scrolled off the top:\n{bottom}");
+
+        // Scrolling PAST the end (or requesting an offset larger than the content allows) clamps
+        // to the same maximum — it is a no-op past the end, not a blank window.
+        let (past_end, _) = render_body_scrolled(&g, &[], room1, None, width, height, max_offset + 50);
+        assert_eq!(past_end, bottom, "an over-large offset clamps to the maximum, not past it");
+    }
+
+    /// A body that fits entirely in the dock never shows a scrollbar column, however far past the
+    /// end a (meaningless) offset is requested.
+    #[test]
+    fn a_body_that_fits_draws_no_scrollbar_and_ignores_any_offset() {
+        let (g, room1, _) = make_graph_with_rooms();
+        let (fits, total) = render_body_scrolled(&g, &[], room1, None, 80, 40, 0);
+        assert!(total < 40, "the content fits well inside 40 rows: {total}");
+        let (scrolled, _) = render_body_scrolled(&g, &[], room1, None, 80, 40, 99);
+        assert_eq!(fits, scrolled, "there is nothing to scroll, so an offset changes nothing");
+    }
+
+    /// The indicator itself: a themed scrollbar (the SAME `scrollbar`/`scrollbar_track`
+    /// selectors every other scrollable list in the app already uses — SQ-1280 adds no new
+    /// selector) appears in the rightmost column only when the body actually overflows.
+    #[test]
+    fn the_scrollbar_appears_only_when_the_body_overflows_and_uses_the_shared_selectors() {
+        let parsed = crate::theme::toml_schema::parse(
+            "[elements]\nscrollbar = { fg = \"magenta\" }\nscrollbar_track = { fg = \"yellow\" }\n",
+        )
+        .unwrap();
+        let theme = crate::theme::resolve::resolve_theme(&crate::colors::GhosttyScheme::default(), &parsed);
+        let (mut g, room1, _) = make_graph_with_rooms();
+        g.set_notes(room1, "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight".to_string());
+
+        let has_bg = |buf: &Buffer, area: Rect, c: Color| {
+            (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
+                .any(|(x, y)| buf.cell((x, y)).is_some_and(|cell| cell.bg == c))
+        };
+
+        // Overflowing: the rightmost column carries the themed bar.
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        let total = draw_room_info_body(&g, &[], room1, None, area, &mut buf, &theme, Style::default(), Style::default(), 0);
+        assert!(total > area.height, "content overflows a 4-row body: {total}");
+        assert!(has_bg(&buf, area, Color::Magenta), "the thumb uses the shared `scrollbar` selector");
+        assert!(has_bg(&buf, area, Color::Yellow), "the track uses the shared `scrollbar_track` selector");
+
+        // Fits: no bar anywhere.
+        let area = Rect::new(0, 0, 40, 40);
+        let mut buf = Buffer::empty(area);
+        let total = draw_room_info_body(&g, &[], room1, None, area, &mut buf, &theme, Style::default(), Style::default(), 0);
+        assert!(total <= area.height, "content fits a 40-row body: {total}");
+        assert!(!has_bg(&buf, area, Color::Magenta), "no thumb when nothing overflows");
+        assert!(!has_bg(&buf, area, Color::Yellow), "no track when nothing overflows");
+    }
+
+    /// Requirement 5 of SQ-1280: the exit card is laid out in COLUMNS, and a scroll must never
+    /// split one card row's columns apart — either the whole row (every column sharing it) is
+    /// visible, or none of it is. A body just short of the exit card's own five rows ("Exits:"
+    /// plus the four-row, three-column grid, SQ-0694) already overflows, so scrolling to the max
+    /// offset lands squarely inside the card: the row it reveals still carries every column
+    /// together — a lone cardinal never appears with its diagonal or portal cut off.
+    #[test]
+    fn scrolling_never_splits_a_card_rows_columns() {
+        let (g, room1, _) = make_graph_with_rooms();
+        // Wide enough for the exit card's full three-column grid (matches the fixture in
+        // `the_rendered_card_puts_three_directions_on_one_row` above).
+        let (width, height) = (58u16, 4u16);
+        let (_, total) = render_body_scrolled(&g, &[], room1, None, width, height, 0);
+        assert!(total > height, "\"Exits:\" plus a four-row card already overflow a 4-row body: {total}");
+
+        let max_offset = total - height;
+        let (bottom, _) = render_body_scrolled(&g, &[], room1, None, width, height, max_offset);
+        let card_row = bottom
+            .lines()
+            .find(|l| l.contains("Out"))
+            .unwrap_or_else(|| panic!("the card's last row is on screen at the max offset:\n{bottom}"));
+        assert!(
+            card_row.contains("W ") && card_row.contains("SW"),
+            "…sharing the row with its cardinal and diagonal, never split apart: {card_row:?}"
         );
     }
 }

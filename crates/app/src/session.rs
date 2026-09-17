@@ -10,15 +10,17 @@
 // zvm change made for this module: added Output::as_any_mut (+ BufferOutput/StdoutOutput impls) to allow mutable downcast to CaptureSink.
 
 use std::any::Any;
+use std::io::Write;
 
-use mapper::direction::parse_direction;
+use mapper::direction::{is_travel_to_command, parse_direction};
 use mapper::mapper::Mapper;
 use zvm::cpu::exec::{Machine, PictureEvent, SoundEvent, StepResult};
 use zvm::error::ZError;
 use zvm::io::{Output, TextAttrs};
-use zvm::location::{detect_location, Location, LocationMethod};
+use zvm::location::{detect_location_with, Location, LocationMethod, PlayerCandidates};
 use zvm::screen::ZColour;
-use zvm::ObjectSnapshot;
+
+use crate::engine::LocationInfo;
 
 use crate::state::ParaFmt;
 use zvm::memory::Memory;
@@ -92,11 +94,152 @@ pub struct CaptureSink {
     /// where it lands. The LAST erase of a turn wins: it is the one whose screen
     /// the player is left looking at.
     cleared_at: Option<usize>,
+    /// Where the Z-machine's output streams 2 and 4, and its input stream 1,
+    /// meet the disk (ZMSD §7.1.1, §7.1.2, §10.2). Empty until
+    /// [`crate::engine::Engine::set_stream_files`] names the game's directory.
+    streams: StreamFiles,
+}
+
+/// The three per-game files behind Z-machine output streams 2 and 4 and input
+/// stream 1 — lanthorn's answer to ZMSD §7.6.5, which lets an interpreter
+/// decline external files and asks it to support them where it can.
+///
+/// **Fixed names in the game's own directory**, `<game_dir>/script.txt` and
+/// `<game_dir>/commands.txt`, exactly as `default.aux` is placed and named
+/// (`aux_store::aux_path`). §7.6.1 describes an 8.3 filename the GAME supplies
+/// and §7.6.5's remarks assume an interpreter that asks the player for one;
+/// lanthorn asks for nothing — a story is opened from a library, its side data
+/// accumulates beside it, and the player never types a path.
+///
+/// **APPENDED, never truncated.** The file belongs to the GAME, not to the run:
+/// a transcript a player turns on across three sessions is one document, and a
+/// command record is a log. (zvm-cli's `--transcript`/`--record` truncate,
+/// because there the player names the path and means this run.) The handle is
+/// opened lazily at the first byte, so naming a directory creates nothing —
+/// a game that never scripts leaves no empty file behind.
+///
+/// This is NOT lanthorn's archive transcript (`transcript.json`), which is the
+/// HOST's record of the scrollback — styled runs, images, meta lines, the
+/// player's own commands — written for the app to restore a session from, nor
+/// the `transcript.txt` that `/export-transcript` writes out of it.
+/// `script.txt` is the Z-machine's stream 2: plain text, exactly what the story
+/// printed, readable by anything.
+#[derive(Default)]
+pub struct StreamFiles {
+    /// The game's directory; `None` until startup wires it.
+    dir: Option<std::path::PathBuf>,
+    /// Output stream 2's handle, opened at its first byte.
+    transcript: Option<std::fs::File>,
+    /// Output stream 4's handle, opened at its first record.
+    commands: Option<std::fs::File>,
+    /// Input stream 1's records, loaded from `commands.txt` the first time the
+    /// game selects the stream. `Some(empty)` means the file was read and is
+    /// exhausted — which is end of file, and returns the machine to the
+    /// keyboard; `None` means it has not been read yet.
+    replay: Option<std::collections::VecDeque<String>>,
+}
+
+impl StreamFiles {
+    /// `<game_dir>/script.txt` — Z-machine output stream 2.
+    ///
+    /// **Named for the SCRIPT verb, not `transcript.txt`, because that name is
+    /// already taken and taken destructively.** `/export-transcript` with no
+    /// argument writes `<game_dir>/transcript.txt` (`export::export_transcript`)
+    /// and TRUNCATES it: that file is lanthorn's own scrollback, meta lines and
+    /// all. This one is the story's stream 2, appended to as it plays. Two
+    /// documents, two names — one file would have each clobbering the other.
+    pub fn transcript_path(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join("script.txt")
+    }
+
+    /// `<game_dir>/commands.txt` — Z-machine output stream 4, and the file
+    /// input stream 1 reads back (ZMSD §10.2.1: one format for both).
+    pub fn commands_path(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join("commands.txt")
+    }
+
+    /// Open `path` for append, creating it and its directory. `None` on any I/O
+    /// error — a transcript that cannot be written must not take the game down.
+    fn open_append(path: &std::path::Path) -> Option<std::fs::File> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+    }
+
+    /// Append `bytes` to output stream 2's file, opening it on first use.
+    /// Flushed per write, because a transcript is most often wanted from a
+    /// session that ended badly.
+    fn write_transcript(&mut self, bytes: &[u8]) {
+        let Some(dir) = self.dir.as_deref() else { return };
+        if self.transcript.is_none() {
+            self.transcript = Self::open_append(&Self::transcript_path(dir));
+        }
+        if let Some(f) = self.transcript.as_mut() {
+            let _ = f.write_all(bytes);
+            let _ = f.flush();
+        }
+    }
+
+    /// Append one finished stream-4 record plus its line separator.
+    fn write_command(&mut self, line: &str) {
+        let Some(dir) = self.dir.as_deref() else { return };
+        if self.commands.is_none() {
+            self.commands = Self::open_append(&Self::commands_path(dir));
+        }
+        if let Some(f) = self.commands.as_mut() {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.write_all(b"\n");
+            let _ = f.flush();
+        }
+    }
+
+    /// The next record for input stream 1, reading `commands.txt` on first use
+    /// (ZMSD §10.2.3: "When input stream 1 is first selected, the interpreter
+    /// may use any method of choosing a file name for the file of commands.
+    /// Good practice is to use the same conventions as when choosing a filename
+    /// for output to stream 4." — which here means the same file).
+    fn next_command(&mut self) -> Option<String> {
+        if self.replay.is_none() {
+            let text = self
+                .dir
+                .as_deref()
+                .map(Self::commands_path)
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            let mut q: std::collections::VecDeque<String> = text
+                .split('\n')
+                .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+                .collect();
+            // A trailing newline yields one record nobody typed.
+            if q.back().is_some_and(String::is_empty) {
+                q.pop_back();
+            }
+            self.replay = Some(q);
+        }
+        self.replay.as_mut().and_then(std::collections::VecDeque::pop_front)
+    }
 }
 
 impl CaptureSink {
     fn new() -> Self {
-        CaptureSink { text: String::new(), runs: Vec::new(), buffering: true, cleared_at: None }
+        CaptureSink {
+            text: String::new(),
+            runs: Vec::new(),
+            buffering: true,
+            cleared_at: None,
+            streams: StreamFiles::default(),
+        }
+    }
+
+    /// Name the directory the stream files live in (see [`StreamFiles`]).
+    pub fn set_stream_dir(&mut self, dir: &std::path::Path) {
+        self.streams.dir = Some(dir.to_path_buf());
+    }
+
+    /// The transcript file this sink writes to, if it knows a directory.
+    pub fn transcript_path(&self) -> Option<std::path::PathBuf> {
+        self.streams.dir.as_deref().map(StreamFiles::transcript_path)
     }
 
     /// Drain accumulated text and style runs together, leaving both empty.
@@ -145,6 +288,22 @@ impl Output for CaptureSink {
     fn screen_cleared(&mut self) {
         self.cleared_at = Some(self.text.chars().count());
     }
+    /// Z-machine output stream 2 — the game's transcript, straight to
+    /// `<game_dir>/transcript.txt` (see [`StreamFiles`]). Not the app's own
+    /// scrollback: that is `self.text`, drained per turn into the styled
+    /// transcript the archive carries.
+    fn transcript(&mut self, text: &str) {
+        self.streams.write_transcript(text.as_bytes());
+    }
+    /// Z-machine output stream 4 — one finished command or keypress record
+    /// (ZMSD §7.1.2.3), already escaped by the engine.
+    fn command_record(&mut self, line: &str) {
+        self.streams.write_command(line);
+    }
+    /// Z-machine input stream 1 — the next recorded command (ZMSD §10.2).
+    fn next_command(&mut self) -> Option<String> {
+        self.streams.next_command()
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -184,38 +343,15 @@ pub(crate) fn clamp_runs(runs: Vec<CaptureRun>, char_len: usize) -> Vec<CaptureR
 /// (the element boundary itself is the break) and its style-chunk char is
 /// consumed in lockstep.
 /// The factor by which Infocom v6 artwork (320×200 MCGA) is scaled into the
-/// presentation UNIT space. Reference interpreters (Frotz DOS/Amiga, `bcpic.c`
-/// `scaler = 2`; SDL `m_v6scale = 2`) present v6 on a 640×400 screen and blit
-/// each 320×200 picture at 2×, returning the doubled dimensions to the game so
-/// its layout math lands on the 640-wide screen (SQ-0479). Both the screen
+/// presentation UNIT space. Grounded in real-game traces across the four v6
+/// titles (SQ-0479): a game's own layout math only lands correctly when its
+/// 320×200 pictures are doubled onto a 640×400 screen, and Frotz's DOS/Amiga
+/// ports and its SDL port agree — both present v6 on that same 640×400 screen
+/// at the same 2× factor. Both the screen
 /// seeding (2×Reso) and every picture crossing into unit space use this one
 /// factor, so screen and picture dimensions scale together — the `is_content_art`
 /// ratios (below) stay valid because both numerator and denominator double.
 pub(crate) const V6_ART_SCALE: u32 = 2;
-
-/// Scale a native-resolution v6 picture into UNIT space (×`scale`,
-/// nearest-neighbour — the DOS-authentic crisp pixel double). Every picture that
-/// crosses from PictSource's art-native pixels into the 640×400 unit screen goes
-/// through here exactly once, so window canvases, inline floats and the
-/// `is_content_art` classification all see one consistent unit-space size.
-///
-/// `scale` is the session's [`GameSession::art_scale`], PER AXIS: `(2, 2)` for
-/// art with a standard window to be scaled against, `(1, 1)` for non-scalable
-/// art, and `(1, 2)` for an EGA/CGA rendition whose pixels are half as wide
-/// (SQ-0790).
-fn v6_scaled_art(img: &image::DynamicImage, scale: (u32, u32)) -> image::DynamicImage {
-    use image::GenericImageView;
-    if scale == (1, 1) {
-        return img.clone();
-    }
-    let (w, h) = img.dimensions();
-    image::DynamicImage::ImageRgba8(image::imageops::resize(
-        img,
-        w * scale.0,
-        h * scale.1,
-        image::imageops::FilterType::Nearest,
-    ))
-}
 
 /// Classify a picture as CONTENT art versus decorative FRAME art (borders,
 /// tiles). (SQ-0461 decision 3)
@@ -493,7 +629,7 @@ pub struct TurnResult {
     /// chunks carry bits 0, default colours and default `para` when the turn emitted
     /// no styling (the Z-machine path never sets a non-default `para`).
     pub transcript_runs: Vec<CaptureRun>,
-    pub location: Option<ObjectSnapshot>,
+    pub location: Option<LocationInfo>,
     pub quit: bool,
     /// The game cleared the screen this turn — a Z-machine `erase_window`
     /// (lower / all, ZMSD §8.7.3) or a Glulx `glk_window_clear` on the primary
@@ -545,6 +681,16 @@ pub struct TurnResult {
     /// the SQ-0407 truncate, which would eat the session's history along with it.
     /// Always `None` for non-v6 Z-machine stories, Glulx and Scott.
     pub prose_retired: Option<usize>,
+    /// What the room the player was standing in BEFORE this turn declares for
+    /// the direction just typed (SQ-1257) — `None` when no direction was typed,
+    /// the pre-turn room was unknown, or the engine has no such table (see
+    /// [`crate::engine::Engine::declared_exit`]). Filled in by the turn driver
+    /// (`turn.rs`, which alone holds both the pre-move room and a live engine
+    /// handle), read by [`apply_turn`] to tell a real passage from one a
+    /// routine improvised on the spot. Every synthetic/seeded `TurnResult`
+    /// (tests, history replay, a host restore) leaves this `None`, which is
+    /// the correct "behave exactly as today" answer for all of them.
+    pub declared_exit: Option<crate::engine::DeclaredExit>,
 }
 
 impl TurnResult {
@@ -557,7 +703,7 @@ impl TurnResult {
     /// is the shape that let the BOOT's seed quietly claim `erase_lower: false`
     /// about a boot that had erased the screen (SQ-1106) — a hand-filled literal
     /// answers a question it was never asked.
-    pub fn observation(location: ObjectSnapshot) -> TurnResult {
+    pub fn observation(location: LocationInfo) -> TurnResult {
         TurnResult { location: Some(location), ..TurnResult::default() }
     }
 }
@@ -580,6 +726,16 @@ pub struct WindowFill {
     /// Zork Zero is the case that needs it — it erases its full-screen decorative
     /// window 7 to white during BOOT, before a word of the story has printed.
     pub out_chars: u64,
+}
+
+/// Whether [`GameSession::apply_canvas_paint`] is drawing a picture the story
+/// just issued, or replaying one from `zvm`'s paint log — the two differ only
+/// in which Current-Palette-establishing rule a [`zvm::paint_log::PaintOp::Draw`]
+/// resolves its picture through. See that function's docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaintMode {
+    Live,
+    Replay,
 }
 
 /// Where a window's picture canvas was painted, so a later `move_window` can be
@@ -663,6 +819,42 @@ pub struct GameSession {
     /// tallies every property of every object once, and the answer describes the
     /// compiler's layout, which no turn can change.
     parse_names: std::cell::OnceCell<Option<zvm::objects::ParseNames>>,
+    /// The story's avatar-candidate pools (SQ-1259 perf follow-up) — cached
+    /// beside [`parse_names`](Self::parse_names) for the identical reason:
+    /// both depend only on what is compiled into the story (short names and
+    /// [`parse_names`](Self::parse_names)'s own answer), so both are static
+    /// for the life of one story and built once. `current_location` and
+    /// `Introspect::player_object` sit on render call paths that run every
+    /// FRAME (`command_band.rs`, `transcript.rs`), not once a turn — see
+    /// [`zvm::location::PlayerCandidates`]'s doc comment for the measured
+    /// cost this cache removes.
+    player_candidates: std::cell::OnceCell<PlayerCandidates>,
+    /// The [`parse_names`](Self::parse_names) walk folded into the one set the
+    /// bulk callers query — "does ANY object answer to this word" (SQ-1176).
+    ///
+    /// A cache, not a `OnceCell`, because unlike its neighbours it holds LIVE
+    /// data: the words sit in dynamic memory and a game can rewrite them, so
+    /// the entry is dropped whenever the VM runs ([`drain_turn`] is the funnel
+    /// every VM-stepping path drains through, and `restore_state` swaps memory
+    /// without stepping). Within a turn the screen is fixed, so one build
+    /// serves every reveal press and the seen-words sweep alike.
+    ///
+    /// [`drain_turn`]: GameSession::drain_turn
+    object_word_set: std::cell::RefCell<Option<std::sync::Arc<grammar_model::ObjectWordSet>>>,
+    /// The built v6 [`ScreenModel`], memoized against everything its build reads
+    /// (SQ-1191) — see [`V6ModelKey`]. `screen_now` runs once per FRAME, and the
+    /// build deep-clones every window's runs, grids and prose; between turns
+    /// nothing on the screen moves, so a redraw (cursor blink, mouse move, map
+    /// pan) costs one key compare instead of a clone tree.
+    ///
+    /// Same shape and soundness argument as [`object_word_set`](Self::object_word_set)
+    /// above: live data behind a `RefCell`, dropped wherever its inputs are
+    /// swapped out from under the key — [`restore_screen`] installs a screen
+    /// whose fresh [`zvm::screen::ScreenState::v6_generation`] could collide
+    /// with a number the memo already holds, and `restore_state` /
+    /// `restore_game_save` swap memory without draining a turn. A `@restart`
+    /// needs no drop: zvm keeps the generation monotone across the reboot.
+    v6_model_memo: std::cell::RefCell<Option<(V6ModelKey, std::sync::Arc<ScreenModel>)>>,
     /// PC at which the disasm cache was last runtime-confirmed; the per-turn
     /// fold is skipped while the VM is parked at the same PC (nav/scroll calls).
     last_confirmed_pc: std::cell::Cell<Option<u32>>,
@@ -772,25 +964,17 @@ pub struct GameSession {
     /// `Machine::v6_win0_out_chars` at the last transcript drain — an event's
     /// offset within the current turn's text is `out_chars - this`.
     v6_win0_chars_seen: u64,
-    /// Ordered display list per window canvas: every picture drawn and every region
-    /// erased, in the order it happened.
+    /// Windows currently replayed from a PIXEL SNAPSHOT rather than from `zvm`'s
+    /// own [`zvm::paint_log::PaintLog`] (SQ-1403) — a window restored from a
+    /// pre-op-list archive, or from an archive whose save-time self-check found
+    /// that replaying its folded ops did not reproduce the live canvas
+    /// ([`Self::display_list`]). A window whose log simply hit
+    /// [`zvm::paint_log::PAINT_LOG_CAP`] is a SEPARATE case `zvm` itself tracks
+    /// ([`zvm::paint_log::PaintLog::is_capped`]) and is not recorded here.
     ///
-    /// This exists to make a palette change behave like real hardware. A v6 screen is
-    /// a framebuffer of palette INDICES, so loading a new palette recolours
-    /// everything already on it, in place, without disturbing what covers what.
-    /// lanthorn bakes RGBA at draw time, so the only faithful way to recolour is to
-    /// replay the window from scratch under the new palette — which needs the erases
-    /// as well as the draws, and needs them in order. (SQ-0567)
-    ///
-    /// Arthur is the story that needs it twice over: its frame is three adaptive
-    /// pictures drawn once at boot (so without a replay it keeps the churchyard's
-    /// palette all game), and its map screen draws a full-screen background OVER that
-    /// frame (so a replay that ignores order paints the frame back on top and hides
-    /// the map).
-    display_ops: std::collections::HashMap<u8, Vec<V6Op>>,
-    /// Windows whose display list overflowed [`V6_OPS_CAP`]. Replay is skipped for
-    /// them rather than replayed from a truncated list, which would invent a screen
-    /// that never existed. They keep the pre-SQ-0567 behaviour: stale palette, right
+    /// Replay is skipped for both kinds rather than replayed from an
+    /// incomplete/mismatching list, which would invent a screen that never
+    /// existed. They keep the pre-SQ-0567 behaviour: stale palette, right
     /// layering.
     unreplayable: std::collections::HashSet<u8>,
     /// The width (in columns) the story image now in memory was laid out for —
@@ -817,6 +1001,21 @@ pub struct GameSession {
     ///
     /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
     pub boot_screen_cols: u16,
+    /// The pre-loaded text (ZMSD §15 `read`, v5+ — TerpEtude option 12,
+    /// Beyond Zork's "AGAIN") `zvm` reported for the CURRENTLY pending line
+    /// read, empty when nothing is pre-loaded (the overwhelmingly common
+    /// case). Kept for the read's whole lifetime — NOT one-shot — so
+    /// [`Self::submit_line_with_terminator`] can strip it back off the
+    /// player's final text before handing the typed continuation to
+    /// [`zvm::cpu::exec::Machine::supply_line`], which prepends it again
+    /// itself. [`Self::take_line_seed`] is the one-shot door for a host that
+    /// only wants to know once per request.
+    line_preload: String,
+    /// Whether [`Self::line_preload`] has already been reported to the host
+    /// via [`Self::take_line_seed`] for the CURRENT pending read — a
+    /// `take`-like one-shot flag without discarding the value itself, since
+    /// [`Self::submit_line_with_terminator`] still needs it afterwards.
+    line_preload_seeded: bool,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -866,31 +1065,39 @@ impl GameSession {
     /// is the native pixel frame seeded from `v6_screen_px` above, never the host
     /// cell pane.
     ///
-    /// The art reaches that unit screen at the uniform [`V6_ART_SCALE`]. A
-    /// launch that resolved a native picture archive may know better — see
-    /// [`Self::new_with_art_scale`] — but every caller of *this* function gets
-    /// the rule exactly as it has always been.
+    /// The art reaches that unit screen at zvm's own uniform rule
+    /// ([`zvm::cpu::exec::BootConfig::DEFAULT_V6_ART_SCALE`]). A launch that
+    /// resolved a native picture archive may know better — see
+    /// [`Self::new_for_machine`] — but every caller of *this* function gets the
+    /// rule exactly as it has always been.
+    ///
+    /// **Colours resolve through §8.3.1's own table** (`Palette::Standard`) and
+    /// header `$1F` keeps zvm's default, because this is the no-machine door and
+    /// neither fact has a machine to come from (SQ-1393). A caller that DOES know
+    /// its machine goes through [`Self::new_for_machine`], where the palette is one
+    /// of the `MachineBoot` facts and is in force before the boot run.
     pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>) -> Result<GameSession, ZError> {
-        Self::new_with_art_scale(story, honor_game_colours, sound_available, interpreter_number, trace_from_boot, picture_dims, v6_screen_px, None, default_colours, host_screen, None, None)
+        // The no-machine door builds zvm's recipe directly rather than through
+        // `MachineBoot::boot_config`: there is no medium here to answer for a
+        // palette, an art scale or a `$1F`, so every one of those keeps zvm's own
+        // default by simply not being stated.
+        let mut config = zvm::cpu::exec::BootConfig::new()
+            .with_honor_game_colours(honor_game_colours)
+            .with_sound_available(sound_available)
+            .with_interpreter_number(interpreter_number)
+            .with_picture_dims(picture_dims);
+        if let Some(px) = v6_screen_px {
+            config = config.with_v6_screen_px(px);
+        }
+        if let Some((bg, fg)) = default_colours {
+            config = config.with_default_colours(bg, fg);
+        }
+        if let Some((r, c)) = host_screen {
+            config = config.with_screen_grid(r.clamp(1, 255) as u8, c.clamp(1, 255) as u8);
+        }
+        Self::from_boot_config(story, config, trace_from_boot)
     }
 
-    /// [`Self::new_with_trace`] with the art scale supplied rather than assumed
-    /// (SQ-0790).
-    ///
-    /// `v6_art_scale` is [`crate::graphics::PictSource::art_scale`]: the per-axis
-    /// factor the art is blown up by on its way onto the 640×400 unit screen,
-    /// when the source has an opinion. `None` — every Blorb-sourced story, and
-    /// every non-v6 one — keeps the uniform [`V6_ART_SCALE`] rule. Only a NATIVE
-    /// archive answers, and only an EGA/CGA one answers with anything other than
-    /// `(2, 2)`, so the two entry points are the same function for the whole
-    /// corpus.
-    ///
-    /// `random_seed` is the value the story's `random` opcode starts from
-    /// (SQ-0811). It is applied here, before the boot run below, because a game's
-    /// initialisation routine may already draw from the generator — seeding after
-    /// the first prompt is one turn too late to change the game the player is
-    /// handed. `None` — every caller but the launcher — leaves zvm's own fixed
-    /// default, so a test's sequence stays the reproducible one it has always been.
     /// Boot a story on a machine, told what that machine is in ONE argument
     /// (SQ-1022).
     ///
@@ -901,10 +1108,15 @@ impl GameSession {
     /// the failure is always the same shape, a screen that is entirely
     /// self-consistent and that the player never sees (SQ-0901, SQ-1020, SQ-1021).
     ///
-    /// Prefer this over [`Self::new_with_art_scale`] anywhere a medium is
-    /// involved. `new_with_trace` remains right for a bare story with no machine
-    /// behind it — and [`crate::machine_boot::MachineBoot::bare`] says so
-    /// explicitly where a caller wants to be plain about it.
+    /// Prefer this anywhere a medium is involved. `new_with_trace` remains right
+    /// for a bare story with no machine behind it — and
+    /// [`crate::machine_boot::MachineBoot::bare`] says so explicitly where a
+    /// caller wants to be plain about it.
+    ///
+    /// `random_seed` is the value the story's `random` opcode starts from
+    /// (SQ-0811); `None` — every caller but the launcher — leaves zvm's own fixed
+    /// default, so a test's sequence stays the reproducible one it has always
+    /// been.
     pub fn new_for_machine(
         story: Vec<u8>,
         honor_game_colours: bool,
@@ -915,23 +1127,15 @@ impl GameSession {
         random_seed: Option<u32>,
         boot: &crate::machine_boot::MachineBoot,
     ) -> Result<GameSession, ZError> {
-        let mut s = Self::new_with_art_scale(
+        let mut s = Self::from_boot_config(
             story,
-            honor_game_colours,
-            sound_available,
-            boot.interpreter_number,
+            boot.boot_config(honor_game_colours, sound_available, picture_dims, host_screen, random_seed),
             trace_from_boot,
-            picture_dims,
-            boot.screen_px,
-            boot.art_scale,
-            boot.default_colours,
-            host_screen,
-            random_seed,
-            Some(boot.text_face()),
         )?;
-        // SQ-1071. Set here rather than threaded through the private constructor
-        // above, whose positional machine facts are the shape SQ-1021 closed the
-        // door on. `new_with_trace` — the honest no-machine door — leaves zvm's
+        // SQ-1071, and set AFTER the boot run rather than inside `BootConfig`:
+        // this is the wrap regime a story's TEXT is laid out under, and moving it
+        // ahead of the boot run would change what a game's own initialisation
+        // printing does. `new_with_trace` — the honest no-machine door — leaves zvm's
         // own default, §8.8.3.1.1 as written, which is what a story file with no
         // medium to name a machine should get.
         s.machine.v6_wrap_regime = boot.wrap_regime;
@@ -946,8 +1150,8 @@ impl GameSession {
         // `ScreenState` for `@restart`, and `session::restore_screen` assigns a
         // whole one over the live machine for a host Save State. A licence held
         // there would be silently reset to `ScreenState::default()`'s by BOTH —
-        // `restore_screen`'s own `..Default::default()` in `archive::ScreenDto` is
-        // exactly that hole. On the `Machine` all three survivals are free: an
+        // `zvm::screen_snapshot::decode`'s own `..Default::default()` is exactly
+        // that hole. On the `Machine` all three survivals are free: an
         // `@restart` re-boots through `reset.rs`'s `MachineBoot::resolve` (which the
         // compiler forces to re-ask), a Quetzal `@restore` touches memory and not
         // screen state, and a host Save State keeps the licence THIS run was
@@ -957,130 +1161,48 @@ impl GameSession {
         Ok(s)
     }
 
-    /// **Private since SQ-1021.** Every machine fact as a separate positional
-    /// argument is the shape this codebase kept getting wrong — four callers
-    /// omitted one, including `reset.rs` in production — so the only reachable
-    /// doors are [`Self::new_for_machine`], which takes them as one value, and
-    /// [`Self::new_with_trace`], which is the honest no-machine case. This is a
-    /// compile error rather than a convention, which is the point.
-    fn new_with_art_scale(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, v6_art_scale: Option<(u32, u32)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>, random_seed: Option<u32>, v6_text: Option<crate::native_font::TextFace>) -> Result<GameSession, ZError> {
+    /// **Private since SQ-1021, and one argument since SQ-1396.** Every machine
+    /// fact as a separate positional argument is the shape this codebase kept
+    /// getting wrong — four callers omitted one, including `reset.rs` in
+    /// production — so the only reachable doors are [`Self::new_for_machine`],
+    /// which takes them as one value, and [`Self::new_with_trace`], which is the
+    /// honest no-machine case. This is a compile error rather than a convention,
+    /// which is the point.
+    ///
+    /// What used to be fourteen positional facts here is now
+    /// [`zvm::cpu::exec::BootConfig`], and the ORDER they are applied in — which
+    /// setter writes the header at once, which is latched to `init_caps`, which
+    /// merely has to precede the boot run, and why the screen must come last —
+    /// went with them, into the crate that knows the Z-machine (SQ-1396). It is
+    /// stated in `BootConfig`'s own module documentation now, where an embedder
+    /// who has never heard of lanthorn will find it.
+    ///
+    /// `trace_from_boot` stays a parameter because it is not a boot fact: it is a
+    /// lanthorn debugging switch that has to be flipped between the machine being
+    /// built and the boot run this function performs.
+    fn from_boot_config(
+        story: Vec<u8>,
+        config: zvm::cpu::exec::BootConfig,
+        trace_from_boot: bool,
+    ) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
-        let sink = Box::new(CaptureSink::new());
-        let mut machine = Machine::with_output(mem, sink);
-        machine.set_honor_game_colours(honor_game_colours);
-        machine.set_sound_available(sound_available);
-        if let Some(seed) = random_seed {
-            machine.set_rng_seed(seed);
-        }
-        if let Some((bg, fg)) = default_colours {
-            machine.set_default_colours(bg, fg);
-        }
-        // SQ-0917: the machine's Version 6 cell, BEFORE the screen is sized and
-        // before the boot run — the story reads `$26`/`$27` and lays its windows
-        // out from them, so a cell that arrives later is one the game has already
-        // disagreed with. `None` keeps zvm's 8x16 default, which is every profile
-        // but the Macintosh.
-        //
-        // SQ-1009: the PEN travels with it, because on a machine that drew
-        // proportionally the two are one fact — see
-        // [`crate::native_font::TextFace::metric`]. The engine and the renderer
-        // then measure through the same table rather than through two copies of
-        // one rule.
-        if machine.mem.version() == 6 {
-            if let Some(text) = v6_text.as_ref() {
-                machine.set_v6_text(text.metric().clone());
-            }
-        }
-        // v6 (SQ-0479): the game lays out on the 640×400 UNIT screen, so
-        // `picture_data` must report the doubled (unit-space) picture sizes —
-        // Frotz's Amiga/DOS interpreter returns `scaler * size` for every pic.
-        // PictSource keeps the raw art-native dims; only the game-facing table
-        // is scaled here (one crossing into unit space).
-        //
-        // …but ONLY for art that declares a standard window to be scaled against
-        // (SQ-0715). Blorb §11: a resource file with no `Reso` chunk has no
-        // scalable images at all, and non-scalable images are shown at their
-        // actual size, one image pixel per screen pixel. `v6_screen_px` IS that
-        // chunk's standard window, so its absence is the spec's own signal.
-        //
-        // SQ-0790: per axis, because an EGA/CGA archive's pixels are half as
-        // wide. The source supplies the pair when it knows one; absent that the
-        // uniform rule stands, which is every path that existed before.
-        let art_scale = if machine.mem.version() == 6 && v6_screen_px.is_some() {
-            v6_art_scale.unwrap_or((V6_ART_SCALE, V6_ART_SCALE))
-        } else {
-            (1, 1)
-        };
-        let picture_dims = if machine.mem.version() == 6 {
-            picture_dims
-                .into_iter()
-                .map(|(n, w, h)| (n, w * art_scale.0 as u16, h * art_scale.1 as u16))
-                .collect()
-        } else {
-            picture_dims
-        };
-        machine.set_picture_dims(picture_dims);
-        machine.set_interpreter_number(interpreter_number);
-        machine.init_caps();
-        // v6 (SQ-0479): present the reference-authentic UNIT screen — the Blorb
-        // `Reso` standard window (the ART resolution, default 320×200) at the
-        // scale the machine drew it, which for the whole corpus but one is the
-        // ×2 of Frotz's Amiga/DOS profile (640×400, 8×16 cell → 80×25). The
-        // screen and the picture dims (above) scale together, so the game's
-        // window/art layout math and our `is_content_art` ratios stay
-        // consistent. init_caps seeded the v1–5 default; this overrides it for
-        // v6 only, before the game can read it.
-        if machine.mem.version() == 6 {
-            let (art_w, art_h) = v6_screen_px.unwrap_or((320, 200));
-            // SQ-0838: the screen is the art's picture space AT THE SCALE THIS
-            // MACHINE DREW IT, which is one statement covering what used to be
-            // a fixed doubling. For every rendition that existed before it is
-            // the same arithmetic by another name — 320×200 at (2,2) and EGA's
-            // 640×200 at (1,2) are both 640×400 — and the difference it buys is
-            // the standard Macintosh, whose monochrome plate is drawn for a
-            // 480×300 screen and displayed 1:1 (`mac/gfx.p`). Doubling that one
-            // anyway would put a 960×600 screen behind a 480×300 plate.
-            //
-            // Absent a declared window there is no picture space to scale, so
-            // the uniform rule stands and the screen is the 640×400 it always
-            // was — the Blorb-less v6 stories (scopa, mysterious01) reach this.
-            let screen_scale = match (v6_screen_px, v6_art_scale) {
-                (Some(_), Some(s)) => s,
-                _ => (V6_ART_SCALE, V6_ART_SCALE),
-            };
-            let w = art_w.saturating_mul(screen_scale.0.max(1) as u16);
-            let h = art_h.saturating_mul(screen_scale.1.max(1) as u16);
-            // SQ-0917: hand the machine the PIXELS, and let it derive the grid.
-            //
-            // This used to round the screen to the nearest whole CELL and declare
-            // that instead, which was a workaround for the round trip on the other
-            // side: `set_screen_dims` took a grid and multiplied it back into
-            // `$22`/`$24`, so anything the cell did not divide was lost, and
-            // rounding down would have told Zork Zero its 300-pixel Macintosh plate
-            // sat on a 288-pixel screen. `set_v6_screen_px` carries the pixels
-            // verbatim, so there is nothing to round and nothing to compensate for
-            // — the screen IS the archive's, and the character grid is a quotient
-            // of it exactly as `mac/xzip.lst` computes `totRows`/`totCols`.
-            //
-            // The rounding had to go rather than stay harmlessly: at the
-            // Macintosh's 7-wide cell it turned 640 into 637 and 480 into 483.
-            machine.set_v6_screen_px(w, h);
-        } else if let Some((r, c)) = host_screen {
-            // SQ-0680: seed the REAL host pane before boot, so a v4/v5 status
-            // routine that lays itself out once at boot (Zork 1) bakes in field
-            // columns that are already correct for this pane, rather than the
-            // zvm 80×24 fallback `init_caps` just seeded a few lines above.
-            machine.set_screen_dims(r.clamp(1, 255) as u8, c.clamp(1, 255) as u8);
-        }
-        // SQ-0680: the width actually declared to the story at boot — the
-        // seeded pane column count, or the zvm fallback `init_caps` used absent
-        // a seed. `declared_story_screen_dims`'s floor reads this back so it
-        // never re-widens a correctly-seeded narrow boot to the old hardcoded
-        // default.
-        let boot_screen_cols = host_screen
-            .filter(|_| machine.mem.version() != 6)
-            .map(|(_, c)| c.clamp(1, 255))
+        // Both read BEFORE the config is handed over, because it is consumed by
+        // the boot. `resolved_art_scale` is the same number `BootConfig` scaled
+        // the picture table by, asked for rather than recomputed — the renderer
+        // composites in that space (SQ-0479, SQ-0715, SQ-0790).
+        let art_scale = config.resolved_art_scale(mem.version());
+        // SQ-0680: the width actually declared to the story at boot — the seeded
+        // pane column count, or the zvm fallback `init_caps` used absent a seed.
+        // `declared_story_screen_dims`'s floor reads this back so it never
+        // re-widens a correctly-seeded narrow boot to the old hardcoded default.
+        // A v6 story is never told a grid, so it always takes the fallback.
+        let boot_screen_cols = config
+            .screen_grid()
+            .filter(|_| mem.version() != 6)
+            .map(|(_, c)| c as u16)
             .unwrap_or(zvm::screen::DEFAULT_SCREEN_COLS as u16);
+        let sink = Box::new(CaptureSink::new());
+        let mut machine = Machine::boot(mem, sink, config);
         // Trace from the very first instruction when requested, so the opening
         // run below records boot PCs into `ever_exec_pcs`. Also capture screen
         // opcodes from boot — a v6 game does its whole window/margin/picture
@@ -1088,13 +1210,16 @@ impl GameSession {
         machine.trace_exec = trace_from_boot;
         machine.trace_screen = trace_from_boot;
 
-        let (pending, quit) = run_settled(&mut machine);
+        let (pending, quit, line_preload) = run_settled(&mut machine);
 
         Ok(GameSession {
             machine, quit, pending, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -1105,9 +1230,10 @@ impl GameSession {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols,
+            line_preload,
+            line_preload_seeded: false,
         })
     }
 
@@ -1223,33 +1349,36 @@ impl GameSession {
     /// Windows are emitted in paint order (ascending `z_seq`), matching
     /// [`pictures_png`](Self::pictures_png) so relative z-order survives either path.
     pub fn display_list(&mut self) -> (crate::archive::DisplayListDto, Vec<u8>, Vec<String>) {
-        let mut keys: Vec<u8> = self.pictures_canvas.keys().copied().collect();
-        keys.sort_by_key(|k| (self.pictures_canvas[k].z_seq, *k));
-
         let palette = self.pict_source.as_ref().and_then(|s| s.current_palette().map(<[u8]>::to_vec));
-        let mut windows = Vec::new();
         let mut fallback = Vec::new();
         let mut diags = Vec::new();
 
+        let mut keys: Vec<u8> = self.pictures_canvas.keys().copied().collect();
+        keys.sort_by_key(|k| (self.pictures_canvas[k].z_seq, *k));
+        // ONE global replay (SQ-1403: `zvm`'s log has no per-window shape to
+        // check independently — a cross-window mirror only comes out right
+        // when every window's entries replay together, in true issue order),
+        // scratch — [`Self::replay_paint_log_scratch`] restores the live state
+        // before returning, so nothing here has touched it.
+        let (replayed, _anchor) = self.replay_paint_log_scratch();
+
         for win in keys {
-            let (cw, ch) = {
-                let c = &self.pictures_canvas[&win];
-                (c.img.width(), c.img.height())
-            };
-            if self.unreplayable.contains(&win) {
+            let capped = self.machine.paint_log().is_capped(win);
+            if self.unreplayable.contains(&win) || capped {
                 fallback.push(win);
                 // The two ways a window becomes unreplayable have the same
                 // consequence and completely different fixes, and they are already
                 // distinguishable: an overflow leaves a FULL list behind, while a
                 // window restored from pixels has none at all.
-                let n = self.display_ops.get(&win).map_or(0, Vec::len);
-                diags.push(if n >= V6_OPS_CAP {
+                diags.push(if capped {
                     format!(
-                        "v6 window {win}: display list hit the {V6_OPS_CAP}-op cap, so it cannot be \
+                        "v6 window {win}: display list hit the {}-op cap, so it cannot be \
                          replayed — storing its canvas as a PNG. Its colours will not follow a later \
-                         palette change. If a real game reaches this, the cap is too low."
+                         palette change. If a real game reaches this, the cap is too low.",
+                        zvm::paint_log::PAINT_LOG_CAP
                     )
                 } else {
+                    let n = self.machine.paint_log().ops(win).len();
                     format!(
                         "v6 window {win}: restored from pixels, so it has no draw history to replay \
                          ({n} op(s) recorded) — storing its canvas as a PNG. Expected for a save \
@@ -1258,22 +1387,29 @@ impl GameSession {
                 });
                 continue;
             }
-            let ops = self.display_ops.get(&win).cloned().unwrap_or_default();
-            let rebuilt = self.replay_into_scratch(&ops, cw, ch);
-            if *rebuilt.img == *self.pictures_canvas[&win].img {
-                windows.push(crate::archive::V6WindowOpsDto { win, w: cw, h: ch, ops });
-            } else {
+            let matches = replayed.get(&win).is_some_and(|r| *r.img == *self.pictures_canvas[&win].img);
+            if !matches {
                 fallback.push(win);
+                let n = self.machine.paint_log().ops(win).len();
                 diags.push(format!(
-                    "v6 window {win}: replaying its {} recorded op(s) does not reproduce the live \
+                    "v6 window {win}: replaying its {n} recorded op(s) does not reproduce the live \
                      canvas — storing a PNG for it, and its colours will not follow a later palette \
-                     change. A draw path that is not being recorded.",
-                    ops.len()
+                     change. A draw path that is not being recorded."
                 ));
             }
         }
         let layers = self.v6_screen_layers();
-        (crate::archive::DisplayListDto { palette, windows, layers }, fallback, diags)
+        // The log itself travels as one blob (`display.bin`, SQ-1403) regardless of
+        // which windows the self-check above demoted to a PNG fallback — a window
+        // in `fallback` is simply skipped when the log is replayed back on restore
+        // ([`Self::load_display_list`]), so an entry the self-check distrusts for
+        // ONE window costs nothing for the others.
+        let dto = crate::archive::DisplayListDto {
+            palette,
+            layers,
+            paint_log_bytes: zvm::paint_log::encode(self.machine.paint_log()),
+        };
+        (dto, fallback, diags)
     }
 
     /// The v6 screen layers that ride BESIDE the window canvases (SQ-0814), as the
@@ -1370,7 +1506,7 @@ impl GameSession {
     }
 
     /// The longest display list any v6 window is currently holding, and how many
-    /// windows have hit [`V6_OPS_CAP`].
+    /// windows have hit [`zvm::paint_log::PAINT_LOG_CAP`].
     ///
     /// Exists to answer "is the cap big enough?" with a measurement instead of a
     /// guess. The number that matters is not the peak but whether it GROWS with play:
@@ -1379,8 +1515,9 @@ impl GameSession {
     /// would overflow eventually and the cap would just be a bigger number before the
     /// same failure.
     pub fn display_ops_extent(&self) -> (usize, usize) {
-        let longest = self.display_ops.values().map(Vec::len).max().unwrap_or(0);
-        let at_cap = self.display_ops.values().filter(|v| v.len() >= V6_OPS_CAP).count();
+        let log = self.machine.paint_log();
+        let longest = (0u8..8).map(|w| log.ops(w).len()).max().unwrap_or(0);
+        let at_cap = (0u8..8).filter(|&w| log.is_capped(w)).count();
         (longest, at_cap)
     }
 
@@ -1390,61 +1527,54 @@ impl GameSession {
         self.pictures_png().into_iter().filter(|(w, _)| wins.contains(w)).collect()
     }
 
-    /// Replay `ops` into a fresh `w × h` canvas under the CURRENT palette, without
-    /// touching any live canvas — the save-time self-check's scratch surface, and
-    /// the restore path's canvas builder. Mirrors
-    /// [`replay_under_current_palette`](Self::replay_under_current_palette) op for op;
-    /// any divergence between the two would make the self-check meaningless.
-    fn replay_into_scratch(&mut self, ops: &[V6Op], w: u32, h: u32) -> crate::graphics::Canvas {
-        let mut canvas = crate::graphics::Canvas::new(w, h);
-        canvas.erase_rect(0, 0, w, h);
-        for op in ops {
-            match *op {
-                V6Op::Erase { dx, dy, w: ew, h: eh } => canvas.erase_rect(dx, dy, ew, eh),
-                V6Op::Draw { number, dx, dy } => {
-                    let Some(img) = self
-                        .pict_source
-                        .as_mut()
-                        .and_then(|s| s.image_under_current_palette(number as u32))
-                    else {
-                        continue;
-                    };
-                    let img = v6_scaled_art(&img, self.art_scale);
-                    canvas.draw_image_clipped(&img, dx, dy, (w, h));
-                }
-            }
-        }
-        canvas
-    }
-
     /// Rebuild the v6 screen from a restored display list (SQ-0588) — the counterpart
     /// of [`display_list`](Self::display_list), and the reason a restored window can be
     /// recoloured at all.
     ///
     /// The Current Palette is reinstated FIRST (Blorb §11.3: an adaptive picture has no
-    /// palette of its own and decodes through whichever one is live), then each window's
-    /// canvas is rebuilt by replaying its ops. Those windows keep their display lists, so
-    /// the next palette change replays them again — which is exactly what a window
+    /// palette of its own and decodes through whichever one is live), then `zvm`'s own
+    /// paint log is reinstated, then EVERY window is replayed from it in one global,
+    /// true-issue-order walk ([`Self::replay_paint_log_scratch`]) — the same walk a live
+    /// mid-session palette change runs. Those windows keep their paint log, so the
+    /// next palette change replays them again — which is exactly what a window
     /// restored from a PNG cannot do.
     ///
-    /// `pngs` covers the windows the list does not: the save-time self-check's fallbacks,
-    /// and every window of a pre-SQ-0588 archive. They load as pixels and are marked
-    /// `unreplayable`, i.e. today's behaviour, unchanged.
+    /// `pngs` covers the windows the log does not: the save-time self-check's fallbacks,
+    /// and every window of a pre-SQ-1403 archive. They load as pixels and are marked
+    /// `unreplayable`, i.e. today's behaviour, unchanged. The walk still processes their
+    /// entries (a window with no draws of its own can still have been the SOURCE of a
+    /// cross-window erase into one of the trusted windows), it just does not COMMIT
+    /// their own resulting canvas over the PNG pixels already loaded for them.
     pub fn load_display_list(&mut self, dto: &crate::archive::DisplayListDto, pngs: &[(u8, Vec<u8>)]) {
+        // The paint log is the RECIPE (SQ-1403) — reinstate it before anything below
+        // reads it. Absent bytes (an older archive format) or an unreadable buffer
+        // both reset it to empty, exactly as `restore_screen_snapshot` resets the
+        // screen: what cannot be trusted is treated as nothing rather than as
+        // whatever the pre-restore session happened to leave standing.
+        let _ = self.machine.restore_paint_log(&dto.paint_log_bytes);
         // Pixels first, so a window present in BOTH (which should not happen, but an
         // archive is an external input) ends up rebuilt from ops rather than pixels.
         self.load_pictures_png(pngs);
         if let Some(src) = self.pict_source.as_mut() {
             src.set_current_palette(dto.palette.clone());
         }
-        for w in &dto.windows {
-            let ops = w.ops.clone();
-            let mut canvas = self.replay_into_scratch(&ops, w.w, w.h);
-            canvas.version = canvas.version.wrapping_add(1);
-            canvas.z_seq = crate::graphics::next_draw_seq();
-            self.pictures_canvas.insert(w.win, canvas);
-            self.display_ops.insert(w.win, ops);
-            self.unreplayable.remove(&w.win);
+        let png_wins: std::collections::HashSet<u8> = pngs.iter().map(|(w, _)| *w).collect();
+        let (canvas, anchor) = self.replay_paint_log_scratch();
+        for (win, mut c) in canvas {
+            if png_wins.contains(&win) {
+                continue; // present in both — an archive is an external input; pixels already won
+            }
+            c.version = c.version.wrapping_add(1);
+            c.z_seq = crate::graphics::next_draw_seq();
+            self.pictures_canvas.insert(win, c);
+            self.unreplayable.remove(&win);
+            // Recomputed live-fashion by the SAME walk that just built the canvas;
+            // `Self::load_v6_screen_layers` (called separately, right after this)
+            // overwrites it from the archive anyway, but a caller that reaches this
+            // alone still gets an anchor consistent with the canvas it just got.
+            if let Some(a) = anchor.get(&win) {
+                self.canvas_anchor.insert(win, *a);
+            }
         }
     }
 
@@ -1476,13 +1606,18 @@ impl GameSession {
         //
         // Without this, the first palette change after a restore ERASES the restored
         // art. `replay_under_current_palette` clears each window's canvas and rebuilds
-        // it from the display list — and a restored window's list is empty, or worse
+        // it from the paint log — and a restored window's log is empty, or worse
         // holds only the Erase ops that `erase_screen_rect` records when a LATER
         // window is erased over it. Arthur shows the cost: one move after a restore
         // recolours the palette, its full-screen border window replays a list of pure
         // erases, and the surrounding art vanishes while the room picture — redrawn by
         // the game that same turn — stays. (SQ-0587)
-        self.display_ops.clear();
+        //
+        // The paint log itself is NOT reset here (SQ-1403): a caller with one to
+        // reinstate ([`Self::load_display_list`]) has already done so before this
+        // runs, and a caller with none at all ([`crate::engine_helpers::apply_v6_pictures`]'s
+        // no-display-list branch) resets it itself — this function has no way to
+        // tell those two apart from `blobs` alone.
         self.unreplayable.clear();
         for (win, _) in blobs {
             self.unreplayable.insert(*win);
@@ -1526,22 +1661,50 @@ impl GameSession {
         self.pending
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "t-session"))]
     fn interpreter_number_for_test(&self) -> u8 {
         self.machine.mem.read_byte(0x1E)
     }
 
     /// Supply a player command, step until the next input request or Quit,
     /// and return the turn result.
+    ///
+    /// A LINE must never reach a keypress read (SQ-1270, documented on
+    /// [`crate::engine::Engine::submit`]): when the VM is waiting for
+    /// `read_char`, `command` is delivered as a single keypress — its first
+    /// character, or Enter (13) for an empty line — via [`Self::submit_char`],
+    /// exactly as the app's own keypress path would. zvm's `supply_line`
+    /// already turns a line-at-a-char-prompt into a no-op that answers with
+    /// the terminator alone and discards the text (SQ-1266); routing here
+    /// goes one step further and preserves the player's intent instead of
+    /// silently dropping it.
     pub fn submit(&mut self, command: &str) -> TurnResult {
+        if self.pending_input() == InputKind::Char {
+            let zscii = match command.chars().next() {
+                Some(c) if c.is_ascii() => c as u8,
+                _ => 13, // empty line, or a lead char with no ZSCII code: behave like Enter
+            };
+            return self.submit_char(zscii);
+        }
         self.submit_line_with_terminator(command, 13)
     }
 
     /// Supply a player command terminated by an explicit ZSCII terminator (v5+
     /// terminating-characters table), step until the next input request or Quit,
     /// and return the turn result. `submit` is this with terminator 13 (Enter).
+    ///
+    /// `command` is the FULL text at the prompt, pre-load included — the
+    /// natural shape once [`Self::take_line_seed`] has seeded the input line
+    /// with it (SQ-1419): the player sees it already there and either leaves
+    /// it, or types more after it. [`zvm::cpu::exec::Machine::supply_line`]
+    /// re-prepends whatever pre-load is still pending on its own, so the
+    /// known prefix is stripped back off here first — passing the untouched
+    /// `command` through unchanged would double it.
     pub fn submit_line_with_terminator(&mut self, command: &str, terminator: u8) -> TurnResult {
-        self.machine.supply_line(command, terminator);
+        let typed = command.strip_prefix(self.line_preload.as_str()).unwrap_or(command);
+        self.machine.supply_line(typed, terminator);
+        self.line_preload.clear();
+        self.line_preload_seeded = false;
         self.advance_after_input(false)
     }
 
@@ -1553,9 +1716,16 @@ impl GameSession {
 
     /// Supply a single keypress, step until the next input request or Quit,
     /// and return the turn result.
+    ///
+    /// `ch` not being a legal ZSCII input code (ZMSD §3.8) drops the
+    /// keystroke — matching `zvm::cpu::exec::Machine::supply_char`'s own
+    /// former runtime-checked behaviour, now enforced by
+    /// [`zvm::text::input::ZsciiInput`] at this boundary instead.
     pub fn submit_char(&mut self, ch: u8) -> TurnResult {
         self.arm_line_continuation();
-        self.machine.supply_char(ch);
+        if let Some(zscii) = zvm::text::input::ZsciiInput::new(ch) {
+            self.machine.supply_char(zscii);
+        }
         self.advance_after_input(false)
     }
 
@@ -1572,7 +1742,7 @@ impl GameSession {
     /// (§7.1.1.1), so a command turn's reply always opens a line.
     fn arm_line_continuation(&mut self) {
         let idx = self.machine.screen.v6_input_window as usize;
-        self.pen_before_char = self.machine.screen.v6.as_mut().and_then(|v6| {
+        self.pen_before_char = self.machine.screen.v6_mut().and_then(|v6| {
             let w = v6.windows.get_mut(idx)?;
             w.clear_stream_origin();
             Some(w.pen())
@@ -1675,13 +1845,34 @@ impl GameSession {
     fn finish_turn(&mut self, stop: RunStop) -> TurnResult {
         let (quit, pending, pending_io) = match stop {
             RunStop::Quit => (true, InputKind::Line, None),
-            RunStop::Input(k) => (false, k, None),
+            RunStop::Input(k, preload) => {
+                // A fresh read landed — restate the pre-load in force for it
+                // (empty for the common case), and re-arm the one-shot
+                // display seed so the host reports it again.
+                self.line_preload = preload;
+                self.line_preload_seeded = false;
+                (false, k, None)
+            }
             RunStop::SavePending => (false, self.pending, Some(PendingIo::Save)),
             RunStop::RestorePending => (false, self.pending, Some(PendingIo::Restore)),
         };
         self.quit = quit;
         self.pending = pending;
         self.drain_turn(quit, pending_io, false)
+    }
+
+    /// What the app's input line should hold for the newest line-input
+    /// request with a pre-loaded prefix (ZMSD §15 `read`, v5+ — TerpEtude
+    /// option 12, Beyond Zork's "AGAIN"), if one has appeared since the last
+    /// call. One-shot per request: re-polling never re-inserts it, so the
+    /// player's own typing on top of it is never clobbered on the next tick.
+    /// `None` both when nothing is pre-loaded and once already reported.
+    pub fn take_line_seed(&mut self) -> Option<String> {
+        if self.line_preload.is_empty() || self.line_preload_seeded {
+            return None;
+        }
+        self.line_preload_seeded = true;
+        Some(self.line_preload.clone())
     }
 
     /// Step the VM to the next input request (or Quit) and build the
@@ -1714,6 +1905,13 @@ impl GameSession {
         pending_io: Option<PendingIo>,
         timed_out: bool,
     ) -> TurnResult {
+        // The VM ran, so dynamic memory may have changed under the cached
+        // object-word set — a game CAN rewrite an object's parse-name property
+        // mid-play, and a stale set would keep answering for the old words.
+        // Every VM-stepping path drains through here (submit, timed interrupts,
+        // the game's own @restore/@restart), so this is the per-turn
+        // invalidation the cache's soundness rests on (SQ-1176).
+        self.object_word_set.take();
         // A mid-turn @restart re-booted the VM: drop the app-side v6 chrome the
         // VM's own screen reset cannot reach — the rasterized picture-canvas
         // cache and the window-0 char counters — so the reboot's fresh boot art
@@ -1722,19 +1920,16 @@ impl GameSession {
         if std::mem::take(&mut self.machine.just_restarted) {
             self.pictures_canvas.clear();
             self.story_pics.clear();
-            // The display list is the RECIPE for `pictures_canvas` — dropping the
-            // canvas and keeping the ops leaves a save/replay that cannot be
-            // recomputed from its inputs. Concretely (SQ-0658): the reboot's first
-            // draw into a window re-creates its canvas and APPENDS to the ops the
-            // pre-restart session left there, so the next palette change replays
-            // the old game's art onto the new one's screen; and a window marked
-            // `unreplayable` before the restart stays excluded from replay for the
-            // rest of the session even though its canvas is brand new. Nor do the
-            // pre-restart erase FILLS describe any region of the rebooted screen.
-            // An `erase_window` clears a window's ops on the way past, so an
-            // Infocom boot that erases before it draws heals itself — but only
-            // for the windows it happens to erase, and only in that order.
-            self.display_ops.clear();
+            // `zvm`'s own paint log is the RECIPE for `pictures_canvas`, and
+            // `Machine::restart` clears it structurally (SQ-1403) in the same
+            // breath as the paint queues themselves — so unlike the pre-SQ-1403
+            // shape of this bug (SQ-0658: the reboot's first draw re-created a
+            // canvas and APPENDED to the ops the pre-restart session left there,
+            // replaying the old game's art onto the new one's screen), there is no
+            // display list left here to drop. What IS still ours to drop: a window
+            // marked `unreplayable` before the restart, which would otherwise stay
+            // excluded from replay for the rest of the session even though its
+            // canvas is brand new.
             self.unreplayable.clear();
             self.window_fills.clear();
             // The same argument reaches the other two layers beside the window tree
@@ -1767,13 +1962,13 @@ impl GameSession {
         self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
         let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
         let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
-        let detected = detect_location(&self.machine);
+        let detected = detect_location_with(&self.machine, self.player_candidates());
         let location = detected.as_ref().map(location_to_snapshot);
         let location_method = detected.as_ref().map(Location::method);
 
-        let diagnostics = std::mem::take(&mut self.machine.diagnostics);
+        let diagnostics = self.machine.take_diagnostics();
         let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
-        let sounds = std::mem::take(&mut self.machine.pending_sounds);
+        let sounds = self.machine.take_pending_sounds();
         // A v6 wrap+scroll window moved out from under prose it had already
         // printed, and the engine froze that prose where it was painted (SQ-0697).
         // The stamp is in the same window-0 output-char space as an inline
@@ -1782,7 +1977,7 @@ impl GameSession {
         // printed at the window's new origin. A flat `mark_screen_clear` around
         // the whole push could not split a turn that contains both halves — and
         // Shogun's opening is exactly one such turn.
-        let prose_retired_at = std::mem::take(&mut self.machine.v6_prose_retired);
+        let prose_retired_at = self.machine.take_v6_prose_retired();
         let prose_retired = prose_retired_at
             .map(|at| (at.saturating_sub(win0_base) as usize).min(transcript.chars().count()));
         // …and the head above that boundary is not scrollback, it is PAINT (SQ-0890).
@@ -1887,6 +2082,7 @@ impl GameSession {
             pictures,
             transcript_elems,
             prose_retired,
+            declared_exit: None,
         }
     }
 
@@ -1901,6 +2097,7 @@ impl GameSession {
         // inherits its colour is asking the host to resolve the ground, which
         // is what the ordinary window background already does.
         let Some(rgba) = crate::render::v6_layout::explicit_pixel_rgba(
+            self.machine.palette(),
             crate::state::pack_zcolour(f.bg),
         ) else {
             return;
@@ -1977,24 +2174,31 @@ impl GameSession {
             .unwrap_or((640, 400))
     }
 
-    /// Drain `Machine::pending_pictures` and `Machine::pending_erase_fills`,
-    /// applying both to the screen IN THE ORDER THE GAME ISSUED THEM, and return
-    /// the drained picture events for `TurnResult` — mirrors `pending_sounds`,
-    /// except the rasterization happens here rather than in the app layer (Task 2
-    /// decision: canvas store + Pict source both live on `GameSession` so the Task
-    /// 4 screen adapter can read `pictures_canvas` without reaching into
-    /// `AppState`). A no-op drain for non-v6 stories, which never push either.
+    /// Drain [`zvm::cpu::exec::Machine::take_paint_events`], apply every one of
+    /// them to the screen, and return the picture events for `TurnResult` —
+    /// mirrors `pending_sounds`, except the rasterization happens here rather than
+    /// in the app layer (Task 2 decision: canvas store + Pict source both live on
+    /// `GameSession` so the Task 4 screen adapter can read `pictures_canvas`
+    /// without reaching into `AppState`). A no-op drain for non-v6 stories, which
+    /// never push anything.
     ///
-    /// The two queues are one timeline (`EraseFill::pics_before`, SQ-0715). Fills
-    /// and pictures paint the same screen, so draining one and then the other
-    /// replays the turn out of order: scopa's boot fills the green table, draws
-    /// its Neapolitan and Sicilian card pictures and then fills the menu buttons,
-    /// and running all the fills last let the opening full-screen clear erase both
-    /// cards it had already painted.
+    /// The interleave used to be reconstructed here from `EraseFill::pics_before`
+    /// (SQ-0715); since SQ-1396 it is `zvm`'s, and there is no way to take the two
+    /// queues apart. That matters because getting it wrong is silent: scopa's boot
+    /// fills the green table, draws its Neapolitan and Sicilian card pictures and
+    /// then fills the menu buttons, so fills-last lets the opening full-screen
+    /// clear erase both cards it had already painted.
     fn drain_pictures(&mut self) -> Vec<PictureEvent> {
-        let events = std::mem::take(&mut self.machine.pending_pictures);
-        let fills = std::mem::take(&mut self.machine.pending_erase_fills);
-        let mut next_fill = 0usize;
+        let paints = self.machine.take_paint_events();
+        // The pictures alone, because the pacing decisions below are about what
+        // covers what and a fill covers nothing the renderer paces on.
+        let events: Vec<PictureEvent> = paints
+            .iter()
+            .filter_map(|p| match p {
+                zvm::cpu::exec::PaintEvent::Picture(ev) => Some(*ev),
+                _ => None,
+            })
+            .collect();
         // A new turn supersedes whatever sequence was still playing: those frames
         // describe a screen the game has already moved on from.
         self.paced_frames.clear();
@@ -2023,13 +2227,26 @@ impl GameSession {
         // together, so the pillars — each a single disjoint image — were held only
         // because the compass shared their turn.
         let covers_earlier = self.events_that_repaint_covered_ground(&events);
-        for (i, ev) in events.iter().enumerate() {
-            // Every fill the game issued before this picture goes down first.
-            while next_fill < fills.len() && fills[next_fill].pics_before as usize <= i {
-                let f = fills[next_fill];
-                self.apply_erase_fill(&f);
-                next_fill += 1;
-            }
+        // One walk, in the game's own order — a fill that came before a picture
+        // goes down before it, and one that came after goes down after.
+        let mut i = 0usize;
+        for paint in &paints {
+            // `zvm`'s own paint log is fed automatically by `Machine`, at the
+            // same points these events were queued (SQ-1403) — nothing to do
+            // here for it.
+            let ev = match paint {
+                zvm::cpu::exec::PaintEvent::Erase(f) => {
+                    self.apply_erase_fill(f);
+                    continue;
+                }
+                zvm::cpu::exec::PaintEvent::Picture(ev) => ev,
+                // `PaintEvent` is `#[non_exhaustive]`, so a kind zvm adds later
+                // reaches this arm rather than failing the build. It is skipped
+                // deliberately: the pacing arithmetic below counts PICTURES, and
+                // silently miscounting them would be worse than not painting
+                // something this build has never heard of.
+                _ => continue,
+            };
             self.apply_picture_event(ev);
             // Hold the screen here only when the NEXT picture to paint is about to
             // cover ground already painted — that is the moment there is something
@@ -2048,12 +2265,7 @@ impl GameSession {
                     });
                 }
             }
-        }
-        // …and everything the game filled after its last picture (or, on a turn
-        // with no pictures at all, the whole queue).
-        for f in &fills[next_fill..] {
-            let f = *f;
-            self.apply_erase_fill(&f);
+            i += 1;
         }
         // The last picture of the turn may still be sitting on a canvas whose
         // window has since moved (scopa moves window 3 again for the next fill
@@ -2419,22 +2631,19 @@ impl GameSession {
     /// always has (Shogun's title splash has to vanish when the game erases the
     /// window it is sitting in).
     fn retire_stranded_canvas(&mut self, win: u8, now: (u16, u16)) {
-        let Some(anchor) = self.canvas_anchor.get(&win).copied() else { return };
-        if now == anchor.origin {
-            return; // a redraw in place — the canvas is still telling the truth
-        }
-        self.canvas_anchor.remove(&win);
-        let Some(canvas) = self.pictures_canvas.remove(&win) else { return };
-        // Nothing else can reproduce these pixels once they leave the canvas, so
-        // the window's replay list goes with them.
-        self.display_ops.remove(&win);
+        let Some((src, anchor)) = self.strand_canvas(win, now) else { return };
+        // `zvm`'s own paint log strands itself the same moment (SQ-1403): the log
+        // folds on the SAME window-box-origin comparison this function does, so by
+        // the time this runs the log for `win` already holds only ops from the new
+        // origin. Nothing else can reproduce the pixels that just left the canvas,
+        // so any stale PNG-fallback veto for the canvas that no longer exists goes
+        // with them too.
         self.unreplayable.remove(&win);
         let (sw, sh) = self.v6_native_extent();
         let (ox, oy) = (
             u32::from(anchor.origin.0.max(1)) - 1,
             u32::from(anchor.origin.1.max(1)) - 1,
         );
-        let src = canvas.img;
         let ground = self
             .paint
             .get_or_insert_with(|| std::sync::Arc::new(image::RgbaImage::new(sw, sh)));
@@ -2454,6 +2663,25 @@ impl GameSession {
         }
     }
 
+    /// The shared half of [`Self::retire_stranded_canvas`]: detect whether
+    /// `win`'s canvas is stranded (its origin no longer matches `now`) and, if
+    /// so, remove it from `pictures_canvas`/`canvas_anchor` and return what was
+    /// removed. Ground-freezing (painting the removed pixels onto
+    /// [`GameSession::paint`]) is NOT done here — [`Self::apply_canvas_paint`],
+    /// the replay path, calls this and discards the return, because the ground
+    /// is a separately persisted pixel layer (SQ-0706) that a replay must not
+    /// repaint: whatever a stranding freeze contributed to it, at the moment it
+    /// truly happened, is already baked into the persisted ground.
+    fn strand_canvas(&mut self, win: u8, now: (u16, u16)) -> Option<(std::sync::Arc<image::RgbaImage>, CanvasAnchor)> {
+        let anchor = self.canvas_anchor.get(&win).copied()?;
+        if now == anchor.origin {
+            return None; // a redraw in place — the canvas is still telling the truth
+        }
+        self.canvas_anchor.remove(&win);
+        let canvas = self.pictures_canvas.remove(&win)?;
+        Some((canvas.img, anchor))
+    }
+
     /// Record that `win`'s canvas now holds pixels drawn while the window sat at
     /// `origin`, covering `(dx, dy, w, h)` in canvas coords (SQ-0715).
     fn anchor_canvas_draw(&mut self, win: u8, origin: (u16, u16), dx: i32, dy: i32, w: u32, h: u32) {
@@ -2471,6 +2699,17 @@ impl GameSession {
 
     /// The screen rect a v6 window occupies — `(x, y, w, h)` in the same 0-based
     /// unit-pixel space the window canvases use (window coords are 1-based).
+    /// Reads the machine's CURRENT window table, which is the right source for
+    /// every OTHER window a cross-window erase is being mirrored INTO — both
+    /// live (obviously current) and during a replay, since by the time a replay
+    /// runs the window table has already been resolved to its final state
+    /// (restored from `screen.bin`, or simply live) and every window's own
+    /// surviving paint-log entries describe pixels at that SAME final position
+    /// (an earlier position is exactly what the origin-change retirement rule
+    /// drops). See [`screen_rect_from_win_box`] for the window whose OWN event
+    /// this is, which uses that event's `win_box` instead — the two coincide
+    /// for a live event and can differ for a replayed one if the window moved
+    /// again afterward without painting anything.
     fn window_screen_rect(&self, win: u8) -> Option<(u32, u32, u32, u32)> {
         let v6 = self.machine.screen.v6.as_ref()?;
         let w = v6.windows.get(win as usize)?;
@@ -2494,8 +2733,12 @@ impl GameSession {
     /// erases windows 2/5/6 — never 7 — so that background has to disappear from
     /// window 7's canvas or it sits under every later screen for the rest of the game.
     ///
-    /// The erase is recorded in each affected window's display list too, so a later
-    /// palette replay reproduces it rather than restoring pixels the game removed.
+    /// Nothing is recorded here (SQ-1403): this mirror is a fact about
+    /// `lanthorn`'s eight-canvas model, not about the Z-machine, so `zvm`'s own
+    /// paint log carries no entry for it at all. A later replay reproduces it
+    /// anyway — by calling this SAME function again, at the same point in the
+    /// SAME issue-ordered walk `zvm::paint_log::PaintLog::ops_in_order` gives —
+    /// rather than by storing its result. See [`Self::apply_canvas_paint`].
     fn erase_screen_rect(&mut self, rect: (u32, u32, u32, u32), skip: Option<u8>) {
         let (rx, ry, rw, rh) = rect;
         if rw == 0 || rh == 0 {
@@ -2525,110 +2768,188 @@ impl GameSession {
             // NOT a z_seq bump: an erase is not a draw, and re-stamping the layer
             // here would reorder the composite for a window nothing was drawn into.
             canvas.erase_rect(ex, ey, ew, eh);
-            self.record_op(win, V6Op::Erase { dx: ex, dy: ey, w: ew, h: eh });
         }
     }
 
-    /// Append an op to a window's display list, dropping the window out of replay if
-    /// it overflows the cap. A whole-canvas op supersedes everything before it, so the
-    /// list resets there — which is what keeps a screen-swapping story (Arthur) short.
-    fn record_op(&mut self, win: u8, op: V6Op) {
-        let full = self
-            .pictures_canvas
-            .get(&win)
-            .map(|c| (c.img.width(), c.img.height()))
-            .is_some_and(|(cw, ch)| match op {
-                V6Op::Erase { dx, dy, w, h } => dx <= 0 && dy <= 0 && w >= cw && h >= ch,
-                V6Op::Draw { .. } => false,
-            });
-        let ops = self.display_ops.entry(win).or_default();
-        if full {
-            ops.clear();
-            self.unreplayable.remove(&win);
-        } else if let V6Op::Erase { dx, dy, w, h } = op {
-            // SQ-0592: an erase paints the window background over its rect, so every
-            // EARLIER erase lying entirely inside it contributes nothing to the final
-            // canvas and can go. This is the `full` reset above generalized from "covers
-            // the whole canvas" to "covers that op's rect" — and it is what keeps the
-            // list proportional to what is ON the screen rather than to how long the
-            // session has run.
-            //
-            // Shogun is the case that needs it: it re-erases the same two regions every
-            // turn, reaching 266 ops by turn 200 while holding only 7 distinct ones, and
-            // would cross V6_OPS_CAP around turn 390 — at which point the window drops
-            // out of palette replay for the rest of the session.
-            //
-            // Only earlier ERASES are pruned. An earlier draw under this rect is dead
-            // too, but proving it needs the picture's scaled footprint, and keeping it
-            // is harmless: replay order is preserved, so the erase still covers it.
-            ops.retain(|prev| match *prev {
-                V6Op::Erase { dx: pdx, dy: pdy, w: pw, h: ph } => {
-                    let inside = pdx >= dx
-                        && pdy >= dy
-                        && pdx.saturating_add(pw as i32) <= dx.saturating_add(w as i32)
-                        && pdy.saturating_add(ph as i32) <= dy.saturating_add(h as i32);
-                    !inside
+    /// A window box (1-based, native pixels, exactly as `zvm` reports it in a
+    /// [`zvm::paint_log::PaintOp`]) as a 0-based screen rect, in the same space
+    /// [`Self::window_screen_rect`] answers in. Used for the window an event or
+    /// op is ABOUT — its own box at the moment of the call is always the right
+    /// source, live or replayed, unlike an OTHER window's box (see
+    /// [`Self::window_screen_rect`]'s docs for why that one stays live).
+    fn screen_rect_from_win_box(b: (u16, u16, u16, u16)) -> (u32, u32, u32, u32) {
+        (u32::from(b.0.max(1)) - 1, u32::from(b.1.max(1)) - 1, u32::from(b.2), u32::from(b.3))
+    }
+
+    /// Apply one [`zvm::paint_log::PaintOp`] to `win`'s picture canvas — the
+    /// canvas-only core [`Self::apply_picture_event`] (live drawing) and a log
+    /// replay ([`Self::replay_paint_log_scratch`]) both call, so the two can
+    /// never disagree about what a draw, an erase-picture, or a whole-window
+    /// clear does to the canvases (SQ-1403). Deliberately narrower than
+    /// `apply_picture_event`: no window-0 inline-float classification (a host
+    /// render decision, not a canvas fact, and irrelevant here — an inline
+    /// float never touches a canvas either way), no `window_fills` bookkeeping
+    /// and no ground-freezing on strand (both separately persisted layers a
+    /// replay must not re-derive — see [`Self::strand_canvas`]).
+    ///
+    /// `mode` decides only how a [`PaintOp::Draw`] resolves its picture: LIVE
+    /// decoding may establish a new Current Palette from a non-adaptive
+    /// picture's own colours (Blorb §11.3); a REPLAY walks potentially many
+    /// draws that already happened under ONE settled palette and must decode
+    /// every one of them through it without re-establishing anything picture
+    /// by picture as it goes (see [`crate::graphics::PictSource::scaled_image_under_current_palette`]).
+    fn apply_canvas_paint(&mut self, win: u8, op: zvm::paint_log::PaintOp, mode: PaintMode) {
+        use zvm::paint_log::PaintOp;
+        let win_box = match op {
+            PaintOp::Draw { win_box, .. }
+            | PaintOp::ErasePicture { win_box, .. }
+            | PaintOp::Clear { win_box } => win_box,
+            // `PaintOp` is `#[non_exhaustive]`: a kind this build has never
+            // heard of is skipped rather than failing the build.
+            _ => return,
+        };
+        let _ = self.strand_canvas(win, (win_box.0, win_box.1));
+        // A window-0 inline float — or Shogun's ceded-margin twin drawn from a
+        // graphics window, SQ-0888 — never touches a canvas, live or replayed.
+        // `apply_picture_event` filters it BEFORE ever reaching here for a live
+        // event; a replay walks the log directly and has no such upstream
+        // filter, so the SAME classifier runs here too, fed from the SAME
+        // `PictureEvent` fields `zvm`'s paint log carried through (SQ-1403),
+        // `out_chars` INCLUDED: it must be the value AT THE CALL, not this
+        // session's current running count. By the time a turn's pictures are
+        // drained, `self.machine.v6_win0_out_chars` has already moved past
+        // every one of them (a whole turn's text streams before its pictures
+        // are drained), so it stands in for nothing here — using it in place
+        // of the op's own `out_chars` misclassified mysterious01's boot title
+        // card, which carries `0` at the call while the live counter had
+        // already reached 24 by the time this ran.
+        if let PaintOp::Draw { number, x, y, at_cursor, margin_after, out_chars, .. }
+        | PaintOp::ErasePicture { number, x, y, at_cursor, margin_after, out_chars, .. } = op
+        {
+            let erase = matches!(op, PaintOp::ErasePicture { .. });
+            let synthetic =
+                PictureEvent::new(number, win, x, y, erase, out_chars, margin_after, at_cursor, win_box);
+            if self.win0_inline_float_x(&synthetic).is_some() {
+                return;
+            }
+        }
+        match op {
+            PaintOp::Clear { .. } => {
+                self.pictures_canvas.remove(&win);
+                self.canvas_anchor.remove(&win);
+                self.erase_screen_rect(Self::screen_rect_from_win_box(win_box), Some(win));
+            }
+            PaintOp::Draw { number, x, y, .. } => {
+                let (pw, ph) = (
+                    (win_box.2.max(1) as u32).min(CANVAS_PX_CAP),
+                    (win_box.3.max(1) as u32).min(CANVAS_PX_CAP),
+                );
+                let dx = (x.max(1) as i32) - 1;
+                let dy = (y.max(1) as i32) - 1;
+                let canvas =
+                    self.pictures_canvas.entry(win).or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
+                canvas.grow_to(pw, ph);
+                let scale = self.art_scale;
+                let img = match mode {
+                    PaintMode::Live => self.pict_source.as_mut().and_then(|s| s.scaled_image(number as u32, scale)),
+                    PaintMode::Replay => self
+                        .pict_source
+                        .as_mut()
+                        .and_then(|s| s.scaled_image_under_current_palette(number as u32, scale)),
+                };
+                if let Some(img) = img {
+                    let canvas = self.pictures_canvas.get_mut(&win).expect("just inserted above");
+                    canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
+                    canvas.z_seq = crate::graphics::next_draw_seq();
+                    let drawn_w = img.width().min(pw.saturating_sub(dx.max(0) as u32));
+                    let drawn_h = img.height().min(ph.saturating_sub(dy.max(0) as u32));
+                    self.anchor_canvas_draw(win, (win_box.0, win_box.1), dx, dy, drawn_w, drawn_h);
                 }
-                V6Op::Draw { .. } => true,
-            });
+            }
+            PaintOp::ErasePicture { number, x, y, .. } => {
+                let (pw, ph) = (
+                    (win_box.2.max(1) as u32).min(CANVAS_PX_CAP),
+                    (win_box.3.max(1) as u32).min(CANVAS_PX_CAP),
+                );
+                let dx = (x.max(1) as i32) - 1;
+                let dy = (y.max(1) as i32) - 1;
+                let canvas =
+                    self.pictures_canvas.entry(win).or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
+                canvas.grow_to(pw, ph);
+                let dims = self
+                    .pict_source
+                    .as_mut()
+                    .and_then(|s| s.dims(number as u32))
+                    .map(|(w, h)| (w * self.art_scale.0, h * self.art_scale.1));
+                let (ew, eh) = dims.unwrap_or((pw, ph));
+                let ew = ew.min(pw.saturating_sub(dx.max(0) as u32));
+                let eh = eh.min(ph.saturating_sub(dy.max(0) as u32));
+                let canvas = self.pictures_canvas.get_mut(&win).expect("just inserted above");
+                canvas.erase_rect(dx, dy, ew, eh);
+                let (wx, wy, _, _) = Self::screen_rect_from_win_box(win_box);
+                self.erase_screen_rect((wx + dx.max(0) as u32, wy + dy.max(0) as u32, ew, eh), Some(win));
+            }
+            _ => {}
         }
-        if ops.len() >= V6_OPS_CAP {
-            self.unreplayable.insert(win);
-            return;
-        }
-        ops.push(op);
     }
 
-    /// Replay every window's display list under the Current Palette (SQ-0567).
+    /// Rebuild every window's canvas + anchor PURELY from `zvm`'s paint log, in
+    /// true issue order — the canvas-only half of live per-turn drawing
+    /// ([`Self::apply_canvas_paint`]), replayed instead of driven by a fresh
+    /// event (SQ-1403), under [`PaintMode::Replay`] so a picture that already
+    /// established a palette once does not re-establish it as history replays.
     ///
-    /// The canvas is cleared and rebuilt op by op, so the result is what the screen
-    /// would look like if the new palette had been loaded all along: every picture
-    /// recoloured, every erase still erased, and — the part a plain replot got wrong —
-    /// everything covering what it covered before. Arthur's map background is drawn
-    /// over its frame, and must stay over it.
+    /// Does NOT commit: `pictures_canvas`/`canvas_anchor` are swapped out
+    /// before the walk and swapped back after, so the live session is
+    /// UNCHANGED by calling this — the replayed result comes back as the
+    /// return value for the caller to do with as it sees fit. Three callers,
+    /// three answers to "what to do with it": [`Self::display_list`]'s
+    /// save-time self-check compares it against the (untouched) live state
+    /// window by window and keeps neither; [`Self::replay_under_current_palette`]
+    /// commits all of it; [`Self::load_display_list`] commits everything
+    /// except the windows its OWN prior self-check already distrusted (loaded
+    /// from PNG instead).
+    fn replay_paint_log_scratch(
+        &mut self,
+    ) -> (std::collections::HashMap<u8, crate::graphics::Canvas>, std::collections::HashMap<u8, CanvasAnchor>) {
+        let live_canvas = std::mem::take(&mut self.pictures_canvas);
+        let live_anchor = std::mem::take(&mut self.canvas_anchor);
+        let ops: Vec<(u8, zvm::paint_log::PaintOp)> = self.machine.paint_log().ops_in_order().to_vec();
+        for (win, op) in ops {
+            self.apply_canvas_paint(win, op, PaintMode::Replay);
+        }
+        let replayed_canvas = std::mem::replace(&mut self.pictures_canvas, live_canvas);
+        let replayed_anchor = std::mem::replace(&mut self.canvas_anchor, live_anchor);
+        (replayed_canvas, replayed_anchor)
+    }
+
+    /// Replay every window's canvas under the Current Palette (SQ-0567) and
+    /// COMMIT the result, live.
     ///
-    /// Decoding goes through [`PictSource::image_under_current_palette`], which
-    /// splices the live palette into each picture without letting it establish a new
-    /// one: on real hardware the framebuffer holds indices, so a picture already
-    /// drawn shows through whatever palette is loaded now, base or adaptive alike.
+    /// The result is what the screen would look like if the new palette had
+    /// been loaded all along: every picture recoloured, every erase still
+    /// erased, and — the part a plain replot got wrong — everything covering
+    /// what it covered before, including the cross-window mirror of another
+    /// window's erase (SQ-0568), because [`Self::replay_paint_log_scratch`]
+    /// walks `zvm`'s paint log in true issue order through the SAME functions
+    /// live drawing uses. Arthur's map background is drawn over its frame, and
+    /// must stay over it.
     fn replay_under_current_palette(&mut self) {
-        let mut wins: Vec<u8> = self.display_ops.keys().copied().collect();
-        wins.sort();
-        for win in wins {
-            if self.unreplayable.contains(&win) {
-                continue;
+        let (mut canvas, mut anchor) = self.replay_paint_log_scratch();
+        // PNG-fallback windows (`unreplayable`) have no draw history in the log
+        // to replay from — that is exactly why they are PNG-fallback — so the
+        // replayed map has nothing for them; keep what is already there rather
+        // than losing their art on the next palette change.
+        for win in self.unreplayable.iter().copied().collect::<Vec<_>>() {
+            if let Some(c) = self.pictures_canvas.get(&win) {
+                canvas.entry(win).or_insert_with(|| c.clone());
             }
-            let Some(ops) = self.display_ops.get(&win).cloned() else { continue };
-            let Some((cw, ch)) = self.pictures_canvas.get(&win).map(|c| (c.img.width(), c.img.height()))
-            else {
-                continue;
-            };
-            if let Some(c) = self.pictures_canvas.get_mut(&win) {
-                c.erase_rect(0, 0, cw, ch);
-            }
-            for op in ops {
-                match op {
-                    V6Op::Erase { dx, dy, w, h } => {
-                        if let Some(c) = self.pictures_canvas.get_mut(&win) {
-                            c.erase_rect(dx, dy, w, h);
-                        }
-                    }
-                    V6Op::Draw { number, dx, dy } => {
-                        let Some(img) = self
-                            .pict_source
-                            .as_mut()
-                            .and_then(|s| s.image_under_current_palette(number as u32))
-                        else {
-                            continue;
-                        };
-                        let img = v6_scaled_art(&img, self.art_scale);
-                        if let Some(c) = self.pictures_canvas.get_mut(&win) {
-                            c.draw_image_clipped(&img, dx, dy, (cw, ch));
-                        }
-                    }
-                }
+            if let Some(a) = self.canvas_anchor.get(&win) {
+                anchor.entry(win).or_insert(*a);
             }
         }
+        self.pictures_canvas = canvas;
+        self.canvas_anchor = anchor;
     }
 
     /// Apply one `PictureEvent` to `pictures_canvas`. The event's `(y, x)` are
@@ -2654,45 +2975,41 @@ impl GameSession {
         // order). Drop the whole canvas: Shogun's title splash must actually
         // vanish when the game erases window 7 before drawing the menu frame.
         if ev.erase && ev.number == 0 {
-            self.pictures_canvas.remove(&ev.window);
-            self.canvas_anchor.remove(&ev.window); // nothing left to strand
-            // Nothing of this window survives to be replayed.
-            self.display_ops.remove(&ev.window);
-            self.unreplayable.remove(&ev.window);
-            // The erased region belongs to the shared SCREEN, so take it out of
-            // every other window's canvas too (SQ-0568).
-            if let Some(rect) = self.window_screen_rect(ev.window) {
-                self.erase_screen_rect(rect, Some(ev.window));
-                // …and record what the erase PAINTED there (SQ-0584). ZMSD §8.8.5.3:
-                // the rect is filled with the window's background colour, opaquely —
-                // dropping the canvas above only removes what was under it. A fill of
-                // the region a window no longer covers is dead the moment the window
-                // moves or shrinks, so it is clamped to the live rect when published.
-                let bg = self
-                    .machine
-                    .screen
-                    .v6
-                    .as_ref()
-                    .and_then(|v6| v6.windows.get(ev.window as usize))
-                    .map(|w| crate::state::pack_zcolour(w.bg))
-                    .unwrap_or(0);
-                let (x, y, w, h) = rect;
-                if w > 0 && h > 0 {
-                    self.window_fills.insert(
-                        ev.window,
-                        WindowFill {
-                            x,
-                            y,
-                            w,
-                            h,
-                            bg,
-                            seq: crate::graphics::next_draw_seq(),
-                            out_chars: ev.out_chars,
-                        },
-                    );
-                } else {
-                    self.window_fills.remove(&ev.window);
-                }
+            self.apply_canvas_paint(ev.window, zvm::paint_log::PaintOp::Clear { win_box: ev.win_box }, PaintMode::Live);
+            // …and record what the erase PAINTED there (SQ-0584), LIVE only:
+            // `window_fills` is a separately persisted screen layer (SQ-0814),
+            // not a canvas fact, so a replay ([`Self::apply_canvas_paint`]) never
+            // touches it — only a freshly-drained live event does. ZMSD §8.8.5.3:
+            // the rect is filled with the window's background colour, opaquely —
+            // the canvas-clear above only removes what was under it. A fill of
+            // the region a window no longer covers is dead the moment the window
+            // moves or shrinks, so it is clamped to the event's OWN rect (not
+            // read back from live state, which by the time this runs already IS
+            // this event's state, but naming the real source directly).
+            let bg = self
+                .machine
+                .screen
+                .v6
+                .as_ref()
+                .and_then(|v6| v6.windows.get(ev.window as usize))
+                .map(|w| crate::state::pack_zcolour(w.bg))
+                .unwrap_or(0);
+            let (x, y, w, h) = Self::screen_rect_from_win_box(ev.win_box);
+            if w > 0 && h > 0 {
+                self.window_fills.insert(
+                    ev.window,
+                    WindowFill {
+                        x,
+                        y,
+                        w,
+                        h,
+                        bg,
+                        seq: crate::graphics::next_draw_seq(),
+                        out_chars: ev.out_chars,
+                    },
+                );
+            } else {
+                self.window_fills.remove(&ev.window);
             }
             return;
         }
@@ -2745,7 +3062,8 @@ impl GameSession {
             if ev.erase {
                 return; // no canvas to erase; a win0 erase_picture is a no-op here
             }
-            if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
+            let scale = self.art_scale;
+            if let Some(img) = self.pict_source.as_mut().and_then(|s| s.scaled_image(ev.number as u32, scale)) {
                 // A window-0 picture is normally a drop-cap / room icon floated at
                 // the left margin (text flows beside it). But Shogun draws its
                 // large opening SHIP illustration into window 0 too — a
@@ -2754,10 +3072,9 @@ impl GameSession {
                 // content-art image (Shogun's ship) aligns InlineUp (full-size,
                 // its own band); a genuine drop-cap (Zork Zero's initial letter,
                 // a small tile) keeps MarginLeft.
-                // Scale into unit space (SQ-0479) so the float renders at its
-                // authentic 2× size beside the 8×16 text and its reserved rows
-                // (height/16) stay consistent with the 16px grid.
-                let img = v6_scaled_art(&img, self.art_scale);
+                // Scaled into unit space (SQ-0479) already, so the float renders
+                // at its authentic 2× size beside the 8×16 text and its reserved
+                // rows (height/16) stay consistent with the 16px grid.
                 let (iw, ih) = (img.width(), img.height());
                 let (screen_w, screen_h) = self.v6_screen_px();
                 let align = win0_pic_align(
@@ -2776,95 +3093,53 @@ impl GameSession {
                     align,
                     scaled: None,
                     margin_px,
+                    // A Z-machine v6 picture carries no Glk imagerule (SQ-1424):
+                    // the game sizes it itself in native pixels.
+                    rule: None,
+                    // No Glk hyperlink concept in v6 (SQ-1503; that's a Glulx
+                    // `glk_set_hyperlink` mechanism).
+                    link: 0,
                 };
                 self.story_pics.push((ev.out_chars, float));
             }
             return;
         }
-        // Clamp the pixel-canvas backing store so a hostile / buggy story that
-        // sets window_size(w, 0xFFFF, 0xFFFF) then draws/erases can't force a
-        // ~17 GB RgbaImage allocation (an OOM abort). CANVAS_PX_CAP (4096) far
-        // exceeds any real v6 screen (~640 px) yet bounds worst-case storage to
-        // ~64 MB — mirroring the grid-cell cap on the engine side (Phase 1a).
-        const CANVAS_PX_CAP: u32 = 4096;
-        // The window's box AT THE MOMENT OF THE CALL, not now: a scratch window is
-        // resized for one drawing operation and moved on (SQ-0715). scopa sizes
-        // window 3 to 1000×1000 for each card and had shrunk it to an 80×1 sliver
-        // by the time this ran, clipping every picture out of existence.
-        let (pw, ph) = (
-            (ev.win_box.2.max(1) as u32).min(CANVAS_PX_CAP),
-            (ev.win_box.3.max(1) as u32).min(CANVAS_PX_CAP),
-        );
-        // 1-based window-relative → 0-based canvas coords.
-        let dx = (ev.x.max(1) as i32) - 1;
-        let dy = (ev.y.max(1) as i32) - 1;
-        let canvas = self.pictures_canvas.entry(ev.window)
-            .or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
-        // Track the window's current box without wiping earlier draws: grow
-        // preserves content; a shrunken window only tightens the clip below
-        // (window_size "does not change the current display", ZMSD §15).
-        canvas.grow_to(pw, ph);
-        // An erase_picture footprint to take out of the OTHER windows' canvases too,
-        // applied once the canvas borrow above has ended (SQ-0568). Window-relative;
-        // translated to screen coords at the bottom of this function.
-        let mut screen_erase: Option<(u32, u32, u32, u32)> = None;
-        if ev.erase {
-            // Picture dims are art-native; the canvas is unit space, so scale the
-            // erased footprint by V6_ART_SCALE to match the doubled draw (SQ-0479).
-            let dims = self
-                .pict_source
-                .as_mut()
-                .and_then(|s| s.dims(ev.number as u32))
-                .map(|(w, h)| (w * self.art_scale.0, h * self.art_scale.1));
-            let (ew, eh) = dims.unwrap_or((pw, ph));
-            // Clip the erase to the window box.
-            let ew = ew.min(pw.saturating_sub(dx.max(0) as u32));
-            let eh = eh.min(ph.saturating_sub(dy.max(0) as u32));
-            canvas.erase_rect(dx, dy, ew, eh);
-            self.record_op(ev.window, V6Op::Erase { dx, dy, w: ew, h: eh });
-            // …and the same region of the shared screen (SQ-0568).
-            screen_erase = Some((dx.max(0) as u32, dy.max(0) as u32, ew, eh));
-        } else if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
-            // Blit the art at 2× into the unit-space window canvas (SQ-0479): the
-            // game placed it at unit coords (dx,dy) expecting the Amiga/DOS
-            // doubled picture, so the scaled pixels fill the box the game reserved.
-            let img = v6_scaled_art(&img, self.art_scale);
-            canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
-            canvas.z_seq = crate::graphics::next_draw_seq();
-            // Remember where on the SCREEN these pixels landed, so a later
-            // `move_window` freezes them there instead of dragging them along
-            // (SQ-0715).
-            let drawn_w = img.width().min(pw.saturating_sub(dx.max(0) as u32));
-            let drawn_h = img.height().min(ph.saturating_sub(dy.max(0) as u32));
-            self.anchor_canvas_draw(
-                ev.window,
-                (ev.win_box.0, ev.win_box.1),
-                dx,
-                dy,
-                drawn_w,
-                drawn_h,
-            );
-            // Every picture goes in the display list, base or adaptive: under a new
-            // palette they ALL recolour, and their order is what a replay has to
-            // reproduce. (SQ-0567)
-            self.record_op(ev.window, V6Op::Draw { number: ev.number, dx, dy });
-            // SQ-0461 decision 3 ALSO anchored a transcript inline band here for a
-            // large CONTENT-art draw into a graphics window (Shogun's title
-            // splash), marked `ImageSource::ContentSplash`, so that the frameless
-            // mode — which drops graphics windows — could still show it. It was
-            // the only consumer: hybrid and raster both render the window canvas
-            // itself and had to SKIP the band to avoid drawing the art twice.
-            // SQ-0895 removed the mode, so the band had no reader left and is no
-            // longer emitted; `is_content_art` survives because the window-0
-            // margin/inline classifier above still asks it the same question.
-        }
-        // Apply the deferred cross-window erase now the canvas borrow has ended:
-        // translate the window-relative footprint into screen coords (SQ-0568).
-        if let Some((ex, ey, ew, eh)) = screen_erase {
-            if let Some((wx, wy, _, _)) = self.window_screen_rect(ev.window) {
-                self.erase_screen_rect((wx + ex, wy + ey, ew, eh), Some(ev.window));
+        // Every picture is in `zvm`'s own paint log, base or adaptive (SQ-1403):
+        // under a new palette they ALL recolour, and a replay walks the log's
+        // OWN issue order to reproduce it (SQ-0567) — see
+        // [`Self::apply_canvas_paint`], the canvas-only core this and a replay
+        // both call.
+        // SQ-0461 decision 3 ALSO anchored a transcript inline band here for a
+        // large CONTENT-art draw into a graphics window (Shogun's title splash),
+        // marked `ImageSource::ContentSplash`, so that the frameless mode —
+        // which drops graphics windows — could still show it. It was the only
+        // consumer: hybrid and raster both render the window canvas itself and
+        // had to SKIP the band to avoid drawing the art twice. SQ-0895 removed
+        // the mode, so the band had no reader left and is no longer emitted;
+        // `is_content_art` survives because the window-0 margin/inline
+        // classifier above still asks it the same question.
+        let op = if ev.erase {
+            zvm::paint_log::PaintOp::ErasePicture {
+                number: ev.number,
+                x: ev.x,
+                y: ev.y,
+                win_box: ev.win_box,
+                at_cursor: ev.at_cursor,
+                margin_after: ev.margin_after,
+                out_chars: ev.out_chars,
             }
-        }
+        } else {
+            zvm::paint_log::PaintOp::Draw {
+                number: ev.number,
+                x: ev.x,
+                y: ev.y,
+                win_box: ev.win_box,
+                at_cursor: ev.at_cursor,
+                margin_after: ev.margin_after,
+                out_chars: ev.out_chars,
+            }
+        };
+        self.apply_canvas_paint(ev.window, op, PaintMode::Live);
     }
 
     /// The reported v6 screen size in pixels (header words 0x22/0x24), falling
@@ -3305,6 +3580,7 @@ impl GameSession {
                     left_margin: win.left_margin,
                     right_margin: win.right_margin,
                     node: WinNode::Grid(GridWindow {
+                        win: 0,
                         cols: 0,
                         rows: 0,
                         cells: Vec::new(),
@@ -3371,6 +3647,7 @@ impl GameSession {
                 // text buffers. Live screen state: no scrollback, and the lines go
                 // when the game erases the window.
                 WinNode::Buffer(BufferWindow {
+                    win: 0,
                     primary: false,
                     lines: win.prose.clone(),
                     runs: vec![Vec::new(); win.prose.len()],
@@ -3388,6 +3665,7 @@ impl GameSession {
                 })
             } else {
                 WinNode::Grid(GridWindow {
+                    win: 0,
                     cols,
                     rows,
                     cells: win
@@ -3558,6 +3836,91 @@ impl GameSession {
             content_size,
         }
     }
+
+    /// The [`V6ModelKey`] for one build of the v6 model over `visible` — every
+    /// fact [`GameSession::v6_screen_model`] reads, reduced to cheap compares.
+    fn v6_model_key(&self, visible: &std::collections::HashMap<u8, crate::graphics::Canvas>) -> V6ModelKey {
+        let mut canvases: Vec<(u8, u64, u64)> =
+            visible.iter().map(|(w, c)| (*w, c.version, c.z_seq)).collect();
+        canvases.sort_unstable();
+        let mut fills: Vec<(u8, u64)> =
+            self.window_fills.iter().map(|(w, f)| (*w, f.seq)).collect();
+        fills.sort_unstable();
+        V6ModelKey {
+            generation: self.machine.screen.v6_generation(),
+            cell: (self.machine.v6_cell().w(), self.machine.v6_cell().h()),
+            input_window: self.machine.screen.v6_input_window,
+            win0_out_chars: self.machine.v6_win0_out_chars,
+            screen_px: (self.machine.mem.read_word(0x22), self.machine.mem.read_word(0x24)),
+            screen_chars: (self.machine.mem.read_byte(0x20), self.machine.mem.read_byte(0x21)),
+            page_pair: machine_screen_pair(&self.machine)
+                .map(|(fg, bg)| (crate::state::pack_zcolour(fg), crate::state::pack_zcolour(bg))),
+            canvases,
+            fills,
+        }
+    }
+
+    /// [`GameSession::v6_screen_model`], memoized behind [`V6ModelKey`]
+    /// (SQ-1191). A frame whose key matches the held one gets the held `Arc`
+    /// back — one key build and compare instead of deep-cloning every window's
+    /// runs, grids and prose — and any mismatch rebuilds and replaces the memo,
+    /// so the stored model always corresponds to the stored key.
+    fn v6_screen_model_shared(
+        &self,
+        visible: &std::collections::HashMap<u8, crate::graphics::Canvas>,
+    ) -> std::sync::Arc<ScreenModel> {
+        let key = self.v6_model_key(visible);
+        if let Some((held, model)) = self.v6_model_memo.borrow().as_ref() {
+            if *held == key {
+                return std::sync::Arc::clone(model);
+            }
+        }
+        let model = std::sync::Arc::new(self.v6_screen_model(visible));
+        *self.v6_model_memo.borrow_mut() = Some((key, std::sync::Arc::clone(&model)));
+        model
+    }
+}
+
+/// Everything [`GameSession::v6_screen_model`] READS, reduced to cheap compares
+/// — the key for [`GameSession::v6_model_memo`] (SQ-1191).
+///
+/// The expensive tree (eight windows' runs, grids and prose) is stood for by
+/// zvm's [`zvm::screen::ScreenState::v6_generation`], which advances with every
+/// mutable borrow of the window table. Everything else the build consumes is a
+/// cheap scalar read taken fresh per key, so a missed bump cannot hide in it:
+///
+/// - `cell`: the session's v6 cell (`Machine::v6_cell`) — every native→cell
+///   division in the build;
+/// - `input_window` / `win0_out_chars`: the prose-window choice and the
+///   window-0 placeholder/fill-freshness tests;
+/// - `screen_px` / `screen_chars`: header `$22`/`$24` and `$20`/`$21` — the
+///   clip box and the degenerate `content_size` fallback;
+/// - `page_pair`: [`machine_screen_pair`]'s ANSWER — keying on the output
+///   covers the header bytes and the licence flag it reads, whoever wrote them;
+/// - `canvases`: each visible canvas's `(version, z_seq)` — content and draw
+///   order, and thereby WHICH map the caller handed in (the settled
+///   `pictures_canvas` vs a paced in-flight frame, SQ-0708);
+/// - `fills`: each window's erase fill by its draw-sequence stamp, which is
+///   unique per insertion — a fill is immutable once recorded, and replacing
+///   one takes a fresh stamp.
+///
+/// NOT in the key, and why each omission is sound: `v6_metric` is replaced
+/// only by `Machine::set_v6_text`, which moves the generation on its way
+/// through the window table; the status model is constant (`HostManaged` for
+/// every v4+ story, v6 included); and `pack_zcolour` is pure tag-packing — the
+/// palette resolves colours at RENDER time, behind the render's own content
+/// key (SQ-1187), so a palette change never alters this model.
+#[derive(PartialEq)]
+struct V6ModelKey {
+    generation: u64,
+    cell: (u16, u16),
+    input_window: u8,
+    win0_out_chars: u64,
+    screen_px: (u16, u16),
+    screen_chars: (u8, u8),
+    page_pair: Option<(u32, u32)>,
+    canvases: Vec<(u8, u64, u64)>,
+    fills: Vec<(u8, u64)>,
 }
 
 /// The `face:` block of `/dump-windows` — which TYPEFACE the metrics below came
@@ -3673,18 +4036,21 @@ fn machine_screen_pair(machine: &Machine) -> Option<(ZColour, ZColour)> {
     zvm::screen::machine_screen_pair(machine)
 }
 
-/// Convert a detected `Location` into the `ObjectSnapshot` used as a room id.
+/// Convert a detected `Location` into the [`LocationInfo`] used as a room id.
 /// `NameOnly` (no backing object) gets a stable synthetic id from its name;
-/// every other variant carries a real object. Shared by per-turn draining and
-/// the startup seed so both assign the same room id.
-fn location_to_snapshot(loc: &Location) -> zvm::ObjectSnapshot {
+/// every other variant carries a real object, whose `u16` object number is
+/// widened into a `RoomId` here — the one place a Z-machine `zvm::ObjectSnapshot`
+/// becomes the engine-neutral `LocationInfo` (SQ-1297). Shared by per-turn
+/// draining and the startup seed so both assign the same room id.
+fn location_to_snapshot(loc: &Location) -> LocationInfo {
     match loc {
-        Location::NameOnly(name) => zvm::ObjectSnapshot {
-            number: crate::roomid::synthetic_room_id(name),
-            parent: 0,
-            name: name.clone(),
-        },
-        _ => loc.object().expect("non-NameOnly variants carry an object").clone(),
+        Location::NameOnly(name) => {
+            LocationInfo { number: crate::roomid::synthetic_room_id(name), parent: 0, name: name.clone() }
+        }
+        _ => {
+            let obj = loc.object().expect("non-NameOnly variants carry an object");
+            LocationInfo { number: obj.number.into(), parent: obj.parent, name: obj.name.clone() }
+        }
     }
 }
 
@@ -3718,7 +4084,13 @@ pub fn echoed_direction_command(transcript: &str) -> Option<&str> {
 
 /// Pure bridge: observe the new location (if any) into the mapper.
 ///
-/// Calls `mapper.observe(snap.number, &snap.name, parse_direction(command))`.
+/// Calls `mapper.observe(snap.number, &snap.name, parse_direction(command))` for an ordinary
+/// move. Several turn shapes call [`Mapper::observe_relocation`] instead, because the room
+/// change they describe is not a walked passage: a death/resurrection, a random-exit landing, a
+/// suspicious contradiction left for a probe, and — since SQ-1299 — a `go to` / `goto` /
+/// `go back to` / `return to` / `revisit` / `walk to` command ([`is_travel_to_command`]) that
+/// actually moved the player, which the game's own "Approaching" action may have routed through
+/// any number of unseen rooms in one turn.
 /// In Auto mode, runs a light overlap cleanup (radius 2, max 20 passes) after each
 /// observation so the live map never shows an illegal connector overlap.
 /// No-op when `result.location` is `None`.
@@ -3779,6 +4151,101 @@ pub fn apply_turn(
             return;
         }
         let moved_room = mapper.graph.current() != Some(snap.number);
+        // SQ-1257: the ORIGIN room's own map data named a fixed destination for the
+        // direction just typed, and the player did not land there. The story's code
+        // overrode the move — Lost Pig's gnome tunnels are the case this exists for,
+        // a "before going" rule that sends the player to a random cave regardless of
+        // what the room's exit table says. `moved_room` guards it: a mismatch against
+        // a room the player never left (a refusal that nonetheless prints a fresh
+        // description) is not evidence of anything.
+        // SQ-1257 Phase 2: once a direction out of the origin is already marked random, this
+        // move mints no edge EITHER — same as the mismatch case above, and for the same reason:
+        // one lucky landing is not proof the story stopped randomising. What is different from
+        // before is that this is not the end of the story: `turn::finish_command_turn` (which
+        // sees this decision through `TurnResult`/the graph, not through a return value here)
+        // arms a Phase-2 re-probe for exactly this shape, and TWO reseeded attempts that both
+        // agree with THIS landing is what upgrades the mark to a real edge
+        // (`random_exit_probe::deliver`) — never a single move on its own, here or anywhere.
+        let already_random = mapper
+            .graph
+            .current()
+            .zip(parse_direction(command))
+            .is_some_and(|(here, d)| mapper.graph.is_random_exit(here, d));
+        // SQ-1264 / SQ-1269: does the graph ALREADY claim something for (origin, dir) that this
+        // move's landing CONTRADICTS? `declared_exit` alone (Z-machine) or its Glulx mirror only
+        // ever fires from a STATIC table read, and Adventure's forests are not caught by it at
+        // all — the room's own `e_to`/`w_to`/etc name a perfectly ordinary FIXED room; the
+        // randomness is a redirect the DESTINATION performs on arrival (its `initial` routine
+        // rerolling `PlayerTo` half the time), which nothing in the origin's own exit table can
+        // see. This check closes that hole with evidence `declared_exit` does not need: if the
+        // graph already holds an edge for this exact (origin, direction) pointing at some OTHER
+        // room than where the player just landed, that contradiction is itself proof the exit is
+        // random — a fixed passage cannot lead to two different rooms. Fires regardless of
+        // `declared_exit`, so it protects an engine with no declared-exit seam at all.
+        //
+        // SQ-1269 widens it to a SELF-LOOP too: "leads back here" is as much a claimed
+        // destination as a real edge is (`old_dest == here`, the room itself — the room card's
+        // "back here" once this is pooled), so a landing elsewhere contradicts it exactly the
+        // same way. `.or_else` only runs when no real edge already answered the question, so a
+        // room with both an edge AND a leftover self-loop on the same key (an older map file;
+        // current code never leaves the two coexisting) still prefers the more specific fact.
+        let existing_conflict: Option<mapper::graph::RoomId> = moved_room
+            .then(|| mapper.graph.current())
+            .flatten()
+            .zip(parse_direction(command))
+            .and_then(|(here, d)| {
+                mapper
+                    .graph
+                    .connections()
+                    .iter()
+                    .find(|c| c.origin == here && c.dir == d && c.dest != here && c.dest != snap.number)
+                    .map(|c| c.dest)
+                    .or_else(|| mapper.graph.self_loops(here).contains(&d).then_some(here))
+            });
+        // SQ-1314: and it only means anything for a move made ON THE COMPASS. `declared_exit`
+        // answers about the story's own compass column for `dir`; a nautical word — Counterfeit
+        // Monkey's yacht, Shogun's decks — fills that same `Direction` slot on the MAP while the
+        // story files it under a direction object of its own, so the compass column describes a
+        // passage the player did not walk. `turn::finish_command_turn` no longer even asks in that
+        // case (`declared_exit` stays `None`), and this restates the rule where the decision is
+        // actually made: `apply_turn` is engine-neutral and takes whatever `declared_exit` a
+        // caller hands it, so the guard has to hold here too.
+        let declared_mismatch = moved_room
+            && mapper::direction::is_compass_command(command)
+            && matches!(
+                result.declared_exit,
+                Some(crate::engine::DeclaredExit::Room(r)) if r != snap.number
+            );
+        // SQ-1269: "suspicion, not proof". A declared mismatch or a live contradiction against
+        // something the map already believed is no longer marked on the spot — Inform 7's
+        // "instead of going" redirects contradict the exit table every time, and games change
+        // passages permanently, and neither guess is proof the destination VARIES. Left for
+        // `turn::finish_command_turn` to hand to a probe (`random_exit_probe::SearchKind::
+        // Suspicion`, see [`mapper::mapper::Mapper::note_random_exit_suspicion`]) when one can
+        // run, or resolved immediately (`Mapper::resolve_suspicion_as_random`, unchanged from the
+        // old immediate-marking behaviour) when none can — this function has no engine to ask.
+        // `already_random` stays its own, separate, IMMEDIATE branch below: a re-walk of a
+        // direction already marked is Phase 2's own UPGRADE territory, never a new suspicion.
+        let suspicious = !already_random && (existing_conflict.is_some() || declared_mismatch);
+        // SQ-1370: the pool a brand-new direction inherits, because the room it just reached (or
+        // the fixed room its own table named for the move) is one the map already knows a random
+        // exit sends the player to. Computed here beside the other pre-decisions — it reads the
+        // graph immutably, and every branch below mutates it.
+        //
+        // It ranks BELOW `already_random`, which is Phase 2's upgrade territory and says
+        // something about this very direction, and ABOVE `suspicious`, which does not: a declared
+        // mismatch against a room the map already knows is reached at random is not a mystery
+        // needing a probe round trip, it is the randomness the player has already proved. Left as
+        // a suspicion it would be settled by a shadow that agrees with the live landing one time
+        // in four and mint a confident arrow for a coin flip. `inherited_random_pool` refuses
+        // every key the map already claims an EDGE or a self-loop for, so the other half of
+        // `suspicious` — a live contradiction — is never the branch this overtakes.
+        let inherited_pool: Option<Vec<mapper::graph::RoomId>> = (moved_room && !already_random)
+            .then(|| mapper.graph.current().zip(parse_direction(command)))
+            .flatten()
+            .and_then(|(here, d)| {
+                inherited_random_pool(&mapper.graph, here, d, snap.number, result.declared_exit)
+            });
         if fatal {
             // The game said the player died this turn and moved them somewhere that is NOT
             // reachable by the command they typed (e.g. a grue kills you in the dark and drops
@@ -3800,12 +4267,117 @@ pub fn apply_turn(
             // died. (SQ-0673)
             mapper.observe_relocation(snap.number, &snap.name);
             death.unresolved = false;
+        } else if already_random {
+            // SQ-1257 Phase 2 territory, unchanged by SQ-1269: a re-walk of a direction ALREADY
+            // marked random mints no edge — one lucky landing is not proof the story stopped
+            // randomising. The destination is still observed as the current room, and the live
+            // landing is noted as evidence of where the story sends the player (SQ-1261);
+            // `finish_command_turn` decides separately whether to arm an UPGRADE probe
+            // (`random_exit_probe::SearchKind::Upgrade`) from `MapGraph::is_random_exit` alone,
+            // which this branch's own marking does not change.
+            if let (Some(origin), Some(d)) = (mapper.graph.current(), parse_direction(command)) {
+                if snap.number != origin {
+                    mapper.graph.note_random_destination(origin, d, snap.number);
+                }
+            }
+            mapper.observe_relocation(snap.number, &snap.name);
+            // Ordinary play resuming, same reasoning as the `arrived` branch below:
+            // whatever death was outstanding is settled without a resurrection.
+            death.unresolved = false;
+        } else if let Some(pool) = &inherited_pool {
+            // SQ-1370: the first walk of a direction the map knew nothing about, into a room some
+            // other direction's pool already names. Mint NO edge — Adventure's forests randomise
+            // on arrival, so the arrow this walk would draw is exactly the one the NEXT walk of
+            // the same direction would have had to take back. Mark it instead, copy the pool so
+            // the room card can name where the story sends the player from the very first walk,
+            // and let `turn::finish_command_turn` arm the ordinary Upgrade probe (which it does
+            // from `MapGraph::is_random_exit` alone, so this branch's own marking is what asks
+            // for it). The mark is recorded as INHERITED: no walk of this direction has proved
+            // anything yet, and `random_exit_probe::deliver_upgrade` needs to know that before it
+            // applies SQ-1269's pool guard to a pool this direction never earned.
+            if let (Some(origin), Some(d)) = (mapper.graph.current(), parse_direction(command)) {
+                mapper.graph.mark_random_exit_inherited(origin, d);
+                // The live landing first — it is the one destination this direction has actually
+                // been seen to reach — then the inherited members, in the pool's own order.
+                mapper.graph.note_random_destination(origin, d, snap.number);
+                for &dest in pool {
+                    mapper.graph.note_random_destination(origin, d, dest);
+                }
+            }
+            mapper.observe_relocation(snap.number, &snap.name);
+            // Ordinary play resuming, same reasoning as every other branch that relocates.
+            death.unresolved = false;
+        } else if suspicious {
+            // SQ-1269: neither a declared-exit mismatch nor a contradicted edge/self-loop is
+            // PROOF the destination varies — mint nothing, mark nothing, leave whatever the graph
+            // already claimed (an edge, a self-loop, or nothing at all) standing exactly as it
+            // was, and stash the fact so `finish_command_turn` can hand it to a probe. The
+            // destination is still observed as the current room in the meantime.
+            if let (Some(origin), Some(d)) = (mapper.graph.current(), parse_direction(command)) {
+                mapper.note_random_exit_suspicion(origin, d, existing_conflict, snap.number);
+            }
+            mapper.observe_relocation(snap.number, &snap.name);
+            death.unresolved = false;
+        } else if moved_room && is_travel_to_command(command) {
+            // GO TO / GOTO / GO BACK TO / RETURN TO / REVISIT / WALK TO (SQ-1299): Counterfeit Monkey's
+            // "Approaching" action walks the player through however many unseen rooms the route
+            // needs, in one turn. There is no direction to record and the rooms in between were
+            // never announced, so — like a death or a teleport — this is a relocation, not a
+            // walked passage: no edge is minted between the origin and wherever the route ended.
+            // A `go to` that did NOT move the player (refused, or already there) falls through to
+            // the ordinary branches below unchanged.
+            mapper.observe_relocation(snap.number, &snap.name);
         } else if arrived {
             // The game printed this room's heading again, so the player MOVED — even if they
             // came out where they went in. That is the only evidence a maze self-loop ever
             // leaves, and without it "west leads back here" is indistinguishable from walking
             // into a wall and thrown away (SQ-0666).
-            mapper.observe_moved(snap.number, &snap.name, parse_direction(command));
+            //
+            // SQ-1269 hole 3: before minting an ordinary self-loop, check whether this exact
+            // (origin, direction) already carries a REAL edge elsewhere — a fixed passage that a
+            // same-room landing now contradicts, exactly the same shape as the moved-room
+            // contradiction above, just arriving back rather than leaving. A RENAME overrides
+            // this: `Mapper::observe_moved`'s own rename-loop check is structural (the story
+            // renamed the room in the same breath — proof on its own, no probe needed), so it is
+            // read here FIRST and, when it fires, this contradiction check is skipped entirely —
+            // the rename already decides the move.
+            //
+            // SQ-1345: `moved_room` disqualifies it just as firmly, and for a reason the rename
+            // check cannot see. `renamed` asks whether the room the player is standing in prints
+            // a DIFFERENT name now — a fine proxy for "you changed rooms" only while names are
+            // unique. Zork I ships four rooms called `Forest`, so a walk from one into another is
+            // a genuine crossing whose heading is identical to the one it left, `renamed` is
+            // false, and this branch read an ordinary passage as a contradicted self-loop: it
+            // filed the suspicion with the ORIGIN as the live landing ("back here"), against the
+            // very edge the previous walk of that direction had correctly minted. Two Forests,
+            // one arrow, and the room card said `E ? destination varies: Forest 3, back here`.
+            // Room identity is a fact the detector states outright (`snap.number`), so read it
+            // rather than inferring it from the printed name. A move that DID change rooms and
+            // contradicts something is the `existing_conflict`/`suspicious` branch above, which
+            // files the suspicion with the real landing.
+            let origin = mapper.graph.current();
+            let dir = parse_direction(command);
+            let renamed = origin
+                .and_then(|o| mapper.graph.room(o))
+                .is_some_and(|r| r.label() != snap.name);
+            let conflicting_edge: Option<mapper::graph::RoomId> = if renamed || moved_room {
+                None
+            } else {
+                origin.zip(dir).and_then(|(o, d)| {
+                    mapper
+                        .graph
+                        .connections()
+                        .iter()
+                        .find(|c| c.origin == o && c.dir == d && c.dest != o)
+                        .map(|c| c.dest)
+                })
+            };
+            if let (Some(o), Some(d), Some(old)) = (origin, dir, conflicting_edge) {
+                mapper.note_random_exit_suspicion(o, d, Some(old), o);
+                mapper.observe_relocation(snap.number, &snap.name);
+            } else {
+                mapper.observe_moved(snap.number, &snap.name, dir);
+            }
             // A heading reprinted in the room the player is already standing in — a `look`, a
             // maze self-loop, a move the game refused with a re-description — is ordinary play
             // resuming, so whatever death was outstanding has been settled without a
@@ -3864,6 +4436,95 @@ pub struct DeathWatch {
     /// reprinted in place (ordinary play resuming). It suppresses exactly one relocation, never a
     /// second.
     pub unresolved: bool,
+}
+
+/// The pool a NEW direction should inherit, because the room it just reached is one the map
+/// already knows a random exit sends the player to (SQ-1370) — or `None` when nothing here has
+/// earned that.
+///
+/// # Why a landing is enough
+///
+/// Adventure randomises on the ARRIVAL side. `At_Hill_In_Road`'s `s_to`, `In_A_Valley`'s `e_to`
+/// and its `w_to` all declare the same perfectly ordinary FIXED room, `In_Forest_1`, whose own
+/// `initial` routine reroutes half of every arrival on to `In_Forest_2`. So the randomness is a
+/// property of the DESTINATION, shared by every way in — and yet each of those three directions
+/// used to be discovered from scratch: mint a confident arrow on the first walk, wait for a
+/// second walk to contradict it, and only then mark `?`. The player who has already proved the
+/// hill's south is random has proved something about the valley's west too, and this is where the
+/// map says so: the first walk of a new direction into a pooled room is marked on the spot, with
+/// the pool copied, and `random_exit_probe::arm_for_finished_turn` arms the same Upgrade probe it
+/// arms for any other marked direction.
+///
+/// # It is a hypothesis, and it is recorded as one
+///
+/// The same evidence reads differently when the randomness lives on the ORIGIN side: one exit
+/// that scatters the player among five rooms says nothing about the fixed corridor into any one
+/// of them. That direction is marked all the same — the two cases are indistinguishable from a
+/// single landing — but as an INHERITED mark ([`mapper::graph::MapGraph::mark_random_exit_inherited`]),
+/// which agreeing re-walks are allowed to clear where an earned one's pool would lock it in. A
+/// fixed passage into a random room therefore repairs itself; see `random_exit_probe::deliver_upgrade`.
+///
+/// # What is refused
+///
+/// * A key the map already claims something for — an edge, a self-loop, or a `?` — because this
+///   is the FIRST-walk rule; a second walk that contradicts an edge is SQ-1264's contradiction
+///   rule, and a re-walk of a marked direction is Phase 2's upgrade. Only a direction the map has
+///   nothing to say about reaches here.
+/// * A move that did not leave the room (`landed == origin`): `In Forest`'s own north, south and
+///   west all loop back, and the room the loop returns to is of course in its own neighbours'
+///   pools. A self-loop is a fact about staying put, not about arriving anywhere.
+/// * A pool that names its OWN origin room (SQ-1345). Zork I's four same-named forests filled the
+///   field map with pools like `[#175, #33]` on room #33 — the real destination plus a phantom
+///   "back here" — and a corrupt pool must not seed more marks from the rooms it wrongly names.
+/// * A pool of fewer than two rooms: one sighting is where a direction that varies and one that
+///   was walked once look exactly alike, and propagating from it would spread a guess made from
+///   a single observation.
+pub fn inherited_random_pool(
+    graph: &mapper::graph::MapGraph,
+    origin: mapper::graph::RoomId,
+    dir: mapper::direction::Direction,
+    landed: mapper::graph::RoomId,
+    declared: Option<crate::engine::DeclaredExit>,
+) -> Option<Vec<mapper::graph::RoomId>> {
+    use mapper::direction::Direction;
+    if dir == Direction::Unknown || landed == origin {
+        return None;
+    }
+    if graph.is_random_exit(origin, dir)
+        || graph.self_loops(origin).contains(&dir)
+        || graph.connections().iter().any(|c| c.origin == origin && c.dir == dir)
+    {
+        return None; // the map already claims something here; this rule is about first walks
+    }
+    // The rooms this move can be recognised by: where the player actually came out, and — since
+    // the origin's own table is what a declared mismatch would have been read against — whatever
+    // fixed room that table named. Adventure's valley declares `In_Forest_1` both ways, so a walk
+    // that happens to land in the OTHER forest is recognised by either half.
+    let mut keys = vec![landed];
+    if let Some(crate::engine::DeclaredExit::Room(r)) = declared {
+        if r != origin && !keys.contains(&r) {
+            keys.push(r);
+        }
+    }
+    let mut pool: Vec<mapper::graph::RoomId> = Vec::new();
+    // `rooms()` walks a BTreeMap, so the union below is built in room-id order and two runs over
+    // the same map produce the same pool in the same order.
+    for room in graph.rooms() {
+        for (d, dests) in &room.random_destinations {
+            if (room.id, *d) == (origin, dir) || dests.contains(&room.id) {
+                continue; // itself, or SQ-1345's phantom self-entry
+            }
+            if !dests.iter().any(|x| keys.contains(x)) {
+                continue;
+            }
+            for &dest in dests {
+                if dest != origin && !pool.contains(&dest) {
+                    pool.push(dest);
+                }
+            }
+        }
+    }
+    (pool.len() >= 2).then_some(pool)
 }
 
 /// The `tried` record this turn's command is about to create: `(the room the player is standing
@@ -3996,8 +4657,11 @@ fn is_death_relocation(transcript: &str) -> bool {
 
 /// Stop reason from `run_until_input`.
 enum RunStop {
-    /// VM is waiting for player input of this kind.
-    Input(InputKind),
+    /// VM is waiting for player input of this kind. The `String` is the
+    /// pre-loaded text (ZMSD §15 `read`, v5+) reported alongside a fresh
+    /// `NeedLine` — empty for `InputKind::Char` and for the overwhelmingly
+    /// common line read with nothing pre-loaded.
+    Input(InputKind, String),
     /// VM ended via `@quit` (a mid-run `@restart` re-boots in place and keeps
     /// running, so it never surfaces here).
     Quit,
@@ -4015,8 +4679,8 @@ fn run_until_input(machine: &mut Machine) -> RunStop {
         match machine.step() {
             StepResult::Quit => return RunStop::Quit,
             StepResult::Fault => return RunStop::Quit,
-            StepResult::NeedLine { .. } => return RunStop::Input(InputKind::Line),
-            StepResult::NeedChar => return RunStop::Input(InputKind::Char),
+            StepResult::NeedLine { preload, .. } => return RunStop::Input(InputKind::Line, preload),
+            StepResult::NeedChar => return RunStop::Input(InputKind::Char, String::new()),
             StepResult::SaveRequest => return RunStop::SavePending,
             StepResult::RestoreRequest => return RunStop::RestorePending,
             // @restart (ZMSD §6.1.3): re-boot the machine in place and keep
@@ -4026,12 +4690,13 @@ fn run_until_input(machine: &mut Machine) -> RunStop {
             // `drain_turn`.
             StepResult::Restart => machine.restart(),
             StepResult::Continue => {}
+            _ => return RunStop::Quit,
         }
     }
 }
 
 /// Run to a player-facing stop — an input request or a quit — returning
-/// `(pending_kind, quit)`.
+/// `(pending_kind, quit, line_preload)`.
 ///
 /// A game `@save`/`@restore` reached along the way is auto-FAILED and the drive
 /// continues, because the callers are the paths with no dialog to open: the boot
@@ -4040,11 +4705,11 @@ fn run_until_input(machine: &mut Machine) -> RunStop {
 /// and the suspension itself belongs to a run that is being replaced or has not
 /// started. This is the Z-machine twin of the Glulx `drive_settled`, so the two
 /// engines behave identically at these three points (SQ-0656).
-fn run_settled(machine: &mut Machine) -> (InputKind, bool) {
+fn run_settled(machine: &mut Machine) -> (InputKind, bool, String) {
     loop {
         match run_until_input(machine) {
-            RunStop::Input(k) => return (k, false),
-            RunStop::Quit => return (InputKind::Line, true),
+            RunStop::Input(k, preload) => return (k, false, preload),
+            RunStop::Quit => return (InputKind::Line, true, String::new()),
             RunStop::SavePending => machine.complete_save(false),
             RunStop::RestorePending => machine.complete_restore_failure(),
         }
@@ -4094,7 +4759,7 @@ pub(crate) fn ends_with_read_prompt(s: &str) -> bool {
 /// happen within this module since `GameSession::new` always installs one).
 fn sink_mut(machine: &mut Machine) -> &mut CaptureSink {
     machine
-        .out
+        .output_mut()
         .as_any_mut()
         .downcast_mut::<CaptureSink>()
         .expect("GameSession machine must have a CaptureSink output")
@@ -4111,6 +4776,15 @@ fn sink_mut(machine: &mut Machine) -> &mut CaptureSink {
 /// screen also carries the width its game was laid out for
 /// ([`GameSession::note_restored_screen_cols`], SQ-0681) — routing every restore
 /// through one function is what keeps that from being missed on a path.
+///
+/// This is `lanthorn`'s side of [`zvm::cpu::exec::Machine::restore_screen_snapshot`],
+/// and the three duties that method's docs hand back to the host are exactly the
+/// three below it: the sink's buffer mode, the v6 colour pair re-derived from the
+/// restored window table, and [`reconcile_restored_screen_size`]. The archive
+/// carries the screen as `zvm`'s own blob and hands `load_archive`'s caller the
+/// decoded `ScreenState` (`zvm::screen_snapshot::decode`), so this function
+/// stays the ONE place a restored screen is installed — the alternative, calling
+/// the machine method from each restore path, would put the install in six.
 pub fn restore_screen(session: &mut GameSession, screen: zvm::screen::ScreenState) {
     // The upper window's grid width IS the restored game's frame of reference:
     // it was last sized from header byte $21 as the SAVING session declared it
@@ -4120,9 +4794,13 @@ pub fn restore_screen(session: &mut GameSession, screen: zvm::screen::ScreenStat
     // `max` below is a no-op. (SQ-0681)
     let restored_cols = screen.upper.cols;
     let buffering = screen.buffer_mode;
+    // The restored screen's v6 generation has no history — its numbers can
+    // collide with ones the memo already holds — so the memoized model goes
+    // with the screen it described (SQ-1191).
+    session.v6_model_memo.take();
     let machine = &mut session.machine;
     machine.screen = screen;
-    machine.out.set_buffer_mode(buffering);
+    machine.output_mut().set_buffer_mode(buffering);
     // SQ-0551: same class of fix as the `buffer_mode` re-sync above — state that
     // lives in two places, only one of which is archived.
     //
@@ -4141,8 +4819,10 @@ pub fn restore_screen(session: &mut GameSession, screen: zvm::screen::ScreenStat
     // the restored screen self-consistent and needs nothing persisted.
     //
     // Versions 1–5/7/8 have no window table to derive from, and nothing else in
-    // the archive holds the game's selected colour, so THEY carry the pair in
-    // `screen.json` instead (see `ScreenDto::current_fg`) — it is already in
+    // the archive holds the game's selected colour, so THEY carry the pair in the
+    // screen snapshot instead (see `zvm::screen_snapshot`, which writes the pair
+    // for real below Version 6 and as `Default` at and above it, so neither
+    // mechanism can quietly paper over the other going wrong) — it is already in
     // `screen` by the time we get here, and the derivation below simply doesn't
     // fire for them. Beyond Zork, Photopia and Nameless all set colours and
     // depend on that path.
@@ -4349,7 +5029,7 @@ pub fn format_pane_title(name: &str, filename: &str, disk_image: bool) -> String
 
 use crate::engine::{
     BorderPref, BufferWindow, Debugger, DisasmProvenance, Engine, EngineError, EngineSave, GraphicsWindow,
-    GridCell, GridWindow, Introspect, KeyInput, LocationInfo, PositionedWindow, ScreenModel, Split,
+    GridCell, GridWindow, Introspect, KeyInput, PositionedWindow, ScreenModel, Split,
     StatusField, StatusModel, WinNode,
 };
 
@@ -4379,7 +5059,7 @@ impl GameSession {
             }
         } // drop borrow_mut before confirmation / the shared borrow
         // Runtime confirmation, once per turn (skip while parked at same PC).
-        if self.last_confirmed_pc.get() != Some(self.machine.state.pc) {
+        if self.last_confirmed_pc.get() != Some(self.machine.state.pc()) {
             self.confirm_disasm();
         }
         let slot = self.disasm_cache.borrow();
@@ -4392,10 +5072,10 @@ impl GameSession {
         let mut slot = self.disasm_cache.borrow_mut();
         let Some(cache) = slot.as_mut() else { return }; // don't build just to confirm
         let mem = &self.machine.mem;
-        for f in &self.machine.state.frames {
-            cache.confirm_routine(mem, f.func_addr);
+        for f in self.machine.state.frames() {
+            cache.confirm_routine(mem, f.func_addr());
         }
-        cache.confirm_pc(mem, self.machine.state.pc);
+        cache.confirm_pc(mem, self.machine.state.pc());
         // When parked at an input prompt, `state.pc` points PAST the read to the
         // code that consumes the input; confirm the read instruction itself too, so
         // it renders as a real op instead of being eaten by a stale tiling. This is
@@ -4404,7 +5084,7 @@ impl GameSession {
         if let Some(read_pc) = self.machine.pending_read_pc() {
             cache.confirm_pc(mem, read_pc);
         }
-        for &pc in &self.machine.exec_pcs {
+        for &pc in self.machine.exec_pcs() {
             cache.confirm_pc(mem, pc);
         }
         // Draining a fault isn't needed here (confirm reads via decode which may
@@ -4421,14 +5101,14 @@ impl GameSession {
         let built = self.disasm_cache.borrow().is_some();
         if built {
             self.fold_confirmations();
-            self.last_confirmed_pc.set(Some(self.machine.state.pc));
+            self.last_confirmed_pc.set(Some(self.machine.state.pc()));
         }
     }
 
     /// object entry base address -> object number.
     fn object_addr_map(&self) -> std::collections::HashMap<u32, u16> {
         let mem = &self.machine.mem;
-        zvm::object_tree_view(&self.machine)
+        zvm::location::object_tree_view(&self.machine)
             .iter()
             .map(|s| (zvm::objects::object_entry_addr(mem, s.number), s.number))
             .collect()
@@ -4548,21 +5228,12 @@ impl GameSession {
     }
 }
 
-/// One entry in a v6 window's display list — a picture drawn, or a region erased,
-/// in window-canvas coordinates (SQ-0567).
-///
-/// Serializable because a host Save State persists the display list itself rather
-/// than a picture of the result (SQ-0588): these ops ARE the archived form of a v6
-/// screen, replayed under the restored palette to rebuild it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum V6Op {
-    Draw { number: u16, dx: i32, dy: i32 },
-    Erase { dx: i32, dy: i32, w: u32, h: u32 },
-}
-
-/// Longest display list kept per window. Comfortably above any real screen (Arthur's
-/// busiest is a handful of ops) while bounding a story that redraws forever.
-pub const V6_OPS_CAP: usize = 512;
+/// Clamp on a v6 window's pixel-canvas backing store, so a hostile / buggy story
+/// that sets `window_size(w, 0xFFFF, 0xFFFF)` then draws/erases can't force a
+/// ~17 GB `RgbaImage` allocation (an OOM abort). Far exceeds any real v6 screen
+/// (~640 px) yet bounds worst-case storage to ~64 MB — mirroring the grid-cell
+/// cap on the engine side (Phase 1a).
+const CANVAS_PX_CAP: u32 = 4096;
 
 /// Mirror a Z-machine's screen into the neutral [`ScreenModel`].
 ///
@@ -4575,6 +5246,7 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
     let screen = &machine.screen;
     let src = &screen.upper;
     let grid = GridWindow {
+        win: 0,
         fill: None, // v6-only erase fill (SQ-0584)
         cols: src.cols,
         rows: src.rows,
@@ -4643,6 +5315,7 @@ pub fn status_model_from_machine(machine: &Machine) -> StatusModel {
             zvm::screen::StatusRight::Time { hours, minutes } => {
                 StatusField::Time { hours, minutes }
             }
+            _ => StatusField::ScoreTurns { score: 0, turns: 0 },
         };
         StatusModel::Classic { location: sl.location, right }
     } else {
@@ -4652,7 +5325,7 @@ pub fn status_model_from_machine(machine: &Machine) -> StatusModel {
 
 impl Engine for GameSession {
     fn submit(&mut self, command: &str) -> TurnResult {
-        if self.machine.trace_exec { self.machine.exec_pcs.clear(); }
+        if self.machine.trace_exec { self.machine.clear_exec_pcs(); }
         // A turn executes new code, so its freshly-recorded boundaries must be
         // folded afterward EVEN IF it returns to the same parked PC (every
         // look/examine returns to the same input prompt). Reopen the per-turn
@@ -4664,7 +5337,7 @@ impl Engine for GameSession {
     }
 
     fn submit_key(&mut self, key: KeyInput) -> Option<TurnResult> {
-        if self.machine.trace_exec { self.machine.exec_pcs.clear(); }
+        if self.machine.trace_exec { self.machine.clear_exec_pcs(); }
         self.last_confirmed_pc.set(None); // reopen the confirmation gate each turn
         let byte = GameSession::key_input_to_zscii(key)?;
         Some(self.submit_char(byte))
@@ -4771,11 +5444,13 @@ impl Engine for GameSession {
     /// [`screen`](Engine::screen) for every non-v6 story and for every v6 frame
     /// once the sequence has settled, which is every frame the player is not
     /// actively watching a picture land on.
-    fn screen_now(&self) -> ScreenModel {
+    fn screen_now(&self) -> std::sync::Arc<ScreenModel> {
         if self.machine.screen.v6.is_some() {
-            self.v6_screen_model(self.visible_canvas())
+            // Memoized (SQ-1191): a frame on which nothing changed gets the
+            // previous frame's Arc back instead of a fresh clone tree.
+            self.v6_screen_model_shared(self.visible_canvas())
         } else {
-            screen_model_from_machine(&self.machine)
+            std::sync::Arc::new(screen_model_from_machine(&self.machine))
         }
     }
 
@@ -4861,6 +5536,11 @@ impl Engine for GameSession {
         self.machine
             .restore_file(&save.bytes)
             .map_err(|e| EngineError::BadSave(format!("{e:?}")))?;
+        // The restore swapped dynamic memory wholesale, and this path does not
+        // drain a turn — drop the cached object-word set here as `drain_turn`
+        // does, or it keeps answering for the session we just left (SQ-1176).
+        self.object_word_set.take();
+        self.v6_model_memo.take(); // same duty for the memoized screen model (SQ-1191)
         // The restored memory brings NO screen with it — Quetzal archives none by
         // design — so whatever is in the upper window belongs to the moment we
         // just left, not to the one we just restored. Leaving it there lets a
@@ -4880,6 +5560,17 @@ impl Engine for GameSession {
         // (`restore_screen`, the `.lanthorn` archive path) replaces the whole
         // `ScreenState` immediately after this and never sees the blank.
         self.machine.screen.upper.blank();
+        // The v6 half of the same duty (SQ-1283). A Version 6 story paints its
+        // status text into the window model rather than the grid above, so
+        // blanking the grid left a v6 band standing — and `detect_location` reads
+        // the band. A shadow restored below decks on Shogun still held the room
+        // its PREVIOUS question had walked into, and Shogun repaints line 2 only
+        // when `HERE` changes, so a refused `se` printed "You can't go that way",
+        // repainted nothing, and detection named that stale room. The return probe
+        // minted a passage to it, once per direction it tried. Only the band goes:
+        // the prose window is v6's lower window and blanking has never touched
+        // that. See `zvm::location::clear_v6_status_band`.
+        zvm::location::clear_v6_status_band(&mut self.machine);
         // A Save State is snapshotted at an input prompt; its PC points AT the
         // read/read_char instruction (save_pc rewinds it), so run forward to
         // re-execute that read — re-arming the pending input on the freshly
@@ -4894,15 +5585,21 @@ impl Engine for GameSession {
         // has to be ANSWERED rather than silently dropped — dropping it parks the
         // VM on a suspension no dialog will ever open for. Uniform with the Glulx
         // adapter, whose restore runs the same settling drive. (SQ-0656)
-        let (pending, quit) = run_settled(&mut self.machine);
+        let (pending, quit, line_preload) = run_settled(&mut self.machine);
         self.pending = pending;
         self.quit = quit;
+        self.line_preload = line_preload;
+        self.line_preload_seeded = false;
         Ok(())
     }
 
     fn restore_game_save(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
         self.machine.complete_restore_success(bytes)
             .map_err(|e| EngineError::BadSave(format!("{e:?}")))?;
+        // Memory was swapped without draining a turn — same duty as in
+        // `restore_state` above (SQ-1176).
+        self.object_word_set.take();
+        self.v6_model_memo.take(); // same duty for the memoized screen model (SQ-1191)
         // complete_restore_success lands mid-way through the game's save verb
         // (just past the @save descriptor), not at a read. Run forward to the
         // next read so the machine is re-armed at a clean prompt — otherwise the
@@ -4916,10 +5613,12 @@ impl Engine for GameSession {
         // that stop left the VM suspended with no dialog to answer it — every
         // later turn would re-report it. It is auto-failed and the drive
         // continues, as on the boot and Save State paths. (SQ-0656)
-        let (pending, quit) = run_settled(&mut self.machine);
+        let (pending, quit, line_preload) = run_settled(&mut self.machine);
         let _ = self.take_transcript();
         self.pending = pending;
         self.quit = quit;
+        self.line_preload = line_preload;
+        self.line_preload_seeded = false;
         Ok(())
     }
 
@@ -4955,11 +5654,78 @@ impl Engine for GameSession {
         self.machine.aux_dirty = false;
     }
 
+    fn set_stream_files(&mut self, game_dir: &std::path::Path) {
+        sink_mut(&mut self.machine).set_stream_dir(game_dir);
+    }
+
+    fn transcript_on(&self) -> bool {
+        self.machine.transcript_on()
+    }
+
+    /// `/transcript on|off`, and the SCRIPT verb's switch when the story has
+    /// none. `Machine::set_transcript` writes `Flags 2` bit 0 with it (ZMSD
+    /// §7.4), so a story that DOES have a SCRIPT verb sees the same state the
+    /// player set and can turn it off again.
+    fn set_transcript(&mut self, on: bool) -> Option<std::path::PathBuf> {
+        self.machine.set_transcript(on);
+        on.then(|| sink_mut(&mut self.machine).transcript_path()).flatten()
+    }
+
     fn current_location(&self) -> Option<LocationInfo> {
         // Version-aware detection (same as a turn), NOT the v3-only global-0 read:
-        // v4+ games have no location global, so `zvm::current_location` returns
+        // v4+ games have no location global, so `zvm::location::current_location` returns
         // None at boot, leaving the starting room off the map until the first turn.
-        detect_location(&self.machine).as_ref().map(location_to_snapshot)
+        // `_with` + the cached candidate pool: this runs every rendered FRAME
+        // via `command_band.rs`, not once a turn (SQ-1259).
+        detect_location_with(&self.machine, self.player_candidates()).as_ref().map(location_to_snapshot)
+    }
+
+    fn declared_exit(
+        &self,
+        origin: mapper::graph::RoomId,
+        dir: mapper::direction::Direction,
+    ) -> crate::engine::DeclaredExit {
+        use mapper::direction::Direction as D;
+        use zvm::world::Compass;
+        let Some(compass) = (match dir {
+            D::N => Some(Compass::N),
+            D::S => Some(Compass::S),
+            D::E => Some(Compass::E),
+            D::W => Some(Compass::W),
+            D::NE => Some(Compass::Ne),
+            D::NW => Some(Compass::Nw),
+            D::SE => Some(Compass::Se),
+            D::SW => Some(Compass::Sw),
+            D::Up => Some(Compass::Up),
+            D::Down => Some(Compass::Down),
+            D::In => Some(Compass::In),
+            D::Out => Some(Compass::Out),
+            D::Unknown => None,
+        }) else {
+            return crate::engine::DeclaredExit::Unknown;
+        };
+        // `origin` is a RoomId; the Z-machine world model wants a real object
+        // number. Always fits — a Z-machine RoomId IS an object number,
+        // widened at `location_to_snapshot` and never larger than u16::MAX.
+        let Ok(origin) = u16::try_from(origin) else {
+            return crate::engine::DeclaredExit::Unknown;
+        };
+        match self.world_model().declared_exit(&self.machine.mem, origin, compass) {
+            zvm::world::DeclaredExit::Room(r) => crate::engine::DeclaredExit::Room(r.into()),
+            zvm::world::DeclaredExit::Code => crate::engine::DeclaredExit::Code,
+            zvm::world::DeclaredExit::Message => crate::engine::DeclaredExit::Message,
+            zvm::world::DeclaredExit::Absent => crate::engine::DeclaredExit::Absent,
+            zvm::world::DeclaredExit::Unknown => crate::engine::DeclaredExit::Unknown,
+            _ => crate::engine::DeclaredExit::Unknown,
+        }
+    }
+
+    fn rng_seed(&self) -> Option<u32> {
+        Some(self.machine.rng_seed())
+    }
+
+    fn reseed_random(&mut self, seed: u32) {
+        self.machine.set_rng_seed(seed);
     }
 
     fn set_trace_screen(&mut self, on: bool) {
@@ -4967,7 +5733,7 @@ impl Engine for GameSession {
     }
 
     fn take_screen_trace(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.machine.screen_trace)
+        self.machine.take_screen_trace()
     }
 
     fn v6_snapshot(&self) -> Option<Vec<String>> {
@@ -5011,7 +5777,7 @@ impl Engine for GameSession {
         self.machine.trace_exec = on;
         // Only the per-turn set is cleared when tracing stops; the cumulative
         // `ever_exec_pcs` (permanent colour + persisted coverage) is preserved.
-        if !on { self.machine.exec_pcs.clear(); }
+        if !on { self.machine.clear_exec_pcs(); }
     }
 
     fn seed_executed_pcs(&mut self, pcs: &std::collections::HashSet<u32>) {
@@ -5135,6 +5901,13 @@ impl GameSession {
             .get_or_init(|| zvm::objects::ParseNames::detect(&self.machine.mem))
             .as_ref()
     }
+
+    /// The story's avatar-candidate pools, derived on first use — see the
+    /// [`player_candidates`](Self::player_candidates) field's doc comment.
+    pub fn player_candidates(&self) -> &PlayerCandidates {
+        self.player_candidates
+            .get_or_init(|| PlayerCandidates::build(&self.machine.mem, self.parse_names()))
+    }
 }
 
 impl Introspect for GameSession {
@@ -5146,7 +5919,7 @@ impl Introspect for GameSession {
         crate::inventory::list_inventory(&self.machine.mem, self.parse_names(), container)
     }
 
-    fn room_objects(&self, room: u16) -> Vec<crate::engine::ObjectWords> {
+    fn room_objects(&self, room: mapper::graph::RoomId) -> Vec<crate::engine::ObjectWords> {
         crate::render::room_info::list_room_objects(
             self.world_model(),
             self.parse_names(),
@@ -5157,7 +5930,7 @@ impl Introspect for GameSession {
 
     fn room_objects_excluding(
         &self,
-        room: u16,
+        room: mapper::graph::RoomId,
         exclude: Option<u16>,
     ) -> Vec<crate::engine::ObjectWords> {
         crate::render::room_info::list_room_objects_excluding(
@@ -5180,13 +5953,33 @@ impl Introspect for GameSession {
 
     fn all_object_words(&self) -> Option<Vec<crate::engine::ObjectWords>> {
         // `ParseNames::detect` is cached in `parse_names`; the walk itself is
-        // one pass over the object table and runs once a TURN, from
-        // `input::refresh_seen_words`, never per frame.
+        // one pass over the object table. The bulk any-object callers go
+        // through `object_word_set` below instead, which caches the walk for
+        // the rest of the turn.
         Some(self.parse_names()?.all(&self.machine.mem))
     }
 
-    fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16> {
-        let max_obj = zvm::object_tree_view(&self.machine)
+    fn object_word_set(&self) -> Option<std::sync::Arc<grammar_model::ObjectWordSet>> {
+        // Whether the story keeps parse names at all is a compile-time layout
+        // fact (`parse_names` is a `OnceCell`), so a `None` needs no cache.
+        let names = self.parse_names()?;
+        if let Some(set) = self.object_word_set.borrow().as_ref() {
+            return Some(std::sync::Arc::clone(set));
+        }
+        // One walk of the object table per TURN, not per token: `drain_turn`
+        // drops the entry whenever the VM runs, because the words live in
+        // dynamic memory and a game can rewrite them (see the field's doc).
+        let set = std::sync::Arc::new(grammar_model::ObjectWordSet::build(&names.all(&self.machine.mem)));
+        *self.object_word_set.borrow_mut() = Some(std::sync::Arc::clone(&set));
+        Some(set)
+    }
+
+    fn children_of(&self, parent: mapper::graph::RoomId) -> std::collections::BTreeSet<u16> {
+        // A Z-machine `parent` is always a real object number (RoomId widened
+        // at `location_to_snapshot`, never larger than u16::MAX); anything
+        // else has no children here.
+        let Ok(parent) = u16::try_from(parent) else { return std::collections::BTreeSet::new() };
+        let max_obj = zvm::location::object_tree_view(&self.machine)
             .into_iter()
             .map(|s| s.number)
             .max()
@@ -5197,13 +5990,16 @@ impl Introspect for GameSession {
     }
 
     fn player_object(&self) -> Option<u16> {
-        zvm::find_player_object(&self.machine)
+        // Cached candidate pool (SQ-1259): reached whenever `state.player_obj`
+        // is `None`, which is every render frame until it locks, on the
+        // per-frame path in `command_band.rs`/`transcript.rs`.
+        zvm::location::find_player_object_with(&self.machine, self.player_candidates())
     }
 }
 
 impl Debugger for GameSession {
     fn pc(&self) -> u32 {
-        self.machine.state.pc
+        self.machine.state.pc()
     }
 
     fn disassemble(&self, addr: u32, lines: usize) -> Vec<String> {
@@ -5281,7 +6077,7 @@ impl Debugger for GameSession {
     }
 
     fn executed_pcs(&self) -> std::collections::HashSet<u32> {
-        self.machine.exec_pcs.clone()
+        self.machine.exec_pcs().clone()
     }
 
     fn ever_executed_pcs(&self) -> std::collections::HashSet<u32> {
@@ -5290,14 +6086,14 @@ impl Debugger for GameSession {
 
     fn stack_lines(&self) -> Vec<String> {
         let st = &self.machine.state;
-        if st.frames.is_empty() {
+        if st.frames().is_empty() {
             return vec!["(no frames)".to_string()];
         }
-        let mut out = Vec::with_capacity(st.frames.len());
-        for (i, f) in st.frames.iter().enumerate() {
+        let mut out = Vec::with_capacity(st.frames().len());
+        for (i, f) in st.frames().iter().enumerate() {
             out.push(format!(
                 "#{i}  fn@{:06x}  ret={:06x}  args={}",
-                f.func_addr, f.return_pc, f.arg_count
+                f.func_addr(), f.return_pc(), f.arg_count()
             ));
         }
         out
@@ -5305,22 +6101,22 @@ impl Debugger for GameSession {
 
     fn eval_stack_lines(&self) -> Vec<String> {
         let st = &self.machine.state;
-        if st.eval_stack.is_empty() {
+        if st.eval_stack().is_empty() {
             return vec!["(empty)".to_string()];
         }
         let bases: std::collections::HashSet<usize> =
-            st.frames.iter().map(|f| f.eval_base).collect();
-        st.eval_stack.iter().enumerate().rev().map(|(i, v)| {
+            st.frames().iter().map(|f| f.eval_base()).collect();
+        st.eval_stack().iter().enumerate().rev().map(|(i, v)| {
             let b = if bases.contains(&i) { "  <- frame base" } else { "" };
             format!("[{i:>3}] {:04x}  ({}){}", v, *v as i16, b)
         }).collect()
     }
 
     fn locals_lines(&self) -> Vec<String> {
-        match self.machine.state.frames.last() {
+        match self.machine.state.frames().last() {
             None => vec!["(no frame)".to_string()],
-            Some(f) if f.locals.is_empty() => vec!["(none)".to_string()],
-            Some(f) => f.locals.iter().enumerate()
+            Some(f) if f.locals().is_empty() => vec!["(none)".to_string()],
+            Some(f) => f.locals().iter().enumerate()
                 .map(|(i, w)| format!("local{i} = {:04x}  ({})", w, w))
                 .collect(),
         }
@@ -5338,7 +6134,7 @@ impl Debugger for GameSession {
         // directly under its parent. (Numeric order + per-object indent, which
         // this replaces, does NOT nest children under their parents.)
         let mem = &self.machine.mem;
-        let numbers: Vec<u16> = zvm::object_tree_view(&self.machine)
+        let numbers: Vec<u16> = zvm::location::object_tree_view(&self.machine)
             .iter().map(|s| s.number).collect();
         let out = build_object_tree(
             &numbers,
@@ -5448,10 +6244,10 @@ impl Debugger for GameSession {
     }
 
     fn frame_locals(&self, idx: usize) -> Vec<String> {
-        match self.machine.state.frames.get(idx) {
+        match self.machine.state.frames().get(idx) {
             None => vec!["(no frame)".to_string()],
-            Some(f) if f.locals.is_empty() => vec!["(no locals)".to_string()],
-            Some(f) => f.locals.iter().enumerate()
+            Some(f) if f.locals().is_empty() => vec!["(no locals)".to_string()],
+            Some(f) => f.locals().iter().enumerate()
                 .map(|(i, w)| format!("local{i} = 0x{:04x}  ({})", w, *w as i16))
                 .collect(),
         }
@@ -5460,8 +6256,8 @@ impl Debugger for GameSession {
     fn var_value(&self, var: u8) -> Option<u16> {
         let st = &self.machine.state;
         match var {
-            0 => st.eval_stack.last().copied(), // peek the top; never pops
-            1..=15 => st.frames.last()?.locals.get((var - 1) as usize).copied(),
+            0 => st.eval_stack().last().copied(), // peek the top; never pops
+            1..=15 => st.frames().last()?.locals().get((var - 1) as usize).copied(),
             n => Some(self.machine.global(n - 16)),
         }
     }
@@ -5625,7 +6421,7 @@ fn build_object_tree(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod tests {
     use super::*;
     use mapper::direction::Direction;
@@ -5720,6 +6516,8 @@ mod tests {
             align: ImageAlign::MarginLeft,
             scaled: None,
             margin_px: Some(56),
+            rule: None,
+            link: 0,
         };
         let text = "first line\nsecond line";
         // One style chunk covering everything (bold), to verify run splitting.
@@ -5745,6 +6543,8 @@ mod tests {
             align: ImageAlign::MarginLeft,
             scaled: None,
             margin_px: None,
+            rule: None,
+            link: 0,
         };
         let elems = interleave_story_elems("story text", &[], vec![(0, TranscriptElem::Image(img))], 0, None);
         assert_eq!(elems.len(), 2, "Image then Text");
@@ -5844,6 +6644,7 @@ mod tests {
             pixels: std::sync::Arc::new(image::RgbaImage::new(2, 2)),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
+            rule: None, link: 0,
         }
     }
 
@@ -5893,7 +6694,7 @@ mod tests {
         let first = TurnResult {
             transcript: String::new(),
             transcript_runs: Vec::new(),
-            location: Some(ObjectSnapshot { number: 1, parent: 0, name: "Hall".into() }),
+            location: Some(LocationInfo { number: 1, parent: 0, name: "Hall".into() }),
             quit: false,
             erase_lower: false,
             info: None,
@@ -5907,6 +6708,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
             prose_retired: None,
+            declared_exit: None,
         };
         apply_turn(&mut m, "look", &first, &mut Default::default());
         assert_eq!(m.graph.current(), Some(1));
@@ -5917,7 +6719,7 @@ mod tests {
         let second = TurnResult {
             transcript: String::new(),
             transcript_runs: Vec::new(),
-            location: Some(ObjectSnapshot { number: 2, parent: 0, name: "Attic".into() }),
+            location: Some(LocationInfo { number: 2, parent: 0, name: "Attic".into() }),
             quit: false,
             erase_lower: false,
             info: None,
@@ -5931,6 +6733,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
             prose_retired: None,
+            declared_exit: None,
         };
         apply_turn(&mut m, "north", &second, &mut Default::default());
         assert!(m.graph.room(2).is_some());
@@ -5941,6 +6744,189 @@ mod tests {
         assert_eq!(conns[0].origin, 1);
         assert_eq!(conns[0].dir, Direction::N);
         assert_eq!(conns[0].dest, 2);
+    }
+
+    /// SQ-1257 Phase 3 regression, driven through the real `apply_turn` seam (a maze room whose
+    /// name does NOT change, the shape a Zork I maze self-loop takes — no `stories/` fixture
+    /// needed for this synthetic form). A compass move that reprints the SAME room heading under
+    /// the SAME name must still read as an ordinary self-loop (`↩`), never a random exit (`?`):
+    /// the rename-loop check must fire only on an actual rename, not on every same-room arrival.
+    /// Falsify by dropping the `label_before` guard in `Mapper::observe_inner` (unconditional
+    /// `add_self_loop` becomes unconditional `record_random_exit`) and the final assertion fails.
+    #[test]
+    fn apply_turn_same_room_same_name_move_stays_a_self_loop_not_a_random_exit() {
+        let mut m = Mapper::default();
+        let enter = TurnResult {
+            transcript: "Maze\nYou are in a maze of twisty little passages, all alike.".into(),
+            transcript_runs: Vec::new(),
+            location: Some(LocationInfo { number: 1, parent: 0, name: "Maze".into() }),
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
+            diagnostics: vec![],
+            fault: None,
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+            pictures: Vec::new(),
+            transcript_elems: Vec::new(),
+            prose_retired: None,
+            declared_exit: None,
+        };
+        apply_turn(&mut m, "look", &enter, &mut Default::default());
+        assert_eq!(m.graph.current(), Some(1));
+
+        // West leads back into the SAME room object, under the SAME printed name.
+        let west = TurnResult {
+            transcript: "Maze\nYou are in a maze of twisty little passages, all alike.".into(),
+            transcript_runs: Vec::new(),
+            location: Some(LocationInfo { number: 1, parent: 0, name: "Maze".into() }),
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
+            diagnostics: vec![],
+            fault: None,
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+            pictures: Vec::new(),
+            transcript_elems: Vec::new(),
+            prose_retired: None,
+            declared_exit: None,
+        };
+        apply_turn(&mut m, "west", &west, &mut Default::default());
+
+        assert_eq!(m.graph.current(), Some(1), "still the same room object");
+        assert_eq!(m.graph.self_loops(1), vec![Direction::W], "recorded as an ordinary self-loop");
+        assert!(!m.graph.is_random_exit(1, Direction::W), "not a random exit — the name never changed");
+        assert_eq!(
+            mapper::matrix::classify(&m.graph, 1, Direction::W),
+            mapper::matrix::MatrixCell::SelfLoop,
+            "the matrix reads it as `leads back here`, not `destination varies`"
+        );
+    }
+
+    /// The Lost Pig shape, driven through the same `apply_turn` seam: a compass move that
+    /// reprints the SAME room object's heading under a DIFFERENT name is a random exit, not a
+    /// self-loop — SQ-1257 Phase 3's rename-loop check.
+    #[test]
+    fn apply_turn_same_room_different_name_move_is_a_random_exit_not_a_self_loop() {
+        let mut m = Mapper::default();
+        let enter = TurnResult {
+            transcript: "Twisty Cave\nGnomes cavort obscenely as they dig for gold.".into(),
+            transcript_runs: Vec::new(),
+            location: Some(LocationInfo { number: 183, parent: 0, name: "Twisty Cave".into() }),
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
+            diagnostics: vec![],
+            fault: None,
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+            pictures: Vec::new(),
+            transcript_elems: Vec::new(),
+            prose_retired: None,
+            declared_exit: None,
+        };
+        apply_turn(&mut m, "look", &enter, &mut Default::default());
+        assert_eq!(m.graph.current(), Some(183));
+
+        // North leads back into the SAME room object, but re-rolled under a different name.
+        let north = TurnResult {
+            transcript: "Confusing Passage\nGnomes cavort obscenely as they dig for gold.".into(),
+            transcript_runs: Vec::new(),
+            location: Some(LocationInfo { number: 183, parent: 0, name: "Confusing Passage".into() }),
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
+            diagnostics: vec![],
+            fault: None,
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+            pictures: Vec::new(),
+            transcript_elems: Vec::new(),
+            prose_retired: None,
+            declared_exit: None,
+        };
+        apply_turn(&mut m, "north", &north, &mut Default::default());
+
+        assert_eq!(m.graph.current(), Some(183), "still the same room object");
+        assert!(m.graph.self_loops(183).is_empty(), "no self-loop is minted for a rename-loop");
+        assert!(m.graph.is_random_exit(183, Direction::N), "north is recorded as a random exit");
+        assert_eq!(m.graph.room(183).unwrap().name, "Confusing Passage", "the label is the CURRENT name");
+        assert_eq!(m.graph.room(183).unwrap().aliases, vec!["Twisty Cave"], "the old name joins the aliases");
+        assert_eq!(
+            mapper::matrix::classify(&m.graph, 183, Direction::N),
+            mapper::matrix::MatrixCell::Random { destinations: 0 },
+            "the matrix reads it as `destination varies`, not `leads back here`"
+        );
+        // SQ-1261: a rename-loop's "destination" is the room the player is already standing in —
+        // there is nothing to name, so nothing is recorded, unlike an ordinary random-exit walk
+        // that lands somewhere else.
+        assert!(
+            m.graph.random_destinations(183, Direction::N).is_empty(),
+            "a rename-loop records no destination — the room never actually changed"
+        );
+    }
+
+    /// SQ-1314: the declared-exit mismatch rule is about a move made ON THE COMPASS, and a
+    /// nautical word is not one.
+    ///
+    /// `Engine::declared_exit` takes a [`Direction`] and reads the story's own compass column for
+    /// it. A ship word fills that same slot on the MAP through a projection nothing in the story
+    /// shares — Counterfeit Monkey files `fore` under a direction object of its own, and the
+    /// compass column for the slot `fore` projects onto may name a completely different room, or
+    /// none. So a mismatch between that column and where a `fore` actually landed is a mismatch
+    /// between two different questions, and marking the passage suspicious on it is a lie about a
+    /// move the player just completed.
+    ///
+    /// `turn::finish_command_turn` no longer even asks in that case; this pins the rule where the
+    /// decision is made, because `apply_turn` believes whatever `declared_exit` it is handed.
+    #[test]
+    fn a_declared_mismatch_against_a_nautical_word_is_not_a_suspicion() {
+        let room = |n: u32, name: &str| LocationInfo { number: n, parent: 0, name: name.into() };
+
+        // The compass baseline: `north` really is the column `declared_exit` answered about, so a
+        // mismatch there is a genuine contradiction and still raises a suspicion.
+        let mut m = Mapper::default();
+        apply_turn(&mut m, "", &TurnResult::observation(room(1, "Open Sea")), &mut Default::default());
+        let mut r = TurnResult::observation(room(2, "Sunning Deck"));
+        r.declared_exit = Some(crate::engine::DeclaredExit::Room(9));
+        apply_turn(&mut m, "north", &r, &mut Default::default());
+        assert!(
+            m.take_random_exit_suspicion().is_some(),
+            "a compass move contradicting its own compass column is still suspicious"
+        );
+        assert!(m.graph.connections().iter().all(|c| !(c.origin == 1 && c.dir == Direction::N)));
+
+        // The same numbers, walked with the ship's own word. `fore` projects onto NORTH on the
+        // map, but the story routed it through a direction object of its own, so the north column
+        // says nothing about it — and the passage must be minted like any ordinary walk.
+        let mut m = Mapper::default();
+        apply_turn(&mut m, "", &TurnResult::observation(room(1, "Galley")), &mut Default::default());
+        let mut r = TurnResult::observation(room(2, "Brock's Stateroom"));
+        r.declared_exit = Some(crate::engine::DeclaredExit::Room(9));
+        apply_turn(&mut m, "fore", &r, &mut Default::default());
+        assert!(
+            m.take_random_exit_suspicion().is_none(),
+            "a compass column cannot contradict a move that was not made on the compass"
+        );
+        assert_eq!(
+            m.graph.connections().iter().find(|c| c.origin == 1 && c.dir == Direction::N).map(|c| c.dest),
+            Some(2),
+            "the ship passage is minted, drawn, and not marked `?`"
+        );
+        assert!(!m.graph.is_random_exit(1, Direction::N));
     }
 
     /// SQ-0576: a compass click submits no text, but the game echoes the
@@ -5984,6 +6970,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
             prose_retired: None,
+            declared_exit: None,
         };
         apply_turn(&mut m, "look", &result, &mut Default::default());
         assert_eq!(m.graph.current(), None);
@@ -6014,7 +7001,7 @@ mod tests {
         let mk = |num: u16, name: &str, transcript: &str| TurnResult {
             transcript: transcript.into(),
             transcript_runs: Vec::new(),
-            location: Some(ObjectSnapshot { number: num, parent: 0, name: name.into() }),
+            location: Some(LocationInfo { number: num.into(), parent: 0, name: name.into() }),
             quit: false,
             erase_lower: false,
             info: None,
@@ -6028,6 +7015,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
             prose_retired: None,
+            declared_exit: None,
         };
         let mut m = Mapper::default();
         apply_turn(&mut m, "", &mk(1, "Living Room", "Living Room\n"), &mut Default::default());
@@ -6057,6 +7045,100 @@ mod tests {
         );
     }
 
+    /// SQ-1299: a GO TO command (Counterfeit Monkey's "Approaching" action) that actually moves
+    /// the player must record a relocation, not a walked passage — no edge between rooms that
+    /// may be several apart, and no `arrived_via` (nobody walked anything). An ordinary compass
+    /// move in the same session still mints its edge exactly as before.
+    #[test]
+    fn apply_turn_go_to_records_relocation_not_a_directional_edge() {
+        let mk = |num: u16, name: &str, transcript: &str| TurnResult {
+            transcript: transcript.into(),
+            transcript_runs: Vec::new(),
+            location: Some(LocationInfo { number: num.into(), parent: 0, name: name.into() }),
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
+            diagnostics: vec![],
+            fault: None,
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+            pictures: Vec::new(),
+            transcript_elems: Vec::new(),
+            prose_retired: None,
+            declared_exit: None,
+        };
+        let mut m = Mapper::default();
+        apply_turn(&mut m, "", &mk(1, "The Bar", "The Bar\n"), &mut Default::default());
+
+        // "go to Deep Street" lands several unseen rooms away — no direction, no edge.
+        apply_turn(
+            &mut m,
+            "go to Deep Street",
+            &mk(2, "Deep Street", "Deep Street\nYou are on a busy street.\n"),
+            &mut Default::default(),
+        );
+        assert_eq!(m.graph.current(), Some(2), "player is now at the travel destination");
+        assert_eq!(m.graph.connections().len(), 0, "a travel command must not mint any edge");
+        assert_eq!(
+            m.arrived_via(),
+            None,
+            "nobody walked anything — no arrival passage to cut a peel at"
+        );
+
+        // A real compass move afterwards still mints its edge exactly as before.
+        apply_turn(
+            &mut m,
+            "north",
+            &mk(3, "Alleyway", "Alleyway\nA narrow gap between buildings.\n"),
+            &mut Default::default(),
+        );
+        let conns = m.graph.connections();
+        assert_eq!(conns.len(), 1, "the ordinary compass move mints its own edge");
+        assert_eq!(conns[0].origin, 2);
+        assert_eq!(conns[0].dir, Direction::N);
+        assert_eq!(conns[0].dest, 3);
+        assert_eq!(m.arrived_via(), Some((2, Direction::N)));
+    }
+
+    /// A `go to` that does NOT move the player (refused, or already standing there) is left to
+    /// the ordinary branches unchanged — [`is_travel_to_command`] gates on `moved_room` too.
+    #[test]
+    fn apply_turn_go_to_refused_leaves_current_room_untouched() {
+        let mk = |num: u16, name: &str, transcript: &str| TurnResult {
+            transcript: transcript.into(),
+            transcript_runs: Vec::new(),
+            location: Some(LocationInfo { number: num.into(), parent: 0, name: name.into() }),
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
+            diagnostics: vec![],
+            fault: None,
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+            pictures: Vec::new(),
+            transcript_elems: Vec::new(),
+            prose_retired: None,
+            declared_exit: None,
+        };
+        let mut m = Mapper::default();
+        apply_turn(&mut m, "", &mk(1, "The Bar", "The Bar\n"), &mut Default::default());
+        apply_turn(
+            &mut m,
+            "go to the bar",
+            &mk(1, "The Bar", "You're already there.\n"),
+            &mut Default::default(),
+        );
+        assert_eq!(m.graph.current(), Some(1));
+        assert_eq!(m.graph.connections().len(), 0);
+        assert!(m.graph.self_loops(1).is_empty(), "an already-there go to mints no self-loop either");
+    }
+
     #[test]
     fn apply_turn_gates_nameonly_until_first_real_room() {
         // BeyondZork VT220 setup shows the player's name ("Frank Booth") in a
@@ -6065,7 +7147,7 @@ mod tests {
         let mk = |method: Option<LocationMethod>, num: u16, name: &str| TurnResult {
             transcript: String::new(),
             transcript_runs: Vec::new(),
-            location: Some(ObjectSnapshot { number: num, parent: 0, name: name.into() }),
+            location: Some(LocationInfo { number: num.into(), parent: 0, name: name.into() }),
             quit: false,
             erase_lower: false,
             info: None,
@@ -6079,6 +7161,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
             prose_retired: None,
+            declared_exit: None,
         };
 
         let mut m = Mapper::default();
@@ -6123,7 +7206,7 @@ mod tests {
         let result = TurnResult {
             transcript: String::new(),
             transcript_runs: Vec::new(),
-            location: Some(ObjectSnapshot { number: 333, parent: 0, name: "Orbiting Boony".into() }),
+            location: Some(LocationInfo { number: 333, parent: 0, name: "Orbiting Boony".into() }),
             quit: false,
             erase_lower: false,
             info: None,
@@ -6137,6 +7220,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
             prose_retired: None,
+            declared_exit: None,
         };
         apply_turn(&mut m, "", &result, &mut Default::default());
         assert_eq!(m.graph.current(), Some(333));
@@ -6165,6 +7249,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
             prose_retired: None,
+            declared_exit: None,
         };
         assert!(r.info.is_none());
     }
@@ -6176,7 +7261,7 @@ mod tests {
         TurnResult {
             transcript: String::new(),
             transcript_runs: Vec::new(),
-            location: Some(ObjectSnapshot { number, parent: 0, name: name.into() }),
+            location: Some(LocationInfo { number: number.into(), parent: 0, name: name.into() }),
             quit: false,
             erase_lower: false,
             info: None,
@@ -6190,6 +7275,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
             prose_retired: None,
+            declared_exit: None,
         }
     }
 
@@ -6378,14 +7464,18 @@ mod tests {
         // that window doubled, so the art doubles with it.
         let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), Some((320, 200)), None, None)
             .expect("v6 session");
-        assert_eq!(session.machine.picture_dims, vec![(5, 200, 120), (9, 40, 60)]);
+        for &(n, w, h) in &[(5, 200, 120), (9, 40, 60)] {
+            assert_eq!(session.machine.picture_dims(n), Some((w, h)));
+        }
 
         // No `Reso` at all (scopa.blb): Blorb §11 makes every image in the file
         // non-scalable — "always displayed at their actual size. (One image pixel
         // per screen pixel.)" — so the game is told the truth (SQ-0715).
         let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), None, None, None)
             .expect("v6 session");
-        assert_eq!(session.machine.picture_dims, dims);
+        for &(n, w, h) in &dims {
+            assert_eq!(session.machine.picture_dims(n), Some((w, h)));
+        }
     }
 
     /// SQ-0532/A-F1. ZMSD §8.4: the interpreter "may change the exact dimensions
@@ -6548,7 +7638,7 @@ mod tests {
         use ratatui::style::{Color, Style};
         // A dark page with white ink → black background (2), white foreground (9).
         let dark = Style::new().fg(Color::Rgb(238, 238, 238)).bg(Color::Rgb(12, 12, 16));
-        let (bg, fg) = crate::colors::host_default_colour_pair(dark, None, None).expect("resolved");
+        let (bg, fg) = crate::colors::host_default_colour_pair(zvm::screen::Palette::Standard, dark, None, None).expect("resolved");
         assert_eq!((bg, fg), (2, 9));
         let s = GameSession::new_with_trace(read_char_story_v5(), true, false, None, false, Vec::new(), None, Some((bg, fg)), None)
             .expect("v5 session");
@@ -6558,7 +7648,7 @@ mod tests {
         // A light page with black ink is the mirror image, and reaches the header
         // through the live path too (a theme reload has no constructor to use).
         let light = Style::new().fg(Color::Rgb(0, 0, 0)).bg(Color::Rgb(250, 250, 250));
-        let (bg, fg) = crate::colors::host_default_colour_pair(light, None, None).expect("resolved");
+        let (bg, fg) = crate::colors::host_default_colour_pair(zvm::screen::Palette::Standard, light, None, None).expect("resolved");
         assert_eq!((bg, fg), (9, 2));
         let mut s = GameSession::new(read_char_story_v5(), true, false, None).expect("v5 session");
         Engine::set_default_colours(&mut s, bg, fg);
@@ -6615,7 +7705,7 @@ mod tests {
             .expect("GameSession::new failed");
         s.set_trace_screen(true);
         assert!(s.machine.trace_screen, "set_trace_screen(true) reaches the machine");
-        s.machine.screen_trace.push("@set_colour(fg=std5, bg=std2)".to_string());
+        s.machine.push_screen_trace("@set_colour(fg=std5, bg=std2)".to_string());
         let lines = s.take_screen_trace();
         assert!(lines.iter().any(|l| l.starts_with("@")), "{lines:?}");
         assert!(s.take_screen_trace().is_empty(), "second drain is empty");
@@ -6720,6 +7810,43 @@ mod tests {
         assert_eq!(session.pending_input(), InputKind::Line,
             "after quit, pending should be reset to Line");
     }
+
+    #[test]
+    fn submit_at_a_char_prompt_delivers_only_the_first_keypress() {
+        // SQ-1270: `GameSession::submit("north")` at a read_char prompt must
+        // never hand the whole line to the VM — it delivers ONE keypress, the
+        // command's first character, exactly as pressing 'n' would.
+        let story = read_char_story_v5();
+        let mut session = GameSession::new(story, true, false, None).expect("GameSession::new failed");
+        assert_eq!(session.pending_input(), InputKind::Char);
+
+        let result = session.submit("north");
+        assert!(result.quit, "read_char->quit story: the routed keypress still drives to Quit");
+        assert_eq!(session.machine.global(0), b'n' as u16,
+            "the read_char store variable holds 'n' (the line's first char), not the whole line");
+    }
+
+    #[test]
+    fn submit_at_a_char_prompt_with_an_empty_line_delivers_enter() {
+        // SQ-1270: an empty submitted line at a char prompt behaves like the
+        // app's own Enter keypress (ZSCII 13, matching `key_input_to_zscii`),
+        // not like the terminator-only zvm fallback for a NON-empty line
+        // (SQ-1266) landing on the same value by coincidence.
+        let story = read_char_story_v5();
+        let mut session = GameSession::new(story, true, false, None).expect("GameSession::new failed");
+        assert_eq!(session.pending_input(), InputKind::Char);
+
+        let result = session.submit("");
+        assert!(result.quit);
+        assert_eq!(session.machine.global(0), 13, "empty line at a char prompt reads as Enter");
+    }
+
+    // The Line-prompt path is unchanged: `the_object_word_set_is_cached_...`
+    // above and the save/restore round-trips further below all call
+    // `submit("north")`/`submit("look")` on a Line-waiting session and depend
+    // on the full command reaching the parser, so they already regress if the
+    // `pending_input() == Char` branch above were ever taken when it should
+    // not be.
 
     // ── Engine adapter (zvm) tests ─────────────────────────────────────────────
 
@@ -6879,7 +8006,7 @@ mod tests {
         let expected = zvm::dictionary::load(&sess.machine.mem).words(&sess.machine.mem);
         assert_eq!(vocab, expected);
         // player_object == today's find_player_object.
-        assert_eq!(intro.player_object(), zvm::find_player_object(&sess.machine));
+        assert_eq!(intro.player_object(), zvm::location::find_player_object(&sess.machine));
     }
 
     #[test]
@@ -7098,8 +8225,8 @@ mod tests {
         assert!(r.sounds.is_empty(), "no sounds when the game emits no sound");
         assert!(r.diagnostics.is_empty(), "no diagnostics on a clean turn");
         // VM queues are drained after the turn.
-        assert!(sess.machine.pending_sounds.is_empty());
-        assert!(sess.machine.diagnostics.is_empty());
+        assert!(sess.machine.pending_sounds().is_empty());
+        assert!(sess.machine.diagnostics().is_empty());
     }
 
     // ── Plan 1b Task 2: pending_pictures → per-window canvases ────────────────
@@ -7160,7 +8287,7 @@ mod tests {
         // A witness the save's failure result must overwrite (0 is its own default).
         machine.mem.write_word(0x0300, 0xFFFF);
 
-        let (pending, quit) = run_settled(&mut machine);
+        let (pending, quit, _line_preload) = run_settled(&mut machine);
 
         assert_eq!(
             machine.mem.read_word(0x0300), 0,
@@ -7168,6 +8295,66 @@ mod tests {
         );
         assert!(quit, "and the drive runs on to the game's quit, which must set the quit flag");
         assert_eq!(pending, InputKind::Line, "a quit reports the neutral Line input mode");
+    }
+
+    /// The cached object-word set is one build per TURN — and not one per
+    /// session, which is the soundness line: a game CAN rewrite an object's
+    /// parse-name property in dynamic memory, and the set must see it on the
+    /// next turn (SQ-1176).
+    ///
+    /// Driven on the committed `minizork.z3` fixture, whose lantern (object
+    /// 102) files its words under property 17 — pinned by
+    /// `zvm/tests/parse_names.rs` against the game's own parser.
+    #[test]
+    fn the_object_word_set_is_cached_for_a_turn_and_dropped_when_the_vm_runs() {
+        use crate::engine::Introspect;
+        use std::sync::Arc;
+
+        let story = zvm::fixtures::load("minizork.z3").expect("committed fixture");
+        let mut sess = GameSession::new(story, true, false, None).expect("minizork boots");
+
+        let first = Introspect::object_word_set(&sess).expect("minizork has parse names");
+        assert!(
+            first.contains("lantern") && first.contains("mailbox") && !first.contains("verbose"),
+            "the set answers as any(refers_to) answers on the real story"
+        );
+        let again = Introspect::object_word_set(&sess).expect("still answerable");
+        assert!(Arc::ptr_eq(&first, &again), "within a turn, one build serves every caller");
+
+        // The game rewrites its world under the cache: point the lantern's
+        // first parse word (the slot holding `lamp`) at the dictionary entry
+        // for a word no object answers to today. Not an article — the set
+        // deliberately never holds one (`grammar_model::ARTICLES`, SQ-1210),
+        // so `a` could never come back however fresh the rebuild.
+        let chosen = zvm::grammar::dictionary_words(&sess.machine.mem)
+            .into_iter()
+            .find(|w| {
+                w.text.chars().all(char::is_alphabetic)
+                    && !first.contains(&w.text)
+                    && !grammar_model::ARTICLES.contains(&w.text.as_str())
+            })
+            .expect("minizork has verbs no object answers to");
+        let prop = zvm::objects::get_prop_addr(&sess.machine.mem, 102, 17);
+        assert_ne!(prop, 0, "the lantern keeps its words in property 17");
+        sess.machine.mem.write_word(u32::from(prop), chosen.address as u16);
+
+        // Within the same turn the cache is deliberately stale — the screen the
+        // player is reading has not changed either.
+        let stale = Introspect::object_word_set(&sess).expect("still answerable");
+        assert!(
+            Arc::ptr_eq(&first, &stale) && !stale.contains(&chosen.text),
+            "within a turn the cached build stands"
+        );
+
+        // A turn runs; the next build must read the rewritten memory.
+        sess.submit("look");
+        let fresh = Introspect::object_word_set(&sess).expect("still answerable");
+        assert!(
+            fresh.contains(&chosen.text),
+            "after a turn the set sees the rewritten parse word {:?}",
+            chosen.text
+        );
+        assert!(!Arc::ptr_eq(&first, &fresh), "and it is a fresh build, not the stale one");
     }
 
     /// A valid 2x2 red PNG, encoded via the `image` crate (mirrors
@@ -7191,9 +8378,9 @@ mod tests {
         let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
         let mut windows: [ZWindow; 8] = Default::default();
-        windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
-        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 64, 48) });
+        windows[7] = ZWindow::new(0, 0, 48, 64);
+        machine.screen.v6 = Some(V6Windows::new(windows, 7));
+        machine.queue_picture_event(PictureEvent::new(1, 7, 2, 3, false, 0, None, false, (1, 1, 64, 48)));
 
         // Construct the session directly (bypassing the constructor's boot
         // loop, which this synthetic story can't usefully run) with a Pict
@@ -7204,6 +8391,9 @@ mod tests {
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7214,18 +8404,19 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
         assert!(sess.pictures_canvas.is_empty(), "no canvas before the turn is drained");
         let result = sess.drain_turn(false, None, false);
 
-        assert_eq!(result.pictures, vec![PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 64, 48) }],
+        assert_eq!(result.pictures, vec![PictureEvent::new(1, 7, 2, 3, false, 0, None, false, (1, 1, 64, 48))],
             "the drained event is carried on TurnResult (mirrors pending_sounds)");
-        assert!(sess.machine.pending_pictures.is_empty(), "the VM queue is drained after the turn");
+        assert!(sess.machine.pending_pictures().is_empty(), "the VM queue is drained after the turn");
 
         let canvas = sess.pictures_canvas.get(&7).expect("a canvas was created for window 7");
         assert_eq!(canvas.img.dimensions(), (64, 48), "canvas sized from the v6 window's pixel dims");
@@ -7266,8 +8457,8 @@ mod tests {
         let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
         let mut windows: [ZWindow; 8] = Default::default();
-        windows[7] = ZWindow { x_size: 320, y_size: 200, ..Default::default() };
-        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+        windows[7] = ZWindow::new(0, 0, 200, 320);
+        machine.screen.v6 = Some(V6Windows::new(windows, 7));
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_red(320, 200));
         let mut sess = GameSession {
@@ -7275,6 +8466,9 @@ mod tests {
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7285,13 +8479,14 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
-        let draw = PictureEvent { number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 320, 200) };
+        let draw = PictureEvent::new(1, 7, 1, 1, false, 0, None, false, (1, 1, 320, 200));
         sess.apply_picture_event(&draw);
         assert!(sess.story_pics.is_empty(), "graphics-window content art anchors no transcript band");
         // It really did reach the screen — the band's absence is a routing
@@ -7306,7 +8501,7 @@ mod tests {
 
         // …and neither does a fresh draw after a canvas clear (erase_window rides
         // the queue as number 0), which used to be the case that reset the dedupe.
-        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 320, 200) });
+        sess.apply_picture_event(&PictureEvent::new(0, 7, 1, 1, true, 0, None, false, (1, 1, 320, 200)));
         sess.apply_picture_event(&draw);
         assert!(sess.story_pics.is_empty(), "a post-clear draw anchors nothing");
     }
@@ -7332,8 +8527,8 @@ mod tests {
         let mut windows: [ZWindow; 8] = Default::default();
         // Window 0 as Zork Zero frames it: a 464×320 prose column inside the
         // graphical border, wide enough that a 4×4 unit-space tile cannot span it.
-        windows[0] = ZWindow { x_size: 464, y_size: 320, ..Default::default() };
-        machine.screen.v6 = Some(V6Windows { windows, current: 0 });
+        windows[0] = ZWindow::new(0, 0, 320, 464);
+        machine.screen.v6 = Some(V6Windows::new(windows, 0));
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
@@ -7341,6 +8536,9 @@ mod tests {
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7351,18 +8549,16 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
         // Off the cursor by the native placement inset, but with the margin the
         // prose is to flow in declared right after — an inline float.
-        sess.apply_picture_event(&PictureEvent {
-            number: 1, window: 0, x: 5, y: 19, erase: false, out_chars: 0,
-            margin_after: Some(96), at_cursor: false, win_box: (89, 81, 464, 320),
-        });
+        sess.apply_picture_event(&PictureEvent::new(1, 0, 5, 19, false, 0, Some(96), false, (89, 81, 464, 320)));
         assert_eq!(sess.story_pics.len(), 1, "the declared margin marks it as flowing with the text");
         assert_eq!(sess.story_pics[0].1.align, crate::inline_image::ImageAlign::MarginLeft);
         assert_eq!(sess.story_pics[0].1.margin_px, Some(96), "the game's own left margin rides along");
@@ -7370,10 +8566,7 @@ mod tests {
 
         // Neither signal: art the game placed for itself, which keeps the canvas
         // (Arthur's centred intro plates — SQ-0695).
-        sess.apply_picture_event(&PictureEvent {
-            number: 1, window: 0, x: 29, y: 5, erase: false, out_chars: 0,
-            margin_after: None, at_cursor: false, win_box: (1, 1, 464, 320),
-        });
+        sess.apply_picture_event(&PictureEvent::new(1, 0, 29, 5, false, 0, None, false, (1, 1, 464, 320)));
         assert_eq!(sess.story_pics.len(), 1, "placed art anchors no new float");
         assert!(sess.pictures_canvas.contains_key(&0), "placed art gets the window canvas");
     }
@@ -7382,16 +8575,18 @@ mod tests {
     fn restart_drops_the_pre_restart_v6_display_list() {
         use zvm::screen::{V6Windows, ZWindow};
         // SQ-0658: `@restart` dropped `pictures_canvas` (the rasterized RESULT) but
-        // kept `display_ops` (the RECIPE that rebuilds it under a new palette). The
-        // reboot's first draw into a window re-creates the canvas and APPENDS to the
-        // ops the dead session left behind, so the next palette change replays the
-        // old game's art onto the new one's screen. `unreplayable` and the erase
-        // `window_fills` were stranded the same way.
+        // kept the RECIPE that rebuilds it under a new palette — then `zvm`'s own
+        // paint log (SQ-1403) `Machine::restart` clears structurally, so this class
+        // of bug is now fixed at the layer that owns the recipe. The reboot's first
+        // draw into a window used to re-create the canvas and APPEND to the ops the
+        // dead session left behind, replaying the old game's art onto the new one's
+        // screen. `unreplayable` and the erase `window_fills` were stranded the
+        // same way and are still app's to drop.
         let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
         let mut windows: [ZWindow; 8] = Default::default();
-        windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
-        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+        windows[7] = ZWindow::new(0, 0, 48, 64);
+        machine.screen.v6 = Some(V6Windows::new(windows, 7));
 
         // A 2×2 picture; every draw covers 4×4 unit pixels (V6_ART_SCALE).
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
@@ -7400,6 +8595,9 @@ mod tests {
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7410,36 +8608,47 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
         // The pre-restart session draws at the window's top-left corner…
-        sess.apply_picture_event(&PictureEvent {
-            number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false,
-            win_box: (1, 1, 64, 48),
-        });
-        assert_eq!(sess.display_ops.get(&7).map_or(0, Vec::len), 1, "the draw is recorded for replay");
+        // `queue_picture_event` feeds `zvm`'s own paint log automatically
+        // (SQ-1403), exactly as the real opcode would; drained immediately so
+        // it is not picked up again by `drain_turn`'s own drain further down.
+        let pre_restart_draw = PictureEvent::new(1, 7, 1, 1, false, 0, None, false, (1, 1, 64, 48));
+        sess.machine.queue_picture_event(pre_restart_draw);
+        let _ = sess.machine.take_paint_events();
+        sess.apply_picture_event(&pre_restart_draw);
+        assert_eq!(sess.machine.paint_log().ops(7).len(), 1, "the draw is recorded for replay");
         // …and something took window 7 out of replay (an op-cap overflow in a long
         // session; forced here, since the count itself is not the point).
         sess.unreplayable.insert(7);
 
-        // @restart: the VM re-boots in place and the session drains the turn.
+        // @restart: the VM re-boots in place and the session drains the turn. Driven
+        // directly (rather than a real `Machine::restart()`, which also reboots
+        // memory/screen unrelated to what this test pins) — so the paint-log half of
+        // what a real restart does is simulated here the same way.
         sess.machine.just_restarted = true;
+        let _ = sess.machine.restore_paint_log(&[]);
         let _ = sess.drain_turn(false, None, false);
         assert!(sess.pictures_canvas.is_empty(), "the rasterized canvas is dropped (pre-existing)");
-        assert!(sess.display_ops.is_empty(), "and so is the display list that rebuilds it");
+        assert!(
+            (0u8..8).all(|w| sess.machine.paint_log().ops(w).is_empty()),
+            "and so is the paint log that rebuilds it"
+        );
         assert!(sess.unreplayable.is_empty(), "a pre-restart replay veto must not outlive the reboot");
         assert!(sess.window_fills.is_empty(), "nor the erase fills of a screen that no longer exists");
 
         // The rebooted game draws the SAME picture somewhere else, then a base
         // picture establishes a new palette and every window replays.
-        sess.apply_picture_event(&PictureEvent {
-            number: 1, window: 7, x: 33, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false,
-            win_box: (1, 1, 64, 48),
-        });
+        let post_restart_draw = PictureEvent::new(1, 7, 33, 1, false, 0, None, false, (1, 1, 64, 48));
+        sess.machine.queue_picture_event(post_restart_draw);
+        let _ = sess.machine.take_paint_events();
+        sess.apply_picture_event(&post_restart_draw);
         sess.replay_under_current_palette();
 
         let canvas = sess.pictures_canvas.get(&7).expect("the reboot's draw made a canvas");
@@ -7478,9 +8687,9 @@ mod tests {
         let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
         let mut windows: [ZWindow; 8] = Default::default();
-        windows[0] = ZWindow { x_size: 640, y_size: 400, ..Default::default() };
-        windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
-        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+        windows[0] = ZWindow::new(0, 0, 400, 640);
+        windows[7] = ZWindow::new(0, 0, 48, 64);
+        machine.screen.v6 = Some(V6Windows::new(windows, 7));
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
@@ -7488,6 +8697,9 @@ mod tests {
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7498,22 +8710,18 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
         // The pre-restart game paints a ground (a PART-screen erase naming a colour —
         // a full-screen one would be a screen clear and drop the ground by itself)…
-        sess.apply_erase_fill(&zvm::cpu::exec::EraseFill {
-            window: 7, x: 1, y: 1, w: 64, h: 48, bg: ZColour::True24(0x00FF00), pics_before: 0,
-        });
+        sess.apply_erase_fill(&zvm::cpu::exec::EraseFill::new(7, 1, 1, 64, 48, ZColour::True24(0x00FF00), 0));
         // …and draws into window 7, anchoring its canvas where the window sits now.
-        sess.apply_picture_event(&PictureEvent {
-            number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false,
-            win_box: (1, 1, 64, 48),
-        });
+        sess.apply_picture_event(&PictureEvent::new(1, 7, 1, 1, false, 0, None, false, (1, 1, 64, 48)));
         assert!(sess.paint.is_some(), "premise: the pre-restart screen has a painted ground");
         assert!(sess.canvas_anchor.contains_key(&7), "premise: and window 7's canvas is anchored");
 
@@ -7541,8 +8749,8 @@ mod tests {
         let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
         let mut windows: [ZWindow; 8] = Default::default();
-        windows[7] = ZWindow { x_size: 320, y_size: 200, ..Default::default() };
-        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+        windows[7] = ZWindow::new(0, 0, 200, 320);
+        machine.screen.v6 = Some(V6Windows::new(windows, 7));
 
         let blorb = crate::graphics::test_blorb_with_pict(3, &png_bytes_red(23, 200));
         let mut sess = GameSession {
@@ -7550,6 +8758,9 @@ mod tests {
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7560,13 +8771,14 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
-        sess.apply_picture_event(&PictureEvent { number: 3, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 320, 200) });
+        sess.apply_picture_event(&PictureEvent::new(3, 7, 1, 1, false, 0, None, false, (1, 1, 320, 200)));
         assert!(sess.story_pics.is_empty(), "frame art stays canvas-only");
         assert!(sess.pictures_canvas.contains_key(&7), "but it IS drawn into the window canvas");
     }
@@ -7578,12 +8790,12 @@ mod tests {
         let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
         let mut windows: [ZWindow; 8] = Default::default();
-        windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
-        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+        windows[7] = ZWindow::new(0, 0, 48, 64);
+        machine.screen.v6 = Some(V6Windows::new(windows, 7));
         // Draw, then erase the same picture — the erase must clear back to
         // transparent over the picture's own footprint (2x2, ZMSD §15).
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 64, 48) });
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: true, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 64, 48) });
+        machine.queue_picture_event(PictureEvent::new(1, 7, 2, 3, false, 0, None, false, (1, 1, 64, 48)));
+        machine.queue_picture_event(PictureEvent::new(1, 7, 2, 3, true, 0, None, false, (1, 1, 64, 48)));
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
@@ -7591,6 +8803,9 @@ mod tests {
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7601,9 +8816,10 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -7630,21 +8846,25 @@ mod tests {
         // Window 0: the main scrolling window, at (0, 1) cell, 80x20 cells.
         // attributes 15 = the boot default (wrapping on → transcript Buffer;
         // a cleared wrapping bit would mean positioned paint mode → Grid).
-        windows[0] = ZWindow { x_coord: 1, y_coord: 17, x_size: 640, y_size: 320, attributes: 15, ..Default::default() };
+        windows[0] = ZWindow::new(17, 1, 320, 640);
+        windows[0].attributes = 15;
         windows[0].grid.resize(20, 80);
         // Window 1: a one-row (16px) status strip along the top, at (0, 0) cell, 80x1 cells.
-        windows[1] = ZWindow { x_coord: 1, y_coord: 1, x_size: 640, y_size: 16, ..Default::default() };
+        windows[1] = ZWindow::new(1, 1, 16, 640);
         windows[1].grid.resize(1, 80);
         // Window 7: a small picture window at (2, 1) cell, 8x6 cells.
-        windows[7] = ZWindow { x_coord: 17, y_coord: 17, x_size: 64, y_size: 96, ..Default::default() };
+        windows[7] = ZWindow::new(17, 17, 96, 64);
         windows[7].grid.resize(6, 8);
-        machine.screen.v6 = Some(V6Windows { windows, current: 1 });
+        machine.screen.v6 = Some(V6Windows::new(windows, 1));
 
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7655,9 +8875,10 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         // Window 7 has a rendered picture (a canvas sized to its pixel dims).
         sess.pictures_canvas.insert(7, crate::graphics::Canvas::new(64, 48));
@@ -7721,23 +8942,26 @@ mod tests {
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
         let mut windows: [ZWindow; 8] = Default::default();
         // Window 1: a real status window with one paint run.
-        windows[1] = ZWindow {
-            x_coord: 1, y_coord: 1, x_size: 640, y_size: 8,
-            y_cursor: 1, x_cursor: 9,
-            left_margin: 2, right_margin: 3,
-            font_number: 1, font_size: 0x0808,
-            attributes: 3, // bit0 wrap + bit1 scroll
-            ..Default::default()
-        };
+        windows[1] = ZWindow::new(1, 1, 8, 640);
+        windows[1].y_cursor = 1;
+        windows[1].x_cursor = 9;
+        windows[1].left_margin = 2;
+        windows[1].right_margin = 3;
+        windows[1].font_number = 1;
+        windows[1].font_size = 0x0808;
+        windows[1].attributes = 3; // bit0 wrap + bit1 scroll
         windows[1].texts.push(zvm::screen::V6Text::derived(1, 1, "Score: 10".to_string(), 0, ZColour::Default, ZColour::Default, zvm::screen::V6Cell::DEFAULT));
         // Window 3 stays entirely default (blank) — must be skipped.
-        machine.screen.v6 = Some(V6Windows { windows, current: 1 });
+        machine.screen.v6 = Some(V6Windows::new(windows, 1));
 
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7748,9 +8972,10 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         let mut canvas = crate::graphics::Canvas::new(64, 48);
         canvas.z_seq = 42;
@@ -7782,13 +9007,16 @@ mod tests {
         let mem = Memory::new(minimal_v6_story()).unwrap();
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
         let mut windows: [ZWindow; 8] = Default::default();
-        windows[7] = ZWindow { x_size: 0xFFFF, y_size: 0xFFFF, ..Default::default() };
-        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+        windows[7] = ZWindow::new(0, 0, 0xFFFF, 0xFFFF);
+        machine.screen.v6 = Some(V6Windows::new(windows, 7));
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
             disasm_cache: std::cell::RefCell::new(None),
             world: std::cell::OnceCell::new(),
             parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -7799,14 +9027,15 @@ mod tests {
             window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
-            display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
             boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
         };
         // The erase path allocates the canvas even without a resolved image.
         // (number != 0: a real erase_picture — number 0 is the erase_window
         // canvas-clear sentinel, which removes the canvas instead.)
-        sess.apply_picture_event(&PictureEvent { number: 5, window: 7, x: 0, y: 0, erase: true, out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 0xFFFF, 0xFFFF) });
+        sess.apply_picture_event(&PictureEvent::new(5, 7, 0, 0, true, 0, None, false, (1, 1, 0xFFFF, 0xFFFF)));
         let c = sess.pictures_canvas.get(&7).expect("erase allocated a canvas");
         assert!(c.img.width() <= 4096 && c.img.height() <= 4096,
             "canvas clamped, got {}x{}", c.img.width(), c.img.height());
@@ -7871,7 +9100,7 @@ mod tests {
     #[test]
     fn minizork_v3_ingame_save_restore_round_trips() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../zvm/tests/fixtures/minizork.z3");
+            .join("tests/fixtures/stories/minizork-r34-s871124.z3");
         if !fixture.exists() {
             panic!("minizork.z3 fixture missing at {} — this smoke test must run", fixture.display());
         }
@@ -7910,7 +9139,7 @@ mod tests {
     #[test]
     fn game_save_restore_via_manager_accepts_next_command() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../zvm/tests/fixtures/minizork.z3");
+            .join("tests/fixtures/stories/minizork-r34-s871124.z3");
         if !fixture.exists() { panic!("minizork.z3 missing"); }
         let story = std::fs::read(&fixture).expect("read minizork.z3");
 
@@ -7945,7 +9174,7 @@ mod tests {
     #[test]
     fn minizork_v3_qzl_file_round_trips_end_to_end() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../zvm/tests/fixtures/minizork.z3");
+            .join("tests/fixtures/stories/minizork-r34-s871124.z3");
         if !fixture.exists() {
             panic!("minizork.z3 fixture missing at {} — this smoke test must run", fixture.display());
         }
@@ -8269,9 +9498,137 @@ mod tests {
         assert_eq!(s.line_key_terminator(&KeyInput::Enter), None);
         assert_eq!(s.line_key_terminator(&KeyInput::Backspace), None);
     }
+
+    // ── SQ-1191: the memoized v6 screen model ─────────────────────────────────
+
+    /// A synthetic v6 session with `text` painted on window 7, built the way
+    /// `drain_turn_applies_pending_draw_picture_to_the_window_canvas` builds
+    /// its fixture (bypassing the boot loop the minimal story can't run).
+    fn v6_session_with_run(text: &str) -> GameSession {
+        use zvm::screen::{V6Cell, V6Metric, V6Text, V6Windows, ZColour, ZWindow};
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        windows[7] = ZWindow::new(0, 0, 48, 64);
+        machine.screen.v6 = Some(V6Windows::new(windows, 7));
+        let metric = V6Metric::fixed(V6Cell::DEFAULT);
+        machine.screen.v6_mut().unwrap().paint_run(
+            7,
+            V6Text::derived(1, 1, text.to_string(), 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT),
+            &metric,
+        );
+        GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true, pen_before_char: None, output_continued: false,
+            disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
+            parse_names: std::cell::OnceCell::new(),
+            player_candidates: std::cell::OnceCell::new(),
+            object_word_set: std::cell::RefCell::new(None),
+            v6_model_memo: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+            canvas_anchor: std::collections::HashMap::new(),
+            art_scale: (V6_ART_SCALE, V6_ART_SCALE),
+            paint: None,
+            paced_frames: std::collections::VecDeque::new(),
+            window_fills: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
+            unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            line_preload: String::new(),
+            line_preload_seeded: false,
+        }
+    }
+
+    /// Every painted-run text reachable in the model, flattened for a contains test.
+    fn model_run_texts(model: &ScreenModel) -> Vec<String> {
+        let mut out = Vec::new();
+        if let WinNode::Layered(entries) = &model.root {
+            for pw in entries {
+                if let WinNode::Grid(g) = &pw.node {
+                    out.extend(g.px_texts.iter().map(|t| t.text.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// SQ-1191: `screen_now` hands the SAME `Arc` back while nothing on the v6
+    /// screen changes, and a paint through zvm's one door replaces it with a
+    /// fresh model that carries the new run.
+    #[test]
+    fn screen_now_memoizes_the_v6_model_until_the_screen_changes() {
+        use zvm::screen::{V6Cell, V6Metric, V6Text, ZColour};
+        let mut sess = v6_session_with_run("steady");
+
+        let first = Engine::screen_now(&sess);
+        let again = Engine::screen_now(&sess);
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &again),
+            "no VM step between two frames: the memoized model must be handed back, not rebuilt"
+        );
+        assert!(model_run_texts(&first).contains(&"steady".to_string()), "the fixture's run is in the model");
+
+        let metric = V6Metric::fixed(V6Cell::DEFAULT);
+        sess.machine.screen.v6_mut().unwrap().paint_run(
+            7,
+            V6Text::derived(17, 1, "painted".to_string(), 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT),
+            &metric,
+        );
+        let after = Engine::screen_now(&sess);
+        assert!(
+            !std::sync::Arc::ptr_eq(&again, &after),
+            "a paint moved the v6 generation: the next frame must be a fresh build"
+        );
+        assert!(
+            model_run_texts(&after).contains(&"painted".to_string()),
+            "…and the fresh build carries the new run: {:?}",
+            model_run_texts(&after)
+        );
+    }
+
+    /// SQ-1191 stale-model trap: a restored `ScreenState` carries a generation
+    /// with no history, so its numbers can COLLIDE with the one the memo holds.
+    /// `restore_screen` drops the memo, so the first frame after the restore is
+    /// built from the restored table even when the generations match exactly.
+    #[test]
+    fn restore_screen_drops_the_memoized_model() {
+        use zvm::screen::{V6Cell, V6Metric, V6Text, V6Windows, ZColour, ZWindow};
+        let mut sess = v6_session_with_run("before");
+        let held = Engine::screen_now(&sess);
+        assert!(model_run_texts(&held).contains(&"before".to_string()));
+
+        // A replacement screen with different content — and, deliberately, the
+        // SAME generation number the memo was keyed on.
+        let mut saved = zvm::screen::ScreenState::default();
+        let mut windows: [ZWindow; 8] = Default::default();
+        windows[7] = ZWindow::new(0, 0, 48, 64);
+        saved.v6 = Some(V6Windows::new(windows, 7));
+        let metric = V6Metric::fixed(V6Cell::DEFAULT);
+        saved.v6_mut().unwrap().paint_run(
+            7,
+            V6Text::derived(1, 1, "after".to_string(), 0, ZColour::Default, ZColour::Default, V6Cell::DEFAULT),
+            &metric,
+        );
+        saved.v6_generation = sess.machine.screen.v6_generation();
+
+        restore_screen(&mut sess, saved);
+        let fresh = Engine::screen_now(&sess);
+        assert!(
+            !std::sync::Arc::ptr_eq(&held, &fresh),
+            "the memo must not survive a wholesale screen install"
+        );
+        let texts = model_run_texts(&fresh);
+        assert!(
+            texts.contains(&"after".to_string()) && !texts.contains(&"before".to_string()),
+            "the first post-restore frame is built from the restored table: {texts:?}"
+        );
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod debugger_impl_tests {
     use super::*;
     use crate::engine::Engine;
@@ -8282,7 +9639,7 @@ mod debugger_impl_tests {
     // zvm's own dictionary/objects/location tests use for this reason.
     fn zvm_session() -> Option<GameSession> {
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../zvm/tests/fixtures/minizork.z3");
+            .join("tests/fixtures/stories/minizork-r34-s871124.z3");
         if !fixture_path.exists() {
             return None; // fixture absent — skip
         }
@@ -8316,7 +9673,7 @@ mod debugger_impl_tests {
         // a turn must reopen the gate rather than skip confirmation. (read-pc follow-up)
         let Some(mut session) = zvm_session() else { return };
         session.set_debug_trace(true);
-        let pc = session.machine.state.pc;
+        let pc = session.machine.state.pc();
         let _ = session.debugger().unwrap().disassemble(pc, 1); // builds + confirms, closes the gate
         assert_eq!(session.last_confirmed_pc.get(), Some(pc), "confirm closes the gate on the parked PC");
         let _ = Engine::submit(&mut session, "look");
@@ -8337,7 +9694,7 @@ mod debugger_impl_tests {
         assert!(s.machine.mem.take_mem_fault().is_some(), "sanity: OOB read latches a fault");
         let _ = s.machine.mem.read_word(end + 100); // re-latch (the check above drained it)
         // Any Debugger read must leave the fault cell clean.
-        let pc = s.machine.state.pc;
+        let pc = s.machine.state.pc();
         let dbg = s.debugger().expect("zvm has a debugger");
         let _ = dbg.disassemble(pc, 8);
         assert!(
@@ -8489,7 +9846,7 @@ mod debugger_impl_tests {
     fn zvm_exposes_a_debugger() {
         let Some(s) = zvm_session() else { return };
         let d = s.debugger().expect("zvm has a debugger");
-        assert_eq!(d.pc(), s.machine.state.pc);
+        assert_eq!(d.pc(), s.machine.state.pc());
         assert_eq!(d.globals_lines().len(), 240);
         assert!(!d.dictionary_lines().is_empty());
         assert!(!d.object_tree_lines().is_empty());
@@ -8721,17 +10078,17 @@ mod debugger_impl_tests {
     fn frame_func_addrs_are_promoted_to_routine_headers() {
         let Some(s) = zvm_session() else { return };
         let _ = s.disassemble(Debugger::pc(&s), 1); // build cache + fold the call stack in
-        for f in &s.machine.state.frames {
+        for f in s.machine.state.frames() {
             // Only func_addrs inside the code region get a header; disassembling
             // at one now shows a RoutineHeader unit line ("; routine").
-            let hdr = s.disassemble(f.func_addr, 1);
+            let hdr = s.disassemble(f.func_addr(), 1);
             if hdr.is_empty() {
                 continue; // outside the tiled code region
             }
             assert!(
                 hdr[0].contains("; routine"),
                 "func_addr {:06x} did not become a routine header: {:?}",
-                f.func_addr, hdr[0]
+                f.func_addr(), hdr[0]
             );
         }
     }
@@ -8748,7 +10105,7 @@ mod debugger_impl_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod untried_turn_tests {
     use super::*;
     use mapper::direction::Direction;
@@ -8757,11 +10114,12 @@ mod untried_turn_tests {
         TurnResult {
             transcript: transcript.into(),
             transcript_runs: Vec::new(),
-            location: loc.map(|(n, name)| zvm::ObjectSnapshot { number: n, parent: 0, name: name.into() }),
+            location: loc.map(|(n, name)| LocationInfo { number: n.into(), parent: 0, name: name.into() }),
             quit: false, erase_lower: false, info: None, sounds: Vec::new(),
             glulx_sound_ops: Vec::new(), diagnostics: vec![], fault: None,
             location_method: None, pending_io: None, timed_out: false,
             pictures: Vec::new(), transcript_elems: Vec::new(), prose_retired: None,
+            declared_exit: None,
         }
     }
 
@@ -8800,5 +10158,214 @@ mod untried_turn_tests {
         // The ways never typed are all that remain on offer.
         let left = m.graph.untried(1);
         assert!(left.contains(&Direction::S) && left.contains(&Direction::Up), "{left:?}");
+    }
+
+}
+
+#[cfg(all(test, feature = "t-session"))]
+mod inherited_random_pool_tests {
+    //! SQ-1370 rule 1, on a synthetic map: the first walk of a NEW direction into a room some
+    //! other direction's pool already names is marked random on the spot, with that pool copied,
+    //! instead of minting a confident arrow a second walk would have to take back.
+    //!
+    //! Everything here goes through [`apply_turn`], the engine-neutral function both the
+    //! Z-machine and the Glulx session reach this rule by (`turn::finish_command_turn` calls it
+    //! for every engine), so these cases and the real-story ones in
+    //! `crates/app/tests/suites/sq1264_forest_randomization.rs` exercise one rule and not two.
+    //! `TurnResult::observation` leaves `declared_exit` at `None`, which is the "engine with no
+    //! declared-exit seam at all" case; the one case that needs a declaration sets it.
+
+    use super::*;
+    use mapper::direction::Direction;
+    use mapper::graph::RoomId;
+
+    fn snap(number: RoomId, name: &str) -> LocationInfo {
+        LocationInfo { number, parent: 0, name: name.to_string() }
+    }
+
+    /// A map with room 1's north already marked random over the pool `[2, 3]` — the shape a
+    /// contradicted walk leaves behind — and the player standing in room 4.
+    fn map_with_a_known_pool() -> (Mapper, DeathWatch) {
+        let mut mapper = Mapper::default();
+        let mut death = DeathWatch::default();
+        apply_turn(&mut mapper, "", &TurnResult::observation(snap(1, "Hill")), &mut death);
+        mapper.record_random_exit(1, Direction::N);
+        mapper.graph.note_random_destination(1, Direction::N, 2);
+        mapper.graph.note_random_destination(1, Direction::N, 3);
+        apply_turn(&mut mapper, "", &TurnResult::observation(snap(4, "Valley")), &mut death);
+        (mapper, death)
+    }
+
+    fn edge(mapper: &Mapper, from: RoomId, dir: Direction) -> Option<RoomId> {
+        mapper.graph.connections().iter().find(|c| c.origin == from && c.dir == dir).map(|c| c.dest)
+    }
+
+    #[test]
+    fn a_first_walk_into_a_pooled_room_is_marked_random_with_the_pool_copied() {
+        let (mut mapper, mut death) = map_with_a_known_pool();
+        apply_turn(&mut mapper, "west", &TurnResult::observation(snap(2, "Forest")), &mut death);
+
+        assert!(mapper.graph.is_random_exit(4, Direction::W), "marked on the FIRST walk");
+        assert_eq!(edge(&mapper, 4, Direction::W), None, "and no confident arrow drawn");
+        assert_eq!(
+            mapper.graph.random_destinations(4, Direction::W),
+            &[2, 3],
+            "the live landing first, then the rest of the pool it inherited"
+        );
+        assert!(
+            mapper.graph.is_inherited_random_exit(4, Direction::W),
+            "recorded as INHERITED: no walk of this direction has proved anything yet"
+        );
+        assert_eq!(mapper.graph.current(), Some(2), "the player is still observed as having arrived");
+        assert!(
+            mapper.take_random_exit_suspicion().is_none(),
+            "decided here, not left for a probe to settle"
+        );
+        assert_eq!(
+            mapper::matrix::classify(&mapper.graph, 4, Direction::W),
+            mapper::matrix::MatrixCell::Random { destinations: 2 },
+            "the matrix reads `?²` straight away"
+        );
+    }
+
+    /// The other half of rule 1: the origin's own table names a pooled room, and the player lands
+    /// somewhere the map has never seen. `In_A_Valley` declares `In_Forest_1` for both east and
+    /// west, so the declaration alone is enough to recognise the move.
+    #[test]
+    fn a_declared_exit_naming_a_pooled_room_is_enough_on_its_own() {
+        let (mut mapper, mut death) = map_with_a_known_pool();
+        let mut r = TurnResult::observation(snap(9, "Somewhere New"));
+        r.declared_exit = Some(crate::engine::DeclaredExit::Room(2)); // 2 is in room 1's pool
+        apply_turn(&mut mapper, "west", &r, &mut death);
+
+        assert!(mapper.graph.is_random_exit(4, Direction::W), "marked from the declaration");
+        assert_eq!(edge(&mapper, 4, Direction::W), None);
+        assert_eq!(
+            mapper.graph.random_destinations(4, Direction::W),
+            &[9, 2, 3],
+            "where the player actually came out, plus the pool the declaration matched"
+        );
+    }
+
+    /// An ordinary walk into a room NOTHING pools mints its edge exactly as it always did — the
+    /// negative control, so a rule that fired on every move would be caught here.
+    #[test]
+    fn a_first_walk_into_an_unpooled_room_still_mints_its_edge() {
+        let (mut mapper, mut death) = map_with_a_known_pool();
+        apply_turn(&mut mapper, "south", &TurnResult::observation(snap(7, "Meadow")), &mut death);
+        assert_eq!(edge(&mapper, 4, Direction::S), Some(7), "an ordinary passage, ordinarily drawn");
+        assert!(!mapper.graph.is_random_exit(4, Direction::S));
+    }
+
+    /// A SELF-LOOP is not an arrival anywhere. `In Forest`'s own north, south and west all come
+    /// back to the room the player is standing in — which is of course a room its neighbours'
+    /// pools name — and reading that as "a direction into a pooled room" would mark every forest
+    /// loop random. (`advent.z6` proves the same thing end to end in
+    /// `z6_forest_self_loop_directions_are_always_deterministic`.)
+    #[test]
+    fn a_move_that_never_left_the_room_is_not_an_arrival_in_a_pooled_room() {
+        let (mut mapper, mut death) = map_with_a_known_pool();
+        // Walk into the pooled room 2 first (marked, per the case above), then loop inside it.
+        // The loop turn carries a REPRINTED heading, which is the only evidence a self-loop ever
+        // leaves (SQ-0666) and what puts this move on `apply_turn`'s `arrived` branch at all.
+        apply_turn(&mut mapper, "west", &TurnResult::observation(snap(2, "Forest")), &mut death);
+        let mut loop_turn = TurnResult::observation(snap(2, "Forest"));
+        loop_turn.transcript = "Forest\n\nYou are in a forest.\n".to_string();
+        apply_turn(&mut mapper, "north", &loop_turn, &mut death);
+        assert!(!mapper.graph.is_random_exit(2, Direction::N), "the loop is not a random exit");
+        assert_eq!(mapper.graph.self_loops(2), vec![Direction::N], "it is recorded as what it is");
+    }
+
+    /// This is the FIRST-walk rule and nothing else. A direction the map already claims something
+    /// for is somebody else's business: a contradicted edge is SQ-1264's contradiction rule (a
+    /// suspicion for a probe to settle), and a re-walk of a marked direction is Phase 2's upgrade.
+    #[test]
+    fn a_direction_the_map_already_claims_something_for_is_left_alone() {
+        // An existing edge that this landing AGREES with: re-walked, still an ordinary passage.
+        let (mut mapper, mut death) = map_with_a_known_pool();
+        mapper.graph.add_edge(4, Direction::W, 2);
+        apply_turn(&mut mapper, "west", &TurnResult::observation(snap(2, "Forest")), &mut death);
+        assert!(!mapper.graph.is_random_exit(4, Direction::W), "a known passage is not re-judged here");
+        assert_eq!(edge(&mapper, 4, Direction::W), Some(2), "and its edge stands");
+
+        // An existing edge this landing CONTRADICTS: SQ-1264/SQ-1269's suspicion, untouched.
+        let (mut mapper, mut death) = map_with_a_known_pool();
+        mapper.graph.add_edge(4, Direction::W, 8);
+        apply_turn(&mut mapper, "west", &TurnResult::observation(snap(2, "Forest")), &mut death);
+        assert_eq!(edge(&mapper, 4, Direction::W), Some(8), "the old edge stands — nothing decided yet");
+        assert!(!mapper.graph.is_random_exit(4, Direction::W), "not marked either");
+        let susp =
+            mapper.take_random_exit_suspicion().expect("a contradiction is a suspicion, as before");
+        assert_eq!(
+            (susp.origin, susp.dir, susp.old_dest, susp.live_dest),
+            (4, Direction::W, Some(8), 2)
+        );
+    }
+
+    /// SQ-1345: Zork I's four same-named forests filled a field map with pools naming their OWN
+    /// room — `#33 E → [#175, #33]`, the real destination plus a phantom "back here". A corrupt
+    /// pool must not go on to seed marks on every direction that reaches the rooms it names.
+    #[test]
+    fn a_pool_that_names_its_own_origin_room_never_propagates() {
+        let mut mapper = Mapper::default();
+        let mut death = DeathWatch::default();
+        apply_turn(&mut mapper, "", &TurnResult::observation(snap(33, "Forest")), &mut death);
+        mapper.record_random_exit(33, Direction::E);
+        mapper.graph.note_random_destination(33, Direction::E, 175);
+        mapper.graph.note_random_destination(33, Direction::E, 33); // the phantom self-entry
+        apply_turn(&mut mapper, "", &TurnResult::observation(snap(247, "Forest Path")), &mut death);
+
+        apply_turn(&mut mapper, "east", &TurnResult::observation(snap(175, "Forest")), &mut death);
+        assert!(!mapper.graph.is_random_exit(247, Direction::E), "a corrupt pool seeds nothing");
+        assert_eq!(edge(&mapper, 247, Direction::E), Some(175), "the ordinary crossing keeps its edge");
+    }
+
+    /// One sighting is where "this direction varies" and "this direction was walked once" look
+    /// exactly alike, so a pool of one is not enough to propagate from.
+    #[test]
+    fn a_pool_of_one_room_is_not_enough_to_propagate() {
+        let mut mapper = Mapper::default();
+        let mut death = DeathWatch::default();
+        apply_turn(&mut mapper, "", &TurnResult::observation(snap(1, "Hill")), &mut death);
+        mapper.record_random_exit(1, Direction::N);
+        mapper.graph.note_random_destination(1, Direction::N, 2);
+        apply_turn(&mut mapper, "", &TurnResult::observation(snap(4, "Valley")), &mut death);
+
+        apply_turn(&mut mapper, "west", &TurnResult::observation(snap(2, "Forest")), &mut death);
+        assert!(!mapper.graph.is_random_exit(4, Direction::W), "one sighting propagates nothing");
+        assert_eq!(edge(&mapper, 4, Direction::W), Some(2), "the ordinary edge is minted, as before");
+    }
+
+    /// The helper itself, read directly: it answers with the pool it would copy, so the decision
+    /// can be seen without going through a turn.
+    #[test]
+    fn the_helper_answers_with_the_union_of_every_pool_that_names_the_room() {
+        let mut mapper = Mapper::default();
+        let mut death = DeathWatch::default();
+        apply_turn(&mut mapper, "", &TurnResult::observation(snap(1, "Hill")), &mut death);
+        mapper.record_random_exit(1, Direction::N);
+        mapper.graph.note_random_destination(1, Direction::N, 2);
+        mapper.graph.note_random_destination(1, Direction::N, 3);
+        mapper.graph.upsert_room(5, "Ridge".to_string());
+        mapper.record_random_exit(5, Direction::S);
+        mapper.graph.note_random_destination(5, Direction::S, 3);
+        mapper.graph.note_random_destination(5, Direction::S, 6);
+        mapper.graph.upsert_room(4, "Valley".to_string());
+
+        assert_eq!(
+            inherited_random_pool(&mapper.graph, 4, Direction::W, 3, None),
+            Some(vec![2, 3, 6]),
+            "room 3 is named by both pools, so both are copied — in room-id order, deterministically"
+        );
+        assert_eq!(
+            inherited_random_pool(&mapper.graph, 4, Direction::W, 7, None),
+            None,
+            "a room nothing pools is nothing to inherit from"
+        );
+        assert_eq!(
+            inherited_random_pool(&mapper.graph, 4, Direction::Unknown, 3, None),
+            None,
+            "a move with no direction has nothing to mark"
+        );
     }
 }

@@ -1,0 +1,22 @@
+[package]
+name = "audio-relay"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "Serves a lanthorn session's ALSA-captured PCM to a browser over a WebSocket"
+# Not a dependency of `lanthorn` (SQ-1250) — a standalone companion binary,
+# so unlike `buildinfo`/`cli-host` it stays internal rather than published.
+publish = false
+
+[[bin]]
+name = "lanthorn-audio-relay"
+path = "src/main.rs"
+
+[lib]
+doctest = false
+
+[dependencies]
+tungstenite = "0.26"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.189"

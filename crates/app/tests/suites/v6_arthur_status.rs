@@ -309,7 +309,7 @@ fn arthur_hybrid_tall_pane_extends_story_to_bottom() {
     // 400, which is terminal row 31 of 40, so the frame stood open down its
     // whole lower quarter. The poles are now TILED to the band's full height
     // (a 4-row texture cut at 90% of the pole's height, then its own foot —
-    // Bocfel's `draw_arthur_side_images`), so the same cell is painted.
+    // see docs/internals/v6-border-tiling-spec.md), so the same cell is painted.
     let flank_art = (vp.y..vp.y + 6).any(|y| buf.cell((vp.x - 1, y)).unwrap().bg != Color::Reset);
     assert!(flank_art, "the side border art shows in the flank beside the top of the story");
     let deep = buf.cell((vp.x - 1, area.height - 2)).unwrap();
@@ -644,7 +644,6 @@ fn mac_arthur_at_status(honor: bool) -> Option<(app::session::GameSession, app::
     let (profile, source) =
         app::interpreter::InterpreterProfile::resolve_with_source(&path, None, None, None);
     assert_eq!(profile, app::interpreter::InterpreterProfile::Macintosh, "the volume names the machine");
-    app::v6_set_palette(profile.palette());
     let bytes = match app::hints::load_mounted_story_from(&path, Some(ENTRY)).ok()?.0 {
         app::hints::LoadedStory::ZCode(b) => b,
         other => panic!("Arthur is Z-code on this volume, got {other:?}"),
@@ -671,6 +670,8 @@ fn mac_arthur_at_status(honor: bool) -> Option<(app::session::GameSession, app::
         honoured.then(|| profile.default_colours()).flatten(),
         true,
         faces,
+        profile.palette(),
+        None,
     );
     assert_eq!(boot.cell, zvm::interpreter::MACINTOSH_V6_CELL, "the Macintosh's 7x15 cell");
     let face = boot.text_face();
@@ -722,7 +723,6 @@ fn mac_arthur_at_status(honor: bool) -> Option<(app::session::GameSession, app::
 #[test]
 fn mac_arthur_raster_score_bar_is_one_ribbon_not_the_location_alone() {
     for honor in [true, false] {
-        let _g = app::v6_palette_at_boot();
         let Some((session, face)) = mac_arthur_at_status(honor) else { return };
         let model = session.screen();
         let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };

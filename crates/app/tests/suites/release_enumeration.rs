@@ -1,6 +1,6 @@
 //! SQ-0961: **how far to look for stories is one question with one answer.**
 //!
-//! `zvm-cli` pointed at `treasures/Lost Treasures of Infocom, The_Disk1.adf`
+//! `zvm-cli` pointed at `treasures/Amiga/Lost Treasures of Infocom, The_Disk1.adf`
 //! offered the six games on that platter; lanthorn pointed at the same file
 //! listed all twenty across the six-volume release. Nothing was wrong with the
 //! CLI's mount — it asked a narrower question, because there was no wider one to
@@ -23,8 +23,8 @@
 //!
 //! | fixture | volumes | naming | games |
 //! | --- | --- | --- | --- |
-//! | `treasures/Lost Treasures of Infocom, The_Disk1.adf` … `_Disk6` | 6 | identical stem, index last | 20 |
-//! | `treasures/The Lost Treasures of Infocom - Disk 1 - ….dc42` … `Disk 5` | 5 | index in the middle, **no common suffix** | 20 |
+//! | `treasures/Amiga/Lost Treasures of Infocom, The_Disk1.adf` … `_Disk6` | 6 | identical stem, index last | 20 |
+//! | `treasures/Mac/The Lost Treasures of Infocom - Disk 1 - ….dc42` … `Disk 5` | 5 | index in the middle, **no common suffix** | 20 |
 //!
 //! They agree on the twenty games and on almost nothing else: the Amiga press
 //! carries *Enchanter* r16/831118, *Hitchhiker's* r58/851002 and *Zork Zero*
@@ -67,10 +67,10 @@ struct Press {
 const PRESSES: &[Press] = &[
     // The Amiga press. Named by disk 3 rather than disk 1, because the claim is
     // about the release and not about a privileged volume.
-    Press { member: "Lost Treasures of Infocom, The_Disk3.adf", volumes: 6, games: 20 },
+    Press { member: "Amiga/Lost Treasures of Infocom, The_Disk3.adf", volumes: 6, games: 20 },
     // The Macintosh DiskCopy 4.2 press — the naming that grouped as nothing.
     Press {
-        member: "The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
+        member: "Mac/The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
         volumes: 5,
         games: 20,
     },
@@ -222,6 +222,41 @@ fn a_one_game_release_still_opens_without_a_menu() {
     );
 }
 
+/// **The defect itself** (SQ-1523): several late-1980s Infocom titles shipped
+/// the *identical* Z-code build (same release and serial) for two machines —
+/// `treasures/ISOs/LostTreasures1.iso` and `LostTreasures2.iso` carry Trinity's
+/// r12/s860926 build on both its DOS and Mac volumes. The cross-volume fold's
+/// `seen` key used to carry only `(release, serial)`, so widening from LT1 to
+/// its sibling LT2 pushed the DOS row, then dropped the Mac row that followed it
+/// in the same sibling's own list — even though it is a different `DiskImage`
+/// and a real, separate story. `zvm-cli -- LostTreasures1.iso` reported 60
+/// stories where lanthorn's picker reported 68.
+///
+/// FALSIFICATION: key `stories_across_the_release`'s fold on `(release, serial)`
+/// alone (drop the `DiskImage` `build_of` now carries) and Trinity drops back to
+/// one row here.
+#[test]
+fn a_build_shared_by_two_machines_keeps_both_rows() {
+    let path = treasures_dir().join("ISOs/LostTreasures1.iso");
+    if !path.exists() {
+        return;
+    }
+    let rows = rows_the_cli_offers(&path);
+    let trinity: Vec<&cli_host::disk_set::Reachable> =
+        rows.iter().filter(|r| r.name.to_ascii_uppercase().contains("TRINITY")).collect();
+    assert_eq!(
+        trinity.len(),
+        2,
+        "Trinity should appear once per machine: {:?}",
+        trinity.iter().map(|r| (&r.name, r.image)).collect::<Vec<_>>()
+    );
+    assert_ne!(
+        trinity[0].image, trinity[1].image,
+        "the two Trinity rows must be two different machines, not the same one twice: {:?}",
+        trinity.iter().map(|r| (&r.name, r.image)).collect::<Vec<_>>()
+    );
+}
+
 // ── the source-level rule ─────────────────────────────────────────────────────
 
 /// Crates whose `src/` may name [`blorb::medium::MountedDisk::mount`] freely.
@@ -279,12 +314,18 @@ fn collect_rs(dir: &Path, label: &str, out: &mut Vec<(String, String)>) {
 /// detected, which is the whole point of it. Only a `mod` is cut: a
 /// `#[cfg(test)]` on a bare `fn` or `static` keeps its lines, and the rule erring
 /// toward noise is what makes it safe to leave alone (the same trade
-/// `palette_lock_discipline` makes).
+/// `scratch_path_discipline` makes).
 fn without_test_modules(src: &str) -> String {
     let mut out = String::new();
     let mut lines = src.lines().peekable();
     while let Some(line) = lines.next() {
-        if line.trim() != "#[cfg(test)]" {
+        // SQ-1242 put `app`'s in-crate `mod tests` blocks behind `t-*` Cargo
+        // features, spelled `#[cfg(all(test, feature = "t-<group>"))]` (or
+        // `any(feature = …)` for the couple shared across two groups) — both
+        // prefixes are checked, or this scan stops recognising the boundary in
+        // every file SQ-1242 rewrote and starts reading test code as production.
+        let t = line.trim();
+        if t != "#[cfg(test)]" && !t.starts_with("#[cfg(all(test,") {
             out.push_str(line);
             out.push('\n');
             continue;

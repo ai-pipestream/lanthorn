@@ -28,6 +28,8 @@ mod command_band;
 mod border_controls;
 #[path = "suites/return_probe.rs"]
 mod return_probe;
+#[path = "suites/declared_exit.rs"]
+mod declared_exit;
 #[path = "suites/matrix_path_highlight.rs"]
 mod matrix_path_highlight;
 #[path = "suites/matrix_view.rs"]
@@ -36,6 +38,8 @@ mod matrix_view;
 mod maze_layer_commands;
 #[path = "suites/maze_layer_frozen.rs"]
 mod maze_layer_frozen;
+#[path = "suites/lostpig_room_and_inventory.rs"]
+mod lostpig_room_and_inventory;
 #[path = "suites/mysterious_room_detection.rs"]
 mod mysterious_room_detection;
 #[path = "suites/nameonly_room_corroboration.rs"]
@@ -44,3 +48,81 @@ mod nameonly_room_corroboration;
 mod retired_exit_surfaces;
 #[path = "suites/room_dock_render.rs"]
 mod room_dock_render;
+#[path = "suites/sq1264_forest_randomization.rs"]
+mod sq1264_forest_randomization;
+#[path = "suites/sq1287_advent_map_layout.rs"]
+mod sq1287_advent_map_layout;
+#[path = "suites/sq1289_random_room_placement.rs"]
+mod sq1289_random_room_placement;
+#[path = "suites/sq1291_zork_chasm_layout.rs"]
+mod sq1291_zork_chasm_layout;
+#[path = "suites/sq1292_probed_return_arrow.rs"]
+mod sq1292_probed_return_arrow;
+#[path = "suites/sq1506_probe_death_landing.rs"]
+mod sq1506_probe_death_landing;
+#[path = "suites/sq1266_v6_shadow_restore.rs"]
+mod sq1266_v6_shadow_restore;
+#[path = "suites/sq1267_shadow_room_identity.rs"]
+mod sq1267_shadow_room_identity;
+#[path = "suites/sq1260_zil_carousel_randomization.rs"]
+mod sq1260_zil_carousel_randomization;
+#[path = "suites/sq1268_zil_v4plus_exits.rs"]
+mod sq1268_zil_v4plus_exits;
+#[path = "suites/sq1284_glulx_restore_room_cache.rs"]
+mod sq1284_glulx_restore_room_cache;
+#[path = "suites/sq1286_glulx_room_lock.rs"]
+mod sq1286_glulx_room_lock;
+#[path = "suites/sq1283_shogun_room_identity.rs"]
+mod sq1283_shogun_room_identity;
+#[path = "suites/sq1283b_shogun_below_decks_fan.rs"]
+mod sq1283b_shogun_below_decks_fan;
+#[path = "suites/sq1285_bolded_object_name_room.rs"]
+mod sq1285_bolded_object_name_room;
+#[path = "suites/sq1293_glulx_opening_room.rs"]
+mod sq1293_glulx_opening_room;
+#[path = "suites/sq1294_glulx_silent_vehicle_move.rs"]
+mod sq1294_glulx_silent_vehicle_move;
+#[path = "suites/sq1295_glulx_bold_name_below_heading.rs"]
+mod sq1295_glulx_bold_name_below_heading;
+#[path = "suites/sq1294b_glulx_flashback_heading.rs"]
+mod sq1294b_glulx_flashback_heading;
+#[path = "suites/sq1301_spider_and_web_twin_rooms.rs"]
+mod sq1301_spider_and_web_twin_rooms;
+#[path = "suites/sq1302_wizard_sniffer_rooms.rs"]
+mod sq1302_wizard_sniffer_rooms;
+#[path = "suites/sq1304_anchorhead_twisting_lane.rs"]
+mod sq1304_anchorhead_twisting_lane;
+#[path = "suites/sq1303_glulx_static_world.rs"]
+mod sq1303_glulx_static_world;
+#[path = "suites/sq1306_mapgen.rs"]
+mod sq1306_mapgen;
+#[path = "suites/sq1305_glulx_stale_sidecar.rs"]
+mod sq1305_glulx_stale_sidecar;
+#[path = "suites/sq1308_mapgen_layers.rs"]
+mod sq1308_mapgen_layers;
+#[path = "suites/sq1372_adventure_maze.rs"]
+mod sq1372_adventure_maze;
+#[path = "suites/sq1375_zork_house_makes_room.rs"]
+mod sq1375_zork_house_makes_room;
+#[path = "suites/sq1376_forest_west_of_house.rs"]
+mod sq1376_forest_west_of_house;
+#[path = "suites/sq1389_lostpig_gnome_room.rs"]
+mod sq1389_lostpig_gnome_room;
+#[path = "suites/sq1377_distorted_flags_are_final.rs"]
+mod sq1377_distorted_flags_are_final;
+#[path = "suites/sq1314_nautical_passage_erasure.rs"]
+mod sq1314_nautical_passage_erasure;
+#[path = "suites/sq1315_anchorhead_2018.rs"]
+mod sq1315_anchorhead_2018;
+#[path = "suites/sq1316_connector_overlaps.rs"]
+mod sq1316_connector_overlaps;
+#[path = "suites/sq1332_connector_bends.rs"]
+mod sq1332_connector_bends;
+#[path = "suites/sq1336_export_json.rs"]
+mod sq1336_export_json;
+#[path = "suites/sq1342_quit_clears_resume.rs"]
+mod sq1342_quit_clears_resume;
+#[path = "suites/sq1345_zork1_forest_shadow.rs"]
+mod sq1345_zork1_forest_shadow;
+#[path = "suites/sq1351_nguhd_topics.rs"]
+mod sq1351_nguhd_topics;

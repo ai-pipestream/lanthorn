@@ -1,0 +1,1957 @@
+# Architecture
+
+[← back to README](../../README.md)
+
+lanthorn is a Rust workspace. Two ideas shape it: the **interpreter and the
+mapper are decoupled** (a VM reports *where you are*; the mapper turns the stream
+of locations and movements into a spatial graph, knowing nothing about the
+engine), and **three different story formats render through one neutral screen
+model** so a single renderer draws them all.
+
+## Crates
+
+| Crate | Responsibility |
+|-------|----------------|
+| `zvm` (`lanthorn-zvm`) | A from-scratch Z-machine virtual machine — executes story files, standard Quetzal save/restore, and (since SQ-1401) a versioned binary SCREEN snapshot beside it (`screen_snapshot.rs`, `Machine::screen_snapshot` / `restore_screen_snapshot`) — Quetzal deliberately carries no screen state, because the standard assumes the story repaints, and a host Save State gets no such repaint, so what the archive used to hold as a hand-maintained serde mirror of six `zvm` types is now `zvm`'s own hand-rolled versioned blob, in the same shape as `quetzal.rs`. Zero-dependency. It also owns the **machine table** (`interpreter.rs`, SQ-0872): one row per ZMSD §11.1.3 interpreter number, carrying what that machine IS — the byte it writes into `$1E`, the default page and ink it reports in `$2C`/`$2D`, the palette its colour numbers resolve through, and the §8.3 screen rules the standard gives it by name — each value sourced out of Infocom's own interpreter for the machine and quoted at its constant. The table is keyed by the **number**, not by an enum, for the same reason `blorb::medium` answers one: a number is a compact published encoding that needs no shared type, which is what lets three crates kept deliberately independent talk about the same machine. It landed here because zvm had been carrying a per-machine rule for one machine since SQ-0740 (the Amiga's global colour pens) as a special case beside a lone constant; when the Macintosh arrived it landed in `app::session` instead, so one concept sat in two crates and `zvm-cli` could see only half of it — it set the interpreter number and never the colours, telling a story off a release press which machine it was on and leaving it to infer what that machine looked like from the generic §8.3.2 seed. Both front-ends now read this table, so they cannot present different machines off the same disk, and `machine()` answering `None` for an unmodelled number is what lets a front-end *say* it does not model one instead of quietly substituting an IBM PC. What stays in `app::interpreter` stays for charter reasons: reading a disk to work out which machine pressed it is I/O policy, the art-flavour preference needs `blorb`, and a standard window is a Version 6 picture space stated by an archive. And since SQ-1118, `objects::ParseNames` reads what an object can be **called** rather than what it is printed as. Both compiler families keep the words as an array of dictionary addresses in a property, and disagree about which: Inform hard-codes `name` at 1 (`Inform6/src/objects.c`, and Inform 7 keeps it), while ZIL numbers `SYNONYM` per game and the number really moves — 14 in Seastalker, 17 in Zork II, 18 in Zork I, 31 in Spellbreaker, 63 in Nord and Bert, with **nothing in the image naming it**. So Infocom's is detected: tally which properties are word arrays over the whole object table, then take the one whose objects CONTAIN every other candidate's. Containment and not size, because from V4 the adjectives are word arrays too and lead by too little to separate (Zork Zero 432 to 306) while an object cannot have adjectives without nouns — and because the V6 games' dictionary flags mark almost nothing a noun (24 of Zork Zero's 1624 words), so no part-of-speech filter reaches them. Where neither containment nor a 2x margin settles it, it refuses: Journey and Scopa have no parser, and `advent.z8` tokenises against its own word table with the Z-machine dictionary declaring zero entries. SQ-1120 then took the runner-up containment discards and made it the answer to a second question — an object's **adjectives**, which Infocom keeps in a property of their own and which a player types (`take brass lantern`, `examine baby prams`, both confirmed under `zvm-cli`). It ships for **V4 and up only**, where that property holds dictionary addresses: all fifteen V4–V6 titles in `stories/` agree, Zork Zero p51/p46 and Shogun p45/p32 among them. A V1–3 story keeps its adjectives as one-byte *numbers* the property scan cannot see at all, so its runner-up is noise — one to four objects, against leaders of 136 to 246 — and the version gate refuses it rather than answering `win` for Zork I's kitchen window. **What makes shipping half of this safe is that the half is stated in the type**: `Adjectives::Unavailable` means the story cannot be asked and `Adjectives::Read { words: [] }` means this object has none, so a word list never quietly means two things on two story versions. |
+| `gvm` (`lanthorn-gvm`) | A Glulx virtual machine (Glk I/O) for modern Inform 7 games — accelerated Inform veneer, full float opcodes. Zero-dependency. Since SQ-1102 it also reads Inform's **grammar tables** (`grammar.rs`), the counterpart of `zvm::grammar` and the same questions asked of the modern half of the corpus: which words are verbs, what sentence shapes each verb accepts, which prepositions it expects, what parts of speech the dictionary marks. The formats are near-identical — Plotkin describes the lines as "nearly identical to the grammar version 2 format in Z-machine Inform" — but where the Z-machine names the table's address in its header, **a Glulx image records it nowhere**, by design rather than oversight: `glulxdump`, written by the man who designed both, requires the address on its command line and its header comment asks for a layout field that was never added. So the module derives it, by a chain that has to close exactly — the dictionary (a run of `$60`-tagged records at a constant stride whose length matches the count before it), then the actions table ending precisely where the dictionary begins, then the grammar table ending precisely where the actions table begins, with every verb, line and token walked to prove it lands on that byte and no other. The last step earns its keep: **889 byte offsets across the 22-story corpus satisfy the pointer-array precondition — 279 in one game — and exactly 22 survive the walk.** Verified against `glulxdump` on all 22, 6,911 grammar lines, zero differences; the reference tool cannot find these tables but can read them once handed what this module derives. Locating a table is not the same as reading the numbers in it, and SQ-1114 is the other half: a dictionary record holds its verb's index *inverted*, and Inform in Glulx mode counted down from the Z-machine's `$FF` until v6.32 widened it to `$FFFF` (`Inform6/verbs.c`), so the four pre-6.32 stories in the corpus — `advent.blb` among them — read as a complete grammar table with **not one verb word attached to it**, which is a thing no story has. The base is now decided per file by checking both against the grammar table's own verb count, since which one a story uses is a fact about the compiler that built it and not about the format. SQ-1118 added `objects.rs` on the same footing and for the same reason — a Glulx image records the OBJECT tree's address nowhere either — deriving it from Plotkin's §2 structure: a `$70`-tagged linked list whose every next-link names the object exactly one stride along, ending at a `0`, with `NUM_ATTR_BYTES` recovered from the stride that makes the walk close. A clean walk is not proof on its own (the list from object *k* is also a list, so the head is the lowest address that closes), and the verification is the objects' own `name` arrays: every entry of every array must land on a `$60` dictionary record of the table `locate` already found. Confirmed against the parser — `advent.blb`'s lantern answers `lamp`, `headlamp`, `headlight`, `lantern`, `light`, `shiny` and `brass`, and `gvm-cli` takes and drops it by all of them. Inform 7 objects have no hardware short name at all, so there the word list is the only text in the image that identifies the object. SQ-1241 took the rest of §2's record, because it costs nothing once the stride is known: three of the six longs — `parent`, `sibling`, `child`, at `13`, `17` and `21` past `NUM_ATTR_BYTES` — are Inform's ordinary containment tree, so a verified list is a verified TREE and the app's `Introspect` seam works on Glulx (see "Glulx introspection" below). Attributes are deliberately left unread: their NUMBERING is the Inform library's rather than the format's and moves between library releases, so `container`/`open`/`transparent` cannot be identified from the image and a nested "what can you see inside that" walk would be a guess. SQ-1303 added `i7map.rs`, which reads an Inform **7** story's whole compiled WORLD MODEL — the room set, each room's printed name, and every room's exits — off the image with no turn played: `crate::world` reads the Inform 6 library's `door_dir`/`*_to` convention, which I7 simply does not compile, storing the map instead as one array (`Map_Storage`) indexed `room_index * No_Directions + dir_index` by two compiler-assigned instance-count properties. As with every other table here nothing in the image names any of it, so all four facts are derived: an instance-count property is a bijection onto `0..n-1`; the DIRECTION one is the bijection whose members answer to the compass words (Counterfeit Monkey has twenty directions where the Standard Rules define twelve, which is why the count is read rather than assumed); the room one is whichever other bijection makes an array work; and the array itself is the window of `rooms × directions` words scoring highest on RECIPROCITY, an I7 connection being two-way by default — measured on Counterfeit Monkey the true base scores 180 of 181 room entries reciprocal and the next offset along scores 133. The arrays are **not** word-aligned (`0x378f28` in one corpus story, an address ≡ 1 (mod 4) in another), so every scan runs at all four byte phases; a four-byte stride from RAMSTART finds the first map and is structurally blind to the second. It reads 23 of the 31 Inform 7 Glulx stories in `stories/` and REFUSES the rest rather than reporting a coincidence — a pre-6L02 build carries no instance-count properties at all (`AnchorheadDemo.gblorb`, build 4K41), and a story that builds its map at run time (Kerkerkruip) has a compiled array of zeros. `Map_Storage` is in RAM because `AssertMapConnection` writes to it, so every read goes to live memory rather than to a boot snapshot. |
+| `scott` (`lanthorn-scott`) | A Scott Adams (ScottFree `.dat`) virtual machine for the classic text adventures. Zero-dependency. Since SQ-1118 `Database::item_words` answers the same question the other two engines answer — what an item IS and what it can be CALLED — from the only material the format has: the `/NOUN/` marker in an item's description and the `*`-prefixed synonyms following that noun in the table. Adventureland's empty bottle answers `bot` and `con`, so a player may type either "bottle" or "container", which nothing in the printed name could have told you. **Five encodings, one entry point:** `Database::parse` reads the reference text format, the TI-99/4A tokenised releases (`ti994a.rs`), the Commodore 64 *Mysterious Adventures* (`c64.rs`), the **ZX Spectrum** ones (`zx_mysterious.rs` over `z80.rs`'s container step, SQ-1478) and the US S.A.G.A. binary databases (`saga_us.rs`) — every one decoding to the same `Database`, and every other dialect refused by name. The ZX loader is the one that needs no per-release table at all: those releases plant nine table addresses in the nine words after the header, so the header's field order and the dictionary's verb/noun split are derived rather than looked up (`docs/internals/scott-dialects-spec.md` §4.6, Appendix A item 12). |
+| `mapper` (`lanthorn-mapper`) | A VM-agnostic map model: rooms, connections, layered 2-D layout, overlap removal, edge routing. Serializable. |
+| `app` (package `lanthorn`) | The `lanthorn` TUI binary (ratatui + crossterm): play loop, live map rendering, debug inspector, all interactive features. `assets.rs` is its counterpart to `blorb::medium`: **one enumeration of every place a story's files can live** — the directory beside it, and the volume it was mounted out of — so a caller looking for a game's assets filters that one list instead of learning that disk images exist. `launch_options::discover_art_candidates` is the only filter over it today; before SQ-0843 it was a bare `read_dir`, which is why a Macintosh disk's two picture archives were unpickable while `blorb` had been reading them for a week. A new asset **source** is an arm in `assets::files`, a new asset **kind** is a filter beside that one, and a new disk **format** is still just a row in `blorb::medium::FORMATS`. `disk_set` is a second small enumeration in the same spirit — **which files are volumes of one multi-disk release** — and it answers from filenames alone, never opening a disk, because the question is about how a collection was pressed rather than what is on it. It lived here until `zvm-cli` needed it and now lives in `cli-host` (SQ-0874), re-exported as `app::disk_set` so every call site is unchanged; see that crate's row for why moving it beat copying it. It feeds three callers: `picker::StorySource` (what a launch argument *means* — a directory, the release a named volume belongs to, or, since SQ-0962, the games on a volume that belongs to no release at all: that arm asked `disk_set::members` and gave up on `None`, so a single compilation disc launched whatever story its own tiebreak preferred and the other thirty-two were unreachable, because "is this a volume of a set?" was standing in for "is there a choice to make?". The mount that answers the wider question is asked only after the cheap name-only rule declines, and only of files that really are disk images; the cross-volume IFID fold is now conditional on there BEING other volumes, since a lone hybrid disc carries one build per machine on purpose), `picker::scan_stories` (which folds a set's duplicate builds together by IFID, since the ST shelf carries 39 stories for 33 games), and `disk_set::mount_at`, the one way either front-end opens a named volume. The volume label was weighed as the grouping signal and rejected on measurement, not taste: nine of the corpus's volumes report none at all, and Zork Zero's two DOS presses both label their first disk `ZORK0 1`, so it would leave one family ungrouped and merge the one pair the filename rule correctly separates (SQ-0844). |
+| `zvm-cli` / `gvm-cli` (package `lanthorn-gvm-cli`) / `scott-cli` | Standalone DOS-style command-line players (no map): save/restore, single-key input, terminal-bell bleeps — and, piped, a clean deterministic harness for testing/scripting. `zvm-cli` declines graphical **v6** stories at load: they drive a windowed display it cannot present, and every one of them runs away at its first input prompt. `zvm` itself supports v6 fully — play those in `lanthorn`. `zvm-cli` also opens an original release disk image — **every format `blorb` reads, without naming one of them** (`blorb::medium` mounts it, so this costs no dependency) — and picks between several stories on one disk with a startup menu or `--story <n|name>`; the medium also sets the interpreter number it advertises, exactly as the TUI's does, with `-I` still overriding — see [the interpreter's disk-image notes](interpreter.md#the-command-line-player-takes-a-floppy-too). A v6 disk still gets the v6 refusal rather than a disk error: the mount worked, the renderer is what is missing. `scott-cli` gained the same shape of disk mount since SQ-1414, for the one dialect a disk actually needs it: the Commodore 64 *Mysterious Adventures* compilation disks hold six and five program files apiece, `MountedDisk::stories` stays Z-code/Glulx/Blorb-only by design, so `scott-cli` scans `MountedDisk::contents` itself, keeps what `scott::looks_like_scott_bytes` accepts, and picks with the same `--story <n|name>` matched through the same `cli_host::story_pick` `zvm-cli` uses — a number or a name resolves identically at either prompt. |
+| `cli-host` (`lanthorn-cli-host`) | The plumbing those three CLIs share: terminal escapes, the input/EOF rule, an RAII terminal restore, and `--help`/`--version`. Not the renderers — see below. Since SQ-0850 it also owns the one thing the CLIs share with the **TUI**: `storage.rs`, which answers *what do I call this game's save directory* for every host, and the `titles.rs` catalogue the readable half of that name comes from. `app` depends on it for exactly that, because a story taken off a disk image is keyed by its own release and serial and two implementations of that rule would be two directories. SQ-0874 sent a second rule down the same road for the same reason. `disk_set.rs` says **which files are volumes of one multi-disk release**, from filenames alone; it lived in `app`, and `zvm-cli` therefore could not reach it, so the CLI mounted every disk with `MountedDisk::mount` — `mount_set` with no companions — and no multi-volume release opened there at all. *Trinity* played in the TUI and not at the prompt, and the Apple II 5.25" presses answered "no story file on this disk image" off a disk whose game is simply on the next floppy. The choice was to move the rule down or copy it sideways, and a copy is how two front-ends end up with two ideas of what a release is — invisible until a game goes missing from one of them. It moved cleanly because it is pure filename logic over a directory listing, reading its extension census off `blorb::medium` (which `cli-host` already depended on) and opening nothing; `app::disk_set` is now a re-export, so every existing call site still spells it the way it did. `disk_set::mount_at` sits beside it as the one way either front-end opens a named volume, and it keeps the laziness that makes the seam affordable: the companions closure is called only when the named volume has no story of its own, so an ordinary floppy and every compilation disk cost exactly the one read they always did. SQ-0941 gave that lazy arm its other half. `mount_set` reassembles a story the release *pages* across its volumes, which is the Apple II and Commodore case; it can say nothing about a release whose volumes are independent filesystems holding distinct files, because there is no container spanning them — and that is the DOS press, which keeps the story whole on one floppy and the installer and the artwork on the others. So a volume that still has no story asks `members_indexed` for its siblings and takes the game off whichever one has it, mounting them plainly because anything paged was already found. Only when the release carries **exactly one** game, which is `app::assets::volumes`'s threshold and is here for the same reason: widening across *The Lost Treasures of Infocom* would hand whoever opened its launcher disk one of thirty unrelated games, and a shelf is a browser's job. Measured on *Zork Zero* release 393 / serial 890714, whose 360K press puts `INSTALL.EXE` on disk 1, `ZORK0.ZIP` on disk 2 and `ZORK0.EG1` on disk 3 — the disk a player opens first was the one that could not work. SQ-0961 gave the module the other half of its job, **enumeration**: `stories_across_the_release` answers "every story this path can reach", which is what `app::assets::volumes` has answered about artwork since SQ-0874 and what nothing answered about stories at all. Each front-end therefore decided for itself and they drifted — `zvm-cli` on the Amiga *Lost Treasures* disk 1 offered the six games on that platter while the TUI listed all twenty across the six-volume release. The named volume's own list comes through untouched (a compilation's menu does not move because the shelf around it became visible) and the siblings follow in disk order with a build already offered dropped, keyed on the release and serial `storage::disk_story_key` names a save directory with — which is what keeps SQ-0941's widening from listing the DOS *Zork Zero* twice. Three bugs from one seam was enough evidence that reasoning would not hold the line, so `release_enumeration::no_production_code_mounts_the_platter_alone` fails any production call to `MountedDisk::mount` outside this file; unit tests inside `src/` are exempt, because several of them legitimately mount a platter to establish a premise. The same quest widened the *grouping* rule, which was a prerequisite rather than an aside: the Macintosh DiskCopy press names each volume after the games on it (`- Disk 1 - Beyond Zork, Lurking Horror`), so its five stems share a prefix and no suffix whatever, and a prefix-index-suffix rule grouped none of them. The suffix is dropped from the key only when the digit run is introduced by one of `disk`/`disc`/`side`, which is the qualifier that keeps `Ultima 1`, `Ultima 2 - Revenge`, `Ultima 3` from becoming one release. `gvm-cli` compiles the module and gains nothing and no dependency, which is the price of the shared crate being genuinely shared. `scott-cli` no longer belongs in that sentence (SQ-1414): it now calls `disk_set::mount_at` for its own `--story`, the same one way either front-end opens a named volume. |
+| `blorb` (`lanthorn-blorb`) | Blorb container parsing — bundled story, cover art, and sound/image resources — plus the release-media readers beside it: Infocom's native picture archives, Amiga `.adf` floppies (`adf.rs`), Macintosh DiskCopy 4.2 / HFS disks (`hfs.rs`, which SQ-0870 taught to open a **hybrid CD** as well — not through a new reader but through `cd.rs`, a wrapper in the same shape as the DiskCopy unwrap: it measures a raw disc's sector stride from the distance between sync patterns rather than matching 2352, reads the mode byte to place the user data, and walks the Apple Partition Map to the `Apple_HFS` entry, which on the *Masterpieces* disc starts at block 513 and is the only one of the three the crate reads — the ISO9660 side is SQ-0871. A cooked `.iso` falls out of the same code as an offset with nothing copied, since the absence of a sync pattern *is* the cooked case. The same quest fixed what made the partition unreadable even after extracting it by hand: `volume_is_sane` bounded a volume by the size its MDB claims, and a hybrid disc's Macintosh partition is sized for the medium — 665,589,248 bytes of allocation blocks against 307,992,064 present, every one of them allocated, only free tail missing. The bound is now on the blocks a reader **follows**: the catalogue and extents-overflow extents the MDB names must be inside the image, and per-file truncation is caught where it already was, in `read_fork`, which refuses a fork whose chain runs short rather than handing back a partial one), DOS **and** Atari ST floppies (`fat12.rs` — one FAT12 reader for both, because GEMDOS put its BPB at the DOS offsets; the machine is decided by whether the boot sector opens with an x86 jump, which DOS's load protocol requires and TOS has no use for), and Apple II ProDOS disks (`prodos.rs` — a `2IMG` wrapper whose declared data length reads zero on every image in the corpus, so the block count is the fallback; then seedling/sapling/tree/extended files, sparse blocks and nested directories). ProDOS gained a **third** wrapper in SQ-0864, and it is the only one that moves bytes rather than offsetting them: a 5.25" `.dsk` is the same filesystem with its sectors in the order the drive numbers them, so `dos_order.rs` de-interleaves 35 tracks of 16 sectors back into ProDOS block order and hands the result to the same reader. That module is deliberately nothing else — no format, no row, no verdict; it re-orders and the volume directory decides, so a DOS 3.3 or Pascal 5.25" disk comes through it just as willingly and is then declined. A **fourth** wrapper landed in SQ-0889 and cost no new decoder at all: `Shogun.po` is an 800 KB ProDOS volume behind an 84-byte DiskCopy 4.2 header (`dataSize` 819,200 plus `tagSize` 19,200 plus the header being its 838,484 bytes exactly), so `volume_at` gained the placement and borrowed `hfs.rs`'s unwrap for it — DiskCopy is a wrapper and not a filesystem, so each reader sniffs 84 bytes in and declines what is not its own, and a Macintosh DiskCopy image is unwrapped by the ProDOS reader as willingly as a DOS 3.3 floppy is de-interleaved by it and turned away just as fast. It opens the Apple *Shogun* press (release 311, serial 890510) off one disk instead of five. SQ-0868 gave it a **second traversal of the same table**: read the interleave grid row-wise instead of column-wise and it is DOS 3.3's own *logical* sector order, so `logical_order` sits beside `prodos_order` with one `PHYSICAL_OF` behind both (ProDOS block `b` of a track is DOS logical sectors `b` and `b + 8`, and the ProDOS order is now derived from that relation rather than restated). That second order is what `infocom_boot.rs` needs — the reader for Infocom's **raw self-booting** Apple II floppies, which are the same 143,360 bytes in the same sector order as a 5.25" ProDOS `.dsk` and have no filesystem under them at all: no volume directory in any order, no DOS 3.3 VTOC, just Infocom's loader and a run of Z-code its own RWTS reads off known tracks. It is therefore the one row in `medium.rs` whose bytes are not a volume, and the story is located not by a boot signature (which would fit a corpus of one) but by de-interleaving and taking the first sector boundary whose story **verifies against its own ZMSD §11.1.6 header checksum** — shared with `infocom_packed.rs` rather than copied. That check is decisive about *which* sectors and blind to their order, since it is a byte sum, so the order was settled twice more: only the logical order puts a real Version 3 dictionary where the header points, and only it produces a game that boots. Two rows now claim the `.dsk` spelling and stay disjoint **by construction, not by table order** — the boot-disk sniff declines a ProDOS volume outright — which is what keeps `DiskImage::detect`'s promise that `FORMATS` order is "a formality rather than a precedence" true now that two formats share a size, a sector order and a name. SQ-0869 added the one other row whose bytes are not a volume, `d64.rs` — Infocom's **Commodore 1541** releases. A `.d64` needs no de-interleave (the container stores each track's sectors in ascending order by definition), and Commodore DOS is present on all three disks in the corpus and used by none of them: *Trinity* writes its story over its own directory sector and its BAM reports the whole disk free, while *Hitchhiker's* keeps a directory whose one file is a BASIC loader and stamps its DOS bytes `TG` rather than `2A`. Two things make it unlike `infocom_boot.rs`. First, the presses disagree about the layout — the 1984 disk spends sixteen of each track's twenty-one sectors and skips the loader and directory tracks whole, the 1986 disk spends every sector and skips only the BAM — so the reader carries both plans and keeps whichever one's reassembly verifies, and where a press stops on a disk falls out of the media rather than a table, since a 1541 `FORMAT` leaves each block as `$4B` then 255 x `$01`. Second, and new to the crate, a story can be **larger than a disk**: *Trinity* is Version 4, so its `$1A` field counts in fours and the story is 262,064 bytes against a floppy's 174,848, with side 1 holding 344 sectors and a header and side 2 holding 680 and nothing that identifies it at all. That is why `MountedDisk` now carries the set's raw IMAGES beside the set's files — the Apple's packed volume pages a story across segments that are files, and the Commodore's pages one across sectors that are not, so `story_across_the_set` asks `infocom_packed` and then `d64`, both of which verify against the story's own checksum before answering. The layout was settled the way SQ-0868's correction demands rather than by the order-blind checksum alone: the dictionary at each header's pointer decodes as a textbook one, an FNV-1a fingerprint over every sector in order is pinned, and *Trinity*'s reassembly is byte-identical from `$40` on to `stories/trinity-r12-s860926.z4`, an independent dump of the same build. The three bytes below `$40` that differ are the press declaring a high-memory mark of 22,527 where the reference says 63,423 — a 64 KB machine paging a 256 KB story — which is legal precisely because the checksum starts at `$40`, and which cost `adf.rs`'s `looks_like_story` its assumption that high memory begins at or above static memory. SQ-1095 added the ninth row, `g64.rs`, and it is the first that is not a container at all: a `.g64` holds the raw GCR **bitstream** a 1541's head reads — sync marks, encoded header and data blocks, gaps, and whatever the mastering house did to the parts of the disk that are not data — so every sector it hands on is computed rather than copied. Decode it and it *is* a D64, which is the whole design: the module ends at `sector_image`, hands `d64.rs` a 174,848-byte image, and takes no interest in what a story is. The container layout is Peter Schepers' `G64.TXT` rev 1.9 and the 4-bit-to-5-bit nybble table is VICE's `gcr.c` cross-checked against Linus Åkesson's *GCR decoding on the fly*, with the inverse table computed from the forward one at compile time rather than transcribed. Two things are worth carrying forward. First, **decode what decodes**: Infocom's Commodore protection lives in the loader, which lanthorn never executes, so a track whose bitstream is not sectors is skipped rather than refused — on `plundered_hearts[infocom_1987](r26)(!).g64` that is five whole tracks (36-40) plus one unreadable block, 682 of 683 sectors decoding and the story untouched. Second, the one leniency: both block types end in "off" bytes that exist only to pad the block to a multiple of five, and a drive's write splice lands in exactly those nybbles — six sectors of that press have a corrupt final GCR byte and are otherwise perfect, so an invalid code past the last meaningful byte is passed over and the XOR checksum over what means something is what actually decides. Reverting that concession loses the whole story and no synthetic test notices, which is why the oracle matters: what comes off the bitstream is byte-identical to `stories/plunderedhearts-r26-s870730.z3`, all 128,962 bytes. It also found a **third** Commodore sector layout — the 1987 press spends seventeen sectors a track from track 5, skipping track 17 and starting after the BAM and directory sector on track 18 — so `d64.rs` now carries three plans and still keeps whichever one's reassembly verifies. The row answers Commodore 128 (7) like its `.d64` neighbour, because §11.1.3 asks which machine the interpreter runs on and a container cannot change that. All hand-rolled; the crate took no dependencies until SQ-1488, which gave it exactly one — `depack.rs` wraps `regenerator2000-core`'s 6502-emulation unpacker so a `.D64`'s directory can carry a Commodore program crunched behind a `$0801` BASIC stub (the *Hulk* collection disks) instead of a clear-text Scott Adams table, depacking it before the app's own `scott::looks_like_scott_bytes` sniff ever sees the bytes — see that dependency's `Cargo.toml` comment for the licence check. Beside the filesystems sits `infocom_packed.rs`, which is not one: the Apple II press of *Arthur* and *Journey* stores no story file at all but a **packed volume** — an index in block 0 of the first `.D1` segment, then per-segment runs mapping story pages to blocks scattered across every floppy in the set, so reading is a scatter-gather rather than a file read (SQ-0852). It takes named byte blobs rather than a `Volume` because it is not a filesystem's business; and it assembles and then **verifies the story's own header checksum** before handing anything back, because a wrong page map yields a file just as plausible as a right one. SQ-0864 corrected one thing SQ-0852 recorded about it: the 5.25" pressings of *Shogun* and *Zork Zero* do **not** carry the packed volume bare on a filesystem-less disk — they are ordinary ProDOS volumes in DOS sector order, and what looked like a hand-rolled per-disk block map is a ProDOS index block. Two of Shogun's segments are ProDOS *tree* files, which the hand-rolled reading could not have addressed at all. `medium.rs`'s provided `Volume::stories` asks it on every format, so a story that is not a file is still a story on the list — and `MountedDisk::mount_set` asks it once more across a whole multi-disk release, which is the only way *Shogun* opens at all, since its story is on no single one of its five floppies. That set path is format-neutral and above the table: no reader implements anything for it and none can opt out, the companion volumes are opened through whichever row claimed the one you named, and the closure that supplies them is called **only** when the named volume has no story of its own — so a compilation disk costs exactly the one read it always did. Which files are one release is `cli_host::disk_set`'s answer, from filenames alone; `blorb` is handed bytes and never learns what a directory is. `medium.rs` is the seam on top, and it is the **only place in the workspace that names a disk format**: a `FORMATS` table of one row per format, a `Volume` trait each reader implements by delegation, and a `MountedDisk` every front-end holds. Ask it whether bytes are an image, open them, list the stories on the volume, take the one to play, take the disk's own artwork, name the container for the picker, and get the Z-machine interpreter number the machine implies. Detect and mount walk the same table, so a format lanthorn can recognise is a format it can open — the guarantee that was missing when `zvm-cli` detected an Amiga floppy and refused a Macintosh disk `blorb` had read for a month (SQ-0840). The row also carries the filename extensions a directory scan pre-filters on, which is the newest column and the one that had to be retrofitted: the TUI's story picker kept its own list, never heard about the DOS and ST rows, and left a shelf of mountable `.ima` and `.st` floppies out of the story list for two quests (SQ-0849). Extensions decide nothing — content still does — they only say which files are worth opening. SQ-1458 added three rows and one traversal, all of them for the **Scott Adams** media rather than Infocom's, and each one tests a different part of the seam's claim to be format-neutral. `atr.rs` reads the Atari 8-bit `.atr` container — a sixteen-byte header, then 128-byte sectors numbered from one — and the Atari DOS 2 filesystem inside it: sector 360 the VTOC, sectors 361-368 the directory, and each data sector spending its last three bytes on a link trailer whose top six bits are the **file number**, which is the check that makes a walk safe on a disk whose directory has been written over. Nine of the fourteen S.A.G.A. sides in `stories/` have exactly that — the release masters its database straight through sectors 360-368 — so the CONTAINER identifies the medium here and the filesystem is read only if it is still there; a side with no directory left mounts and lists nothing, as either side of *Trinity* does. That is also why the row is the only one with a reserved name on `read_named`: the database is not a file, spec §7.3 addresses it as a **file offset**, so `atr::IMAGE_ENTRY` hands back the bytes the mount was given, header and all, and it is deliberately not listed by `contents` because it is not a file on the disk but the disk. `dos33.rs` reads Apple II **DOS 3.3** volumes, the third format wearing the 5.25" `.dsk` and the one the spelling is named after: no de-interleave at all, because a flat DOS-order dump *is* the logical numbering, then the VTOC at track 17 sector 0, the catalogue chain, and track/sector lists whose pairs are the file's sectors in order (a `(0, 0)` pair is a sparse 256 zero bytes; a catalogue entry's sector count includes its own list sectors, so nothing here sizes a read from it). A type-`B` file's four-byte load prologue is offered both ways, and which one `read_named` returns was **measured** rather than chosen: §7.4's mastering offset `0x016D` reads Adventureland's header out of the raw array with the prologue in front and reads four bytes late out of the stripped one, so `read` is the raw one and `read_binary` is the door to the address. It also refuses something, with a reason worth carrying: a **ProDOS-ordered** DOS 3.3 disk is not claimed, because sectors 0 and 15 are the interleave's only fixed points — so track 17 sector 0 and track 17 sector 15, the VTOC and the first catalogue sector, are in the same place in both orderings. A shuffled disk therefore passes every structural test, names its files correctly, and reads each one out of the wrong sector; the arm that tried it found a volume and handed back rubbish, which is worse than declining, and there is no specimen in the corpus to measure a discriminator against. `.woz` is likewise named and refused — a bit-preserving image is a GCR bitstream needing `g64.rs`'s shape of work. `xex.rs` is the row whose bytes are not a disk in any sense: an Atari binary-load file is `FF FF` and then segments, each an inclusive `start`/`end` pair and that many bytes, and the trap it exists to avoid is that a segment loading into `$02E0` or `$02E2` is **`RUNAD`/`INITAD`, a vector and not payload** — reading them as payload turns *The Hulk*'s 21,809-byte image at `$4000` into a 37,457-byte one at `$02E0` with 15,648 bytes of hole in front of the game. And `d64.rs` gained the directory walk it never had (SQ-1458): the Scott Adams Commodore releases are ordinary CBM DOS disks of uncompressed `PRG` files, so `contents` now lists every **closed** `PRG`/`SEQ` with a non-zero block count, read through the two-byte block links, keeping the PRG's own load-address bytes. Three of those four conditions are the corpus's: *Zork I*'s Solid Gold press spells its title in `DEL` banner entries and carries a zero-block `ZORK I` beside a BASIC stub, and neither is a file. The walk is gated on the existing `directory_reads`, so *Trinity*'s two sides — whose story is written over their directory — still take the raw-sector arm and nothing about the Infocom presses moved; the sniff gained the arm rather than losing one, and `stories()` is now the ordinary `looks_like_story` rule over the volume's files plus the checksum-verified raw-sector story, which keeps it engine-neutral: a Scott Adams `PRG` is offered through `contents()` and classified by the app, because what makes those bytes a game is not a fact this crate knows. Adding a format is a row here plus the reader it names, and every front-end gains it in the same commit — DOS and the Atari ST landed as **two rows over one reader**, which is what the row/reader split is for, since they are one filesystem and two machines, and ProDOS then landed as one row over one new reader with nothing outside `blorb` touched at all (SQ-0836); the interpreter-number default lives in the same row for the same reason two copies of "an `.adf` means interpreter 4" went stale in one place and not the other (SQ-0839). An explicit number always outranks it. |
+| `audio` (`lanthorn-audio`) | Sound playback (rodio) — synthesized bleeps and sampled AIFF / Ogg / ProTracker MOD. |
+| `buildinfo` (`lanthorn-buildinfo`) | A tiny zero-dep helper: a `build.rs` that stamps the git commit hash into non-release build versions. |
+| `grammar-model` (`lanthorn-grammar-model`) | The **answer** a grammar reader returns, and none of the reading: `Token`, `NounKind`, `RoutineRef`, `Slot`, `SyntaxLine`, `Verb`, `WordRoles`, with Inform's elementary-token numbering and the six token types. Zero-dependency, and depended on by `zvm` and `gvm` alike (SQ-1103). It exists because the two READERS share nothing — a Z-machine grammar table is at a header-named address and a Glulx image records its own nowhere; verb numbers count down from $FF against $FFFF (or against $FF, before Inform 6.32 — SQ-1114); line headers are 2 bytes against 3; tokens 1+2 against 1+4; dictionaries Z-encoded against `$60`-tagged; five table shapes against one — while the two ANSWERS are the same question answered about two story formats. Each engine keeps what is about its FORMAT rather than its answer: `zvm::grammar::GrammarFormat` (which of the five shapes), `gvm::grammar::Tables`/`locate` (where the derived addresses were found), and each crate's own `GrammarError`. SQ-1118 added `ObjectWords` on the same principle: an object's id, its printed name, the dictionary words that refer to it and the length its vocabulary truncates at, as ONE value — a caller holding the words without the name cannot say which thing they belong to, and one holding the name without the words is offering a player something the parser never agreed to accept. All three engines return it. SQ-1120 added `Adjectives` beside it on the same reasoning: only Infocom splits adjectives out of the name array and only from V4 can they be read, so the value distinguishes *unavailable* from *absent* rather than flattening both to an empty list — `ObjectWords::new` still takes five arguments and defaults to `Unavailable`, and `with_adjectives` is the only way to say otherwise. SQ-1108 then lifted the **container** those answers arrive in, which SQ-1103 had deliberately left behind: `Vocabulary` holds the verbs, the spelling index, the prepositions, the dictionary roles and the action routines, and answers the ten questions each engine's `Grammar` used to answer with bodies that matched character for character. It **derives** the spelling index and the preposition list from the verbs rather than being handed them, because both are functions of the verbs alone and both were previously built by the same dozen lines in each reader — a caller that could supply them could supply them inconsistently. Each engine's `Grammar` composes one and delegates to it explicitly, one method for one, rather than exposing it: the public API of `zvm::grammar::Grammar` still reads on its own, which is what `zvm` being embeddable outside lanthorn asks of it, and every call site and both `grammar_tables.rs` suites went through unchanged — which is how the readers' verification survives a restructuring of their insides. The loaders share nothing and were not touched. |
+| `verb-synonyms` (`lanthorn-verb-synonyms`) | The bridge from a word a player typed to one the story knows, when the two are related by **meaning** rather than by spelling. Guess-the-verb's motivating case — `illuminate` → `light` — is unreachable by edit distance (8 on a 10-letter word), by stemming (`illuminat-` reaches nothing) or by grammar shape, because all three operate on FORM and the bridge required is meaning. Ships a generated TSV of synonym groups beside its reader, `include_str!`'d and parsed lazily behind a `OnceLock`: 3,068 groups, 80 KB, greppable and diffable, so a regeneration shows in review as changed lines rather than as one changed blob. A word appears in as many groups as it has senses — `illuminate` is in the *light* group and the *explain* group — and the groups are never merged, because collapsing everything transitively connected joins senses through polysemous words and the table starts confidently suggesting nonsense. The consumer intersects a group with THIS story's dictionary, so nothing is ever offered that the parser would reject: the table proposes, the story disposes (SQ-1110, SQ-1115, SQ-1119). A **second** table sits beside it and answers the other half of the same problem: `irregular_forms.tsv`, WordNet's own exception lists as `form → base`, for the inflections no suffix rule can produce — `lit` → `light`, `took` → `take`, `went` → `go`, `mice` → `mouse`. `app`'s `vocab::stems` strips regular endings and then asks it, always rather than only on a miss, because it is one hash lookup and some words are reached both ways. Nouns are in it as well as verbs, deliberately: `stems` serves every position in a command, so `mice` → `mouse` is the same case as `lit` → `light` one slot to the right. The lookup hands back a SLICE of bases, because a spelling can inflect two ways — `axes` is `ax` and `axis`, `singing` is `sing` and `singe` — and only the story's own dictionary can settle which was meant (SQ-1113). |
+| `verb-synonyms-gen` | The generator, shipped with its table because a derived artifact whose inputs are unrecorded cannot be regenerated or audited. Harvests the real IF verb vocabulary from every story it is given (`Grammar::verb_words` on Z-machine and Glulx, `Database::verbs` on Scott), expands it through WordNet **offline**, and inverts the result — so a word outside IF's vocabulary never enters the table and the size stays bounded by the domain rather than by English. `if_groups.tsv` carries the corpus's own verb groupings, which outrank the thesaurus: an author writing `Verb 'examine' 'x' 'inspect'` has stated what a word means IN A PARSER, which is a better authority here than a lexicographer's view of English (SQ-1115). Coverage is measured, not asserted — 90% of the common-verb basis — and a relaxation that scored higher was rejected for putting `fish`, `hook` and `net` in a group with `grab`. Its third subcommand, `irregulars`, is the odd one out: no corpus and no frequency list, because an irregular inflection is a fact about English rather than about interactive fiction — it copies WordNet's `verb.exc` and `noun.exc` out as the shipped `irregular_forms.tsv`, which is the only honest way to hold that data, a hand table being a second copy to reconcile with the first every time either moved (SQ-1113). Licence terms for every input are recorded in `THIRD-PARTY-NOTICES.md`. |
+
+The crates layer `zvm`/`gvm`/`scott` → `mapper` → `app`; the CLIs are thin VM
+front-ends. The mapper has **no dependency on any VM**, so layout logic can be
+tested in isolation, and the VM crates stay **zero-dependency** (image/audio/
+resource types live in `app`, `blorb`, and `audio`). "Zero-dependency" means no
+EXTERNAL crates: `zvm` and `gvm` both depend on `grammar-model`, which is itself
+dependency-free, in the same way other crates depend on `blorb`. `app` depends on
+`verb-synonyms` for the same reason and with the same freedom — it is `app`'s to
+use because knowing about English is emphatically not the VM crates' business,
+and `verb-synonyms-gen` is a dev tool that may take whatever dependencies it
+likes because nothing ships it.
+
+**The crates.io package name differs from the crate name for most of these**
+(SQ-1250, so the workspace could publish without colliding with unrelated
+crates already registered under `zvm`, `gvm`, `blorb`, `mapper`, `audio` and
+`gvm-cli`): the table above parenthesizes each published package name beside
+the crate name every `use`/`-p`/`cargo tree` inside this repository still uses
+for it — `[lib] name`/`[[bin]] name` were kept exactly as they were, so only
+the *package* identity changed. `zvm-cli`, `scott-cli`, `buildinfo` and
+`cli-host` keep their crate names as their package names too (the latter two
+are internal but must still publish, since `lanthorn` depends on both).
+`verb-synonyms-gen` and `audio-relay` are `publish = false` — the former is a
+dev tool nothing ships, the latter is a standalone companion binary `lanthorn`
+does not depend on.
+
+### What `cli-host` does and does not share
+
+The three CLIs share their *plumbing* and keep their *renderers*. The line is
+drawn where it is because of what actually went wrong. Five escape helpers were
+byte-identical in `zvm-cli` and `gvm-cli`, which was merely untidy — but the same
+stdin-EOF bug (a 0-byte read taken for a blank command, so the game is fed a
+fabricated newline forever) shipped **three** times: fixed in `zvm-cli`'s char
+path long ago, still live in `gvm-cli` until SQ-0604, and still live in
+`zvm-cli`'s own *line* path until SQ-0605 found it. Three copies, three chances
+to get it wrong, and the terminal was left un-restored on the paths nobody was
+thinking about.
+
+So `cli-host` owns: the escape sequences, [`HostMode`] (may we emit escapes? may
+we take over line editing?), the EOF-honest readers, `TerminalGuard` (restores on
+every exit *including* a panic), and `--help`/`--version`.
+
+It also owns the **save-directory key** — and that one is shared with `app`, which
+is otherwise no CLI at all. The reason is the same drift argument one layer up:
+the rule now has cases in it (a story mounted out of a disk image keys on its
+release and serial, not on the image's filename, because one compilation carries
+six games; a story out of a zip keys on its entry's basename, because a zip has
+no release to be keyed by and one archive can carry two games just as easily) and
+a second copy of a rule with a case in it is a second answer waiting to happen.
+`app::storage` re-exports it rather than restating it. SQ-1098 turned the rule's
+inputs into one value, `storage::StoryOrigin` — the path, the entry inside it and
+the build — because they were two positional arguments and the third was simply
+missing, which is the refactoring policy's shape exactly: five call sites
+reassembling one decision, and the omission produced a *plausible* key rather
+than an error.
+
+It owns the **pin placement** for the same reason, and that one is worth setting
+out because the reasoning is not guessable from the code (SQ-0909). Both `zvm-cli`
+and `gvm-cli` keep rows fixed while the story scrolls under them — a v3 status
+bar, a Glk grid window, BeyondZork's compass, an InvisiClues menu — and both did
+it by confining the screen with DECSTBM. The cost was invisible until somebody
+looked for it: **a terminal only archives a line that scrolls off the top of the
+screen, and it judges that by the scroll region's top margin.** Pin at the top and
+the region starts at row 2, so a line leaving row 2 has not left the screen and is
+simply dropped. Every line of narrative the player had read was thrown away to
+keep one status bar in view.
+
+Measured against Ghostty's core, feeding 30 lines to a 10-row screen:
+
+| region | rows reaching history |
+|---|---|
+| none | 21 |
+| rows 2–10, pinned at the **top** | **0** |
+| rows 1–9, pinned at the **bottom** | **22** |
+
+So it is not pinning that costs the history — pinning *at the top* is. Move the
+same rows to the bottom, the region starts at row 1 again, and everything
+scrolling past is archived exactly as it would be with no region at all. That is
+the whole of `--pin bottom` (alias `--scrollback`), and the reason **lanthorn
+implements no scrollback of its own**: the history a player wants is the one their
+terminal already keeps, complete with its wheel, its selection and its search, and
+the only question was whether we were preventing it. The alternative — a ring
+buffer, a pager, re-wrapping on resize, SGR replay, and mouse reporting that would
+have *disabled* the terminal's own text selection — would have been more code and
+a worse result.
+
+The default stays `top`, where Infocom put the status line. An earlier attempt
+bought the same history by *unpinning* one-row status bars and letting them flow
+into the transcript; it worked, and it was the wrong trade, because it gave up the
+thing the player looks at every turn to get the thing they occasionally want.
+
+`cli_host::pin` therefore owns the placement, the region helpers, the `/pin`
+parser and the exit teardown; `gvm-cli`'s `enter_region` stays local because it
+confines a band between two explicit rows, where the shared helper places N rows
+of chrome at one end. The measurement lives with the code it justifies, in that
+module's own tests, against `qwertty-term-vt` rather than against our own decoder
+— checking a renderer with the decoder that renders it only proves it agrees with
+itself.
+
+The teardown is shared for a related reason. Dropping the region without moving
+the cursor leaves the shell prompt wherever the game left its `>`, so the next
+prompt is drawn *into* the story text — and the paths that got that wrong were the
+ones that never reach `main`: Ctrl-C and Ctrl-D in raw mode are keypresses rather
+than signals, so nothing else stops the process. Both placements need the same
+treatment, because the bottom row is occupied either way: by the last line of
+story under a top pin, by the chrome itself under a bottom pin.
+
+`scott-cli` needs none of this and takes none of it. It emits no escape sequences
+at all and has no status window to pin, so it always had native scrollback — which
+is the same property that gives it the escape-free `TerminalGuard` below.
+
+It owns none of the drawing. `gvm-cli/glk_term.rs` and `zvm-cli/screen.rs` have
+essentially no logic in common, and `scott-cli` — which emits no escape sequences
+at all — would only pay for machinery it does not need. That last property is
+load-bearing rather than incidental, so the guard comes in two flavours and
+`scott-cli` takes the one that restores raw mode and emits nothing.
+
+[`HostMode`]: ../../crates/cli-host/src/mode.rs
+
+## Three engines, one renderer — and Glk only for Glulx
+
+All three VMs implement one `Engine` trait whose `screen()` returns an
+engine-neutral **`ScreenModel`** (a window tree the app knows how to draw). The
+one generic renderer draws every engine from that model. But *how* each engine
+arrives at its `ScreenModel` differs, and this is a deliberate design decision:
+
+- **Glulx (`gvm`) uses Glk.** A Glulx game drives Glk display calls (open/close/
+  arrange windows, `put_text`, `grid_put`, …). The app's `AppGlk`
+  (`app/src/glk_backend.rs`) records those calls and *projects them* onto the
+  `ScreenModel`. Glk lives entirely in this **app-layer translator** — `gvm`
+  itself just makes the calls; the VM crate carries no terminal or Glk types.
+- **Z-machine (`zvm`) is native.** `zvm` has its **own** `ScreenState` + `Output`
+  model (v3 status line, v4+ cursor-addressed upper window). The app *mirrors*
+  that state into the same `ScreenModel` — no Glk involved.
+- **Scott Adams (`scott`) is native.** The `scott` VM has no screen model of its
+  own at all; the app builds a `ScreenModel` directly from its output. No Glk.
+
+So **Glk is confined to the Glulx path.** Z-machine and Scott are implemented
+against their own I/O models and converge with Glulx only at the neutral
+`ScreenModel` layer.
+
+**The Glk level is 0.7.6** (`gestalt_Version` → `0x0000_0706`). The one call
+0.7.6 added is `glk_image_draw_scaled_ext` (dispatch selector `0x00EC`), and it
+is the one place where the "record the calls, project them onto the
+`ScreenModel`" division above is not quite enough — because in a text-buffer
+window its `imagerule_WidthRatio` is **standing**, not one-shot. The spec's
+§"Graphics in Text Buffer Windows" requires the picture's width to stay
+"relative to the *current* window width", resizing whenever the window does,
+where §"Graphics in Graphics Windows" says the same rule is resolved once at
+call time and `maxwidth` is ignored outright. So the rule cannot be collapsed
+into a pixel size anywhere on the way in.
+
+It is handled by keeping the rule as a value the whole way down:
+`gvm::glk::ImageRule` holds the rule word beside the three arguments it
+interprets and owns the arithmetic (width first, then height, then `maxwidth`
+as a proportional reduction of both); a separate backend seam,
+`GlkBackend::buffer_draw_image_ext`, hands a host the rule rather than a size,
+where `graphics_draw_image` takes the size gvm already resolved. `AppGlk`
+stores it on the `InlineImage`, and `InlineImage::fitted_cells` — which the
+transcript wrapper already calls with the live band width on every layout —
+re-resolves it there. A terminal resize therefore needs no image-specific
+resize path at all: it is just the next layout arriving with a different width.
+The archive persists the rule rather than the resolved size, per "persist the
+recipe, not the result" (a restore routinely lands in a different pane).
+SQ-1424; the reasoning for the earlier, honest 0.7.5 it replaces is in
+`zvm-embedding-review.md`.
+
+**Which engine gets the file is decided by evidence, and all four of them are
+tested now** (SQ-0889). `hints::extract_story` classifies a story image: a Blorb
+proves itself by its `FORM`/`IFRS` magic, a Glulx image by `Glul`, a Scott Adams
+database by a content sniff of its leading integers — and, until SQ-0889, a
+Z-machine story by being none of those. Z-code was the else-branch, so the only
+gate a file had left was `zvm::header::parse_header`'s `3..=8` on byte 0, which
+about **2.3% of arbitrary containers pass**. One did: an 838 KB Apple II DiskCopy
+image whose name-length byte is `0x06` opened as a Version 6 story, paired itself
+with a sidecar archive belonging to a different game, printed "story ended
+without asking for input" and exited **0** — a message that reads as a game bug
+and sends the reader looking somewhere else entirely. Z-code now proves itself
+like the other three, by `blorb::adf::looks_like_zcode`: dynamic memory ends
+below `$0e`, the writable object and global tables are inside it, the dictionary
+is in static memory, the serial is six printable bytes, and the declared file
+length does not over-run the bytes present (ZMSD §1.1, §11.1.6). That check is
+**borrowed from the disk readers rather than restated** — it is the same one that
+decides which file on a mounted volume is the game, and two of its clauses are
+corrections that cost a real release its visibility when they were assumed
+instead of measured (`SQ-0856`'s high-ASCII serial, `SQ-0869`'s Commodore
+*Trinity* whose high-memory mark sits below its static base). A second copy would
+be a second place for that to go stale. A container that passes nothing is
+refused with its length and the head of its file, which is where a wrapper writes
+its name, and the process exits non-zero.
+
+### Why confine Glk to Glulx
+
+- **Spec-faithful.** Glulx's I/O *is defined* in terms of Glk — using Glk there
+  matches the standard. The Z-machine and Scott Adams formats are **not** defined
+  against Glk; they have their own display models. Implementing each format's I/O
+  the way its spec describes keeps every engine honest.
+- **No leaky abstraction.** Routing the Z-machine's cursor-addressed upper window
+  or Scott's fixed two-window layout *through* Glk's windowing model would be an
+  impedance mismatch — format-specific behavior would be distorted or lost. Each
+  engine keeps its exact semantics.
+- **Unification at the right layer.** Cross-engine render unification is banked at
+  the `ScreenModel`, so one renderer serves all three — *without* forcing a single
+  I/O library onto formats that don't use it.
+- **Smaller, self-contained VMs.** `zvm` and `scott` don't pull in a Glk layer
+  they'd never use, so they stay zero-dependency and easy to reason about; Glk
+  code lives in exactly one place (`app`'s Glulx backend).
+
+### Glulx introspection: what the panels can ask, and what they cannot
+
+`Engine::introspect` — the seam the inventory panel and the command panel's
+*here*/*carried* columns read — was `None` on Glulx until SQ-1241, so both
+panels fell back to scraping the transcript of an `i` command, which any custom
+inventory prose defeats. City of Secrets' does, and the panels were empty for
+the whole game.
+
+They now read the story's own object tree, and everything about the FORMAT lives
+in `gvm::objects` (see the crate table above); `glulx_session.rs` only translates
+between that reader's 32-bit addresses and the trait's handles — an ordinary
+object handle (a container, the player) stays a `u16`, but the ROOM-shaped ones
+(`Introspect::room_objects`/`room_objects_excluding`, and `children_of`'s
+`parent`) are a full `mapper::graph::RoomId` (`u32` since SQ-1297), because on
+Glulx that handle IS the widened `roomid` hash below. Worth knowing, because
+each of these is a refusal rather than a stub:
+
+- **Handles.** A Glulx object has no number, so the adapter hands out its
+  one-based position in the object list. That space and the room space are
+  disjoint by construction — a room id is a `roomid` hash with the high bit set —
+  so a handle is never ambiguous. A room handle resolves only when it names the
+  room the player is in *right now*: the id is a hash and nothing can invert it,
+  and re-hashing the current address is the only sound comparison. Every caller
+  asks about exactly that room anyway.
+- **What an Inform 7 story has already written down** (`gvm::i7map`, SQ-1303).
+  Everything below this bullet is lanthorn WATCHING a game to work out where you
+  are; an I7 story does not need watching. Its compiler emits the whole map as one
+  word array — `Map_Storage`, indexed `room_index * No_Directions + dir_index` —
+  and puts each room's text in a `printed name` property, so which objects are
+  rooms, what each is called, and where each direction leads are all readable from
+  the image with no turn played. As everywhere else in `gvm`, **nothing in a Glulx
+  file names any of it**: `Map_Storage`, `No_Directions` and the two
+  instance-count properties are compiler-assigned and invisible, so each is
+  recovered from a signature (an instance-count property is a bijection onto
+  `0..n-1`; the direction one is the bijection whose members answer to the compass
+  words; the map is the window of `rooms × directions` words that scores highest on
+  RECIPROCITY, an I7 connection being two-way by default). The arrays are **not**
+  word-aligned — Counterfeit Monkey's map is at `0x378f28` and The Wizard
+  Sniffer's at an address ≡ 1 (mod 4) — so every scan runs at all four byte phases.
+  `GlulxSession` builds it once at boot (`i7_world`, measured 202 ms release on
+  Counterfeit Monkey's 5.5 MB image, 3 ms on The Wizard Sniffer) and spends it on
+  three things: `room_for` resolves a room name to a room ADDRESS before the lock
+  has learned anything, so the opening room is never a name hash; `static_room_name`
+  supplies the label, so a heading, a status line and a silent `look` cannot spell
+  one room three ways; and `RoomLock::set_rooms` narrows the learner's candidates
+  to words holding an actual ROOM and gives it the one-move `name_witness` below.
+  **`None` is the common answer and is a first-class path**: an Inform 6 game, an
+  I7 build older than the array (`AnchorheadDemo.gblorb`, build 4K41), a story that
+  generates its map at run time (Kerkerkruip, whose compiled array is all zeros and
+  which the reader refuses rather than naming a coincidence). Those keep exactly
+  the behaviour the rest of this section describes; `sq1303_glulx_static_world`
+  pins Kerkerkruip's identity dump against one taken before the change.
+- **Where the player is** comes from the `location` global, which the room-lock
+  learner (`glulx_roomlock.rs`, SQ-0526) finds by watching which RAM word changes
+  when the room does, and remembers per game. Before it resolves, the room
+  questions answer empty. What settles the winner among the words that correlate
+  is the VALUE it holds: it has to be a real object of this story, checked
+  against `ParseNames`' own object list (SQ-1286). That used to be approximated
+  by "an address inside the scanned 64 KB window", which is ample for the global
+  — Inform lays its globals at the start of RAM — and far too small for what the
+  global points at, since the object table follows the globals and the arrays.
+  Only five of the 42 Glulx stories in `stories/` keep their objects within that
+  window; Counterfeit Monkey's are 1.9 MB above it, so the true candidate was
+  discarded every turn and the game keyed rooms by name for whole sessions.
+  Where the I7 world model above is readable the candidate must hold not merely an
+  object but a ROOM, and there is a second, much faster route in (SQ-1303): on a
+  turn the story printed a heading, a word that has just changed to a room **whose
+  own static name is that heading** is the global on ONE move's evidence
+  (`RoomLock::name_witness`). Counterfeit Monkey locked on the tenth command by
+  correlation and locks on the first step north by this. Two words normally agree
+  — Inform keeps `location` and `real_location` side by side — and the lower
+  address wins, deterministically; two words holding DIFFERENT rooms of that name
+  is a maze and is refused, because that is precisely the case a name cannot
+  settle. **The room set narrows candidates and never falsifies a lock**: in
+  darkness `location` holds `thedark`, an object of the story that is not a room,
+  so `verify` stays on the object list or a walk into an unlit room would throw a
+  correct lock away.
+- **And once it has resolved, the lock is the authority** (SQ-1294). It decides
+  the room's identity *and* whether the room changed at all; the heading only
+  supplies the NAME. The rule used to be the other way round — the heading said
+  whether you had moved, and a locked word that disagreed was thrown away — and
+  the turns where the two disagree are exactly the turns the lock exists for.
+  Counterfeit Monkey drives its car out of Deep Street narrating the whole
+  arrival without reprinting a room; its `REMEMBER` verb prints a flashback
+  heading for a yacht galley while the player stands still in a hostel dormitory.
+  Each used to `relearn`, and every room until the lock re-resolved was keyed by
+  a name hash again — which is how one Deep Street became two, and how a session
+  ended up with "a bunch of Samuel Johnson rooms". The only thing that can
+  falsify a lock now is its own VALUE: a word no longer holding one of this
+  story's objects is not the `location` global, whatever the screen says. (A zero
+  is not evidence either way — a game may park `location` at nothing mid-scene —
+  and an address outside the scanned window is still dropped on sight, because it
+  could never be checked at all, SQ-0658.) Two consequences worth knowing: a
+  heading printed on a turn the lock calls stationary names nothing, so a room the
+  story genuinely RENAMES is re-read the next time you walk into it; and there is
+  no `Ambiguous` movement any more, because two rooms can share a name but an
+  address cannot be ambiguous about itself — a maze step is a plain move.
+- **A remembered address outlives the story it was learned from, so the
+  `room-global` sidecar carries the image's own identity, not just an address**
+  (SQ-1305). The save directory is keyed by the story's FILENAME
+  (`~/.lanthorn/saves/<file>.save/`), so a story rebuilt under the same name — a
+  new release of a `.gblorb`, an author's own rebuild — reuses the old sidecar,
+  and a value check alone cannot always catch a wrong address: the globals
+  region is full of OTHER objects (`player`, `actor`, `real_location`) a rebuild
+  can just as easily leave the word pointing at, and such a word never fails
+  the object-value test. `GlulxSession::image_identity` pairs the header's
+  whole-image checksum (bytes 0x20-0x23, GLULX_NOTES.md §"Header field layout")
+  with EXTSTART (which the same doc's §2 states equals the image FILE's length),
+  formats it `hex:hex`, and every sidecar line is `"<addr> <checksum>:<extstart>"`
+  — a line with no token at all is the pre-SQ-1305 format and is stale by
+  definition (pre-release: no back-compat), refused exactly like a mismatched
+  one. And where this story's compiled I7 world model is readable, a sidecar
+  address is cross-checked ONCE more, at boot only: a value that is neither `0`
+  nor one of the story's own ROOMS is refused before it is ever trusted
+  (`GlulxSession::sidecar_addr_plausible`) — narrower than the checksum+length
+  match can be, since a rebuild that inserts one global before `location` can
+  keep an unchanged checksum and length while shifting every later global's
+  address down.
+- **And even a lock that DID get installed wrongly recovers on its own**
+  (SQ-1305's other half): three straight turns of a FRESH heading printed while
+  the locked word does not move (`RoomLock::verify`'s `FROZEN_LOCK_HEADINGS`)
+  drops the lock and relearns, the same `relearn` the value check already used.
+  One such turn is not evidence — Counterfeit Monkey's `REMEMBER` flashback is
+  exactly one heading-only turn over a motionless word, and a correct lock must
+  survive it — so the threshold is one more than a flashback can produce on its
+  own, and small enough that a genuinely frozen lock recovers within a couple of
+  turns of the player noticing the map has stopped.
+- **A room the story moved you into but never named** is asked about directly:
+  `GlulxSession::silent_look` snapshots the VM, types `look` into it, reads the
+  heading off the backend, throws the answer away and restores. The snapshot is
+  taken and put back at the same point in the same turn, so what the player's next
+  command runs against is exactly what it would have run against — a
+  restore-to-self, not the kind of restore SQ-0587/0588 warns about. **Two
+  snapshots, because the game's state lives in two places**: `Machine::save_state`
+  covers the VM and gvm's own Glk model, and `AppGlk::display_snapshot` covers what
+  each window CONTAINS — the buffer logs and their drain pointers, the grid cells,
+  the per-window heading scans, the scroll offsets, the graphics canvases and the
+  layout. Restoring only the VM is not enough and is not merely untidy: the drain
+  pointer moves past prose the log still holds, so the player is owed the room
+  description on their *next* turn and reads it twice. It exists
+  because a Glulx room's NAME has only one source: Inform 7 compiles no hardware
+  short name for its objects, so `ParseNames::short_name` of a room is the empty
+  string, and on Counterfeit Monkey `find_player` refuses the story outright — the
+  object table can identify the room and cannot say what it is called. The
+  question is spent only where there is no name to be had (the opening room, or an
+  arrival the lock saw and the story did not announce), never on a turn that
+  printed a heading, and a story that refuses four in a row is not asked again.
+  Note it is *not* `probe.rs`'s shadow: that is owned by `AppState`, armed with a
+  recipe and answered on a worker thread a beat later, where this is needed
+  synchronously inside the turn that noticed — and in sessions (headless
+  harnesses, the shadow itself) where no `AppState` exists. What the shadow buys
+  is isolation from a question with side effects, and `look` is the one question
+  that has none.
+
+  This is where the Z-machine and Glulx sides genuinely differ. `GameSession`'s
+  `current_location` re-derives the room from the LIVE object tree on every call
+  (`zvm::location::detect_location_with`), so it answers correctly at boot with
+  nothing printed and no probe; the Glulx adapter has no tree to read a player's
+  parent from and no printed name to read off it, so it has to make the story
+  speak.
+- **Who the player is** is `ParseNames::find_player`, the same rule
+  `zvm::location::find_player_object` applies: avatar-ish PRINTED names
+  (`PLAYER_NAMES`) OR parse WORDS (`PLAYER_WORDS`: `me`/`myself`/`self`/
+  `yourself`), *validated against the room*, because a name alone picks the
+  wrong object often enough to matter — Lost Pig's Grunk has no avatar-ish
+  short name at all and answers only to `me` (SQ-1259). Preferring a situated
+  candidate over an unsituated one, then one whose ancestor chain reaches the
+  room, is what the room-validation IS; where two situated candidates both
+  look like avatars and the room cannot settle it, it answers `None` and the
+  scrape fallback stands — a wrong inventory being worse than an empty one.
+  The room-name side has an analogous trap: a status line's short name is not
+  unique (a compass direction can share a room's own name), so
+  `zvm::location::resolve_room_object` prefers the object the game's own
+  `location` global names — global 0 for Inform, and, when that says nothing,
+  any of the 240 globals so long as exactly one of the same-named candidates is
+  held there (ZIL keeps the current room in `HERE`, an ordinary global the
+  compiler places wherever it likes; SQ-1283) — then a top-level (parent-0)
+  match, before falling back to the old longest-match/lowest-number rule.
+  Shogun is the story that needs the widened read: it ships two rooms called
+  `Bridge`, two called `Main Deck` and four called `Ledge`, keeps its rooms in a
+  `ROOMS` container (so the parent-0 rule cannot separate them) and holds a
+  constant NPC in global 0, so the lowest-numbered twin used to win every time
+  and the Erasmus's own bridge was reported as a bridge in Osaka from turn one.
+- **A corpus sweep for these heuristics**: `cargo run -p lanthorn --example location_scan --release` boots every Z-machine story under `stories/` (or `--corpus DIR`, `--only a,b`, `--json`), plays `""` then `look`, and prints one row per story — the detected room (id/name/`LocationMethod`), the detected player (id/short name), and the carried items' display names, straight off `zvm::location::detect_location`/`find_player_object` and the session's own `Introspect::contents`. Any change to `zvm::location`'s heuristics should be run through it before and after, with the two JSON outputs diffed — a rule that looks right on the one story it was fixing for can silently rewire another's room or avatar (SQ-1259 found nine such stories on its own change: real fixes, and one real regression it did not ship with).
+- **One level, not scope.** `visible_contents` is the direct children. Nesting
+  into an open container needs the `container`/`open`/`transparent` attributes,
+  whose numbering is the Inform library's rather than the format's, so there is
+  nothing in the image to read them from.
+- **A story with no readable Inform object list still answers `None`**, not an
+  empty `Some`: the trait's consumers distinguish "could not ask" from "asked,
+  nothing there", and `introspect()` is conditional on the reader for that reason.
+
+## Graphical v6: a fourth window kind on the same model
+
+Graphical Z-machine **v6** stories (*Zork Zero* and kin) don't fit the plain
+window tree — pictures and text share one pixel-addressed screen. Rather than
+build a second renderer, v6 gets one more `ScreenModel` node,
+`WinNode::Layered`, carrying the game's windows z-ordered background-first:
+`session.rs`'s `v6_screen_model` builds it from `zvm`'s native v6 window
+state; `render/screen.rs`'s `Layered` arm composites it — per-cell without an
+image protocol, or (with one) as one native-pixel-space canvas assembled by
+`render/v6_layout.rs`'s classification/geometry helpers and drawn by
+`render/graphics.rs::draw_v6_canvas`. Same generic renderer, same neutral
+model — v6 is a fourth leaf kind, not a parallel pipeline. See [Graphical
+v6](v6-graphics.md) for what that composite looks like from the
+player's side.
+
+**A modal forces the cell path**, and that changes which graphics a dialog has
+to keep clear of. `dialog_bounds` subtracts every graphics window so a dialog
+never lands under an image placement — but the cell path draws no frame art, so
+on a v6 composite the only thing still placed is a chrome window entirely
+*beside* the story (Journey's picture column). Subtracting the rest put the
+dialog in the strip below the frame's own stamp, clipped to eight rows with its
+buttons off the pane. `v6_layout::cell_path_side_columns` is now the single
+statement of which windows those are, called by the cell path and by
+`dialog_bounds` both: they had measured it on two different bases — pane-
+proportional cells against the game's native cells — and agreed only near an
+80-column pane, which is every pane anybody had tested.
+
+## One transcript wrap, for both ways of drawing it
+
+Both render paths wrap the whole scrollback and then show forty rows of it, and
+they used to disagree about when that was necessary — in opposite directions.
+The cell path (which hybrid's story text also uses) had a whole-product cache
+keyed on a generation counter that moves on *every* transcript mutation, so each
+turn threw the wrap away and rebuilt it from line zero; its idle frame sat flat
+while its post-turn frame grew to 35 ms at 20,000 turns. The raster path had no
+cache at all, behind a whole-canvas gate that hashes the live input line — so one
+keystroke re-wrapped the lot.
+
+`render/wrap_cache.rs` is now the single owner of the question. `WrapKey` gathers
+every fact that can move a wrap boundary — width, filter, the picker's cell, the
+screen-clear anchor, the machine and window pages, the period look, and the pen's
+own advance table — in one constructor, so a caller cannot supply a subset and get
+a plausible wrong answer. `WrapKey::plan` answers **reuse**, **append**, or
+**rebuild**, and both paths obey the same answer: content only ever grows at the
+end, so a turn extends the wrapped rows, while a resize or a theme change drops
+them. There are two cache structs because the two products are different types —
+`WrappedRow`s carrying kinds, styles, runs and image bands against the raster's
+glyph rows and emphasis bits — but only one copy of the rule, because two copies
+of a measurement rule is precisely what drifted.
+
+Raster is the degenerate case rather than a second design: its columns come from
+the native v6 screen rect, i.e. the game's own coordinate space, so they do not
+move with the pane and it takes the append branch essentially always. The cell
+path wraps to the terminal's columns and takes the rebuild branch on a resize.
+
+Two details are worth knowing before touching it. The wrap carries state across
+lines — an open margin float narrows the rows beside it — so an append resumes
+from the float the last line left open, and the trailing flush of a picture that
+outran its text is *not* final: the next prose line to arrive claims those strips,
+so an append truncates back past the flush before extending. And the append/rebuild
+choice is stated by each mutator (`TranscriptEdit::Appended` / `Rewrote`) rather
+than inferred, with the last consumed line's fingerprint in the key as the guard
+that catches a mutator which picked wrong. `cargo run --release -p app --example
+scroll_bench` measures all of it.
+
+## Input: a suspend/resume handshake
+
+Input is engine-neutral too. A VM's `step()` returns a request —
+`NeedLine` / `NeedChar` / `NeedEvent` — and the host resolves it with
+`supply_line` / `supply_char` / `supply_filename`. The values are neutral (no
+terminal types cross the boundary), so the same host loop drives every engine and
+the CLIs can feed input from a pipe for deterministic testing. A LINE must never
+reach a keypress read (SQ-1270): `Engine::submit` routes by `pending_input()`,
+delivering a submitted line as a single keypress — its first character, or Enter
+for an empty line — when the VM is waiting on `Char`, so a caller (the app, a
+CLI, or `app::probe`'s shadow below) can always call `submit` without checking
+which kind of read is pending.
+
+## Asking the game a question it cannot be asked out loud
+
+`app::probe` forks the live session into a **shadow** — a second `Engine` on the
+same story, driven from a host snapshot of the live one — runs commands in it,
+reads the answer off it and throws it away. `Engine::save_state` /
+`restore_state` are engine-neutral and already in the trait, so this works on all
+three VMs; the shadow is booted lazily and reused, and the live session is never
+stepped, saved or restored (restoring under a running game is the SQ-0587/0588
+hazard — the game never learns it happened).
+
+Two things about it are load-bearing and easy to get wrong:
+
+- **How a story says no is discovered, not assumed.** Every family words its
+  refusals differently, and a table of English phrases is broken by the next
+  game. So `Refusals` is built from what the shadow prints in reply to
+  deliberate nonsense, run beside the real question — one control the parser
+  cannot have understood, plus a pair of the same command carrying two different
+  nouns, believed only when both replies reduce to the same sentence and neither
+  changed the world. `ProbeRun::did_something` combines that with `WorldPrint`,
+  which is a changed world's proof of success (an unchanged one proves nothing —
+  `examine` legitimately changes nothing).
+- **The controls belong to the ROOM, not the session.** Zork I answers `light
+  rug` with `You don't have that!` in the field and `You don't have the carpet.`
+  in the living room. A signature learned once at boot is a signature of the
+  wrong room, so controls and question run in the same `run`, off the same
+  snapshot.
+
+- **It only asks a story that is waiting for a LINE** (SQ-1349). Every question
+  the seam puts is a typed command, so `ShadowProbe::snapshot_from` refuses
+  outright — synchronously, before it pays for a snapshot — whenever the live
+  session's `Engine::pending_input` is anything but `Line`: a title splash, a
+  `[MORE]`, a yes/no, a Glk timer event. A caller sees the `None` from
+  `ask`/`snapshot` it already handles as "no probe was possible". This is not a
+  hypothetical: `journey-r83-s890706.z6` is driven entirely from menus and never
+  presents a line prompt at all. Asked one anyway, the shadow typed `look` at
+  the menu, the routing (SQ-1270) delivered the `l`, an intro page turned, and
+  the page's prose came back looking like a reply — an answer about the story's
+  key handling wearing the clothes of an answer about the command. A harness
+  that wants a real answer drives the story to its own prompt first
+  (`vocabulary_vetting`'s `gated_z5` and its Coloratura case are the pattern).
+- **It runs on a worker thread, and a late answer is dropped** (SQ-1124). Only
+  the story interpreter belongs on the main thread, so `ShadowProbe::ask` hands
+  the worker a snapshot and returns; the event loop collects the answer with
+  `poll` and the offer arrives a beat after the game's reply. There is no
+  budget and no too-slow latch: a slow story simply answers later, and an answer
+  that arrives after the player has typed again is *stale* — it would attach a
+  suggestion to a command that never provoked it — so it is discarded. Measured
+  on Zork I, the player's turn now pays ~1 ms (a snapshot and a world hash)
+  against SQ-1121's whole 12–15 ms run.
+- **A shadow boots the way the LIVE game boots.** It reads the live game's own
+  per-story store and Glk VFS — read-only, through
+  `glulx_session::GameStore::read_only`, so it can never write what it reads.
+  Booting with neither is not "isolated" so much as a *different launch*:
+  Counterfeit Monkey checks a 52-byte VFS marker and then `@restore`s
+  `_Counterfeit_Monkey-startup-data.qzl`, and a shadow given neither re-ran the
+  whole initialisation the live session skips (2.4 s against 0.53 s, measured).
+  Both halves are needed: the `.qzl` alone is never asked for.
+
+Isolation is explicit rather than assumed: the shadow boots with sound and
+graphics off, no Blorb, a read-only store it may never write, and an in-game
+`@save`/`@restore` or a Glk filename prompt inside a probe is answered *failed*
+so the VM unwinds where it stands. `app::vocab` is the first consumer (SQ-1121,
+vetting a suggestion before it is offered) and the return probe below is the
+second. SQ-1043's irreversible-move caution is a **reading of the second**, not a
+third consumer: see the last bullet there.
+
+### The second consumer: the return probe (SQ-0785)
+
+`app::return_probe` asks the shadow a structurally different question — *am I
+back where I started?* — and everything that differs between the two consumers
+follows from that.
+
+- **It reads a room number, not prose.** Success is `step.landing() == Some(origin)`,
+  the same `snap.number` `session::apply_turn` keys rooms by, so none of the
+  `Refusals` machinery above applies. Landing *somewhere* is not landing back —
+  but since SQ-1292 it is not nothing either, and what the third room does
+  depends on whether the map already holds it:
+
+  | the shadow came out in | edge minted | attempt marked `probed` |
+  |---|---|---|
+  | the origin | yes, and the search ends | yes |
+  | another room **the map holds** | yes, and the search carries on | yes |
+  | a room the map does **not** hold | no | **no** — offered again on a later visit, by which time the map may be able to read it (SQ-1292) |
+  | nowhere (a refusal, a story that ended) | no | yes — as informative as it will ever be |
+  | **a room it was RESURRECTED into** | **no** | **no** (SQ-1506) |
+
+  The last row is the one that has to be stated rather than derived. `location`
+  is where the shadow *ended up*, which is a different question from where the
+  direction *leads*: a step that ended the story, reached for a file, or got the
+  shadow killed still reports a room. Zork I's troll kills a shadow the turn it
+  walks into the Troll Room and the game wakes it up in the Forest — a room the
+  player had walked and the map therefore held — so `Cellar —north→ Forest ¹`
+  minted as cleanly as any observed passage, and, occupying the `north` slot, it
+  then swallowed the player's own later walk into the Troll Room and the return
+  search that walk would have armed. `crate::probe::ProbeStep::died` is the fact
+  (`session::turn_reports_death`, the *same* detector the live turn path has read
+  since SQ-0259 to choose `Mapper::observe_relocation` over a minted edge), and
+  `ProbeStep::landing` is the single reading both probe consumers go through, so
+  the return probe and Phase 2's random-exit probe below cannot drift about what
+  an attempt proved. The mark is withheld as well as the edge because **a shadow
+  may die by dice**: the troll kills it on one restore of the Cellar snapshot and
+  lets it past on the next, and `probed` is permanent — the same argument
+  SQ-1292 makes for the unreadable landing.
+- **Its answers are never stale.** SQ-1124 drops an answer whose `turn_epoch`
+  has moved, because a vocabulary suggestion is about *this* turn. "South from
+  here returns to A" is about the *map*, so it is recorded whenever it lands. A
+  new **move** does end the search — the move may itself be the walk back — and
+  that is a different rule from staleness.
+- **One snapshot serves the whole search.** Attempts go out one at a time so each
+  answer is durable (`MapGraph::mark_probed`, one direction per answer, so an
+  aborted search resumes rather than restarts), and `ShadowProbe::snapshot` is
+  split out of `ask` so the player's thread pays for one host snapshot per search
+  instead of one per attempt — 102 ms each on Counterfeit Monkey in a debug
+  build, and twelve of those is exactly the main-thread cost SQ-1124 removed.
+- **The edge goes in through the mapper's own door.** `Mapper::mint_passage` is
+  the extracted body of `observe_inner`'s minting branch, and both a walked
+  crossing and `Mapper::record_probed_passage` call it — one path, so the two
+  cannot drift in shape, in `?`-stub hygiene, or in placement. What the probe
+  path skips is everything about the *player*: the current pointer, `arrived_via`
+  and the layer suggestion. `ProbedPassage` carries the three facts as one value
+  and deliberately cannot name the outbound passage, which is how reciprocity is
+  made unwriteable rather than merely unwritten.
+- **Two consumers, one channel, one collector.** `ShadowProbe::poll` takes
+  whatever has arrived without knowing who wanted it, so a consumer polling for
+  itself would sometimes take the other's answer off the channel and drop it.
+  `loop_tick::poll_shadow_answers` collects once and routes by token.
+
+Measured per attempt, worker time, debug build: Zork I **0.7 ms**, Coloratura
+**4.3 ms**, Counterfeit Monkey **343 ms**. In play the priority order usually
+stops at the first success — Zork I's North of House takes three commands
+(2.7 ms), Counterfeit Monkey's Back Alley one (407 ms). `cargo run -p app
+--example return_probe_cost` is the instrument.
+
+### Declared exits: a room's own data, read before a move is judged (SQ-1257)
+
+Some Inform games move the player somewhere their own exit table never named —
+Lost Pig's gnome tunnels relocate to a random cave through a rule that fires
+before the library's ordinary movement code ever runs. Recording that as an
+edge fills the map with contradictory arrows, and neither the return probe
+above nor a raw location diff can tell it apart from an ordinary passage: both
+only ever see *where the player ended up*, never what the room's data claimed.
+
+`zvm::world::WorldModel::declared_exit(mem, room, dir)` answers a different
+question — not "where did the player go" but "what does this room's *compiled
+exit table* say for this direction" — read independently of anything ever
+walked. Two Inform 6 library conventions make this possible, both recovered
+from the story at runtime rather than assumed (property numbers are never
+portable between compiles: Lost Pig's `door_dir` is property 34, nothing like
+`linklpa.h`'s own declaration order): `door_dir`, a property every compass
+object (`north`, `south`, …) carries whose VALUE is the property number of
+that direction's own `*_to` (`inform6lib/english.h`); and `door_to`, which a
+declared exit hops through one extra time when it names a "door" connector
+object rather than a room directly (`verblib.h`'s `GoSub`). Both are derived
+by the same shape of evidence-gathering `WorldModel`'s openness-attribute
+inference already uses elsewhere in this file: try every candidate property
+number, keep the one whose values behave the way the convention requires
+(distinct per direction for `door_dir`; present and — where resolvable at all
+— pointing at a genuine terminal room, never a chained connector, for
+`door_to`), refuse rather than guess when nothing agrees.
+
+The answer is one of `DeclaredExit::{Room(RoomId), Code, Message, Absent,
+Unknown}`. `Absent` and `Unknown` look alike from the outside — both mean "no
+exit here" — but say different things about the STORY: `Absent` is a room
+whose compass WAS identified (`exit_props[dir]` resolved to a real property
+number) and whose *own* `*_to` for `dir` is simply unset — Lost Pig's
+gnome-tunnel rooms read this way, because a "before going" rule intercepts
+the move before the library's exit-table code ever runs. `Unknown` is a story
+with no such convention to find at all (Zork I, Scott, and — until SQ-1303
+added the Inform 7 half below — every Glulx story) — there is no reason to
+think ANY property here means an exit, so it is never worth asking further
+about.
+
+`app::turn::finish_command_turn` reads `declared_exit` — via
+`Engine::declared_exit`, overridden by the Z-machine adapter and (since
+SQ-1264/SQ-1303) the Glulx one; Scott answers `Unknown` — for the room being
+LEFT and the direction just typed,
+before `apply_turn` decides what the move means, and stores it on that turn's
+`TurnResult`. `apply_turn` then compares: a `Room(x)` that matches where the
+player actually landed is an ordinary passage, recorded exactly as before; a
+`Room(x)` that does NOT match is the story overriding its own declared exit —
+but, since SQ-1269 (see below), that mismatch is no longer treated as proof on
+its own. `Code`, `Message`, `Absent` and `Unknown` all leave THIS PART of the
+turn exactly as it read before this seam existed — a routine-computed exit, a
+printed refusal, or no data at all are none of them, on their own, proof the
+destination varies; most `Code` exits are perfectly deterministic doors whose
+destination just happens to be computed instead of stored.
+
+### Declared exits: the ZIL convention (SQ-1260)
+
+Every Infocom game up to and including the Zork trilogy is ZIL, not Inform, so
+`door_dir` never exists in its table and the section above answered `Unknown`
+for every direction on every such story — Zork II's Carousel Room sent the
+player at random with no protection at all, because there was no data for
+Phase 1 to compare against. `zvm::world::infer_zil_exits` (and its resolver,
+`WorldModel::resolve_zil`) is the second derivation feeding the same
+`DeclaredExit` seam, found only where the Inform one comes up empty.
+
+ZIL's own room-exit syntax has five shapes, documented by Infocom's internal
+training manual **"Learning ZIL"** (Steve Meretzky, 1989/1995;
+<https://eblong.com/infocom/other/Learning_ZIL_Meretzky_1995.pdf>), §2.2:
+**UEXIT** (`(DIR TO ROOM)`, unconditional), **NEXIT** (`(DIR "string")`, never
+a passage), **FEXIT** (`(DIR PER ROUTINE)`, decided at run time), **CEXIT**
+(`(DIR TO ROOM IF GLOBAL …)`, gated on a global) and **DEXIT** (`(DIR TO ROOM
+IF DOOR IS OPEN …)`, gated on a door object). Unlike Inform's `door_dir`
+indirection through a compass OBJECT, ZIL's compiler stamps the exit property
+number straight into the compass DICTIONARY WORD's own data byte — the `DIR`
+flag (`$10`) and the `DATA_FIRST` field that says which of a word's two data
+bytes holds it, both from ztools' `tx.h`
+(<https://github.com/ecliptik/ztools/blob/master/tx.h>) — so recovering it
+needs no object-table voting at all, only a dictionary scan.
+
+No explicit type tag is stored in the property itself: the five shapes were
+found, empirically, to compile to five DISTINCT property LENGTHS on every
+Version-3 room checked — 1 (UEXIT, the room number alone), 2 (NEXIT, a packed
+string), 3 (FEXIT, a packed routine address), 4 (CEXIT, `[room][global]
+[string]`) and 5 (DEXIT, `[room][door][string][pad]`) — verified against real
+West of House, Kitchen, Living Room and Attic properties in
+`stories/zork1-r88-s840726.z3`, cross-checked byte for byte against the
+retail game's own recovered source (`1dungeon.zil`,
+<https://github.com/historicalsource/zork1>), and against the tracked
+`minizork.z3` fixture. See `crates/zvm/src/world.rs`'s "Declared exits: ZIL"
+module docs for the full citations and the byte layouts.
+
+**V4+ (SQ-1268): the room-reference width is a per-STORY fact, not a
+per-VERSION one.** SQ-1260 refused every V4+ story outright, on the theory
+that two-byte object references there (ZMSD §12.3) would collide UEXIT's
+length with a fixed 2-byte NEXIT. Checked against `stories/
+trinity-r12-s860926.z4`'s Palace Gate and Bluff — byte for byte against the
+real ZIL source (`places.zil`, <https://github.com/historicalsource/trinity>)
+— that theory was wrong in the useful direction: EVERY shape is one byte
+wider than its V3 counterpart, because the packed string/routine fields scale
+too, not just the room reference (UEXIT 2, NEXIT 3, FEXIT 4, CEXIT 5
+extrapolated/unconfirmed, DEXIT 6), so NEXIT never lands on UEXIT's length
+after all. AMFV, Bureaucracy (V4) and Beyond Zork (V5) all compile the same
+way. `stories/sherlock-r26-s880127.z5` does not — a V5 story whose compiler
+packed room references into a single byte throughout, exactly like V3 —
+checked against 221-B Baker Street's own compiled table (byte for byte, cross
+referenced by object number and name since Sherlock's ZIL source is not on
+`historicalsource`). `zvm::world::infer_zil_room_width` derives this width
+per story, empirically, off the exit tables themselves (never off the
+dictionary, never off the Z-machine version): a length-1 property whose byte
+is a plausible room number casts a "narrow" vote and a length-2 property
+whose word is one casts a "wide" vote, and whichever wins is what
+`WorldModel::resolve_zil` uses for every one of the five shapes on that
+story — `w`/`w+1`/`w+2`/`w+3`/`w+4` for UEXIT/NEXIT/FEXIT/CEXIT/DEXIT,
+reproducing V3's original table exactly at `w=1`.
+
+V6 (Zork Zero, Shogun, Arthur) needed a THIRD derivation: there is no `DIR`
+flag at all to test — ztools' own `showdict.c` skips flag decoding for
+Version 6 outright (`else if (header.version != V6)`), because V6 dictionary
+entries use a different scheme entirely (`tx.h`'s `parser_types` enum lists
+`infocom6_grammar` as its own case). Empirically, a V6 direction word's
+dictionary entry stores the exit-property number DIRECTLY in its first data
+byte, no flag or indirection — checked against Zork Zero's Banquet Hall and
+Shogun's `ON-BRIDGE`, both against their real ZIL source
+(<https://github.com/historicalsource/zorkzero>,
+<https://github.com/historicalsource/shogun>) — and `zvm::world::
+infer_zil_exits_v6` reads it that way, gated on the same `1..=63` plausible-
+property-number test the flagged derivation uses. Journey's dictionary (27
+entries) carries none of the twelve compass words at all — "no compass
+parser" is a fact about the dictionary, so the derivation naturally answers
+`None` without special-casing the game by name. `crates/app/tests/suites/
+sq1268_zil_v4plus_exits.rs` proves all of this on the real games: Trinity
+(UEXIT/NEXIT/FEXIT/DEXIT on two rooms, one real move), Sherlock (UEXIT on two
+directions plus a real move through its FEXIT), Zork Zero (UEXIT on three
+directions plus a real move — its Prologue scene kills the player outright on
+its fifth turn without hiding under a table, so the harness reaches the
+Banquet Hall adaptively rather than on a fixed turn count), Shogun (UEXIT on
+two directions, read statically) and Journey (`Unknown` everywhere).
+
+UEXIT and DEXIT both classify as `DeclaredExit::Room` — DEXIT's destination
+is a plain, static room number in every case checked, never a routine, so
+only whether the move actually SUCCEEDS this turn depends on the door; Phase
+1 only ever acts on a landing (`moved_room`), so a shut door mints no false
+edge. CEXIT and FEXIT both classify as `Code`. NEXIT classifies as
+`DeclaredExit::Message` (a printed refusal, never a passage in any state the
+game can be in) rather than `Code` — a stronger claim, and what keeps Phase 2
+from wasting a probe on a direction that can never lead anywhere.
+
+**The Carousel Room itself is the proving case, and it is deliberately NOT
+caught by this derivation alone.** Its own compiled table
+(`2dungeon.zil`, <https://github.com/historicalsource/zork2>) is eight
+perfectly ordinary UEXITs — `(NORTH TO MARBLE-HALL) (NE TO STREAM-PATH) …` —
+exactly the Lost Pig/Adventure-forest shape this whole seam exists to handle:
+the randomness lives entirely in the room's `ACTION` routine
+(`CAROUSEL-ROOM-FCN`, `2actions.zil`), an `M-BEG` "before going" hook that
+overrides `PRSO` before `V-WALK` ever reads the property above. West is the
+deterministic case (`<EQUAL? ,PRSO ,P?WEST>` alone satisfies the routine's
+`OR`, no probability roll needed — every OTHER direction is overridden only
+80% of the time): it is declared a confident `Room(_)` (Room-8) and never
+once actually leads there. `crates/app/tests/suites/
+sq1260_zil_carousel_randomization.rs` drives this end to end on
+`stories/zork2-r48-s840904.z3` and is what Phase 1/SQ-1264 catch it with, not
+this section's own derivation.
+
+### Phase 2: proving it, in a reseeded shadow (`app::random_exit_probe`)
+
+`Absent` and `Code` are exactly the two answers Phase 1 cannot itself settle,
+and are the only two `app::turn::finish_command_turn` ever arms a Phase-2
+search for (never `Unknown` — there is nothing there worth asking about, and
+Zork I/Glulx/Scott pay nothing). The proof: walk the SAME direction from the
+SAME pre-move moment TWICE, under two different random seeds, in a silent
+shadow (`app::probe::ShadowProbe`, the same worker the return probe above
+shares), and see whether either walk disagrees with where the live player
+actually went. Disagreement is direct evidence the story rolled dice for this
+move — `random_exit_probe::deliver` then deletes the edge Phase 1 already
+minted and calls `Mapper::record_random_exit`; agreement on all three (or no
+usable evidence from a shadow attempt that quit, escaped or DIED — SQ-1506, and
+`ProbeStep::landing` is the one place all three are read) leaves the edge
+standing.
+
+**The pre-move snapshot is the END of the PREVIOUS turn**, because by the
+time anything can classify a move, the move has already happened —
+`Engine::submit` runs before `finish_command_turn` is ever called, at three
+different call sites in `main.rs`'s event loop, which do not agree on when
+`cmd` itself becomes known (a mouse-click move is only known from the game's
+own echoed transcript, AFTER submit). Rather than touch three divergent call
+sites, `AppState::random_exit_pre_move_save` carries a `(RoomId,
+Arc<EngineSave>)` forward one turn at a time — refreshed at the tail of every
+`finish_command_turn` call for an engine `Engine::rng_seed` answers `Some`
+for, using whatever `TurnSave` already computed for history/auto-save this
+turn when available (free) — and is validated against `room_before` before
+use: a snapshot whose room does not match is stale (a restore since, or a
+turn that never refreshed it) and is simply not used, rather than trusted.
+
+**The reseed is not optional.** Quetzal saves no RNG state at all
+(`zvm::quetzal` never touches `Machine::rng_state` — see that field's docs),
+so a shadow restored from a snapshot runs its OWN draw, wherever the shadow's
+last boot or restore left it, not a copy of the live game's. Two attempts
+from the same snapshot could otherwise inherit the same shadow state and
+always agree with each other by accident, which would look exactly like a
+deterministic story. `Engine::reseed_random` (a new `Engine` trait method,
+`GameSession` calling `Machine::set_rng_seed`, default no-op elsewhere) forces
+each attempt's own draw explicitly, in `probe::serve`'s per-command loop,
+AFTER that attempt's restore and BEFORE it runs — to two seeds
+(`random_exit_probe::derived_seeds`) neither equal to the live game's own, so
+agreement is actual evidence rather than an artifact of both starting from
+the same place. `probe::Job` carries this as a `reseeds: Vec<Option<u32>>`
+parallel to `commands`, `None` at every index for every OTHER probe consumer
+(a return search, a vocabulary offer) — their shadow's RNG runs wherever it
+already did, exactly as before this existed.
+
+**A random mark is not permanent — it is re-checked, not trusted.** A single
+lucky agreement never speaks for itself (one reseeded walk landing where the
+live game did could be a coincidence), which is why every judgement — first
+walk or re-walk alike — needs the SAME two-attempt agreement Phase 2 always
+asks for. But a direction that behaves deterministically on every later walk
+has to be able to become a real edge: Lost Pig's gnome, once fetched,
+deliberately leads the player back OUT of the tunnels along a fixed route,
+and a map that can never draw that route because the direction was once
+random would be wrong in the other direction — confidently withholding a
+passage the story has since committed to.
+
+So walking an already-marked direction re-probes instead of doing nothing.
+`session::apply_turn` still mints no edge for it on this move (there is
+nothing yet to mint — see the comment there), but
+`turn::finish_command_turn`'s Phase-2 gate now covers two shapes, told apart
+by `RandomExitSearch::was_random`: a first walk of `Absent`/`Code` (the edge
+`apply_turn` minted is what is being confirmed or deleted) and a re-walk of
+an already-marked direction (there is no edge — this is the UPGRADE path).
+`random_exit_probe::deliver` forks on it: agreement across both reseeded
+attempts clears the mark (`MapGraph::unmark_random_exit`) and mints the
+edge through `Mapper::record_probed_passage` — the same
+`Mapper::mint_passage` work (`add_edge`, collapsing a redundant `?` stub,
+laying the destination out) a walked crossing does, without touching
+`set_current`/`arrived_via`, since this answer can land turns after the move
+it is about; disagreement (or no evidence) leaves the mark exactly as it
+was. `mapper::matrix::classify` checks for a real edge before it ever looks
+for a random mark — the ordinary precedence every other cell already has —
+because the upgrade path means the two facts are never meant to coexist for
+long: whenever an edge exists in a marked direction, the mark is on its way
+out and the edge is what should be drawn.
+
+Measured on `LostPig.z8`, worker time, debug build: the deterministic gateway
+(Statue Room → north → Windy Cave, `Code`) costs one Phase-2 attempt pair
+alongside seven ordinary probe questions already in flight from the walk
+there, ~215 ms cumulative; one further Phase-2 move into the genuinely random
+Twisty Cave costs **two** shadow attempts (one restore + one reseed + one
+`submit` + one world-print each) at **~41 ms** total — all of it on the
+worker thread, never the player's, which pays only the one host snapshot
+`finish_command_turn` already keeps a `TurnSave` for.
+
+### Phase 3: the room keeps its own name history, and a rename-loop is not a loop
+
+Lost Pig's gnome tunnels do not just send the player to a random cave — the
+room they land in prints a FRESH NAME every time ("Twisty Cave", "Confusing
+Passage", "Strange Place", …), while `location`-global room-locking (see the
+declared-exits section above) keeps it the same object throughout. Before this
+existed, a compass move that returned to the room it left was unconditionally
+a self-loop (SQ-0666): `crate::graph::MapGraph::add_self_loop` cannot tell a
+maze's honest "west leads back here" apart from a room whose very NAME is part
+of what varies, so the tunnels drew a `↩` badge that grew a fresh direction
+every crossing and a label that flickered to whatever the story rolled last.
+
+Two independent pieces close this, both living in `crates/mapper`, which never
+needed to know anything about declared exits, RNG seeds or shadows to do it —
+this is a purely STRUCTURAL fact about a name changing, visible without a
+probe:
+
+- **`crate::graph::Room::aliases`** — every OTHER name the game has printed
+  for a room, in first-seen order, maintained by the one place a rename
+  happens: `Room::note_name_change`, called from `MapGraph::upsert_room`'s
+  revisit branch whenever the incoming name differs from what the room
+  already had. The room's displayed label is still just `Room::name` (or a
+  `label_override`, unaffected) — aliases are purely the history beside it,
+  persisted with the room like every other room fact (`#[serde(default)]`,
+  so an older map file loads with an empty list).
+- **The rename-loop check in `Mapper::observe_inner`** — the one place
+  `crates/app`'s `apply_turn` ever asks the mapper to record a same-room
+  arrival (`Mapper::observe_moved`). It now captures the room's label
+  BEFORE the incoming `upsert_room` call (the only moment the previous label
+  is still readable) and, for a same-room move the caller has proven really
+  happened, compares it against this turn's printed name: unchanged is an
+  ordinary self-loop exactly as before; changed calls
+  `Mapper::record_random_exit` instead of `MapGraph::add_self_loop` — the
+  same call Phase 1 makes for a declared-exit mismatch, so a rename-loop and
+  a table-mismatch read identically to everything downstream (the matrix,
+  the room card, the map box). No self-loop edge is minted for a
+  rename-loop, so the box draws no return-arrow badge for it either.
+
+`mapper::matrix::classify` now checks `MatrixCell::Random` BEFORE
+`MatrixCell::SelfLoop` on a shared key (both fall out of the `dest.is_none()`
+branch, after a real edge, which still beats either). The rename-loop check
+means the two never coexist for a move recorded since it went in — one
+crossing writes one or the other, never both — but an OLDER map file (or a
+future writer nobody has audited yet) could still carry a self-loop and a
+random mark on the same direction, and "the story never even commits to a
+destination room name" is the more specific, truer thing to say about it than
+"leads back here". This mirrors the existing edge-beats-both precedence
+exactly: most specific, most informative fact wins.
+
+The drawn map marks a room with aliases with a small superscript count beside
+its label (`Twisty Passage⁵`, Unicode superscript digits, `⁹⁺` past nine),
+styled through its own selector (`map.room_alias_marker`) rather than the
+room's base colour; the room panel lists them under "Also seen as", and
+`/export-map`'s dump carries them on the `ROOM` line as `aka=[...]`. All three
+read `crate::graph::Room::aliases` directly — nothing recomputes the list, so
+the box, the panel and the dump can never disagree about what a room used to
+be called.
+
+### SQ-1261: a `?` exit remembers where it has actually sent you
+
+The `?` mark itself (`crate::graph::Room::random_exits`) only ever answered
+"is this direction random?" — it named no destinations, so the room card said
+"destination varies" and nothing more, however many times the player had
+actually walked it. `crate::graph::Room::random_destinations: Vec<(Direction,
+Vec<RoomId>)>` is the fact that closes that gap: every distinct room a marked
+direction has actually been seen to land in, first-seen order, no duplicates,
+one entry per marked direction. `MapGraph::note_random_destination` appends to
+it; `MapGraph::random_destinations` reads it back; `MapGraph::unmark_random_exit`
+clears a direction's list along with the mark itself, so a later re-mark (the
+Phase 2 upgrade can be undone by a subsequent disagreement) starts over rather
+than resuming a stale list from before the confirmation. Persisted exactly
+like `random_exits` (`#[serde(default)]`), so an older map file loads with
+every list empty rather than failing to parse.
+
+Two sources feed it, matching the two ways a direction gets marked at all:
+
+- **Every live walk of an already-marked direction that lands somewhere other
+  than the origin** — `session::apply_turn`'s `random_exit` branch (the one
+  `Mapper::record_random_exit` already lived in, for both the very first
+  mismatch and every re-walk of an already-marked direction) now also calls
+  `MapGraph::note_random_destination(origin, dir, snap.number)`, guarded by
+  `snap.number != origin`. That guard matters: a re-walk of an already-marked
+  direction that bounces the player right back to the room they started in
+  (`already_random` true, `moved_room` false — a refusal, not a landing) names
+  no destination worth recording, and a rename-loop never reaches this branch
+  at all (`moved_room` is false there too, for the same reason — the object
+  never actually changed).
+- **Phase 2's shadow attempts, on disagreement** — `random_exit_probe::deliver`
+  judges two shapes (see Phase 2 above), and both now call the new
+  `note_disagreeing_destinations` on a disagreement, before returning: it
+  notes the LIVE destination and every shadow attempt's own landing (skipping
+  a step that quit, escaped, DIED, or reported no location — `landings` and
+  `judge` both go through `ProbeStep::landing`, the same "evidence, not a
+  vote" reading). A death is skipped for the reason the return probe skips
+  it (SQ-1506): the story relocated the shadow, so pooling the room it woke
+  up in would name a resurrection as a destination the direction reaches.
+  For a first-walk disagreement
+  this is the only place the live destination is ever recorded, since the
+  walk that earned the mark went through the ordinary `arrived` branch in
+  `apply_turn`, not the `random_exit` one, and recorded nothing on its own.
+  For an upgrade disagreement the live destination was likely already noted
+  by `apply_turn`'s own re-walk (`note_random_destination` dedupes, so this is
+  harmless either way) but the SHADOW attempts' own destinations are new
+  information regardless. **The upgrade-agreement path notes nothing at
+  all** — the mark is about to be cleared, and `unmark_random_exit` empties
+  the list in the same stroke, so there is nothing left to attach a note to.
+  A rename-loop, driven entirely through `Mapper::observe_inner` and never
+  through Phase 2 at all, notes nothing either — Lost Pig's own tunnel rooms
+  confirm it: `random_destinations` is asserted empty for every rename-loop
+  direction on the real game (`declared_exit.rs`'s Phase 3 case), the same
+  turns whose `random_exits` marks are non-empty.
+
+Three surfaces read `random_destinations`, and none of them recompute it:
+
+- **The room card** (`render::room_info::card_detail`) now takes the room id
+  and direction alongside the classified cell, and for `MatrixCell::Random`
+  names every recorded destination through the same `dest_name` helper every
+  other cell uses (a room a shadow saw but the map does not otherwise know —
+  possible, since a probe attempt can reach a room the player never visited —
+  falls back to `#id`, exactly like `LeavesLayer`'s cross-layer destination
+  does): `"destination varies: A, B, C"`, first-seen order, or bare
+  `"destination varies"` with nothing recorded yet.
+- **The matrix cell** — `mapper::matrix::MatrixCell::Random` gained a
+  `destinations: usize` field (a COUNT, not the list, so the enum stays
+  `Copy`; the list itself is a graph lookup the room card and the dump make
+  directly), set by `classify_with` from `graph.random_destinations(room,
+  dir).len()`. `render::matrix::cell_text` prints a bare `?` for zero, else
+  `?` followed by the shared superscript-count glyph (`?²`) — the same table
+  `render::map`'s alias marker uses, pulled out to
+  `render::superscript_count` so the three surfaces (alias count, random-exit
+  matrix count, random-exit box stub) can never draw a different digit for
+  the same count.
+- **The map box** — a NEW marker; before this, a `?` direction drew nothing
+  on the box at all. `mapper::render::RenderRoom::random_stubs:
+  Vec<(Direction, usize)>` carries every marked direction paired with its
+  recorded-destination count, built by `render_traced` from
+  `Room::random_exits` and filtered to exclude any direction that ALSO
+  carries a real edge (defensive — `mint_passage`/`unmark_random_exit` never
+  leave the two coexisting in ordinary play, but a hand-edited or
+  pre-upgrade map file could, and a real passage's own arrowhead must win the
+  slot). `render::map::draw_box_room` draws each stub LAST, after every
+  border line and corner glyph, so it overwrites whatever was painted there:
+  a cardinal direction takes the same border-centre cell a real exit's
+  arrowhead would (`random_stub_pos`, mirroring `box_edge_anchor`'s
+  Bottom/Top/Left/Right formulas at slot 0), a diagonal takes the box corner
+  a diagonal departure draws at (mirroring `corner_anchor`). One glyph only —
+  `random_stub_marker` — a bare `?` with nothing recorded, else the
+  superscript count alone (`╰────²────╯` on the south border for two
+  recorded destinations; never `?²` on the box, where there is room for
+  exactly one character). Nothing is routed beyond it: the whole point of the
+  mark is that there is nowhere stable to route to. A non-planar direction
+  (Up/Down/In/Out — theoretically markable, since `mark_random_exit` only
+  excludes `Direction::Unknown`) has no side or corner of its own and stays
+  visible on the matrix and the room card only. Styled through its own
+  selector, `map.room_random_stub` (default: the `alert` role, matching
+  `map.matrix.cell:random`'s own default — the same fact, one colour).
+- **`/export-map`'s dump** carries them on the `ROOM` line as
+  `random=[N→(#187 "Probably New Tunnel", #189 "Somewhere Else"), …]`, one
+  entry per marked direction, each destination by id and label — so an
+  exported map keeps the same evidence the room card and the matrix's
+  superscript count show.
+
+### SQ-1264: the Glulx seam, and a live-walk contradiction rule that needs no shadow
+
+Two gaps SQ-1257/SQ-1261 left, found on Colossal Cave Adventure's two "In
+Forest" clearings (`advent.blb`, Glulx, and `advent.z6`, Z-machine — the same
+Inform source, `advent.inf`, compiled both ways): `Engine::declared_exit`
+answered `Unknown` for every Glulx story (`GlulxSession` never overrode the
+default), and even where Phase 1/Phase 2 both work, they have a statistical
+blind spot once a direction is marked random.
+
+**Why Adventure's forests are not what Phase 1 was built to catch.**
+`At_Hill_In_Road`'s `s_to` and `In_A_Valley`'s `e_to`/`w_to` all name a
+perfectly ordinary FIXED room, `In_Forest_1` — a plain `Room(_)`, never
+`Code`/`Absent`, so this is NOT Lost Pig's shape (a routine deciding the
+destination). The randomness lives on the DESTINATION side: `In_Forest_1`
+carries an `initial` routine that runs on every arrival and, half the time,
+silently redirects the player on to `In_Forest_2` instead
+(`if (random(2) == 1) PlayerTo(In_Forest_2, 1);`) — invisible to a reader of
+the ORIGIN's own exit table, which is all `declared_exit` ever reads. What
+still catches it: `apply_turn`'s existing `Room(x)` vs. actual-landing
+compare, unchanged — a walk that lands in `In_Forest_2` while the origin
+declared `Room(In_Forest_1)` is exactly the mismatch shape Phase 1 already
+watches for, so the FIRST divergence is caught with no new code at all.
+`In_Forest_1`'s own W/N/S (all self-referencing `*_to` values, i.e.
+declared self-loops) never trigger the redirect under any seed tried —
+Inform's move engine does not re-invoke a room's `initial` when
+`next_loc == location`, so a same-room "move" is a no-op as far as that hook
+is concerned; the randomness is arrival-only, matching the user report this
+quest was filed from exactly (`↩wns` on the forest, no random mark on the
+self-loop directions).
+
+**`gvm::world`** (`crates/gvm/src/world.rs`) is the Glulx mirror of
+`zvm::world`'s `door_dir`/`*_to`/`door_to` derivation, existing because `gvm`
+takes no dependency on `zvm` (each VM core stays independent — see the hard
+rules in `CLAUDE.md`): its own `Compass`/`DeclaredExit`, shaped identically,
+converted to `crate::engine::DeclaredExit` at the `GlulxSession` boundary —
+an app-level type, not a re-export of either VM's own `DeclaredExit` since
+SQ-1297 (its `Room` variant carries a `mapper::graph::RoomId`, which `zvm`
+and `gvm` cannot know about being zero-dependency crates), and the same type
+`GameSession`'s own `declared_exit` converts `zvm::world::DeclaredExit` into.
+Reading through `gvm::objects::ParseNames` — which needed
+two new general methods, `property`/`property_word`, since its existing
+`name_array` reader stops at the FIRST property (assumed to be property 1,
+correct only for the `name` array itself) rather than walking the whole
+table. The one real difference from the Z-machine reader: Glulx property ids
+are `u16` with no 63-property ceiling the way the Z-machine's `door_dir`
+scan has, so `gvm::world::MAX_PROP_SCAN` (1000) is a measured, generous
+headroom rather than a spec-derived bound — the highest property id anywhere
+in `advent.blb`'s whole object table is 276, and `door_dir` itself is a
+LIBRARY-assigned property (`english.h`, compiled early), so it lands low in
+every corpus story tried.
+
+**`GlulxSession::declared_exit`** has one problem `GameSession`'s never did:
+`origin` is a [`mapper::graph::RoomId`] — for Glulx, `crate::roomid::
+glulx_room_id`'s HASH of the room's object address (SQ-0526), not the address
+itself — and by the time `declared_exit` is asked about it
+(`turn::finish_command_turn`, after the move already ran), the live session
+has moved PAST that room, so the "re-hash the current address" trick
+`resolve_handle` uses for `Introspect` handles cannot answer for a room the
+player just LEFT. `GlulxSession::room_addrs: HashMap<RoomId, u32>` is the
+fix: every room the room-lock resolves to a real address is remembered as it
+is discovered (`room_for`, on every turn once locked), so `origin` — a room
+the player necessarily stood in on some EARLIER turn — is always already in
+the map by the time `declared_exit` asks. Grows for the session's life and
+never needs invalidating, since a Glulx object's address is fixed at compile
+time.
+
+**And SQ-1303 gave it a second half, for the games `gvm::world` could never
+serve.** `door_dir`/`*_to` is the Inform **6** library's convention, so on an
+Inform 7 story the derivation above finds nothing and every direction of every
+room answered `Unknown`. Where `gvm::world` has no answer, `GlulxSession::
+i7_declared_exit` reads the room's own row of `Map_Storage` instead (see the
+i7map bullet under "Glulx introspection"): a cell naming a room — or a two-sided
+door whose far side the model resolves through its `found_in` array — is
+`Room(_)`; a cell naming a door only `door_to()` can resolve is `Code`, which is
+what that variant is for; a zero cell in a column this story HAS is `Absent`; a
+direction the story does not declare at all, or a room the model does not know,
+is `Unknown`. Nothing downstream needed changing — the mismatch/suspicion rules
+below and Phase 2's probes read `DeclaredExit`, not the engine — so an Inform 7
+game now gets exactly the same treatment a ZIL one does. **The read goes to LIVE
+memory on every ask**: `Map_Storage` is in RAM precisely so
+`AssertMapConnection` can rewrite it ("change the north exit of the Hall to the
+Cellar"), and Counterfeit Monkey does — two rooms in the SQ-1303 spike's played
+dump have connections its compiled map does not. `gvm`'s
+`a_map_cell_rewritten_in_ram_is_seen_by_the_next_ask` perturbs a cell and
+re-asks, which is the layer that can: `app` has no seam for writing a running
+story's memory, and adding one for a test would be worse than the coverage is
+worth.
+
+**The live-walk CONTRADICTION RULE**, in `session::apply_turn`, closes Phase
+2's statistical hole rather than the Phase-1 gap: once a direction IS marked
+random, a re-walk arms a Phase-2 UPGRADE probe (see above), and with two
+possible destinations, its two reseeded shadow attempts each independently
+have a 50% chance of agreeing with whatever the live walk just landed in —
+so they agree with EACH OTHER, and with the live landing, purely by luck one
+time in four, upgrading the mark back to a confident (wrong) edge for a
+direction that is still random underneath. The rule needs no shadow and no
+`declared_exit` answer to close this: when a move from `origin` via `dir`
+lands in `dest != origin` and the graph ALREADY holds an edge
+`origin --dir--> other` with `other != dest`, that contradiction is itself
+proof the exit is random — a fixed passage cannot lead to two different
+rooms. It is folded into the same suspicion the declared-exit mismatch
+already raises (SQ-1269, below), so an engine with a working `declared_exit`
+seam gets it as a second, independent trigger, and an engine with NONE at all
+(or one whose derivation fails to find the convention) is still protected —
+the rule reads only the graph the mapper already keeps. What it used to do —
+mark the direction on the spot, unconditionally — is exactly what SQ-1269
+replaced: read on.
+
+**Proof, on both engines, needed two real fixture quirks worked around, not
+fixed** — both are properties of the `.z6`/`.blb` files themselves, not of
+lanthorn, and are recorded here so the next person does not go looking for a
+bug in `random_exit_probe` that is not there. `advent.z6` is a "V6Lib private
+beta" test compile whose own init code writes a runtime-random value into
+the header's release-number field (the banner text visibly reads a
+different "Release NNN" on every fresh boot, though the file's own static
+header byte is fixed at release 10) — Quetzal's IFhd validation, reading
+that field from CURRENT memory, refuses to restore the live session's save
+into a separately-booted shadow every time (`BadSave("SaveMismatch")`), so
+Phase 2's reseeded-shadow upgrade path is untestable on this specific
+fixture; the real-game suite proves the declared-exit-mismatch path and the
+contradiction rule instead, and Phase 2 itself keeps its existing coverage
+on Lost Pig (which has no such quirk) and the hand-built
+`random_exit_probe.rs` unit tests. Glulx's own room-lock (SQ-0526) is
+host-side state that a Quetzal-style snapshot never carries, so a shadow
+booted with NO store learns its OWN lock from scratch and reports its very
+first move's room under a NAME hash — numerically nothing like the live
+session's ADDRESS hash — making every Phase-2 comparison read as a
+disagreement regardless of what the game did; pointing the shadow's
+`ShadowRecipe::store` at the SAME directory the live session persists its
+`room-global` sidecar to (`GlulxSession::remember_room_global`) lets the
+shadow read the learned address at its own boot and report rooms in the
+same id space from its first move, which is what makes Adventure's Glulx
+build the one that proves Phase 2's upgrade path for real
+(`crates/app/tests/suites/sq1264_forest_randomization.rs`).
+
+**Sharing the store directory is only half of it (SQ-1267).** `ShadowProbe`
+is one worker shared by every feature that asks the shadow anything —
+vocabulary vetting and the return probe as well as Phase 2 — and it boots its
+shadow lazily on the FIRST question of the whole session, then keeps it
+alive across every later one. `GlulxSession::restore_state` swaps VM memory
+only; the room-lock (`room_lock`, a plain struct field) is host-side and
+untouched by it, so a shadow that happened to boot before the LIVE session
+had located its own `location` global stayed unlocked for the rest of the
+session regardless of how long afterwards the live session went on to lock
+and write its `room-global` sidecar — an ordinary vetted suggestion on turn
+one is exactly early enough to trigger this in the field, well before the
+player is anywhere near a forest. The fix carries the live session's room
+identity into the shadow explicitly rather than leaving it to infer one:
+`Engine::room_identity_state`/`Engine::apply_room_identity_state` are a pair
+of engine-neutral, opaque-bytes methods — `GameSession` (Z-machine) answers
+`None`, since its room ids are `zvm`'s own object numbers and need no such
+state; `GlulxSession` answers the room-lock's learned address, or an empty
+vec while still learning (an UNLOCKED state is itself worth carrying, so a
+shadow that locked early on its own exploratory commands, or read a stale
+address off the shared sidecar, is forced back to unlocked too). `probe::
+serve` reads it once per job (`ProbeSnapshot`/`Job::room_identity`, captured
+from the LIVE engine at ask time, not from the sidecar) and applies it right
+after EVERY `restore_state`, not only at boot — a shadow answers many
+questions across its lifetime, and each one must be keyed the way the live
+session is keyed AT THAT MOMENT, which can change over the shadow's life
+even though `room_identity_state` cannot. `random_exit_probe::
+note_disagreeing_destinations` adds one narrow, deliberately non-primary
+guard on top: a shadow-reported destination equal to `live_dest`'s own
+printed name hashed the unlocked way (`roomid::synthetic_room_id`) is
+dropped from the pool rather than recorded, which is cheap insurance against
+exactly the phantom shape this bug produced without excluding a genuinely
+new room a disagreeing attempt is the only thing to have found (the reason
+it does not simply require "already on the map" — SQ-1261 depends on that
+staying possible).
+
+**And the other half of the same duty: the SCREEN a restore does not bring
+with it.** Room identity is host-side state on Glulx; on the Z-machine it is
+read off the *screen*, and a save archives none (Quetzal's design — the story
+is assumed to repaint). So `GameSession::restore_state` blanks everything the
+location ladder reads, and each version keeps its room name somewhere else:
+
+| version | where the room name is | what `restore_state` clears |
+|---|---|---|
+| v1–v3 | global 0, inside the snapshot | nothing to clear |
+| v4/v5/v7/v8 | the upper-window grid | `UpperWindow::blank` (SQ-0785) |
+| **v6** | the window model's paint runs | `zvm::location::clear_v6_status_band` (SQ-1283) |
+
+Each is the same rule — *memory restored without a screen must not be read
+against another moment's screen* — and it is `probe::serve`'s restore-before-
+every-command that makes breaking it visible: a story that repaints its band
+only when the room changes (Shogun's status routine, Zork Zero's, Arthur's)
+leaves a refused move printing nothing at all, and detection then names the
+room the shadow walked into on the question BEFORE. `return_probe::deliver`
+mints a passage to it — `record_probed_passage` refuses `from == to`, but a
+stale room is not `from` — so the map grows one phantom edge per direction the
+search tries, all fanning onto the same room. The Shogun report was exactly
+that: `Below Decks` joined to the Erasmus's `Bridge` in all eight compass
+directions (`crates/app/tests/suites/sq1283b_shogun_below_decks_fan.rs`
+replays it), and `GlulxSession::restore_state` clearing `last_room` is the
+same fix on the engine with no screen at all (SQ-1284). The v6 clear takes
+only the BAND — the extent `detect_location_v6` reads, derived once in
+`v6_band_runs` and shared by the reader and the clear — never the prose
+window, which is v6's lower window and has never been blanked on any version.
+
+### SQ-1269: suspicion, not proof — the probe decides
+
+Three holes SQ-1257/SQ-1261/SQ-1264 left, all in the DECISION layer rather
+than the detection layer above: the mechanisms that spot a mismatch were
+sound, but what `apply_turn` and `random_exit_probe` did with a mismatch
+was not.
+
+**(1) Flicker.** Phase 2's UPGRADE path (`deliver_upgrade`) cleared a `?` mark
+back to a confident edge on a single agreement between two reseeded shadow
+attempts and the live landing — but with two possible destinations, that is a
+25% chance of pure luck. `deliver_upgrade` now refuses to upgrade at all once
+`MapGraph::random_destinations(origin, dir)` already holds **two or more**
+distinct rooms: the pool itself is already proof the direction varies, and a
+single agreeing pair cannot outweigh it. Upgrade stays possible only while
+the pool holds fewer than two rooms — the mark came from a single mismatch,
+or a disagreement that pooled exactly one room besides the live landing.
+Measured on a REAL fixture, not just the synthetic unit tests: Adventure's
+Glulx build (`advent.blb`) pools BOTH forests from the very first mismatch's
+own shadow attempts, so `blb_forest_random_walk_stays_marked_once_the_pool_
+holds_both_forests` (`sq1264_forest_randomization.rs`) is a walk that, before
+SQ-1269, cleared the mark on its "lucky" reseed and now correctly stays
+marked.
+
+**(2) Suspicion is not proof; the probe decides.** Both the declared-exit
+mismatch (Phase 1, above) and the live-walk contradiction rule (SQ-1264,
+above) used to mark `?` on the spot, unconditionally. Both misfire on
+DETERMINISTIC behaviour: Inform 7's `instead of going north, move the player
+to X` contradicts the room's own exit table on every single walk, and a game
+that changes a passage permanently (a door now leads somewhere new) looks
+identical to one that rolls dice for it. Neither guess is proof.
+
+`session::apply_turn` now computes `existing_conflict` (an edge OR a
+self-loop already on `(origin, dir)` that the live landing contradicts — see
+(3)) and `declared_mismatch` (the Phase-1 shape) as before, but where either
+fires and `already_random` does not (a re-walk of an ALREADY-marked
+direction stays Phase 2's own immediate territory, untouched), it does not
+mark anything: it mints nothing, marks nothing, leaves whatever the graph
+already believed (an edge, a self-loop, or nothing) standing exactly as it
+was, and instead calls `Mapper::note_random_exit_suspicion(origin, dir,
+old_dest, live_dest)` — a new transient field on `Mapper`
+(`pending_random_exit_suspicion: Option<RandomExitSuspicion>`, the same
+one-shot shape `pending_suggestion` already uses), where `old_dest` is
+whatever the graph claimed before (`None` for a bare declared mismatch with
+no prior edge, `Some(x)` for a contradicted edge, `Some(origin)` — the room
+ITSELF — for a contradicted self-loop, see (3)).
+
+`turn::finish_command_turn` drains it with `Mapper::take_random_exit_suspicion`
+after the ordinary Phase-1/Phase-2 arming block (this is the "snapshot
+condition" extension: the pre-move engine snapshot `random_exit_pre_move_save`
+was already captured unconditionally every turn a `rng_seed`-supporting
+engine reports one — see Phase 2 above — so the change here is entirely in
+what gets ARMED from it, widened from `Absent`/`Code` alone to a declared
+`Room(_)` mismatch or an existing-edge/self-loop contradiction too) and,
+when a pre-move snapshot exists for the right origin, arms a THIRD search
+shape, `random_exit_probe::SearchKind::Suspicion { old_dest }`, reusing the
+exact same infra (`arm_random_exit_search`, two reseeded attempts) the other
+two shapes do. `random_exit_probe::deliver`'s `Suspicion` arm
+(`deliver_suspicion`) is where the question actually gets answered: full
+agreement on both attempts means the passage is DETERMINISTIC and has
+CHANGED — `Mapper::resolve_suspicion_as_changed` removes the old edge/
+self-loop (if any) and mints the new one straight to `live_dest`, no mark at
+all; any disagreement means it is genuinely random —
+`Mapper::resolve_suspicion_as_random` removes the old edge/self-loop, marks
+the direction, and pools `old_dest` (when it names one) alongside
+`live_dest` and everything the shadow itself saw
+(`note_disagreeing_destinations`, SQ-1261/SQ-1267's existing pool hygiene,
+unchanged). A STALE answer — the state the search was about has already
+changed by the time it arrives, exactly the same discipline `deliver_
+first_walk`/`deliver_upgrade` already apply — is dropped rather than acted
+on.
+
+Where NO probe can run at all — an engine with no `rng_seed`/`reseed_random`
+(Scott Adams; Glulx before its room-lock has anything to key a snapshot by),
+or simply no usable pre-move snapshot for this turn — `finish_command_turn`
+resolves the suspicion immediately via `Mapper::resolve_suspicion_as_random`:
+exactly the OLD unconditional-marking behaviour, unchanged in effect for a
+turn this module never gets a chance to look at. **A probe that DID arm but
+came back with no usable evidence at all resolves the same way.** This is
+not a corner case invented for symmetry: `advent.z6`'s own Quetzal quirk (its
+init code writes a runtime-random release number into the header, so
+`GameSession::restore_state` refuses every shadow restore — see SQ-1264
+above) means EVERY Suspicion search on that specific fixture comes back with
+`Answer::run: None`, every time — a broken shadow is, from `deliver_
+suspicion`'s point of view, structurally indistinguishable from a probe that
+never ran, and treating them differently would have meant `advent.z6`'s own
+forest never gets marked at all, silently, forever. `random_exit_probe::
+tests::a_broken_shadow_answer_resolves_a_suspicion_the_same_as_no_probe_at_
+all` pins the synthetic shape of the same fact.
+
+**(3) Self-loops are destinations.** A direction that sometimes leads back
+into the room and sometimes out used to be an ordinary self-loop badge
+(`↩`) plus, on the next contradicting walk, a plain `?` mark that named only
+the NEW landing — the fact that it ALSO, sometimes, leads back into the room
+it leaves was thrown away. The room itself is now counted as a destination:
+`existing_conflict`'s computation gains an `.or_else` that checks
+`MapGraph::self_loops(origin)` whenever no real edge already answers the
+question — a landing elsewhere contradicts a recorded self-loop exactly the
+way it contradicts a recorded edge, with `old_dest = Some(origin)` (the room
+IS the "destination" a self-loop claims). The same-room ARRIVAL side gets
+the mirror check, in `apply_turn`'s `arrived` branch, BEFORE the rename-loop
+structural check (which stays immediate — a rename is proof on its own, no
+probing needed) and before the ordinary self-loop path: an EXISTING real
+edge for `(origin, dir)` that a same-room landing now contradicts is the
+same suspicion, `old_dest = Some(that edge's destination)`, `live_dest =
+origin`. Once resolved as random, `MapGraph::remove_connection` deletes
+whichever kind of connection stood there (a self-loop is stored as an
+ordinary `Connection` with `dest == origin`, so the same removal call
+handles both), and the pool gets `origin` itself alongside whatever else —
+the room card's "destination varies: …, back here" (`render::room_info::
+card_detail`'s `Random` arm special-cases `id == room_id` to print "back
+here" rather than recursing into the room's own name). The render layer
+follows: `mapper::render::RenderRoom::self_loops` is now filtered to exclude
+any direction that ALSO carries a `?` mark (defensive — current code never
+leaves a self-loop CONNECTION coexisting with a mark on the same key, since
+marking removes it, but an older map file could) — the `?` stub supersedes
+the loop badge, never both. `crate::matrix::classify`'s existing precedence
+(a random mark already beat a self-loop on the same key, SQ-1257 Phase 3)
+needed no code change at all; only its doc comment, and this defensive
+render filter, are new.
+
+**Presentation: random Up/Down/In/Out now show on the box.** `random_stub_
+pos` has no border/corner cell for a non-planar direction (SQ-1261's own
+doc already noted this as a known gap), so a `?`-marked Up exit showed in
+the matrix and the room card but nowhere on the drawn box. `render::map::
+draw_portal_icons` — the pass that already places a real portal edge's
+glyph in one of three fixed slots (Up → top-centre, In/Out/Unknown → the
+free interior cell nearest the partner, Down → bottom-centre) — now also
+checks each room's `random_stubs` for a vertical direction whose slot no
+real edge has claimed, and draws the same `random_stub_marker` (a bare `?`,
+or the superscript destination count) at that slot's fixed anchor, styled
+through the existing `map.room_random_stub` selector — no new selector, no
+new glyph, just a place for one that already existed to land.
+self-loop connection (`origin == dest`, `MapGraph::add_self_loop`) was never
+excluded from `crates/mapper/src/route/mod.rs`'s routing passes — `origin ==
+dest` forms a degenerate "pair" whose forward and backward buckets in
+`select_shared_paths` are the SAME set of indices, so the edge got paired
+with ITSELF and produced a real polyline looping back around the room's own
+box, on top of the `↩` badge `render/map.rs` already draws. `route_topology_
+with`'s `compass_pairs`/`compass` construction, `select_shared_paths`, and
+`departure_corners` all now exclude `c.origin == c.dest`, verified against
+the shape of the real save this quest was investigated from (`
+route::tests::a_self_loop_is_never_routed_as_a_connector`, falsified by
+reverting the three guards and confirming the pinned save's forest room
+grows exactly the bogus loop described above).
+
+### SQ-1314: a direction is not a word — the ship's own vocabulary
+
+`Direction` is a MAP slot. The word a player reached it by is a different
+fact, and aboard a ship the two disagree: Counterfeit Monkey's `aft-port` and
+`southwest` fill the same slot, and the story accepts exactly one of them.
+Everything above reads a direction; two things have to SPEAK one — a shadow
+probe, which types a command at a real parser, and `Engine::declared_exit`,
+which reads the story's own COMPASS column for it — and both were handed the
+slot without the word.
+
+Reported against 0.4.4: *"Initially, the map seemed to understand nautical
+directions, but as I used them, the map gradually erased them, until the boat
+was full of disconnected rooms."* Nine of the ten rooms of Slango's yacht
+ended up carrying a `random=` pool, and every pool named its own origin —
+
+```text
+ROOM #83 "Galley"  random=[SW→(#84 "Slango's Bunk", #83 "Galley"), …]
+```
+
+A pool member equal to its own origin means a REFUSED move was recorded as an
+arrival. Read off the compiled image (`gvm::i7map`, no turn played), the story
+says why. Counterfeit Monkey declares **twenty** direction columns: the twelve
+compass points and portals, then eight of its own — `Starboard`, `port`,
+`fore`, `aft` and the four quarters `aft-port`, `aft-starboard`, `fore-port`,
+`fore-starboard`. Every yacht room hangs its passages on those and declares
+**nothing** on the compass point the map projects them onto:
+
+```text
+ROOM "Galley"  up -> Navigation Area | fore -> Brock's Stateroom
+               aft-port -> Slango's Bunk | aft-starboard -> Your Bunk
+    compass asks: N=Absent … Sw=Absent … Up=Some(Navigation Area)
+```
+
+So, once SQ-1296 taught `parse_direction` the quarter directions and `ap`
+began resolving to `Direction::SW`, each yacht move ran this chain:
+
+1. `finish_command_turn` asked `declared_exit(Galley, SW)`, which read the
+   SOUTHWEST column — empty — and answered `Absent`.
+2. `apply_turn` minted the ordinary edge. The map was still right.
+3. `Absent` put the move in Phase 2's "worth probing" set, arming a
+   `SearchKind::FirstWalk`.
+4. The probe typed `long_label(SW)` — **"southwest"** — into a reseeded shadow
+   of the Galley. The story refuses it, the shadow never left, and its step
+   reported the Galley as its landing.
+5. `judge` read that as a disagreement; `deliver_first_walk` DELETED the edge,
+   marked the direction random, and pooled Slango's Bunk *and the Galley*.
+
+Which is why the four `up`/`down` passages were the only yacht edges still
+standing in the reported dump: there, the compass word IS the ship's word.
+
+Three rules, each closing a different half:
+
+**A direction that will be spoken travels with its word.**
+`mapper::direction::WalkedDir` carries the slot, the player's own word, and
+the [`DirFamily`] it came from; `WalkedDir::parse` is its only constructor, so
+the two can never be a different player's move. `arm_random_exit_search` takes
+one and types `walked.word()` — a bare `Direction` can no longer reach it,
+which is a compile error rather than a convention. `parse_direction` is now
+defined *as* `WalkedDir::parse(cmd).map(|w| w.dir())` over one word table, so
+the parse, the word and the family cannot drift. (The return probe already
+asked the way back in the player's vocabulary — `reciprocal_word`, SQ-1290.)
+
+**A refused move is not an arrival.** `random_exit_probe::landings` is the one
+reading of a shadow run's steps that both `judge` and
+`note_disagreeing_destinations` go through, and it discards a step that came
+out in the search's own origin: the shadow never left. The exception is a
+search whose SUBJECT is a passage that leads back here — the live player came
+out where they went in, or the map already held a self-loop the suspicion is
+contradicting — and that judgement lives in exactly one place,
+`RandomExitSearch::self_landing_is_evidence`, so the SQ-1269 "back here" pool
+still works.
+
+**A compass column is not asked about a non-compass move.**
+`declared_exit_for_command` answers `None` for a nautical word: the projection
+onto `Direction::SW` is the MAP's, not the story's, so the southwest column
+describes a passage the player did not walk. That truthful `Absent` about a
+question nobody asked is what armed step 3. `apply_turn`'s declared-mismatch
+rule restates the guard, because it is engine-neutral and believes whatever
+`declared_exit` a caller hands it.
+
+**And the gate itself now exists once.** The Phase-2 arming block was copied
+by hand into five real-story harnesses that drive a turn the way the run loop
+does, each restating the order and the conditions — and none of the copies
+knew about any of this. `random_exit_probe::arm_for_finished_turn` is the
+single implementation; `turn::finish_command_turn` and all five harnesses call
+it. A rule spelled in six places is a rule kept in one of them.
+
+`sq1314_nautical_passage_erasure` is the fixture-backed suite. It does not
+play to the yacht — Counterfeit Monkey's own `test_full_game_alt.txt` is the
+only script that reaches it, and 553 headless inputs cost 4m10s and
+desynchronise before the last dozen — so it asks the story the question it can
+answer with no turn played: its own compiled map. Every route it walks is
+built from the passages the story itself declares, so it cannot drift from the
+fixture the way a hand-copied walkthrough can.
+
+## Reading back the bytes we actually emit
+
+Every other harness in the repo renders into a ratatui `Buffer` and asserts on
+cells — lanthorn's own model of the screen. None of them can see the *stream*,
+so a defect that is right in the model and wrong on the glass is invisible to
+all of them. `crates/app/tests/pty_stream/` closes that gap: it runs the real
+`lanthorn` binary under a pty, plays the part of the terminal, and decodes the
+escape bytes that come back.
+
+Five parts, and the split matters for Windows:
+
+| file | what it is |
+| --- | --- |
+| `tests/pty_stream/driver.rs` | The pty (`posix_openpt` + `libc`, no new dependency), the terminal-query answers, the keystroke script. **Unix only** — a pty is. |
+| `tests/pty_stream/decode.rs` | Bytes → named sequences → a screen model: cursor, SGR, kitty APC commands, U+10EEEE placeholder cells. **Portable**, and unit-tested on every platform. |
+| `tests/pty_stream/oracle.rs` | The same bytes through a real terminal emulator — see [the placement oracle](#a-second-reader-for-the-same-bytes-the-placement-oracle). **Portable.** |
+| `tests/pty_stream/raster.rs` | That resolved screen drawn as a PNG — see [looking at the frame](#looking-at-the-frame-the-rasteriser). **Portable.** |
+| `tests/pty_stream/inflate.rs` | Undoes the kitty protocol's `o=z` before the oracle sees it — see below. **Portable.** |
+| `tests/pty_stream/mod.rs` | The report — protocol verdict, uploads, placement rects, a background map, and the finding. |
+
+**Compressed uploads have to be undone for the oracle, and only for it.** A
+graphics-window upload is transmitted zlib-compressed (`o=z`) whenever the
+terminal answered the compression probe — which the pty harness does — and that
+is a transport encoding sitting at exactly the level base64 sits at. Our own decoder
+never noticed — it counts payload bytes and does not decode pixels — but the
+oracle's terminal core deliberately links no codecs at all: its image decoder is
+a seam and the byte-stream entry point wires the null one, so a compressed
+transmit fails with `EINVAL: decompression failed`, the image is never stored,
+and every placement naming it vanishes. `Capture::bytes` therefore stays the wire
+stream (`Flush` offsets index it, and the wire size is a measurement worth
+having) and `Capture::terminal_bytes()` is what the oracle is handed.
+
+**It verifies the protocol first, and says so out loud.** lanthorn picks its
+graphics backend from `Picker::from_query_stdio`, which asks the terminal three
+questions before the UI starts and falls back to half-blocks when nobody
+answers. A bare pty answers nothing, so a naive harness silently measures the
+half-block path and every number it produces is worthless. The driver answers
+the kitty capability query, DA1, `CSI 16 t` (the cell size — not cosmetic: v6 art
+is scaled by pixel and placed by cell) and the OSC 10/11 colour probes, and the
+capture then *proves* kitty from the stream rather than from hope: no APC `_G`
+traffic means no kitty, and the test refuses to go on.
+
+**What it can tell apart that nothing else can.** A kitty placement is virtual:
+the upload (`a=T,U=1`) says how big the image is and nothing about where it
+goes, and the position comes from the placeholder cells printed afterwards. So
+"this row is that colour" has two entirely different causes — an image is placed
+over it, or a background was painted into the cells — and they are different
+bugs with different fixes. The decoder builds a grid, marks which cells carry
+placeholders, and the report's background map names each row's runs with
+`(image)` on the ones an upload covers. SQ-0747's flank-panel fill was settled
+this way in one run: the overrun rows were **painted cells, not a placement
+rect**.
+
+Ad hoc:
+
+```sh
+cargo build -p app                       # the harness drives the REAL binary
+cargo run -p app --example pty_capture -- \
+    --story "stories/Journey - The Quest Begins.adf" \
+    --size 117x64 --keys "wait:1500,cr,wait:800,cr,wait:800,cr,wait:1200" \
+    --out /tmp/journey.stream.txt
+```
+
+`--size` is the terminal, not the story pane: at `117x64` with the map hidden
+(the default here) the frame border and the help row leave the story pane the
+`115x61` a finding is usually quoted at. Exit status 3 means the run did not
+negotiate kitty. `cargo run -p app --example pty_capture -- --help` lists the
+rest.
+
+From a test: `cargo test -p app --test pty_emitted_stream -- --nocapture`, which
+writes its report to `target/pty-capture/`. It asserts that the harness measured
+the right backend and could read a placement back, and deliberately does **not**
+pin any particular defect's presence — a test that fails when a bug is fixed is
+a trap for the next person, so the image-versus-paint reading is printed as a
+finding instead. On Windows the whole thing compiles and the decoder's unit
+tests run; the pty case is an explicit skip.
+
+Its complement is `/dump-cells` ([Graphical v6](v6-graphics.md)), which
+dumps the same screen from the *inside*: that shows what we computed, this shows
+what we sent. Disagreement between the two is the interesting case.
+
+## A second reader for the same bytes: the placement oracle
+
+`pty_stream/decode.rs` is *our* reading of the emitted stream — a hand-rolled
+decoder that shares whatever assumptions we built it with. When the model
+looks right (Layer 1) and the stream also looks right by our own reading
+(Layer 2) but the screen is still wrong, the next question is whether our
+reading of the stream is itself the bug. `crates/app/tests/pty_stream/oracle.rs`
+(SQ-0764) answers that by resolving the same captured bytes through
+`qwertty-term-vt`, a dev-dependency that is a pure-Rust port of Ghostty's
+terminal core (tracking upstream Ghostty commit `2da015cd6`, including the
+297-entry diacritic table matching kitty's published list) — one dependency,
+no build script, builds on all three platforms. Reach for it for placement
+lifetime, z-order, overlap, stale placements, missing deletes, and anything
+turning on the unicode-placeholder continuation rules our decoder doesn't
+model. The oracle runs with the crate's own debug assertions ON (SQ-0774):
+`qwertty-term-vt` 0.4.0 mishandled a chunked kitty transmit-and-display
+(joshka/qwertty-term#327), which is fixed on our fork
+(`sharkusk/qwertty-term`, branch `lanthorn-0.4.0-chunked-fix`) pinned via
+`[patch.crates-io]` in the workspace `Cargo.toml` until an upstream release
+past 0.4.0 carries it.
+
+**It's a port, not Ghostty.** `qwertty-term-vt` tracks Ghostty's algorithm
+faithfully enough to answer "does this placement cover these cells" — but a
+port can diverge from what a real terminal does in ways nobody's hit yet.
+Before writing up a user-visible bug on the oracle's word alone, eyeball it
+on a real terminal too.
+
+**The two decoders name images differently.** Ours keys an image by the low
+24 bits of the placeholder's foreground colour; the oracle keys it by the
+full 32-bit `i=` value (`full = low24 | (high_byte << 24)`). Comparing a
+lanthorn-side id against an oracle-side id means masking the oracle's down to
+the low 24 bits first, not comparing them raw.
+
+**The two decoders agree on image coverage — now.** They didn't when the
+oracle landed: ours attributes a cell to an image by foreground colour alone
+and doesn't model the diacritic continuation rule, so it counted 33 runs of
+orphaned placeholder cells a real terminal declined to draw. That was
+SQ-0772, and it was lanthorn's bug, not the harness's: virtual placements
+were emitted as one anchored cell per row plus bare continuations, invisible
+to ratatui's damage model, so a later frame could destroy the anchor and
+strand the rest. Every placeholder cell now carries its own row, column and
+id high byte and lives in the buffer like any other content, and the real
+capture asserts agreement on *both* axes. Ours still can't read a high byte
+(see above), so a disagreement there remains an id-masking question, not a
+coverage one.
+
+**What the oracle reports is a function of the bytes, and that had to be made
+true twice.** `resolve_placements` documents itself as returning "placements in
+arbitrary order" — it walks a `HashMap` — so anything downstream that reads a
+candidate list positionally gets a fresh random permutation on every call.
+`resolve_rects` did that in two places (SQ-0982). It took a cell's `source_y`
+from whichever candidate ended up LAST in the list, and it read a pin
+placement's declared cell grid off whichever placement of that image the map
+yielded FIRST. Both are now decided: candidates are sorted by
+`(z, image id, cell offset, source rect)` and the one on TOP supplies the cell,
+because `OracleCell::source_y` answers "which pixel row lands here" and what
+lands is the topmost draw; the declared grid is matched by pin POSITION, so an
+image pinned twice at two sizes no longer lends both of its rects an arbitrary
+one of the two. The z-then-id key is the same expression `raster.rs` sorts
+draws by, for the same reason and off the same protocol sentence (see the
+rasteriser section below); same z and same id is undefined upstream, so the
+position tail is arbitrary-but-stable. `the_same_bytes_always_resolve_the_same_way`
+and `several_placements_on_one_cell_report_the_topmost_source_row` are the
+guards. An oracle that answers differently on different runs is worse than one
+that is merely wrong, because nobody can tell which answer they got.
+
+**A stronger oracle exists in principle but isn't built.** For literal
+Ghostty ground truth (not a port of it), `libghostty-vt` — Ghostty's own C
+library — is reachable in theory, but only as a prebuilt artifact. Building
+it from source needs zig plus a full ghostty source checkout, which drags in
+the entire GUI dependency graph (sentry, imgui, freetype, glslang, …) even
+to get the headless VT core, and it doesn't build at all on macOS 26 with the
+pinned toolchain. The viable route, not yet set up, is a GitHub Actions
+matrix (IPv4-only runners, so no fetch-wall failures) that publishes
+`libghostty-vt.a` plus headers and the generated `.pc`, consumed on a dev
+machine through the `-sys` crate's `pkg-config` feature — which skips zig
+entirely. Full findings live on SQ-0764; don't re-derive this, extend it.
+
+## Looking at the frame: the rasteriser
+
+Everything above answers questions *about* a frame. `pty_stream/raster.rs`
+(SQ-0775) draws it. The oracle already resolves a capture to a cell grid with
+per-cell colours plus every placement's source rect, destination size and
+position; the rasteriser composites that into an RGBA canvas at the capture's
+own cell size and writes a PNG. Development happens over ssh as often as not,
+and half the render quests in the tracker end in "the user must go look at it" —
+this turns that into "here is the picture, is this right?", and a before/after
+pair makes a render change reviewable with no terminal at all.
+
+```sh
+cargo run -p app --example pty_capture -- \
+    --story "stories/Journey - The Quest Begins.adf" \
+    --size 117x64 --keys cr,wait:800,cr,wait:800,cr \
+    --out /tmp/j.txt --png /tmp/j.png
+```
+
+A before/after pair is one more flag, not a second mode: capture the old build
+to a PNG, then run the new one with `--png-diff /tmp/before.png --png
+/tmp/pair.png` and the two frames come back side by side with a divider between
+them.
+
+**It is not a screenshot, and the difference is not cosmetic.** Text is drawn
+with the repo's own bitmap fonts (`render/bitfont.rs`, the ones the v6 pixel
+composite uses), scaled to fill each cell: no hinting, no ligatures, and bold and
+italic are synthesized from the roman master rather than being real faces. It is an oracle for
+**layout, art placement and colour** — where the panes are, where the art
+landed, what was painted under it, which of two overlapping things won — drawn
+with our glyphs from what Ghostty's *algorithm* resolved. Judge geometry from
+it; never judge typography from it. Two more honest limits: cells the app never
+painted show the emulator's own default background (palette entry 0, Ghostty's
+`#1D1F21`) rather than whatever the real terminal answered the OSC 11 probe
+with, because the capture only sees the app→terminal direction; and a
+below-background placement (kitty `z < -1073741824`) is bucketed on the z the
+*renderer* sorts by, which upstream hardcodes to `-1` for every virtual
+placement whatever the client asked for.
+
+**It refuses to hide the bug it was built beside.** Each placement is
+rasterised from its OWN resolved source rect, one draw per resolved placement,
+never from the aggregated cell rect. A virtual placement resolves one entry per
+screen row, and an orphaned run redraws the image's *first* row down the whole
+rect (SQ-0772) — sampling per draw means the picture shows that as the banded
+smear it is on the glass. A rasteriser that drew each image once into its
+bounding box would render a clean, plausible, wrong picture of exactly the
+defect worth seeing.
+
+**The picture is a function of the bytes, and that had to be made true**
+(SQ-0968). Draws are sorted by `(z, image id, position)`, not by `z` alone: the
+protocol settles a tie itself — "if two images with the same z-index overlap then
+the image with the lower id is considered to have the lower z-index" — and there
+is no resolver order to fall back on, because `resolve_placements` walks a
+`HashMap` and hands back a fresh random permutation on every call. Sorting on `z`
+alone therefore made two overlapping same-z placements a coin flip: measured at
+six orderings in ten renders of one stream inside a single process, with the
+losing half putting a superseded image on top and blending the live one's
+transparency into it — which is exactly what a stale placement looks like.
+`the_same_bytes_always_draw_the_same_picture` is the guard.
+
+**What SQ-0968 reported, and what it turned out to be.** It was filed as "`--png`
+composites a band's transparency onto stale content and showed a block the
+emitted bytes prove was gone", off the SQ-0948 Shogun frame. That does not
+reproduce: captured on `stories/shogun-r322-s890706.z6` (release 322, serial
+890706, IBM PC) at 117x40 with 8x18 cells, two turns in (`cr` off the boot menu,
+then `look`), the band's own texels under the reported block read `[0,0,0,0]` and
+the picture draws the terminal default there; with the SQ-0948 fix reverse-applied
+and nothing else changed, the same texels read opaque white and the picture draws
+the block. The instrument tracked the bytes in both directions — the third
+left-flank band the lane eventually found really was still carrying the fill. The
+ordering defect above is what the audit did turn up, and it is a different one.
+
+The tests are in `tests/pty_oracle.rs`'s `raster` module: hand-authored streams
+whose expected picture can be stated exactly, asserting **colours at
+coordinates** — a PNG writer's obvious failure mode is emitting a plausible
+blank, and "a file appeared" accepts one.
+
+## The gallery: the same capture, meant to be looked at
+
+`pty_stream/gallery.rs` and `--example gallery` (SQ-0942) turn the harness into
+a picture-maker for the project page. One committed recipe,
+`crates/app/examples/gallery.toml`, names every frame — the medium, the key
+script, the pane size, the backend, the v6 render mode, the pinned seed and a
+caption — and one
+command regenerates the whole set into `target/gallery/`, with a proof-sheet
+`index.html` and a `gallery.json` recording what was actually captured.
+
+```sh
+cargo build -p app
+cargo run -p app --example gallery                  # the whole manifest
+cargo run -p app --example gallery -- --list        # what it would take
+cargo run -p app --example gallery -- --only journey-amiga
+```
+
+Six things are deliberate:
+
+- **The output is labelled a render inside its own pixels.** Every frame gets a
+  footer strip saying so, drawn in the bitmap face whatever the frame above it
+  used. An image gets separated from its page the first time somebody drags it
+  into a chat window, and the only claim that survives that trip is the one in
+  the pixels. This is the price of the next bullet.
+- **It draws with a real typeface** (`--font`, else the first candidate that
+  loads, else the bitmap master; `fontdue` is a dev-dependency).
+  `raster::render` keeps the bitmap face and the tests never pass the flag, so
+  the geometry oracle goes on looking as synthetic as it should — giving *that*
+  a real font would make it 90% convincing at a job it cannot do.
+
+  The default face and its size are a **measurement** (SQ-0963). A half-block
+  sample is one cell wide and half a cell tall, so square samples want a cell of
+  exactly 1:2 — and because a cell is `round(advance · px)` by `round(line · px)`,
+  what matters is how often the *rounded* cell lands there. Fira Code (0.615 /
+  1.231 em = 2.000) does at ten sizes in 6..24 px/em — 5x10, 6x12, 7x14, 8x16,
+  9x18, 10x20, 11x22, 13x26, 14x28, 15x30, the historical terminal cells — where
+  JetBrains Mono (2.200), which this list used to lead with, manages one. So Fira
+  Code leads the list, and the rasterisation size comes from the face's own line
+  metrics rather than a `0.78 × cell_h` guess, with a printed complaint if some
+  other face's cell does not match the box it sits in.
+
+  **The kitty cell is 16x32** (SQ-1001; it was 8x18, then 8x16), which is 26 px/em
+  of that face and lands exactly. The absolute size is not a taste either: a v6
+  press draws its text on an 8x16 *game*-pixel cell, hybrid gives each of those
+  characters one terminal cell, and the art beside it is magnified by `s` — so a
+  cell of `8s × 16s` puts one game character in one terminal cell and anything
+  smaller renders the prose at a fraction of the size the game laid out. At 8x16
+  against art at 2x it was rendering it at half. The knock-on is that a kitty shot
+  cannot magnify by less than 2: at 1x the game's 80-column screen would get 40
+  cells and its text overruns its own windows. Half-blocks keep 10x20 because
+  `Picker::halfblocks()` hardcodes that cell whatever the terminal reports.
+
+  Coverage stopped being the deciding question at the same time. `Face::draw`
+  used to send a fixed RANGE — U+2500..=U+259F — to the bitmap master and
+  everything else to fontdue, so the map's arrowheads (Arrows and Geometric
+  Shapes) came out as `.notdef` boxes under Monaco. It now asks the face whether
+  it **has** the glyph (`fontdue::Font::has_glyph`) and falls back for anything it
+  does not, which fixes every face rather than one; the structural range still
+  goes to the bitmap master even when the face has it, because a text face draws
+  those with gaps at the cell seams. Anything neither can draw is named in the
+  run's output, since a blank cell is quieter than a tofu box and this quest
+  exists because a tofu box went unnoticed.
+
+  The structural range itself was still incomplete (SQ-1272): the automap's
+  `diagonal_corners` draws its half-diagonal corner stubs from four Legacy
+  Computing glyphs (U+1FBA0-1FBA3), which sat outside U+2500..=U+259F and so
+  went to an outline face like any text — landed there by CENTRING the
+  rasterised ink in the cell, discarding the glyph's own bearing
+  (`fontdue::Metrics::xmin`), which is a second, independent bug: a monospace
+  face places every glyph at a fixed offset from the cell's own origin, and
+  ink-centring silently overrides that for any asymmetric glyph. Two glyphs
+  from two rasterisers with two different placement rules step sideways at
+  the seam between them, which is what a committed gallery frame with a
+  diagonal connector showed. `is_structural` now also covers U+1FBA0-1FBA3
+  (routing them to the bitmap master, which has hand-authored bitmaps for
+  them tracing the Unicode chart's own edge-midpoint definitions), and the
+  outline branch places by bearing (`px + xmin`) rather than by ink-centring
+  whenever the face's own metrics match the cell it's drawn into, falling
+  back to centring only in the `cell_complaint` case where there's no
+  cell-relative origin to trust.
+
+- **A shot's `size` is a magnification.** A v6 press lays out on a fixed native
+  screen (640x400 for most of the manifest) and lanthorn letterboxes it into the
+  story pane at `min(box_w / native_w, box_h / native_h)`, unrounded; the
+  composite is then resized once to `round(native · s)` with every band a 1:1
+  crop out of it. So `s` is the only place softness can enter, and the manifest's
+  sizes are the ones where it is a whole number — 82x28, 122x41 and 162x53 for a
+  640x400 press at a 16x32 cell (2x, 3x, 4x), 130x43 at half-blocks' 10x20. The
+  first draft was 117x40 throughout, which is 1.4375x. `Provenance` derives the
+  native screen from the mounted medium through `startup.rs`'s own chain, the
+  tool prints the magnification under every frame, and
+  `every_v6_shot_magnifies_by_a_whole_number` fails the gate if a size drifts off
+  it. This cannot become one constant: Arthur's Apple II press is 560x384, and
+  the Macintosh's monochrome plates are 480x300 — which is why `zork0-mac-mono`
+  is 92x32 and every other kitty shot is 82x28.
+- **A `--pictures` name is part of the provenance** (SQ-1001). A shot may pass
+  `args = ["--pictures", "Pic.data"]` to choose which rendition of the artwork to
+  draw, and the archive's own flavour then picks the machine. `Provenance::read`
+  takes that name and resolves the override the way `startup.rs` does, because the
+  named archive changes the picture space the press lays out on: read without it,
+  the native screen, the magnification and the profile all belong to the rendition
+  the shot did not draw, and all of them stay self-consistent. `expect` cannot
+  catch that — two renditions of one scene look like each other. A named archive
+  that will not load fails the shot outright rather than falling back to the
+  Blorb, which in the app is the right call for a player and in a gallery is a
+  caption describing a picture that is not there.
+- **Nothing about a frame is declared twice.** The release and serial come from
+  the header of the bytes the medium mounted; the turn count is counted off the
+  key script. A manifest that tries to state either is refused.
+- **Every shot carries a non-vacuity guard** (`expect`, `expect_art_cells`), and
+  a shot that fails it never becomes a picture. This is not ceremony: pointed at
+  a DOS floppy that lanthorn opens a browser for, the first draft captured
+  *Ballyhoo* off a neighbouring disk while the release, serial and medium in the
+  record all went on correctly describing the Zork Zero image the manifest
+  named — because those are read from the file and not from the frame.
+- **One shot renders more than one frame: the composite** (SQ-1165). A shot that
+  names `machines = [2, 3, 4, 6, 7, 8]` is captured once per §11.1.3 interpreter
+  number — each launch with `--interpreter N --colour machine` appended, which is
+  the pair SQ-1154 made reach a bare story file — and the results are tiled into
+  a single picture, each tile badged with its machine. It is a shot KIND rather
+  than a second example beside this one, because the provenance, the guards, the
+  pinned seed, the burnt-in label, the proof sheet and `gallery.json` are all
+  things a composite needs exactly as much as a single frame does; a renderer of
+  its own would have grown them again and then drifted.
+
+  `machine-colours` is the one in the manifest: *Deadline* r27/s831005, a
+  **Version 3** story chosen for its status line, so every tile carries two
+  coloured surfaces rather than one and the reverse-video band is where the IBM
+  PC's white-on-EGA-blue and the Commodore 128's cyan show hardest. Six tiles,
+  not nine, because nine machines are not nine looks: the three Apple rows share
+  `APPLE_PERIOD_LOOK` and the Atari ST shares the Macintosh's pair.
+
+  **Its guard is `check_machines_differ`, and it is the reason the kind is worth
+  having.** Every tile draws the same story at the same moment, so every string
+  `expect` could name is on all of them and six copies of one palette pass
+  unanimously — the SQ-1164 failure one shape along. The guard reads each tile's
+  page, ink and pair set off its own story pane and refuses the frame if two
+  machines `zvm::interpreter` measured APART came out the same. The obligation is
+  derived per pair rather than listed, because interpreters 2 and 8 were measured
+  alike — both white on black with a full reverse — and differ only in caret
+  shape, so a rule of "every tile must differ" would refuse a correct frame.
+  Falsified by swapping the appended `--colour machine` for `--colour theme`: all
+  six tiles collapse onto the terminal default and the guard names eleven pairs.
+
+  Two layout facts are derived rather than chosen, and both because a TILE is a
+  terminal and therefore already landscape. `Shot::tile_columns` picks the count
+  that makes the finished PICTURE closest to square, not the squarest grid:
+  `ceil(sqrt(6))` gives 3x2 and a 3128x1402 banner that gets scaled down until the
+  prose is unreadable, where 2 columns give 2090x2016. And the machine's name is
+  a BADGE on the tile rather than a caption above it, drawn in the harness's own
+  bitmap face on a near-black plate under a hairline — a treatment lanthorn's
+  theme has nowhere, since the one thing the tag must not do is read as something
+  the app drew. `badge_anchor` finds the lowest clear two-row band in each pane
+  off that tile's own resolved screen, so it can never land on the status band,
+  the prose or the caret; a tile with no clear ground goes unbadged and says so.
+
+`tests/suites/gallery_manifest.rs` runs the whole validator over the committed
+recipe, so a manifest that has gone stale fails the gate rather than failing
+whoever is trying to cut a release. It needs no gitignored media.
+
+## Casts: the same capture, as a moving image
+
+`pty_stream/cast.rs` and `--example cast` (SQ-0943) serialise a capture as an
+[asciinema v2](https://docs.asciinema.org/manual/asciicast/v2/) file. It is a
+small tool because the harness already collects exactly the right data: a
+`Flush` is a timestamped byte range from the real binary under a real pty, and a
+v2 cast is a header line followed by `[seconds, "o", data]` events. Same shape as
+the gallery — one committed recipe (`crates/app/examples/casts.toml`), output
+under `target/casts/`, a required guard per entry.
+
+```sh
+cargo build --workspace
+cargo run -p app --example cast              # the whole manifest
+cargo run -p app --example cast -- --list
+cargo run -p app --example cast -- --only zork-map --gif
+asciinema play target/casts/machines.cast
+```
+
+**`--gif` is what makes a cast publishable.** A `.cast` is JSON and needs a
+player, which a GitHub README cannot run — so the flag renders each recording as
+an animated GIF beside it with [`agg`](https://docs.asciinema.org/manual/agg/),
+asciinema's own renderer (`brew install agg`). `docs/automapping.gif`,
+`docs/beyond-zork.gif` and `docs/anchorhead.gif` are that output.
+
+**`agg` and not `svg-term`, and the reason is geometry rather than taste.** The
+SVG route was built first and discarded: `svg-term` lays columns out 1.002 units
+apart while a box-drawing glyph is one unit wide, so every cell boundary carries a
+hairline seam. It is invisible in prose and cumulative along a rule — enough to
+render lanthorn's own window borders as dashed lines — and no flag adjusts it,
+because it is baked into the emitted geometry. (It also runs `svgo` over its own
+output, which *deletes* the `font-family` declaration and drops the whole page
+onto the viewer's proportional default; `--no-optimize` fixes that half but not
+the seams.) `agg` rasterises with a real font at whole-pixel cell positions, so a
+`│` column is solid and a `─` run is continuous.
+
+What that costs is GIF's 256-colour palette, and it is why **no cast is a Version
+6 recording**. A half-block v6 frame carries two 24-bit colours per cell and is
+exactly the content the palette cannot hold; more to the point, half-blocks is the
+fallback for a reader without a graphics protocol rather than a preview of what v6
+looks like. Version 6 is shown with the gallery's kitty stills, and motion is kept
+for what only motion shows. Every entry in `casts.toml` is text or 16-colour,
+which GIF holds exactly.
+
+**These recordings deliberately do NOT answer the kitty capability query.** The
+asciinema player renders cells and SGR and drops kitty's APC graphics, so a
+kitty recording replays with no artwork at all and lanthorn looks like it draws
+nothing. Left unanswered, `ratatui-image` falls back to half-blocks — the same
+v6 *pixel* path resolved into `▀` with a foreground and a background, which is
+glyphs and 24-bit SGR and replays exactly. Measured on a Journey recording:
+1,624 `▀`, 1,499 `▄`, 3,649 truecolour foreground and 3,689 truecolour
+background sequences, none in iTerm2's colon-separated form (the one gap in the
+player). The tool refuses any recording that emits real graphics commands
+anyway, and every file says in its own header why there is no kitty artwork in
+it.
+
+`Spec::answer_kitty` is what selects that, and `Spec::argv` is what lets the same
+driver record `zvm-cli`, `gvm-cli` and `scott-cli` — the CLI clients are
+text-only by design, so a cast captures them *completely*.
+
+One driver bug fell out of building this, and it is worth knowing about: sending
+a keystroke used to reset the same clock the flush grouping read, so the app's
+reply — a few milliseconds after the key — always looked like a continuation of
+the previous burst however many seconds earlier it was, and **every run
+collapsed into one flush at `at: 0`**. Invisible to the decoder, which only
+wants the grouping for attribution; fatal to a recorder, for which those
+timestamps *are* the recording. Reads and keystrokes now keep separate clocks.
+
+## See also
+
+- [Interactive-fiction standards lanthorn implements](../reference/standards.md) (Z-Machine,
+  Glulx, Glk, Quetzal, Blorb, Treaty of Babel).
+- [What CI cannot see](ci-fixture-coverage.md) — which integration suites skip
+  vacuously without `stories/`, which of them an authored fixture can reach,
+  and which are about a particular commercial release and never will be.
+- Design/strategy notes under [`docs/design/`](../design/).

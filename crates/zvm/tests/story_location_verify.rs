@@ -20,8 +20,9 @@
 
 use std::path::PathBuf;
 use zvm::cpu::exec::{Machine, StepResult};
-use zvm::location::{detect_location, LocationMethod};
+use zvm::location::{detect_location, find_player_object, LocationMethod};
 use zvm::memory::Memory;
+use zvm::text::input::ZsciiInput;
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
@@ -47,9 +48,10 @@ fn boot_to_first_read(data: Vec<u8>) -> Option<Machine> {
             StepResult::NeedLine { .. } => return Some(machine),
             StepResult::Quit | StepResult::Restart | StepResult::Fault => return Some(machine),
             StepResult::Continue => {}
-            StepResult::NeedChar => machine.supply_char(b'\n'),
+            StepResult::NeedChar => machine.supply_char(ZsciiInput::NEWLINE),
             StepResult::SaveRequest => machine.complete_save(false),
             StepResult::RestoreRequest => machine.complete_restore_failure(),
+            _ => return Some(machine),
         }
     }
     None
@@ -63,9 +65,10 @@ fn run_one_turn(machine: &mut Machine, input: &str) {
         match machine.step() {
             StepResult::NeedLine { .. } | StepResult::Quit | StepResult::Restart | StepResult::Fault => return,
             StepResult::Continue => {}
-            StepResult::NeedChar => machine.supply_char(b'\n'),
+            StepResult::NeedChar => machine.supply_char(ZsciiInput::NEWLINE),
             StepResult::SaveRequest => machine.complete_save(false),
             StepResult::RestoreRequest => machine.complete_restore_failure(),
+            _ => return,
         }
     }
 }
@@ -222,6 +225,58 @@ fn beyondzork_vt220_mode_bordered_title_resolves() {
     assert!(name.starts_with("Hilltop"), "expected Hilltop, got {name:?}");
 }
 
+// ── SQ-1259: room/player detection unchanged on titles the fix must not
+// disturb — widening `player_candidates` to parse words, and tie-breaking
+// `resolve_room_object` by the game's own `location` global / top-level
+// parent, both apply only when they actually resolve an ambiguity. Falsified
+// by reverting `crates/zvm/src/location.rs` alone (keeping this file) and
+// confirming these still pass unchanged — they do, byte for byte, both
+// before and after the fix. ─────────────────────────────────────────────────
+
+/// Photopia opens on a title/credits screen with no room yet: `(self object)`
+/// is genuinely this game's only avatar (it never renames or replaces it),
+/// so widening candidate matching to parse words adds no new contender here.
+#[test]
+fn photopia_room_and_player_detection_unchanged() {
+    let Some(story) = load_story("photopia.z5") else {
+        return; // fixture absent — skip.
+    };
+    let Some(machine) = boot_to_first_read(story) else {
+        panic!("photopia: never reached a line-read prompt");
+    };
+    assert_eq!(
+        detect_location(&machine),
+        None,
+        "photopia's opening prompt is still a title/credits screen, not a room"
+    );
+    assert_eq!(
+        find_player_object(&machine).map(|p| zvm::objects::short_name(&machine.mem, p)),
+        Some("(self object)".to_string()),
+        "photopia's avatar is genuinely the unrenamed Inform selfobj"
+    );
+}
+
+/// Curses opens in the Attic with an avatar literally named "yourself" — the
+/// Inform 6 idiom SQ-0701/SQ-1259's PLAYER_NAMES/PLAYER_WORDS both already
+/// cover — so nothing about the SQ-1259 widening changes its resolution.
+#[test]
+fn curses_room_and_player_detection_unchanged() {
+    let Some(story) = load_story("curses.z5") else {
+        return; // fixture absent — skip.
+    };
+    let Some(machine) = boot_to_first_read(story) else {
+        panic!("curses: never reached a line-read prompt");
+    };
+    let loc = detect_location(&machine).expect("curses opens in a detectable room");
+    assert_eq!(loc.method(), LocationMethod::PlayerParent);
+    let room = loc.object().expect("object-backed");
+    assert_eq!(room.number, 35);
+    assert_eq!(room.name, "Attic");
+    let player = find_player_object(&machine).expect("curses has an identifiable player object");
+    assert_eq!(player, 15);
+    assert_eq!(zvm::objects::short_name(&machine.mem, player), "yourself");
+}
+
 // ── SQ-0358: a stale status line must not outrank the object tree ───────────
 
 /// Restore `save_name` through the game's OWN restore path, so it redraws its status line exactly
@@ -239,10 +294,11 @@ fn restore_fixture(story: &str, save_name: &str) -> Option<Machine> {
             }
             StepResult::NeedLine { .. } if restored => return Some(m),
             StepResult::NeedLine { .. } => m.supply_line("x", 13), // "Restore from file:" prompt
-            StepResult::NeedChar => m.supply_char(b'\n'),
+            StepResult::NeedChar => m.supply_char(ZsciiInput::NEWLINE),
             StepResult::SaveRequest => m.complete_save(false),
             StepResult::Quit | StepResult::Restart | StepResult::Fault => return None,
             StepResult::Continue => {}
+            _ => return None,
         }
     }
     None

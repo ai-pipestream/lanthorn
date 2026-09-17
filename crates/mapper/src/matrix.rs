@@ -14,10 +14,10 @@
 //! unrelated to when the player found the room — so without a persisted visit order, numbering
 //! that used id order instead would renumber every "Maze" room behind a newly-found low-id one.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::direction::{opposite, Direction};
-use crate::graph::{MapGraph, RoomId};
+use crate::graph::{Connection, MapGraph, RoomId};
 use crate::layer::LayerId;
 
 /// The twelve travel directions, in the order the matrix columns them.
@@ -65,23 +65,42 @@ pub enum MatrixCell {
     Probed,
     /// Never tried — the exploration frontier.
     Untried,
+    /// Tried; the story sent the player somewhere different each time (SQ-1257) —
+    /// Lost Pig's gnome tunnels are the specimen. Explored, not a frontier, and
+    /// names no SINGLE destination because none is stable enough to name: the
+    /// room the story picks varies, so no `dest` can be trusted from one
+    /// crossing to the next. A REAL edge in the same direction beats this, and
+    /// this beats [`MatrixCell::SelfLoop`] on the same key — see
+    /// [`classify_with`].
+    ///
+    /// `destinations` is a COUNT, not the list (SQ-1261): every distinct room this direction has
+    /// actually been seen to land in ([`crate::graph::Room::random_destinations`]), carried here
+    /// only so the render layer can draw its superscript without a second graph lookup per cell.
+    /// The list itself belongs to the room panel and the dump, which read the graph directly —
+    /// `MatrixCell` stays `Copy`, so it carries a size, not the rooms.
+    Random { destinations: usize },
 }
 
 impl MatrixCell {
-    /// The room this cell points at, when it points at one. `None` for the three cells that name
-    /// no destination (`SelfLoop` points at the row's own room, so it names nothing new).
+    /// The room this cell points at, when it points at one. `None` for the cells that name no
+    /// SINGLE destination (`SelfLoop` points at the row's own room, so it names nothing new;
+    /// `Random` may have several, which is exactly why it cannot answer with one).
     pub fn dest(&self) -> Option<RoomId> {
         match self {
             MatrixCell::Reciprocal { dest }
             | MatrixCell::ReturnBy { dest, .. }
             | MatrixCell::OneWay { dest }
             | MatrixCell::LeavesLayer { dest } => Some(*dest),
-            MatrixCell::SelfLoop | MatrixCell::Probed | MatrixCell::Untried => None,
+            MatrixCell::SelfLoop
+            | MatrixCell::Probed
+            | MatrixCell::Untried
+            | MatrixCell::Random { .. } => None,
         }
     }
 
     /// True for the two cells that mark unexplored ground (`×` and `·`) — what the frontier style
-    /// dims.
+    /// dims. [`MatrixCell::Random`] is deliberately excluded: it is explored (the player tried it
+    /// and learned the story decides), just not explorable any further.
     pub fn is_frontier(&self) -> bool {
         matches!(self, MatrixCell::Probed | MatrixCell::Untried)
     }
@@ -89,20 +108,86 @@ impl MatrixCell {
 
 /// Classify `dir` out of `room`.
 ///
-/// A REAL destination beats a self-loop on the same key: the graph deliberately keeps both when it
-/// has seen both (see [`MapGraph::add_edge`]), and a passage that demonstrably leads somewhere is
-/// the more useful of the two facts. `↩` therefore means "the only thing this direction ever did
-/// was bring me back".
+/// Precedence, most specific fact first: a REAL destination beats everything else — the graph
+/// deliberately keeps a self-loop or a random mark beside a real edge on the same key (see
+/// [`MapGraph::add_edge`], [`MapGraph::mark_random_exit`]), and a passage that demonstrably
+/// leads somewhere is the more useful fact. Failing that, a RANDOM mark beats a self-loop
+/// (SQ-1257 Phase 3): the two are mutually exclusive for any move recorded since the
+/// rename-loop check went in (`Mapper::observe_inner` marks one or the other, never both, for
+/// the same crossing), but an older map file can carry both on one key, and "the story never
+/// commits to a destination" is the stronger of the two things to say about it. `↩` therefore
+/// means "the only thing this direction ever did was bring me back, under the same name every
+/// time".
+///
+/// SQ-1269 widens what can produce a mark on this key without changing this precedence at all:
+/// a rename-loop stays the one IMMEDIATE mark (structural — the story renamed the room in the
+/// same breath, which is proof on its own); an existing self-loop or edge that a NEW landing
+/// contradicts is no longer marked on the spot — it is left a suspicion for a probe to judge
+/// (`app::random_exit_probe`'s `Suspicion` shape), and only a DISAGREEING probe answer removes
+/// the old self-loop/edge and marks the direction (via `Mapper::resolve_suspicion_as_random`),
+/// pooling the room itself as a destination when a self-loop was the thing contradicted — the
+/// room card's "back here". An AGREEING probe answer instead concludes the passage merely
+/// CHANGED and mints straight over the old self-loop/edge with no mark at all
+/// (`Mapper::resolve_suspicion_as_changed`). Either way the self-loop and the mark still never
+/// coexist going forward; this cell's precedence is what protects an older save that predates
+/// the rule from showing both at once.
 pub fn classify(graph: &MapGraph, room: RoomId, dir: Direction) -> MatrixCell {
+    classify_with(graph, &ConnIndex::new(graph), room, dir)
+}
+
+/// The graph's connections indexed by origin room, built once per [`build`]
+/// call (SQ-1181).
+///
+/// `classify` asks "which edges leave this room" up to fifteen times per cell
+/// — the dest lookup, the reciprocal check, and one scan per return column —
+/// and a table redrawn at animation rate was paying rows x 12 x 15 full-list
+/// scans per frame. Each origin's edges keep the whole list's relative order,
+/// so the first-match answers are exactly the un-indexed ones.
+struct ConnIndex<'a> {
+    by_origin: HashMap<RoomId, Vec<&'a Connection>>,
+}
+
+impl<'a> ConnIndex<'a> {
+    fn new(graph: &'a MapGraph) -> Self {
+        let mut by_origin: HashMap<RoomId, Vec<&'a Connection>> = HashMap::new();
+        for c in graph.connections() {
+            by_origin.entry(c.origin).or_default().push(c);
+        }
+        ConnIndex { by_origin }
+    }
+
+    /// Every connection leaving `room`, in the graph's own insertion order.
+    fn from(&self, room: RoomId) -> &[&'a Connection] {
+        self.by_origin.get(&room).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// [`classify`], against a prebuilt [`ConnIndex`] — the same logic, scanning
+/// only the origin's own edges. The public per-cell `classify` delegates here
+/// with a throwaway index (one pass over the list, no worse than the single
+/// scan it always cost), so there is exactly one classification to keep right.
+fn classify_with(graph: &MapGraph, idx: &ConnIndex<'_>, room: RoomId, dir: Direction) -> MatrixCell {
     if dir == Direction::Unknown {
         return MatrixCell::Untried;
     }
-    let dest = graph
-        .connections()
-        .iter()
-        .find(|c| c.origin == room && c.dir == dir && c.dest != room)
-        .map(|c| c.dest);
+    let dest = idx.from(room).iter().find(|c| c.dir == dir && c.dest != room).map(|c| c.dest);
     let Some(dest) = dest else {
+        // A REAL edge (above) beats this, and did not exist — so a direction the story sends
+        // somewhere different each time is reported before falling back to a self-loop or the
+        // tried/untried read. Checked BEFORE self-loops (SQ-1257 Phase 3): a compass move that
+        // returns to the room it left AND renames it is recorded as a random mark, never a
+        // self-loop edge (see `Mapper::observe_inner`'s rename-loop check) — but an OLD map file
+        // saved before that distinction existed can still carry both a self-loop and a random
+        // mark on the same key, and a random exit is the stronger, more specific fact: it says
+        // not just "this returns" but "the story never commits to the same room name either".
+        // SQ-1257 Phase 2 can UPGRADE this: a random-marked direction that later behaves
+        // deterministically gets a real edge and the mark is cleared in the same stroke
+        // (`random_exit_probe::deliver`), so the two facts never coexist in the graph for long
+        // — but while the mark stands alone (no edge yet, or the edge disagreed and was
+        // removed), this is what makes it visible.
+        if graph.is_random_exit(room, dir) {
+            return MatrixCell::Random { destinations: graph.random_destinations(room, dir).len() };
+        }
         if graph.self_loops(room).contains(&dir) {
             return MatrixCell::SelfLoop;
         }
@@ -113,14 +198,13 @@ pub fn classify(graph: &MapGraph, room: RoomId, dir: Direction) -> MatrixCell {
     if graph.layer_of(dest) != graph.layer_of(room) {
         return MatrixCell::LeavesLayer { dest };
     }
-    if graph.connections().iter().any(|c| c.origin == dest && c.dir == opposite(dir) && c.dest == room)
-    {
+    if idx.from(dest).iter().any(|c| c.dir == opposite(dir) && c.dest == room) {
         return MatrixCell::Reciprocal { dest };
     }
     // Any other direction that comes back. Scanned in column order so the answer is stable
     // whatever order the edges were minted in.
     for back in MATRIX_DIRS {
-        if graph.connections().iter().any(|c| c.origin == dest && c.dir == back && c.dest == room) {
+        if idx.from(dest).iter().any(|c| c.dir == back && c.dest == room) {
             return MatrixCell::ReturnBy { dest, back };
         }
     }
@@ -341,13 +425,16 @@ impl Matrix {
 /// exactly the same order and a player's "the one I called 7" keeps meaning the same room.
 pub fn build(graph: &MapGraph, layer: LayerId) -> Matrix {
     let labels = labels(graph, layer);
+    // One index for the whole table (SQ-1181): rows x 12 cells all classify
+    // against it instead of each rescanning the full connection list.
+    let idx = ConnIndex::new(graph);
     let rows = rooms_by_seq(graph, layer)
         .into_iter()
         .map(|id| MatrixRow {
             room: id,
             label: labels.row_of(id).to_string(),
             tag: labels.tag_of(id).to_string(),
-            cells: MATRIX_DIRS.map(|d| classify(graph, id, d)),
+            cells: MATRIX_DIRS.map(|d| classify_with(graph, &idx, id, d)),
         })
         .collect();
     let here = graph.current().filter(|&id| graph.layer_of(id) == layer);
@@ -370,7 +457,7 @@ mod tests {
             (4, "Dead End, near Vending Machine"),
             (9, "At West End of Long Hall"),
         ] {
-            g.upsert_room(id, n.into());
+            g.upsert_room(id.into(), n.into());
         }
         let l = g.new_layer(Some(MAIN_LAYER), "Maze".into());
         for id in [1, 2, 3, 4] {
@@ -406,6 +493,104 @@ mod tests {
         g.add_edge(4, Direction::E, 1);
         assert_eq!(classify(&g, 4, Direction::E), MatrixCell::OneWay { dest: 1 });
         assert!(g.self_loops(4).contains(&Direction::E), "and the loop is not destroyed");
+    }
+
+    /// SQ-1257: a random exit reads as `?`, beats `Probed`/`Untried`, is beaten by a real edge,
+    /// and never counts as a frontier.
+    #[test]
+    fn a_random_exit_beats_probed_and_untried_but_a_real_edge_beats_it() {
+        let (mut g, _l) = maze();
+        assert_eq!(classify(&g, 1, Direction::S), MatrixCell::Untried, "never tried south");
+
+        g.mark_random_exit(1, Direction::S);
+        assert_eq!(
+            classify(&g, 1, Direction::S),
+            MatrixCell::Random { destinations: 0 },
+            "random beats untried, no destinations recorded yet"
+        );
+        assert!(!classify(&g, 1, Direction::S).is_frontier(), "random is explored, not a frontier");
+        assert!(g.untried(1).iter().all(|&d| d != Direction::S), "and drops out of the untried list");
+
+        g.mark_random_exit(4, Direction::E); // already Probed from `maze()`'s mark_tried
+        assert_eq!(
+            classify(&g, 4, Direction::E),
+            MatrixCell::Random { destinations: 0 },
+            "random beats a bare probe too"
+        );
+
+        // SQ-1257 Phase 2: a random mark can be UPGRADED — a direction that later behaves
+        // deterministically gets a real edge, via `random_exit_probe::deliver`, which clears the
+        // mark in the same stroke (`MapGraph::unmark_random_exit`). The classifier does not
+        // trust that pairing to be perfect on its own: an edge sitting beside a mark that,
+        // for whatever reason, was not cleared must still read as the edge, not the mark —
+        // a stale "destination varies" badge on a passage the map can now name is a worse lie
+        // than briefly trusting an edge the mapper itself just placed.
+        g.add_edge(1, Direction::S, 4);
+        assert_eq!(
+            classify(&g, 1, Direction::S),
+            MatrixCell::OneWay { dest: 4 },
+            "a real edge in the same key wins over an un-cleared random mark"
+        );
+        assert!(g.is_random_exit(1, Direction::S), "the random record itself is untouched by classify");
+    }
+
+    /// SQ-1261: the `Random` cell's `destinations` count tracks
+    /// [`MapGraph::note_random_destination`], not just whether the direction is marked.
+    #[test]
+    fn a_random_exit_carries_its_recorded_destination_count() {
+        let (mut g, _l) = maze();
+        g.mark_random_exit(1, Direction::S);
+        assert_eq!(classify(&g, 1, Direction::S), MatrixCell::Random { destinations: 0 });
+
+        g.note_random_destination(1, Direction::S, 2);
+        assert_eq!(classify(&g, 1, Direction::S), MatrixCell::Random { destinations: 1 });
+
+        g.note_random_destination(1, Direction::S, 3);
+        g.note_random_destination(1, Direction::S, 2); // repeat — no change
+        assert_eq!(classify(&g, 1, Direction::S), MatrixCell::Random { destinations: 2 });
+    }
+
+    /// SQ-1257 Phase 3: a key that carries BOTH a self-loop and a random mark — which
+    /// `Mapper::observe_inner`'s rename-loop check never produces for one crossing, but an older
+    /// map file can — must read as `Random`, the more specific fact ("the story never even
+    /// commits to a destination room name"). Falsify by reverting `classify_with`'s check order
+    /// back to self-loop-before-random and this fails on the first assertion.
+    #[test]
+    fn a_random_exit_beats_a_self_loop_on_the_same_key() {
+        let (mut g, _l) = maze();
+        // South out of room 1 carries no real edge in `maze()`, so a self-loop recorded there
+        // is the only fact on the key.
+        assert!(g.add_self_loop(1, Direction::S));
+        assert_eq!(classify(&g, 1, Direction::S), MatrixCell::SelfLoop, "a bare loop reads as a loop");
+
+        g.mark_random_exit(1, Direction::S);
+        assert_eq!(
+            classify(&g, 1, Direction::S),
+            MatrixCell::Random { destinations: 0 },
+            "random beats a self-loop recorded on the same key"
+        );
+        assert!(g.self_loops(1).contains(&Direction::S), "the self-loop record itself survives");
+    }
+
+    /// SQ-1181: `build` classifies against a shared per-call [`ConnIndex`];
+    /// the public per-cell `classify` builds a throwaway one. Both delegate to
+    /// the same `classify_with`, and this pins that the table really carries
+    /// the per-cell answers — the guard against the two routes ever drifting.
+    #[test]
+    fn build_cells_agree_with_per_cell_classify() {
+        let (g, l) = maze();
+        let m = build(&g, l);
+        for row in &m.rows {
+            for (i, cell) in row.cells.iter().enumerate() {
+                assert_eq!(
+                    *cell,
+                    classify(&g, row.room, MATRIX_DIRS[i]),
+                    "room {} {:?}",
+                    row.room,
+                    MATRIX_DIRS[i]
+                );
+            }
+        }
     }
 
     #[test]
@@ -478,7 +663,7 @@ mod tests {
     fn two_repeating_names_disambiguate_their_numbers() {
         let mut g = MapGraph::new();
         for (id, n) in [(1u16, "Maze"), (2, "Maze"), (3, "Cave"), (4, "Cave")] {
-            g.upsert_room(id, n.into());
+            g.upsert_room(id.into(), n.into());
         }
         let lbl = labels(&g, MAIN_LAYER);
         assert_eq!(lbl.tag_of(2), "M2");

@@ -12,6 +12,13 @@
 //!
 //! Lines starting with `#` are comments: the file is meant to be annotated (mark
 //! which room ids look wrong) and handed back for analysis.
+//!
+//! A Z-machine room's id is always its own real, stable object number (`#136`). A synthetic
+//! room (Glulx or name-only — see [`crate::roomid::is_synthetic_room`]) instead shows its small
+//! per-map discovery ORDINAL (`#12`) everywhere except the ROOM line, which carries both the
+//! ordinal and the raw id it stands for (`#12 (8000ABCD)`) so a reported problem can still be
+//! traced to the exact id every other diagnostic surface (the room panel, `crate::export_dot`)
+//! uses (SQ-1300).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -114,19 +121,36 @@ fn ascii_map(graph: &MapGraph, layer: mapper::layer::LayerId, symbols: &SymbolSe
 
 /// Produce the full map dump string for `graph`, drawn with the player's `symbols`.
 pub fn render_dump(graph: &MapGraph, symbols: &SymbolSet) -> String {
+    render_dump_with_header(graph, symbols, &[])
+}
+
+/// [`render_dump`], with `extra` lines added to the `#` header block after the
+/// room/edge/current line.
+///
+/// One caller: `lanthorn-mapgen`, which has a fact about the map that the graph
+/// itself has nowhere to put — where the story STARTS the player, and whether
+/// it could be learned at all (SQ-1359, `app::mapgen::StartProbe`). Each line
+/// is written verbatim behind a `# `, so a caller passes a sentence and not a
+/// format.
+pub fn render_dump_with_header(graph: &MapGraph, symbols: &SymbolSet, extra: &[String]) -> String {
     let mut rooms: Vec<&mapper::graph::Room> = graph.rooms().collect();
     rooms.sort_by_key(|r| r.id);
     let conns = graph.connections();
 
     let mut out = String::new();
     out.push_str("# lanthorn map dump\n");
-    let current = graph.current().map(|id| format!("#{id}")).unwrap_or_else(|| "none".into());
+    let current =
+        graph.current().map(|id| crate::roomid::room_label_no(graph, id)).unwrap_or_else(|| "none".into());
     out.push_str(&format!(
-        "# rooms: {}, edges: {}, current: {}\n#\n",
+        "# rooms: {}, edges: {}, current: {}\n",
         rooms.len(),
         conns.len(),
         current
     ));
+    for line in extra {
+        out.push_str(&format!("# {line}\n"));
+    }
+    out.push_str("#\n");
 
     if rooms.is_empty() {
         out.push_str("# (empty map)\n");
@@ -142,15 +166,64 @@ pub fn render_dump(graph: &MapGraph, symbols: &SymbolSet) -> String {
         } else {
             format!("  notes={:?}", r.notes)
         };
+        // Other names the story has printed for this room (SQ-1257 Phase 3) — Lost Pig's gnome
+        // tunnels are the specimen — so an exported map still says what the room was called
+        // before its label last changed.
+        let aka = if r.aliases.is_empty() {
+            String::new()
+        } else {
+            format!("  aka={:?}", r.aliases)
+        };
+
+        // Every `?` random-exit direction (SQ-1261), with the distinct rooms it has actually
+        // been seen to land in, by id and name — the same evidence the room card and the
+        // matrix's superscript count draw from, so a dump can be cross-checked against either.
+        let random = if r.random_exits.is_empty() {
+            String::new()
+        } else {
+            let dirs: Vec<String> = r
+                .random_exits
+                .iter()
+                .map(|&d| {
+                    let dests: Vec<String> = graph
+                        .random_destinations(r.id, d)
+                        .iter()
+                        .map(|&id| {
+                            // A pool member the map has no node for is a room only the SHADOW
+                            // has stood in — the random-exit probe deliberately admits a
+                            // destination the live player has never visited (SQ-1261), and the
+                            // map is a record of what the PLAYER has seen, so no room is added
+                            // for it. Say that outright: an empty `""` there read as a room
+                            // whose name went missing and sent SQ-1284 hunting a room-identity
+                            // bug that was not one.
+                            let shown = crate::roomid::room_label_no(graph, id);
+                            match graph.room(id) {
+                                Some(rr) => format!("{shown} {:?}", rr.label()),
+                                None => format!("{shown} <unvisited>"),
+                            }
+                        })
+                        .collect();
+                    // SQ-1370: a mark this direction did not earn — copied from a pool some
+                    // other direction proved, on the first walk into one of its rooms — says so,
+                    // because a dump is the first thing read when a `?` looks wrong and the two
+                    // kinds are judged differently on a re-walk (`random_exit_probe::deliver_upgrade`).
+                    let how = if graph.is_inherited_random_exit(r.id, d) { " inherited" } else { "" };
+                    format!("{}→({}){how}", dir_str(d), dests.join(", "))
+                })
+                .collect();
+            format!("  random=[{}]", dirs.join(", "))
+        };
 
         // Build align= annotation.
         let mut align_parts: Vec<String> = Vec::new();
         if let Some(&cid) = chains.ew.get(&r.id) {
-            let members: Vec<String> = chains.ew_members[cid].iter().map(|id| id.to_string()).collect();
+            let members: Vec<String> =
+                chains.ew_members[cid].iter().map(|&id| crate::roomid::room_label_no(graph, id)).collect();
             align_parts.push(format!("row[{}]", members.join(",")));
         }
         if let Some(&cid) = chains.ns.get(&r.id) {
-            let members: Vec<String> = chains.ns_members[cid].iter().map(|id| id.to_string()).collect();
+            let members: Vec<String> =
+                chains.ns_members[cid].iter().map(|&id| crate::roomid::room_label_no(graph, id)).collect();
             align_parts.push(format!("col[{}]", members.join(",")));
         }
         let align = if align_parts.is_empty() {
@@ -163,7 +236,14 @@ pub fn render_dump(graph: &MapGraph, symbols: &SymbolSet) -> String {
         let dropped: Vec<String> = conns
             .iter()
             .filter(|c| c.origin == r.id && c.distorted && grid_offset(c.dir).is_some())
-            .map(|c| format!("{}→{}→{}", c.origin, dir_str(c.dir), c.dest))
+            .map(|c| {
+                format!(
+                    "{}→{}→{}",
+                    crate::roomid::room_label_no(graph, c.origin),
+                    dir_str(c.dir),
+                    crate::roomid::room_label_no(graph, c.dest)
+                )
+            })
             .collect();
         let dropped_str = if dropped.is_empty() {
             String::new()
@@ -179,15 +259,21 @@ pub fn render_dump(graph: &MapGraph, symbols: &SymbolSet) -> String {
             String::new()
         };
         out.push_str(&format!(
-            "ROOM {} {:?} pos={}{} align={}{}{}\n",
-            r.id, r.label(), pos, notes, align, dropped_str, layer_str
+            "ROOM {} {:?} pos={}{}{}{} align={}{}{}\n",
+            crate::roomid::room_label_full(graph, r.id), r.label(), pos, notes, aka, random, align, dropped_str, layer_str
         ));
     }
 
     out.push_str("#\n# === EDGES (origin DIR dest) ===\n");
     for c in conns {
         let dist = if c.distorted { "  distorted" } else { "" };
-        out.push_str(&format!("EDGE {} {} {}{}\n", c.origin, dir_str(c.dir), c.dest, dist));
+        out.push_str(&format!(
+            "EDGE {} {} {}{}\n",
+            crate::roomid::room_label_no(graph, c.origin),
+            dir_str(c.dir),
+            crate::roomid::room_label_no(graph, c.dest),
+            dist
+        ));
     }
 
     let portals: Vec<String> = conns
@@ -196,11 +282,17 @@ pub fn render_dump(graph: &MapGraph, symbols: &SymbolSet) -> String {
         .map(|c| {
             let name = graph.room(c.dest).map(|r| r.label().to_string()).unwrap_or_default();
             let glyph = arrow_for_direction(c.dir, &symbols.arrows, &symbols.portal);
-            format!("PORTAL {} {} #{} {}", c.origin, glyph, c.dest, name)
+            format!(
+                "PORTAL {} {} {} {}",
+                crate::roomid::room_label_no(graph, c.origin),
+                glyph,
+                crate::roomid::room_label_no(graph, c.dest),
+                name
+            )
         })
         .collect();
     if !portals.is_empty() {
-        out.push_str("#\n# === PORTALS (origin glyph #target name) ===\n");
+        out.push_str("#\n# === PORTALS (origin glyph target name) ===\n");
         for line in &portals {
             out.push_str(line);
             out.push('\n');
@@ -236,7 +328,7 @@ pub fn render_dump(graph: &MapGraph, symbols: &SymbolSet) -> String {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-state"))]
 mod tests {
     use super::*;
     use mapper::direction::Direction;
@@ -257,8 +349,8 @@ mod tests {
             .expect("peel cellar");
         let dump = render_dump(&g, &SymbolSet::default());
         // ROOM legend tags the peeled room's layer; the base room carries no tag.
-        assert!(dump.contains(&format!("ROOM 2 \"Cellar\" pos=0,0 align=none layer={l}")), "dump:\n{dump}");
-        assert!(dump.lines().any(|ln| ln.starts_with("ROOM 1 \"Hall\"") && !ln.contains("layer=")));
+        assert!(dump.contains(&format!("ROOM #2 \"Cellar\" pos=0,0 align=none layer={l}")), "dump:\n{dump}");
+        assert!(dump.lines().any(|ln| ln.starts_with("ROOM #1 \"Hall\"") && !ln.contains("layer=")));
         // The MAP renders each layer under its own header (no single merged plane).
         assert!(dump.contains("# --- layer 0 (Main) ---"), "dump:\n{dump}");
         assert!(dump.contains(&format!("# --- layer {l} (Cellar) ---")), "dump:\n{dump}");
@@ -283,7 +375,7 @@ mod tests {
         let dump = render_dump(&g, &nerd);
         // nf-fa-sign_in (U+F090) — the "nerdfont" preset's In icon.
         assert!(
-            dump.contains(&format!("PORTAL 1 {} #2 Vault", '\u{F090}')),
+            dump.contains(&format!("PORTAL #1 {} #2 Vault", '\u{F090}')),
             "legend must use the configured preset:\n{dump}"
         );
         assert!(dump.contains('\u{F090}'), "map badge must use it too:\n{dump}");
@@ -294,7 +386,7 @@ mod tests {
         // The default set still reads as it always did.
         let plain = render_dump(&g, &SymbolSet::default());
         assert!(
-            plain.contains(&format!("PORTAL 1 {ascii_in} #2 Vault")),
+            plain.contains(&format!("PORTAL #1 {ascii_in} #2 Vault")),
             "default dump keeps the default icon:\n{plain}"
         );
     }
@@ -307,12 +399,128 @@ mod tests {
         let dump = render_dump(&m.graph, &SymbolSet::default());
 
         assert!(dump.contains("# lanthorn map dump"));
-        assert!(dump.contains("ROOM 1 \"West of House\""), "room legend: {dump}");
-        assert!(dump.contains("ROOM 2 \"Forest\""));
-        assert!(dump.contains("EDGE 1 N 2"), "edge list: {dump}");
+        assert!(dump.contains("ROOM #1 \"West of House\""), "room legend: {dump}");
+        assert!(dump.contains("ROOM #2 \"Forest\""));
+        assert!(dump.contains("EDGE #1 N #2"), "edge list: {dump}");
         // The ASCII map shows room ids.
         assert!(dump.contains("#1"));
         assert!(dump.contains("#2"));
+    }
+
+    /// SQ-1300: a synthetic (name-only/Glulx) room's ROOM line carries BOTH its small per-map
+    /// ordinal and the raw hex id underneath it, so a reported problem can still be traced to the
+    /// exact id every other diagnostic surface uses — while every OTHER reference to the same
+    /// room (the EDGE list, the ASCII grid) carries only the short ordinal form, matching what the
+    /// screen itself shows. A Z-machine room's id is untouched by any of this.
+    #[test]
+    fn dump_room_line_carries_both_forms_for_a_synthetic_room_edges_carry_only_the_ordinal() {
+        let mut m = Mapper::default();
+        let alley = crate::roomid::synthetic_room_id("Back Alley");
+        let sigil = crate::roomid::synthetic_room_id("Sigil Street");
+        m.observe(alley, "Back Alley", None);
+        m.observe(sigil, "Sigil Street", Some(Direction::N));
+        let dump = render_dump(&m.graph, &SymbolSet::default());
+
+        let hex = crate::roomid::display_room_id(alley);
+        let room_line = dump.lines().find(|l| l.starts_with("ROOM #1 ")).expect("Back Alley's ROOM line");
+        assert!(
+            room_line.contains(&format!("#1 ({})", hex.trim_start_matches('#'))),
+            "ROOM line carries both the ordinal and the raw hex id: {room_line}"
+        );
+
+        assert!(dump.contains("EDGE #1 N #2"), "EDGE line carries only the short ordinal form:\n{dump}");
+        assert!(!dump.contains(&hex), "the raw hex id appears nowhere outside the ROOM line:\n{dump}");
+
+        // A Z-machine room (below the synthetic flag) is untouched by any of this.
+        let mut m2 = Mapper::default();
+        m2.observe(136, "Hallway", None);
+        let dump2 = render_dump(&m2.graph, &SymbolSet::default());
+        assert!(dump2.contains("ROOM #136 \"Hallway\""), "a real object number keeps its plain form:\n{dump2}");
+    }
+
+    /// SQ-1257 Phase 3: a room the story has renamed carries its other names on the ROOM line
+    /// as `aka=[...]`, so `/export-map` keeps them. A room with no rename carries no `aka=`
+    /// segment at all — the field must not clutter every ordinary room.
+    #[test]
+    fn dump_room_line_carries_aka_only_when_the_room_has_aliases() {
+        let mut m = Mapper::default();
+        m.observe_moved(183, "Twisty Cave", None);
+        m.observe_moved(183, "Confusing Passage", Some(Direction::N));
+        m.observe(2, "Plain Room", None); // never renamed
+        let dump = render_dump(&m.graph, &SymbolSet::default());
+
+        assert!(
+            dump.contains(r#"aka=["Twisty Cave"]"#),
+            "the tunnel room's old name appears as aka=[...]:\n{dump}"
+        );
+        let plain_room_line =
+            dump.lines().find(|l| l.starts_with("ROOM #2 ")).expect("room 2's line");
+        assert!(!plain_room_line.contains("aka="), "an unrenamed room carries no aka= at all: {plain_room_line}");
+    }
+
+    /// SQ-1261: a `?` random exit carries the rooms it has actually landed in on the ROOM line
+    /// as `random=[...]`, by id and name — so an exported map keeps the same evidence the room
+    /// card and the matrix's superscript count show. A room with no random exit carries no
+    /// `random=` segment at all.
+    #[test]
+    fn dump_room_line_carries_random_destinations_only_when_recorded() {
+        let mut m = Mapper::default();
+        m.observe(1, "Windy Cave", None);
+        m.observe(2, "Plain Room", None); // never marked
+        assert!(m.record_random_exit(1, Direction::N));
+        m.graph.note_random_destination(1, Direction::N, 2);
+        let dump = render_dump(&m.graph, &SymbolSet::default());
+
+        let random_room_line =
+            dump.lines().find(|l| l.starts_with("ROOM #1 ")).expect("room 1's line");
+        assert!(
+            random_room_line.contains(r#"random=[N→(#2 "Plain Room")]"#),
+            "the marked direction names its recorded destination by id and name: {random_room_line}"
+        );
+        let plain_room_line =
+            dump.lines().find(|l| l.starts_with("ROOM #2 ")).expect("room 2's line");
+        assert!(
+            !plain_room_line.contains("random="),
+            "a room with no random exit carries no random= at all: {plain_room_line}"
+        );
+
+        // SQ-1370: a mark COPIED from another direction's pool is annotated, because a re-walk
+        // judges the two differently and a dump is where that question gets asked.
+        assert!(
+            !random_room_line.contains("inherited"),
+            "an earned mark says nothing extra: {random_room_line}"
+        );
+        m.graph.mark_random_exit_inherited(2, Direction::W);
+        m.graph.note_random_destination(2, Direction::W, 1);
+        let dump = render_dump(&m.graph, &SymbolSet::default());
+        let inherited_line =
+            dump.lines().find(|l| l.starts_with("ROOM #2 ")).expect("room 2's line");
+        assert!(
+            inherited_line.contains(r#"random=[W→(#1 "Windy Cave") inherited]"#),
+            "an inherited mark says so: {inherited_line}"
+        );
+    }
+
+    /// SQ-1284: a pooled destination the map holds no room for is a room only the SHADOW has
+    /// stood in — the pool admits one deliberately (SQ-1261) — and the dump must SAY so rather
+    /// than print an empty name, which reads as a room whose name went missing.
+    #[test]
+    fn dump_names_a_pooled_room_the_map_does_not_hold() {
+        let mut m = Mapper::default();
+        m.observe(1, "Twisting Lane", None);
+        assert!(m.record_random_exit(1, Direction::E));
+        m.graph.note_random_destination(1, Direction::E, 55341); // never observed as a room
+        let dump = render_dump(&m.graph, &SymbolSet::default());
+
+        let line = dump.lines().find(|l| l.starts_with("ROOM #1 ")).expect("room 1's line");
+        assert!(
+            line.contains("#55341 <unvisited>"),
+            "an unvisited pool member is named as such, not as an empty name: {line}"
+        );
+        assert!(
+            !line.contains(r#"#55341 """#),
+            "…and never as `#55341 \"\"`, the spelling that read as a lost room name: {line}"
+        );
     }
 
     #[test]
@@ -348,6 +556,35 @@ mod tests {
         assert!(!dump.contains("▒ = unrouted"), "unrouted concept removed from legend");
     }
 
+    /// SQ-1277's own claim ("map_dump.rs renders from the graph, not the buffer") does NOT
+    /// hold — `ascii_map` renders through the real `render_map` into an off-screen buffer and
+    /// copies each cell's symbol verbatim (see this module's own doc comment) — so the NBSP
+    /// `guard_symbol_spill` writes beside a west arrowhead's short label DOES reach the dump
+    /// text. It is harmless here for the same reason it is on screen: a NBSP prints
+    /// indistinguishably from a plain space and `char::is_whitespace()` still calls it
+    /// whitespace, so nothing that reads this dump by eye or by `.contains()` can tell the
+    /// difference — only a byte-exact comparison against a space would. Pinned here so a
+    /// future exact-text fixture doesn't discover the difference by surprise.
+    #[test]
+    fn nbsp_guard_reaches_the_dump_but_reads_as_a_plain_space() {
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Cave".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (1, 0));
+        g.set_pos(2, (0, 0));
+        g.add_edge(1, Direction::W, 2);
+        let dump = render_dump(&g, &SymbolSet::default());
+        assert!(dump.contains('\u{a0}'), "the guard's NBSP does reach the dump text:\n{dump}");
+        for line in dump.lines() {
+            for ch in line.chars() {
+                if ch == '\u{a0}' {
+                    assert!(ch.is_whitespace(), "NBSP must still read as whitespace to any consumer");
+                }
+            }
+        }
+    }
+
     #[test]
     fn dump_legend_shows_alignment_rules() {
         use mapper::direction::Direction;
@@ -357,7 +594,7 @@ mod tests {
         // make it a reciprocal E/W pair so a chain forms
         m.graph.add_edge(2, Direction::W, 1);
         let dump = render_dump(&m.graph, &SymbolSet::default());
-        assert!(dump.contains("align=row[1,2]"), "reciprocal pair annotated as a row chain:\n{dump}");
+        assert!(dump.contains("align=row[#1,#2]"), "reciprocal pair annotated as a row chain:\n{dump}");
     }
 
     #[test]
@@ -393,9 +630,9 @@ mod tests {
         // Five spoke rooms at column 0, rows 1..5.
         for row in 1i32..=5 {
             let id = (row + 1) as u16;
-            g.upsert_room(id, format!("S{row}"));
-            g.set_pos(id, (0, row));
-            g.add_edge(id, Direction::E, 1);
+            g.upsert_room(id.into(), format!("S{row}"));
+            g.set_pos(id.into(), (0, row));
+            g.add_edge(id.into(), Direction::E, 1);
         }
 
         let dump = render_dump(&g, &SymbolSet::default());
@@ -425,7 +662,7 @@ mod tests {
         let dump = render_dump(&m.graph, &SymbolSet::default());
         assert!(dump.contains("# === PORTALS"), "portal legend section present:\n{dump}");
         assert!(
-            dump.contains("PORTAL 1 ↑ #2 Attic"),
+            dump.contains("PORTAL #1 ↑ #2 Attic"),
             "portal line shows origin, glyph, target id and full name:\n{dump}"
         );
     }

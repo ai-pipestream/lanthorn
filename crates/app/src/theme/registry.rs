@@ -329,16 +329,46 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("glk.grid.input", Section::GlkGrid, Kind::Style, Some("accent"), Delta::EMPTY),
     row("glk.grid.user1", Section::GlkGrid, Kind::Style, Some("chrome"), Delta::EMPTY),
     row("glk.grid.user2", Section::GlkGrid, Kind::Style, Some("chrome"), Delta::EMPTY),
+    // A Glk grid's GROUND (the cells the game never wrote) — reversed chrome,
+    // the same spelling `status_bar`/`help_bar` already use, so a grid window
+    // reads as a distinct chrome band rather than page-on-page (SQ-1212). This
+    // is deliberately NOT one of the 11 `GLK_STYLE_NAMES` slots above: it is the
+    // fill behind unwritten cells, not a per-style colour a game selects into.
+    row("glk.grid.background", Section::GlkGrid, Kind::Style, Some("chrome"), mods(false, false, false, true)),
     // ── §4 map.* colours (hybrid (c): own tokens; current/selected → accent) ──
     // map.background: own token, defaults to terminal background (resolver-supplied).
     row("map.background", Section::Map, Kind::Style, None, Delta::EMPTY),
     // Room fill + cardinal/portal connectors derive from roles so a base scheme
     // recolours them (old from_ghostty: room=foreground, connector=palette[6]).
-    // `text`/`accent` give white/cyan for the terminal default AND follow the scheme.
+    // `text`/`accent` give white/blue for the terminal default (SQ-1531: accent
+    // moved from the cyan slot to the blue one) AND follow the scheme.
     row("map.room", Section::Map, Kind::Style, Some("text"), Delta::EMPTY),
     row("map.room_current", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.room_selected", Section::Map, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    // The superscript alias-count marker beside a room's label (SQ-1257 Phase 3) — a room like
+    // Lost Pig's gnome tunnels that keeps changing its own printed name. `muted`, same reasoning
+    // as `map.loc_indicator`: a small footnote, not something competing with the label for the
+    // eye.
+    row("map.room_alias_marker", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
+    // The box drawn for a room that lives on ANOTHER layer (SQ-1356). `muted`, because a ghost
+    // is a signpost rather than a place: it must be legible enough to read the name off, and
+    // quiet enough that a layer's own rooms are what the eye lands on first. The broken outline
+    // (`map.ghost_box_style`) is what carries the distinction where colour cannot.
+    row("map.room_ghost", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
+    // The `?` random-exit stub on a room box's border/corner (SQ-1261) — the same fact
+    // `map.matrix.cell:random` marks in the table, so it shares that selector's `alert` role
+    // rather than inventing a second colour for one idea.
+    row("map.room_random_stub", Section::Map, Kind::Style, Some("alert"), Delta::EMPTY),
     row("map.connector", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
+    // The PRIMARY arrowhead of a stacked same-destination group (SQ-1276): several of a room's
+    // own exits collapse to one line, and this is the accent that tells it apart from an
+    // ordinary passage. Defaults to the room BORDER's own colour, reversed, not the exit arrow's
+    // — `draw_box_room` draws a border in `map.room`'s style (current/selected rooms are handled
+    // at draw time by `draw_connector_arrows`'s own per-room background pick, not by this
+    // selector), so the primary reads as a bite taken out of that room's own frame rather than as
+    // another connector colour landing on it. The same "accented by inversion" idiom
+    // `map.room_selected` already uses on the room box itself.
+    row("map.room_stacked_exit", Section::Map, Kind::Style, Some("map.room"), mods(false, false, false, true)),
     // `distorted` (magenta) has no matching role — kept explicit (a distinctive marker).
     row("map.connector_distorted", Section::Map, Kind::Style, None, fg(Color::Magenta)),
     row("map.connector_portal", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
@@ -359,6 +389,10 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // "how do I get THERE", and the two frequently light up in the same row.
     row("map.matrix.cell:path", Section::Map, Kind::Style, Some("accent"), mods(true, false, true, false)),
     row("map.matrix.cell:frontier", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
+    // `?` — a direction the STORY sends somewhere different each time (SQ-1257), Lost Pig's gnome
+    // tunnels being the specimen. Deliberately not `frontier`: this is a random exit is explored,
+    // not unexplored ground, so it defaults to `alert` rather than dimmed out of the way like `·`/`×`.
+    row("map.matrix.cell:random", Section::Map, Kind::Style, Some("alert"), Delta::EMPTY),
     row("map.matrix.footnote", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     // ── Honest asymmetric edges in the DRAWN view (SQ-0666). Both default to the current
     // connector appearance, so nothing changes look until someone styles them.
@@ -368,6 +402,7 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.trail", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     // Glyph-set presets (the old [symbols] section, merged in): preset name in `glyph`.
     row("map.box_style", Section::Map, Kind::Placement, None, glyph("rounded")),
+    row("map.ghost_box_style", Section::Map, Kind::Placement, None, glyph("dashed")),
     row("map.arrow_set", Section::Map, Kind::Placement, None, glyph("filled")),
     row("map.portal_icons", Section::Map, Kind::Placement, None, glyph("ascii")),
     row("map.path_style", Section::Map, Kind::Placement, None, glyph("light")),
@@ -406,10 +441,11 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // floated over and was invisible except for its text (SQ-1139). It reported as
     // "blends into the background" because it *was* the background.
     //
-    // `accent` is not one either, and that is the trap worth naming: the cyan a
-    // tooltip wants IS accent's cyan, but accent is `fg(Cyan)` with NO background
-    // (`slot(6, ..)` in resolve.rs), so deriving from it reproduces SQ-1139 exactly
-    // — cyan ink on whatever the tip floats over. A surface needs the PAIR.
+    // `accent` is not one either, and that is the trap worth naming: the highlight
+    // colour a tooltip wants IS accent's own ink, but accent is `fg(..)` with NO
+    // background (`slot(4, ..)` in resolve.rs — SQ-1531 moved this from the cyan
+    // slot to the blue one), so deriving from it reproduces SQ-1139 exactly — ink
+    // with no fill on whatever the tip floats over. A surface needs the PAIR.
     //
     // `dialog.list_selected` is that pair: it is the Black-on-Cyan row highlight
     // every modal list already uses (Saves, Replay, browser, Config, verb dock), so
@@ -450,14 +486,20 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("more_prompt", Section::Elements, Kind::Style, Some("chrome"), mods(false, false, false, true)),
     row("tidy_progress", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     row("meta_marker", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
-    row("inventory_dock", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
-    // ── The room dock (SQ-0692): the docked panel describing one room. `room_dock`
-    // is its body text; the header line naming the room, its layer and the
-    // follow/pin regime gets its own selector, reversed while PINNED so the one
-    // line that changes meaning is the one that changes look.
-    row("room_dock", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
-    row("room_dock.header", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
-    row("room_dock.header:pinned", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    row("inventory_panel", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    // ── The Room Panel (SQ-0692): the panel describing one room, docked at the
+    // bottom of the map pane. `room_panel` is its body text; the header line
+    // naming the room, its layer and the follow/pin regime gets its own
+    // selector, reversed while PINNED so the one line that changes meaning is
+    // the one that changes look.
+    row("room_panel", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("room_panel.header", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
+    row("room_panel.header:pinned", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    // The "Also seen as: ..." line (SQ-1257 Phase 3) — the other names the story has printed
+    // for this room, e.g. Lost Pig's gnome tunnels. `muted` on purpose, same reasoning as
+    // `map.loc_indicator`: it is background information about the room, not something to draw
+    // the eye to the way the header or the exit card does.
+    row("room_panel.aliases", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("story_info_title", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
     // ── `/dump-terminal` (SQ-0994). Its whole point is telling a MEASURED value
     // from an ASSUMED one, so the two get different looks: a heading to find the
@@ -492,6 +534,8 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("story_no_metadata", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("story_tile", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("story_tile_selected", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, true)),
+    // A folder row in the story picker (a sub-directory of the library, or `..`).
+    row("story_folder", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     row("notification", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
     row("hotkey_key", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     // Sound-beep pulse colours are bespoke (warm amber / cool blue) — no role
@@ -504,7 +548,10 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("input_text", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("input_prompt", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("upper_window_border", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
-    row("room_panel", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    // A Scott Adams game's own chrome window describing the current room —
+    // unrelated to our map pane's Room Panel below, hence the `scott_` prefix
+    // rather than `room_panel` (SQ-1237 freed that name for the UI panel).
+    row("scott_room_panel", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
     // ── command palette (SQ-0419) — reuses the dialog chrome; these style its
     // rows. `palette_match` highlights the fuzzy-matched characters; `palette_selected`
     // is the highlighted row; `palette_query` is the input line. ──────────────
@@ -574,7 +621,18 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // dialog body must still be able to leave the glyphs at full strength, since
     // the whole ask is "can you see these clearly".
     row("dialog.font_check.sample", Section::Dialog, Kind::Style, Some("dialog.background"), Delta::EMPTY),
-    // ── SQ-0664: the command band (bottom dock). Its rows reuse
+    // ── SQ-1227: the story browser's per-story menu — the little context menu
+    // that Space (or a right-click) opens beside the highlighted row. It is a
+    // modal surface like any other, so all four rows INHERIT rather than mint a
+    // colour: the border is the dialog frame, an item is the dialog body, the
+    // highlighted item is the same Black-on-Cyan every modal list uses, and the
+    // right-hand key column is the dim footer text, because a hotkey shown for
+    // REFERENCE must not compete with the action it belongs to.
+    row("dialog.story_menu.border", Section::Dialog, Kind::BorderGlyphs, Some("dialog.border"), Delta::EMPTY),
+    row("dialog.story_menu.item", Section::Dialog, Kind::Style, Some("dialog.background"), Delta::EMPTY),
+    row("dialog.story_menu.item:selected", Section::Dialog, Kind::Style, Some("dialog.list_selected"), Delta::EMPTY),
+    row("dialog.story_menu.key", Section::Dialog, Kind::Style, Some("dialog.list_footer"), Delta::EMPTY),
+    // ── SQ-0664: the command panel. Its `command_panel.*` rows reuse
     // `dialog.list_selected`. SQ-0667 (2026-08-05) retired the band's own
     // frame (it draws no `panel.border` anymore — see `render/command_band.rs`)
     // and its phrase line (`band.phrase` / `band.phrase:armed`, RETIRED along
@@ -583,23 +641,25 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // Column headers (WHAT — here / WHAT — carried / WITH…; VERB's header
     // carries no text anymore, also SQ-0667): muted until the column holds
     // the cursor.
-    row("band.column_header", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
-    row("band.column_header:active", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
-    // The one-click quick-action row along the bottom of the band.
-    row("band.quick", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("command_panel.column_header", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("command_panel.column_header:active", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    // The one-click quick-action row along the bottom of the band. Normal
+    // text, not muted (SQ-1218) — the rose/cluster/word block is a primary
+    // set of click targets, not secondary chrome.
+    row("command_panel.quick", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     // The quick block's hover highlight (SQ-0677): reversed video, since the
     // quick block lost its arrow-armed keyboard state (armed columns reuse
     // `dialog.list_selected` instead, a fg/bg swap, not REVERSED) and hover is
     // now its only transient highlight — the two must never look the same.
-    row("band.quick:hover", Section::Elements, Kind::Style, Some("band.quick"), mods(false, false, false, true)),
+    row("command_panel.quick:hover", Section::Elements, Kind::Style, Some("command_panel.quick"), mods(false, false, false, true)),
     // In-column group labels and the "(nothing visible)" placeholder.
-    row("band.group_label", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
+    row("command_panel.group_label", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
     // SQ-1135: a noun-column row that came from what the story PRINTED rather
     // than from its object tree. Same column, weaker claim — the story knows the
     // word, which is not a promise the thing is here — so it is dimmed. The
     // band's first per-ROW selector; every other row still takes the panel's
     // base style, and the selection (`dialog.list_selected`) still overrides.
-    row("band.item:seen", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("command_panel.item:seen", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     // The file browser's current-directory row and unselected directory entries.
     row("file_browser_cwd", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
     row("file_browser_dir", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
@@ -612,7 +672,7 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
         Delta { fg: Some(Color::Black), bg: Some(Color::Yellow), ..Delta::EMPTY }),
 ]);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-theme"))]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -692,12 +752,17 @@ mod tests {
         "glk.grid.input",
         "glk.grid.user1",
         "glk.grid.user2",
+        "glk.grid.background",
         // §4 map.*
         "map.background",
         "map.room",
         "map.room_current",
         "map.room_selected",
+        "map.room_alias_marker",
+        "map.room_random_stub",
+        "map.room_ghost",
         "map.connector",
+        "map.room_stacked_exit",
         "map.connector_distorted",
         "map.connector_portal",
         "map.shared_path",
@@ -708,11 +773,13 @@ mod tests {
         "map.matrix.cell:entrance",
         "map.matrix.cell:path",
         "map.matrix.cell:frontier",
+        "map.matrix.cell:random",
         "map.matrix.footnote",
         "map.edge:oneway",
         "map.edge:asym",
         "map.trail",
         "map.box_style",
+        "map.ghost_box_style",
         "map.arrow_set",
         "map.portal_icons",
         "map.path_style",
@@ -739,10 +806,11 @@ mod tests {
         "more_prompt",
         "tidy_progress",
         "meta_marker",
-        "inventory_dock",
-        "room_dock",
-        "room_dock.header",
-        "room_dock.header:pinned",
+        "inventory_panel",
+        "room_panel",
+        "room_panel.header",
+        "room_panel.header:pinned",
+        "room_panel.aliases",
         "story_info_title",
         "terminal_dump_heading",
         "terminal_dump_assumed",
@@ -765,6 +833,7 @@ mod tests {
         "story_no_metadata",
         "story_tile",
         "story_tile_selected",
+        "story_folder",
         "notification",
         "hotkey_key",
         "sound_beep_high",
@@ -775,7 +844,7 @@ mod tests {
         "input_text",
         "input_prompt",
         "upper_window_border",
-        "room_panel",
+        "scott_room_panel",
         "palette_query",
         "palette_name",
         "palette_match",
@@ -804,14 +873,19 @@ mod tests {
         "dialog.region_prompt.option:chosen",
         // SQ-1104: the font check's sample rows
         "dialog.font_check.sample",
+        // SQ-1227: the story browser's per-story menu
+        "dialog.story_menu.border",
+        "dialog.story_menu.item",
+        "dialog.story_menu.item:selected",
+        "dialog.story_menu.key",
         // SQ-0664: the command band
-        "band.column_header",
-        "band.column_header:active",
-        "band.quick",
-        "band.quick:hover",
-        "band.group_label",
+        "command_panel.column_header",
+        "command_panel.column_header:active",
+        "command_panel.quick",
+        "command_panel.quick:hover",
+        "command_panel.group_label",
         // SQ-1135: the printed-word rows in the noun columns
-        "band.item:seen",
+        "command_panel.item:seen",
         "file_browser_cwd",
         "file_browser_dir",
         "inspector_edge_ok",
@@ -906,9 +980,12 @@ mod tests {
         assert_eq!(hint.fg, Some(Color::Yellow));
         assert!(hint.add_modifier.contains(Modifier::DIM));
 
-        // file_browser_cwd / file_browser_dir: old `.fg(Yellow)` / `.fg(Cyan)`.
+        // file_browser_cwd: old `.fg(Yellow)`.
         assert_eq!(theme.get("file_browser_cwd").style.fg, Some(Color::Yellow));
-        assert_eq!(theme.get("file_browser_dir").style.fg, Some(Color::Cyan));
+        // file_browser_dir: old `.fg(Cyan)` — SQ-1531 deliberately moved the
+        // `accent` role's default from cyan to blue, so this one no longer
+        // reproduces the pre-registry hardcoded style.
+        assert_eq!(theme.get("file_browser_dir").style.fg, Some(Color::Blue));
 
         // inspector_edge_ok / inspector_edge_distorted: old `.fg(Green)` / `.fg(Red)`.
         assert_eq!(theme.get("inspector_edge_ok").style.fg, Some(Color::Green));
@@ -990,7 +1067,11 @@ mod tests {
     /// - the **`glk.*`** families are the app's one CONSTRUCTED selector family
     ///   (`format!("glk.{win}.{name}")` in `render::glk_theme_modifiers`), so a
     ///   row is read when its leaf is one of `GLK_STYLE_NAMES` — which means a
-    ///   `glk.buffer.user3` row with no matching Glk style still fails here.
+    ///   `glk.buffer.user3` row with no matching Glk style still fails here —
+    ///   OR the row's full name is quoted literally, which is how a `glk.grid.*`
+    ///   row outside the 11-style family (`glk.grid.background`, SQ-1212's grid
+    ///   ground, looked up by its exact selector name rather than constructed)
+    ///   is read.
     ///
     /// One limit worth knowing: a literal inside a `#[cfg(test)]` block counts,
     /// so a row only a test names passes. Both rows this case was written for
@@ -1042,7 +1123,7 @@ mod tests {
             } else if let Some(leaf) =
                 name.strip_prefix("glk.buffer.").or_else(|| name.strip_prefix("glk.grid."))
             {
-                crate::render::GLK_STYLE_NAMES.contains(&leaf)
+                crate::render::GLK_STYLE_NAMES.contains(&leaf) || quoted.contains(name)
             } else {
                 quoted.contains(name)
             };

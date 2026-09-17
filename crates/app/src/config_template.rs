@@ -45,7 +45,7 @@
 //! installed. [`top_up`] closes that — it appends the documented settings a file has
 //! never held, touching nothing that is already there (SQ-1129).
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-persist"))]
 use crate::config::Config;
 use crate::config::CONFIG_SCHEMA_VERSION;
 
@@ -70,11 +70,11 @@ pub enum Line {
 
 /// One documented setting: TOML key, the literal to show, whether that literal is
 /// the real default, and the comment lines above it (no leading `#`).
-struct Row {
-    key: &'static str,
-    value: &'static str,
-    line: Line,
-    doc: &'static [&'static str],
+pub(crate) struct Row {
+    pub(crate) key: &'static str,
+    pub(crate) value: &'static str,
+    pub(crate) line: Line,
+    pub(crate) doc: &'static [&'static str],
 }
 
 const fn d(key: &'static str, value: &'static str, doc: &'static [&'static str]) -> Row {
@@ -89,10 +89,10 @@ const fn live(key: &'static str, value: &'static str, doc: &'static [&'static st
 
 /// A group of settings under a banner comment. `table` names the TOML table the rows
 /// belong to (`Some("[search]")`), or `None` for top-level keys.
-struct Group {
-    banner: &'static str,
-    table: Option<&'static str>,
-    rows: &'static [Row],
+pub(crate) struct Group {
+    pub(crate) banner: &'static str,
+    pub(crate) table: Option<&'static str>,
+    pub(crate) rows: &'static [Row],
 }
 
 const STARTUP: &[Row] = &[
@@ -144,6 +144,14 @@ const SAVES: &[Row] = &[
             "the archive and keeps per-turn blobs in memory.",
         ],
     ),
+    d(
+        "history_turns",
+        "500",
+        &[
+            "How many of the most recent turns record_turn_history retains before",
+            "evicting the oldest. Bounds memory on a long session; no 0 = unbounded.",
+        ],
+    ),
     d("undo_levels", "16", &["Undo depth: retained in-memory snapshots. 0 disables undo."]),
     d(
         "aux_storage",
@@ -167,7 +175,7 @@ const INTERFACE: &[Row] = &[
         "false",
         &[
             "Type into a persistent command bar instead of the inline story prompt.",
-            "(Unrelated to the [command_band] section further down, which is the",
+            "(Unrelated to the [command_panel] section further down, which is the",
             "point-and-click phrase builder.)",
         ],
     ),
@@ -198,7 +206,7 @@ const INTERFACE: &[Row] = &[
     ),
     d(
         "return_probe",
-        "false",
+        "true",
         &[
             "After a move, look for the way BACK in a silent throwaway copy of the",
             "game, and put it on the map when it is found. Automaps otherwise learn",
@@ -208,11 +216,11 @@ const INTERFACE: &[Row] = &[
             "comes out in the room you left: a probe that lands somewhere else",
             "records nothing at all, and neither does one that finds no way back.",
             "",
-            "OFF by default: it runs your game a few extra turns in private after",
-            "every move that opens a gap. The footprint on the STORY pane's bottom",
-            "border switches it — beside the map toggle, since the search keeps",
-            "running with the map hidden — and \"/set-return-probe\" persists it",
-            "per-game.",
+            "On by default: it runs your game a few extra turns in private after",
+            "every move that opens a gap, and never touches your screen or saves.",
+            "The footprint on the STORY pane's bottom border switches it — beside",
+            "the map toggle, since the search keeps running with the map hidden —",
+            "and \"/set-return-probe\" persists it per-game.",
         ],
     ),
     d(
@@ -220,7 +228,7 @@ const INTERFACE: &[Row] = &[
         "true",
         &[
             "Keep the words below out of any panel that ENUMERATES a story's",
-            "vocabulary unprompted — the command band's VERB column and its like.",
+            "vocabulary unprompted — the command panel's VERB column and its like.",
             "Infocom's dictionaries are saltier than their prose, and a panel puts",
             "the whole lot in front of anyone who opens it.",
             "",
@@ -245,16 +253,32 @@ const INTERFACE: &[Row] = &[
         ],
     ),
     d("show_status_bar", "true", &["Show the status/score bar across the top of the story pane."]),
-    d("show_room_numbers", "false", &["Show room numbers (#id) inside Boxes-zoom room boxes."]),
+    d(
+        "show_room_numbers",
+        "false",
+        &["Show room numbers (#id, or a small ordinal for a name-only room) inside Boxes-zoom room boxes."],
+    ),
+    d(
+        "grab_zone_cells",
+        "2",
+        &[
+            "How many cells wide the draggable pane boundaries are: the story/map",
+            "splitter and the inventory/room panel top edges. Raise it for touch —",
+            "e.g. the Docker web image on a tablet, where a finger cannot land on",
+            "so narrow a target. The command panel's own top edge is unaffected and",
+            "always stays a single row, so it never swallows clicks on its own",
+            "column headers. Clamped to 1-6.",
+        ],
+    ),
     d("split_ratio", "50", &["The story pane's share of the story/map split, as a percentage."]),
-    d("inv_dock_pct", "33", &["Inventory dock height cap, as a percentage of screen height."]),
+    d("inv_dock_pct", "33", &["Inventory panel height cap, as a percentage of screen height."]),
     d(
         "room_dock_pct",
         "33",
         &[
-            "Room dock height, as a percentage of screen height. The dock docks at",
-            "the bottom of the map pane and describes the room you are in (or the",
-            "one you clicked).",
+            "Room panel height, as a percentage of screen height. The panel docks",
+            "at the bottom of the map pane and describes the room you are in (or",
+            "the one you clicked).",
         ],
     ),
     d(
@@ -416,14 +440,14 @@ const INTERPRETER: &[Row] = &[
         &[
             "Which of your own boot media under ~/.lanthorn/ answers first when",
             "several carry the machine's system typeface. A case-insensitive piece of",
-            "the file's name — \"1.3\" picks the Workbench 1.3 floppy out of a",
-            "drawer holding both — and empty means no preference.",
+            "the file's name — \"6.0.8\" picks the System 6.0.8 startup disk out",
+            "of a folder holding System 6 and 7 — and empty means no preference.",
             "It only breaks a tie. Every medium of the right kind is read and the",
             "faces pool together, so a file named here that does not carry the face",
             "being asked for falls through to the others rather than losing it; with",
             "no preference the pool is ordered by filename.",
-            "Drop a Mac OS System disk, a Workbench floppy or an Amiga Kickstart",
-            "ROM (*.rom) in ~/.lanthorn/ and a Version 6 game off that machine's own",
+            "Drop a Mac OS System disk or an Amiga Kickstart ROM (*.rom) in",
+            "~/.lanthorn/ and a Version 6 game off that machine's own",
             "media is drawn with the face the machine really used — Geneva on a",
             "Macintosh, which lives in the System file and on no Infocom disk, and",
             "topaz 8 on an Amiga, which lives in Kickstart and on no floppy at all.",
@@ -449,6 +473,21 @@ const INTERPRETER: &[Row] = &[
             "The cost is screen area — the picture stops at the rung below the pane",
             "rather than filling it. A pane too small for even the smallest step falls",
             "back to free scaling.",
+        ],
+    ),
+    d(
+        "kitty_shared_memory",
+        "\"auto\"",
+        &[
+            "On a kitty-protocol terminal, hand it the artwork through shared memory",
+            "instead of base64-encoding every pixel into the stream. A 640x400 frame is",
+            "a megabyte of base64 the terminal then has to decode; through shared memory",
+            "it is a filename.",
+            "\"auto\" asks the terminal at startup and uses it only if it answered — a",
+            "terminal on the far end of an ssh connection cannot open our memory, so",
+            "over SSH nothing changes and the pictures still arrive. \"off\" does not even",
+            "ask. There is deliberately no \"on\": this is something a terminal can do or",
+            "cannot, not a preference.",
         ],
     ),
     ex(
@@ -504,13 +543,13 @@ const COMMAND_BAND: &[Row] = &[
         "height",
         "5",
         &[
-            "Rows the band occupies. It has no frame (SQ-0667) - every row here",
+            "Rows the band occupies. It has no frame - every row here",
             "is content. Clamped to 3-11, and to whatever the screen can spare.",
             "Resize mode (the band is one of its targets while open) writes this",
             "key.",
         ],
     ),
-    d("auto_open", "false", &["Open the command band as soon as the story starts."]),
+    d("auto_open", "false", &["Open the command panel as soon as the story starts."]),
     ex(
         "verbs",
         "[ { word = \"unlock\", arity = \"pair\", prep = \"with\" }, { word = \"polish\", arity = \"object\" } ]",
@@ -565,7 +604,7 @@ const KEYMAP: &[Row] = &[d(
     ],
 )];
 
-const GROUPS: &[Group] = &[
+pub(crate) const GROUPS: &[Group] = &[
     Group { banner: "Startup and files", table: None, rows: STARTUP },
     Group { banner: "Saving and undo", table: None, rows: SAVES },
     Group { banner: "Interface", table: None, rows: INTERFACE },
@@ -573,7 +612,7 @@ const GROUPS: &[Group] = &[
     Group { banner: "Sound", table: None, rows: SOUND },
     Group { banner: "Transcript search", table: Some("search"), rows: SEARCH },
     Group { banner: "Animation", table: Some("animation"), rows: ANIMATION },
-    Group { banner: "Command band", table: Some("command_band"), rows: COMMAND_BAND },
+    Group { banner: "Command panel", table: Some("command_panel"), rows: COMMAND_BAND },
     Group { banner: "Key bindings", table: Some("keymap"), rows: KEYMAP },
 ];
 
@@ -953,18 +992,18 @@ fn insert_point(headers: &[(String, usize)], table: Option<&str>, eof: usize) ->
 /// key deliberately reads as 0 ("written before versioning", see the field's docs)
 /// while `Config::default()` carries the current stamp, so the stamp is the one
 /// difference a commented template is EXPECTED to have.
-#[cfg(test)]
+#[cfg(all(test, feature = "t-persist"))]
 fn shape(cfg: &Config) -> String {
     format!("{cfg:?}").replacen(&format!("version: {}", cfg.version), "version: <stamp>", 1)
 }
 
 /// Every documented row, for the tests below and for anyone auditing coverage.
-#[cfg(test)]
+#[cfg(all(test, feature = "t-persist"))]
 fn all_rows() -> Vec<(&'static str, &'static str, Line)> {
     GROUPS.iter().flat_map(|g| g.rows.iter().map(|r| (r.key, r.value, r.line))).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-persist"))]
 mod tests {
     use super::*;
 
@@ -984,10 +1023,10 @@ mod tests {
             // `adult_words` is the one SETTING written live (SQ-1122): the list is
             // only a default if the player can read it, and it is the default, so
             // the template is still a no-op as written.
-            ["adult_words", "animation", "command_band", "keymap", "search", "version"],
+            ["adult_words", "animation", "command_panel", "keymap", "search", "version"],
             "live keys: {parsed:?}"
         );
-        for t in ["animation", "command_band", "keymap", "search"] {
+        for t in ["animation", "command_panel", "keymap", "search"] {
             assert!(
                 parsed[t].as_table().is_some_and(|x| x.is_empty()),
                 "section [{t}] is a bare header with every setting commented: {:?}",
@@ -1103,7 +1142,14 @@ mod tests {
         // is whatever lanthorn last wrote, and a reader who set it by hand would be
         // asking to be prompted once and then never again — which is what
         // `--font-check on` and `/run-font-check` already do, on purpose (SQ-1112).
-        let exempt = ["version", "font_check_pending"];
+        // `command_band` is exempt for a narrower reason than the other two: the
+        // Rust FIELD keeps that name (an internal identifier, SQ-1237 left it
+        // alone), but the TOML section it (de)serialises to is renamed to
+        // `command_panel` via `#[serde(rename = "command_panel")]` — so the
+        // generic `GROUPS.table == field name` check below can't find it under
+        // its own name. `Group { table: Some("command_panel"), .. }` is exactly
+        // where it is documented.
+        let exempt = ["version", "font_check_pending", "command_band"];
         let missing: Vec<&str> = persisted
             .iter()
             .copied()
@@ -1154,10 +1200,10 @@ mod tests {
         live.sort_unstable();
         assert_eq!(
             live,
-            ["adult_words", "animation", "command_band", "default_story_dir", "keymap", "search", "version"],
+            ["adult_words", "animation", "command_panel", "default_story_dir", "keymap", "search", "version"],
             "only the changed setting joins the stamp, the seeded adult list and the section headers: {after}"
         );
-        for t in ["animation", "command_band", "keymap", "search"] {
+        for t in ["animation", "command_panel", "keymap", "search"] {
             assert!(parsed[t].as_table().is_some_and(|x| x.is_empty()), "[{t}] stays a bare header");
         }
 

@@ -48,7 +48,7 @@ pub(crate) struct BootResult {
     /// Wrapped in [`app::terminal_dump::CountingWriter`] so `/dump-terminal` can
     /// report how many bytes a frame costs (SQ-0994). One `fetch_add` per write
     /// and one per flush; it never looks at a byte.
-    pub terminal: Terminal<CrosstermBackend<app::terminal_dump::CountingWriter<Stdout>>>,
+    pub terminal: Terminal<CrosstermBackend<app::terminal_dump::CountingWriter<std::io::BufWriter<Stdout>>>>,
     pub game_dir: std::path::PathBuf,
     pub ifid: String,
     pub arc_file: std::path::PathBuf,
@@ -186,6 +186,9 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     // First time a directory is passed on the command line with no default set,
     // offer to remember it as the default story directory (persisted to config).
     if cfg.default_story_dir.is_none()
+        // A headless --fetch has no one to answer a question.
+        && cli.fetch.is_none()
+        && cli.import_metadata.is_none()
         && cli.story.as_deref().map(|p| p.is_dir()).unwrap_or(false)
         && prompt_yes_no(&format!(
             "Set {} as your default story directory?",
@@ -226,10 +229,10 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     let ask_font = should_ask_font_check(cli.font_check, first_run, cfg.font_check_pending);
     if ask_font {
         match ask_font_check(&cfg) {
-            FontCheckOutcome::Answered(nerdfont) => {
+            FontCheckOutcome::Answered { nerdfont, diagonal } => {
                 match app::style::style_write_path(cfg.style.as_deref(), &cfg.user_dir) {
                     Some(path) => {
-                        if let Err(e) = app::style::write_font_check_answer(&path, nerdfont) {
+                        if let Err(e) = app::style::write_font_check_answer(&path, nerdfont, diagonal) {
                             eprintln!("lanthorn: could not save the font choice: {e}");
                         }
                     }
@@ -412,7 +415,10 @@ fn ask_fetch_keep(
     // Themed the way the game and the browser are, so the prompt does not arrive
     // in a palette the player has never seen.
     let (base, _w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
-    let (colors, _syms, _w2) = app::style::resolve(&base, &cfg.user_dir);
+    // No story is booted yet, so there is no machine to resolve a colour number
+    // through: §8.3.1's own table (SQ-1393).
+    let (colors, _syms, _w2) =
+        app::style::resolve(&base, &cfg.user_dir, zvm::screen::Palette::Standard);
 
     let mut state = AppState::default();
     state.colors = colors;
@@ -559,30 +565,45 @@ fn set_font_check_pending(cfg: &mut Config, want: bool) {
 /// the second the player saw it and dismissed it, and asking again next launch is
 /// nagging.
 enum FontCheckOutcome {
-    /// The player chose: `true` = the patched-font row, `false` = the plain row
-    /// (which Esc and the close box also mean).
-    Answered(bool),
-    /// Ctrl-C. Seen and dismissed — nothing written, nothing owed.
+    /// Stage one was reached and answered: `nerdfont` = the patched-font row
+    /// (which Esc and the close box also mean at that stage). `diagonal` is
+    /// stage two's answer (SQ-1245) — `Some` for either row, `None` for a stage-
+    /// two Esc/close/failure, which leaves `diagonal_corners` untouched rather
+    /// than forcing a choice for a question the player never reached an opinion
+    /// on.
+    Answered { nerdfont: bool, diagonal: Option<bool> },
+    /// Ctrl-C, at either stage. Seen and dismissed — nothing written at all,
+    /// nothing owed, even if stage one had already been answered: Ctrl-C is the
+    /// "get me out of this entirely" signal, not a per-stage cancel.
     Refused,
-    /// No interactive terminal, a pane too small to hold the comparison, or a
-    /// read that failed. Nobody was asked, so the question survives the launch.
+    /// No interactive terminal, a pane too small to hold stage one's
+    /// comparison, or a read that failed, before stage one could be answered.
+    /// Nobody was asked, so the question survives the launch.
     CouldNotAsk,
 }
 
-/// Run the font check on its own, before any game exists (SQ-1104).
+/// Run the font check on its own, before any game exists (SQ-1104, SQ-1245).
 ///
 /// The dialog, its focus ring, its buttons and its keyboard ladder are all
 /// `render::font_check_dialog`'s — this is only the small terminal loop that
 /// stands in for the game's, since there is no game yet. Exactly the shape
-/// [`ask_fetch_keep`] has, for the same reason: two drivers, one dialog.
+/// [`ask_fetch_keep`] has, for the same reason: two drivers, one dialog module.
 /// Tab/Shift-Tab move focus, Enter activates, Esc cancels; Space is left alone
 /// (widget-reserved), as the shared chrome does everywhere else.
 ///
+/// Two stages, one loop shape run twice: stage one (icon glyphs) then stage two
+/// (diagonal corner stubs), sharing one `AppState`/`Terminal` and torn down
+/// exactly ONCE at the end regardless of which stage or path it exits through
+/// (SQ-0998) — an early `restore_terminal()` per exit point is a copy of the
+/// canonical teardown's steps, which is what that quest fixed.
+///
 /// Nothing is written by any path but [`FontCheckOutcome::Answered`]; the plain
-/// glyphs stand meanwhile, which is the answer that works in every font.
+/// glyphs and the orthogonal fallback stand meanwhile, which are the answers
+/// that work in every font.
 fn ask_font_check(cfg: &Config) -> FontCheckOutcome {
     use app::render::font_check_dialog::{
-        draw_font_check_always, font_check_key_focused, FontCheckAction,
+        diagonal_check_key_focused, draw_diagonal_check_always, draw_font_check_always,
+        font_check_key_focused, DiagonalCheckAction, FontCheckAction,
     };
     use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 
@@ -590,7 +611,10 @@ fn ask_font_check(cfg: &Config) -> FontCheckOutcome {
     // arrive in a palette the player has never seen — and so the sample rows are
     // drawn in the colours the map will actually use.
     let (base, _w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
-    let (colors, _syms, _w2) = app::style::resolve(&base, &cfg.user_dir);
+    // No story is booted yet, so there is no machine to resolve a colour number
+    // through: §8.3.1's own table (SQ-1393).
+    let (colors, _syms, _w2) =
+        app::style::resolve(&base, &cfg.user_dir, zvm::screen::Palette::Standard);
 
     let mut state = AppState::default();
     state.colors = colors;
@@ -618,70 +642,146 @@ fn ask_font_check(cfg: &Config) -> FontCheckOutcome {
     };
 
     const BUTTONS: usize = 2;
-    let answer = loop {
-        let mut rects = None;
-        if terminal
-            .draw(|f| {
-                rects = draw_font_check_always(&state, f.area(), f.buffer_mut());
-            })
-            .is_err()
-        {
-            break FontCheckOutcome::CouldNotAsk;
-        }
-        // A pane too small to hold the comparison cannot ask the question, and a
-        // question nobody can read must not block the launch.
-        if rects.is_none() {
-            break FontCheckOutcome::CouldNotAsk;
-        }
-        let ev = match crossterm::event::read() {
-            Ok(ev) => ev,
-            Err(_) => break FontCheckOutcome::CouldNotAsk,
-        };
-        if let Event::Mouse(m) = &ev {
-            if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+    // A labeled BLOCK, not a loop: each stage below runs exactly once, and the
+    // label exists only so an early Ctrl-C/CouldNotAsk from either stage can
+    // jump straight to the end without a second copy of the teardown.
+    let outcome = 'stages: {
+        // ── Stage one: the icon glyphs ────────────────────────────────────
+        let nerdfont = loop {
+            let mut rects = None;
+            if terminal
+                .draw(|f| {
+                    rects = draw_font_check_always(&state, f.area(), f.buffer_mut());
+                })
+                .is_err()
+            {
+                break 'stages FontCheckOutcome::CouldNotAsk;
+            }
+            // A pane too small to hold the comparison cannot ask the question,
+            // and a question nobody can read must not block the launch.
+            if rects.is_none() {
+                break 'stages FontCheckOutcome::CouldNotAsk;
+            }
+            let ev = match crossterm::event::read() {
+                Ok(ev) => ev,
+                Err(_) => break 'stages FontCheckOutcome::CouldNotAsk,
+            };
+            if let Event::Mouse(m) = &ev {
+                if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    continue;
+                }
+                let Some(r) = &rects else { continue };
+                let pt = (m.column, m.row);
+                if r.nerd.is_some_and(|b| b.contains(pt.into())) {
+                    break true;
+                }
+                if r.plain.is_some_and(|b| b.contains(pt.into()))
+                    || r.close.is_some_and(|b| b.contains(pt.into()))
+                {
+                    break false;
+                }
                 continue;
             }
-            let Some(r) = &rects else { continue };
-            let pt = (m.column, m.row);
-            if r.nerd.is_some_and(|b| b.contains(pt.into())) {
-                break FontCheckOutcome::Answered(true);
+            let Event::Key(key) = ev else { continue };
+            if key.kind == KeyEventKind::Release {
+                continue;
             }
-            if r.plain.is_some_and(|b| b.contains(pt.into()))
-                || r.close.is_some_and(|b| b.contains(pt.into()))
+            // Ctrl-C is not an answer; it is a refusal, and a refusal writes
+            // nothing — at either stage.
+            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c'))
             {
-                break FontCheckOutcome::Answered(false);
+                break 'stages FontCheckOutcome::Refused;
             }
-            continue;
-        }
-        let Event::Key(key) = ev else { continue };
-        if key.kind == KeyEventKind::Release {
-            continue;
-        }
-        // Ctrl-C is not an answer; it is a refusal, and a refusal writes nothing.
-        if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c'))
-        {
-            break FontCheckOutcome::Refused;
-        }
-        match key.code {
-            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
-                state.overlays.dialog_focus = (state.overlays.dialog_focus + 1) % BUTTONS;
+            match key.code {
+                KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                    state.overlays.dialog_focus = (state.overlays.dialog_focus + 1) % BUTTONS;
+                }
+                KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+                    state.overlays.dialog_focus =
+                        (state.overlays.dialog_focus + BUTTONS - 1) % BUTTONS;
+                }
+                code => match font_check_key_focused(code, state.overlays.dialog_focus) {
+                    FontCheckAction::None => {}
+                    FontCheckAction::Nerd => break true,
+                    FontCheckAction::Plain => break false,
+                },
             }
-            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
-                state.overlays.dialog_focus =
-                    (state.overlays.dialog_focus + BUTTONS - 1) % BUTTONS;
+        };
+
+        // ── Stage two: the diagonal corner stubs (SQ-1245) ────────────────
+        // Its own default focus, matching the dialog's declared default —
+        // stage one may have left focus on row 1.
+        state.overlays.dialog_focus = 1;
+        let diagonal = loop {
+            let mut rects = None;
+            // A draw failure or too-small pane here does not cost stage one's
+            // answer — it just leaves `diagonal_corners` untouched, the same as
+            // an explicit skip.
+            if terminal
+                .draw(|f| {
+                    rects = draw_diagonal_check_always(&state, f.area(), f.buffer_mut());
+                })
+                .is_err()
+            {
+                break None;
             }
-            code => match font_check_key_focused(code, state.overlays.dialog_focus) {
-                FontCheckAction::None => {}
-                FontCheckAction::Nerd => break FontCheckOutcome::Answered(true),
-                FontCheckAction::Plain => break FontCheckOutcome::Answered(false),
-            },
-        }
+            if rects.is_none() {
+                break None;
+            }
+            let ev = match crossterm::event::read() {
+                Ok(ev) => ev,
+                Err(_) => break None,
+            };
+            if let Event::Mouse(m) = &ev {
+                if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    continue;
+                }
+                let Some(r) = &rects else { continue };
+                let pt = (m.column, m.row);
+                if r.nerd.is_some_and(|b| b.contains(pt.into())) {
+                    break Some(true);
+                }
+                if r.plain.is_some_and(|b| b.contains(pt.into())) {
+                    break Some(false);
+                }
+                if r.close.is_some_and(|b| b.contains(pt.into())) {
+                    break None;
+                }
+                continue;
+            }
+            let Event::Key(key) = ev else { continue };
+            if key.kind == KeyEventKind::Release {
+                continue;
+            }
+            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c'))
+            {
+                break 'stages FontCheckOutcome::Refused;
+            }
+            match key.code {
+                KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                    state.overlays.dialog_focus = (state.overlays.dialog_focus + 1) % BUTTONS;
+                }
+                KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+                    state.overlays.dialog_focus =
+                        (state.overlays.dialog_focus + BUTTONS - 1) % BUTTONS;
+                }
+                code => match diagonal_check_key_focused(code, state.overlays.dialog_focus) {
+                    DiagonalCheckAction::None => {}
+                    DiagonalCheckAction::Diagonal => break Some(true),
+                    DiagonalCheckAction::Orthogonal => break Some(false),
+                    DiagonalCheckAction::Skip => break None,
+                },
+            }
+        };
+
+        FontCheckOutcome::Answered { nerdfont, diagonal }
     };
 
     // THE canonical teardown, not a copy of its steps (SQ-0998).
     crate::restore_terminal();
-    answer
+    outcome
 }
 
 /// The real story-pane `(rows, cols)` a v1–8 Z-machine session should be BOOTED
@@ -697,11 +797,11 @@ fn ask_font_check(cfg: &Config) -> FontCheckOutcome {
 /// frame `story_screen_dims` insets), the resolved config (margins, the
 /// `virtual_screen_cols`/`rows` pin — pinned wins here exactly as it wins in
 /// the live pane measurement, since this reuses the very same call), the
-/// garglk.ini margin overlay, and the pane-split sizes. Command band / inventory
-/// dock are left at their true boot-time state — closed; both open only after
-/// this session already exists (`band_auto_open`, further down) — and neither
-/// affects the WIDTH this seeds anyway, only rows, which the SQ-0679 floor
-/// never gates.
+/// garglk.ini margin overlay, and the pane-split sizes. Command panel /
+/// inventory panel are left at their true boot-time state — closed; both open
+/// only after this session already exists (`initial_panel`, further down) —
+/// and neither affects the WIDTH this seeds anyway, only rows, which the
+/// SQ-0679 floor never gates.
 ///
 /// `None` when the terminal size can't be queried (piped/non-terminal stdout,
 /// e.g. some test harnesses) or the query reports a zero-area frame; the
@@ -762,6 +862,34 @@ pub(crate) fn host_story_screen(state: &AppState) -> Option<(u16, u16)> {
     app::render::screen::story_screen_dims(pane_layout.story, state)
 }
 
+/// Re-issue bracketed paste and (when `mouse` is on) mouse capture.
+///
+/// Written once here so the launch path below and every `Event::Resize` arm
+/// call the SAME two `execute!`s instead of hand-copying them — they cannot
+/// drift apart, and this is also why both the launch site's original modes
+/// and a resize's re-assertion trace to one function.
+///
+/// The resize call exists for the web image (SQ-1340): `docker/serve-session.sh`
+/// runs the game inside `dtach -A ... -r winch`, and a browser tab reattaching
+/// to that session gets a brand-new xterm.js instance that never saw the
+/// escapes this function's launch-site caller sent at boot — mouse capture and
+/// bracketed paste are per-terminal state, not per-session state, and dtach
+/// only reconnects the byte stream, not the terminal mode. `-r winch` delivers
+/// SIGWINCH on every attach, which crossterm surfaces as `Event::Resize`, so a
+/// resize is the only hook a reattach gives us. Before this fix, the picker
+/// happened to be the sole thing re-enabling mouse capture (it does so
+/// unconditionally on open), which is why a reattached iPad regained mouse
+/// input only after opening the story list, and never regained bracketed
+/// paste at all. Both sequences are idempotent on every terminal we support,
+/// so calling this on a plain local resize (no reattach involved) is harmless.
+pub(crate) fn reassert_terminal_modes<W: std::io::Write>(w: &mut W, mouse: bool) -> std::io::Result<()> {
+    execute!(w, EnableBracketedPaste)?;
+    if mouse {
+        execute!(w, EnableMouseCapture)?;
+    }
+    Ok(())
+}
+
 /// Build the per-story engine + mapper + UI state + terminal for `story_path`,
 /// using the one-time [`LaunchCtx`]. This is the per-story half of the old
 /// `boot()` (load the story, build the engine, load the mapper/archive, seed the
@@ -785,13 +913,23 @@ pub(crate) fn boot_story(
     // `disk_entry` is which story on the image the browser row stood for
     // (SQ-0859) — `None` for every loose file and every single-story floppy, and
     // then this is byte-for-byte the load it always was.
-    let (loaded, disk_image) = match hints::load_mounted_story_from(&story_path, disk_entry) {
+    //
+    // `_full` rather than `_from` because a US S.A.G.A. release's pictures are
+    // separate files on the same floppy (SQ-1475) and the mount does not
+    // outlive this call: they come out with the story or not at all.
+    let mounted = match hints::load_mounted_story_full(&story_path, disk_entry) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("lanthorn: cannot read '{}': {}", story_path.display(), e);
             std::process::exit(1);
         }
     };
+    // `saga_pictures` is deliberately not read off the mount here: a Scott
+    // story's `ScottPictureSources::resolve` (SQ-1485) re-derives the same
+    // set from `story_path`/the story bytes, the one function `reset.rs`'s
+    // Scott arm calls too, so both resolve it the same way rather than one
+    // reading it off a live mount and the other re-deriving it by hand.
+    let hints::MountedStory { story: loaded, disk_image, saga_pictures: _ } = mounted;
     // Raw executable bytes (for the IFID / map-dir key), independent of engine.
     let story_bytes = loaded.bytes().to_vec();
     // Read off `loaded` before it is consumed into a session below: which bundled
@@ -829,6 +967,11 @@ pub(crate) fn boot_story(
     // outrank the sidecar key; parked on `cfg` so a restart re-resolves the same
     // archive instead of quietly reverting to the Blorb.
     cfg.pictures_override = overrides.pictures.clone();
+    // SQ-1473: same mechanism, for the Scott C64 vector artwork's resolution —
+    // a choice the launch-options dialog made and the player did not persist
+    // rides with the story for the session, so `@restart` draws the same
+    // resolution rather than quietly reverting to the default.
+    cfg.scott_picture_resolution_override = overrides.scott_picture_resolution;
     let picture_override = if cfg.images {
         app::graphics::PictureOverride::resolve_with_session(
             &story_path,
@@ -914,8 +1057,9 @@ pub(crate) fn boot_story(
             // (SQ-0876).
             disk_image,
         );
-    // SQ-0939: the palette, asked ONCE and asked HERE — before the session
-    // constructor runs the story, and before the host resolves a single colour.
+    // SQ-0939: the palette, asked ONCE and asked HERE — before the style is
+    // resolved, before the session constructor runs the story, and before the host
+    // resolves a single colour.
     //
     // Which table, and why the story's Version is part of the question, lives on
     // `Config::machine_text_palette` — with the licence, because an unlicensed
@@ -923,18 +1067,23 @@ pub(crate) fn boot_story(
     // `--colour theme|terminal`, which withholds the licence on original media).
     // The suites that measure a booted frame call the same function.
     //
-    // Every consumer reads this one global: the VM's own `true_value` for window
-    // properties 17/18, the ColorScheme's standard-colour seed, the v6 pixel path
-    // and the CLI's SGR path. Setting it late, or per-path, is how one colour
-    // number comes to look like two colours on one screen.
-    zvm::screen::set_palette(cfg.machine_text_palette(story_bytes.first().copied()));
-    // SQ-0885: an experiment knob for header `$1F`, set beside the palette
-    // because it is the same kind of fact — one machine per run — and because
-    // the session constructor runs the story, so it has to be in force before
-    // the boot below. Re-asserted every launch (with `None` when the flag is
-    // absent) so a picker→play loop cannot carry one story's override into the
-    // next, exactly as the palette is.
-    zvm::screen::set_interpreter_version(cli.interpreter_version);
+    // SQ-1393: a VALUE, carried from here to the two places that must agree — the
+    // `MachineBoot` the session is built from (so the VM's own `true_value` for
+    // window properties 17/18 and the two-colour card rule resolve through it) and
+    // the `ColorScheme` (so the standard-colour seed, the greys, the v6 pixel path
+    // and the IBM bold rule do). It used to be a process-wide atomic in `zvm`,
+    // which is what made "set it late, or per-path" possible at all.
+    //
+    // It is refined once more below, where the archive turns out to name a
+    // two-colour card — which cannot be known here, because nothing is mounted yet.
+    let mut machine_palette = cfg.machine_text_palette(story_bytes.first().copied());
+    // SQ-0885: an experiment knob for header `$1F`, carried beside the palette
+    // because it is the same kind of fact — a property of the machine this launch
+    // presents — and because the session constructor runs the story, so it has to
+    // reach the `Machine` before the boot below. Parked on `cfg` so `reset.rs` can
+    // re-ask for it on an `@restart`; it is a flag of this run, so nothing else
+    // could tell that path about it.
+    cfg.interpreter_version = cli.interpreter_version;
 
     // Booting a large story to its first prompt can take several seconds, and this
     // happens before the alternate screen is entered — so the normal terminal would
@@ -971,7 +1120,14 @@ pub(crate) fn boot_story(
     // In-game graphics Picker (None when --images off or unavailable). Built once
     // and reused both for the Glulx session's char-cell pixel size and, below,
     // AppState.game_picker (the render side already tolerates None).
-    let game_picker = if cfg.images { picker_ui::build_cover_picker(cfg.image_protocol) } else { None };
+    let game_picker = if cfg.images { picker_ui::build_cover_picker(cfg.image_protocol, cfg.kitty_shared_memory) } else { None };
+    // SQ-1511: did that build's query — if it ran one — get any answer at all?
+    // See `picker_ui::picker_query_answered`'s doc (SQ-1520 shared it with
+    // `run_story_picker`'s own cover-art preview picker) for why this is read
+    // the same way `loop_tick::poll_picker_requery` skips a font-change
+    // requery on either case rather than paying its stdio round trip on a
+    // terminal that will only ever answer with nothing.
+    let game_picker_query_answered = picker_ui::picker_query_answered(game_picker.as_ref());
     // Probe the terminal's own default fg/bg (OSC 10/11) in the same pre-UI query
     // window as the image-protocol Picker above (SQ-0510). Seeds the v6 raster
     // canvas's default ink/page so "terminal default" theme colours follow the
@@ -1023,7 +1179,7 @@ pub(crate) fn boot_story(
     // below must land in `cs` before they are derived. `state.colors` is assigned
     // from these below.
     let (style_doc, style_w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
-    let (mut cs, set, style_w2) = app::style::resolve(&style_doc, &cfg.user_dir);
+    let (mut cs, set, style_w2) = app::style::resolve(&style_doc, &cfg.user_dir, machine_palette);
     // SQ-0319: discover a per-game garglk.ini beside the story and overlay its
     // colours onto the resolved theme BEFORE the backend snapshot below, so the
     // imported look is in the backend for glk_style_measure and painted from
@@ -1036,7 +1192,7 @@ pub(crate) fn boot_story(
     // wins). Capture the base before garglk mutates `cfg` so `reload_style` can
     // recompute the precedence and `auto` can fall back to it.
     let honor_game_colours_base = cfg.honor_game_colours;
-    let garglk_overlay = app::garglk_ini::discover(&story_path);
+    let garglk_overlay = app::garglk_ini::discover_with_entry(&story_path, disk_entry);
     let garglk_line = garglk_overlay.as_ref().map(|ov| {
         let summary = ov.apply(&mut cs);
         // …unless `--game-colours` was typed on this launch, which outranks both
@@ -1143,6 +1299,7 @@ pub(crate) fn boot_story(
         cs.theme.get("transcript").style,
         term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
         term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
+        machine_palette,
     );
     // SQ-0679/SQ-0680: the real story-pane `(rows, cols)`, measured before the
     // engine exists, so a v4/v5 story's boot-time status-bar layout already
@@ -1311,7 +1468,16 @@ pub(crate) fn boot_story(
             // before the session constructor, which runs the story to its first
             // prompt and is where the game's own `set_colour` lands.
             if let Some((palette, pair)) = picts.two_colour_card_screen(&cfg) {
-                zvm::screen::set_palette(palette);
+                // SQ-1393: the card's table, over the base resolved above. The
+                // scheme's eight Z-machine ANSI slots keep the seed the BASE table
+                // gave them — they were resolved before anything was mounted, and
+                // that is exactly the state this replaces: the global used to be
+                // moved here with the seed already taken from the earlier value.
+                // What follows the card is everything read through
+                // `ColorScheme::machine_palette`: the greys, the v6 pixel path,
+                // the IBM bold rule, and the VM's own two-colour-card rule.
+                machine_palette = palette;
+                cs.machine_palette = palette;
                 // …and the pair §8.3.3 reports is the card's, not the machine's:
                 // black 2 rather than blue 6, with the ink unmoved at white 9.
                 //
@@ -1374,6 +1540,13 @@ pub(crate) fn boot_story(
                 // the host's own ground is painted un-snapped.
                 cfg.machine_colours_licensed(),
                 launch_faces,
+                // SQ-1393: the machine's own colour table — the base resolved
+                // before anything was mounted, refined a few rows up where the
+                // archive turned out to be a two-colour card — and the `$1F`
+                // override, both of which used to be process-wide statics set
+                // before the constructor rather than facts of this boot.
+                machine_palette,
+                cfg.interpreter_version,
             );
             // SQ-0790: how DENSE that art is, which only a native archive knows.
             // A 320-wide rendition doubles onto the unit screen exactly as a
@@ -1473,20 +1646,36 @@ pub(crate) fn boot_story(
                 }
             }
         }
-        app::hints::LoadedStory::Scott(bytes) => match app::scott_session::ScottSession::new_with_trace(
-            bytes,
-            resolve_pict_blorb(&story_path, cfg.images),
-            // `--debug` (SQ-0449/SQ-0464): trace from boot so the opening
-            // occurrence pass (run inside the VM constructor) is captured.
-            cli.debug,
-            Some(random_seed),
-        ) {
-            Ok(s) => Box::new(s),
-            Err(e) => {
-                eprintln!("lanthorn: cannot load Scott Adams story: {e}");
-                std::process::exit(1);
+        app::hints::LoadedStory::Scott(bytes) => {
+            // The four picture facts, resolved the one way both a launch and
+            // an `@restart` resolve them (SQ-1485, `reset.rs`'s Scott arm is
+            // the other caller).
+            let pictures = app::graphics::ScottPictureSources::resolve(
+                &story_path,
+                &bytes,
+                &game_dir,
+                resolve_pict_blorb(&story_path, cfg.images),
+                game_picker.as_ref(),
+                cfg.scott_picture_resolution_override,
+            );
+            match app::scott_session::ScottSession::new_with_options(
+                bytes,
+                // `--debug` (SQ-0449/SQ-0464): trace from boot so the opening
+                // occurrence pass (run inside the VM constructor) is captured.
+                cli.debug,
+                Some(random_seed),
+                // ScottFree's `-y`/`-s`/`-t`/`-p` options, this story's own
+                // per-game choice (SQ-1413).
+                app::scott_session::resolve_options(&game_dir),
+                pictures,
+            ) {
+                Ok(s) => Box::new(s),
+                Err(e) => {
+                    eprintln!("lanthorn: cannot load Scott Adams story: {e}");
+                    std::process::exit(1);
+                }
             }
-        },
+        }
     };
     // Strip the game's own inline read prompt only when the dedicated command
     // bar is on (SQ-0264); otherwise inline-prompt mode keeps the game's ">".
@@ -1532,12 +1721,17 @@ pub(crate) fn boot_story(
     // Load mapper (and optionally restore the game save) from the archive.
     let mut startup_transcript: app::state::LoadedTranscript = None;
     // Rewind/replay history carried from the archive when the game is auto-restored.
-    let mut startup_history: Vec<app::history::TurnRecord> = Vec::new();
+    let mut startup_history: Vec<std::sync::Arc<app::history::TurnRecord>> = Vec::new();
     // Command history (Up/Down recall) carried from the archive, always loaded.
     let mut startup_command_history: Vec<String> = Vec::new();
     // Turn counter carried from the archive when the game is auto-restored, so a
     // later save records the cumulative count rather than only post-resume moves.
     let mut startup_turns: Option<u32> = None;
+    // What the just-restored archive is missing because it predates the screen
+    // (SQ-1401) or paint-log (SQ-1403) format bump — SQ-1410. Computed here
+    // (while `ac` still exists) and applied to the transcript once `state`
+    // exists, below.
+    let mut startup_restore_degradation: Option<app::archive::RestoreDegradation> = None;
     // When auto_load is false but a save exists and prompt_load_on_launch is true,
     // stash the save for the launch dialog instead of discarding it.
     let mut pending_resume_stash: app::state::PendingResume = None;
@@ -1559,6 +1753,10 @@ pub(crate) fn boot_story(
                             // Hand Glulx back the room it was saved in (SQ-0523);
                             // no-op for zvm.
                             crate::engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
+                            startup_restore_degradation = Some(app::archive::RestoreDegradation::from_format_version(
+                                ac.meta.format_version,
+                                crate::engine_helpers::is_v6_session(&*session),
+                            ));
                             startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs, ac.transcript_para, ac.transcript_images));
                             startup_history = ac.history;
                             // Restore the turn counter from the same archive (SQ-0429):
@@ -1599,6 +1797,14 @@ pub(crate) fn boot_story(
         session.set_aux_data(app::aux_store::read_global_aux(&game_dir));
     }
 
+    // …and tell the engine where the Z-machine's own stream files live:
+    // `<game_dir>/script.txt` (output stream 2, ZMSD §7.1.1) and
+    // `<game_dir>/commands.txt` (output stream 4 and input stream 1, §7.1.2 and
+    // §10.2), beside `default.aux` and for the same reason. Naming the directory
+    // opens nothing — the files appear only if the story, or `/set-transcript`,
+    // actually selects a stream.
+    session.set_stream_files(&game_dir);
+
     // The per-story Glk file VFS sidecar was loaded into the VM before boot
     // (GlulxSession::new). A Glulx game may write a Glk file during boot (e.g.
     // CM's init cache); flush it now so it persists before the first turn and
@@ -1635,6 +1841,7 @@ pub(crate) fn boot_story(
     state.show_room_numbers = cfg.show_room_numbers;
     state.show_status_bar = cfg.show_status_bar;
     state.game_picker = game_picker;
+    state.game_picker_query_answered = game_picker_query_answered;
     state.term_default_colors = term_default_colors;
     state.query_sweep = query_sweep;
     state.pane_sizes = app::state::PaneSizes {
@@ -1643,13 +1850,21 @@ pub(crate) fn boot_story(
         inv_dock_pct: cfg.inv_dock_pct,
         room_dock_pct: cfg.room_dock_pct,
     };
-    // `[command_band] auto_open` — open the band with the story, for players who
-    // want it as their default input surface rather than a thing to summon.
-    // SQ-1123: whether the band opens with this story is the band toggle's own
-    // state, so a per-game answer wins over the global `[command_band] auto_open`
-    // — absent key = inherit, as every sidecar key does.
-    let band_auto_open =
-        app::styles::read_per_game_command_band(&game_dir).unwrap_or(cfg.command_band.auto_open);
+    // `[command_panel] auto_open` — open the command panel with the story, for
+    // players who want it as their default input surface rather than a thing to
+    // summon. SQ-1123: whether a panel opens with this story is the border
+    // control's own state, so a per-game answer wins over the global
+    // `[command_panel] auto_open` — absent key = inherit, as every sidecar key
+    // does. SQ-1237 widened the per-game key to a three-state cycle (the
+    // inventory panel has no global auto-open of its own, so the fallback for
+    // an absent key is still just command-or-none).
+    let initial_panel = app::styles::read_per_game_panel(&game_dir).unwrap_or(
+        if cfg.command_band.auto_open {
+            app::state::SidePanel::Command
+        } else {
+            app::state::SidePanel::None
+        },
+    );
     // SQ-0318: remember the global honor base so reload_style can recompute the
     // per-game > garglk > global precedence (and `auto` can fall back here).
     state.honor_game_colours_base = honor_game_colours_base;
@@ -1685,6 +1900,12 @@ pub(crate) fn boot_story(
     // neither of them knows what engine was built or what it opened.
     state.story_zversion = story_zversion;
     state.config = cfg;
+
+    // `--transcript-file` (SQ-0410): open before anything below pushes to the
+    // transcript, so the opening banner a few lines down lands in the file too.
+    if let Some(path) = &cli.transcript_file {
+        state.attach_transcript_sink(path);
+    }
 
     // Debug trace (trace feature): start a fresh log for this run and arm the
     // engine's screen-trace buffer per config; no-op when no section is active.
@@ -1740,23 +1961,35 @@ pub(crate) fn boot_story(
         }
         None => None,
     };
-    if state.config.enable_sound {
-        state.audio = Some(audio::AudioBackend::new(state.config.volume));
-    }
+    // `state.audio` stays `None` here and opens lazily on first actual use
+    // (`AppState::play_turn_sounds` / `play_glulx_sound_ops`, or the
+    // `/play-sound` diagnostic) — opening a real output device costs real
+    // time (~240ms measured, SQ-1014's audit) and a story that never plays a
+    // sound should never pay it just because `enable_sound` is on (SQ-1423).
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = session.introspect().map(|i| i.vocabulary()).unwrap_or_default();
 
-    // `[command_band] auto_open`: open the band with the story. Instant (no
-    // slide) so the first frame is already the settled layout.
-    if band_auto_open {
-        let mut mapper_noop = mapper::mapper::Mapper::default();
-        // Not through `Action::OpenCommandBand`: that action PERSISTS the band's
-        // state per-game (SQ-1123), and a global `auto_open` must not pin itself
-        // to whichever story you happened to launch. The state change without the
-        // persistence is exactly what this helper is.
-        app::input::open_command_band(&mut state, &mut mapper_noop, true);
-        state.band_dock.toggle_to(true, true);
+    // Open whichever panel this story starts with (SQ-1123, widened to a
+    // three-state cycle by SQ-1237): the per-game override, or the global
+    // `[command_panel] auto_open` fallback resolved into `initial_panel` above.
+    // Instant (no slide) so the first frame is already the settled layout.
+    match initial_panel {
+        app::state::SidePanel::Command => {
+            let mut mapper_noop = mapper::mapper::Mapper::default();
+            // Not through `Action::OpenCommandBand`: that action PERSISTS the
+            // panel state per-game (SQ-1123), and a global `auto_open` must not
+            // pin itself to whichever story you happened to launch. The state
+            // change without the persistence is exactly what this helper is.
+            app::input::open_command_band(&mut state, &mut mapper_noop, true);
+            state.band_dock.toggle_to(true, true);
+        }
+        app::state::SidePanel::Inventory => {
+            // Same non-persisting rule as the command panel above.
+            app::input::open_inventory_panel(&mut state, true);
+            state.inv_dock.toggle_to(true, true);
+        }
+        app::state::SidePanel::None => {}
     }
 
     // Push the game's opening banner and capture the title from it. Glulx returns
@@ -1781,7 +2014,8 @@ pub(crate) fn boot_story(
     // chunk, the fetched IFDB sidecar, then the bundled tables — so the pane
     // names the game the way the list does. The banner heuristic is the tier
     // below it, and the filename stem is the last resort it was meant to be.
-    let meta_title = app::picker::metadata_title_in(&story_path, &game_dir, &ifid, is_scott);
+    let meta_title =
+        app::picker::metadata_title_in(&story_path, &game_dir, &ifid, is_scott, &story_bytes);
     state.title =
         app::session::resolve_title(None, meta_title.as_deref(), banner_title.as_deref(), &story_path);
     let story_filename = story_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -1906,10 +2140,14 @@ pub(crate) fn boot_story(
     // until the view catches up rather than answering that read. Skipped entirely
     // for a resumed transcript (below): that scrollback was already read, and
     // paging it would park a returning player mid-history.
+    // The baseline is the first row of the banner that carries PROSE, not row 0:
+    // a story that opens with a few newlines (every Inform 7 Glulx one does) had
+    // those blank rows counted as text the reader must not miss, which paged a
+    // banner that fit and ate the first keystroke of the first command (SQ-1434).
     if startup_transcript.is_none()
         && app::pager::should_arm(session.pending_input(), app::pager::more_suppressed(&*session))
     {
-        state.pager.arm(0);
+        state.pager.arm(app::pager::opening_baseline(&state));
     }
 
     // If an archived transcript was loaded on startup, replace the fresh one.
@@ -1927,6 +2165,11 @@ pub(crate) fn boot_story(
         // just replaced; the sidecar reset dropped it, so rebuild it from the
         // resumed scrollback (SQ-1135).
         app::input::refresh_seen_words(&mut state, &*session);
+    }
+    // After the resumed transcript above, not before: this line must survive
+    // as the last one on screen, not be overwritten by `state.transcript = lines`.
+    if let Some(degradation) = startup_restore_degradation {
+        crate::engine_helpers::push_restore_degradation_notice(&mut state, degradation);
     }
     if !startup_history.is_empty() {
         state.history = startup_history;
@@ -2027,7 +2270,11 @@ pub(crate) fn boot_story(
         eprintln!("lanthorn: cannot enter alternate screen: {}", e);
         std::process::exit(1);
     }
-    // Bracketed paste (SQ-0653). Without it the terminal replays a paste as raw
+    // Bracketed paste (SQ-0653) and mouse capture (opt-in via config `mouse`),
+    // via the shared [`reassert_terminal_modes`] so the launch site and every
+    // `Event::Resize` re-assertion (SQ-1340) send the same bytes.
+    //
+    // Bracketed paste: without it the terminal replays a paste as raw
     // keystrokes, and the app cannot tell them from typing: a Tab fired
     // autocomplete, a leading '/' opened the command palette, and every newline
     // SUBMITTED a line to the game — so pasting a walkthrough played it. With the
@@ -2035,16 +2282,13 @@ pub(crate) fn boot_story(
     // field as literal text. Best-effort: a terminal that ignores the sequence
     // simply never sends `Event::Paste`, which is exactly today's behavior.
     // `restore_terminal()` always issues DisableBracketedPaste.
-    let _ = execute!(stdout(), EnableBracketedPaste);
-
-    // Mouse capture is opt-in (config `mouse = true`). Capture puts the terminal
-    // in any-motion reporting mode, so every mouse movement wakes the event loop
-    // and forces a full redraw; leaving it off keeps idle/scroll responsive and
-    // preserves the terminal's native text selection. restore_terminal() always
-    // issues DisableMouseCapture, which is a harmless no-op when it was never on.
-    if state.config.mouse {
-        let _ = execute!(stdout(), EnableMouseCapture);
-    }
+    //
+    // Mouse capture puts the terminal in any-motion reporting mode, so every
+    // mouse movement wakes the event loop and forces a full redraw; leaving it
+    // off keeps idle/scroll responsive and preserves the terminal's native text
+    // selection. restore_terminal() always issues DisableMouseCapture, which is
+    // a harmless no-op when it was never on.
+    let _ = reassert_terminal_modes(&mut stdout(), state.config.mouse);
 
     // The fork-and-probe seam (SQ-1121). Armed with the story's own bytes and the
     // boot facts that change how it runs, so the shadow a vetted suggestion is
@@ -2078,8 +2322,14 @@ pub(crate) fn boot_story(
     // are session setup rather than frame traffic.
     let traffic: app::terminal_dump::TrafficHandle = Default::default();
     state.term_traffic = Some(std::sync::Arc::clone(&traffic));
+    // And buffered before it reaches the tty (SQ-1192): raw `Stdout` is a
+    // mutex-locked LineWriter with a ~1 KiB buffer, so a dense frame was
+    // thousands of lock/flush rounds — one per queued crossterm command. The
+    // buffer sits INSIDE the counter so the traffic numbers keep meaning what
+    // they meant: bytes when the backend writes them, a flush per drawn frame.
+    // Writes larger than the buffer (a base64 image transmit) bypass it whole.
     let terminal = match Terminal::new(CrosstermBackend::new(app::terminal_dump::CountingWriter::new(
-        stdout(),
+        std::io::BufWriter::with_capacity(256 * 1024, stdout()),
         traffic,
     ))) {
         Ok(t) => t,
@@ -2158,10 +2408,34 @@ fn prompt_yes_no(question: &str) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod tests {
-    use super::should_ask_font_check;
+    use super::{reassert_terminal_modes, should_ask_font_check};
     use app::config::OnOff;
+
+    /// SQ-1340: a resize re-asserts bracketed paste always, and mouse capture
+    /// only when the config asked for it — the same rule the launch site
+    /// applies, since both call the one function.
+    ///
+    /// This assertion is Unix-only. crossterm enables mouse capture on Windows
+    /// through the console API, not an escape sequence, so there are no bytes to
+    /// assert on there; the function itself is exercised by the launch path on
+    /// every platform.
+    #[test]
+    #[cfg(not(windows))]
+    fn reassert_terminal_modes_gates_mouse_on_config() {
+        let mut with_mouse = Vec::new();
+        reassert_terminal_modes(&mut with_mouse, true).unwrap();
+        let with_mouse = String::from_utf8(with_mouse).unwrap();
+        assert!(with_mouse.contains("\x1b[?2004h"), "bracketed paste: {with_mouse:?}");
+        assert!(with_mouse.contains("\x1b[?1000h"), "mouse capture: {with_mouse:?}");
+
+        let mut without_mouse = Vec::new();
+        reassert_terminal_modes(&mut without_mouse, false).unwrap();
+        let without_mouse = String::from_utf8(without_mouse).unwrap();
+        assert!(without_mouse.contains("\x1b[?2004h"), "bracketed paste: {without_mouse:?}");
+        assert!(!without_mouse.contains("\x1b[?1000h"), "mouse capture: {without_mouse:?}");
+    }
 
     /// SQ-1112: the reported bug, and the guard that made it hard to fix.
     ///

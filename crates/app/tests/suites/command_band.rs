@@ -128,6 +128,9 @@ fn taking_an_object_moves_it_from_here_to_carried() {
         .unwrap_or_else(|| here0[0].clone());
     session.submit("open mailbox");
     session.submit("take leaflet");
+    // Mirror the run loop: every turn finisher bumps `turn_epoch`, which is
+    // what tells the epoch-gated refresh the VM has run (SQ-1175).
+    state.begin_turn();
     refresh_objects(&mut state, &session);
 
     let band = state.overlays.command_band.as_ref().unwrap();
@@ -268,6 +271,43 @@ fn an_unchanged_object_tree_does_not_force_a_repaint() {
     seed_player_obj(&mut state, &session);
     assert!(refresh_objects(&mut state, &session), "the first fill is a change");
     assert!(!refresh_objects(&mut state, &session), "…and the second is not");
+}
+
+/// SQ-1175: with no turn in between, the second refresh does not merely report
+/// "unchanged" — it never re-reads the engine at all. Objects only move when
+/// the VM runs, and every path that runs it bumps `turn_epoch`, so the ~20 Hz
+/// loop tick must not repeat the object-tree walk (on v4+ the location
+/// detection behind it decodes every short name in the game per call).
+///
+/// Falsify by removing the `objects_epoch` gate in `refresh_objects`: the
+/// second call then recomputes, finds the real list differs from the planted
+/// sentinel, overwrites it and returns true.
+#[test]
+fn an_unchanged_epoch_skips_the_recompute_entirely() {
+    let Some(mut session) = boot_zmachine("minizork-r34-s871124.z3") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+    session.submit("look");
+    seed_player_obj(&mut state, &session);
+    assert!(refresh_objects(&mut state, &session), "the first fill is a change");
+
+    // Plant a sentinel where the engine's answer would go: a gated refresh must
+    // not even look, so the sentinel survives.
+    state.overlays.command_band.as_mut().unwrap().here = vec!["sentinel".to_string()];
+    assert!(!refresh_objects(&mut state, &session), "same epoch: nothing to re-read");
+    assert_eq!(
+        state.overlays.command_band.as_ref().unwrap().here,
+        vec!["sentinel".to_string()],
+        "the cached columns were not recomputed"
+    );
+
+    // …and the gate INVALIDATES: a new turn re-reads the engine and the real
+    // list replaces the sentinel (the stale-cache half of the bargain).
+    state.begin_turn();
+    assert!(refresh_objects(&mut state, &session), "a bumped epoch recomputes");
+    let here = &state.overlays.command_band.as_ref().unwrap().here;
+    assert!(!here.iter().any(|h| h == "sentinel"), "the sentinel is gone: {here:?}");
+    assert!(!here.is_empty(), "…replaced by the room's real objects");
 }
 
 // ── Not a modal ──────────────────────────────────────────────────────────────
@@ -741,7 +781,7 @@ fn the_grammar_is_read_once_per_open() {
     assert!(!refresh_verbs(&mut state, &session), "…and an idle tick forces no repaint");
 }
 
-/// `[command_band] verbs` still replaces the column wholesale — the story's own
+/// `[command_panel] verbs` still replaces the column wholesale — the story's own
 /// grammar included — and says whose list it is. Existing configs keep working.
 #[test]
 fn a_configured_verb_list_outranks_the_story_s_grammar() {
@@ -878,6 +918,9 @@ fn the_carried_column_reaches_into_an_opened_container() {
     assert!(!holds(&shut, "lunch"), "a shut sack's lunch is not a word the band may offer: {shut:?}");
 
     session.submit("open sack");
+    // Mirror the run loop: the turn finisher bumps `turn_epoch`, which is what
+    // lets the epoch-gated refresh re-read the tree (SQ-1175).
+    state.begin_turn();
     refresh_objects(&mut state, &session);
     let open = state.overlays.command_band.as_ref().unwrap().items(COL_CARRIED);
     assert!(
@@ -1074,7 +1117,7 @@ fn the_v6_noun_bit_and_the_objects_name_the_same_things() {
 
 /// SQ-1151: the column offers no word a player cannot type.
 ///
-/// **The reported defect**, seen in Arthur's verb panel: it listed both `be` and
+/// **The reported defect**, seen in Arthur's command band: it listed both `be` and
 /// `be?`. The `?` is genuinely in the dictionary entry rather than a ZSCII
 /// fallback — `be` and `be?` differ in their second word (`0x14a5` against
 /// `0x54a5`, Z-char 21 being a literal `?` in alphabet A2) and hold different

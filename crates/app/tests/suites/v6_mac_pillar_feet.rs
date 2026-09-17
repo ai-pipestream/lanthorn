@@ -34,8 +34,8 @@
 //! 3. **The band count is derived from the span** and grows with it; at the
 //!    120x40 the user judged it, it does not regress.
 //! 4. **The COLOUR rendition on the same disk is byte-for-byte unmoved** — its
-//!    shaft is featureless, `pillar_shaft` measures it, and it keeps Bocfel's
-//!    `extend_pillars` untouched.
+//!    shaft is featureless, `pillar_shaft` measures it, and it keeps the plain
+//!    `extend_pillars` composition untouched.
 //!
 //! Both `honor_game_colours` modes, per the project's colour convention: the
 //! flank source is composed from the graphics canvas either way, and a mode that
@@ -76,7 +76,6 @@ fn launch(pictures: Option<&str>, honor: bool) -> GameSession {
     };
     let named = over.std_window();
     let profile = InterpreterProfile::resolve(&path, None, over.flavour(), None);
-    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve_with_override(&path, over, None);
     let dims = picts.all_pict_dims();
     // SQ-1021/SQ-1022: every per-machine fact in one value, so this
@@ -89,6 +88,8 @@ fn launch(pictures: Option<&str>, honor: bool) -> GameSession {
         honor.then(|| profile.default_colours()).flatten(),
         true,
         app::native_font::FaceSet::none(),
+        profile.palette(),
+        None,
     );
     let mut s = GameSession::new_for_machine(bytes, honor, false, false, dims, None, None, &boot)
     .expect("Zork Zero boots off the Macintosh disk");
@@ -263,7 +264,6 @@ fn desired_heights(s: &GameSession, panes: &[(u16, u16)]) -> Vec<u32> {
 /// itself, and the assertion fails with bare shaft running past the foot.
 #[test]
 fn the_macintosh_pillar_puts_its_foot_on_the_bottom_row() {
-    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -330,7 +330,6 @@ fn the_macintosh_pillar_puts_its_foot_on_the_bottom_row() {
 /// stops matching the others.
 #[test]
 fn the_bands_are_evenly_spaced_and_the_pane_decides_how_many() {
-    let _g = app::v6_palette_at_boot();
     if mac_disk().is_none() {
         return;
     }
@@ -445,14 +444,14 @@ fn crop(gfx: &image::RgbaImage, x0: u32, x1: u32, h: u32) -> image::RgbaImage {
 
 /// **The other archive on the same disk must not have moved.** `CPic.data`'s
 /// pillars have a FEATURELESS shaft, so `pillar_shaft` measures them and they
-/// keep Bocfel's `extend_pillars` exactly as it was — the mirror of SQ-0808
-/// included, which a banded column cannot use because a mirror moves its band.
+/// keep the plain `extend_pillars` composition exactly as it was
+/// (v6-border-tiling-spec.md §4.4) — the mirror of SQ-0808 included, which a
+/// banded column cannot use because a mirror moves its band.
 ///
 /// Pinned as the composition's own numbers rather than as a hash, so a failure
 /// says WHICH part moved.
 #[test]
-fn the_colour_pillars_on_the_same_disk_keep_bocfels_composition() {
-    let _g = app::v6_palette_at_boot();
+fn the_colour_pillars_on_the_same_disk_keep_the_plain_extend_pillars_composition() {
     if mac_disk().is_none() {
         return;
     }
@@ -469,7 +468,8 @@ fn the_colour_pillars_on_the_same_disk_keep_bocfels_composition() {
                 app::render::v6_border::pillar_shaft(&f.gfx_flank(), f.art.1),
                 Some((82, 374)),
                 "cols {}..{}, honor_game_colours={honor}: the colour pillar's shaft is PLAIN, and \
-                 the derivation of Bocfel's four constants rests on it (SQ-0799)",
+                 the castle's measured numbers (v6-border-tiling-spec.md §2.1, §7 rule 2) rest on \
+                 it being so (SQ-0799)",
                 f.x0,
                 f.x1,
             );
@@ -481,15 +481,16 @@ fn the_colour_pillars_on_the_same_disk_keep_bocfels_composition() {
                 )
                 .expect("extended");
                 let sp = spans(&out);
-                // Bocfel's foot: 13 raw rows doubled, stamped flush at the bottom
-                // with the shaft's span unbroken all the way down to it.
+                // The measured foot: 13 raw rows doubled (26 unit rows), stamped
+                // flush at the bottom with the shaft's span unbroken all the way
+                // down to it.
                 assert!(sp[d as usize - 1].is_some(), "the colour foot reaches row {}", d - 1);
                 let shaft = sp[82].expect("the shaft's first row");
                 assert!(
                     (82..d - 26).all(|y| sp[y as usize] == Some(shaft)),
                     "cols {}..{}, honor_game_colours={honor}: the colour shaft must hold ONE span \
                      from row 82 to the foot of a {d}-row column — it is the featureless shaft \
-                     that lets Bocfel's fixed stride be invisible",
+                     that lets a fixed stride be invisible",
                     f.x0,
                     f.x1,
                 );

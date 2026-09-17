@@ -229,7 +229,7 @@ fn delta_from_table(t: &toml::value::Table) -> RawDelta {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-theme"))]
 mod tests {
     use super::*;
 
@@ -241,7 +241,7 @@ scheme = "tomorrow-night"     # optional base: built-in name or a Ghostty theme 
 text    = { fg = "white",     bg = "background" }  # body ink on the page
 chrome  = { fg = "white",     bg = "black" }       # ink on a UI surface (bars/panels/upper window)
 line    = { fg = "cyan" }                          # lines, frames, rules, dividers
-accent  = { fg = "cyan" }                          # highlight: links, selection, current room, badges
+accent  = { fg = "blue" }                          # highlight: links, selection, current room, badges
 muted   = { fg = "dark-gray" }                     # dim / secondary
 alert   = { fg = "yellow" }                        # warning / error
 heading = { fg = "white",     bold = true }        # titles / headers
@@ -331,7 +331,7 @@ loc_indicator        = { parent = "muted" }
 # ── Map-wide glyph SET presets. A single glyph is overridden by slot name in ───
 # ── the [map.overrides] table below — selectors carry colours, not glyphs. ─────
 box_style            = "rounded"    # room boxes: rounded | thick | double | solid | super-thick | ascii | borderless
-arrow_set            = "filled"     # cardinal connector arrows: filled | line | nerdfont | nf-bold | nf-box | nf-chevron | nf-circle | nf-outline
+arrow_set            = "filled"     # cardinal connector arrows: filled | line | nerdfont | nf-bold | nf-box | nf-chevron | nf-circle | nf-outline | nf-thick | nf-wind | nf-thin
 portal_icons         = "ascii"      # up/down/in/out endpoint icons: ascii | nerdfont | nerdfont-stairs
 path_style           = "light"      # cardinal (N/S/E/W) connector line: light | heavy | dotted
 portal_path_style    = "dotted"     # up/down/in/out connector line — styled separately from cardinal paths
@@ -389,7 +389,7 @@ align = "right"
         let p = parse(FIXTURE).expect("fixture should parse");
 
         assert_eq!(p.scheme, Some("tomorrow-night".to_string()));
-        assert_eq!(p.roles["accent"].fg, Some("cyan".to_string()));
+        assert_eq!(p.roles["accent"].fg, Some("blue".to_string()));
 
         assert_eq!(p.decls["panel.border:active"].bold, Some(true));
         assert_eq!(p.decls["panel.border:active"].style, Some("single".to_string()));

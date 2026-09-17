@@ -685,6 +685,12 @@ fn ctx(m: &Medium) -> String {
             Some(DiskImage::CommodoreD64) => "Commodore 1541 floppy",
             Some(DiskImage::CommodoreG64) => "Commodore 1541 floppy (GCR bitstream)",
             Some(DiskImage::Iso9660) => "ISO 9660 CD-ROM",
+            // SQ-1458's three. No Infocom release in this table is one — they
+            // are the Scott Adams media — but the enum is exhaustive here on
+            // purpose, so they are named rather than swept into a wildcard.
+            Some(DiskImage::AtariDos2) => "Atari 8-bit floppy",
+            Some(DiskImage::AppleDos33) => "Apple DOS 3.3 floppy",
+            Some(DiskImage::AtariXex) => "Atari 8-bit loadable binary",
             None => "story file",
         },
         m.release,
@@ -749,7 +755,6 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
     assert_is_the_pinned_release(m, &bytes);
     let path = stories_dir().join(m.file);
     let profile = InterpreterProfile::resolve(&path, None, None, None);
-    app::v6_set_palette(profile.palette());
     let mut picts = PictSource::resolve(&path, None);
     let picture_dims = picts.all_pict_dims();
     // The same chain, in the same order: the Blorb's `Reso`, the archive the
@@ -765,6 +770,8 @@ fn boot(m: &Medium, honor_game_colours: bool) -> Option<GameSession> {
         profile.default_colours(),
         true,
         app::native_font::FaceSet::none(),
+        profile.palette(),
+        None,
     );
     let mut s = GameSession::new_for_machine(bytes, honor_game_colours, false, false, picture_dims, None, None, &boot)
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", ctx(m)));
@@ -1293,6 +1300,18 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
             // no story in hand gets, and the IBM PC default is the right thing
             // for it to be.
             Some(DiskImage::Iso9660) => InterpreterProfile::IbmPc,
+            // **The Apple II's third filesystem, answering like its other two**
+            // (SQ-1458). §11.1.3 asks which machine the interpreter runs on, and
+            // DOS 3.3 is the same Apple II that ProDOS and the self-booting press
+            // are — three rows disagreeing would make the number a property of
+            // the disk, which SQ-0857 disproved out of Infocom's own YZIP.
+            Some(DiskImage::AppleDos33) => InterpreterProfile::AppleIIgs,
+            // **And the Atari 8-bit falls through to the default, because
+            // §11.1.3 numbers no such machine** — its 5 is the Atari ST, a
+            // different processor. Both rows state `None` AND decline to imply
+            // the IBM PC, so `resolve` reaches its fallback; the arm is here to
+            // say that is the intended answer rather than an oversight.
+            Some(DiskImage::AtariDos2) | Some(DiskImage::AtariXex) => InterpreterProfile::IbmPc,
             None => InterpreterProfile::IbmPc,
         };
         assert_eq!(
@@ -1315,7 +1334,6 @@ fn the_medium_each_release_ships_on_picks_the_interpreter_profile() {
 /// window 2 and the story file's r83 into window 0.
 #[test]
 fn each_v6_medium_narrates_through_the_window_its_own_release_uses() {
-    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for f in V6_FRAMES {
         let m = MEDIA.iter().find(|m| m.file == f.file).expect("frame names a medium in MEDIA");
@@ -1347,7 +1365,6 @@ fn each_v6_medium_narrates_through_the_window_its_own_release_uses() {
 /// 4, so the medium's profile is visible in the game's own output.
 #[test]
 fn a_game_that_names_its_release_names_the_one_the_medium_carries() {
-    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for (file, wanted) in NARRATED {
         let m = MEDIA.iter().find(|m| m.file == *file).expect("NARRATED names a medium in MEDIA");
@@ -1489,7 +1506,6 @@ fn artwork_on_a_dos_floppy_is_both_listed_and_loadable() {
 #[test]
 fn an_explicit_interpreter_number_outranks_the_floppy_it_was_opened_from() {
     const ZTUU: &str = "Zork - The Undiscovered Underground.adf";
-    let _g = app::v6_palette_at_boot();
     let m = MEDIA.iter().find(|m| m.file == ZTUU).expect("ZTUU is in MEDIA");
     let Some(bytes) = story_bytes(m) else { return };
     assert_is_the_pinned_release(m, &bytes);
@@ -1499,7 +1515,6 @@ fn an_explicit_interpreter_number_outranks_the_floppy_it_was_opened_from() {
     let path = stories_dir().join(m.file);
     let profile = InterpreterProfile::resolve(&path, Some(6), None, None);
     assert_eq!(profile, InterpreterProfile::IbmPc, "{}: explicit beats the medium", ctx(m));
-    app::v6_set_palette(profile.palette());
 
     let mut s = GameSession::new_with_trace(
         bytes,
@@ -1515,6 +1530,10 @@ fn an_explicit_interpreter_number_outranks_the_floppy_it_was_opened_from() {
         None,
     )
     .unwrap_or_else(|e| panic!("{}: should boot without a ZError: {e:?}", ctx(m)));
+    // SQ-1393: the machine's own colour table. `new_with_trace` is the
+    // no-machine door and presents §8.3.1's own, so a harness that boots a
+    // press states the press's table here.
+    s.machine.set_palette(profile.palette());
 
     let mut said = String::new();
     for _ in 0..24 {
@@ -1551,7 +1570,6 @@ fn an_explicit_interpreter_number_outranks_the_floppy_it_was_opened_from() {
 /// beside it, window 0.
 #[test]
 fn each_v6_medium_renders_the_story_viewport_its_own_release_lays_out() {
-    let _g = app::v6_palette_at_boot();
     let mut ran = 0;
     for f in V6_FRAMES {
         let m = MEDIA.iter().find(|m| m.file == f.file).expect("frame names a medium in MEDIA");

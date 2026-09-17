@@ -25,6 +25,32 @@ pub struct Mapper {
     /// about the crossing that produced it and a stale one describes a step the player has already
     /// walked away from. What DOES persist is the answer (`MapGraph::seam_decision`).
     pub(crate) pending_suggestion: Option<LayerSuggestion>,
+    /// A move `apply_turn` could not settle on its own — a declared-exit mismatch or a live
+    /// contradiction against something the map already believed — waiting for a caller with a
+    /// probe to judge it (SQ-1269). See [`RandomExitSuspicion`].
+    ///
+    /// Transient like `pending_suggestion`: set at most once per move, and taken (never merely
+    /// read) by whoever resolves it, so a suspicion nobody looked at cannot leak into the next
+    /// move's decision.
+    pub(crate) pending_random_exit_suspicion: Option<RandomExitSuspicion>,
+}
+
+/// A move that CONTRADICTS what the map already believed about `(origin, dir)`, left for a caller
+/// with a probe to decide (SQ-1269) — see the module's "suspicion, not proof" design at
+/// [`Mapper::note_random_exit_suspicion`].
+///
+/// `old_dest` is whatever the map already claimed for `(origin, dir)` before this move: `Some(x)`
+/// for an existing edge OR self-loop (a self-loop's "destination" is the room itself — `x ==
+/// origin` — which is itself a real pooled destination once the direction is marked, the room
+/// card's "back here"), `None` when nothing existed yet (a Phase-1 declared-exit mismatch with no
+/// prior edge to contradict). `live_dest` is where the player actually landed this move — `==
+/// origin` for a same-room arrival that contradicts an edge elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RandomExitSuspicion {
+    pub origin: RoomId,
+    pub dir: Direction,
+    pub old_dest: Option<RoomId>,
+    pub live_dest: RoomId,
 }
 
 /// One passage a return probe walked: out of `from`, heading `dir`, arriving in `to` (SQ-0785).
@@ -59,7 +85,7 @@ impl Mapper {
     /// CURRENT session — the passage just walked, and what the map made of it — and a restore has
     /// walked nothing yet, so both start empty.
     pub fn restored(graph: MapGraph) -> Self {
-        Mapper { graph, arrived_via: None, pending_suggestion: None }
+        Mapper { graph, arrived_via: None, pending_suggestion: None, pending_random_exit_suspicion: None }
     }
 
     /// Observe the player's location after a turn. The conservative form: when the location has
@@ -87,11 +113,86 @@ impl Mapper {
         self.graph.add_self_loop(here, dir)
     }
 
+    /// Record `dir` out of `origin` as a RANDOM exit (SQ-1257): the room's own declared exit
+    /// data named a fixed destination and the player was sent somewhere else — Lost Pig's gnome
+    /// tunnels, where a "before going" rule overrides the room's exit table entirely. Mints NO
+    /// edge; the caller still moves [`MapGraph::set_current`] to wherever the player actually
+    /// landed via [`Mapper::observe_relocation`], exactly as for any other involuntary move. This
+    /// call is the one that leaves a trace of the ATTEMPT — without it, a direction the story
+    /// randomised is indistinguishable from one nobody has ever tried.
+    ///
+    /// Returns false for an unknown room or [`Direction::Unknown`], matching
+    /// [`Self::record_probed_passage`] and [`Self::record_self_loop`].
+    pub fn record_random_exit(&mut self, origin: RoomId, dir: Direction) -> bool {
+        if dir == Direction::Unknown || self.graph.room(origin).is_none() {
+            return false;
+        }
+        self.graph.mark_random_exit(origin, dir);
+        true
+    }
+
+    /// Leave a move `apply_turn` could not settle on its own for a caller with a probe to decide
+    /// (SQ-1269): a Phase-1 declared-exit mismatch or a live contradiction against something the
+    /// map already believed. Mints nothing and marks nothing — the caller's own move already
+    /// relocated the player (via [`Mapper::observe_relocation`]) — this only stashes the fact so
+    /// [`Mapper::take_random_exit_suspicion`] can hand it to a probe, or, when no probe can run,
+    /// straight to [`Mapper::resolve_suspicion_as_random`] (today's old immediate-marking
+    /// behaviour, unchanged in effect).
+    pub fn note_random_exit_suspicion(&mut self, origin: RoomId, dir: Direction, old_dest: Option<RoomId>, live_dest: RoomId) {
+        self.pending_random_exit_suspicion = Some(RandomExitSuspicion { origin, dir, old_dest, live_dest });
+    }
+
+    /// Take the suspicion the last move left, if it left one (SQ-1269). Taking it is how a caller
+    /// claims responsibility for resolving it — arming a probe, or resolving it immediately when
+    /// none can run — so it is asked at most once.
+    pub fn take_random_exit_suspicion(&mut self) -> Option<RandomExitSuspicion> {
+        self.pending_random_exit_suspicion.take()
+    }
+
+    /// Resolve a [`RandomExitSuspicion`] as PROVEN random (SQ-1269): remove whatever old edge or
+    /// self-loop stood on `(origin, dir)`, mark the direction `?`, and pool both the old
+    /// destination (if any) and the live landing. Used both when no probe can run at all — the
+    /// same immediate marking `apply_turn` always did for this shape before SQ-1269 — and by
+    /// `app::random_exit_probe::deliver` when a Phase-2 probe disagrees.
+    pub fn resolve_suspicion_as_random(&mut self, s: RandomExitSuspicion) {
+        if let Some(old) = s.old_dest {
+            self.graph.remove_connection(s.origin, s.dir);
+            self.graph.note_random_destination(s.origin, s.dir, old);
+        }
+        self.record_random_exit(s.origin, s.dir);
+        if s.live_dest != s.origin {
+            self.graph.note_random_destination(s.origin, s.dir, s.live_dest);
+        }
+    }
+
+    /// Resolve a [`RandomExitSuspicion`] as PROVEN deterministic but CHANGED (SQ-1269): the
+    /// passage used to lead to `old_dest` (or nowhere recorded at all) and a probe confirms it now
+    /// reliably leads to `live_dest` instead — remove the stale edge/self-loop and mint the new
+    /// one. No mark, no pool: the direction never was, and still is not, random.
+    pub fn resolve_suspicion_as_changed(&mut self, s: RandomExitSuspicion) {
+        if s.old_dest.is_some() {
+            self.graph.remove_connection(s.origin, s.dir);
+        }
+        if s.live_dest != s.origin {
+            self.mint_passage(s.origin, s.dir, s.live_dest);
+        } else {
+            self.graph.add_self_loop(s.origin, s.dir);
+        }
+    }
+
     fn observe_inner(&mut self, location: RoomId, name: &str, via: Option<Direction>, moved: bool) {
         // Asked BEFORE the upsert, because after it every room is a room the map knows. Only this
         // moment can answer it, and the detector needs it: a region that grew by one room is worth
         // mentioning once, while walking back into a room already on the map is not (SQ-0853).
         let newly_seen = self.graph.room(location).is_none();
+        // Also captured BEFORE the upsert, which is the only moment this room's PREVIOUS label is
+        // still readable — `upsert_room` is about to overwrite it. Read below, only for a same-room
+        // move (SQ-1257 Phase 3): a compass move that returns to the room it left is a self-loop
+        // ONLY when the story keeps calling that room the same thing; a rename in the same
+        // breath is Lost Pig's gnome tunnels re-rolling a fresh name on every step, and gets
+        // recorded as a random exit instead. `label()` rather than `name`, so a room pinned by a
+        // `label_override` compares against what the player actually sees, not the churn under it.
+        let label_before = self.graph.room(location).map(|r| r.label().to_string());
         self.graph.upsert_room(location, name.to_string());
         // Whatever the last move had to say is about the last move; this one answers for itself.
         self.pending_suggestion = None;
@@ -128,11 +229,20 @@ impl Mapper {
                     );
                 } else if let (true, Some(d)) = (moved, via) {
                     // The player walked `d` and came out where they went in: a self-loop
-                    // (SQ-0666). No placement and no `collapse_unknown_edges` — the edge carries
-                    // no geometry, so there is nothing to lay out and no `?` stub it could make
-                    // redundant. `arrived_via` still records the passage: it IS the one walked.
+                    // (SQ-0666) — UNLESS the story renamed the room in the same breath, which is
+                    // Lost Pig's gnome tunnels rerolling a fresh name every step (SQ-1257 Phase
+                    // 3). No probe, no declared-exit mismatch: a rename on a same-room arrival is
+                    // itself the structural signal, exactly like Phase 1's exit-table mismatch.
+                    // Either way no placement and no `collapse_unknown_edges` run here — neither
+                    // a loop nor a random mark carries geometry, so there is nothing to lay out
+                    // and no `?` stub either could make redundant. `arrived_via` still records
+                    // the passage: it IS the one walked, whichever way this resolves.
                     self.arrived_via = Some((prev_id, d));
-                    self.graph.add_self_loop(prev_id, d);
+                    if label_before.as_deref() != Some(name) {
+                        self.record_random_exit(prev_id, d);
+                    } else {
+                        self.graph.add_self_loop(prev_id, d);
+                    }
                 }
             }
         }
@@ -369,7 +479,7 @@ mod tests {
         let mut m = Mapper::default();
         m.observe(1, "West of House", None);
         m.observe(2, "Forest", Some(Direction::N));
-        assert_eq!(m.graph.connections(), &[crate::graph::Connection{origin:1,dir:Direction::N,dest:2,distorted:false}]);
+        assert_eq!(m.graph.connections(), &[crate::graph::Connection{origin:1,dir:Direction::N,dest:2,distorted:false,weight:crate::graph::PassageWeight::Hard}]);
         assert_eq!(m.graph.current(), Some(2));
     }
 
@@ -513,6 +623,58 @@ mod tests {
 
         // A loop never marks itself distorted, however many relayouts run over it.
         assert!(m.graph.connections().iter().all(|c| !c.distorted));
+    }
+
+    /// SQ-1257 Phase 3: Lost Pig's gnome tunnels. A compass move that returns to the room it
+    /// left AND renames it mints NO self-loop edge — it is recorded as a random exit instead, the
+    /// same structural fact Phase 1 records for a declared-exit mismatch. Falsify by reverting the
+    /// `label_before` check in `observe_inner` back to unconditional `add_self_loop` and this
+    /// fails on the `connections().is_empty()` assertion, reproducing the original symptom (a
+    /// self-loop badge and a flickering label instead of a stable room with a `?` exit).
+    #[test]
+    fn a_same_room_move_that_also_renames_the_room_is_a_random_exit_not_a_loop() {
+        let mut m = Mapper::default();
+        m.observe_moved(183, "Twisty Cave", None); // first sighting of the tunnels
+
+        m.observe_moved(183, "Confusing Passage", Some(Direction::N));
+        assert!(
+            m.graph.connections().is_empty(),
+            "no self-loop (or any edge) is minted for a rename-loop: {:?}",
+            m.graph.connections()
+        );
+        assert!(m.graph.self_loops(183).is_empty());
+        assert!(m.graph.is_random_exit(183, Direction::N), "north is recorded as a random exit");
+        assert!(m.graph.is_tried(183, Direction::N), "and it still counts as tried");
+        assert_eq!(m.graph.room(183).unwrap().name, "Confusing Passage", "the label is the CURRENT name");
+        assert_eq!(
+            m.graph.room(183).unwrap().aliases,
+            vec!["Twisty Cave"],
+            "the old name joins the aliases"
+        );
+        assert_eq!(m.arrived_via(), Some((183, Direction::N)), "the passage walked is still recorded");
+
+        // A second rename-loop, a different direction: the mark and the alias both accumulate.
+        m.observe_moved(183, "Strange Place", Some(Direction::E));
+        assert!(m.graph.is_random_exit(183, Direction::E));
+        assert_eq!(
+            m.graph.room(183).unwrap().aliases,
+            vec!["Twisty Cave", "Confusing Passage"]
+        );
+        assert!(m.graph.connections().is_empty(), "still no edges at all");
+    }
+
+    /// The companion case: a same-room move that does NOT rename the room stays an ordinary
+    /// self-loop, exactly as SQ-0666 always recorded it — the rename check must not turn every
+    /// maze loop into a random exit.
+    #[test]
+    fn a_same_room_move_with_no_rename_stays_an_ordinary_self_loop() {
+        let mut m = Mapper::default();
+        m.observe_moved(1, "Maze", None);
+        m.observe_moved(1, "Maze", Some(Direction::W)); // same name both times
+
+        assert_eq!(m.graph.self_loops(1), vec![Direction::W]);
+        assert!(!m.graph.is_random_exit(1, Direction::W));
+        assert!(m.graph.room(1).unwrap().aliases.is_empty(), "no rename, so no alias either");
     }
 
     /// The retroactive path: a player who KNOWS a probe is a loop can say so, and the fact lands

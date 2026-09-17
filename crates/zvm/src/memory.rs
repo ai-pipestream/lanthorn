@@ -1,12 +1,17 @@
-// Z-machine memory model — ZMSD §1.1, §1.2.
-//
-// Dynamic memory (0x0000 up to but not including static_mem_base) is readable
-// and writable. Static memory and high memory are read-only. All multi-byte
-// story values are big-endian.
+//! Z-machine memory model — ZMSD §1.1, §1.2.
+//!
+//! Dynamic memory (0x0000 up to but not including `static_mem_base`) is readable
+//! and writable. Static memory and high memory are read-only. All multi-byte
+//! story values are big-endian.
 
 use crate::error::ZError;
 use crate::header::{parse_header, Header};
 
+/// The story image's address space (ZMSD §1.1, §1.2): dynamic memory is
+/// readable and writable, static and high memory are read-only, and every
+/// multi-byte value is big-endian. Owns the raw bytes and the parsed
+/// [`Header`], and caches a handful of facts that are expensive to
+/// recompute but fixed for the life of a story image.
 #[derive(Debug)]
 pub struct Memory {
     bytes: Vec<u8>,
@@ -19,6 +24,15 @@ pub struct Memory {
     /// size_bytes, addr). Interior-mutable so read paths (&self) can record it.
     /// Drained by `take_mem_fault`; the CPU checks it after each instruction.
     mem_fault: std::cell::Cell<Option<(bool, u8, u32)>>,
+    /// Memo for `objects::short_name_property` — the property number this
+    /// story's own symbol table gives Inform's `short_name`, or `None` where it
+    /// carries no such table (SQ-1372). Finding it reads the whole image once;
+    /// `objects::printed_name` asks for it per object, per turn.
+    ///
+    /// A story's property numbering is fixed at compile time, so one answer
+    /// serves the whole session — a `@restore` rewrites dynamic memory with the
+    /// same story's bytes, and the identifiers table is part of them.
+    short_name_prop: std::cell::OnceCell<Option<u8>>,
 }
 
 /// Parse the custom Unicode translation table from raw story bytes if present
@@ -84,7 +98,14 @@ impl Memory {
             header,
             unicode_table,
             mem_fault: std::cell::Cell::new(None),
+            short_name_prop: std::cell::OnceCell::new(),
         })
+    }
+
+    /// The `short_name` property-number memo — see the field, and
+    /// `objects::printed_name` which is its only caller.
+    pub(crate) fn short_name_prop_memo(&self) -> &std::cell::OnceCell<Option<u8>> {
+        &self.short_name_prop
     }
 
     /// Length of the story file in bytes.
@@ -135,7 +156,7 @@ impl Memory {
     }
 
     /// Write a big-endian 16-bit word at `addr`. Only dynamic memory is writable
-    /// — same runtime read-only enforcement as [`write_byte`]. The whole word
+    /// — same runtime read-only enforcement as [`Self::write_byte`]. The whole word
     /// must lie below static_mem_base (a word straddling the boundary would
     /// half-corrupt static memory).
     pub fn write_word(&mut self, addr: u32, v: u16) {
@@ -187,7 +208,7 @@ impl Memory {
     pub fn unpack_routine(&self, packed: u16) -> u32 {
         let p = packed as u32;
         match self.header.version {
-            3 => 2 * p,
+            1..=3 => 2 * p,
             4 | 5 => 4 * p,
             6 | 7 => 4 * p + 8 * self.header.routines_offset as u32,
             8 => 8 * p,
@@ -256,7 +277,7 @@ impl Memory {
     pub fn unpack_string(&self, packed: u16) -> u32 {
         let p = packed as u32;
         match self.header.version {
-            3 => 2 * p,
+            1..=3 => 2 * p,
             4 | 5 => 4 * p,
             6 | 7 => 4 * p + 8 * self.header.strings_offset as u32,
             8 => 8 * p,

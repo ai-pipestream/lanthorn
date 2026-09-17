@@ -6,10 +6,18 @@
 //! `gvm-cli`'s `drive`) until the next `glk_select` request or Quit, draining the
 //! [`AppGlk`] backend's output into the [`TurnResult`].
 //!
-//! Automapping/play-aids for Glulx are a later phase (SP4): [`introspect`] and
-//! [`current_location`] return `None`, so the map pane and the play-aids stay
-//! quiet. Glulx saves are tagged `"glulx"`; the 3b-i foreign-engine restore guard
-//! prevents cross-loading a Z-machine save (and vice-versa).
+//! [`introspect`] answers since SQ-1241, for any story whose Inform object list
+//! `gvm::objects::ParseNames` can verify: the tree-walking play-aids — the
+//! inventory dock, the command panel's *carried* and *here* columns — read that
+//! story's own objects instead of scraping the reply to an `i` command. Rooms
+//! still come from the heading heuristics below plus the `location` global the
+//! room-lock learns, and the object-word set (`Engine::object_word_set`,
+//! SQ-1210) is unchanged. See the `impl Introspect` block for what is answered
+//! narrowly and why — one containment level rather than scope, room questions
+//! only for the room the player is standing in, and a REFUSED avatar where two
+//! candidates cannot be told apart. Glulx saves are tagged `"glulx"`; the 3b-i
+//! foreign-engine restore guard prevents cross-loading a Z-machine save (and
+//! vice-versa).
 //!
 //! [`introspect`]: Engine::introspect
 //! [`current_location`]: Engine::current_location
@@ -18,10 +26,10 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use gvm::glk::{GlkBackend, Rect as GlkRect, WinType};
+use gvm::glk::GlkBackend;
 use gvm::{GError, Machine, Memory, StepResult};
 
-use crate::engine::{Engine, EngineError, EngineSave, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
+use crate::engine::{Engine, EngineError, EngineSave, Introspect, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
 use crate::glk_backend::AppGlk;
 use crate::session::{clamp_runs, strip_read_prompt, trim_elems_to_len, FilenameReq, InputKind, PendingIo, TranscriptElem, TurnResult};
 use zvm::location::LocationMethod;
@@ -30,6 +38,18 @@ use zvm::location::LocationMethod;
 pub const GLULX_ENGINE: &str = "glulx";
 /// The save-format version within the `glulx` engine (gvm snapshot).
 const GLULX_SAVE_FORMAT: u32 = 1;
+
+/// How many silent `look`s in a row may come back with no room heading before this
+/// session stops asking (SQ-1293). See [`GlulxSession::silent_look`].
+///
+/// It cannot be one, because a refusal is only evidence about the MOMENT it was
+/// asked: a story is not obliged to be at its parser just because it printed a read
+/// prompt, and Counterfeit Monkey's prologue asks "Can you hear me?" and "Do you
+/// remember our name?" behind exactly that prompt — `look` is not a command there,
+/// and one refusal from it would poison a whole session that answers perfectly well
+/// two turns later. Four in a row is a story that does not name its rooms this way;
+/// any answer at all resets the count.
+const NAMING_LOOK_REFUSALS: u8 = 4;
 
 // ── key → Glk keycode ──────────────────────────────────────────────────────────
 
@@ -70,6 +90,11 @@ pub struct GlulxSession {
     pending: InputKind,
     /// Whether the game has ended.
     quit: bool,
+    /// This session's runaway-turn watchdog: the wall-clock budget one drive gets
+    /// before the turn is aborted as a fault. Resolved once at construction from
+    /// [`default_turn_budget`]; raised per session by
+    /// [`GlulxSession::set_turn_budget`].
+    turn_budget: Duration,
     /// A game-initiated save/restore awaiting the host's file I/O, bubbled to the
     /// run loop via the next `TurnResult`. Set when a turn's drive stops on an
     /// `@save`/`@restore`; cleared by `resume_save`/`resume_restore`.
@@ -98,6 +123,92 @@ pub struct GlulxSession {
     /// discovery over a multi-MB I7 image is not free, so it never runs unless the
     /// inspector is actually opened. See [`crate::glulx_debug`].
     pub(crate) disasm_cache: std::cell::RefCell<Option<gvm::disasm::DisasmCache>>,
+    /// Where this story keeps the words its parser accepts for an object —
+    /// [`gvm::objects::ParseNames`], derived on first ask (SQ-1210). `None`
+    /// inside the cell is a real answer, not a failure to look: a story whose
+    /// RAM holds no Inform object list this reader can verify (glulxercise, a
+    /// non-Inform compiler) refuses at detection, and every consumer falls back
+    /// exactly as before the seam existed. A `OnceCell` because the answer
+    /// describes the compiler's layout — the `$70` list's linkage is emitted by
+    /// `Inform6/src/tables.c` and never rewritten at play — and because the
+    /// detection is a scan of all of RAM, which must not run per turn. The
+    /// same story survives `restore_state`/`restore_game_save` (a foreign
+    /// engine's save is refused before the swap), so the layout does too.
+    parse_names: std::cell::OnceCell<Option<gvm::objects::ParseNames>>,
+    /// The `door_dir`/`*_to`/`door_to` exit-table convention (SQ-1264),
+    /// derived once per story through [`Self::parse_names`] — see
+    /// `gvm::world` for what it recovers and why it never changes for the life
+    /// of a loaded story (same reasoning as [`parse_names`](Self::parse_names)
+    /// itself: the property TABLE STRUCTURE Inform compiled in is read-only
+    /// game data, even though the property *values* it points at can change).
+    /// `None` inside the cell is a real answer — a story with no `door_dir`
+    /// convention (or no readable object tree at all) — not a failure to look.
+    world_model: std::cell::OnceCell<Option<gvm::world::WorldModel>>,
+    /// This story's compiled Inform **7** world model (SQ-1303) — which objects
+    /// are rooms, what each room is called, and which room each direction leads
+    /// to — read off the image by `gvm::i7map` with no turn played.
+    ///
+    /// Forced at BOOT rather than on first use, because the two things it buys
+    /// are both about the opening moments: the room the player starts in is
+    /// keyed by its own address from turn zero, and the room lock can resolve on
+    /// the first move instead of the tenth command. A cell all the same, so the
+    /// derivation has one home and a session built by a path that never boots
+    /// (none today) still gets the right answer lazily.
+    ///
+    /// `None` inside the cell is a real answer and the common one: an Inform 6
+    /// story, an I7 build older than `Map_Storage`, a story that builds its map
+    /// at run time, or no readable object list at all. Every behaviour that
+    /// reads this is skipped for such a story, which then identifies its rooms
+    /// exactly as it did before this existed.
+    ///
+    /// Measured cost of the derivation, release build: 202 ms on
+    /// `CounterfeitMonkey-11.gblorb` (100 rooms, a 5.5 MB image — the largest in
+    /// the corpus), 3 ms on `The_Wizard_Sniffer.gblorb`, 23 ms for Kerkerkruip's
+    /// refusal, 0.2 ms for the Anchorhead demo's.
+    i7_world: std::cell::OnceCell<Option<gvm::i7map::I7World>>,
+    /// Reverse map from a room's [`mapper::graph::RoomId`] (SQ-0526's
+    /// `crate::roomid::glulx_room_id` HASH of the object address) back to that
+    /// address (SQ-1264).
+    ///
+    /// `Engine::declared_exit` is asked about `origin` — the room the player
+    /// was standing in when the command that produced THIS turn was typed —
+    /// and by the time it is asked (`turn::finish_command_turn`, after
+    /// `session.submit` has already run the move) the live session has moved
+    /// on to the DESTINATION room. `resolve_handle`'s "re-hash the current
+    /// address" trick therefore cannot answer for `origin` any more, and the
+    /// hash itself cannot be inverted (that is the whole reason it is a hash —
+    /// see the `Introspection handles` note below). So every room the
+    /// room-lock resolves to a real address is remembered here as it is
+    /// discovered ([`Self::room_for`]), and `origin` — a room the player has
+    /// necessarily stood in on some EARLIER turn, or `declared_exit` would
+    /// have nothing to ask about — is always already in the map by the time
+    /// it is looked up. Grows for the life of the session; never needs
+    /// invalidating, because a Glulx object's address is fixed at compile
+    /// time and never moves.
+    room_addrs: std::cell::RefCell<std::collections::HashMap<mapper::graph::RoomId, u32>>,
+    /// The [`parse_names`](Self::parse_names) walk folded into the one set the
+    /// bulk callers query — "does ANY object answer to this word" (SQ-1176,
+    /// SQ-1210). Same shape and soundness argument as
+    /// `GameSession::object_word_set`: a cache of LIVE data, because the
+    /// `name` arrays sit in RAM and a game can rewrite them, dropped wherever
+    /// the VM runs — every drive on this session funnels through
+    /// [`drive_turn`](Self::drive_turn), [`resize`](Self::resize),
+    /// [`apply_deferred_resize`](Self::apply_deferred_resize),
+    /// [`settle_after_event`](Self::settle_after_event) or the two restore
+    /// paths, and each of those takes this cell.
+    object_word_set: std::cell::RefCell<Option<std::sync::Arc<grammar_model::ObjectWordSet>>>,
+    /// The avatar's object address, derived on first ask each turn and dropped
+    /// beside [`object_word_set`](Self::object_word_set) — same lifetime, same
+    /// reason, and dropped by the same call so the next cache added here cannot
+    /// be forgotten at one of the six sites (SQ-1241).
+    ///
+    /// The inner `Option` is the answer and the outer one is the cache, so a
+    /// story whose avatar is REFUSED is refused once a turn rather than on every
+    /// frame: `render::transcript::inventory_items` asks whenever
+    /// `AppState::player_obj` is unset, which for such a story is forever, and
+    /// the walk decodes every object's name array — 2,494 of them on
+    /// Counterfeit Monkey.
+    player_addr: std::cell::RefCell<Option<Option<u32>>>,
     /// Auxiliary persistent data (Glulx aux persistence is a later phase).
     aux: BTreeMap<String, Vec<u8>>,
     aux_dirty: bool,
@@ -107,6 +218,16 @@ pub struct GlulxSession {
     /// Learns which RAM word holds the game's `location` global, so same-named
     /// rooms get distinct ids (SQ-0526). See [`crate::glulx_roomlock`].
     room_lock: crate::glulx_roomlock::RoomLock,
+    /// Consecutive silent `look`s that came back with no room heading, capped by
+    /// [`NAMING_LOOK_REFUSALS`]: a story that will not name its rooms that way must
+    /// stop being asked. Reset by any answer. See [`GlulxSession::silent_look`]
+    /// (SQ-1293).
+    naming_look_refusals: u8,
+    /// Whether this story has EVER printed a `Subheader` room heading. Latches on
+    /// the first one and never clears, because it is the answer to "does this game
+    /// name its rooms in the buffer?" — see [`GlulxSession::status_line_room`]
+    /// (SQ-1302).
+    saw_buffer_heading: bool,
     /// When false, the game's own trailing `>` read prompt is kept in the
     /// transcript instead of being stripped. Default true. See
     /// [`Engine::set_strip_prompt`].
@@ -115,6 +236,12 @@ pub struct GlulxSession {
     /// (`create_by_name`), and whether this session may write to it. Empty = no
     /// store (game-auto saves auto-fail). See [`drive_auto`] and [`GameStore`].
     store: GameStore,
+    /// Set only by [`Self::new_shadow`]: this session's screen is never
+    /// rendered (the `probe` shadow exists purely to run commands and read
+    /// back `WorldPrint`/transcript, headless). `restore_state` reads this to
+    /// skip its Arrange delivery (SQ-1515) — see the comment there for the
+    /// measured cost that makes it worth skipping.
+    headless: bool,
 }
 
 /// Where a drive services the game's own fixed-name (`create_by_name`) saves,
@@ -170,14 +297,21 @@ impl GameStore {
     }
 }
 
-/// Wall-clock budget for a single drive (one turn's worth of execution). A
-/// well-behaved game reaches an input request in milliseconds; if it runs this
-/// long it is assumed to be in a runaway loop (e.g. layout code that cannot
-/// converge on a given screen geometry) and the turn is aborted as a recoverable
-/// fault so the app survives instead of hard-hanging. Generous, because this is a
-/// last-resort backstop — the tree-driven size snapping in `gvm` already prevents
-/// the known cause. Set via env `LANTHORN_TURN_BUDGET_MS` for testing.
-fn turn_budget() -> Duration {
+/// The DEFAULT wall-clock budget for a single drive (one turn's worth of
+/// execution). A well-behaved game reaches an input request in milliseconds; if
+/// it runs this long it is assumed to be in a runaway loop (e.g. layout code that
+/// cannot converge on a given screen geometry) and the turn is aborted as a
+/// recoverable fault so the app survives instead of hard-hanging. Generous,
+/// because this is a last-resort backstop — `gvm` divides every proportional
+/// split in virtual pixels and floors each child independently (SQ-1220), so the
+/// rounding a layout loop feeds on (unequal halves of an odd split) does not
+/// arise. Set via env `LANTHORN_TURN_BUDGET_MS`.
+///
+/// Read ONCE per session into [`GlulxSession::turn_budget`] rather than on every
+/// turn, so a session carries its own policy and the hot loop makes no env call.
+/// A caller that knows a long turn is legitimate raises it with
+/// [`GlulxSession::set_turn_budget`]; see that method for why one exists.
+fn default_turn_budget() -> Duration {
     std::env::var("LANTHORN_TURN_BUDGET_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
@@ -208,8 +342,7 @@ enum DriveStop {
 
 /// Step the machine until it pauses for input, quits, or requests an in-game
 /// save/restore. Aborts a runaway turn via the wall-clock watchdog.
-fn drive(machine: &mut Machine) -> DriveStop {
-    let budget = turn_budget();
+fn drive(machine: &mut Machine, budget: Duration) -> DriveStop {
     let start = Instant::now();
     let mut steps: u64 = 0;
     loop {
@@ -227,6 +360,14 @@ fn drive(machine: &mut Machine) -> DriveStop {
                 }
             }
             StepResult::Quit => return DriveStop::Quit,
+            // A real VM fault (SQ-1395) is folded into the same `DriveStop::Quit`
+            // as a clean exit — the two are told apart downstream from
+            // `machine.take_fault_trace()`/`diagnostics` (see `turn_result` and
+            // `apply_turn_events`'s `result.fault` check in turn.rs), which this
+            // arm leaves untouched. `StepResult::Fault` only makes that same
+            // distinction reachable to a THIRD-PARTY embedder of gvm who never
+            // reads `diagnostics`; lanthorn already had it.
+            StepResult::Fault => return DriveStop::Quit,
             StepResult::NeedLine { .. } => return DriveStop::Input(InputKind::Line),
             StepResult::NeedChar { .. } => return DriveStop::Input(InputKind::Char),
             StepResult::NeedEvent { .. } => return DriveStop::Event,
@@ -245,15 +386,42 @@ fn drive(machine: &mut Machine) -> DriveStop {
                     return DriveStop::Filename { usage, fmode };
                 }
             }
+            _ => return DriveStop::Quit,
         }
     }
 }
 
+/// The suffix gvm's Glk-spec fileref sanitizer (`gvm::glk::Model::
+/// sanitize_fileref_name`) always appends for `fileusage_SavedGame` (Glk
+/// spec-fixed `0x01`) — `.glksave`, per SQ-1416. gvm owns the sanitize rule
+/// (strip disallowed characters, truncate at the first `.`, append this
+/// suffix); lanthorn owns only the further step of where a SavedGame slot
+/// lives on disk (`<store>/<stem>.qzl`, predating SQ-1416 and unchanged by
+/// it — the file extension players' existing saves already carry). These two
+/// helpers are the one place that boundary is crossed, in both directions, so
+/// it is never duplicated or drifts out of sync with gvm's rule.
+const GLK_SAVEDGAME_SUFFIX: &str = ".glksave";
+
+/// gvm's already-sanitized SavedGame fileref name (e.g. `"foo.glksave"`) ->
+/// lanthorn's on-disk basename (`"foo"`, before `seed_saved_games`/
+/// [`drive_auto`] add `.qzl`). Strips the known suffix rather than
+/// re-deriving gvm's name from the raw fileref argument.
+fn saved_game_disk_stem(glk_name: &str) -> &str {
+    glk_name.strip_suffix(GLK_SAVEDGAME_SUFFIX).unwrap_or(glk_name)
+}
+
+/// The reverse of [`saved_game_disk_stem`]: an on-disk `.qzl` basename ->
+/// the fully-sanitized Glk name gvm's SavedGame existence index is keyed by.
+fn saved_game_glk_name(disk_stem: &str) -> String {
+    format!("{disk_stem}{GLK_SAVEDGAME_SUFFIX}")
+}
+
 /// Seed the machine's host-managed SavedGame existence index from every
-/// `<store>/*.qzl` on disk (raw basename minus the `.qzl` suffix, matching
-/// how [`drive_auto`] writes and how the index is keyed), so a `create_by_name`
-/// game probing `glk_fileref_does_file_exist` before `@restore` sees its save
-/// across launches (SQ-0301). No-op when there is no store, or it is unreadable.
+/// `<store>/*.qzl` on disk (raw basename minus the `.qzl` suffix, mapped to
+/// gvm's Glk name via [`saved_game_glk_name`] — see [`drive_auto`] for the
+/// write side), so a `create_by_name` game probing
+/// `glk_fileref_does_file_exist` before `@restore` sees its save across
+/// launches (SQ-0301). No-op when there is no store, or it is unreadable.
 /// Over-seeding player-save `.qzl` names is inert — a game only ever probes names
 /// it created. Runs for a READ-ONLY store too: a shadow must see the cache it is
 /// about to restore, or it never asks for it.
@@ -273,7 +441,7 @@ fn seed_saved_games(machine: &mut Machine, store: &GameStore) {
             continue;
         };
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0) as u32;
-        machine.seed_saved_game_file(name.to_string(), size);
+        machine.seed_saved_game_file(saved_game_glk_name(name), size);
     }
 }
 
@@ -284,9 +452,9 @@ fn seed_saved_games(machine: &mut Machine, store: &GameStore) {
 /// Only the player's SAVE/RESTORE verb (`create_by_prompt`), or any save when
 /// there is no store, bubbles up as `DriveStop::Save`/`Restore`. A read-only
 /// store reads as usual and answers every write with a clean failure.
-fn drive_auto(machine: &mut Machine, store: &GameStore) -> DriveStop {
+fn drive_auto(machine: &mut Machine, store: &GameStore, budget: Duration) -> DriveStop {
     loop {
-        let stop = drive(machine);
+        let stop = drive(machine, budget);
         let restore = match stop {
             DriveStop::Save => false,
             DriveStop::Restore => true,
@@ -298,7 +466,7 @@ fn drive_auto(machine: &mut Machine, store: &GameStore) -> DriveStop {
         if req.by_prompt || req.name.is_empty() || store.absent() {
             return stop;
         }
-        let path = store.dir().join(format!("{}.qzl", req.name));
+        let path = store.dir().join(format!("{}.qzl", saved_game_disk_stem(&req.name)));
         if restore {
             match std::fs::read(&path) {
                 Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {}
@@ -325,9 +493,9 @@ fn drive_auto(machine: &mut Machine, store: &GameStore) -> DriveStop {
 /// resize, sound-notify) is auto-failed — those paths have no UI to prompt the
 /// player, and leaving the VM suspended would wedge the next turn. The game's
 /// OWN fixed-name saves are serviced silently by [`drive_auto`] first.
-fn drive_settled(machine: &mut Machine, store: &GameStore) -> (InputKind, bool) {
+fn drive_settled(machine: &mut Machine, store: &GameStore, budget: Duration) -> (InputKind, bool) {
     loop {
-        match drive_auto(machine, store) {
+        match drive_auto(machine, store, budget) {
             DriveStop::Input(k) => return (k, false),
             DriveStop::Event => return (InputKind::Event, false),
             DriveStop::Quit => return (InputKind::Line, true),
@@ -430,7 +598,7 @@ impl GlulxSession {
         vfs_bytes: &[u8],
         random_seed: Option<u32>,
     ) -> Result<GlulxSession, GError> {
-        Self::new_with_store(
+        let mut s = Self::new_with_store(
             GameStore::read_only(game_dir),
             image,
             cols,
@@ -445,7 +613,9 @@ impl GlulxSession {
             [[(None, None); 11]; 2],
             false, // no execution trace
             random_seed,
-        )
+        )?;
+        s.headless = true;
+        Ok(s)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -472,6 +642,11 @@ impl GlulxSession {
         // glk_style_measure for the host's rendered colours during its startup
         // (SQ-0315; Kerkerkruip probes its style_User2 slot there, SQ-0803).
         backend.set_theme_colours(theme);
+        // Per-game borderless-windows mode: a backend preference (SQ-0341/
+        // SQ-1402), set before the backend moves into the machine so it is
+        // already in force at the first relayout, so the game's windows abut
+        // with no reserved gutter from boot.
+        backend.set_borderless(borderless);
         let mut machine = Machine::with_glk(mem, backend);
         machine.set_acceleration(acceleration);
         machine.set_graphics(graphics_enabled);
@@ -479,9 +654,6 @@ impl GlulxSession {
         if let Some(seed) = random_seed {
             machine.set_rng_seed(seed);
         }
-        // Per-game borderless-windows mode: applies from the first relayout at
-        // boot, so the game's windows abut with no reserved gutter (SQ-0341).
-        machine.set_borderless(borderless);
         // Load the per-story Glk file VFS sidecar BEFORE booting: a Glulx game
         // may read a cache during boot (e.g. CM skips its long init) or write one
         // (leaving vfs_dirty set), so the sidecar must be in place first (SQ-0290).
@@ -496,37 +668,57 @@ impl GlulxSession {
         // the game's initialisation code is captured in the coverage set — a
         // later `/debug` toggle cannot see the boot PCs. Off by default, so a
         // normal launch keeps the single-branch hot loop with zero trace work.
-        machine.trace_exec = debug;
-        let (pending, quit) = drive_settled(&mut machine, &store);
+        machine.set_trace_exec(debug);
+        let turn_budget = default_turn_budget();
+        let (pending, quit) = drive_settled(&mut machine, &store, turn_budget);
         let mut session = GlulxSession {
             machine,
             pending,
             quit,
+            turn_budget,
             pending_io: None,
             pending_filename: None,
             deferred_resize: None,
             screen_cache: blank_screen(),
             window_dump_cache: Vec::new(),
             disasm_cache: std::cell::RefCell::new(None),
+            parse_names: std::cell::OnceCell::new(),
+            world_model: std::cell::OnceCell::new(),
+            i7_world: std::cell::OnceCell::new(),
+            room_addrs: std::cell::RefCell::new(std::collections::HashMap::new()),
+            object_word_set: std::cell::RefCell::new(None),
+            player_addr: std::cell::RefCell::new(None),
             aux: BTreeMap::new(),
             aux_dirty: false,
             last_room: None,
             room_lock: crate::glulx_roomlock::RoomLock::new(0, 0),
+            naming_look_refusals: 0,
+            saw_buffer_heading: false,
             strip_prompt: true,
             store,
+            headless: false,
         };
         session.refresh_screen();
         session.room_lock = match session.remembered_room_global() {
-            Some(addr) => crate::glulx_roomlock::RoomLock::locked_at(
-                session.machine.mem().ramstart(),
-                session.scan_words(),
-                addr,
-            ),
-            None => crate::glulx_roomlock::RoomLock::new(
+            Some(addr) if session.sidecar_addr_plausible(addr) => {
+                crate::glulx_roomlock::RoomLock::locked_at(
+                    session.machine.mem().ramstart(),
+                    session.scan_words(),
+                    addr,
+                )
+            }
+            _ => crate::glulx_roomlock::RoomLock::new(
                 session.machine.mem().ramstart(),
                 session.scan_words(),
             ),
         };
+        // SQ-1303: read this story's compiled Inform 7 world model NOW, before the
+        // opening room is resolved below — that resolution is the first thing it
+        // pays for, and the room lock wants the room set from its very first
+        // observation rather than from the turn it happens to be asked. `None` for
+        // every story the reader refuses, and everything below then behaves exactly
+        // as it did before. See the `i7_world` field for the measured cost.
+        session.arm_room_lock();
         // Resolve the opening room's id the way a live TURN does, not with a bare
         // name hash. When this story's `location` global was learned in an earlier
         // run the lock is already restored above, so a turn keys rooms by the room's
@@ -537,10 +729,9 @@ impl GlulxSession {
         // hash when nothing is locked, which is every game that never learns.
         let ram = session.scan_ram();
         let awaiting_line_input = session.pending == InputKind::Line;
-        session.last_room = session
-            .appglk()
-            .take_room_heading(awaiting_line_input)
-            .map(|n| session.room_for(&n, &ram));
+        let heading = session.appglk().take_room_heading(awaiting_line_input);
+        let heading = session.name_this_room(heading, awaiting_line_input);
+        session.last_room = heading.map(|n| session.room_for(&n, &ram));
         Ok(session)
     }
 
@@ -587,7 +778,8 @@ impl GlulxSession {
         }
         self.set_screen_size(cols, rows);
         self.machine.rearrange();
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        self.drop_world_caches(); // the drive runs game code (SQ-1176 duty)
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
         self.refresh_screen();
@@ -620,7 +812,8 @@ impl GlulxSession {
         self.deferred_resize = None;
         self.set_screen_size(cols, rows);
         self.machine.rearrange();
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        self.drop_world_caches(); // the drive runs game code (SQ-1176 duty)
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
     }
@@ -636,7 +829,8 @@ impl GlulxSession {
         if self.game_io_pending() {
             return;
         }
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        self.drop_world_caches(); // the drive runs game code (SQ-1176 duty)
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
     }
@@ -649,7 +843,7 @@ impl GlulxSession {
         if self.quit {
             return;
         }
-        self.machine.set_borderless(on);
+        self.appglk().set_borderless(on);
         self.machine.rearrange();
         // Same rule as `resize`: no non-interactive drive while a dialog holds a
         // suspended `@save`/`@restore` (SQ-0656). The mode is already set on the
@@ -664,7 +858,15 @@ impl GlulxSession {
     /// `pending`/`quit` left unchanged, since the game is mid-turn); the run loop
     /// performs the file I/O and calls `resume_save`/`resume_restore`.
     fn drive_turn(&mut self) {
-        match drive_auto(&mut self.machine, &self.store) {
+        // The VM is about to run, so RAM may change under the cached
+        // object-word set — a game CAN rewrite an object's `name` array
+        // mid-play, and a stale set would keep answering for the old words.
+        // Same per-turn invalidation the Z-machine's `drain_turn` performs
+        // (SQ-1176); the other drive paths on this session (`resize`,
+        // `apply_deferred_resize`, `settle_after_event`, the two restores) each
+        // take the cell too.
+        self.drop_world_caches();
+        match drive_auto(&mut self.machine, &self.store, self.turn_budget) {
             DriveStop::Input(k) => {
                 self.pending = k;
                 self.quit = false;
@@ -691,6 +893,354 @@ impl GlulxSession {
                 self.pending_filename = Some(FilenameReq { usage, fmode })
             }
         }
+    }
+
+    /// The reader for the words this story's parser accepts for an object,
+    /// derived on first use — see [`parse_names`](Self::parse_names) the field.
+    /// `None` is the documented refusal: no verified Inform object list in this
+    /// image, and every consumer keeps its pre-SQ-1210 fallback.
+    pub fn parse_names(&self) -> Option<&gvm::objects::ParseNames> {
+        self.parse_names
+            .get_or_init(|| gvm::objects::ParseNames::detect(self.machine.mem()).ok())
+            .as_ref()
+    }
+
+    /// This story's `door_dir`/`*_to`/`door_to` exit-table convention
+    /// (SQ-1264), derived on first use through [`Self::parse_names`]. `None`
+    /// when there is no object list to read at all, OR when one was read but
+    /// it names no `door_dir` convention — [`gvm::world::WorldModel::discover`]
+    /// does not distinguish the two (both leave every direction `Unknown`, the
+    /// same answer `zvm::world` gives a ZIL story), so neither does this.
+    fn world_model(&self) -> Option<&gvm::world::WorldModel> {
+        self.world_model
+            .get_or_init(|| self.parse_names().map(|n| gvm::world::WorldModel::discover(self.machine.mem(), n)))
+            .as_ref()
+    }
+
+    /// This story's compiled Inform 7 world model, derived on first use and
+    /// forced at boot — see the [`i7_world`](Self::i7_world) field for what it
+    /// costs and what `None` means (SQ-1303).
+    pub fn i7_world(&self) -> Option<&gvm::i7map::I7World> {
+        self.i7_world
+            .get_or_init(|| {
+                self.parse_names().and_then(|n| gvm::i7map::I7World::detect(self.machine.mem(), n))
+            })
+            .as_ref()
+    }
+
+    /// What the STORY calls the room at `addr`, where its compiled world model
+    /// says so (SQ-1303).
+    ///
+    /// This is the name that stops one room becoming two nodes. The heading is
+    /// what the story chose to PRINT on the turn it printed it, and it varies:
+    /// Counterfeit Monkey's status line reads `" Back Alley, noon"` where its
+    /// heading reads `"Back Alley"`, a heading can be re-styled or suppressed,
+    /// and a story that renames a room mid-play prints a different string for
+    /// the same place. The `printed name` property is the room's own, so every
+    /// route into [`Self::room_for`] agrees on one label for one address.
+    ///
+    /// `None` — and the heading is used, exactly as before — for a story with no
+    /// world model, for an address that is not one of its rooms, and for a room
+    /// whose printed name is a ROUTINE rather than a constant string (21 of
+    /// Counterfeit Monkey's 2,480 named objects; only running the story can say
+    /// what "the [colour] door" says today).
+    fn static_room_name(&self, addr: u32) -> Option<String> {
+        let world = self.i7_world()?;
+        if !world.is_room(addr) {
+            return None;
+        }
+        world.printed_name(self.machine.mem(), self.parse_names()?, addr)
+    }
+
+    /// The one room this story statically calls `name`, or `None` (SQ-1303).
+    ///
+    /// What lets a story's OPENING room be keyed by its own address before the
+    /// room lock has resolved anything: the player is standing somewhere the
+    /// story has named, and the world model can turn that name back into an
+    /// address without a single move being made. Without it the opening room is
+    /// minted under the hash of its heading and re-keyed later — or, on a story
+    /// that never locks, forever.
+    ///
+    /// **Unique or nothing.** Two rooms of one name is a maze, and a name cannot
+    /// say which one the player is in; that is the whole reason the room lock
+    /// exists, and guessing here would put the map in the wrong room rather than
+    /// merely in a name-keyed one. Matched with
+    /// [`zvm::location::status_name_matches`], the same normalisation the
+    /// Z-machine side has always compared a screen name against an object name
+    /// with.
+    fn room_by_static_name(&self, name: &str) -> Option<u32> {
+        let world = self.i7_world()?;
+        let names = self.parse_names()?;
+        let mem = self.machine.mem();
+        let mut found = None;
+        for &addr in world.rooms() {
+            let Some(printed) = world.printed_name(mem, names, addr) else { continue };
+            if !zvm::location::status_name_matches(name, &printed) {
+                continue;
+            }
+            if found.is_some() {
+                return None; // two rooms of that name; the name cannot say which
+            }
+            found = Some(addr);
+        }
+        found
+    }
+
+    /// What `Map_Storage` declares for `addr` in `compass` (SQ-1303) — the
+    /// Inform **7** half of [`Engine::declared_exit`], asked only where the
+    /// Inform 6 `door_dir` convention had nothing to say (which for an I7 story
+    /// is every direction of every room: that convention is not what its
+    /// compiler emits).
+    ///
+    /// Read from LIVE memory on every ask, not from the boot image. The array is
+    /// in RAM precisely so `AssertMapConnection` can rewrite it — "change the
+    /// north exit of the Hall to the Cellar" — and Counterfeit Monkey does: two
+    /// of the rooms in the SQ-1303 spike's played dump have connections its
+    /// compiled map does not.
+    ///
+    /// The four answers, and what each one means to
+    /// [`crate::random_exit_probe`], which is what consumes them:
+    ///
+    /// * a cell naming a room, or a two-sided door whose far side the model can
+    ///   resolve → [`AppExit::Room`], a fixed destination this move can be
+    ///   checked against;
+    /// * a cell naming a door whose far side only `door_to()` can compute →
+    ///   [`AppExit::Code`], which is exactly what that variant is for;
+    /// * a zero cell in a column this story HAS → [`AppExit::Absent`];
+    /// * no such direction in this story, or no world model, or an origin that
+    ///   is not one of its rooms → [`AppExit::Unknown`].
+    fn i7_declared_exit(
+        &self,
+        names: &gvm::objects::ParseNames,
+        addr: u32,
+        compass: gvm::world::Compass,
+    ) -> crate::engine::DeclaredExit {
+        use crate::engine::DeclaredExit as AppExit;
+        let Some(world) = self.i7_world() else { return AppExit::Unknown };
+        if !world.is_room(addr) {
+            return AppExit::Unknown;
+        }
+        let Some(col) = world.compass_column(compass) else { return AppExit::Unknown };
+        match world.exit(self.machine.mem(), names, addr, col) {
+            None => AppExit::Absent,
+            Some(gvm::i7map::I7Exit::Door(_)) => AppExit::Code,
+            Some(e) => match e.destination() {
+                Some(r) => AppExit::Room(crate::roomid::glulx_room_id(r)),
+                None => AppExit::Code,
+            },
+        }
+    }
+
+    /// Hand the room lock everything this story can be made to say about its own
+    /// rooms: the object table (SQ-1286) and, where there is one, the compiled
+    /// world model's room set with each room's static name (SQ-1303).
+    ///
+    /// One call rather than two at each site, because a lock built with only
+    /// half of it is a lock that learns more slowly for no reason anybody would
+    /// notice — and there are four places a `RoomLock` is built.
+    fn arm_room_lock(&mut self) {
+        if self.room_lock.needs_objects() {
+            let addrs = self.parse_names().map(|p| p.objects().collect::<Vec<u32>>());
+            self.room_lock.set_objects(addrs);
+        }
+        if self.room_lock.needs_rooms() {
+            let rooms = self.i7_world().map(|w| {
+                w.rooms().iter().map(|&a| (a, self.static_room_name(a))).collect::<Vec<_>>()
+            });
+            self.room_lock.set_rooms(rooms);
+        }
+    }
+
+    /// BOOT-ONLY cross-check on a sidecar address before it is ever trusted
+    /// (SQ-1305), where the compiled world model can say something about it.
+    /// The image-identity token on [`Self::remembered_room_global`] already
+    /// refuses a sidecar written by a DIFFERENT build, but Inform lays globals
+    /// out in declaration order — adding one anywhere before `location` in a
+    /// rebuild that otherwise keeps the same checksum and length (unlikely,
+    /// not impossible: both are just sums) shifts every later one down, so an
+    /// image-identity match alone cannot rule out "right build, wrong address"
+    /// with certainty. A value that is neither `0` (a game may legitimately
+    /// park `location` at nothing for a turn, see `RoomLock::verify`) nor one
+    /// of this story's own ROOMS is not a plausible `location` global at boot,
+    /// whatever the sidecar remembers.
+    ///
+    /// `true` when there is no compiled world model to ask (every story
+    /// `gvm::i7map` refuses), which leaves the sidecar exactly as trusted as
+    /// it was before this existed.
+    ///
+    /// **Boot-only, on purpose.** Past the opening moment a locked word CAN
+    /// legitimately hold a non-room object of the story — darkness parks
+    /// `location` on `thedark` (see `RoomLock::is_known_room`'s docs and the
+    /// SQ-1303 test `a_lock_survives_the_player_walking_into_the_dark`) — so
+    /// this check must never run on a live turn, only on the untouched address
+    /// a sidecar hands back before a single word of RAM has moved.
+    fn sidecar_addr_plausible(&self, addr: u32) -> bool {
+        let Some(world) = self.i7_world() else { return true };
+        match self.machine.mem().read32(addr) {
+            Some(0) => true,
+            Some(v) => world.is_room(v),
+            None => false,
+        }
+    }
+
+    /// The address the game's `location` global currently holds — the room the
+    /// player is in, as the STORY sees it (SQ-1241).
+    ///
+    /// `None` until [`crate::glulx_roomlock`] has resolved which RAM word that
+    /// global is, which takes a handful of confidently-observed moves on a
+    /// story's first run and no moves at all on later ones (the address is
+    /// remembered in the per-game sidecar). Read straight from the locked
+    /// address rather than through a `scan_ram` snapshot: this is asked on
+    /// render passes, and the snapshot is sixteen thousand reads.
+    fn location_addr(&self) -> Option<u32> {
+        let global = self.room_lock.locked()?;
+        self.machine.mem().read32(global).filter(|&v| v != 0)
+    }
+
+    /// The player's avatar as an object address, or `None` when this story
+    /// holds no readable object list or none of its objects can be identified
+    /// as an avatar. Validated against
+    /// [`location_addr`](Self::location_addr) where that is known — see
+    /// [`gvm::objects::ParseNames::find_player`].
+    ///
+    /// Cached for the turn, refusal included: see the
+    /// [`player_addr`](Self::player_addr) field.
+    fn player_addr(&self) -> Option<u32> {
+        if let Some(cached) = *self.player_addr.borrow() {
+            return cached;
+        }
+        let found = self
+            .parse_names()
+            .and_then(|n| n.find_player(self.machine.mem(), self.player_room_hint()));
+        *self.player_addr.borrow_mut() = Some(found);
+        found
+    }
+
+    /// The room to judge avatar candidates by — the *only* thing it is used
+    /// for, which is why it is not [`location_addr`](Self::location_addr).
+    ///
+    /// The learned global is exact and is preferred, but it takes a few
+    /// confidently-observed moves to resolve on a story's first run, and City
+    /// of Secrets needs the discrimination on turn ONE: it ships two situated
+    /// objects answering to avatar names, and the one the player is — Inform
+    /// 6's own `selfobj` — is the one standing in the room, while the decoy
+    /// named `yourself` is parked in a `(ConceptObjs)` bag. Anchorhead is the
+    /// same shape on the Z-machine, decoy and avatar the same way round
+    /// (`zvm::location`'s `PLAYER_NAMES` doc), so neither name outranks the
+    /// other and only the room can say.
+    ///
+    /// Room identity for the MAP is untouched by this: `room_for` still mints
+    /// its id from the learned global or the heading hash, exactly as SQ-0526
+    /// left it. This is a second, weaker question asked for one purpose.
+    fn player_room_hint(&self) -> Option<u32> {
+        self.location_addr().or_else(|| self.room_by_printed_heading())
+    }
+
+    /// The object whose short name is the heading the story last printed.
+    ///
+    /// How the Z-machine side has always found the room — match the name on
+    /// screen against object short names — with two conditions that make it a
+    /// derivation rather than a guess: the object must be at the TOP of the
+    /// containment tree, because Inform keeps rooms there and anything
+    /// contained by something is *in* a room rather than being one; and the
+    /// match must be UNIQUE. Two rooms printing one name is a maze, which is
+    /// exactly the case the learned global exists for (SQ-0526) and exactly the
+    /// case a name cannot settle.
+    fn room_by_printed_heading(&self) -> Option<u32> {
+        let heading = &self.last_room.as_ref()?.name;
+        let names = self.parse_names()?;
+        let mem = self.machine.mem();
+        let mut found = None;
+        for addr in names.objects() {
+            if names.parent(mem, addr).is_some() {
+                continue;
+            }
+            match names.short_name(mem, addr) {
+                Some(short)
+                    if !short.is_empty() && zvm::location::status_name_matches(heading, &short) => {
+                    if found.is_some() {
+                        return None; // two rooms of that name; the name cannot say which
+                    }
+                    found = Some(addr);
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// Drop everything derived from the LIVE object tree. Called wherever the
+    /// VM runs, because the tree and the `name` arrays are in RAM and the game
+    /// rewrites both. One call rather than a take per cache, so the next thing
+    /// derived from the tree is dropped at all six sites by construction.
+    fn drop_world_caches(&mut self) {
+        self.object_word_set.take();
+        self.player_addr.take();
+    }
+}
+
+// ── Introspection handles ───────────────────────────────────────────────────
+//
+// [`Introspect`] addresses objects with a `u16`, which is the Z-machine's own
+// object number and is not what a Glulx object HAS: there objects are records
+// in RAM and their identity is a 32-bit address. So the adapter hands out an
+// index into `ParseNames`' list, one-based so that `0` keeps meaning "no
+// object" the way every caller already assumes.
+//
+// The two handle spaces a caller can pass in are disjoint by construction and
+// this is the whole reason the scheme works:
+//
+//   * an OBJECT handle is `1..=len()`, and no Inform story has 32767 objects;
+//   * a ROOM handle is a [`crate::roomid`] id with the high bit set, minted by
+//     `room_for` from either the locked `location` value or the room name.
+//
+// So [`resolve_handle`] can tell them apart with `is_synthetic_room` and never
+// has to guess. A room handle resolves only when it names the room the player
+// is in RIGHT NOW: the id is a HASH of the address, so nothing can invert it,
+// and re-hashing the current address is the one comparison that is sound. That
+// is also the only room any caller asks about — `main.rs`'s room dock guards on
+// `Some(id) == current_room`, and the command band and `probe` pass
+// `current_location()` straight through.
+
+impl GlulxSession {
+    /// A snapshot of every room this session has resolved an object address for
+    /// (SQ-1336) — every room the player has stood in since the room lock first
+    /// resolved one, per [`Self::room_addrs`]'s own field docs. `/export-json`
+    /// is the one caller: a played [`mapper::graph::RoomId`] is a HASH of the
+    /// address for Glulx, so the address has to travel beside it in the JSON's
+    /// `engine_ref`, exactly as `lanthorn-mapgen`'s own [`crate::mapgen::EngineRef::GlulxAddr`]
+    /// does for a static map.
+    pub fn known_room_addresses(&self) -> std::collections::HashMap<mapper::graph::RoomId, u32> {
+        self.room_addrs.borrow().clone()
+    }
+
+    /// The object address an [`Introspect`] handle names, or `None` when the
+    /// handle names nothing this session can resolve (see the note above).
+    ///
+    /// `handle` is widened to `mapper::graph::RoomId` (SQ-1297): an ordinary
+    /// object handle (from [`Self::handle_for`]) is always a small 1-based
+    /// index and fits comfortably, but a ROOM handle is the same
+    /// [`crate::roomid::glulx_room_id`] hash the mapper uses and needs the
+    /// full widened space to stay unambiguous.
+    fn resolve_handle(&self, handle: mapper::graph::RoomId) -> Option<u32> {
+        let names = self.parse_names()?;
+        if crate::roomid::is_synthetic_room(handle) {
+            let addr = self.location_addr()?;
+            return (crate::roomid::glulx_room_id(addr) == handle).then_some(addr);
+        }
+        names.addr_of((handle as usize).checked_sub(1)?)
+    }
+
+    /// The handle for an object address: its one-based position in the list.
+    ///
+    /// `None` for an address that is not an object of this story's list, and
+    /// for the story large enough that a one-based index would collide with the
+    /// synthetic-room space — no such story exists, and refusing beats
+    /// answering with a handle that means two things.
+    fn handle_for(&self, addr: u32) -> Option<u16> {
+        let index = self.parse_names()?.index_of(addr)?;
+        let handle = u16::try_from(index + 1).ok()?;
+        (!crate::roomid::is_synthetic_room(handle.into())).then_some(handle)
     }
 
     fn appglk(&mut self) -> &mut AppGlk {
@@ -770,29 +1320,96 @@ impl GlulxSession {
         // command — cragne Manor's content warning (SQ-0733).
         let awaiting_line_input = self.pending == InputKind::Line;
         let heading = self.appglk().take_room_heading(awaiting_line_input);
-        let movement = match (&heading, self.last_room.as_ref().map(|r| &r.name)) {
+        // SQ-1351: and a banner the story's own status line contradicts is not a
+        // heading at all, whatever it is styled as.
+        let heading = self.refuse_banner_the_status_line_contradicts(heading);
+        // SQ-1302: a story that names its rooms only on the STATUS LINE — never in
+        // the buffer — is read from there instead, and everything below treats the
+        // answer as the heading it stands in for.
+        let heading = self.name_this_room(heading, awaiting_line_input);
+        // SQ-1286: the learner scores every RAM word, and what tells the room
+        // apart from the counters that also change with it is that its value is a
+        // real OBJECT of this story — and, where the story says so, a real ROOM
+        // (SQ-1303). Both are whole-image scans, so they are done once and never
+        // for a session that booted already locked; `new_with_store` has normally
+        // armed the lock already, and this is the belt for a `RoomLock` rebuilt
+        // mid-session (a restore, a `relearn`).
+        if self.room_lock.locked().is_none() {
+            self.arm_room_lock();
+        }
+        let ram = self.scan_ram();
+        // SQ-1294: **once the lock has resolved, the STORY says whether the room
+        // changed**, and the heading only says what it is called. Comparing headings
+        // is what a learning session has and nothing more: a game that narrates a
+        // move without reprinting the room looks stationary, and a game that prints
+        // a heading for a flashback looks like it moved. Both used to be scored as
+        // contradictions and cost the lock its life (see `RoomLock::verify`).
+        let heading_movement = match (&heading, self.last_room.as_ref().map(|r| &r.name)) {
             (None, _) => crate::glulx_roomlock::Movement::Unchanged,
             (Some(h), Some(prev)) if h == prev => crate::glulx_roomlock::Movement::Ambiguous,
             (Some(_), _) => crate::glulx_roomlock::Movement::Changed,
         };
-        let ram = self.scan_ram();
+        let movement = self.room_lock.movement(&ram).unwrap_or(heading_movement);
         let name = heading.clone().or_else(|| self.last_room.as_ref().map(|r| r.name.clone()));
         let was_locked = self.room_lock.locked();
-        self.room_lock.observe(ram.clone(), name.clone(), movement);
+        // SQ-1305: `heading_movement` is threaded through separately from
+        // `movement` — once locked it feeds `RoomLock::verify`'s frozen-lock
+        // check, which needs the printed-heading verdict rather than the
+        // story-side one `movement` already carries here (see `observe`'s docs
+        // for why the two can't be reconstructed from one another).
+        self.room_lock.observe(ram.clone(), name.clone(), movement, heading_movement);
         if let (None, Some(addr)) = (was_locked, self.room_lock.locked()) {
             self.remember_room_global(addr);
+            // SQ-1304: `take_room_remap` re-keys the MAP's pre-lock rooms; this is
+            // the session's own half of the same swap, and the only moment it can
+            // be done.
+            self.rekey_last_room_to_lock(&ram);
         }
         // Re-resolve the room every turn, not only when a heading is printed: a
         // maze step prints the SAME heading from a different room, so the id has
         // to come from the global even when the name did not change.
-        if let Some(n) = name {
-            self.last_room = Some(self.room_for(&n, &ram));
+        //
+        // The exception is a heading printed on a turn the lock says was NOT a move
+        // (SQ-1294). We are standing where we were standing, so that heading names
+        // nothing: Counterfeit Monkey's `remember` prints "Galley" for a flashback
+        // aboard a yacht while the player never leaves the Dormitory Room, and
+        // adopting it renamed the room under them. A room whose name the story
+        // really does change is re-read the next time they walk into it, which is
+        // the only moment the new name can be told from a memory.
+        if self.adopt_heading_for_room(movement, &ram) {
+            if let Some(n) = &name {
+                self.last_room = Some(self.room_for(n, &ram));
+            }
         }
-        let location = self.last_room.clone();
-        let location_method = location.as_ref().map(|_| LocationMethod::RoomHeading);
-        let diagnostics = std::mem::take(&mut self.machine.diagnostics);
+        let diagnostics = self.machine.take_diagnostics();
         let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
         let glulx_sound_ops = self.appglk().take_sound_ops();
+        // SQ-1293 / SQ-1294: the story moved us somewhere it did not name — or has
+        // not named anywhere yet, because Counterfeit Monkey's opening room is not
+        // announced until something asks. Ask it, out of the player's sight. Last,
+        // so the turn's own diagnostics, fault trace, transcript and sound ops are
+        // already out of the way and anything the question stirs up can simply be
+        // thrown away with the rest of it.
+        let mut story_named = heading.clone();
+        if self.needs_a_room_name(&heading, movement) {
+            // SQ-1302: the refusal itself is what unlocks the status line
+            // (`status_line_room`), so read it on the turn the story declined
+            // rather than leaving the opening room nameless for one more turn.
+            let looked = self.silent_look();
+            let named = match looked {
+                Some(n) => Some(n),
+                None => self.status_line_room(awaiting_line_input),
+            };
+            if let Some(n) = named {
+                self.last_room = Some(self.room_for(&n, &ram));
+                story_named = Some(n);
+            }
+        }
+        // SQ-1315: last of all, because it needs everything above — the name the
+        // story gave this turn, whichever channel it came from.
+        self.check_room_lock_against_story(&ram, movement, story_named.as_deref());
+        let location = self.last_room.clone();
+        let location_method = location.as_ref().map(|_| LocationMethod::RoomHeading);
         TurnResult {
             transcript,
             transcript_runs,
@@ -813,6 +1430,7 @@ impl GlulxSession {
             pictures: Vec::new(),
             transcript_elems: elems,
             prose_retired: None,
+            declared_exit: None,
         }
     }
 
@@ -841,18 +1459,437 @@ impl GlulxSession {
             .collect()
     }
 
-    /// The room id for this turn: the locked `location` global when it is known,
-    /// else the hash of the room name — which is what every Glulx game used before
-    /// the lock existed, and what a game that never locks keeps using.
+    /// The room id for this turn, in the order of authority the whole Glulx
+    /// identity path is built on:
+    ///
+    /// 1. the locked `location` global, when [`crate::glulx_roomlock`] has
+    ///    resolved which RAM word it is (SQ-0526);
+    /// 2. failing that, the address this story's own compiled world model gives
+    ///    for a room it uniquely calls `name` (SQ-1303) — which is how a game
+    ///    that has not locked yet, or never will, still gets a real identity
+    ///    from its very first prompt;
+    /// 3. failing both, the hash of the name, which is what every Glulx game
+    ///    used before any of this existed.
+    ///
+    /// And once an ADDRESS is in hand, the name comes from the story's model
+    /// too where it can ([`Self::static_room_name`]) — the heading only says
+    /// what the room was called on the turn it was printed, and two spellings
+    /// of one room is how one room becomes two nodes.
     fn room_for(&self, name: &str, ram: &[u32]) -> LocationInfo {
-        match self.room_lock.room_id(ram) {
-            Some(addr) => zvm::ObjectSnapshot {
-                number: crate::roomid::glulx_room_id(addr),
-                parent: 0,
-                name: name.to_string(),
-            },
+        let addr = self.room_lock.room_id(ram).or_else(|| self.room_by_static_name(name));
+        match addr {
+            Some(addr) => {
+                let id = crate::roomid::glulx_room_id(addr);
+                // SQ-1264: remember the address behind this hash — see
+                // `room_addrs`'s field docs for why `declared_exit` needs a
+                // cache rather than being able to invert the hash itself.
+                self.room_addrs.borrow_mut().insert(id, addr);
+                let name = self.static_room_name(addr).unwrap_or_else(|| name.to_string());
+                LocationInfo { number: id, parent: 0, name }
+            }
             None => heading_to_room(name),
         }
+    }
+
+    /// Re-key the cached room to the address the lock has just resolved (SQ-1304).
+    ///
+    /// `last_room` is host-side state that `take_room_remap` cannot reach. `turn.rs`
+    /// applies the remap to the MAP, re-keying every pre-lock room from the hash of
+    /// its heading to its real address — and the session goes on answering with the
+    /// hash the map has just retired, because [`Self::last_room`] is only rebuilt on
+    /// a turn [`Self::adopt_heading_for_room`] approves, and once the lock has
+    /// resolved that refuses every [`crate::glulx_roomlock::Movement::Unchanged`]
+    /// turn: a `wait`, a `take`, a refused move, a keypress. So the first such turn
+    /// after the lock lands hands `apply_turn` a dead id, the mapper mints it as a
+    /// room it has never seen, and the room the player is standing in is on the map
+    /// twice — wired to its own twin by an edge no passage explains, and `distorted`
+    /// because no layout can satisfy it. Measured on the Anchorhead demo, five turns
+    /// in.
+    ///
+    /// The NAME is not in question here, only which id carries it, so this rebuilds
+    /// the cached `LocationInfo` through [`Self::room_for`] — which also refreshes
+    /// the `room_addrs` entry `declared_exit` reads — and changes nothing else. Do
+    /// NOT reach for this by loosening `adopt_heading_for_room` instead: that
+    /// function refuses a heading on a still turn for a different reason entirely
+    /// (SQ-1294's flashback), and the two must not be traded for one another.
+    ///
+    /// A no-op for a session with no cached room yet, and for one whose lock cannot
+    /// name a room from this snapshot.
+    fn rekey_last_room_to_lock(&mut self, ram: &[u32]) {
+        let Some(name) = self.last_room.as_ref().map(|r| r.name.clone()) else { return };
+        if self.room_lock.room_id(ram).is_none() {
+            return;
+        }
+        self.last_room = Some(self.room_for(&name, ram));
+    }
+
+    /// Whether this turn's room name may be taken from what the story printed.
+    ///
+    /// Always, while the lock is still learning: the heading is the only witness
+    /// there is. Once it has resolved, only on a turn the LOCK calls a move — see
+    /// the call site for the flashback this refuses, and [`RoomLock::verify`] for
+    /// why the lock outranks the heading at all (SQ-1294).
+    ///
+    /// A room we have no name for at all is always worth naming, however we got
+    /// there; and a locked word holding nothing identifiable — a zero, mid-scene —
+    /// would only re-key the room we are standing in under a NAME hash, which is
+    /// the duplicate this whole change exists to stop.
+    fn adopt_heading_for_room(&self, movement: crate::glulx_roomlock::Movement, ram: &[u32]) -> bool {
+        if self.last_room.is_none() {
+            return true;
+        }
+        if self.room_lock.locked().is_none() {
+            return true;
+        }
+        self.room_lock.room_id(ram).is_some()
+            && movement != crate::glulx_roomlock::Movement::Unchanged
+    }
+
+    /// Check the locked word against what the STORY said this turn, and give the
+    /// address up when the two name different rooms (SQ-1315).
+    ///
+    /// [`crate::glulx_roomlock::RoomLock::verify`] asks whether the locked word
+    /// still holds an object of this story, and whether it has gone dead while
+    /// the screen fills with new room names. Neither question can catch a word
+    /// that has never been the room global and looks exactly like one: Anchorhead
+    /// (2018, release 1 / serial 171017) parks Inform 7's *room gone to* four
+    /// bytes below `location`, so it wins the first move's tie-break and then
+    /// tells two lies that are ordinary Inform, not corruption —
+    ///
+    /// * a move a CHECK rule refuses leaves it holding the room behind the door.
+    ///   `east` at Outside the Real Estate Office prints *"The glass-paneled door
+    ///   is locked, and you lack a key"* and the word reads `Office`, so the map
+    ///   drew an east passage into a room the player was refused entry to — the
+    ///   report's *"attempting to enter a room and failing, the game thinks you
+    ///   entered the room"*;
+    /// * a move an INSTEAD rule reroutes leaves it holding nothing. Twisting
+    ///   Lane's every direction wanders the player into a random street; the word
+    ///   reads zero, [`Self::adopt_heading_for_room`] refuses a zero, and the map
+    ///   stayed in the lane while the player walked off — so the NEXT move's
+    ///   passage was minted out of the lane, which is the report's *"rooms that
+    ///   teleport you randomly"* arriving as a fistful of fixed lane exits.
+    ///
+    /// The evidence that settles it is the one thing `verify` has no access to:
+    /// the room the story NAMED this turn — a printed heading, the answer to
+    /// [`Self::silent_look`], or failing both the status line — resolved through
+    /// the compiled world model ([`Self::room_by_static_name`]) to exactly one
+    /// address. Disagreement with the locked word is not a heuristic; it is the
+    /// story contradicting the guess outright.
+    ///
+    /// The status line is read here and **nowhere else in this file** without
+    /// SQ-1302's gates, and the difference is what it is used FOR: naming a room
+    /// from the grid is a claim, and this is a refusal to believe one. It is also
+    /// the only witness a refused move leaves — Anchorhead prints a heading when
+    /// the player arrives somewhere and nothing whatever when the door is locked,
+    /// and its `look` prints the room name in plain roman rather than as a
+    /// `Subheader`, so the silent look comes back empty too (measured: three
+    /// consecutive refusals, `naming_look_refusals` climbing).
+    ///
+    /// Three conditions keep a CORRECT lock safe, and each has a suite behind it:
+    ///
+    /// * **only on a turn the LOCKED WORD says was a move.** Counterfeit Monkey's
+    ///   `remember` prints a `Galley` heading for a flashback while the player
+    ///   never leaves the Dormitory Room (SQ-1294b) — the word does not move, so
+    ///   nothing is scored against it. This is the exact complement of
+    ///   `verify`'s frozen-lock check, which watches the other pairing (the word
+    ///   still, the headings new).
+    /// * **only when both sides resolve.** A name the model cannot turn into
+    ///   exactly one address says nothing — two rooms of one name is a maze, and
+    ///   `location` parked on `thedark` is a room global telling the truth
+    ///   about a dark room. Either way the check declines to judge.
+    /// * **agreement is checked first, and cheaply.** One
+    ///   [`Self::static_room_name`] of the value in hand answers the ordinary
+    ///   turn; the whole-room-set scan behind `room_by_static_name` runs only
+    ///   where the two names already differ.
+    ///
+    /// On a contradiction the address is rejected for the rest of the session
+    /// ([`crate::glulx_roomlock::RoomLock::reject`]), the sidecar that would
+    /// re-lock it at the next launch is deleted, and THIS turn's room is rebuilt
+    /// from the name the story gave — so the move that caught the lock out is
+    /// also the first move mapped correctly, rather than one more wrong edge.
+    fn check_room_lock_against_story(
+        &mut self,
+        ram: &[u32],
+        movement: crate::glulx_roomlock::Movement,
+        story_named: Option<&str>,
+    ) {
+        if movement != crate::glulx_roomlock::Movement::Changed {
+            return;
+        }
+        let Some(locked) = self.room_lock.locked() else { return };
+        // The strongest witness first. The buffer channels are what SQ-1293 and
+        // SQ-1302 already trust to NAME a room; the status line is added here
+        // only as a check, and it is the only channel a refused move leaves —
+        // Anchorhead prints its heading on arrival and nothing at all when the
+        // door is locked, while the grid says where the player is standing the
+        // whole time.
+        let named = match story_named {
+            Some(n) => n.to_string(),
+            None => match self.appglk().status_room_name() {
+                Some(n) => n,
+                None => return,
+            },
+        };
+        let held = self.room_lock.room_id(ram);
+        if let Some(v) = held {
+            // A value whose name the model cannot state is a value this check
+            // cannot judge — say nothing rather than guess. `thedark` lands here,
+            // which is the darkness case `RoomLock::is_known_room` documents.
+            let Some(held_name) = self.static_room_name(v) else { return };
+            if zvm::location::status_name_matches(&named, &held_name) {
+                return;
+            }
+        }
+        let Some(addr) = self.room_by_static_name(&named) else { return };
+        if held == Some(addr) {
+            return;
+        }
+        self.room_lock.reject(locked, ram.len());
+        self.forget_room_global();
+        self.last_room = Some(self.room_for(&named, ram));
+    }
+
+    /// This turn's room heading, falling back to the STATUS LINE for a story that
+    /// will not print one (SQ-1302).
+    ///
+    /// *The Wizard Sniffer* (release 1 / serial 171007 / Inform 7 build 6L38) is
+    /// the report — *"doesn't seem to detect any rooms at all"*, and literally
+    /// none. It prints the room name ONLY into its two-row status grid
+    /// (`" Atop a Mountain"` over `" Exit: north"`) and never emits a `Subheader`
+    /// run in the buffer, so `StoryScan` had nothing to capture; and because
+    /// [`crate::glulx_roomlock`] scores its candidates against observed heading
+    /// CHANGES, every turn read `Unchanged` and the lock could not learn its way
+    /// out either. Nor could [`Self::silent_look`] (SQ-1293): a `look` here prints
+    /// the description and, again, no heading.
+    ///
+    /// The name was on the player's screen the whole time, and this reads it —
+    /// [`crate::glk_backend::AppGlk::status_room_name`], the Glk twin of
+    /// `zvm::location::status_line_room_name`. What matters is *when*, because a
+    /// status line is chrome the author wrote and a heading is the room's own name;
+    /// three gates keep the chrome from reaching a story the heading already
+    /// serves:
+    ///
+    /// * **The buffer wins, for good.** The moment this story prints one heading,
+    ///   [`Self::saw_buffer_heading`] latches and the status line is never read
+    ///   again. A status line is not always a room even when the game has one —
+    ///   FooFoo's single row is the bare label `" Exits:"` while its heading says
+    ///   "Studio Apartment".
+    /// * **Asking beats reading.** The status line is consulted only once a silent
+    ///   `look` has actually been spent and come back nameless
+    ///   (`naming_look_refusals`), so a story that WILL name its room when asked is
+    ///   still asked, and answers with its own spelling. Counterfeit Monkey's grid
+    ///   reads `" Back Alley, noon"` where its heading reads "Back Alley"; SQ-1293's
+    ///   route is untouched because that look never refuses.
+    /// * **The same banner test a heading gets.** A name is only a room when the
+    ///   turn hands the player the parser's command prompt (SQ-0732 / SQ-0733); a
+    ///   status line painted behind a title card or a "press any key" page is as
+    ///   much a banner as a `Subheader` line printed on one.
+    ///
+    /// A grid-derived name then flows on exactly as a heading would, the room lock
+    /// included — where a REPEATED name is `Ambiguous` for the same reason a
+    /// repeated heading is, so a status-line-only story keeps name-derived room ids
+    /// rather than risking a lock learned from a signal that can never say
+    /// "unchanged".
+    fn name_this_room(&mut self, heading: Option<String>, awaiting_line_input: bool) -> Option<String> {
+        if heading.is_some() {
+            self.saw_buffer_heading = true;
+            return heading;
+        }
+        self.status_line_room(awaiting_line_input)
+    }
+
+    /// The room name on the status line, if this story has earned the right to be
+    /// read that way — see [`Self::name_this_room`] for all three gates.
+    fn status_line_room(&mut self, awaiting_line_input: bool) -> Option<String> {
+        if self.saw_buffer_heading
+            || self.naming_look_refusals == 0
+            || !awaiting_line_input
+            || !self.appglk().ends_at_read_prompt()
+        {
+            return None;
+        }
+        self.appglk().status_room_name()
+    }
+
+    /// Drop a bold own-line banner the story's own STATUS LINE contradicts
+    /// (SQ-1351) — it names something, but not the room.
+    ///
+    /// *Never Gives Up Her Dead* (Brian Rushton, Inform 7, Glulx) is the report:
+    /// *"conversation topics end up as rooms on the map"*. Its topic system
+    /// prints its list under a `Subheader` banner — `"Things to say to Gareth"`
+    /// — set flush against the topics below it, which is precisely the shape
+    /// [`crate::glk_backend::StoryScan`] has to accept as a room heading: an
+    /// own-line bold run JOINED to the text beneath it, exactly as Inform prints
+    /// `"Storage Room"` above a room description. Every heuristic in the buffer
+    /// scan says room. Measured on the opening, `TOPICS` minted *Things to say to
+    /// Gareth* as a node, and because the cached room is sticky the map stayed in
+    /// it for the rest of the conversation — so the next real move out of the
+    /// storage room was minted as a passage from the TOPIC, and the story's own
+    /// rooms hung off a node the game has no such place for.
+    ///
+    /// The buffer cannot settle this, but the story is saying where the player is
+    /// somewhere else at the same time: this story paints the room name into its
+    /// status grid, and it read `" Storage Room"` on the very turn the banner
+    /// said otherwise. So the grid is used here the way
+    /// [`Self::check_room_lock_against_story`] uses it and for the same reason —
+    /// naming a room from the grid is a CLAIM (and stays gated behind SQ-1302's
+    /// `status_line_room`), while this is a REFUSAL to believe one.
+    ///
+    /// Both halves of the gate are needed, and each failure leaves the heading
+    /// exactly as trusted as it was before this existed:
+    ///
+    /// * **the grid must be corroborating the room the map is already in.** A
+    ///   status line is chrome the author wrote and need not be a room at all;
+    ///   one that has just agreed with the room we are standing in has earned
+    ///   the right to disagree about a banner. This is what keeps a story whose
+    ///   grid holds a chapter title, a score or a name from silently refusing
+    ///   every real heading it prints — such a grid never matches the current
+    ///   room, so it never gets a vote.
+    /// * **and it must contradict the banner.** A genuine move repaints both
+    ///   together — measured here, `west` out of the storage room printed the
+    ///   `"Darkness"` heading with `" Darkness"` in the grid — so an arrival
+    ///   never reaches the refusal, and neither does a `look`.
+    ///
+    /// A refused banner is treated as a turn that printed no heading, which is
+    /// what it is: [`crate::glulx_roomlock::Movement::Unchanged`], the room name
+    /// carried over from the cached room, and one more still turn for the
+    /// learner to score. That also keeps a run of topic banners away from
+    /// `RoomLock::verify`'s frozen-lock counter, which would otherwise read three
+    /// topic lists in a row as a lock that has stopped tracking the story.
+    fn refuse_banner_the_status_line_contradicts(
+        &mut self,
+        heading: Option<String>,
+    ) -> Option<String> {
+        let banner = heading.clone()?;
+        let Some(here) = self.last_room.as_ref().map(|r| r.name.clone()) else { return heading };
+        let Some(status) = self.appglk().status_room_name() else { return heading };
+        let corroborates_here = zvm::location::status_name_matches(&status, &here);
+        let contradicts_banner = !zvm::location::status_name_matches(&status, &banner);
+        if corroborates_here && contradicts_banner {
+            return None;
+        }
+        heading
+    }
+
+    /// Whether the story owes us a room name that only asking will get.
+    ///
+    /// Two shapes, and they are the same shape: the map is standing somewhere it
+    /// cannot put a label on. Counterfeit Monkey's opening room is never announced
+    /// — the prologue tells the player to type LOOK and prints no heading until
+    /// they do (SQ-1293) — and its car drives out of Deep Street narrating the
+    /// whole arrival without reprinting a room (SQ-1294).
+    ///
+    /// Deliberately narrow, because the answer costs a turn of the story's time
+    /// (see [`Self::silent_look`]): a heading printed this turn has already
+    /// answered the question, a story that has refused [`NAMING_LOOK_REFUSALS`]
+    /// times running is not going to start now, and a locked word that did not move
+    /// leaves us in a room whose name we already know.
+    fn needs_a_room_name(&self, heading: &Option<String>, movement: crate::glulx_roomlock::Movement) -> bool {
+        if heading.is_some() || self.naming_look_refusals >= NAMING_LOOK_REFUSALS {
+            return false;
+        }
+        let arrived = self.room_lock.locked().is_some()
+            && movement == crate::glulx_roomlock::Movement::Changed;
+        self.last_room.is_none() || arrived
+    }
+
+    /// Ask the story what room this is, and put it back exactly as it was.
+    ///
+    /// A Glulx room has an identity the story will tell us — its `location` global,
+    /// once [`crate::glulx_roomlock`] has found it — and a NAME it will only print.
+    /// Inform 7 compiles no hardware short name for its objects, so the object
+    /// table cannot supply one either: measured on Counterfeit Monkey release 11,
+    /// `ParseNames::short_name` of the room the lock points at is the empty string
+    /// for every room in the game, and `find_player` refuses that story outright
+    /// (its own doc comment says why), so the containment tree is no route in. The
+    /// only thing that knows the name is the story, and the only way to make it say
+    /// so is to ask.
+    ///
+    /// So: snapshot the VM, type `look` into it, read the heading off the backend,
+    /// throw away everything else the answer left behind, and restore. The snapshot
+    /// is taken and put back at the same point in the same turn, so the state the
+    /// player's next command runs against is the state it would have run against —
+    /// that identity is the whole safety argument, and it is why this is a
+    /// restore-to-self rather than the kind of restore SQ-0587/0588 warns about.
+    ///
+    /// **Why not [`crate::probe`]'s shadow.** That is the right machinery for asking
+    /// a story a question, and it cannot serve this seam: `ShadowProbe` is owned by
+    /// `AppState`, armed with a recipe, and answers on a worker thread a beat later
+    /// — where a room name is needed synchronously, inside the turn that discovered
+    /// it was missing, in sessions (the headless harnesses, the shadow itself) where
+    /// no `AppState` exists at all. What the shadow buys over this is isolation from
+    /// a question with side effects, and `look` is the one question that has none.
+    ///
+    /// The cost is one turn of the story's own time per naming, and the guards in
+    /// [`Self::needs_a_room_name`] are what keep that to the opening room and the
+    /// occasional narrated move rather than every turn. A story that answers with no
+    /// heading is asked once and never again.
+    fn silent_look(&mut self) -> Option<String> {
+        // Never while the game is not simply waiting for a command: mid-dialog, at a
+        // keypress page, or suspended on its own save/restore, `look` is not a
+        // command at all — it is an answer to whatever was asked, and it would be
+        // the player's answer. Counterfeit Monkey's prologue is exactly that trap:
+        // "Do you remember our name?" reads a line, and the reply it wants is not
+        // LOOK. The read prompt is the thing that tells a parser apart from a
+        // question, the same test `take_room_heading` applies to a heading.
+        if self.quit
+            || self.pending != InputKind::Line
+            || self.pending_io.is_some()
+            || self.pending_filename.is_some()
+            || !self.appglk().ends_at_read_prompt()
+        {
+            return None;
+        }
+        // TWO snapshots, because the game's state lives in two places. gvm holds the
+        // VM and its own Glk model; the BACKEND holds what each window contains, and
+        // the app renders from the backend — `screen_model` and `window_dump_lines`
+        // read a buffer's whole log, not its undrained tail, so draining the
+        // question's output is not the same as undoing it. Restore only the VM and
+        // the room description stays on the player's screen and in `/dump-windows`,
+        // in a session whose transcript never saw it.
+        let snapshot = self.machine.save_state();
+        let display = self.appglk().display_snapshot();
+        let kept_diagnostics = self.machine.take_diagnostics();
+        self.drop_world_caches();
+        self.machine.supply_line("look");
+        let stopped = drive_auto(&mut self.machine, &self.store, self.turn_budget);
+        self.machine.flush();
+        // A `look` that reached for a file or ended the story is not an answer, and
+        // the state it left is about to be discarded anyway.
+        let heading = match stopped {
+            DriveStop::Input(_) | DriveStop::Event => self.appglk().take_room_heading(true),
+            _ => None,
+        };
+        // Everything the question printed belongs to a turn that never happened. The
+        // sound ops are the one thing the display snapshot does not carry, because
+        // they are a per-turn queue rather than window state: drain them here.
+        let _ = self.appglk().take_sound_ops();
+        // Everything the question logged belongs to a turn that never happened, so
+        // drop it and put back what was there before (SQ-1396: the field is gvm's
+        // now, and this is the drain-and-restore pair that replaces the assignment).
+        let _ = self.machine.take_diagnostics();
+        for d in kept_diagnostics {
+            self.machine.push_diagnostic(d);
+        }
+        let _ = self.machine.take_fault_trace();
+        let restored = self.machine.restore_state(&snapshot).is_ok();
+        self.appglk().restore_display_snapshot(display);
+        self.drop_world_caches();
+        // Last, so the window tree comes from the VM gvm has just put back rather
+        // than from anything the question did to it.
+        self.refresh_screen();
+        if !restored {
+            // Nothing can put this session back; refuse the name rather than report
+            // one read off a game that has moved on without the player.
+            self.naming_look_refusals = NAMING_LOOK_REFUSALS;
+            return None;
+        }
+        if heading.is_none() {
+            self.naming_look_refusals = self.naming_look_refusals.saturating_add(1);
+        } else {
+            self.naming_look_refusals = 0;
+        }
+        heading
     }
 
     /// The re-key table produced when the lock resolves: rooms mapped under a
@@ -868,22 +1905,63 @@ impl GlulxSession {
         (!self.store.absent()).then(|| self.store.dir().join("room-global"))
     }
 
-    /// The address learned in an earlier run of this story, if any.
+    /// An identity for the RUNNING image, cheap enough to stamp on every write
+    /// (SQ-1305): the header's whole-image checksum (bytes 0x20-0x23 —
+    /// GLULX_NOTES.md §"Header field layout" / Glulx spec §1.4) paired with
+    /// EXTSTART, which the same doc's §2 states IS the image file's length
+    /// ("The image file length equals EXTSTART, the stored initial memory").
+    /// Two words rather than one: a rebuild that happens to preserve the
+    /// checksum (a comment-only recompile can, since the checksum sums 32-bit
+    /// words of content) is vanishingly unlikely to also preserve EXTSTART,
+    /// and neither field alone is a byte-for-byte hash — this is a cheap
+    /// double-check, not cryptographic identity.
+    ///
+    /// The save directory is keyed by the story's FILENAME
+    /// (`~/.lanthorn/saves/<file>.save/`), so a story replaced under the same
+    /// name — a new release of a `.gblorb`, an author's rebuild — reuses the
+    /// old sidecar unless something here refuses it.
+    fn image_identity(&self) -> (u32, u32) {
+        let mem = self.machine.mem();
+        (mem.checksum(), mem.extstart())
+    }
+
+    /// The address learned in an earlier run of THIS BUILD of this story, if
+    /// any — `None` for a sidecar stamped by a different one (see
+    /// [`Self::image_identity`]), which is treated exactly like an absent
+    /// sidecar: the learner starts fresh and [`Self::remember_room_global`]
+    /// overwrites the stale file once it resolves again.
     ///
     /// Persisting it is not an optimisation, it is what keeps a RESUME correct:
     /// the learner needs unambiguous room changes to converge, and a save parked
     /// somewhere ambiguous — the maze, where every heading repeats — could never
     /// re-learn. Falling back to name-derived ids there would key the resumed
     /// rooms differently from the ones already in the restored map and duplicate
-    /// every one of them. Object addresses are fixed for a given story file, so a
-    /// remembered address stays valid; it is verified every turn regardless, and
-    /// dropped if the game ever contradicts it.
+    /// every one of them. Object addresses are fixed for a given BUILD of a
+    /// story file, so a remembered address stays valid there; it is still
+    /// verified every turn regardless (see `RoomLock::verify`), and dropped if
+    /// the game ever contradicts it — the pre-SQ-1294 doc line this replaced
+    /// promised that check alone would catch a rebuild that reused the address
+    /// for some OTHER object, which SQ-1294 made no longer true for the reason
+    /// [`RoomLock::verify`] now documents.
+    ///
+    /// The on-disk shape is one line, `"<addr> <checksum>:<extstart>"`, both of
+    /// the second field's halves hex — a bare decimal address with no token at
+    /// all is the pre-SQ-1305 format and is stale by definition (pre-release:
+    /// no back-compat shims), so it is refused here exactly like a mismatched
+    /// token.
     fn remembered_room_global(&self) -> Option<u32> {
         let raw = std::fs::read_to_string(self.room_global_path()?).ok()?;
-        raw.trim().parse::<u32>().ok().filter(|&a| a != 0)
+        let (addr, token) = raw.trim().split_once(' ')?;
+        let addr = addr.parse::<u32>().ok().filter(|&a| a != 0)?;
+        let (checksum, extstart) = token.split_once(':')?;
+        let checksum = u32::from_str_radix(checksum, 16).ok()?;
+        let extstart = u32::from_str_radix(extstart, 16).ok()?;
+        (self.image_identity() == (checksum, extstart)).then_some(addr)
     }
 
-    /// Remember a freshly learned address for later runs. Best-effort: a story
+    /// Remember a freshly learned address for later runs, stamped with this
+    /// build's [`Self::image_identity`] so a later run under a REBUILT story of
+    /// the same filename does not inherit it (SQ-1305). Best-effort: a story
     /// with no writable directory simply re-learns next time.
     fn remember_room_global(&self, addr: u32) {
         if !self.store.may_write() {
@@ -893,7 +1971,22 @@ impl GlulxSession {
             if let Some(dir) = p.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            let _ = std::fs::write(p, addr.to_string());
+            let (checksum, extstart) = self.image_identity();
+            let _ = std::fs::write(p, format!("{addr} {checksum:x}:{extstart:x}"));
+        }
+    }
+
+    /// Delete the remembered address (SQ-1315). Called where the story has just
+    /// contradicted the lock: without this the sidecar would hand the very word
+    /// the story caught out straight back at the next launch, before a single
+    /// turn has been played and with the rejection list — which is a fact about
+    /// this SESSION's learning, not about the story file — starting empty again.
+    fn forget_room_global(&self) {
+        if !self.store.may_write() {
+            return;
+        }
+        if let Some(p) = self.room_global_path() {
+            let _ = std::fs::remove_file(p);
         }
     }
 
@@ -903,9 +1996,16 @@ impl GlulxSession {
     }
 
     /// Start already locked to a previously learned address (see
-    /// [`Self::locked_room_global`]). Object addresses are fixed for a given story
-    /// file, so a remembered address is valid on every later run — and the lock is
-    /// still verified each turn, so a wrong one is dropped rather than trusted.
+    /// [`Self::locked_room_global`]). Object addresses are fixed for a given BUILD
+    /// of a story file, so a remembered address stays valid across runs of that
+    /// same build — the caller is responsible for that precondition (the
+    /// on-disk sidecar's route in, [`Self::remembered_room_global`], checks it
+    /// against [`Self::image_identity`] before ever calling this; the live
+    /// shadow-sync route, [`Self::apply_room_identity_state`], carries it from
+    /// another session of the SAME running image and needs no such check). The
+    /// lock is still verified every turn regardless (see `RoomLock::verify`),
+    /// so an address that turns out wrong is dropped rather than trusted
+    /// forever.
     pub fn relock_room_global(&mut self, addr: u32) {
         self.room_lock = crate::glulx_roomlock::RoomLock::locked_at(
             self.machine.mem().ramstart(),
@@ -939,6 +2039,33 @@ impl GlulxSession {
         // next turn and left the impostor behind.
         let ram = self.scan_ram();
         self.last_room = Some(self.room_for(name, &ram));
+    }
+
+    /// Raise (or lower) this session's runaway-turn watchdog.
+    ///
+    /// The default is a last-resort backstop against a game that cannot reach an
+    /// input request at all, sized for the interactive app — see
+    /// [`default_turn_budget`]. A caller that KNOWS a particular turn is a long
+    /// but finite piece of work has to say so, because the watchdog cannot tell
+    /// the two apart: it aborts the turn as a fault, leaving the game half way
+    /// through whatever it was doing, and nothing downstream is looking at that
+    /// fault.
+    ///
+    /// Measured, and the reason this exists (SQ-1514): Kerkerkruip deals a
+    /// dungeon inside ONE `glk_select`-to-`glk_select` span, and the cost depends
+    /// on the pane it is laying its panels out for — **1.9s at 100x30 but 10.5s
+    /// at 120x40**, against a 10s default. A headless harness driving the
+    /// panelled layout in a debug build therefore sits right on the watchdog, and
+    /// since [`drive`] samples the clock only every million steps it tips over
+    /// *intermittently*: green locally under nextest, red on two of three CI
+    /// runners, the only symptom being a game that answered a click by doing
+    /// nothing. Such a caller raises the budget rather than racing it.
+    ///
+    /// Not a config key — the shipped app wants the default, and
+    /// `LANTHORN_TURN_BUDGET_MS` already covers wanting another one for a whole
+    /// run.
+    pub fn set_turn_budget(&mut self, budget: Duration) {
+        self.turn_budget = budget;
     }
 
     /// The Glk timer interval the game has requested (via
@@ -985,28 +2112,30 @@ impl GlulxSession {
         self.finish_turn()
     }
 
-    /// The layout rects (in story-pane cells) of every window with an active Glk
-    /// mouse request — the windows a terminal click may be diverted into. Empty
-    /// when no window is watching for clicks.
-    pub fn mouse_windows(&mut self) -> Vec<(u32, WinType, GlkRect)> {
-        let layout = self.appglk().layout().to_vec();
-        layout
-            .into_iter()
-            .filter(|&(id, _, _, _)| self.machine.mouse_requested(id))
-            .map(|(id, ty, rect, _)| (id, ty, rect))
-            .collect()
+    /// The ids of every window with an active Glk mouse request — the windows a
+    /// terminal click may be diverted into. Empty when no window is watching for
+    /// clicks.
+    ///
+    /// Ids only, not rects (SQ-1203): gvm's own layout rect reserves a 1-cell
+    /// border gutter per bordered split whether or not the theme actually draws a
+    /// rule there (`upper_window_border` defaults to `BorderStyle::None`,
+    /// SQ-0821), so it disagrees with what the renderer painted by every
+    /// collapsed gutter between the pane origin and the window. The hit-test
+    /// (`glk_mouse_target`) uses the render's own recorded rects
+    /// (`StoryPaneMetrics::win_rects`) instead — "ask the drawing where it put
+    /// the text", not gvm's layout.
+    pub fn mouse_windows(&mut self) -> Vec<u32> {
+        let ids: Vec<u32> = self.appglk().layout().iter().map(|&(id, ..)| id).collect();
+        ids.into_iter().filter(|&id| self.machine.mouse_requested(id)).collect()
     }
 
-    /// The layout rects (in story-pane cells) of every window with an active Glk
-    /// hyperlink request — the windows a click on a linked transcript cell may be
-    /// diverted into. Empty when no window is watching for hyperlink clicks.
-    pub fn hyperlink_windows(&mut self) -> Vec<(u32, WinType, GlkRect)> {
-        let layout = self.appglk().layout().to_vec();
-        layout
-            .into_iter()
-            .filter(|&(id, _, _, _)| self.machine.hyperlink_requested(id))
-            .map(|(id, ty, rect, _)| (id, ty, rect))
-            .collect()
+    /// The ids of every window with an active Glk hyperlink request — the
+    /// windows a click on a linked transcript cell may be diverted into. Empty
+    /// when no window is watching for hyperlink clicks. Ids only, for the same
+    /// reason as [`Self::mouse_windows`] (SQ-1203).
+    pub fn hyperlink_windows(&mut self) -> Vec<u32> {
+        let ids: Vec<u32> = self.appglk().layout().iter().map(|&(id, ..)| id).collect();
+        ids.into_iter().filter(|&id| self.machine.hyperlink_requested(id)).collect()
     }
 
     /// The `(width, height)` of one text-grid cell in pixels — used to convert a
@@ -1039,11 +2168,38 @@ impl GlulxSession {
     /// its next input request. A no-op turn once the game has quit. `x`/`y` are
     /// char col/row for a grid window, pixels for a graphics window.
     pub fn deliver_mouse(&mut self, win: u32, x: u32, y: u32) -> TurnResult {
+        let (x, y) = self.clamp_into_window(win, x, y);
         if !self.quit {
             self.machine.deliver_mouse(win, x, y);
             self.settle_after_event();
         }
         self.finish_turn()
+    }
+
+    /// Pull a window-relative click back inside the window the GAME thinks it
+    /// has. The DRAWN rect a click is hit-tested against is wider than gvm's own
+    /// by every gap the renderer hands to the trailing child: the separator the
+    /// theme declined to draw (SQ-1203) and, since SQ-1220, the padding cell a
+    /// proportional split could not divide — two cells for City of Secrets' help
+    /// menu, whose grid is on the far side of a 15 % split. Both gaps are ours,
+    /// the game was told a smaller window, and Glk §8.6 promises a mouse event's
+    /// coordinates lie inside it — so a click on a cell it has never heard of
+    /// arrives at the nearest one it has rather than off the end of its menu.
+    ///
+    /// Text windows only. A graphics window's coordinates are PIXELS against a
+    /// canvas the render scales to the drawn rect, so they are in range by
+    /// construction and there is nothing here to clamp them against.
+    fn clamp_into_window(&mut self, win: u32, x: u32, y: u32) -> (u32, u32) {
+        let reported = self
+            .appglk()
+            .layout()
+            .iter()
+            .find(|&&(id, ty, ..)| id == win && ty != gvm::glk::WinType::Graphics)
+            .map(|&(_, _, r, _)| (r.width, r.height));
+        match reported {
+            Some((w, h)) => (x.min(w.saturating_sub(1)), y.min(h.saturating_sub(1))),
+            None => (x, y),
+        }
     }
 
     /// A click landed on a linked transcript cell inside a hyperlink-watching
@@ -1066,17 +2222,40 @@ impl GlulxSession {
     pub fn save_quetzal(&self) -> Vec<u8> {
         self.machine.save_quetzal()
     }
+
+    /// Opcodes the machine has dispatched since it was built — after a
+    /// constructor, exactly what the boot drive cost.
+    ///
+    /// A count, not a clock: it is the same number on a quiet machine and under
+    /// a full parallel test run, which is what lets a test assert that one boot
+    /// took a different PATH from another (SQ-1400). See
+    /// [`gvm::Machine::insn_count`] for what it does not count — an accelerated
+    /// call bypasses the dispatcher, so intercepted work is invisible to it in
+    /// both boots being compared.
+    pub fn insn_count(&self) -> u64 {
+        self.machine.insn_count()
+    }
 }
 
 /// Decide whether a terminal click at absolute `(col, row)` should be diverted
 /// to the game as a Glk mouse-input event, and if so compute its coordinates.
 ///
-/// Returns `(win, val1, val2)` only when no overlay is open and the click lands
-/// inside one of the mouse-watching `windows` (as reported by
-/// [`GlulxSession::mouse_windows`]). `story = (x, y, w, h)` is the story-pane
-/// rect: the Glk screen is sized to exactly the story pane, so a click cell maps
-/// to a Glk screen cell by subtracting the pane origin. `val1`/`val2` are then
-/// window-relative col/row for a grid window, or pixels for a graphics window.
+/// Returns `(win, val1, val2)` only when no overlay is open, `win` is currently
+/// mouse-watching (`requested`, as reported by [`GlulxSession::mouse_windows`]),
+/// and the click lands inside that window's rect as the renderer actually DREW
+/// it (`win_rects`, from `StoryPaneMetrics::win_rects` — absolute screen
+/// coordinates, one entry per Glk-identified leaf this frame). `val1`/`val2` are
+/// then window-relative col/row for a grid window, or pixels for a graphics
+/// window.
+///
+/// The hit-test is against the DRAWN rect, not gvm's own layout rect, and that
+/// is the whole of SQ-1203: gvm reserves a 1-cell border gutter per bordered
+/// split whether or not the theme draws a rule there (`upper_window_border`
+/// defaults to `BorderStyle::None`, SQ-0821), so the two rects skew by every
+/// collapsed gutter between the pane origin and the window. A click on a menu's
+/// drawn top row landed one row above every gvm rect and was silently dropped.
+/// `story = (x, y, w, h)` (the story-pane rect) is kept only as a fast
+/// overlay-adjacent bounds check — every drawn rect already lies inside it.
 ///
 /// `sub_px` is the click's offset WITHIN its cell, which a terminal only knows
 /// under pixel mouse reporting (SQ-0563). With it, a graphics window hears the
@@ -1089,7 +2268,8 @@ pub fn glk_mouse_target(
     col: u16,
     row: u16,
     story: (u16, u16, u16, u16),
-    windows: &[(u32, WinType, GlkRect)],
+    requested: &[u32],
+    win_rects: &[(u32, crate::engine::WinKind, ratatui::layout::Rect)],
     char_px: (u32, u32),
     sub_px: Option<(u16, u16)>,
 ) -> Option<(u32, u32, u32)> {
@@ -1100,14 +2280,13 @@ pub fn glk_mouse_target(
     if col < sx0 || col >= sx0 + sw || row < sy0 || row >= sy0 + sh {
         return None;
     }
-    let sx = (col - sx0) as u32;
-    let sy = (row - sy0) as u32;
-    let (win, wintype, rect) = windows
+    let pt = ratatui::layout::Position { x: col, y: row };
+    let &(win, kind, rect) = win_rects
         .iter()
-        .copied()
-        .find(|&(_, _, r)| sx >= r.left && sx < r.left + r.width && sy >= r.top && sy < r.top + r.height)?;
-    let (rel_x, rel_y) = (sx - rect.left, sy - rect.top);
-    let (vx, vy) = if wintype == WinType::Graphics {
+        .find(|&&(id, _, r)| requested.contains(&id) && r.contains(pt))?;
+    let rel_x = (col - rect.x) as u32;
+    let rel_y = (row - rect.y) as u32;
+    let (vx, vy) = if kind == crate::engine::WinKind::Graphics {
         // The kitty render scales the canvas to exactly the window's cell rect
         // (`render_kitty_virtual`), so cells and canvas pixels stay in proportion
         // and a cell offset converts straight to a canvas pixel. Clamped inside
@@ -1130,17 +2309,20 @@ pub fn glk_mouse_target(
 /// Decide which hyperlink-watching window owns a click on a linked transcript
 /// cell at absolute `(col, row)`, if any.
 ///
-/// Returns the window id only when no overlay is open and the click lands inside
-/// one of the hyperlink-watching `windows` (as reported by
-/// [`GlulxSession::hyperlink_windows`]). Same overlay/bounds/origin logic as
-/// [`glk_mouse_target`], but a hyperlink event carries the link value from the
-/// cell→link map rather than coordinates, so only the window id is returned.
+/// Returns the window id only when no overlay is open, the window is currently
+/// hyperlink-watching (`requested`, as reported by
+/// [`GlulxSession::hyperlink_windows`]), and the click lands inside that
+/// window's DRAWN rect (`win_rects`, same source and reasoning as
+/// [`glk_mouse_target`] — SQ-1203). A hyperlink event carries the link value
+/// from the cell→link map rather than coordinates, so only the window id is
+/// returned.
 pub fn glk_hyperlink_window(
     overlay_open: bool,
     col: u16,
     row: u16,
     story: (u16, u16, u16, u16),
-    windows: &[(u32, WinType, GlkRect)],
+    requested: &[u32],
+    win_rects: &[(u32, crate::engine::WinKind, ratatui::layout::Rect)],
 ) -> Option<u32> {
     if overlay_open {
         return None;
@@ -1149,18 +2331,17 @@ pub fn glk_hyperlink_window(
     if col < sx0 || col >= sx0 + sw || row < sy0 || row >= sy0 + sh {
         return None;
     }
-    let sx = (col - sx0) as u32;
-    let sy = (row - sy0) as u32;
-    windows
+    let pt = ratatui::layout::Position { x: col, y: row };
+    win_rects
         .iter()
-        .find(|&&(_, _, r)| sx >= r.left && sx < r.left + r.width && sy >= r.top && sy < r.top + r.height)
-        .map(|&(win, _, _)| win)
+        .find(|&&(id, _, r)| requested.contains(&id) && r.contains(pt))
+        .map(|&(id, _, _)| id)
 }
 
 /// Build a name-based room snapshot from an Inform room heading. Glulx has no
 /// readable object tree, so identity is the synthetic id of the normalized name.
 fn heading_to_room(name: &str) -> LocationInfo {
-    zvm::ObjectSnapshot {
+    LocationInfo {
         number: crate::roomid::synthetic_room_id(name),
         parent: 0,
         name: name.to_string(),
@@ -1183,11 +2364,27 @@ impl Engine for GlulxSession {
         // A new command turn re-starts per-turn execution coverage (the `|` gutter
         // + last-turn set); the cumulative `ever_executed` is preserved. Mirrors
         // the Z-machine engine's per-turn clear chokepoint.
-        if self.machine.trace_exec {
-            self.machine.executed_pcs.clear();
+        if self.machine.trace_exec() {
+            self.machine.clear_executed_pcs();
         }
         if !self.quit {
-            self.machine.supply_line(command);
+            if self.pending == InputKind::Char {
+                // A LINE must never reach a keypress read (SQ-1270, contract on
+                // `Engine::submit`): deliver `command`'s first character (or
+                // Enter for an empty line) as ONE keypress, the same route
+                // `submit_key` takes, instead of handing the whole line to
+                // `supply_line` (which gvm already refuses as a mismatched
+                // event with a diagnostic — this keeps the command's intent
+                // instead of losing the turn to that no-op).
+                let key = match command.chars().next() {
+                    Some(c) => KeyInput::Char(c),
+                    None => KeyInput::Enter,
+                };
+                let code = key_to_glk(key).expect("Char and Enter always map to a Glk code");
+                self.machine.supply_char(code);
+            } else {
+                self.machine.supply_line(command);
+            }
             self.drive_turn();
         }
         self.finish_turn()
@@ -1195,8 +2392,8 @@ impl Engine for GlulxSession {
 
     fn submit_key(&mut self, key: KeyInput) -> Option<TurnResult> {
         let code = key_to_glk(key)?;
-        if self.machine.trace_exec {
-            self.machine.executed_pcs.clear();
+        if self.machine.trace_exec() {
+            self.machine.clear_executed_pcs();
         }
         if !self.quit {
             self.machine.supply_char(code);
@@ -1341,7 +2538,7 @@ impl Engine for GlulxSession {
             if self.pending_filename.take().is_some() {
                 self.machine.supply_filename(None);
             }
-            let _ = drive_settled(&mut self.machine, &self.store);
+            let _ = drive_settled(&mut self.machine, &self.store, self.turn_budget);
             // The abandoned verb's tail ("Failed.") describes a run that is being
             // replaced and would land above the archive's own restored scrollback.
             let _ = self.take_transcript_elems();
@@ -1349,6 +2546,35 @@ impl Engine for GlulxSession {
         self.machine
             .restore_state(&save.bytes)
             .map_err(|e| EngineError::BadSave(format!("{e:?}")))?;
+        // The restore swapped RAM wholesale, and this path does not drive a
+        // turn first — drop the cached object-word set as `drive_turn` does, or
+        // it keeps answering for the session we just left (SQ-1176). The
+        // `parse_names` layout survives: same story, same compiler tables.
+        self.drop_world_caches();
+        // …and the room cache with them (SQ-1284). `last_room` is the room the
+        // story last printed a HEADING for — a screen fact, held host-side because
+        // no Glulx snapshot carries it — and `drive_turn` treats it as sticky, so a
+        // turn that prints no heading (a refused move, `take`, `wait`) reports it
+        // again as "where you still are". That is right within one run and a lie
+        // across a restore: memory restored without a screen must not be read
+        // against another moment's screen, the same rule `GameSession::restore_state`
+        // follows when it blanks the upper window (SQ-0785).
+        //
+        // The shadow probe is where it bit. `probe::serve` restores to the player's
+        // moment before every command, and a refused move there printed no heading —
+        // so the shadow reported the room its PREVIOUS question had walked into, and
+        // `return_probe::deliver` minted an edge to it. Commercial Anchorhead never
+        // resolves its room lock, so ids come from `heading_to_room` on that stale
+        // NAME: "Outside the Real Estate Office" grew edges NW, NE, S, SW, U, D and
+        // OUT all landing on "Office", one per refused direction the search tried.
+        // `record_probed_passage` already refuses `from == to`, so the honest `None`
+        // this leaves behind records nothing at all, which is the right answer for a
+        // move that never happened.
+        //
+        // Every LIVE restore path re-seeds it immediately from the archive's own
+        // `Meta::location` (`engine_helpers::seed_resumed_location`, SQ-0523), so
+        // clearing it here costs a resume nothing.
+        self.last_room = None;
         // Nothing the previous run was waiting on survives the swap.
         // `Machine::restore_state` drops the VM-side suspensions (SQ-0656); these
         // are the host-side halves of the same records, and leaving them set would
@@ -1359,9 +2585,38 @@ impl Engine for GlulxSession {
         // uniformly with `GameSession::restore_state` (session.rs): a snapshot taken
         // at a "press any key" prompt may be restored while this session sits at a
         // line prompt, and `pending` is what the app renders its input bar from.
-        // The machine is parked at its select (guaranteed by the block above), so
-        // this re-reports the restored suspension without executing anything.
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        //
+        // Glulx spec §1.8.5: a save carries no window CONTENTS, only the window
+        // model, and leans on the game to repaint on its own next Arrange/Redraw.
+        // That is fine restoring into windows the game already had live; it is
+        // not fine here, because `Machine::restore_state` just swapped in an
+        // entirely different window model (different ids in general — see its
+        // own comment) that the backend was never told about through the normal
+        // `glk_window_open` path. Deliver the Arrange a resize would give it —
+        // gvm's relayout already ran (inside `Machine::restore_state`), this is
+        // the notify-the-game half — so every panel the game repaints
+        // unprompted on Arrange (Kerkerkruip's side panels among them) comes
+        // back instead of staying as blank as an un-arranged restore leaves it
+        // (SQ-1515). Skipped when a resize is ALREADY queued for the dialog's
+        // resume below: that one covers this restore too, and `deliver_arrange`
+        // has only one pending select to write into — a second call here would
+        // starve it.
+        //
+        // Also skipped for a `headless` session (the `probe` shadow) — a cost
+        // decision, not a correctness one: its screen is never rendered, so
+        // running the game's Arrange handler here is pure waste, and on a game
+        // with real side-panel repaint work it is not a small amount. Measured
+        // on Kerkerkruip: a shadow restore went from 22ms to 737ms once this
+        // fix started delivering the Arrange, and `probe::serve` restores the
+        // shadow once per probed command plus once more to park it back on the
+        // snapshot — a 5-command job pays that 715ms delta six times, on the
+        // shadow's own background thread but still real waste for nothing
+        // anyone will ever see painted.
+        if self.deferred_resize.is_none() && !self.headless {
+            self.machine.rearrange();
+            self.drop_world_caches(); // the drive runs game code (SQ-1176 duty)
+        }
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
         // A size queued while the dialog was open would otherwise be stranded: the
@@ -1399,10 +2654,13 @@ impl Engine for GlulxSession {
         // instead of resuming at the restored PC. The game re-requests its own
         // line event on the way back to the prompt.
         self.machine.abandon_pending_input();
+        // RAM was reverted to the save point without a turn being driven — same
+        // duty as in `restore_state` above (SQ-1176).
+        self.drop_world_caches();
         // Run the save-verb tail out to the next prompt, so the session is
         // re-armed at a clean input request rather than parked mid-verb
         // (mirrors the Z-machine's `restore_game_save`).
-        let (pending, quit) = drive_settled(&mut self.machine, &self.store);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.store, self.turn_budget);
         self.pending = pending;
         self.quit = quit;
         self.pending_io = None;
@@ -1456,20 +2714,109 @@ impl Engine for GlulxSession {
         self.last_room.clone()
     }
 
+    /// What `origin`'s own map data declares for `dir` (SQ-1264) — the Glulx
+    /// side of the same seam `GameSession::declared_exit` implements for the
+    /// Z-machine. See [`Self::room_addrs`] for why `origin` (a hashed
+    /// [`mapper::graph::RoomId`], not the object address itself) is looked up
+    /// in a cache rather than inverted: by the time this is asked the live
+    /// session has already moved past the room being asked about.
+    fn declared_exit(
+        &self,
+        origin: mapper::graph::RoomId,
+        dir: mapper::direction::Direction,
+    ) -> crate::engine::DeclaredExit {
+        use crate::engine::DeclaredExit as AppExit;
+        use mapper::direction::Direction as D;
+        let Some(compass) = (match dir {
+            D::N => Some(gvm::world::Compass::N),
+            D::S => Some(gvm::world::Compass::S),
+            D::E => Some(gvm::world::Compass::E),
+            D::W => Some(gvm::world::Compass::W),
+            D::NE => Some(gvm::world::Compass::Ne),
+            D::NW => Some(gvm::world::Compass::Nw),
+            D::SE => Some(gvm::world::Compass::Se),
+            D::SW => Some(gvm::world::Compass::Sw),
+            D::Up => Some(gvm::world::Compass::Up),
+            D::Down => Some(gvm::world::Compass::Down),
+            D::In => Some(gvm::world::Compass::In),
+            D::Out => Some(gvm::world::Compass::Out),
+            D::Unknown => None,
+        }) else {
+            return AppExit::Unknown;
+        };
+        let Some(names) = self.parse_names() else { return AppExit::Unknown };
+        let Some(&addr) = self.room_addrs.borrow().get(&origin) else { return AppExit::Unknown };
+        let i6 = match self.world_model() {
+            Some(model) => match model.declared_exit(self.machine.mem(), names, addr, compass) {
+                gvm::world::DeclaredExit::Room(r) => AppExit::Room(crate::roomid::glulx_room_id(r)),
+                gvm::world::DeclaredExit::Code => AppExit::Code,
+                gvm::world::DeclaredExit::Message => AppExit::Message,
+                gvm::world::DeclaredExit::Absent => AppExit::Absent,
+                gvm::world::DeclaredExit::Unknown => AppExit::Unknown,
+            },
+            None => AppExit::Unknown,
+        };
+        if i6 != AppExit::Unknown {
+            return i6;
+        }
+        self.i7_declared_exit(names, addr, compass)
+    }
+
+    fn rng_seed(&self) -> Option<u32> {
+        Some(self.machine.rng_seed())
+    }
+
+    fn reseed_random(&mut self, seed: u32) {
+        self.machine.set_rng_seed(seed);
+    }
+
+    /// The room-lock's learned `location`-global address, or an empty vec
+    /// while still learning (SQ-1267). Always `Some`, never `None`: an
+    /// UNLOCKED state is itself a fact worth carrying — a shadow that reads a
+    /// stale locked address off the shared on-disk `room-global` sidecar (or
+    /// locks early on its own exploratory commands) before the live session
+    /// has locked would key rooms differently from a live session that has
+    /// not, which is exactly the same disagreement in the other direction.
+    fn room_identity_state(&self) -> Option<Vec<u8>> {
+        Some(match self.locked_room_global() {
+            Some(addr) => addr.to_be_bytes().to_vec(),
+            None => Vec::new(),
+        })
+    }
+
+    /// Force this session's room-lock to match a [`Self::room_identity_state`]
+    /// captured from the live session: relock to the carried address, or —
+    /// for an empty (still-learning) state — drop back to a fresh unlocked
+    /// learner, exactly as [`Self::relock_room_global`] does for a remembered
+    /// one. A malformed state (wrong length) is treated as "unlocked" rather
+    /// than trusted, the same conservative fallback `word_index` already
+    /// gives a corrupt sidecar value.
+    fn apply_room_identity_state(&mut self, state: &[u8]) {
+        match <[u8; 4]>::try_from(state) {
+            Ok(bytes) => self.relock_room_global(u32::from_be_bytes(bytes)),
+            Err(_) => {
+                self.room_lock = crate::glulx_roomlock::RoomLock::new(
+                    self.machine.mem().ramstart(),
+                    self.scan_words(),
+                );
+            }
+        }
+    }
+
     fn set_trace_screen(&mut self, on: bool) {
-        self.machine.trace_screen = on;
+        self.machine.set_trace_screen(on);
     }
 
     fn take_screen_trace(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.machine.screen_trace)
+        self.machine.take_screen_trace()
     }
 
     fn set_debug_trace(&mut self, on: bool) {
-        self.machine.trace_exec = on;
+        self.machine.set_trace_exec(on);
         // Only the per-turn set is cleared when tracing stops; the cumulative
         // `ever_executed` (permanent colour + persisted coverage) is preserved.
         if !on {
-            self.machine.executed_pcs.clear();
+            self.machine.clear_executed_pcs();
         }
     }
 
@@ -1479,9 +2826,9 @@ impl Engine for GlulxSession {
 
     /// The story's grammar and dictionary, as the engine-neutral snapshot.
     ///
-    /// `None` when the Glulx grammar tables cannot be located, or when the
-    /// dictionary is Unicode-valued — `gvm::grammar` refuses both, and there is
-    /// nothing to offer from a table we could not read.
+    /// `None` when the Glulx grammar tables cannot be located — there is
+    /// nothing to offer from a table we could not read. Both dictionary record
+    /// shapes read, byte-valued and Unicode (SQ-1231).
     fn story_vocabulary(&self) -> Option<crate::vocab::StoryVocabulary> {
         let mem = self.machine.mem();
         let grammar = gvm::grammar::Grammar::load(mem).ok()?;
@@ -1508,12 +2855,134 @@ impl Engine for GlulxSession {
         Some(self)
     }
 
-    // introspect() uses the trait default (None).
+    /// Introspection, for a story whose Inform object list this reader can
+    /// verify — which is what SQ-1241 turned on for Glulx.
+    ///
+    /// **`Some` is conditional on `parse_names`, deliberately.** The trait's
+    /// consumers tell "could not ask" (`None`) apart from "asked, nothing
+    /// there" (an empty `Some`), and a story with no readable object list —
+    /// glulxercise, anything not built by Inform — must answer the first.
+    /// Returning `Some(self)` unconditionally would make `probe::WorldPrint`
+    /// fingerprint an unreadable world as a real one and let the command band
+    /// label a column off a tree that was never walked.
+    fn introspect(&self) -> Option<&dyn crate::engine::Introspect> {
+        self.parse_names().map(|_| self as &dyn crate::engine::Introspect)
+    }
+
+    /// "Does ANY object answer to this word", from the story's own Inform
+    /// object list — `gvm::objects::ParseNames`, the same walk the Z-machine
+    /// side does through `zvm::objects` (SQ-1210). Fail-safe by construction:
+    /// detection refuses (`None`) unless a verified `$70` list with readable
+    /// `name` arrays exists, and every consumer then keeps its documented
+    /// dictionary fallback.
+    fn object_word_set(&self) -> Option<std::sync::Arc<grammar_model::ObjectWordSet>> {
+        // Whether the story keeps a readable object list is a compile-time
+        // layout fact (`parse_names` is a `OnceCell`), so a `None` needs no
+        // cache.
+        let names = self.parse_names()?;
+        if let Some(set) = self.object_word_set.borrow().as_ref() {
+            return Some(std::sync::Arc::clone(set));
+        }
+        // One walk of the object list per TURN, not per token: every drive path
+        // drops the entry (see the field's doc), because the `name` arrays live
+        // in RAM and a game can rewrite them.
+        let set = std::sync::Arc::new(grammar_model::ObjectWordSet::build(
+            &names.all(self.machine.mem()),
+        ));
+        *self.object_word_set.borrow_mut() = Some(std::sync::Arc::clone(&set));
+        Some(set)
+    }
+}
+
+/// Object-tree introspection over an Inform story's own `$70` object list
+/// (SQ-1241).
+///
+/// Every fact about the format lives in [`gvm::objects`] — the record layout,
+/// the containment fields, the avatar rule — and this impl only translates
+/// between that reader's addresses and the trait's `u16` handles (see the note
+/// above [`GlulxSession::resolve_handle`]).
+///
+/// Two questions are answered narrowly on purpose, and neither is a stub:
+///
+/// * **[`visible_contents`](Introspect::visible_contents) is the trait default,
+///   the DIRECT children.** Nesting into an open container needs the
+///   `container`/`open`/`transparent` attributes, and attribute NUMBERING is
+///   the Inform library's rather than the format's — it moves between library
+///   releases and again under Inform 7 — so there is nothing in the image to
+///   read them from. A list of what is actually in your hands is true; a
+///   guessed nesting would list the contents of a box the player has never
+///   opened, which is a spoiler as well as a lie.
+/// * **Room questions answer only for the room the player is in**, because a
+///   room handle is a hash of the room's address and only the current address
+///   can be re-hashed and compared. Every caller asks about exactly that room.
+impl Introspect for GlulxSession {
+    fn vocabulary(&self) -> Vec<String> {
+        match gvm::grammar::Grammar::load(self.machine.mem()) {
+            Ok(g) => g.words().map(str::to_string).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn contents(&self, container: u16) -> Vec<crate::engine::ObjectWords> {
+        let (Some(names), Some(addr)) = (self.parse_names(), self.resolve_handle(container.into())) else {
+            return Vec::new();
+        };
+        names.contents(self.machine.mem(), addr)
+    }
+
+    fn room_objects(&self, room: mapper::graph::RoomId) -> Vec<crate::engine::ObjectWords> {
+        self.room_objects_excluding(room, None)
+    }
+
+    fn room_objects_excluding(
+        &self,
+        room: mapper::graph::RoomId,
+        exclude: Option<u16>,
+    ) -> Vec<crate::engine::ObjectWords> {
+        let (Some(names), Some(addr)) = (self.parse_names(), self.resolve_handle(room)) else {
+            return Vec::new();
+        };
+        // The avatar is structurally a child of the room it stands in, so
+        // without this it appears in every room of every game (SQ-0667). By
+        // handle, never by name: an Inform 7 object prints nothing at all.
+        let skip = exclude.and_then(|h| self.resolve_handle(h.into()));
+        names
+            .children(self.machine.mem(), addr)
+            .into_iter()
+            .filter(|&c| Some(c) != skip)
+            .filter_map(|c| names.of(self.machine.mem(), c))
+            .collect()
+    }
+
+    fn all_object_words(&self) -> Option<Vec<crate::engine::ObjectWords>> {
+        Some(self.parse_names()?.all(self.machine.mem()))
+    }
+
+    fn object_word_set(&self) -> Option<std::sync::Arc<grammar_model::ObjectWordSet>> {
+        // The cached one the `Engine` seam already hands out (SQ-1210); the
+        // trait's default would rebuild the set on every ask.
+        Engine::object_word_set(self)
+    }
+
+    fn children_of(&self, parent: mapper::graph::RoomId) -> std::collections::BTreeSet<u16> {
+        let (Some(names), Some(addr)) = (self.parse_names(), self.resolve_handle(parent)) else {
+            return std::collections::BTreeSet::new();
+        };
+        names
+            .children(self.machine.mem(), addr)
+            .into_iter()
+            .filter_map(|c| self.handle_for(c))
+            .collect()
+    }
+
+    fn player_object(&self) -> Option<u16> {
+        self.handle_for(self.player_addr()?)
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod tests {
     use super::*;
     use crate::engine::WinNode;
@@ -2270,6 +3739,35 @@ mod tests {
         assert!(r.quit);
     }
 
+    #[test]
+    fn submit_at_a_char_prompt_delivers_only_the_first_keypress() {
+        // SQ-1270: `submit("Zebra")` at a char prompt must never hand gvm the
+        // whole line — gvm's own `supply_line_terminated` already refuses a
+        // line at a pending char event (a no-op with a diagnostic), so before
+        // this routing existed the command was silently dropped and the turn
+        // never ran. Falsify by reverting the `pending == InputKind::Char`
+        // branch in `GlulxSession::submit`: this then asserts `quit` on a
+        // session left stuck waiting, which fails.
+        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Char);
+
+        let r = sess.submit("Zebra");
+        assert_eq!(r.transcript, "Z", "only the line's first character reaches the char read");
+        assert!(r.quit, "the routed keypress still drives the story to its trailing quit");
+    }
+
+    #[test]
+    fn submit_at_a_char_prompt_with_empty_line_delivers_enter() {
+        // An empty submitted line at a char prompt behaves like the app's own
+        // Enter keypress (`key_to_glk(KeyInput::Enter)`), not like the
+        // dropped-turn no-op a bare `supply_line("")` would produce.
+        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Char);
+
+        let r = sess.submit("");
+        assert!(r.quit, "an empty line at a char prompt is delivered as Enter, driving the story on");
+    }
+
     /// Program: open a buffer, arm a 50ms timer, then glk_select with NO line/char
     /// request — a legal blocking wait on the timer (Glk §4.4). Once the timer
     /// resolves the select, quit.
@@ -2510,6 +4008,7 @@ mod tests {
             pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
+            rule: None, link: 0,
         };
         sess.appglk().test_push_primary_image(dummy);
 
@@ -2546,10 +4045,37 @@ mod tests {
         }
     }
 
+    /// A hand-built image with no Inform object list must still answer "could
+    /// not ask", not "asked, nothing there" (SQ-1241). `introspect()` is
+    /// conditional on `parse_names`, and this is the story that fails it: every
+    /// consumer — `probe::WorldPrint`, the command band's column header,
+    /// `vocab::scope_split` — distinguishes the two, and a bare `Some(self)`
+    /// would have quietly turned every refusal into a false empty world.
     #[test]
-    fn introspect_is_none() {
+    fn introspect_refuses_a_story_with_no_object_list() {
         let sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
-        assert!(sess.introspect().is_none(), "Glulx introspection is SP4");
+        assert!(sess.parse_names().is_none(), "the hand-built image holds no Inform object list");
+        assert!(sess.introspect().is_none(), "so introspection refuses rather than answering empty");
+    }
+
+    /// The two [`Introspect`] handle spaces this adapter mixes must not
+    /// overlap, or `resolve_handle` would have to guess which one it was handed
+    /// (SQ-1241). Object handles are one-based list positions; room ids are
+    /// `roomid` hashes with the high bit set. The guard is `handle_for`'s
+    /// refusal above the ceiling, and this is the arithmetic behind it.
+    #[test]
+    fn object_handles_and_room_ids_occupy_disjoint_halves() {
+        use crate::roomid::{glulx_room_id, is_synthetic_room, synthetic_room_id};
+        // Every handle an object can get, from the first to the last one
+        // `handle_for` will hand out.
+        for h in [1u16, 2, 1000, 0x7FFE, 0x7FFF] {
+            assert!(!is_synthetic_room(h.into()), "object handle {h} must not read as a room");
+        }
+        // …and every room id, however it was minted.
+        for addr in [0x1000u32, 0x21b0c, 0x53f973, u32::MAX] {
+            assert!(is_synthetic_room(glulx_room_id(addr)), "a located room is flagged");
+        }
+        assert!(is_synthetic_room(synthetic_room_id("Kitchen")), "and so is a named one");
     }
 
     #[test]
@@ -2566,10 +4092,27 @@ mod tests {
     fn glulx_state_round_trips_through_lanthorn_archive() {
         use std::collections::BTreeMap;
         // A Glulx engine save survives a .lanthorn archive round-trip: write its
-        // EngineSave (no screen.json), reload, and restore into a FRESH session
+        // EngineSave (no screen entry), reload, and restore into a FRESH session
         // through Engine::restore_state — state is preserved, no panic.
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        //
+        // `graphics_split_line_image` (not the plain `simple_line_image`): since
+        // SQ-1515, `restore_state` delivers a Glk Arrange on the freshly-swapped
+        // window model (mirroring a resize, so a Glulx game with side panels
+        // repaints them rather than staying orphaned-blank — see its own
+        // restore_state doc comment). Per Glk spec §2.3 a compliant game must
+        // tolerate an Arrange at ANY select, but `simple_line_image`'s single
+        // bare `glk_select` does not re-select afterward and falls through
+        // straight into `quit` — exactly the fixture `graphics_split_line_image`
+        // exists for (its own doc: "select twice so the game stays alive across
+        // an Arrange"). Byte-for-byte equality is no longer the right
+        // assertion either: the restored run has processed one MORE event (the
+        // Arrange + its re-select) than the archived save point, so the state
+        // is functionally equivalent, not byte-identical.
+        let mut sess =
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None, &[])
+                .expect("new");
         let _ = sess.take_transcript(); // drain the banner
+        assert_eq!(sess.pending_input(), InputKind::Line, "source session reached its line prompt");
         let es = sess.save_state();
         assert_eq!(es.engine, GLULX_ENGINE);
 
@@ -2582,14 +4125,16 @@ mod tests {
         let ac = crate::archive::load_archive(&path).expect("load archive");
         let _ = std::fs::remove_file(&path);
         assert_eq!(ac.engine, GLULX_ENGINE, "archive records the glulx tag");
-        assert!(ac.screen.is_none(), "Glulx archive carries no screen.json");
+        assert!(ac.screen.is_none(), "Glulx archive carries no screen entry");
         assert_eq!(ac.save, es.bytes, "archived bytes are the Glulx save");
 
-        let mut fresh = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let mut fresh =
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None, &[])
+                .expect("new");
         let _ = fresh.take_transcript();
         fresh.restore_state(&ac.engine_save()).expect("Glulx restore from archive");
-        assert_eq!(fresh.pending_input(), InputKind::Line, "restored input state");
-        assert_eq!(fresh.save_state().bytes, es.bytes, "restored Glulx state matches");
+        assert!(!fresh.has_quit(), "an unsolicited restore Arrange must not end the game");
+        assert_eq!(fresh.pending_input(), InputKind::Line, "restored session re-suspends on its line request");
     }
 
     #[test]
@@ -2687,12 +4232,11 @@ mod tests {
             GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (9, 19), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char, "suspends on the grid char request");
 
-        // Only the grid (window 2) watches; the buffer (window 1) does not.
+        // Only the grid (window 2) watches; the buffer (window 1) does not. Ids
+        // only (SQ-1203) — the DRAWN rect for hit-testing comes from the
+        // render's own `win_rects`, not from gvm's layout.
         let windows = sess.mouse_windows();
-        assert_eq!(windows.len(), 1, "only the requesting window is listed");
-        assert_eq!(windows[0].0, 2, "grid window id");
-        assert_eq!(windows[0].1, WinType::TextGrid);
-        assert_eq!(windows[0].2, GlkRect { left: 0, top: 0, width: 80, height: 1 }, "grid spans the top row");
+        assert_eq!(windows, vec![2], "only the requesting window's id is listed");
 
         assert_eq!(sess.char_pixels(), (9, 19), "cell pixel size exposed for graphics scaling");
     }
@@ -2709,25 +4253,63 @@ mod tests {
         assert!(sess.mouse_windows().is_empty(), "mouse request consumed (one-shot)");
     }
 
+    /// SQ-1220: the renderer draws a text window out over every gap it hands the
+    /// trailing child — the separator the theme never draws (SQ-1203) and the
+    /// padding cell a proportional split keeps — so a click hit-tested against
+    /// that DRAWN rect can carry a coordinate past the window the game was told
+    /// it has. Glk §8.6 says a mouse event's coordinates are inside the window.
+    #[test]
+    fn mouse_coordinates_are_clamped_into_the_window_the_game_was_told() {
+        let mut sess =
+            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        // Window 2 is the grid: one row, the pane's full 80 columns.
+        assert_eq!(sess.clamp_into_window(2, 5, 0), (5, 0), "a click inside the window is untouched");
+        assert_eq!(
+            sess.clamp_into_window(2, 79, 0),
+            (79, 0),
+            "the window's own last column is not moved"
+        );
+        assert_eq!(
+            sess.clamp_into_window(2, 81, 3),
+            (79, 0),
+            "a click on a gutter cell past the edge lands on the last cell the game knows"
+        );
+        // An unknown window is passed through — nothing to clamp against.
+        assert_eq!(sess.clamp_into_window(999, 95, 7), (95, 7), "no layout entry, no clamp");
+    }
+
     // ── glk_mouse_target coordinate mapping ───────────────────────────────────
+    //
+    // `win_rects` carries the DRAWN rect in ABSOLUTE screen coordinates (SQ-1203
+    // — what `render_node` actually painted, not gvm's own layout rect, which
+    // reserves a border gutter the theme may draw thinner or not at all). Every
+    // case below therefore states the window's rect in screen coordinates, not
+    // pane-relative ones; `requested` is the separate id list `mouse_windows`
+    // reports.
+
+    use crate::engine::WinKind;
 
     #[test]
     fn glk_mouse_target_grid_is_identity_minus_origin() {
-        // Story pane at (3, 2); a grid window filling the top row at rect(0,0,80,1).
-        let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
-        // Click at absolute (10, 2) → story cell (7, 0) → grid-relative (7, 0).
-        let got = super::glk_mouse_target(false, 10, 2, (3, 2, 80, 24), &windows, (9, 19), None);
-        assert_eq!(got, Some((2, 7, 0)), "grid reports window-relative col/row");
+        // Story pane at (3, 2); a grid window drawn filling the top row, so its
+        // absolute rect is (3, 2, 80, 1).
+        let requested = [2u32];
+        let win_rects = [(2u32, WinKind::Grid, ratatui::layout::Rect::new(3, 2, 80, 1))];
+        // Click at absolute (10, 2) → grid-relative (10-3, 2-2) = (7, 0).
+        let got = super::glk_mouse_target(false, 10, 2, (3, 2, 80, 24), &requested, &win_rects, (9, 19), None);
+        assert_eq!(got, Some((2, 7, 0)), "grid reports window-relative col/row, from the DRAWN origin");
     }
 
     #[test]
     fn glk_mouse_target_graphics_scales_by_char_pixels() {
-        // A graphics window offset within the pane at rect(4, 1, 20, 10).
-        let windows = [(5u32, WinType::Graphics, GlkRect { left: 4, top: 1, width: 20, height: 10 })];
-        // Story pane at origin (0,0); click at (6, 3) → story cell (6,3) →
-        // window-relative (2, 2) → CELL-CENTRE pixels (2×9+4, 2×19+9) = (22, 47)
-        // (SQ-0520: centre, not top-left, so packed toolbar buttons hit true).
-        let got = super::glk_mouse_target(false, 6, 3, (0, 0, 80, 24), &windows, (9, 19), None);
+        // A graphics window drawn at absolute rect (4, 1, 20, 10); story pane at
+        // origin (0, 0), so pane-relative and absolute coincide here.
+        let requested = [5u32];
+        let win_rects = [(5u32, WinKind::Graphics, ratatui::layout::Rect::new(4, 1, 20, 10))];
+        // Click at (6, 3) → window-relative (2, 2) → CELL-CENTRE pixels
+        // (2×9+4, 2×19+9) = (22, 47) (SQ-0520: centre, not top-left, so packed
+        // toolbar buttons hit true).
+        let got = super::glk_mouse_target(false, 6, 3, (0, 0, 80, 24), &requested, &win_rects, (9, 19), None);
         assert_eq!(got, Some((5, 22, 47)), "graphics reports cell-centre pixels");
     }
 
@@ -2736,14 +4318,15 @@ mod tests {
     /// band that lies between two cell centres.
     #[test]
     fn glk_mouse_target_graphics_uses_the_sub_cell_offset_when_known() {
-        let windows = [(5u32, WinType::Graphics, GlkRect { left: 0, top: 0, width: 20, height: 2 })];
+        let requested = [5u32];
+        let win_rects = [(5u32, WinKind::Graphics, ratatui::layout::Rect::new(0, 0, 20, 2))];
         // advent.blb's toolbar geometry: 8×18 cells. Cell row 0, 14px down — the
         // W/E compass band, which cell-centre reporting (y=9 or 27) cannot reach.
-        let got = super::glk_mouse_target(false, 2, 0, (0, 0, 80, 24), &windows, (8, 18), Some((3, 14)));
+        let got = super::glk_mouse_target(false, 2, 0, (0, 0, 80, 24), &requested, &win_rects, (8, 18), Some((3, 14)));
         assert_eq!(got, Some((5, 2 * 8 + 3, 14)), "the exact pixel clicked");
 
         // Second cell row: the offset is relative to the cell, so it adds on top.
-        let got = super::glk_mouse_target(false, 2, 1, (0, 0, 80, 24), &windows, (8, 18), Some((0, 4)));
+        let got = super::glk_mouse_target(false, 2, 1, (0, 0, 80, 24), &requested, &win_rects, (8, 18), Some((0, 4)));
         assert_eq!(got, Some((5, 16, 18 + 4)), "row offset plus in-cell offset");
     }
 
@@ -2751,32 +4334,67 @@ mod tests {
     /// size disagrees with the one the game was told.
     #[test]
     fn glk_mouse_target_clamps_a_sub_cell_offset_inside_the_cell() {
-        let windows = [(5u32, WinType::Graphics, GlkRect { left: 0, top: 0, width: 20, height: 2 })];
-        let got = super::glk_mouse_target(false, 1, 0, (0, 0, 80, 24), &windows, (8, 18), Some((99, 99)));
+        let requested = [5u32];
+        let win_rects = [(5u32, WinKind::Graphics, ratatui::layout::Rect::new(0, 0, 20, 2))];
+        let got = super::glk_mouse_target(false, 1, 0, (0, 0, 80, 24), &requested, &win_rects, (8, 18), Some((99, 99)));
         assert_eq!(got, Some((5, 8 + 7, 17)), "clamped to the cell's last pixel");
     }
 
     #[test]
     fn glk_mouse_target_declines_outside_and_under_an_overlay() {
-        let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
+        let requested = [2u32];
+        let win_rects = [(2u32, WinKind::Grid, ratatui::layout::Rect::new(0, 0, 80, 1))];
         // Click below the grid (row 5) but inside the pane → misses every window.
         assert_eq!(
-            super::glk_mouse_target(false, 10, 5, (0, 0, 80, 24), &windows, (1, 1), None),
+            super::glk_mouse_target(false, 10, 5, (0, 0, 80, 24), &requested, &win_rects, (1, 1), None),
             None,
             "a click outside every watching window falls through",
         );
         // Click outside the story pane entirely.
         assert_eq!(
-            super::glk_mouse_target(false, 90, 0, (0, 0, 80, 24), &windows, (1, 1), None),
+            super::glk_mouse_target(false, 90, 0, (0, 0, 80, 24), &requested, &win_rects, (1, 1), None),
             None,
             "a click outside the story pane falls through",
         );
         // Same in-window click, but an overlay is open → declined.
         assert_eq!(
-            super::glk_mouse_target(true, 10, 0, (0, 0, 80, 24), &windows, (1, 1), None),
+            super::glk_mouse_target(true, 10, 0, (0, 0, 80, 24), &requested, &win_rects, (1, 1), None),
             None,
             "an open overlay keeps the click",
         );
+    }
+
+    /// A window drawn on screen but NOT in the requested set (not currently
+    /// mouse-watching) declines the click, even though its rect contains it
+    /// (SQ-1203: the id set and the drawn rects are independent lists).
+    #[test]
+    fn glk_mouse_target_declines_a_drawn_but_unrequested_window() {
+        let requested: [u32; 0] = [];
+        let win_rects = [(2u32, WinKind::Grid, ratatui::layout::Rect::new(0, 0, 80, 1))];
+        assert_eq!(
+            super::glk_mouse_target(false, 10, 0, (0, 0, 80, 24), &requested, &win_rects, (1, 1), None),
+            None,
+            "drawn but not watching → declined",
+        );
+    }
+
+    /// This is SQ-1203 itself, reproduced without a real game: gvm's layout rect
+    /// reserves a border gutter the theme never draws (SQ-0821's no-rule
+    /// default), so a window whose DRAWN origin is one cell EARLIER than gvm's
+    /// reported origin must be hit-tested against the drawn one — a click on the
+    /// drawn top-left corner, which the old gvm-rect hit-test missed entirely.
+    #[test]
+    fn glk_mouse_target_uses_the_drawn_rect_not_a_gutter_inflated_one() {
+        let requested = [5u32];
+        // gvm's own layout would have reported this window one cell down/right
+        // (a reserved but undrawn border gutter); the DRAWN rect is what actually
+        // reached the screen.
+        let win_rects = [(5u32, WinKind::Grid, ratatui::layout::Rect::new(9, 24, 70, 5))];
+        // A click on the drawn top-left corner (9, 24) must hit window-relative
+        // (0, 0) — under the old gvm-rect math (origin (10, 25)) this cell fell
+        // outside every window and the click was dropped.
+        let got = super::glk_mouse_target(false, 9, 24, (0, 0, 80, 30), &requested, &win_rects, (1, 1), None);
+        assert_eq!(got, Some((5, 0, 0)), "hit-tested against the DRAWN origin, not a gutter-inflated one");
     }
 
     // ── Hyperlink input (glk_request_hyperlink_event) ─────────────────────────
@@ -2808,12 +4426,10 @@ mod tests {
             GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (9, 19), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char, "suspends on the grid char request");
 
-        // Only the grid (window 2) watches; the buffer (window 1) does not.
+        // Only the grid (window 2) watches; the buffer (window 1) does not. Ids
+        // only (SQ-1203) — see `mouse_windows_lists_only_watching_windows_and_char_pixels_exposed`.
         let windows = sess.hyperlink_windows();
-        assert_eq!(windows.len(), 1, "only the requesting window is listed");
-        assert_eq!(windows[0].0, 2, "grid window id");
-        assert_eq!(windows[0].1, WinType::TextGrid);
-        assert_eq!(windows[0].2, GlkRect { left: 0, top: 0, width: 80, height: 1 }, "grid spans the top row");
+        assert_eq!(windows, vec![2], "only the requesting window's id is listed");
     }
 
     #[test]
@@ -2829,42 +4445,276 @@ mod tests {
     }
 
     // ── glk_hyperlink_window hit test ─────────────────────────────────────────
+    // Same DRAWN-rect / absolute-coordinate contract as `glk_mouse_target` above.
 
     #[test]
     fn glk_hyperlink_window_returns_the_owning_window_id() {
-        // Story pane at (3, 2); a grid window filling the top row at rect(0,0,80,1).
-        let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
-        // Click at absolute (10, 2) → story cell (7, 0) → inside the grid.
-        let got = super::glk_hyperlink_window(false, 10, 2, (3, 2, 80, 24), &windows);
-        assert_eq!(got, Some(2), "returns the window whose rect contains the cell");
+        // Story pane at (3, 2); a grid window drawn filling the top row, so its
+        // absolute rect is (3, 2, 80, 1).
+        let requested = [2u32];
+        let win_rects = [(2u32, WinKind::Grid, ratatui::layout::Rect::new(3, 2, 80, 1))];
+        // Click at absolute (10, 2) → inside the grid.
+        let got = super::glk_hyperlink_window(false, 10, 2, (3, 2, 80, 24), &requested, &win_rects);
+        assert_eq!(got, Some(2), "returns the window whose DRAWN rect contains the cell");
     }
 
     #[test]
     fn glk_hyperlink_window_declines_outside_overlay_and_empty() {
-        let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
+        let requested = [2u32];
+        let win_rects = [(2u32, WinKind::Grid, ratatui::layout::Rect::new(0, 0, 80, 1))];
         // Click below the grid (row 5) but inside the pane → misses every window.
         assert_eq!(
-            super::glk_hyperlink_window(false, 10, 5, (0, 0, 80, 24), &windows),
+            super::glk_hyperlink_window(false, 10, 5, (0, 0, 80, 24), &requested, &win_rects),
             None,
             "a click outside every watching window falls through",
         );
         // Click outside the story pane entirely.
         assert_eq!(
-            super::glk_hyperlink_window(false, 90, 0, (0, 0, 80, 24), &windows),
+            super::glk_hyperlink_window(false, 90, 0, (0, 0, 80, 24), &requested, &win_rects),
             None,
             "a click outside the story pane falls through",
         );
         // Same in-window click, but an overlay is open → declined.
         assert_eq!(
-            super::glk_hyperlink_window(true, 10, 0, (0, 0, 80, 24), &windows),
+            super::glk_hyperlink_window(true, 10, 0, (0, 0, 80, 24), &requested, &win_rects),
             None,
             "an open overlay keeps the click",
         );
         // No hyperlink-watching windows at all.
         assert_eq!(
-            super::glk_hyperlink_window(false, 10, 0, (0, 0, 80, 24), &[]),
+            super::glk_hyperlink_window(false, 10, 0, (0, 0, 80, 24), &[], &[]),
             None,
             "no watching windows → nothing to divert to",
         );
+    }
+
+    /// A window drawn on screen but NOT in the requested set declines the click
+    /// (SQ-1203: same independence as the mouse path).
+    #[test]
+    fn glk_hyperlink_window_declines_a_drawn_but_unrequested_window() {
+        let requested: [u32; 0] = [];
+        let win_rects = [(2u32, WinKind::Grid, ratatui::layout::Rect::new(0, 0, 80, 1))];
+        assert_eq!(
+            super::glk_hyperlink_window(false, 10, 0, (0, 0, 80, 24), &requested, &win_rects),
+            None,
+            "drawn but not watching → declined",
+        );
+    }
+
+    // ── The silent look must leave no trace (SQ-1293) ──────────────────────────
+
+    /// `stories/CounterfeitMonkey-10.gblorb`, or the fetched Archive fixture
+    /// (`scripts/fixtures.manifest`) when there is no local copy — `None` when
+    /// neither exists, and this skips vacuously without it.
+    fn counterfeit_monkey() -> Option<Vec<u8>> {
+        let local = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/CounterfeitMonkey-10.gblorb");
+        let p = if local.is_file() {
+            local
+        } else {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/stories/CounterfeitMonkey-10.gblorb")
+        };
+        match std::fs::read(&p) {
+            Ok(b) => Some(b),
+            Err(_) => {
+                eprintln!("SKIP: gitignored story missing at {}", p.display());
+                None
+            }
+        }
+    }
+
+    /// Boot Counterfeit Monkey and play its prologue — `y`, `andra`, a keypress —
+    /// which ends at the first command prompt, where the naming look fires.
+    /// `ask` false pre-spends the refusal budget so this session never asks: the
+    /// control the subject is compared against.
+    fn cm_through_prologue(bytes: Vec<u8>, ask: bool) -> GlulxSession {
+        let pict = blorb::Blorb::parse(bytes.clone()).ok();
+        let crate::hints::LoadedStory::Glulx(image) =
+            crate::hints::extract_story(bytes).expect("a readable container")
+        else {
+            panic!("Counterfeit Monkey is a Glulx story");
+        };
+        let mut s = GlulxSession::new(image, 80, 30, true, false, false, (8, 16), pict, &[])
+            .expect("Counterfeit Monkey boots");
+        let _ = s.take_transcript();
+        if !ask {
+            // A session with NO route to a room name, which is what makes the look
+            // the only difference between the two. Both routes have to be shut off:
+            // the refusal cap stops the silent look, and pretending the buffer has
+            // already named a room stops the status line (SQ-1302) — which would
+            // otherwise answer "Back Alley, noon" off Counterfeit Monkey's own grid
+            // and leave this case comparing two sessions that both know where they
+            // are. No real session is ever in this state; that is the point of a
+            // control.
+            s.naming_look_refusals = NAMING_LOOK_REFUSALS;
+            s.saw_buffer_heading = true;
+        }
+        let _ = s.submit("y");
+        let _ = s.submit("andra");
+        let _ = s.submit_key(KeyInput::Enter).expect("Glulx takes keys");
+        s
+    }
+
+    /// Every character the backend's own window state holds: each grid's cells and
+    /// each non-primary buffer's lines. The primary buffer carries none — the app
+    /// renders it from the transcript — which is why the transcript is compared
+    /// separately below.
+    fn window_text(s: &GlulxSession) -> String {
+        fn walk(n: &WinNode, out: &mut String) {
+            match n {
+                WinNode::Pair { first, second, .. } => {
+                    walk(first, out);
+                    walk(second, out);
+                }
+                WinNode::Grid(g) => {
+                    for row in 1..=g.rows {
+                        for col in 1..=g.cols {
+                            out.push(g.cell(row, col).ch);
+                        }
+                        out.push('\n');
+                    }
+                }
+                WinNode::Buffer(b) => {
+                    for line in &b.lines {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+                WinNode::Layered(ws) => ws.iter().for_each(|w| walk(&w.node, out)),
+                WinNode::Graphics(_) | WinNode::Blank => {}
+            }
+        }
+        let mut out = String::new();
+        walk(&s.screen().root, &mut out);
+        out
+    }
+
+    /// SQ-1293: `silent_look` types a command nobody asked for. Restoring the VM
+    /// puts back gvm's state and NOT the backend's — the backend keeps its own copy
+    /// of what every window holds, and the app renders from that one. So the
+    /// question must be undone in both places, and the way to prove it is a control
+    /// session driven identically that never asks: after the turn where the subject
+    /// asks, the two must be indistinguishable in everything except the answer.
+    #[test]
+    fn a_silent_look_leaves_the_backend_exactly_as_it_found_it() {
+        let Some(bytes) = counterfeit_monkey() else { return };
+        let mut subject = cm_through_prologue(bytes.clone(), true);
+        let mut control = cm_through_prologue(bytes, false);
+
+        // Non-vacuity: the look is the ONLY difference between these two sessions,
+        // and it is what put a room on the map.
+        assert_eq!(
+            subject.current_location().map(|l| l.name),
+            Some("Back Alley".to_string()),
+            "the subject asked, and got the opening room"
+        );
+        assert_eq!(control.current_location(), None, "the control never asked, so it has none");
+
+        // Everything else must match: the windows the app renders …
+        assert_eq!(subject.window_dump(), control.window_dump(), "the window tree");
+        assert_eq!(window_text(&subject), window_text(&control), "and what the windows hold");
+        // … and the next turn, which is where a polluted heading scan or a stale
+        // read-prompt tail would surface.
+        let a = subject.submit("look");
+        let b = control.submit("look");
+        assert_eq!(a.transcript, b.transcript, "the next turn prints the same thing");
+        assert_eq!(
+            a.location.map(|l| l.name),
+            b.location.map(|l| l.name),
+            "and is read the same way"
+        );
+        assert_eq!(subject.window_dump(), control.window_dump(), "still the same windows after it");
+        assert_eq!(window_text(&subject), window_text(&control));
+    }
+
+    // ── SQ-1305: the `room-global` sidecar carries the image it was written for ──
+
+    /// Boot a tiny session against `dir` and immediately read back what the
+    /// room-lock resolved to (before any turn is played, so this is purely
+    /// about what the boot path did with `dir/room-global`).
+    fn boot_for_sidecar(dir: &std::path::Path) -> GlulxSession {
+        let body = enc(0x120, &[]); // quit immediately; the boot drive is all we need
+        GlulxSession::new_in(
+            dir.to_path_buf(), image_for(body, 1), 80, 24, true, false, false, false,
+            (1, 1), None, &[], [[(None, None); 11]; 2], false, None,
+        )
+        .expect("tiny image boots")
+    }
+
+    /// This test image's (checksum, EXTSTART) — the token
+    /// [`GlulxSession::image_identity`] stamps a sidecar with.
+    fn sidecar_test_token() -> (u32, u32) {
+        let body = enc(0x120, &[]);
+        let mem = gvm::memory::Memory::new(image_for(body, 1)).expect("valid header");
+        (mem.checksum(), mem.extstart())
+    }
+
+    #[test]
+    fn a_sidecar_stamped_with_this_images_token_is_honoured() {
+        let dir = crate::scratch_dir("sq1305-token-match");
+        let (checksum, extstart) = sidecar_test_token();
+        std::fs::write(dir.join("room-global"), format!("1024 {checksum:x}:{extstart:x}"))
+            .expect("write sidecar");
+
+        let s = boot_for_sidecar(&dir);
+        assert_eq!(
+            s.locked_room_global(),
+            Some(1024),
+            "a sidecar whose token matches the running image is trusted at boot"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_stamped_with_a_different_images_token_is_ignored() {
+        let dir = crate::scratch_dir("sq1305-token-mismatch");
+        let (checksum, extstart) = sidecar_test_token();
+        // Flip a bit of the checksum: same shape, different image.
+        std::fs::write(dir.join("room-global"), format!("1024 {:x}:{extstart:x}", checksum ^ 1))
+            .expect("write sidecar");
+
+        let s = boot_for_sidecar(&dir);
+        assert_eq!(
+            s.locked_room_global(),
+            None,
+            "a sidecar stamped for a DIFFERENT image (a rebuilt story) is treated as absent, \
+             not trusted with a possibly-wrong address"
+        );
+    }
+
+    #[test]
+    fn a_legacy_bare_address_sidecar_is_ignored() {
+        // Pre-SQ-1305 format: a bare decimal address, no token at all. Stale by
+        // definition (pre-release: no back-compat shims) — treated exactly like
+        // an absent sidecar, and overwritten the next time this session's lock
+        // resolves.
+        let dir = crate::scratch_dir("sq1305-legacy-format");
+        std::fs::write(dir.join("room-global"), "1024").expect("write legacy sidecar");
+
+        let s = boot_for_sidecar(&dir);
+        assert_eq!(
+            s.locked_room_global(),
+            None,
+            "a bare-address (pre-token) sidecar carries no image identity and is refused"
+        );
+    }
+
+    #[test]
+    fn remember_room_global_stamps_the_running_images_token() {
+        let dir = crate::scratch_dir("sq1305-stamp-roundtrip");
+        {
+            let s = boot_for_sidecar(&dir);
+            s.remember_room_global(2048);
+        }
+        let raw = std::fs::read_to_string(dir.join("room-global")).expect("sidecar written");
+        let (checksum, extstart) = sidecar_test_token();
+        assert_eq!(
+            raw.trim(),
+            format!("2048 {checksum:x}:{extstart:x}"),
+            "the written line carries the address and this image's checksum:extstart token"
+        );
+        // And round-trips: a second boot against the same story and dir honours it.
+        let s2 = boot_for_sidecar(&dir);
+        assert_eq!(s2.locked_room_global(), Some(2048), "what was written is what gets read back");
     }
 }

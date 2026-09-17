@@ -30,6 +30,16 @@ mod more_pager_first_new_row;
 mod pane_title_sources;
 #[path = "suites/print_then_erase_boundary.rs"]
 mod print_then_erase_boundary;
+#[path = "suites/sq1354b_bureaucracy_bp_line.rs"]
+mod sq1354b_bureaucracy_bp_line;
+#[path = "suites/sq1355_bureaucracy_form_exit.rs"]
+mod sq1355_bureaucracy_form_exit;
+#[path = "suites/sq1410_restore_degradation_notice.rs"]
+mod sq1410_restore_degradation_notice;
+#[path = "suites/sq1411_splash_resume_pager.rs"]
+mod sq1411_splash_resume_pager;
+#[path = "suites/sq1434_glulx_opening_pager.rs"]
+mod sq1434_glulx_opening_pager;
 #[path = "suites/transparent_backdrop_audit.rs"]
 mod transparent_backdrop_audit;
 #[path = "suites/upper_grid_resize.rs"]

@@ -138,7 +138,7 @@ fn zoom_box_size(zoom: Zoom) -> (u16, u16) {
 // screen = virtual + (area.origin - scroll * step).
 
 /// An integer rectangle in virtual map space (coordinates may be negative).
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct VRect {
     x: i32,
     y: i32,
@@ -172,23 +172,41 @@ pub(crate) const BOX_H: i32 = 5;
 
 /// One axis of the non-uniform Boxes-zoom layout: where each room line starts (pixels)
 /// and how wide each channel after it is.
+#[derive(Debug)]
 pub struct PosTable {
     room_start: std::collections::BTreeMap<i32, i32>, // grid line index → pixel start of the box
     channel_w: std::collections::BTreeMap<i32, i32>,  // grid line index → pixel width of the gap after it
+    /// Per-line box size along this axis, for a caller whose boxes are not all one size.
+    /// Absent → `box_dim`. The terminal never fills this: its boxes are `BOX_W`×`BOX_H`
+    /// everywhere, so every lookup answers `box_dim` and the arithmetic is the arithmetic
+    /// it always was. The SVG export fills it, because there a box is as wide as its name
+    /// needs (SQ-1313).
+    box_dims: std::collections::BTreeMap<i32, i32>,
     lo: i32,                                           // lowest grid line index
     hi: i32,                                           // highest grid line index
-    box_dim: i32,                                      // box size along this axis (pixels)
+    box_dim: i32,                                      // default box size along this axis (pixels)
 }
 impl PosTable {
     pub fn room_pixel(&self, idx: i32) -> i32 { self.line_pixel(idx) }
     pub fn channel_span(&self, idx: i32) -> i32 { *self.channel_w.get(&idx).unwrap_or(&MIN_GUTTER) }
+
+    /// The box size along this axis at grid line `idx` — `box_dim` unless the caller asked
+    /// for a per-line one. Every consumer of the shared geometry (`lane_pixel`,
+    /// `box_edge_anchor`, `corner_anchor`, `total_pixels`) reads the box size through here
+    /// rather than from `BOX_W`/`BOX_H` directly, so one table describes one layout.
+    pub fn box_dim_at(&self, idx: i32) -> i32 {
+        *self.box_dims.get(&idx).unwrap_or(&self.box_dim)
+    }
+
+    /// Lowest / highest tabulated grid line.
+    pub fn range(&self) -> (i32, i32) { (self.lo, self.hi) }
 
     /// Total pixel extent from the first room's box-left to just past the last room's
     /// trailing channel. This is the minimum pixel span needed to draw all rooms and
     /// their inter-room channels without clipping.
     pub fn total_pixels(&self) -> i32 {
         let last = self.room_pixel(self.hi);
-        last + self.box_dim + self.channel_span(self.hi)
+        last + self.box_dim_at(self.hi) + self.channel_span(self.hi)
     }
 
     /// Pixel-x (or -y) of the box left/top edge at grid line `idx`, extrapolating with a
@@ -204,7 +222,7 @@ impl PosTable {
         } else {
             // Past the last room: its start, its own box+channel, then default strides.
             let last = self.room_start.get(&self.hi).copied().unwrap_or(0);
-            let after = last + self.box_dim + self.channel_span(self.hi);
+            let after = last + self.box_dim_at(self.hi) + self.channel_span(self.hi);
             after + (idx - self.hi - 1) * (self.box_dim + MIN_GUTTER)
         }
     }
@@ -212,21 +230,53 @@ impl PosTable {
 
 fn channel_width(lanes: u16) -> i32 {
     // Reserve LANE_BASE before lane 0 plus LANE_SPACING per additional lane, so the widest
-    // lane (LANE_BASE + (lanes-1)*LANE_SPACING) stays inside the channel. Empty channels keep
-    // MIN_GUTTER so adjacent boxes never touch.
+    // lane (LANE_BASE + (lanes-1)*LANE_SPACING) stays inside the channel — and then LANE_BASE
+    // again AFTER it, so the deepest lane clears the far box by exactly as much as lane 0 clears
+    // the near one (SQ-1390). Empty channels keep MIN_GUTTER so adjacent boxes never touch.
+    //
+    // **A channel has two sides and both of them are a box edge.** The `+ 1` this used to end on
+    // reserved one cell for the deepest lane to stand in and nothing beyond it, so that lane sat
+    // flush against the far box: a connector attaching there left its arrowhead and turned in the
+    // very next cell, drawing `└◀` — the corner glyph and the arrowhead in adjacent cells, which
+    // reads as the line bending inside the head. Lane 0's own side never showed it, because
+    // LANE_BASE is exactly the clearance that stops it, so the defect was invisible from the
+    // near side of every channel and unavoidable from the far side of every channel. It is
+    // geometry, not routing: with a one-lane channel the old width was MIN_GUTTER = 2 and there
+    // was no lane a route could have taken instead.
     if lanes == 0 {
         MIN_GUTTER
     } else {
-        (LANE_BASE + (lanes as i32 - 1) * LANE_SPACING + 1).max(MIN_GUTTER)
+        (2 * LANE_BASE + (lanes as i32 - 1) * LANE_SPACING + 1).max(MIN_GUTTER)
     }
 }
 
-/// Build the (columns, rows) position tables from the plan and the room bounds.
+/// Build the (columns, rows) position tables from the plan and the room bounds, with every
+/// box `BOX_W`×`BOX_H` — the terminal's own layout.
 pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTable, PosTable) {
+    let none = std::collections::BTreeMap::new();
+    boxes_axes_sized(plan, bounds, BOX_W, &none, BOX_H, &none)
+}
+
+/// [`boxes_axes`], with per-grid-line box sizes: `col_dims`/`row_dims` override `box_w`/`box_h`
+/// at the lines they name and every other line keeps the default (SQ-1313).
+///
+/// The ROUTE is unaffected by any of this — `RoutePlan` is in doubled cell coordinates and knows
+/// nothing of box sizes — so a caller that widens a column gets the terminal's own routes through
+/// the terminal's own channels, drawn against wider boxes. Passing empty maps is exactly
+/// [`boxes_axes`], which is what keeps the drawn view identical.
+pub fn boxes_axes_sized(
+    plan: &RoutePlan,
+    bounds: ((i32, i32), (i32, i32)),
+    box_w: i32,
+    col_dims: &std::collections::BTreeMap<i32, i32>,
+    box_h: i32,
+    row_dims: &std::collections::BTreeMap<i32, i32>,
+) -> (PosTable, PosTable) {
     let ((min_c, min_r), (max_c, max_r)) = bounds;
     let build = |lo: i32,
                  hi: i32,
                  box_dim: i32,
+                 dims: &std::collections::BTreeMap<i32, i32>,
                  lanes: &std::collections::BTreeMap<i32, u16>,
                  floor: &std::collections::BTreeMap<i32, i32>| {
         let mut room_start = std::collections::BTreeMap::new();
@@ -237,9 +287,9 @@ pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTab
             let w = channel_width(lanes.get(&idx).copied().unwrap_or(0))
                 .max(floor.get(&idx).copied().unwrap_or(0));
             channel_w.insert(idx, w);
-            x += box_dim + w;
+            x += dims.get(&idx).copied().unwrap_or(box_dim) + w;
         }
-        PosTable { room_start, channel_w, lo, hi, box_dim }
+        PosTable { room_start, channel_w, box_dims: dims.clone(), lo, hi, box_dim }
     };
     // Rows first: a diagonal's COLUMN demand is expressed relative to the row gap it must cross
     // (SQ-0314), so the vertical spacing has to be known before the horizontal is sized.
@@ -248,12 +298,21 @@ pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTab
     // channel beyond the last room. `build` only tabulates `lo..=hi` and `channel_span` answers
     // `MIN_GUTTER` for anything outside, so a diagonal's floor out there would be silently dropped
     // and the diagonal would vanish. Widen the range to cover every channel a diagonal uses.
+    //
+    // **And every channel that CARRIES A LANE, for the same reason** (SQ-1390). A wrap-around route
+    // is exactly the case that uses the channel before the first room or after the last, and an
+    // untabulated channel is sized by `line_pixel`'s uniform `box_dim + MIN_GUTTER` extrapolation
+    // rather than by [`channel_width`] — so its lane sat flush against the box it turned into,
+    // which is the `└◀` this quest is about, in the one place widening `channel_width` could not
+    // reach. Zork I's `Clearing --Down--> Grating Room` and `Gas Room --Up--> Smelly Room` both
+    // wrap through the channel above their layer's first row.
     let mut row_floor: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
     for &(_, h) in &plan.diag_corners {
         row_floor.insert(h, DIAG_GUTTER);
     }
     let (min_r, max_r) = span_over(min_r, max_r, plan.diag_corners.iter().map(|&(_, h)| h));
-    let rows = build(min_r, max_r, BOX_H, &plan.h_lanes, &row_floor);
+    let (min_r, max_r) = span_over(min_r, max_r, plan.h_lanes.keys().copied());
+    let rows = build(min_r, max_r, box_h, row_dims, &plan.h_lanes, &row_floor);
     let mut col_floor: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
     for &(v, h) in &plan.diag_corners {
         let need = diagonal_col_gap(rows.channel_span(h));
@@ -261,7 +320,8 @@ pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTab
         *slot = (*slot).max(need);
     }
     let (min_c, max_c) = span_over(min_c, max_c, plan.diag_corners.iter().map(|&(v, _)| v));
-    let cols = build(min_c, max_c, BOX_W, &plan.v_lanes, &col_floor);
+    let (min_c, max_c) = span_over(min_c, max_c, plan.v_lanes.keys().copied());
+    let cols = build(min_c, max_c, box_w, col_dims, &plan.v_lanes, &col_floor);
     (cols, rows)
 }
 
@@ -313,15 +373,28 @@ fn diagonal_arrow(dir: Direction, arrows: &crate::symbols::Arrows) -> char {
 
 /// The box-corner cell (virtual pixels) for a diagonal direction: NE→top-right, NW→top-left,
 /// SE→bottom-right, SW→bottom-left.
-fn corner_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), dir: Direction) -> (i32, i32) {
-    let bx = cols.room_pixel(cell.0);
-    let by = rows.room_pixel(cell.1);
+pub(crate) fn corner_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), dir: Direction) -> (i32, i32) {
+    corner_anchor_at(
+        cols.room_pixel(cell.0),
+        rows.room_pixel(cell.1),
+        cols.box_dim_at(cell.0),
+        rows.box_dim_at(cell.1),
+        dir,
+    )
+}
+
+/// [`corner_anchor`]'s geometry, taking the box's own top-left `(bx, by)` and size `(w, h)`
+/// directly instead of a `PosTable` lookup — the primitive [`random_stub_cells`] (SQ-1275)
+/// shares, since `draw_box_room` already has its box's screen position in hand and has no
+/// `PosTable` to derive it from. Kept in exact lock-step with `corner_anchor` by construction:
+/// that function is now nothing but this one fed a `PosTable`-derived `(bx, by)`.
+fn corner_anchor_at(bx: i32, by: i32, w: i32, h: i32, dir: Direction) -> (i32, i32) {
     match dir {
-        Direction::NE => (bx + BOX_W - 1, by),
+        Direction::NE => (bx + w - 1, by),
         Direction::NW => (bx, by),
-        Direction::SE => (bx + BOX_W - 1, by + BOX_H - 1),
-        Direction::SW => (bx, by + BOX_H - 1),
-        _ => (bx + BOX_W / 2, by), // unreachable when guarded by is_diagonal
+        Direction::SE => (bx + w - 1, by + h - 1),
+        Direction::SW => (bx, by + h - 1),
+        _ => (bx + w / 2, by), // unreachable when guarded by is_diagonal
     }
 }
 
@@ -340,6 +413,41 @@ fn in_area(sx: i32, sy: i32, area: Rect) -> bool {
     sx >= area.x as i32 && sx < area.right() as i32 && sy >= area.y as i32 && sy < area.bottom() as i32
 }
 
+/// After drawing a Nerd Font arrowhead glyph at `(x, y)`, guard against Ghostty drawing it TWO
+/// cells wide (SQ-1277). Ghostty's `constraintWidth()` (`src/renderer/cell.zig`) lets a
+/// "symbol-like" glyph — anything in a PUA, or in the Arrows/Dingbats/etc. blocks its own
+/// `isSymbol()` lists — spill into the FOLLOWING cell whenever that cell's codepoint is `0` or
+/// `isSpace()` (which lists ONLY U+0020 SPACE and U+2002 EN SPACE — never U+00A0) and the
+/// PRECEDING cell is not itself a non-graphics symbol. Every arrowhead this map draws is
+/// exactly such a glyph, and the cell to its right is very often a plain space: a room box's own
+/// interior padding after a WEST arrowhead whenever the label is shorter than the interior, or
+/// an empty lane cell after an EAST arrowhead — so in Ghostty specifically (never in a
+/// fixed-advance terminal, which has no such rule) the glyph draws visibly larger than its
+/// neighbours.
+///
+/// The fix: if `(x+1, y)` currently holds a plain U+0020, replace it with U+00A0 NO-BREAK SPACE
+/// in the SAME style that cell already carries. Ghostty's `isSpace()` does not list U+00A0, so
+/// the glyph is constrained back to one cell; a NBSP reads identically to a space everywhere
+/// else that matters here — Rust's `char::is_whitespace()` includes it (so the gallery capture
+/// harness's `Face::draw` still paints nothing and logs no `unresolved_glyphs` entry for it),
+/// and `map_dump`'s cell-copy carries it through unremarked, exactly as SQ-1277 verified. Does
+/// nothing to any OTHER glyph in that cell, and nothing at all past the edge of `area`.
+///
+/// Called from every site that stamps an arrowhead onto a room border — real exits and the
+/// SQ-1276 stacked accent (`draw_connector_arrows`), and the SQ-1275 `?` mark's own arrowhead
+/// (`draw_box_room`) — so the next arrowhead site added gets this for free by calling it too.
+fn guard_symbol_spill(buf: &mut Buffer, x: i32, y: i32, area: Rect) {
+    let (nx, ny) = (x + 1, y);
+    if !in_area(nx, ny, area) {
+        return;
+    }
+    if let Some(cell) = buf.cell_mut((nx as u16, ny as u16)) {
+        if cell.symbol() == " " {
+            cell.set_symbol("\u{00A0}");
+        }
+    }
+}
+
 /// Style for a room given the current selection/current state.
 ///
 /// When a room is BOTH current AND selected, combine both states: use the
@@ -348,7 +456,12 @@ fn in_area(sx: i32, sy: i32, area: Rect) -> bool {
 fn room_style(room: &RenderRoom, state: &AppState) -> Style {
     let is_selected = state.selected_room == Some(room.id);
     let theme = &state.colors.theme;
-    if room.is_current && is_selected {
+    // A cross-layer ghost is never the current room (`render_layer` clears the flag), so the two
+    // arms below can never both fire; selection still wins, since a selected ghost has to be
+    // visibly the one the room card is describing.
+    if room.ghost.is_some() && !is_selected {
+        theme.get("map.room_ghost").style
+    } else if room.is_current && is_selected {
         theme.get("map.room_selected").style.add_modifier(Modifier::REVERSED)
     } else if room.is_current {
         theme.get("map.room_current").style
@@ -413,9 +526,11 @@ pub fn room_screen_rects(
     let scroll = state.scroll;
     let (bw, bh) = zoom_box_size(zoom);
 
-    let boxes = matches!(zoom, crate::state::Zoom::Boxes);
-    let axes = boxes.then(|| boxes_axes(&rm.plan, rm.bounds));
-    let (off_x, off_y) = match &axes {
+    // The same cached tables `render_map` draws from (SQ-1182) — this runs right
+    // after it on every drawn frame, and was rebuilding `boxes_axes` again.
+    let derived = derived_tables(rm, state, zoom);
+    let axes = &derived.axes;
+    let (off_x, off_y) = match axes {
         Some((cols, rows)) => (
             area.x as i32 - cols.room_pixel(scroll.0) + state.char_pan.0,
             area.y as i32 - rows.room_pixel(scroll.1) + state.char_pan.1,
@@ -427,7 +542,7 @@ pub fn room_screen_rects(
         }
     };
     let room_virtual = |cell: (i32, i32)| -> (i32, i32) {
-        match &axes {
+        match axes {
             Some((cols, rows)) => (cols.room_pixel(cell.0), rows.room_pixel(cell.1)),
             None => cell_to_virtual(cell, zoom),
         }
@@ -484,6 +599,106 @@ pub fn room_at_cell(
 // rather than from compile-time constants.  The constants have been removed.
 // See `room_style()` and the connector-drawing functions for usage.
 
+// ── Derived tables (SQ-1182) ─────────────────────────────────────────────────
+
+/// The scroll-independent tables one routed model implies at one zoom: every
+/// room's virtual-space rect, the Boxes-zoom position tables, and the per-edge
+/// kind classification. None depend on scroll or pan — they were nevertheless
+/// rebuilt on every drawn frame, over every room, the whole grid span and every
+/// edge, during 30 fps animation windows included.
+///
+/// All inputs are the model and the zoom, so the LIVE model's tables are cached
+/// in [`AppState::map_derived`] and rebuilt only when the model is replaced
+/// (`poll_render_job` clears the cache) or the zoom changes. Replay, tidy-anim
+/// and test models are built fresh per frame, exactly as before — they are not
+/// tracked by `graph_gen`, so nothing keyed on it may describe them.
+#[derive(Debug)]
+pub(crate) struct MapDerived {
+    /// The zoom this was derived at — part of the cache key.
+    zoom: Zoom,
+    /// Every room's virtual-space rect (step 1 of `render_map`).
+    placed: std::collections::HashMap<RoomId, VRect>,
+    /// The Boxes-zoom lane-routing position tables; `None` at other zooms.
+    axes: Option<(PosTable, PosTable)>,
+    /// Per-edge kind classification; only built (and only read) at Boxes zoom.
+    kinds: std::collections::HashMap<(RoomId, RoomId, Direction), EdgeKind>,
+}
+
+impl MapDerived {
+    /// How many rooms the placement table covers — the freshness probe the
+    /// `state.rs` cache-invalidation test reads (SQ-1182).
+    #[cfg(all(test, feature = "t-state"))]
+    pub(crate) fn rooms_placed(&self) -> usize {
+        self.placed.len()
+    }
+}
+
+fn build_derived(rm: &RenderMap, zoom: Zoom) -> MapDerived {
+    let boxes = matches!(zoom, Zoom::Boxes);
+    let axes = boxes.then(|| boxes_axes(&rm.plan, rm.bounds));
+    let (bw, _bh) = zoom_box_size(zoom);
+    let mut placed: std::collections::HashMap<RoomId, VRect> =
+        std::collections::HashMap::with_capacity(rm.rooms.len());
+    for room in &rm.rooms {
+        let (vx, vy) = match &axes {
+            Some((cols, rows)) => (cols.room_pixel(room.cell.0), rows.room_pixel(room.cell.1)),
+            None => cell_to_virtual(room.cell, zoom),
+        };
+        placed.insert(room.id, VRect { x: vx, y: vy, w: bw as i32 });
+    }
+    let kinds = if boxes { edge_kinds(rm) } else { std::collections::HashMap::new() };
+    MapDerived { zoom, placed, axes, kinds }
+}
+
+/// The derived tables for `rm` at `zoom` — reused from [`AppState::map_derived`]
+/// when `rm` IS the live cached model, built fresh otherwise.
+///
+/// Liveness is decided by address: the production path passes a `Ref`-projected
+/// `&MapRenderCache::rm`, so pointer identity to the entry in `state.map_render`
+/// is exact — a replay graph, a tidy-animation frame or a test's local model can
+/// never alias it. The key carries the entry's own `(gen, layer)` (not
+/// `state.graph_gen`, which runs ahead of a stale model mid-reroute) plus the
+/// zoom; `poll_render_job` clears the cache whenever it installs a new model, so
+/// a same-`(gen, layer)` replacement (the empty placeholder giving way to the
+/// first real route) cannot serve tables derived from the placeholder.
+fn derived_tables<'a>(rm: &RenderMap, state: &'a AppState, zoom: Zoom) -> DerivedSource<'a> {
+    let live_key = state.map_render.try_borrow().ok().and_then(|mr| {
+        mr.as_ref().and_then(|c| std::ptr::eq(&c.rm, rm).then_some((c.gen, c.layer)))
+    });
+    match live_key {
+        Some((gen, layer)) => {
+            let hit = matches!(
+                &*state.map_derived.borrow(),
+                Some((g, l, d)) if *g == gen && *l == layer && d.zoom == zoom
+            );
+            if !hit {
+                *state.map_derived.borrow_mut() = Some((gen, layer, build_derived(rm, zoom)));
+            }
+            DerivedSource::Cached(std::cell::Ref::map(state.map_derived.borrow(), |o| {
+                &o.as_ref().expect("populated above").2
+            }))
+        }
+        None => DerivedSource::Fresh(Box::new(build_derived(rm, zoom))),
+    }
+}
+
+/// Where [`derived_tables`] found its answer; derefs to the tables either way.
+enum DerivedSource<'a> {
+    Cached(std::cell::Ref<'a, MapDerived>),
+    // Boxed so the enum stays pointer-sized either way (clippy: large_enum_variant).
+    Fresh(Box<MapDerived>),
+}
+
+impl std::ops::Deref for DerivedSource<'_> {
+    type Target = MapDerived;
+    fn deref(&self) -> &MapDerived {
+        match self {
+            DerivedSource::Cached(r) => r,
+            DerivedSource::Fresh(d) => d,
+        }
+    }
+}
+
 // ── render_map ────────────────────────────────────────────────────────────────
 
 /// Draw the map from `rm` into `buf` for `area`, using view state from `state`.
@@ -491,7 +706,15 @@ pub fn room_at_cell(
 /// The whole map is built in scroll-independent virtual space (see `VRect`) and
 /// blitted to the screen with a single translation, so panning never re-routes
 /// connectors — the routes are identical at every scroll offset.
-pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer) {
+///
+/// Returns the hover-hit rects of every superscript marker actually drawn this call — the
+/// alias-count marker and any `?` random-exit stub (SQ-1273) — collected at the exact cells
+/// `draw_box_room`/`draw_portal_icons` painted, so a rect can never claim a cell nothing was
+/// drawn to. Always empty outside Boxes zoom, since neither function draws a marker at any
+/// other zoom. Most callers (tests, the tidy animation, the dump harness) have no use for
+/// these and simply ignore the return value, exactly as they ignored the old `()`.
+pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer) -> Vec<(RoomId, MarkerKind, Rect)> {
+    let mut marker_rects: Vec<(RoomId, MarkerKind, Rect)> = Vec::new();
     let zoom = state.zoom;
     let scroll = state.scroll;
 
@@ -517,7 +740,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
                 put_str(buf, area.x as i32, (area.y + top) as i32 + i as i32, &clamped,
                     transcript_style, area);
             }
-            return;
+            return marker_rects;
         }
     }
 
@@ -530,7 +753,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
             let (vx, vy) = cell_to_virtual(room.cell, zoom);
             put_char(buf, vx + off_x, vy + off_y, '■', room_style(room, state), area);
         }
-        return;
+        return marker_rects;
     }
 
     // Boxes zoom uses the non-uniform lane-routing position tables; Compact keeps the
@@ -538,8 +761,12 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // top-left pixel; the scroll offset is computed in the SAME space so panning is a
     // pure translate-and-clip and connector geometry is scroll-invariant.
     let boxes = matches!(zoom, crate::state::Zoom::Boxes);
-    let axes = boxes.then(|| boxes_axes(&rm.plan, rm.bounds));
-    let (off_x, off_y) = match &axes {
+    // ── 1. The scroll-independent tables: room placement, position tables, edge
+    //       kinds — cached for the live model, fresh for any other (SQ-1182).
+    let derived = derived_tables(rm, state, zoom);
+    let axes = &derived.axes;
+    let placed = &derived.placed;
+    let (off_x, off_y) = match axes {
         Some((cols, rows)) => (
             area.x as i32 - cols.room_pixel(scroll.0) + state.char_pan.0,
             area.y as i32 - rows.room_pixel(scroll.1) + state.char_pan.1,
@@ -551,35 +778,46 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         }
     };
     let room_virtual = |cell: (i32, i32)| -> (i32, i32) {
-        match &axes {
+        match axes {
             Some((cols, rows)) => (cols.room_pixel(cell.0), rows.room_pixel(cell.1)),
             None => cell_to_virtual(cell, zoom),
         }
     };
-
-    // ── 1. Place ALL rooms in virtual space (independent of scroll/area) ──────
-    let (bw, _bh) = zoom_box_size(zoom);
-    let mut placed: std::collections::HashMap<RoomId, VRect> =
-        std::collections::HashMap::new();
-    for room in &rm.rooms {
-        let (vx, vy) = room_virtual(room.cell);
-        placed.insert(room.id, VRect { x: vx, y: vy, w: bw as i32 });
-    }
 
     // ── 2. Stub (portal) edges at non-Boxes zoom keep the bare-label `draw_stub`; Boxes zoom draws
     //       the in-room portal-icon overlay after the rooms (below).
     let connector_style = state.colors.theme.get("map.connector").style;
     for edge in &rm.edges {
         if edge.is_stub && !boxes {
-            draw_stub(edge, &placed, off_x, off_y, area, buf, connector_style);
+            draw_stub(edge, placed, off_x, off_y, area, buf, connector_style);
         }
     }
 
     // ── 3. Boxes zoom: draw line-art connectors along their assigned lanes, on top of
     //       the rooms drawn below them in step 2.
+    // SQ-1276: every `(room, primary direction)` that stands for a collapsed same-destination
+    // group — `render_lane_connectors` accent-styles that one arrowhead and nothing else changes,
+    // since the secondary directions were already excluded from `rm.plan` upstream (mapper's
+    // `collapse_stacked_exits`) and simply have no connector here to draw.
+    let stacked_primaries: std::collections::HashSet<(RoomId, Direction)> = rm
+        .rooms
+        .iter()
+        .flat_map(|r| r.stacked_exits.iter().map(move |s| (r.id, s.primary)))
+        .collect();
+    // SQ-1373: every `StackedExit`'s own SECONDARY directions, keyed by the (room, dest) pair
+    // whose primary IS the connector `render_lane_connectors` draws for it — there is no
+    // separate connector to read these off, since `collapse_stacked_exits` removed them before
+    // the router ever ran (contrast `RoutedConnector::secondary_exit`/`secondary_entry`, folded
+    // AFTER routing). Keyed by the pair so the connector loop can look it up however that
+    // connector happens to be oriented (see that loop's own comment).
+    let stacked_secondaries: std::collections::HashMap<(RoomId, RoomId), Vec<Direction>> = rm
+        .rooms
+        .iter()
+        .flat_map(|r| r.stacked_exits.iter().map(move |s| ((r.id, s.dest), s.secondary.clone())))
+        .collect();
     let mut arrowheads: Vec<Arrowhead> = Vec::new();
-    if let Some((cols, rows)) = &axes {
-        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.symbols.portal, &state.colors, state.symbols.diagonal_corners, &edge_kinds(rm));
+    if let Some((cols, rows)) = axes {
+        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.symbols.portal, &state.colors, state.symbols.diagonal_corners, &derived.kinds, &stacked_primaries, &stacked_secondaries);
     }
 
     // ── 4. Draw rooms on top of the line-art (translate + clip) ───────────────
@@ -587,14 +825,14 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         let (vx, vy) = room_virtual(room.cell);
         let sx = vx + off_x;
         let sy = vy + off_y;
-        draw_room(room, state, zoom, sx, sy, area, buf);
+        draw_room(room, state, zoom, sx, sy, area, buf, &mut marker_rects);
     }
 
     // Portal-icon overlay (Boxes zoom), drawn after the rooms so icons sit on the box. In
     // normal view the icons go on the interior right column; in portal view (show_portal_labels)
     // they move onto the border and the destination names float outside the box.
     if boxes {
-        draw_portal_icons(rm, &placed, state, state.show_portal_labels, (off_x, off_y), area, buf);
+        draw_portal_icons(rm, placed, state, state.show_portal_labels, (off_x, off_y), area, buf, &mut marker_rects);
     }
 
     // ── 5. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
@@ -602,8 +840,9 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // Portal view hides the cardinal connector arrowheads so only portal icons sit on borders.
     if !state.show_portal_labels {
         let current_room = rm.rooms.iter().find(|r| r.is_current).map(|r| r.id);
-        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors, state.selected_room, current_room);
+        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors, state.selected_room, current_room, &mut marker_rects);
     }
+    marker_rects
 }
 
 // ── Layer tab strip ───────────────────────────────────────────────────────────
@@ -710,7 +949,18 @@ pub(crate) fn loc_method_label(m: zvm::location::LocationMethod) -> &'static str
         StatusName => "via name match",
         NameOnly => "via name (unlinked)",
         RoomHeading => "via room heading",
+        _ => "via unknown method",
     }
+}
+
+/// Every hit-rect [`render_map_layered`] produced this frame: the room boxes (drawn view) or
+/// row/destination-cell rects (matrix view) mouse routing already used before SQ-1273, plus —
+/// Boxes zoom only, and empty in the matrix view — the superscript marker rects a `Moved` event
+/// resolves against for the room-marker hover tooltip (`main.rs`'s `map_update_hover`).
+#[derive(Debug, Clone, Default)]
+pub struct MapHits {
+    pub room_rects: Vec<(RoomId, Rect)>,
+    pub marker_rects: Vec<(RoomId, MarkerKind, Rect)>,
 }
 
 /// because in that case the border carries layer tabs via `draw_top_inset` and drawing the
@@ -721,7 +971,7 @@ pub fn render_map_layered(
     state: &AppState,
     area: Rect,
     buf: &mut Buffer,
-) -> Vec<(RoomId, Rect)> {
+) -> MapHits {
     use crate::render::paneframe::BorderStyle;
     // Hand the pane's size to input handlers that never see a pane rect (`Action::Recenter`).
     // Recorded here, from the rect actually drawn into, so it cannot drift from what the player
@@ -740,10 +990,12 @@ pub fn render_map_layered(
     // — none of them is showing the player a layer they chose a view for.
     let layer = state.active_layer(graph);
     let hits = if graph.layer_view(layer) == mapper::layer::MapView::Matrix {
-        crate::render::matrix::render_matrix(graph, layer, state, body_area, buf)
+        let room_rects = crate::render::matrix::render_matrix(graph, layer, state, body_area, buf);
+        MapHits { room_rects, marker_rects: Vec::new() }
     } else {
-        render_map(rm, state, body_area, buf);
-        room_screen_rects(rm, state, body_area)
+        let marker_rects = render_map(rm, state, body_area, buf);
+        let room_rects = room_screen_rects(rm, state, body_area);
+        MapHits { room_rects, marker_rects }
     };
 
     // Progress bar while the `animate-tidy` frames are built on a worker thread.
@@ -752,6 +1004,112 @@ pub fn render_map_layered(
         draw_tidy_progress(job, state, area, buf);
     }
     hits
+}
+
+/// A direction's word, capitalized the way a tooltip title reads it ("North", "Up") — the same
+/// words [`mapper::direction::long_label`] spells out for prose, just with the leading letter
+/// upper-cased for a title line rather than embedded mid-sentence.
+fn dir_title(dir: Direction) -> String {
+    let word = mapper::direction::long_label(dir);
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// Word-wrap width for a `MarkerKind::Notes` hover tip (SQ-1386): wide enough to hold a
+/// sentence or two without the box sprawling across the pane, narrow enough that
+/// `tooltip::draw_tip` — which sizes its box to the widest line it is handed, not the pane —
+/// never has to clamp a single overlong line against `area` on its own. `draw_map_hover_tip`
+/// clamps further against the map pane's actual width when it is smaller than this.
+const NOTES_TIP_WRAP_WIDTH: u16 = 40;
+
+/// Draw the hover tooltip for whichever room-box marker the pointer is on, if any (SQ-1273):
+/// the alias-count superscript, a `?` random-exit stub, a stacked-exit arrowhead, or the `●`
+/// notes marker (SQ-1386).
+///
+/// `state.map_hover` is what `main.rs`'s `map_update_hover` last resolved from a `Moved` event
+/// against [`MapHits::marker_rects`] — the exact cells `draw_box_room`/`draw_portal_icons`
+/// painted this frame. Reuses the same floating-box renderer the matrix's own hover tip and the
+/// border-control hints already draw with (`tooltip::draw_tip`), so styling and placement
+/// (beside the anchor, clamped to `area`, flipped when the preferred side would run off) are
+/// identical to theirs — nothing new to theme.
+///
+/// - `MarkerKind::Alias`: "Also seen as:" followed by the room's other names, in stored order.
+/// - `MarkerKind::Random(dir)`: the direction's name as a title, then either every recorded
+///   destination (the room's own id printed as "back here", exactly as the room card's exit
+///   card does) or, when nothing has been recorded yet, "destination varies — none recorded
+///   yet".
+/// - `MarkerKind::Stacked(primary)`: every direction that leads to the same destination as
+///   `primary`, drawn as its own arrow glyph — `arrow_for_direction` for compass directions, the
+///   portal icon set for Up/Down/In/Out, exactly as a room box's own badges resolve one — space
+///   separated on one line, `primary` first (SQ-1276). No title and no room name: the glyphs
+///   themselves are the fact being shown, read fresh from `graph` each time so they always match
+///   whatever the graph currently says regardless of which direction happened to route.
+/// - `MarkerKind::Notes`: the room's note text, no title — the tip IS the note. Read fresh from
+///   `graph` each time (like `Random`/`Stacked`) and word-wrapped to [`NOTES_TIP_WRAP_WIDTH`]
+///   (or narrower, clamped to what `area` can hold) since a note can run to a paragraph and
+///   `tooltip::draw_tip` sizes its box to the widest line it is handed rather than wrapping.
+///
+/// Returns `None` — and paints nothing — while a modal overlay owns the pointer, when nothing is
+/// hovered, or when the hovered room no longer exists in `graph` (a frame drawn after the room
+/// was removed, before the next hover resolution clears it) or its note was cleared.
+pub fn draw_map_hover_tip(
+    graph: &mapper::graph::MapGraph,
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+) -> Option<Rect> {
+    if state.any_modal_overlay_open() {
+        return None;
+    }
+    let (room_id, kind, rect) = state.map_hover?;
+    let room = graph.room(room_id)?;
+
+    let lines: Vec<String> = match kind {
+        MarkerKind::Alias => {
+            let mut lines = vec!["Also seen as:".to_string()];
+            lines.extend(room.aliases.iter().cloned());
+            lines
+        }
+        MarkerKind::Random(dir) => {
+            let mut lines = vec![dir_title(dir)];
+            let dests = graph.random_destinations(room_id, dir);
+            if dests.is_empty() {
+                lines.push("destination varies — none recorded yet".to_string());
+            } else {
+                for &id in dests {
+                    lines.push(if id == room_id {
+                        "back here".to_string()
+                    } else {
+                        crate::render::room_info::display_name(graph, id)
+                    });
+                }
+            }
+            lines
+        }
+        MarkerKind::Stacked(primary) => {
+            let Some(dest) = graph.connections().iter().find(|c| c.origin == room_id && c.dir == primary).map(|c| c.dest) else {
+                return None; // a stale rect from a frame before the model changed
+            };
+            let mut glyphs = vec![arrow_for_direction(primary, &state.symbols.arrows, &state.symbols.portal).to_string()];
+            for c in graph.connections().iter().filter(|c| c.origin == room_id && c.dest == dest && c.dir != primary) {
+                glyphs.push(arrow_for_direction(c.dir, &state.symbols.arrows, &state.symbols.portal).to_string());
+            }
+            vec![glyphs.join(" ")]
+        }
+        MarkerKind::Notes => {
+            if room.notes.is_empty() {
+                return None; // a stale rect from a frame before the note was cleared
+            }
+            let width = NOTES_TIP_WRAP_WIDTH.min(area.width.saturating_sub(4)).max(1);
+            room.notes.split('\n').flat_map(|line| crate::render::transcript::wrap_line(line, width)).collect()
+        }
+    };
+
+    let anchor_col = rect.x + rect.width / 2;
+    super::tooltip::draw_tip(buf, area, anchor_col, rect.y, &lines, &state.colors.theme, &state.symbols)
 }
 
 /// Draw a centered, bordered progress box in the map pane while the tidy animation
@@ -826,25 +1184,6 @@ const DIR_E: u8 = 2;
 const DIR_S: u8 = 4;
 const DIR_W: u8 = 8;
 
-/// The cell-edge midpoints a chain glyph reaches, as direction bits — `None` for a glyph
-/// `diagonal_chain` never emits.
-///
-/// Every half-diagonal endpoint is an edge MIDPOINT, exactly where `─` and `│` attach, so a
-/// chain glyph and an orthogonal run through the same cell describe strokes to the SAME points.
-/// That is what lets the two merge into one mask rather than one overwriting the other
-/// (SQ-0356). Matched against `path`, not against literals: every glyph here is themeable.
-fn chain_glyph_bits(ch: char, path: &crate::symbols::PathGlyphs) -> Option<u8> {
-    Some(match ch {
-        c if c == path.diag_ul => DIR_N | DIR_W,
-        c if c == path.diag_ur => DIR_N | DIR_E,
-        c if c == path.diag_ll => DIR_S | DIR_W,
-        c if c == path.diag_lr => DIR_S | DIR_E,
-        c if c == path.ns => DIR_N | DIR_S,
-        c if c == path.ew => DIR_E | DIR_W,
-        _ => return None,
-    })
-}
-
 /// Box-drawing glyph for a set of direction bits.
 fn glyph_for(mask: u8, path: &crate::symbols::PathGlyphs) -> Option<char> {
     Some(match mask {
@@ -897,21 +1236,21 @@ fn lane_pixel(
     // the doorway cell, so lines still visibly touch the box.
     let px = if dx.rem_euclid(2) == 0 {
         let c = dx.div_euclid(2);
-        cols.room_pixel(c) + BOX_W / 2
+        cols.room_pixel(c) + cols.box_dim_at(c) / 2
     } else {
         let c = (dx - 1).div_euclid(2);
         // A V(c) run varies along y; pick the segment whose y-extent contains dy.
         let lane = seg_lane(segs, Channel::V(c), dy) as i32;
-        cols.room_pixel(c) + BOX_W + LANE_BASE + lane * LANE_SPACING
+        cols.room_pixel(c) + cols.box_dim_at(c) + LANE_BASE + lane * LANE_SPACING
     };
     let py = if dy.rem_euclid(2) == 0 {
         let r = dy.div_euclid(2);
-        rows.room_pixel(r) + BOX_H / 2
+        rows.room_pixel(r) + rows.box_dim_at(r) / 2
     } else {
         let r = (dy - 1).div_euclid(2);
         // An H(r) run varies along x; pick the segment whose x-extent contains dx.
         let lane = seg_lane(segs, Channel::H(r), dx) as i32;
-        rows.room_pixel(r) + BOX_H + LANE_BASE + lane * LANE_SPACING
+        rows.room_pixel(r) + rows.box_dim_at(r) + LANE_BASE + lane * LANE_SPACING
     };
     (px, py)
 }
@@ -959,13 +1298,18 @@ struct Arrowhead {
     room: RoomId,
     shared: bool,
     kind: EdgeKind,
+    /// `Some(primary_dir)` when this arrowhead is the PRIMARY of a stacked same-destination
+    /// group (SQ-1276) — several of `room`'s own exits collapsed to this one line. Styled with
+    /// `map.room_stacked_exit` instead of the ordinary connector selectors, and published as a
+    /// `MarkerKind::Stacked(primary_dir)` hover rect. `None` for an ordinary arrowhead.
+    stacked: Option<Direction>,
 }
 
 /// Classify each drawn edge from the render model's own reverse-edge lookup.
 ///
 /// Keyed by the full `(origin, dest, dir)` triple because a room pair can hold several passages
 /// and they need not agree about the way back.
-fn edge_kinds(rm: &RenderMap) -> std::collections::HashMap<(RoomId, RoomId, Direction), EdgeKind> {
+pub(crate) fn edge_kinds(rm: &RenderMap) -> std::collections::HashMap<(RoomId, RoomId, Direction), EdgeKind> {
     rm.edges
         .iter()
         .map(|e| {
@@ -983,30 +1327,21 @@ fn edge_kinds(rm: &RenderMap) -> std::collections::HashMap<(RoomId, RoomId, Dire
 /// contributes there, plus its departure/arrival arrowhead anchors. This is the single
 /// source of truth for connector plotting: the renderer ORs these per-cell masks into the
 /// shared buffer, and tests re-derive per-connector ownership from the same geometry.
-struct ConnectorPlot {
-    cells: Vec<((i32, i32), u8)>,
+pub(crate) struct ConnectorPlot {
+    pub(crate) cells: Vec<((i32, i32), u8)>,
+    /// The same run as `cells`, reduced to its TURNING POINTS: the orthogonal polyline
+    /// `dep_anchor → … → arr_anchor`, spur-collapsed, with every collinear point between two
+    /// corners dropped. The cell renderer paints per-cell glyphs and never looks at this; a
+    /// vector renderer draws exactly this polyline, so the two describe one route by
+    /// construction rather than by two routers agreeing (SQ-1313).
+    pub(crate) path: Vec<(i32, i32)>,
     /// Explicit-glyph cells for a diagonal corner stub (SQ-0314), painted directly
     /// rather than through the 4-bit orthogonal mask — a diagonal has no
     /// representation in `glyph_for`'s N/E/S/W bits, and `dir_bit` would misfile a
     /// (+1,+1) step as East. Empty unless `diagonal_corners` is on.
-    diag_cells: Vec<((i32, i32), char)>,
-    dep_anchor: (i32, i32),
-    arr_anchor: (i32, i32),
-}
-
-/// The direction bit that seams a `dir` chain to the orthogonal cell it hands off to (SQ-0314).
-///
-/// A chain leaves its last cell through that cell's upper- or lower-centre, and the handoff cell
-/// sits immediately beyond it. For the orthogonal glyph there to actually MEET the chain, it needs
-/// a stroke running from its centre back to the shared edge — i.e. pointing at the chain. A N-ward
-/// chain (NE/NW) hands off upward, so the cell above it needs `DIR_S`; a S-ward chain needs
-/// `DIR_N`. Without this bit the handoff cell draws a bare `─` through its middle and the diagonal
-/// visibly stops one half-cell short.
-fn chain_seam_bit(dir: Direction) -> u8 {
-    match dir {
-        Direction::NE | Direction::NW => DIR_S,
-        _ => DIR_N,
-    }
+    pub(crate) diag_cells: Vec<((i32, i32), char)>,
+    pub(crate) dep_anchor: (i32, i32),
+    pub(crate) arr_anchor: (i32, i32),
 }
 
 /// A half-diagonal chain: the `(cell, glyph)` pairs it plots, plus the point where an orthogonal
@@ -1117,7 +1452,7 @@ fn diagonal_chain(
 /// selects the fallback for terminals without those glyphs — the SAME corner anchor, walked
 /// orthogonally. The toggle picks glyphs, not geometry: where a connector departs and arrives is
 /// the router's business, and both settings ask it the same questions.
-fn plot_connector(
+pub(crate) fn plot_connector(
     conn: &mapper::route::RoutedConnector,
     cols: &PosTable,
     rows: &PosTable,
@@ -1126,7 +1461,7 @@ fn plot_connector(
     // Convert the doubled polyline to a virtual-pixel polyline, resolving each point's lane
     // against this connector's segments by channel + extent (a connector may have two runs
     // in one channel on different lanes).
-    let pix: Vec<(i32, i32)> = conn
+    let mut pix: Vec<(i32, i32)> = conn
         .points
         .iter()
         .map(|&p| lane_pixel(p, cols, rows, &conn.segs))
@@ -1150,12 +1485,6 @@ fn plot_connector(
         box_edge_anchor(cols, rows, origin_cell, conn.exit, conn.exit_slot)
     };
 
-    // The connector leaves the box straight out at 90° (a perpendicular stub on the anchor's own
-    // row/col), then steps along the edge into the first interior channel point. Distinct slots
-    // give distinct border cells; the straight connector on each side keeps slot 0 (centre), so a
-    // displaced connector crosses it as a single clean ┼ instead of a corner stomp.
-    let first_interior = pix[1];
-
     // The arrival anchor does not depend on the departure geometry, so resolve it first: a
     // corner-to-corner diagonal aims its chain straight at it (SQ-0314), and so needs it up front.
     //
@@ -1164,70 +1493,79 @@ fn plot_connector(
     // two ends cannot drift apart. It covers the one-way diagonal (no back edge, but still arrives
     // on the corner facing its origin) and the arrival that YIELDED its corner to the destination's
     // own outgoing diagonal — that one is back on a side doorway, at a real slot.
-    let arr_target = (!conn.merge).then(|| {
-        let last = conn.points[conn.points.len() - 1];
-        let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
-        match conn.entry_corner {
-            Some(d) => corner_anchor(cols, rows, dest_cell, d),
-            None => box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot),
-        }
+    let last_point = conn.points[conn.points.len() - 1];
+    let dest_cell = (last_point.0.div_euclid(2), last_point.1.div_euclid(2));
+    let arr_target = (!conn.merge).then(|| match conn.entry_corner {
+        Some(d) => corner_anchor(cols, rows, dest_cell, d),
+        None => box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot),
     });
 
-    // SQ-0314: a diagonal exit leaves the corner on a chain of half-diagonals, and the orthogonal
-    // path resumes at the chain's far end (a │ attachment point).
+    // SQ-1320: aim the final approach at the SLOT the arrowhead will actually use, not at the
+    // side's centre cell with a sidestep tacked on at the end.
     //
-    // A PURE diagonal — centre → shared corner → centre, the diagonally-adjacent case the router
-    // collapses — aims the chain at the ARRIVAL corner and has no orthogonal leg at all when the
-    // two gaps are square. Every other diagonal chains a while and then bridges to its first
-    // interior channel point as usual.
+    // The router's polyline ends on the destination's COMPASS anchor — its `eb` stub is the side
+    // midpoint, because the fine grid has no way to name a cell part-way along a box edge. The
+    // slot displacement is then applied here, to the anchor alone, and `attach_bridge` bridges
+    // the gap. Where the route approaches ALONG the edge (its last run parallel to the side) that
+    // costs nothing: the offset merely lengthens or shortens the perpendicular stub and the two
+    // merge into one straight run. Where it approaches HEAD-ON — the last run perpendicular to
+    // the side, aimed straight at the midpoint — the bridge has to step sideways in the gutter
+    // immediately outside the box, which is the little jog the user reported on
+    // `Frigid River --W--> White Cliffs Beach` and `Clearing --E--> Forest`.
     //
-    // With `diag` off, or for a non-diagonal exit, `bridge_from` stays the anchor and the geometry
-    // below is the plain corner/edge-to-bridge route.
+    // So displace the whole final perpendicular RUN, not just its last cell: the line then comes
+    // down (or across) the slot's own column/row from its last turn and enters the box straight.
+    // The preceding run is parallel to the edge, so shifting the turn only changes its LENGTH —
+    // every segment stays orthogonal, and the arrowhead does not move.
+    if let Some(aa) = arr_target.filter(|_| conn.entry_corner.is_none()) {
+        straighten_arrival(&mut pix, conn.entry, aa, box_edge_anchor(cols, rows, dest_cell, conn.entry, 0));
+    }
+
+    // The connector leaves the box straight out at 90° (a perpendicular stub on the anchor's own
+    // row/col), then steps along the edge into the first interior channel point. Distinct slots
+    // give distinct border cells; the straight connector on each side keeps slot 0 (centre), so a
+    // displaced connector crosses it as a single clean ┼ instead of a corner stomp.
+    let first_interior = pix[1];
+
+    // SQ-0314: a diagonal exit leaves the box CORNER, and with the diagonal glyphs on it can leave
+    // it on a chain of half-diagonals rather than walking that corner orthogonally.
+    //
+    // **Only a PURE diagonal does** (SQ-1321). Pure means the whole connector is one corner-to-
+    // corner run — centre → shared corner → centre, the diagonally-adjacent case the router
+    // collapses, which in Zork I is `North of House ↔ Behind House` and `South of House ↔ Behind
+    // House`. There the diagonal glyphs draw the passage the reader is actually looking at: one
+    // unbroken slope between two boxes that really do touch at a corner.
+    //
+    // Every OTHER diagonal passage — a destination farther away, or off the true diagonal, or a
+    // route that has to bend — keeps its corner ANCHOR (that is what tells the reader the passage
+    // is a diagonal) and is drawn entirely with horizontal and vertical segments, exactly as the
+    // `diagonal_corners = false` style draws it. A chain that runs a few cells and then turns
+    // orthogonal is not a diagonal, it is a staircase pretending to be one; the user's words are
+    // "the partial diagonal lines look pretty ugly anyhow", and around Stone Barrow, West of
+    // House, South of House, Strange Passage and Living Room they were also so much extra ink in
+    // the tightest part of the map.
+    //
+    // With `diag` off, or for anything but a pure diagonal, `bridge_from` stays the anchor and the
+    // geometry below is the plain corner/edge-to-bridge route.
     let arrive_dir = conn.entry_corner;
-    // "Pure" means the WHOLE connector is one diagonal, corner to corner — so BOTH ends must be
-    // diagonal. Testing only the arrival was a bug: a cardinal-out/diagonal-in pair (E out, NW
-    // back) between adjacent rooms also collapses to three points, and it would then take the pure
-    // branch with an empty chain — suppressing the arrival diagonal and drawing nothing diagonal at
-    // all. (SQ-0314)
+    // "Pure" needs BOTH ends diagonal. Testing only the arrival was a bug: a cardinal-out/
+    // diagonal-in pair (E out, NW back) between adjacent rooms also collapses to three points, and
+    // it would then take the pure branch with an empty chain — suppressing the arrival diagonal and
+    // drawing nothing diagonal at all. (SQ-0314)
     let pure_diagonal = arr_target.is_some()
         && pix.len() == 3
         && arrive_dir.is_some()
         && mapper::direction::is_diagonal(conn.exit_dir);
     let mut diag_cells: Vec<((i32, i32), char)> = Vec::new();
-    // Mask bits that seam a chain to the orthogonal cell it hands off to. The chain attaches at a
-    // cell EDGE midpoint, but an orthogonal run is drawn through the cell's CENTRE — so the
-    // handoff cell must also carry a stroke reaching the edge the chain arrives at, or the two
-    // leave a visible gap. `chain_seam_bit` names that edge.
-    let mut seams: Vec<((i32, i32), u8)> = Vec::new();
     let mut bridge_from = dep_anchor;
-    if let Some(g) = diag {
-        if mapper::direction::is_diagonal(conn.exit_dir) {
-            let target = if pure_diagonal { arr_target.unwrap() } else { first_interior };
-            if let Some((chain, resume)) = diagonal_chain(dep_anchor, target, conn.exit_dir, g) {
-                diag_cells = chain;
-                bridge_from = resume;
-                if !pure_diagonal {
-                    seams.push((resume, chain_seam_bit(conn.exit_dir)));
-                }
-            }
+    if let (Some(g), true) = (diag, pure_diagonal) {
+        let target = arr_target.expect("a pure diagonal has an arrival corner");
+        if let Some((chain, resume)) = diagonal_chain(dep_anchor, target, conn.exit_dir, g) {
+            diag_cells = chain;
+            bridge_from = resume;
         }
     }
-
-    // The ARRIVAL end mirrors the departure: the router emits a diagonal step INTO the destination
-    // corner too (SQ-0314), so a non-adjacent diagonal reads as diagonal-out, run, diagonal-in
-    // rather than losing its diagonals to doglegs at both ends. Chain BACKWARDS from the corner
-    // toward the last interior point — same helper, same geometry, just aimed the other way.
-    let mut bridge_to = arr_target;
-    if let (Some(g), Some(d), Some(aa)) = (diag, arrive_dir, arr_target) {
-        if !pure_diagonal && !conn.merge {
-            let last_interior = pix[pix.len() - 2];
-            if let Some((chain, resume)) = diagonal_chain(aa, last_interior, d, g) {
-                diag_cells.extend(chain);
-                bridge_to = Some(resume);
-                seams.push((resume, chain_seam_bit(d)));
-            }
-        }
-    }
+    let bridge_to = arr_target;
 
     let mut inner_v: Vec<(i32, i32)> = Vec::with_capacity(pix.len() + 6);
     inner_v.push(bridge_from);
@@ -1304,6 +1642,19 @@ fn plot_connector(
         }
     }
 
+    // The vector reading of the same run: keep the endpoints and every cell where the run
+    // turns, drop the collinear ones between (SQ-1313).
+    let mut path: Vec<(i32, i32)> = Vec::with_capacity(run.len().min(16));
+    for i in 0..run.len() {
+        let turn = i == 0
+            || i + 1 == run.len()
+            || (run[i + 1].0 - run[i].0, run[i + 1].1 - run[i].1)
+                != (run[i].0 - run[i - 1].0, run[i].1 - run[i - 1].1);
+        if turn {
+            path.push(run[i]);
+        }
+    }
+
     let mut cells = Vec::with_capacity(run.len());
     for i in 0..run.len() {
         let c = run[i];
@@ -1314,15 +1665,43 @@ fn plot_connector(
         if i + 1 < run.len() {
             mask |= dir_bit(c, run[i + 1]);
         }
-        // Seam a chain's handoff cell to the chain (SQ-0314); see `chain_seam_bit`.
-        for &(at, bit) in &seams {
-            if at == c {
-                mask |= bit;
-            }
-        }
         cells.push((c, mask));
     }
-    Some(ConnectorPlot { cells, diag_cells, dep_anchor, arr_anchor })
+    Some(ConnectorPlot { cells, path, diag_cells, dep_anchor, arr_anchor })
+}
+
+/// Resolve which connector wins each diagonal-chain cell under the SQ-1331 crossing rule, given
+/// every connector's plot (in plan order — the same order `plots` is built in everywhere it is
+/// used) and the set of cells ANY compass connector already claims.
+///
+/// Extends the SQ-0525 crossing convention (a vertical run passes through unbroken, a horizontal
+/// one breaks for a single cell) to slopes: a slope cell some other connector also occupies is
+/// not drawn there at all, leaving a one-cell gap, rather than either line losing its shape to a
+/// manufactured junction glyph. Compass line-art always wins over a slope, which is why a cell it
+/// claims is never entered into the returned map at all; between two slopes, the one plotted
+/// FIRST (lower index into `plots`) wins and every later one yields.
+///
+/// `render_lane_connectors` calls this to decide what to paint, and the `diagonal_glyph_*`
+/// measurement functions below call it to check what got painted — one algorithm, so the drawn
+/// picture and what a test asserts about it cannot drift apart.
+///
+/// `plots` pairs each plot with an ordering key — the caller's own notion of "plan order",
+/// which need not be a freshly-resequenced index; a plan-connector index with gaps (some
+/// connectors never plotted at all) works exactly as well, since only relative order matters.
+fn resolve_diagonal_winners<'a>(
+    plots: impl IntoIterator<Item = (usize, &'a ConnectorPlot)>,
+    compass_cells: &std::collections::HashSet<(i32, i32)>,
+) -> std::collections::HashMap<(i32, i32), usize> {
+    let mut winners = std::collections::HashMap::new();
+    for (ci, plot) in plots {
+        for (c, _) in &plot.diag_cells {
+            if compass_cells.contains(c) {
+                continue;
+            }
+            winners.entry(*c).or_insert(ci);
+        }
+    }
+    winners
 }
 
 /// Draw every plan connector as box-drawing line-art along its lanes, and RETURN the departure
@@ -1340,6 +1719,7 @@ fn plot_connector(
 /// one RECIPROCAL connector (SQ-0216): the far-end block below draws the up/down glyph (derived
 /// from `entry_dir`) at the arrival end too, instead of an arrowhead, so both ends show their own
 /// glyph — styled `map.connector_portal` just like the departure end.
+#[allow(clippy::too_many_arguments)]
 fn render_lane_connectors(
     plan: &RoutePlan,
     cols: &PosTable,
@@ -1353,6 +1733,8 @@ fn render_lane_connectors(
     colors: &crate::colors::ColorScheme,
     diagonal_corners: bool,
     kinds: &std::collections::HashMap<(RoomId, RoomId, Direction), EdgeKind>,
+    stacked_primaries: &std::collections::HashSet<(RoomId, Direction)>,
+    stacked_secondaries: &std::collections::HashMap<(RoomId, RoomId), Vec<Direction>>,
 ) -> Vec<Arrowhead> {
     let (off_x, off_y) = offset;
     // SQ-0314: when on, a diagonal exit leaves its corner on a chain of half-diagonals; `None`
@@ -1389,21 +1771,29 @@ fn render_lane_connectors(
     // instead of `map.connector`/`map.connector_distorted`.
     let mut arrowheads: Vec<Arrowhead> = Vec::new();
 
-    // Plot every connector up front: the diagonal-chain merge below needs to know whether ANY
-    // connector claims a cell with compass line-art, which a single pass painting as it goes
-    // cannot answer for connectors it has not reached yet.
+    // Plot every connector up front: the diagonal-chain crossing rule below needs to know
+    // whether ANY connector claims a cell with compass line-art, which a single pass painting
+    // as it goes cannot answer for connectors it has not reached yet.
     let plots: Vec<(&mapper::route::RoutedConnector, ConnectorPlot)> = plan
         .connectors
         .iter()
         .filter_map(|c| plot_connector(c, cols, rows, diag).map(|p| (c, p)))
         .collect();
-    // Cells carrying compass line-art. Up/down connectors are excluded: they accumulate in their
-    // own mask with their own dotted glyphs, so a chain has nothing there to merge WITH.
-    let compass_cells: std::collections::HashSet<(i32, i32)> = plots
-        .iter()
-        .filter(|(c, _)| !matches!(c.exit_dir, Direction::Up | Direction::Down))
-        .flat_map(|(_, p)| p.cells.iter().map(|(c, _)| *c))
-        .collect();
+    // Cells carrying another connector's line-art — what a slope must yield to (SQ-1331).
+    //
+    // Up/down connectors are IN this set (SQ-1360). They were excluded on the grounds that they
+    // accumulate in their own dotted mask, "so a slope has nothing there to cross" — true of the
+    // two mask maps, false of the BUFFER, which has one cell. Zork I's Kitchen↓Studio portal runs
+    // straight down the gutter the Behind House↘South of House slope crosses, and painted its
+    // dotted `┊` over two of the slope's chain glyphs: the chain simply stopped for two rows and
+    // resumed. A yielded one-cell gap is the whole point of the rule and reads correctly here too.
+    let compass_cells: std::collections::HashSet<(i32, i32)> =
+        plots.iter().flat_map(|(_, p)| p.cells.iter().map(|(c, _)| *c)).collect();
+    // Which connector wins each diagonal-chain cell (SQ-1331) — see `resolve_diagonal_winners`.
+    // The per-connector check below need only ask "am I the recorded winner here", covering both
+    // a compass yield and a diagonal-vs-diagonal one with one lookup.
+    let diag_winners =
+        resolve_diagonal_winners(plots.iter().enumerate().map(|(ci, (_, p))| (ci, p)), &compass_cells);
 
     let mut pending_markers: Vec<PendingMarker> = Vec::new();
     for (ci, (conn, plot)) in plots.iter().enumerate() {
@@ -1478,28 +1868,23 @@ fn render_lane_connectors(
         // 4-bit mask representation, and letting it OR into a neighbour's mask would corrupt
         // that neighbour's glyph choice. Always empty when `diagonal_corners` is off.
         //
-        // On a cell some OTHER connector runs orthogonal line-art through, there is no glyph
-        // for "half-diagonal crossing a line", so the chain MERGES instead: its endpoint bits
-        // OR into the shared mask and the cell renders as the junction that joins them — the
-        // diagonal flattens for that one cell rather than either line losing it (SQ-0356).
-        // Merging via the mask (not by painting a glyph) is what makes this order-independent:
-        // a connector painting the cell later ORs on top and the chain's bits survive.
+        // A cell some OTHER connector also occupies is not drawn as a half-diagonal at all
+        // (SQ-1331): `diag_winners`, computed once above, already says who — compass line-art
+        // always wins, and between two slopes the earlier one in plan order does. This connector
+        // draws the cell only when IT is the recorded winner; otherwise the slope simply leaves a
+        // one-cell gap there and the other connector keeps its own unbroken glyph, exactly as an
+        // orthogonal crossing breaks the horizontal and leaves the vertical unbroken (SQ-0525).
+        // Never a manufactured junction glyph: a slope cell renders as either its own chain glyph
+        // or nothing, never a merge of the two.
         for (c, ch) in &plot.diag_cells {
             let (sx, sy) = (c.0 + off_x, c.1 + off_y);
             if !in_area(sx, sy, area) {
                 continue;
             }
-            let merge = (!is_updown && compass_cells.contains(c))
-                .then(|| chain_glyph_bits(*ch, glyphs))
-                .flatten();
-            let glyph_s = match merge {
-                Some(bits) => {
-                    let entry = cell_map.entry(*c).or_insert((0, ci));
-                    entry.0 |= bits;
-                    glyph_for(entry.0, glyphs).unwrap_or(*ch).to_string()
-                }
-                None => ch.to_string(),
-            };
+            if diag_winners.get(c) != Some(&ci) {
+                continue; // yields to compass line-art, or to an earlier slope
+            }
+            let glyph_s = ch.to_string();
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(&glyph_s).set_style(style);
             }
@@ -1516,6 +1901,10 @@ fn render_lane_connectors(
         } else {
             arrow_for_departure(conn.exit, arrows)
         };
+        // SQ-1276: this departure is the primary of a stacked same-destination group when
+        // `(origin, exit_dir)` names one — several of the origin room's own exits collapsed to
+        // this single line.
+        let dep_stacked = stacked_primaries.contains(&(conn.origin, conn.exit_dir)).then_some(conn.exit_dir);
         arrowheads.push(Arrowhead {
             at: plot.dep_anchor,
             glyph: dep_ch.to_string(),
@@ -1524,17 +1913,20 @@ fn render_lane_connectors(
             room: conn.origin,
             shared: has_secondary,
             kind,
+            stacked: dep_stacked,
         });
         // Far-end glyph for a true reciprocal connector (collapsed opposite pair). An up/down
         // reciprocal draws its own up/down glyph (from the back-edge's direction) at the far end
         // too, same as the departure end, rather than an arrow.
         if conn.reciprocal {
+            let arr_dir = conn.entry_dir.unwrap_or(mapper::direction::opposite(conn.exit_dir));
             let arr_ch = match conn.entry_dir {
                 Some(Direction::Up) if is_updown => portal.up,
                 Some(Direction::Down) if is_updown => portal.down,
                 Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d, arrows),
                 _ => arrow_for_departure(conn.entry, arrows),
             };
+            let arr_stacked = stacked_primaries.contains(&(conn.dest, arr_dir)).then_some(arr_dir);
             arrowheads.push(Arrowhead {
                 at: plot.arr_anchor,
                 glyph: arr_ch.to_string(),
@@ -1543,6 +1935,7 @@ fn render_lane_connectors(
                 room: conn.dest,
                 shared: has_secondary,
                 kind,
+                stacked: arr_stacked,
             });
         }
         // A ONE-WAY passage gets no glyph at its far end (SQ-0688, reversing the arrival arrow
@@ -1560,9 +1953,20 @@ fn render_lane_connectors(
         // staircase that lost the pairing (Zork's Chasm: N wins the line, Up collapses) was
         // invisible. Each secondary direction now queues its glyph beside the shared line's
         // anchor, on the border of the room the collapsed edge DEPARTS from.
+        //
+        // SQ-1373: a `StackedExit`'s own secondaries (SQ-1276, collapsed at the SOURCE before
+        // the router ever ran) queue exactly the same way — every direction in one stack shares
+        // its origin, so unlike the pair above there is only ONE departure room to consider, but
+        // it may be either end of THIS connector depending on which side of the pair won the
+        // routing tie (see `stacked_secondaries`' own comment at the call site).
+        let empty: Vec<Direction> = Vec::new();
+        let stacked_dep = stacked_secondaries.get(&(conn.origin, conn.dest)).unwrap_or(&empty);
+        let stacked_arr = stacked_secondaries.get(&(conn.dest, conn.origin)).unwrap_or(&empty);
         for (dirs, anchor, side, room) in [
             (&conn.secondary_exit, plot.dep_anchor, conn.exit, conn.origin),
             (&conn.secondary_entry, plot.arr_anchor, conn.entry, conn.dest),
+            (stacked_dep, plot.dep_anchor, conn.exit, conn.origin),
+            (stacked_arr, plot.arr_anchor, conn.entry, conn.dest),
         ] {
             for &dir in dirs.iter() {
                 pending_markers.push(PendingMarker {
@@ -1585,8 +1989,18 @@ fn render_lane_connectors(
     // arrow rule); a departure arrow or an earlier marker there pushes this one a step along.
     // Placement runs after EVERY connector has queued its arrowheads, so a marker can never
     // overwrite another connector's departure arrow that lands beside the same anchor.
-    let mut occupied: std::collections::HashSet<(i32, i32)> =
-        arrowheads.iter().map(|a| a.at).collect();
+    //
+    // SQ-1373: a half-diagonal's own CHAIN cell is reserved too. A diagonal leaves its box from
+    // the CORNER (SQ-0314), one step off the same border a `StackedExit`'s own secondary steps
+    // along, and stepping ±1/±2 from a departure anchor beside it can land squarely on that
+    // chain's first glyph — a real Zork I shape (Behind House's own `NW` diagonal to North of
+    // House, stacked against `N`) rendered a stray `▶` clean over the chain's own corner glyph
+    // before this was reserved.
+    let mut occupied: std::collections::HashSet<(i32, i32)> = arrowheads
+        .iter()
+        .map(|a| a.at)
+        .chain(plots.iter().flat_map(|(_, p)| p.diag_cells.iter().map(|(c, _)| *c)))
+        .collect();
     for m in pending_markers {
         let along: fn((i32, i32), i32) -> (i32, i32) = match m.side {
             Side::Top | Side::Bottom => |a, k| (a.0 + k, a.1),
@@ -1608,6 +2022,7 @@ fn render_lane_connectors(
             room: m.room,
             shared: true,
             kind: m.kind,
+            stacked: None, // SQ-0689's own secondary badge, unrelated to an SQ-1276 stack
         });
     }
     arrowheads
@@ -1643,6 +2058,7 @@ fn draw_connector_arrows(
     colors: &crate::colors::ColorScheme,
     selected_room: Option<RoomId>,
     current_room: Option<RoomId>,
+    marker_rects: &mut Vec<(RoomId, MarkerKind, Rect)>,
 ) {
     let (off_x, off_y) = offset;
     // Bound once: the loop below reads these per arrowhead, not per cell.
@@ -1650,16 +2066,19 @@ fn draw_connector_arrows(
     let connector = colors.theme.get("map.connector").style;
     let connector_portal = colors.theme.get("map.connector_portal").style;
     let shared_path = colors.theme.get("map.shared_path").style;
+    let stacked_exit = colors.theme.get("map.room_stacked_exit").style;
     let room_selected = colors.theme.get("map.room_selected").style;
     let room_current = colors.theme.get("map.room_current").style;
     let room_normal = colors.theme.get("map.room").style;
     let edge_oneway = colors.theme.get("map.edge:oneway").style;
     let edge_asym = colors.theme.get("map.edge:asym").style;
-    for Arrowhead { at, glyph, distorted, is_portal, room: room_id, shared, kind } in arrowheads {
+    for Arrowhead { at, glyph, distorted, is_portal, room: room_id, shared, kind, stacked } in arrowheads {
         let (vx, vy) = *at;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
-            let connector_style = if *is_portal {
+            let connector_style = if stacked.is_some() {
+                stacked_exit
+            } else if *is_portal {
                 connector_portal
             } else if *shared {
                 shared_path
@@ -1690,7 +2109,9 @@ fn draw_connector_arrows(
             // visible background is the style's plain `bg`.
             let visible_bg = base.bg;
             // Start from reset so no prior highlight bleeds through, then set the matching bg
-            // and the connector fg.
+            // and the connector fg. `connector_style`'s own modifiers ride along too — every
+            // OTHER selector here defaults to none, so this was a no-op until `map.room_stacked_exit`
+            // (SQ-1276) needed its REVERSED bit to actually reach the drawn cell.
             let mut style = Style::reset();
             if let Some(bg) = visible_bg {
                 style = style.bg(bg);
@@ -1698,8 +2119,13 @@ fn draw_connector_arrows(
             if let Some(fg) = connector_fg {
                 style = style.fg(fg);
             }
+            style = style.add_modifier(connector_style.add_modifier);
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(glyph).set_style(style);
+            }
+            guard_symbol_spill(buf, sx, sy, area);
+            if let Some(primary_dir) = stacked {
+                marker_rects.push((*room_id, MarkerKind::Stacked(*primary_dir), Rect::new(sx as u16, sy as u16, 1, 1)));
             }
         }
     }
@@ -1754,20 +2180,32 @@ fn slot_offset(slot: u16, max: i32) -> i32 {
 ///
 /// Slots map to distinct INTERIOR rows/cols along the side (never the corners), so two
 /// connectors sharing a side land on distinct border cells.
-fn box_edge_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), side: Side, slot: u16) -> (i32, i32) {
-    let bx = cols.room_pixel(cell.0);
-    let by = rows.room_pixel(cell.1);
-    let cx = bx + BOX_W / 2;
-    let cy = by + BOX_H / 2;
+pub(crate) fn box_edge_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), side: Side, slot: u16) -> (i32, i32) {
+    box_edge_anchor_at(
+        cols.room_pixel(cell.0),
+        rows.room_pixel(cell.1),
+        cols.box_dim_at(cell.0),
+        rows.box_dim_at(cell.1),
+        side,
+        slot,
+    )
+}
+
+/// [`box_edge_anchor`]'s geometry, taking the box's own top-left `(bx, by)` and size `(w, h)`
+/// directly instead of a `PosTable` lookup — see [`corner_anchor_at`] for why. `box_edge_anchor`
+/// is now nothing but this fed a `PosTable`-derived `(bx, by)`, so the two can never disagree.
+fn box_edge_anchor_at(bx: i32, by: i32, w: i32, h: i32, side: Side, slot: u16) -> (i32, i32) {
+    let cx = bx + w / 2;
+    let cy = by + h / 2;
     // Along a vertical side (Left/Right) the edge runs in y; offset rows, clamped so the
     // anchor stays on the box's interior rows (off the corners). Along a horizontal side
     // (Top/Bottom) offset cols likewise.
-    let v_max = BOX_H / 2 - 1; // keep off the corners
-    let h_max = BOX_W / 2 - 1;
+    let v_max = h / 2 - 1; // keep off the corners
+    let h_max = w / 2 - 1;
     match side {
-        Side::Right => (bx + BOX_W - 1, cy + slot_offset(slot, v_max)),
+        Side::Right => (bx + w - 1, cy + slot_offset(slot, v_max)),
         Side::Left => (bx, cy + slot_offset(slot, v_max)),
-        Side::Bottom => (cx + slot_offset(slot, h_max), by + BOX_H - 1),
+        Side::Bottom => (cx + slot_offset(slot, h_max), by + h - 1),
         Side::Top => (cx + slot_offset(slot, h_max), by),
     }
 }
@@ -1794,6 +2232,55 @@ fn attach_bridge(anchor: (i32, i32), interior: (i32, i32), side: Side) -> Vec<(i
         Vec::new()
     } else {
         vec![turn]
+    }
+}
+
+/// Slide a connector's final approach onto its arrival SLOT, so the last leg runs straight into
+/// the arrowhead instead of aiming at the side's centre and stepping across at the last moment
+/// (SQ-1320).
+///
+/// `pix` is the whole virtual-pixel polyline, room centre to room centre; only its interior
+/// points are touched, and only when the approach is HEAD-ON — the polyline's last run
+/// perpendicular to `entry`, i.e. pointed straight at the side midpoint. An approach that already
+/// runs ALONG the edge needs nothing: `attach_bridge` absorbs the offset into the perpendicular
+/// stub and draws one straight run either way.
+///
+/// The shift is `arrival - centre` on the side's TANGENT axis (x for Top/Bottom, y for Left/Right)
+/// — the same displacement [`box_edge_anchor`] gave the anchor, so the run lands on the anchor's
+/// own column/row. The whole run moves, not just its last point: shifting one end alone would
+/// make the segment diagonal. The run BEFORE it is parallel to the edge (a merged-collinear
+/// polyline alternates axes), so moving that turn along the tangent only changes that run's
+/// length and every segment stays orthogonal.
+fn straighten_arrival(
+    pix: &mut [(i32, i32)],
+    entry: Side,
+    arrival: (i32, i32),
+    centre: (i32, i32),
+) {
+    // The tangent axis of `entry`: 0 = x (a horizontal side), 1 = y (a vertical side).
+    let tangent_is_x = matches!(entry, Side::Top | Side::Bottom);
+    let tangent = |p: (i32, i32)| if tangent_is_x { p.0 } else { p.1 };
+    let shift = tangent(arrival) - tangent(centre);
+    // `k` is the last INTERIOR point: `pix` ends on the destination's centre, which is trimmed.
+    if shift == 0 || pix.len() < 4 {
+        return;
+    }
+    let k = pix.len() - 2;
+    // Walk back over the tail that shares `pix[k]`'s tangent coordinate — the final run, aimed at
+    // the side. Stop at index 1: `pix[0]` is the origin's centre, which `attach_bridge` replaces.
+    let mut j = k;
+    while j > 1 && tangent(pix[j - 1]) == tangent(pix[k]) {
+        j -= 1;
+    }
+    if j == k {
+        return; // the last run is parallel to the side: no jog to remove
+    }
+    for p in &mut pix[j..=k] {
+        if tangent_is_x {
+            p.0 += shift;
+        } else {
+            p.1 += shift;
+        }
     }
 }
 
@@ -1845,6 +2332,15 @@ fn draw_stub(
 /// is the partner's cell — which is exactly SQ-0351's ask ("towards the room they connect with").
 /// `partner` is `None` when the destination is on another layer (a cross-layer `In`/`Out` has
 /// nothing to aim at on this plane) or has no position yet; the badge then stays centred.
+///
+/// **Up/Down never reach here with a partner, and that is not an oversight** (SQ-1291). A
+/// SAME-layer stairwell is lane-routed like any compass passage and its glyph rides the
+/// connector's departure anchor (see `render_lane_connectors`), which is derived from the two
+/// rooms' cells and so already faces the partner — it never becomes a stub, so it never reaches
+/// `draw_portal_icons` at all. What does reach this arm is the CROSS-layer portal, and its
+/// destination is by definition not on this layer, so `cell_of` cannot resolve a cell for it: the
+/// caller passes `None` because there is nothing else it could pass. Top/bottom is therefore the
+/// only answer available, and the right one — it is the direction of travel off the plane.
 ///
 /// Returned as a unit-ish `(dx, dy)` in room-cell space, y down.
 fn badge_bearing(dir: Direction, origin: (i32, i32), partner: Option<(i32, i32)>) -> Option<(i32, i32)> {
@@ -1919,45 +2415,6 @@ fn portal_slot(dir: Direction) -> Option<usize> {
     }
 }
 
-/// Where a portal-view badge sits for a passage leaving on `bearing`: the border cell it leads
-/// through, and where its floating name goes (SQ-0363).
-///
-/// Returns `(glyph_cell, label_cell, right_align)`. `right_align` means the name ends AT
-/// `label_cell` rather than starting there — a westward passage's name has to run back toward the
-/// box, not away from it.
-///
-/// One rule for all eight directions. It reproduces the three fixed slots exactly — Up lands on
-/// `(bx + BOX_W/2, by)`, Down on `(bx + BOX_W/2, by + BOX_H - 1)`, an eastward In/Out on
-/// `(bx + BOX_W - 1, by + BOX_H/2)` — which is what says it is the same rule they always were,
-/// just written for every direction instead of the four that could cross a layer before SQ-0360.
-fn portal_border_placement(
-    (bx, by): (i32, i32),
-    bearing: (i32, i32),
-) -> ((i32, i32), (i32, i32), bool) {
-    let (dx, dy) = bearing;
-    let col = match dx.signum() {
-        -1 => bx,
-        1 => bx + BOX_W - 1,
-        _ => bx + BOX_W / 2,
-    };
-    let row = match dy.signum() {
-        -1 => by,
-        1 => by + BOX_H - 1,
-        _ => by + BOX_H / 2,
-    };
-    // A name floats clear of the box on whichever side the passage leaves by. With any vertical
-    // component it goes above or below, aligned to the box's left edge (as Up/Down always have);
-    // a purely horizontal one goes out to the side, on the glyph's own row.
-    let label = if dy != 0 {
-        (bx, if dy < 0 { by - 1 } else { by + BOX_H })
-    } else if dx > 0 {
-        (bx + BOX_W, row)
-    } else {
-        (bx - 1, row)
-    };
-    ((col, row), label, dy == 0 && dx < 0)
-}
-
 /// Mid-slot precedence when a room has several of In/Out/Unknown (lower wins): In ▸ Out ▸ Unknown.
 fn mid_precedence(dir: Direction) -> u8 {
     match dir {
@@ -1972,12 +2429,15 @@ fn mid_precedence(dir: Direction) -> u8 {
 type PortalSlots<'a> = [Option<(char, Option<&'a str>)>; 3];
 
 /// Draw in-room portal indicators at Boxes zoom as a post-room overlay (so icons sit on top of
-/// the box interior). Each room's portal (stub) edges map to a right-interior-column slot:
-/// Up→row 1, In/Out/Unknown→row 2 (middle, by `mid_precedence`), Down→row 3. Default = the
-/// direction glyph in that slot's far-right interior cell. When `show_labels` is set, the
-/// portal's destination name is drawn right-aligned on that row with the icon pinned far-right.
-/// In the default view an up-portal claims the upper-right corner, shifting the `●` notes marker
-/// one cell left so both stay visible.
+/// the box interior). Each room's portal (stub) edges map to one of three slots: Up (row 1),
+/// In/Out/Unknown (row 2, middle, by `mid_precedence`), Down (row 3). In the default view, Up
+/// and Down show their glyph on the connector's own border anchor instead of inside the box (see
+/// `render_lane_connectors`), so only the mid slot draws here — on the free interior cell
+/// nearest the room it leads to (`nearest_free_interior`, SQ-0351). That leaves the bottom-right
+/// interior corner free for the notes marker (SQ-1388). When `show_labels` is set, all three
+/// slots float on the border instead — top/bottom centre for Up/Down, right for the mid slot —
+/// with the destination name outside the box.
+#[allow(clippy::too_many_arguments)]
 fn draw_portal_icons(
     rm: &RenderMap,
     placed: &std::collections::HashMap<RoomId, VRect>,
@@ -1986,6 +2446,7 @@ fn draw_portal_icons(
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
+    marker_rects: &mut Vec<(RoomId, MarkerKind, Rect)>,
 ) {
     use std::collections::HashMap;
     let (off_x, off_y) = offset;
@@ -2009,10 +2470,6 @@ fn draw_portal_icons(
     let mut mid_rank: HashMap<RoomId, u8> = HashMap::new();
     // The mid slot's own edge, kept so its badge can be aimed (the glyph alone can't say where).
     let mut mid_edge: HashMap<RoomId, (Direction, RoomId)> = HashMap::new();
-    // Cross-layer portals: the direction of travel to the other layer, per room (SQ-0223).
-    let mut layer_badges: HashMap<RoomId, Vec<Direction>> = HashMap::new();
-    // Portal view only: cross-layer COMPASS passages, which have no portal slot (SQ-0363).
-    let mut layer_borders: HashMap<RoomId, Vec<(Direction, Option<&str>)>> = HashMap::new();
     for edge in &rm.edges {
         if !edge.is_stub {
             continue;
@@ -2020,29 +2477,10 @@ fn draw_portal_icons(
         if edge.dir == Direction::Unknown {
             continue; // Unknown edges are non-spatial (e.g. death/respawn) — show no portal icon
         }
-        // A cross-layer portal gets its own badge, placed by the same rule but marking a way OFF
-        // this layer (SQ-0223). It must not also feed the slots: its destination is not on this
-        // plane, so the slot machinery — which assumes a same-layer partner — cannot aim it.
-        //
-        // Portal view is exempt. There the icons live on the BORDER with the destination name
-        // floating outside, and a cross-layer badge already names its target layer ("Cellar ·
-        // Cellar") — a strictly better answer than a bare glyph. Diverting it there would delete
-        // that label, so in that view the edge keeps its old path through the slots.
-        if edge.is_interlayer && !show_labels {
-            layer_badges.entry(edge.origin).or_default().push(edge.dir);
-            continue;
-        }
-        // A cross-layer COMPASS passage has no portal slot — the slots only ever had to hold the
-        // four directions that could leave a layer before a named seam could cut at
-        // compass ones (SQ-0360). Falling through to `portal_slot` therefore dropped it silently,
-        // icon and label both. Place it by bearing instead (SQ-0363).
-        if edge.is_interlayer && portal_slot(edge.dir).is_none() {
-            layer_borders
-                .entry(edge.origin)
-                .or_default()
-                .push((edge.dir, edge.dest_label.as_deref()));
-            continue;
-        }
+        // Since SQ-1356 a cross-layer passage has no special case here at all: the room it
+        // leads to is drawn as a GHOST on this very panel, and the passage to it is an ordinary
+        // routed connector — so it arrives here, if it arrives at all, as the plain Up/Down/In/Out
+        // stub any portal is, aimed at a partner that really does have a cell on this plane.
         let Some(slot) = portal_slot(edge.dir) else { continue };
         let glyph_ch = dir_glyph(edge.dir);
         let label = edge.dest_label.as_deref();
@@ -2060,14 +2498,19 @@ fn draw_portal_icons(
         }
     }
 
+    let random_stub_style = state.colors.theme.get("map.room_random_stub").style;
     let icon_col = BOX_W - 2; // far-right interior column — the fallback when the interior is full
     for room in &rm.rooms {
         let Some(&rect) = placed.get(&room.id) else { continue };
         let empty: PortalSlots<'_> = [None, None, None];
         let slots = chosen.get(&room.id).unwrap_or(&empty);
-        let layers: &[Direction] = layer_badges.get(&room.id).map_or(&[], |v| v.as_slice());
-        let borders = layer_borders.get(&room.id).map_or(&[][..], |v| v.as_slice());
-        if slots.iter().all(Option::is_none) && layers.is_empty() && borders.is_empty() {
+        // SQ-1269 hole 4: a `?`-marked Up/Down/In/Out direction has no real edge to route
+        // (`RenderRoom::random_stubs` already excludes any direction that also carries one), so
+        // it never reaches `rm.edges` and never fills a slot above — without this it has nowhere
+        // on the box to show at all, unlike a compass random stub's border cell.
+        let vertical_stubs: Vec<(Direction, usize)> =
+            room.random_stubs.iter().copied().filter(|&(d, _)| portal_slot(d).is_some()).collect();
+        if slots.iter().all(Option::is_none) && vertical_stubs.is_empty() {
             continue;
         }
         let style = room_style(room, state);
@@ -2083,26 +2526,7 @@ fn draw_portal_icons(
             put_str(buf, col + off_x, row + off_y, &glyph.to_string(), style, area);
         };
 
-        // A cross-layer portal is drawn in every view: it marks a way OFF this layer, which the
-        // border icons below never expressed. Its glyph is the direction of travel (SQ-0223), so
-        // the badge reads as the move the player makes — ↑/↓ stairs, ◉/◎ a doorway.
-        for &dir in layers {
-            place(dir, None, dir_glyph(dir), buf);
-        }
-
         if show_labels {
-            // A cross-layer compass passage sits on the border it points through, with its
-            // "Room · Layer" name floating outside on that side — the same shape the slotted
-            // portals have always had, for the directions they never covered (SQ-0363).
-            for &(dir, label) in borders {
-                let Some(bearing) = badge_bearing(dir, room.cell, None) else { continue };
-                let ((gc, gr), (lc, lr), right_align) = portal_border_placement((bx, by), bearing);
-                put_str(buf, gc + off_x, gr + off_y, &dir_glyph(dir).to_string(), style, area);
-                if let Some(name) = label {
-                    let col = if right_align { lc - name.chars().count() as i32 + 1 } else { lc };
-                    put_str(buf, col + off_x, lr + off_y, name, style, area);
-                }
-            }
             // Portal view: icons move onto the border; destination names float OUTSIDE the box.
             if let Some((glyph_ch, label)) = slots[0] {
                 let gs = glyph_ch.to_string();
@@ -2143,6 +2567,30 @@ fn draw_portal_icons(
                 place(dir, dest, glyph_ch, buf);
             }
         }
+
+        // SQ-1269 hole 4: give the marker its slot's fixed border anchor whenever nothing else —
+        // a real edge in the same slot — already claimed it (an In/Out/Unknown slot is shared;
+        // Up/Down never collide with a real edge on the SAME direction, since `random_stubs`
+        // already excludes that). Same fixed positions the portal-view badges use for slots 0/1/2
+        // (top-centre / right-mid / bottom-centre) in every view: there is no real passage to
+        // aim at, so the border anchor a real edge would use is exactly what stays free.
+        for &(dir, count) in &vertical_stubs {
+            let Some(slot) = portal_slot(dir) else { continue };
+            if slots[slot].is_some() {
+                continue; // a real edge already drew this slot
+            }
+            let marker = random_stub_marker(count);
+            let marker_style = accent_on(style, random_stub_style);
+            let (mx, my) = match slot {
+                0 => (bx + BOX_W / 2 + off_x, by + off_y),
+                2 => (bx + BOX_W / 2 + off_x, by + BOX_H - 1 + off_y),
+                _ => (bx + BOX_W - 1 + off_x, by + 2 + off_y),
+            };
+            put_str(buf, mx, my, &marker, marker_style, area);
+            if let Some(r) = clipped_marker_rect(mx, my, marker.chars().count() as i32, area) {
+                marker_rects.push((room.id, MarkerKind::Random(dir), r));
+            }
+        }
     }
 }
 
@@ -2150,14 +2598,21 @@ fn draw_portal_icons(
 
 /// Pick the outline `BoxStyle` for a room given its flags.
 ///
-/// Precedence: current > portal > selected > normal.
+/// Precedence: ghost > current > portal > selected > normal.
+///
+/// A GHOST outranks everything (SQ-1356): the broken border is the only thing on the box that
+/// says "this room is somewhere else", and a ghost that borrowed the selected or portal outline
+/// would read as one of the layer's own rooms. Selection and the room card still mark it — by
+/// colour, through `room_style` — which is the channel the outline is not using.
 fn outline_for(
     sym: &SymbolSet,
+    is_ghost: bool,
     is_current: bool,
     has_portal: bool,
     selected: bool,
 ) -> &BoxStyle {
-    if is_current { &sym.room_current }
+    if is_ghost { &sym.room_ghost }
+    else if is_current { &sym.room_current }
     else if has_portal { &sym.room_portal }
     else if selected { &sym.room_selected }
     else { &sym.room_normal }
@@ -2165,6 +2620,7 @@ fn outline_for(
 
 /// Draw a room at screen top-left `(sx, sy)` (already translated from virtual space;
 /// may be partially or fully off-area — drawing is clipped per cell).
+#[allow(clippy::too_many_arguments)]
 fn draw_room(
     room: &RenderRoom,
     state: &AppState,
@@ -2173,6 +2629,7 @@ fn draw_room(
     sy: i32,
     area: Rect,
     buf: &mut Buffer,
+    marker_rects: &mut Vec<(RoomId, MarkerKind, Rect)>,
 ) {
     let base_style = room_style(room, state);
     let selected = state.selected_room == Some(room.id);
@@ -2185,9 +2642,101 @@ fn draw_room(
             draw_compact_room(room, sx, sy, base_style, &state.symbols, selected, area, buf);
         }
         Zoom::Boxes => {
-            draw_box_room(room, sx, sy, base_style, &state.symbols, selected, state.show_alignment, state.show_room_numbers, area, buf);
+            let alias_marker_style = state.colors.theme.get("map.room_alias_marker").style;
+            let random_stub_style = state.colors.theme.get("map.room_random_stub").style;
+            draw_box_room(
+                room, sx, sy, base_style, alias_marker_style, random_stub_style, &state.symbols,
+                selected, state.show_alignment, state.show_room_numbers, area, buf, marker_rects,
+            );
         }
     }
+}
+
+/// Superscript alias-count marker for a room box (SQ-1257 Phase 3): `""` for zero aliases, one
+/// Unicode superscript digit (¹²³⁴⁵⁶⁷⁸⁹, U+00B9/U+00B2/U+00B3/U+2074–2079) for 1–9, and `"⁹⁺"`
+/// (superscript nine plus a superscript plus, U+207A) for ten or more — the box has no room for
+/// a two-digit count, and "at least this many" is still an honest thing to say with one.
+/// A marker's own selector supplies its COLOUR; the ground it sits on supplies everything
+/// else. A selected room paints its box with `map.room_selected`'s background (and the
+/// current room reverses it), and a marker drawn with its selector's full style would punch a
+/// hole of default background through that — which is exactly what the alias superscript did
+/// on a selected Gnome Room. So take the base style the surrounding text or border was drawn
+/// with and swap in only the accent's foreground.
+///
+/// **Unless `base` is REVERSED** (SQ-1278): a selected CURRENT room's `room_style` sets
+/// `Modifier::REVERSED` rather than an explicit background (`room_selected`'s style with the
+/// modifier added), and under reversal the terminal paints `fg` as the VISIBLE background —
+/// so swapping the accent into `fg` put the accent colour where the room's own selection
+/// background belongs, and left the accent invisible as ink. Under reversal the fix is the
+/// mirror image: put the accent colour in `bg` instead, so the visible INK is the accent and
+/// the visible ground stays the selection's — exactly swapped from the non-reversed case,
+/// which is what reversal itself means.
+fn accent_on(base: Style, accent: Style) -> Style {
+    let reversed = base.add_modifier.contains(Modifier::REVERSED);
+    match accent.fg {
+        Some(fg) if reversed => base.bg(fg),
+        Some(fg) => base.fg(fg),
+        None => base,
+    }
+}
+
+fn alias_marker(count: usize) -> String {
+    super::superscript_count(count)
+}
+
+/// Which superscript marker a hover-rect names on a room box (SQ-1273): the alias-count marker
+/// beside the label, or a `?` random-exit stub for a specific direction. Carried alongside the
+/// room id and the exact cells it was drawn into (`MapHits::marker_rects`) so `main.rs`'s
+/// `map_update_hover` can resolve a `Moved` event to the right tooltip content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerKind {
+    Alias,
+    Random(Direction),
+    /// The primary arrowhead of a stacked same-destination group (SQ-1276), carrying its own
+    /// (primary) direction — the hover tip re-derives the destination and the rest of the
+    /// group's directions from the graph at hover time (see `draw_map_hover_tip`).
+    Stacked(Direction),
+    /// The `●` notes marker in a room box's bottom-right inner corner (SQ-1386, moved from the
+    /// top-right corner by SQ-1388) — the hover tip re-reads the room's note text from the graph
+    /// at hover time, wrapped to a sane width, the same way `Random`/`Stacked` re-derive their
+    /// content rather than carrying it themselves.
+    Notes,
+}
+
+/// The visible (area-clipped) rect a `put_str` of `w` cells starting at `(x, y)` actually
+/// painted into, or `None` if none of it landed inside `area` — mirrors `put_str`/`put_char`'s
+/// own per-cell clip (`crate::render::put_str`) so a marker's hover rect can never claim a cell
+/// nothing was drawn to.
+fn clipped_marker_rect(x: i32, y: i32, w: i32, area: Rect) -> Option<Rect> {
+    if w <= 0 || y < area.y as i32 || y >= area.bottom() as i32 {
+        return None;
+    }
+    let x0 = x.max(area.x as i32);
+    let x1 = (x + w).min(area.right() as i32);
+    if x1 <= x0 {
+        return None;
+    }
+    Some(Rect::new(x0 as u16, y as u16, (x1 - x0) as u16, 1))
+}
+
+/// The visible (area-clipped) bounding rect spanning two adjacent single-cell points `a` and `b`
+/// (SQ-1275): generalizes [`clipped_marker_rect`] to a marker whose two cells differ in either
+/// axis — a `?` mark's arrowhead and superscript share a row for E/W and every diagonal, but a
+/// column for N/S — so hovering EITHER cell resolves the same tooltip. `None` when neither cell
+/// lands inside `area`.
+fn clipped_marker_span(a: (i32, i32), b: (i32, i32), area: Rect) -> Option<Rect> {
+    let x0 = a.0.min(b.0);
+    let x1 = a.0.max(b.0) + 1;
+    let y0 = a.1.min(b.1);
+    let y1 = a.1.max(b.1) + 1;
+    let cx0 = x0.max(area.x as i32);
+    let cx1 = x1.min(area.right() as i32);
+    let cy0 = y0.max(area.y as i32);
+    let cy1 = y1.min(area.bottom() as i32);
+    if cx1 <= cx0 || cy1 <= cy0 {
+        return None;
+    }
+    Some(Rect::new(cx0 as u16, cy0 as u16, (cx1 - cx0) as u16, (cy1 - cy0) as u16))
 }
 
 /// Draw a compact (10×4 step) room: 8×3 box with label row.
@@ -2216,7 +2765,7 @@ fn draw_compact_room(
     let mut border_style = style;
     border_style.add_modifier.remove(Modifier::REVERSED);
 
-    let bs = outline_for(sym, is_current, room.has_layer_portal, selected);
+    let bs = outline_for(sym, room.ghost.is_some(), is_current, room.has_layer_portal, selected);
     let (tl, tr, bl, br, h, v) = (bs.tl, bs.tr, bs.bl, bs.br, bs.h, bs.v);
 
     // Top border
@@ -2265,6 +2814,28 @@ fn wrap_two(s: &str, width: usize) -> [String; 2] {
     lines
 }
 
+/// Mark `lines` as clipped when [`wrap_two`] could not fit all of `s` (SQ-1356).
+///
+/// `wrap_two` drops what will not fit, silently — fine for a room name the player has just read
+/// off the story's own prose, and NOT fine for a ghost, whose label this file composes itself:
+/// `from Living Room` comes out as `from` / `Living`, which reads as a room called "Living"
+/// rather than as a truncation. The ellipsis says which it is; the room card (whose header names
+/// the room and the layer it really lives on) is where the whole name still lives.
+///
+/// Ghosts only, deliberately: a room's own name is the story's, and eliding one everywhere would
+/// change every long room box on the map for a reason that belongs to ghosts.
+fn elide_if_clipped(s: &str, lines: &mut [String; 2], width: usize) {
+    let kept = if lines[1].is_empty() { lines[0].clone() } else { format!("{} {}", lines[0], lines[1]) };
+    if kept == s.split_whitespace().collect::<Vec<_>>().join(" ") {
+        return;
+    }
+    let last = if lines[1].is_empty() { 0 } else { 1 };
+    if lines[last].chars().count() >= width {
+        lines[last] = lines[last].chars().take(width.saturating_sub(1)).collect();
+    }
+    lines[last].push('…');
+}
+
 /// Center `s` within `width` columns (truncated to `width` if longer).
 fn center(s: &str, width: usize) -> String {
     let len = s.chars().count();
@@ -2289,18 +2860,22 @@ fn center(s: &str, width: usize) -> String {
 /// Current room: heavy border (┏ ┓ ┗ ┛ ━ ┃) with a REVERSED interior; the
 /// border glyphs themselves are drawn non-reversed.
 /// Selected room: yellow style (SELECTED_STYLE).
-/// Notes: ● marker in top-right inner corner (row 1, col bw-2).
+/// Notes: ● marker in bottom-right inner corner (row 3, col bw-2; SQ-1388).
+#[allow(clippy::too_many_arguments)]
 fn draw_box_room(
     room: &RenderRoom,
     sx: i32,
     sy: i32,
     style: Style,
+    alias_marker_style: Style,
+    random_stub_style: Style,
     sym: &SymbolSet,
     selected: bool,
     show_alignment: bool,
     show_room_numbers: bool,
     area: Rect,
     buf: &mut Buffer,
+    marker_rects: &mut Vec<(RoomId, MarkerKind, Rect)>,
 ) {
     let (w, h) = zoom_box_size(Zoom::Boxes); // (11, 5)
     let (w, h) = (w as i32, h as i32);
@@ -2314,7 +2889,7 @@ fn draw_box_room(
     border_style.add_modifier.remove(Modifier::REVERSED);
 
     // Box outline picked by precedence: current > portal > selected > normal.
-    let bs = outline_for(sym, is_current, room.has_layer_portal, selected);
+    let bs = outline_for(sym, room.ghost.is_some(), is_current, room.has_layer_portal, selected);
     let (tl, tr, bl, br, horiz, vert) = (bs.tl, bs.tr, bs.bl, bs.br, bs.h, bs.v);
 
     // Top border
@@ -2336,24 +2911,59 @@ fn draw_box_room(
 
     // Room name word-wrapped + centered across the first two interior rows.
     let iw = (w - 2) as usize; // interior width (9)
-    let name_lines = wrap_two(&room.label, iw);
-    put_str(buf, sx + 1, sy + 1, &center(&name_lines[0], iw), style, area);
-    put_str(buf, sx + 1, sy + 2, &center(&name_lines[1], iw), style, area);
+    // A room the story keeps renaming (SQ-1257 Phase 3, Lost Pig's gnome tunnels) carries a
+    // small superscript count of its other names beside the label. The marker is never dropped
+    // for lack of room — the NAME shortens instead, by wrapping into a narrower width that
+    // reserves space for it.
+    let marker = alias_marker(room.alias_count);
+    if marker.is_empty() {
+        let mut name_lines = wrap_two(&room.label, iw);
+        if room.ghost.is_some() {
+            elide_if_clipped(&room.label, &mut name_lines, iw);
+        }
+        put_str(buf, sx + 1, sy + 1, &center(&name_lines[0], iw), style, area);
+        put_str(buf, sx + 1, sy + 2, &center(&name_lines[1], iw), style, area);
+    } else {
+        let marker_w = marker.chars().count();
+        let name_w = iw.saturating_sub(marker_w).max(1);
+        let name_lines = wrap_two(&room.label, name_w);
+        // The marker rides on whichever line actually holds text — the second wrapped line when
+        // there is one, else the first — so it reads immediately after the last word of the name.
+        let target = if !name_lines[1].is_empty() { 1 } else { 0 };
+        for (i, line) in name_lines.iter().enumerate() {
+            let y = sy + 1 + i as i32;
+            if i == target {
+                let full_len = line.chars().count() + marker_w;
+                let pad = iw.saturating_sub(full_len);
+                let left = (pad / 2) as i32;
+                put_str(buf, sx + 1 + left, y, line, style, area);
+                let marker_x = sx + 1 + left + line.chars().count() as i32;
+                put_str(buf, marker_x, y, &marker, accent_on(style, alias_marker_style), area);
+                if let Some(r) = clipped_marker_rect(marker_x, y, marker_w as i32, area) {
+                    marker_rects.push((room.id, MarkerKind::Alias, r));
+                }
+            } else {
+                put_str(buf, sx + 1, y, &center(line, iw), style, area);
+            }
+        }
+    }
 
-    // Row 3: #id (centered), with alignment diagnostics appended when enabled.
+    // Row 3 (the bottom interior row) shares its width with the notes marker (SQ-1388): a
+    // room with notes reserves the far-right column for it, the way the alias marker reserves
+    // `marker_w` out of the name rows above.
+    let row3_iw = if room.has_notes { iw.saturating_sub(1) } else { iw };
+
+    // Row 3: #id (centered), with alignment diagnostics appended when enabled. A synthetic room
+    // (Glulx or name-only) shows its small per-map ordinal here instead of the raw hex id — see
+    // `RenderRoom::ordinal` and `crate::roomid::room_label_no_of` (SQ-1300).
     // Only drawn when show_room_numbers is true; when hidden, the row is freed for portal icons.
     if show_room_numbers {
-        let mut row3 = format!("#{}", room.id);
+        let mut row3 = crate::roomid::room_label_no_of(room.id, Some(room.ordinal));
         if show_alignment && !room.align_code.is_empty() {
             row3.push(' ');
             row3.push_str(&room.align_code);
         }
-        put_str(buf, sx + 1, sy + 3, &center(&row3, iw), style, area);
-    }
-
-    // Notes marker in top-right inner corner (row 1, col w-2).
-    if room.has_notes {
-        put_char(buf, sx + w - 2, sy + 1, sym.portal.marker, style, area);
+        put_str(buf, sx + 1, sy + 3, &center(&row3, row3_iw), style, area);
     }
 
     // Self-loop badge (SQ-0666): `↩` plus the directions that lead back into this room, on the
@@ -2369,8 +2979,23 @@ fn draw_box_room(
             .collect::<Vec<_>>()
             .join("");
         let badge = format!("↩{dirs}");
-        let badge: String = badge.chars().take(iw).collect();
+        let badge: String = badge.chars().take(row3_iw).collect();
         put_str(buf, sx + 1, sy + h - 2, &badge, style, area);
+    }
+
+    // Notes marker in the bottom-right inner corner (row h-2, col w-2) — moved down from the
+    // top-right corner (SQ-1388), which the up-portal icon used to claim before it moved onto
+    // the connector's border anchor. Drawn last on this row so it always wins its own cell over
+    // the id text or a self-loop badge, both reserved out of `row3_iw` above. Hoverable
+    // (SQ-1386): the same floating tip the alias/random/stacked markers pop, showing the room's
+    // note text.
+    if room.has_notes {
+        let marker_x = sx + w - 2;
+        let marker_y = sy + h - 2;
+        put_char(buf, marker_x, marker_y, sym.portal.marker, style, area);
+        if let Some(r) = clipped_marker_rect(marker_x, marker_y, 1, area) {
+            marker_rects.push((room.id, MarkerKind::Notes, r));
+        }
     }
 
     // Bottom border
@@ -2379,6 +3004,76 @@ fn draw_box_room(
         put_char(buf, sx + dx, sy + h - 1, horiz, border_style, area);
     }
     put_char(buf, sx + w - 1, sy + h - 1, br, border_style, area);
+
+    // `?` random-exit marks (SQ-1275): the border cell shows the direction's own arrowhead, and
+    // the superscript count (or bare `?`) sits one cell beyond it, in the first lane cell a real
+    // connector on that direction would step into — both drawn LAST so the arrowhead overwrites
+    // whatever the border loops above already painted there (a straight run of `─`/`│`, or a
+    // corner glyph for a diagonal). The router does NOT reserve that cell (SQ-1275 tried that and
+    // it regressed real routes — see SQ-1281): an unrelated connector elsewhere on the map may
+    // legitimately cross it, and wins or loses the cell purely by DRAW ORDER — `render_map` plots
+    // every connector before it draws any room box, so this loop (running strictly after) always
+    // paints the mark's own glyphs on top.
+    for &(dir, count) in &room.random_stubs {
+        if let Some((arrow_at, count_at)) = random_stub_cells(sx, sy, w, h, dir) {
+            let stub_style = accent_on(border_style, random_stub_style);
+            let arrow_ch = arrow_for_direction(dir, &sym.arrows, &sym.portal);
+            put_char(buf, arrow_at.0, arrow_at.1, arrow_ch, stub_style, area);
+            guard_symbol_spill(buf, arrow_at.0, arrow_at.1, area);
+            let marker = random_stub_marker(count);
+            put_str(buf, count_at.0, count_at.1, &marker, stub_style, area);
+            if let Some(r) = clipped_marker_span(arrow_at, count_at, area) {
+                marker_rects.push((room.id, MarkerKind::Random(dir), r));
+            }
+        }
+    }
+}
+
+/// The single glyph a `?` random-exit stub's superscript shows (SQ-1261): a bare `?` when
+/// nothing is recorded yet, else the superscript count of recorded destinations.
+fn random_stub_marker(count: usize) -> String {
+    if count == 0 { "?".to_string() } else { super::superscript_count(count) }
+}
+
+/// Unit step, in virtual pixels, straight out of a room box on `side` — the SAME first move a
+/// real connector's perpendicular departure leg makes leaving its anchor (`attach_bridge`'s walk
+/// from `dep_anchor`, and `lane_pixel`'s own doc on why lane 0 sits `LANE_BASE` beyond this cell,
+/// never on it). Shared by [`random_stub_cells`] so a `?` mark's superscript lands exactly where
+/// that leg's first cell would be.
+fn side_step(side: Side) -> (i32, i32) {
+    match side {
+        Side::Right => (1, 0),
+        Side::Left => (-1, 0),
+        Side::Top => (0, -1),
+        Side::Bottom => (0, 1),
+    }
+}
+
+/// The two cells a `?` random-exit mark draws into on a room box `w`×`h` cells with its
+/// top-left at `(bx, by)` (SQ-1275): the ARROWHEAD cell — [`box_edge_anchor_at`] at slot 0 for a
+/// cardinal direction, [`corner_anchor_at`] for a diagonal — is the exact cell a real exit's own
+/// arrowhead would take, and the COUNT cell one [`side_step`] beyond it is the exact cell that
+/// exit's connector would first step into leaving the box. Both literally reuse the primitives a
+/// real connector's `dep_anchor` is built from, so a mark can never draw somewhere a real exit
+/// would not — and both stay independent of `diagonal_corners`: that toggle only picks which
+/// GLYPHS a real connector's own intermediate line art uses (see `SymbolSet::diagonal_corners`'s
+/// own doc — "the router's doing, not this setting's"), and a mark draws no line art at all.
+///
+/// `mapper::router::side_for` resolves the direction to a [`Side`] — the SAME lookup a real
+/// diagonal connector's own perpendicular leg uses (`route::mod.rs`'s `route_side`) — so the
+/// step direction can never drift from what routing actually does. `None` for a non-planar
+/// direction (Up/Down/In/Out/Unknown): those have no side or corner of their own to sit on, and
+/// stay visible on the matrix, the room panel and the portal-badge overlay instead.
+/// [`mapper::render::RenderRoom::random_stubs`] never carries a direction a real edge also uses.
+pub(crate) fn random_stub_cells(bx: i32, by: i32, w: i32, h: i32, dir: Direction) -> Option<((i32, i32), (i32, i32))> {
+    let side = mapper::router::side_for(dir)?;
+    let arrow = if mapper::direction::is_diagonal(dir) {
+        corner_anchor_at(bx, by, w, h, dir)
+    } else {
+        box_edge_anchor_at(bx, by, w, h, side, 0)
+    };
+    let (dx, dy) = side_step(side);
+    Some((arrow, (arrow.0 + dx, arrow.1 + dy)))
 }
 
 // ── Clipped drawing helpers ───────────────────────────────────────────────────
@@ -2449,6 +3144,597 @@ pub(crate) fn render_overlap_stats(graph: &mapper::graph::MapGraph) -> (usize, u
     let rm = mapper::render::render(graph);
     let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
     overlap_stats(&rm.plan, &cols, &rows)
+}
+
+/// Render ONE layer of `graph` and return its (illegal_overlaps, crossings).
+///
+/// The public face of [`overlap_stats`] for the SQ-1316 no-overlap invariant. A multi-layer map
+/// is never drawn on one canvas — two rooms on different layers routinely share a cell, so
+/// [`render_overlap_stats`]'s whole-graph render would report overlaps between passages that are
+/// never on screen together (`export_svg::render_svg_layered`'s doc comment covers why). Each
+/// layer is measured on its own, which is how it is drawn.
+pub fn layer_overlap_stats(
+    graph: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) -> (usize, usize) {
+    let rm = mapper::render::render_layer(graph, layer);
+    let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+    overlap_stats(&rm.plan, &cols, &rows)
+}
+
+/// Every ILLEGAL shared cell of one layer, as `(cell, the connectors that stomp on it)` —
+/// indices into that layer's own `mapper::render::render_layer(graph, layer).plan.connectors`
+/// (SQ-1316). The structured form behind [`overlap_report`], for a caller that needs to classify
+/// a residual by SHAPE rather than read a sentence about it.
+///
+/// "Illegal" is [`overlap_stats`]'s reading: a cell two or more connectors draw through that is
+/// not a clean perpendicular crossing and not one passage's own trunk-and-stub junction.
+pub fn overlap_cells(
+    graph: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) -> Vec<((i32, i32), Vec<usize>)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let rm = mapper::render::render_layer(graph, layer);
+    let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+    let plan = &rm.plan;
+    let mut owners: BTreeMap<(i32, i32), BTreeMap<usize, u8>> = BTreeMap::new();
+    for (ci, conn) in plan.connectors.iter().enumerate() {
+        if let Some(plot) = plot_connector(conn, &cols, &rows, None) {
+            for (c, mask) in &plot.cells {
+                *owners.entry(*c).or_default().entry(ci).or_insert(0) |= *mask;
+            }
+        }
+    }
+    let ew = DIR_E | DIR_W;
+    let ns = DIR_N | DIR_S;
+    let mut expected = [ns, ew];
+    expected.sort_unstable();
+    let mut out = Vec::new();
+    for (cell, per_conn) in &owners {
+        if per_conn.len() < 2 {
+            continue;
+        }
+        let pairs: BTreeSet<_> = per_conn
+            .keys()
+            .map(|&ci| {
+                let c = &plan.connectors[ci];
+                (c.origin.min(c.dest), c.origin.max(c.dest))
+            })
+            .collect();
+        if pairs.len() == 1 {
+            continue; // a trunk and its merge stubs: a legal T-junction
+        }
+        let mut masks: Vec<u8> = per_conn.values().copied().collect();
+        masks.sort_unstable();
+        if per_conn.len() == 2 && masks == expected {
+            continue; // a clean crossing, which is allowed
+        }
+        out.push((*cell, per_conn.keys().copied().collect()));
+    }
+    out
+}
+
+/// Build one layer's diagonal-chain plots, the compass cells they might cross, and who wins each
+/// crossing (SQ-1331) — the shared setup every `diagonal_glyph_*` measurement below needs, kept
+/// in one place so the two cannot quietly diverge from each other or from
+/// `resolve_diagonal_winners`'s own idea of "wins".
+///
+/// Each plot is paired with its connector's index into `rm.plan.connectors` (in plan order, with
+/// gaps where a connector failed to plot at all) — the same index `resolve_diagonal_winners`
+/// records as a winner, so a caller looks a winning connector back up as
+/// `rm.plan.connectors[idx]`, never by re-deriving a fresh sequential id of its own.
+type DiagonalCrossingState = (
+    mapper::render::RenderMap,
+    Vec<(usize, ConnectorPlot)>,
+    std::collections::HashSet<(i32, i32)>,
+    std::collections::HashMap<(i32, i32), usize>,
+);
+
+fn diagonal_crossing_state(graph: &mapper::graph::MapGraph, layer: mapper::layer::LayerId) -> DiagonalCrossingState {
+    let rm = mapper::render::render_layer(graph, layer);
+    let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+    let glyphs = crate::symbols::SymbolSet::default().path;
+    let plots: Vec<(usize, ConnectorPlot)> = rm
+        .plan
+        .connectors
+        .iter()
+        .enumerate()
+        .filter_map(|(ci, c)| plot_connector(c, &cols, &rows, Some(&glyphs)).map(|p| (ci, p)))
+        .collect();
+    // Up/down connectors included, exactly as `render_lane_connectors` includes them (SQ-1360):
+    // the two must build this set the same way or the measurement stops describing the paint.
+    let compass_cells: std::collections::HashSet<(i32, i32)> =
+        plots.iter().flat_map(|(_, p)| p.cells.iter().map(|(c, _)| *c)).collect();
+    let winners = resolve_diagonal_winners(plots.iter().map(|(ci, p)| (*ci, p)), &compass_cells);
+    (rm, plots, compass_cells, winners)
+}
+
+/// Every diagonal-chain cell that YIELDS under the SQ-1331 crossing rule on one layer, with the
+/// `diagonal_corners` glyph style on (SQ-1321): a slope cell some other connector also occupies
+/// is not drawn there at all — compass line-art always wins, and between two slopes the one
+/// earlier in plan order does (`resolve_diagonal_winners`). One line per yielded cell, naming the
+/// yielding connector and what it yielded to, so a result points at a place on the map.
+///
+/// This is the residual the fix leaves behind, sized so it cannot quietly grow — see
+/// `diagonal_glyph_overlaps` for the complementary invariant that a yield always actually
+/// happens (nothing here should ever show up doubled in the render).
+pub fn diagonal_glyph_yields(
+    graph: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) -> Vec<String> {
+    let (rm, plots, compass_cells, winners) = diagonal_crossing_state(graph, layer);
+    let plan = &rm.plan;
+    let name = |id| graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id:?}"));
+    let label = |ci: usize| {
+        let c = &plan.connectors[ci];
+        format!("{}->{}({:?})", name(c.origin), name(c.dest), c.exit_dir)
+    };
+    let mut out = Vec::new();
+    for (ci, plot) in &plots {
+        let conn = &plan.connectors[*ci];
+        for (c, _) in &plot.diag_cells {
+            let yields_to = if compass_cells.contains(c) {
+                Some("compass line-art".to_string())
+            } else {
+                match winners.get(c) {
+                    Some(&owner) if owner != *ci => Some(label(owner)),
+                    _ => None,
+                }
+            };
+            if let Some(to) = yields_to {
+                out.push(format!(
+                    "cell {c:?}: {}->{}({:?}) yields to {to}",
+                    name(conn.origin),
+                    name(conn.dest),
+                    conn.exit_dir
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Every diagonal-chain cell where the ACTUAL rendered buffer — the same `render_map` the
+/// terminal calls, at Boxes zoom with `diagonal_corners` on — disagrees with what
+/// `resolve_diagonal_winners` says should be there: a winning connector whose own chain glyph
+/// failed to render, or a yielded connector's glyph rendering anyway. Checked against the real
+/// render rather than re-derived from the plan alone, so a bug in `render_lane_connectors`
+/// itself — not just in a test's model of it — fails here.
+///
+/// Always empty on a correct render (see [`diagonal_glyph_yields`] for the expected, non-zero
+/// count of cells a slope yields at all); a non-empty result is a genuine defect in the crossing
+/// rule's own mechanism, never an accepted residual.
+pub fn diagonal_glyph_overlaps(
+    graph: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) -> Vec<String> {
+    let (rm, plots, compass_cells, winners) = diagonal_crossing_state(graph, layer);
+    let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+    let plan = &rm.plan;
+    let name = |id| graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id:?}"));
+
+    // Render the same layer through the real pipeline: Boxes zoom, `diagonal_corners` on — the
+    // same technique `crate::map_dump`'s ascii dump uses.
+    let ((min_col, min_row), _) = rm.bounds;
+    let pad_w = cols.room_pixel(min_col) - cols.room_pixel(min_col - 2);
+    let pad_h = rows.room_pixel(min_row) - rows.room_pixel(min_row - 2);
+    let area = Rect::new(
+        0,
+        0,
+        (cols.total_pixels() + pad_w + 30) as u16,
+        (rows.total_pixels() + pad_h + 20) as u16,
+    );
+    let mut state = AppState::default();
+    state.symbols.diagonal_corners = true;
+    state.zoom = Zoom::Boxes;
+    state.scroll = (min_col - 2, min_row - 2);
+    let mut buf = Buffer::empty(area);
+    render_map(&rm, &state, area, &mut buf);
+    let sym_at = |c: (i32, i32)| -> String {
+        let sx = c.0 - cols.room_pixel(min_col - 2);
+        let sy = c.1 - rows.room_pixel(min_row - 2);
+        buf.cell((sx as u16, sy as u16)).map(|cell| cell.symbol().to_string()).unwrap_or_default()
+    };
+
+    // A yielded cell's OWN chain glyph is not proof of anything by character alone: the fill
+    // glyphs (`─`/`│`) a chain also emits are the same characters an ordinary compass run draws,
+    // so a yielded fill cell showing '─' because the WINNING compass connector is itself a
+    // straight horizontal run there is the render working correctly, not a leak. Only the four
+    // half-diagonal CORNER glyphs are unambiguous — nothing but a chain ever emits one — so a
+    // yield to compass line-art is checked against those specifically, never against the fill
+    // pair. A yield to an earlier SLOPE has no such gap: the winner's own glyph is asserted
+    // directly below, which is the check that actually pins the winner side of the rule.
+    let glyphs = crate::symbols::SymbolSet::default().path;
+    let corner_glyphs: [char; 4] = [glyphs.diag_ul, glyphs.diag_ur, glyphs.diag_ll, glyphs.diag_lr];
+
+    let mut out = Vec::new();
+    for (ci, plot) in &plots {
+        let conn = &plan.connectors[*ci];
+        for (c, ch) in &plot.diag_cells {
+            let is_winner = !compass_cells.contains(c) && winners.get(c) == Some(ci);
+            let rendered = sym_at(*c);
+            let bad = if is_winner {
+                rendered != ch.to_string()
+            } else if compass_cells.contains(c) {
+                corner_glyphs.iter().any(|g| rendered == g.to_string())
+            } else {
+                false
+            };
+            if bad {
+                out.push(format!(
+                    "cell {c:?}: {}->{}({:?}) expected {} chain glyph {ch:?} here but the render shows {rendered:?}",
+                    name(conn.origin),
+                    name(conn.dest),
+                    conn.exit_dir,
+                    if is_winner { "its own" } else { "NO" }
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// How every connector on one layer makes its FINAL APPROACH into its destination (SQ-1320):
+/// `(side arrivals measured, jogs excused by the crowded-side rule, one line per jog that is not)`.
+///
+/// The rule, stated on [`ConnectorPlot::path`] — the drawn polyline reduced to its turns,
+/// `dep_anchor → … → arr_anchor`. An orthogonal route reaches a box in one of exactly two shapes,
+/// and both are fine:
+///
+/// * **head-on** — the last segment runs perpendicular to the entry side, straight down (or
+///   across) the arrowhead's own column/row from wherever the route last turned; or
+/// * **along the channel** — the route runs down the gutter beside the box, parallel to the side,
+///   and turns in once. The turn-in leg is then as long as the clearance between that gutter's
+///   lane and the box, which [`channel_width`] keeps at two cells or more.
+///
+/// **A one-cell turn-in leg is the third bad shape** (SQ-1390), and this doc used to bless it —
+/// "as short as that gutter is wide, which can be a single cell, and there is nothing wrong with
+/// it". There is: the turn and the arrowhead then occupy adjacent cells and the picture reads
+/// `└◀`, the line bending inside its own head. Lost Pig's `Shelf Room ↔ (gnomeRoom)` drew exactly
+/// that. It was never a routing choice — `channel_width` reserved `LANE_BASE` before lane 0 and
+/// nothing after the deepest one, so every channel's FAR box was one cell from a lane and every
+/// channel's NEAR box was two, whatever the route did. The width is symmetric now, so this reads
+/// as a rule rather than as a wish.
+///
+/// **The jog is the third shape**, and it is what SQ-1320 removed: a head-on approach aimed at the
+/// side's CENTRE cell with a ONE-CELL lateral hop spliced in at the end to reach the slot the
+/// arrowhead actually uses. So the test is that hop, not the turn-in leg: the segment immediately
+/// before the last one runs PARALLEL to the entry side and is exactly one cell long. A genuine
+/// along-the-channel approach covers real distance in that segment (fourteen cells for Zork I's
+/// `Atlantis Room --S--> Reservoir North`); a sidestep covers one, by construction, because a slot
+/// is one cell off centre.
+///
+/// The final segment must also be perpendicular to the entry side — the arrowhead sits ON the box
+/// border and the line has to reach it from outside — which is reported the same way.
+///
+/// **Excused: a jog on a destination side carrying two or more arrivals.** Such a side has two
+/// cells to fill and only one of them can be reached head-on, so the second may have to weave in.
+/// The exemption applies to the FINDING, not to the measurement — every side arrival is measured,
+/// and an excused jog is counted and returned rather than silently dropped, because a rule whose
+/// exemption quietly grows is no rule.
+///
+/// A merge stub (which ends on the trunk, not at a box) and a corner arrival (which anchors on a
+/// box corner and takes no slot) have no side approach to measure, and are in neither count.
+///
+/// **Both ends of the drawn line are measured, not only the arrival** (SQ-1390). A reciprocal pair
+/// is drawn ONCE, from whichever room the router happened to make the origin, so half the
+/// arrowheads on any map are DEPARTURE anchors and a rule that looks only at `entry` cannot see
+/// them — which is why Lost Pig's `└◀` sat on a green suite. The departure end takes the leg test
+/// alone (there is no slot to sidestep into on the way OUT), and only when the exit is a side
+/// rather than a box corner. `checked` still counts CONNECTORS, one apiece, so the non-vacuity
+/// numbers callers pin mean what they always meant.
+pub fn arrival_approach_report(
+    graph: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) -> (usize, usize, Vec<String>) {
+    let rm = mapper::render::render_layer(graph, layer);
+    let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+    let plan = &rm.plan;
+    let name = |id| {
+        graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id:?}"))
+    };
+    let side_arrival = |c: &mapper::route::RoutedConnector| !c.merge && c.entry_corner.is_none();
+    let mut per_side: std::collections::BTreeMap<(RoomId, Side), usize> = Default::default();
+    for c in plan.connectors.iter().filter(|c| side_arrival(c)) {
+        *per_side.entry((c.dest, c.entry)).or_default() += 1;
+    }
+    let (mut checked, mut excused) = (0usize, 0usize);
+    let mut out = Vec::new();
+    for conn in plan.connectors.iter().filter(|c| side_arrival(c)) {
+        let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+        let n = plot.path.len();
+        if n < 2 {
+            continue;
+        }
+        checked += 1;
+        let tangent_is_x = matches!(conn.entry, Side::Top | Side::Bottom);
+        let along =
+            |a: (i32, i32), b: (i32, i32)| if tangent_is_x { a.0 != b.0 } else { a.1 != b.1 };
+        let (turn, head) = (plot.path[n - 2], plot.path[n - 1]);
+        let leg = |a: (i32, i32), b: (i32, i32)| (a.0 - b.0).abs() + (a.1 - b.1).abs();
+        let complaint = if along(turn, head) {
+            Some("the arrowhead's own leg runs ALONG the side, not into it".to_string())
+        } else if n >= 3 && leg(turn, head) == 1 {
+            // SQ-1390: the route turns in the cell touching the arrowhead — `└◀`.
+            Some("the turn touches the arrowhead: a ONE-cell leg into the side".to_string())
+        } else if n >= 3 {
+            let prev = plot.path[n - 3];
+            let hop = leg(prev, turn);
+            (along(prev, turn) && hop == 1)
+                .then(|| "a one-cell sidestep into the slot".to_string())
+        } else {
+            None
+        }
+        .or_else(|| {
+            // The DEPARTURE end of the same drawn line (SQ-1390). A corner exit leaves from the box
+            // corner and has no side leg to measure.
+            let out_is_side = !mapper::direction::is_diagonal(conn.exit_dir);
+            (out_is_side && n >= 3 && leg(plot.path[0], plot.path[1]) == 1).then(|| {
+                "the turn touches the DEPARTURE arrowhead: a ONE-cell leg out of the side"
+                    .to_string()
+            })
+        });
+        let Some(why) = complaint else { continue };
+        // The exemption is applied to the FINDING, not to the measurement: a jog on a crowded side
+        // is excused and counted, never quietly skipped, so a caller can watch that number.
+        if per_side.get(&(conn.dest, conn.entry)).copied().unwrap_or(0) >= 2 {
+            excused += 1;
+            continue;
+        }
+        out.push(format!(
+            "{} -{:?}-> {} arrives {:?} slot {}: {why} — path {:?}",
+            name(conn.origin),
+            conn.exit_dir,
+            name(conn.dest),
+            conn.entry,
+            conn.entry_slot,
+            plot.path,
+        ));
+    }
+    (checked, excused, out)
+}
+
+/// The same reading as [`overlap_stats`], but naming every ILLEGAL cell and the connectors that
+/// stomp on it — so a failing no-overlap case points at a place on the map rather than at a count
+/// (SQ-1316).
+///
+/// One line per illegal cell: the virtual pixel, then each contributor as
+/// `Origin->Dest(dir)[mask]`, where the mask is the compass strokes that connector draws through
+/// the cell. Reading them is how the routing defect is identified: two `EW` contributors are a
+/// line-on-line stomp, an `EW` beside an `ES` is a bend landing on someone's run, three
+/// contributors is a pile-up.
+pub fn overlap_report(
+    graph: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) -> Vec<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let rm = mapper::render::render_layer(graph, layer);
+    let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+    let plan = &rm.plan;
+    let mut owners: BTreeMap<(i32, i32), BTreeMap<usize, u8>> = BTreeMap::new();
+    for (ci, conn) in plan.connectors.iter().enumerate() {
+        if let Some(plot) = plot_connector(conn, &cols, &rows, None) {
+            for (c, mask) in &plot.cells {
+                *owners.entry(*c).or_default().entry(ci).or_insert(0) |= *mask;
+            }
+        }
+    }
+    let spell = |m: u8| {
+        let mut s = String::new();
+        for (bit, ch) in [(DIR_N, 'N'), (DIR_S, 'S'), (DIR_E, 'E'), (DIR_W, 'W')] {
+            if m & bit != 0 {
+                s.push(ch);
+            }
+        }
+        if s.is_empty() { "-".into() } else { s }
+    };
+    let name = |id| {
+        graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id:?}"))
+    };
+    let ew = DIR_E | DIR_W;
+    let ns = DIR_N | DIR_S;
+    let mut expected = [ns, ew];
+    expected.sort_unstable();
+    let mut out = Vec::new();
+    for (cell, per_conn) in &owners {
+        if per_conn.len() < 2 {
+            continue;
+        }
+        let pairs: BTreeSet<_> = per_conn
+            .keys()
+            .map(|&ci| {
+                let c = &plan.connectors[ci];
+                (c.origin.min(c.dest), c.origin.max(c.dest))
+            })
+            .collect();
+        if pairs.len() == 1 {
+            continue; // a trunk and its merge stubs: a legal T-junction
+        }
+        let mut masks: Vec<u8> = per_conn.values().copied().collect();
+        masks.sort_unstable();
+        if per_conn.len() == 2 && masks == expected {
+            continue; // a clean crossing, which is allowed
+        }
+        let who: Vec<String> = per_conn
+            .iter()
+            .map(|(&ci, &m)| {
+                let c = &plan.connectors[ci];
+                format!("{}->{}({:?})[{}]", name(c.origin), name(c.dest), c.exit_dir, spell(m))
+            })
+            .collect();
+        out.push(format!("cell {cell:?}: {}", who.join(" + ")));
+    }
+    out
+}
+
+/// Every compass connection whose `distorted` flag DISAGREES with the FINAL room positions
+/// (SQ-1377): one line per mismatch, naming the endpoints, the direction, the flag as stored,
+/// and what the geometry actually says.
+///
+/// This is `mapper::layout::mark_distorted`'s own rule, applied read-only with an empty
+/// `dropped` set (exactly [`mapper::layout::remark_distorted`]'s recomputation, without
+/// mutating `graph`): a compass edge with no `grid_offset` (Up/Down, In/Out/Unknown) is never
+/// distorted; a self-loop is never distorted; otherwise the flag must equal
+/// `!edge_is_satisfied(graph, conn)`. A non-empty result means some code path wrote positions
+/// after the last `distorted` marking without re-deriving the flags from them — the defect
+/// SQ-1377 fixed by making `remark_distorted` the pipeline's last step.
+///
+/// **Cross-layer connections are skipped entirely, not merely excused.** `mark_distorted` (and
+/// `remark_distorted` after it) only ever runs over a single layer's `layer_subgraph` — a
+/// connection whose two endpoints sit in different layers is never a member of ANY subgraph the
+/// marking machinery touches, so its flag carries no promise to compare against. Its two
+/// endpoints' positions are also each packed independently within their OWN layer, anchored at
+/// their own `(0,0)` — so a raw coordinate difference between them is not a geometry claim at
+/// all, just two unrelated numbers. A story with a maze split across several layers (Adventure's
+/// `Maze`/`At Brink of Pit`/`Dead End` instances each land on their own layer) draws several such
+/// boundary-crossing compass edges, and comparing them here would report the layout as broken
+/// for a reason neither pipeline claims to fix.
+pub fn distorted_flags_agree_with_geometry(graph: &mapper::graph::MapGraph) -> Vec<String> {
+    let name = |id| graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id:?}"));
+    let mut out = Vec::new();
+    for conn in graph.connections() {
+        if graph.layer_of(conn.origin) != graph.layer_of(conn.dest) {
+            continue; // outside every layer_subgraph mark_distorted ever runs over
+        }
+        let geometry_says_distorted = match mapper::direction::grid_offset(conn.dir) {
+            None => false,
+            Some(_) if conn.is_self_loop() => false,
+            Some(_) => !mapper::layout::edge_is_satisfied(graph, conn),
+        };
+        if conn.distorted != geometry_says_distorted {
+            out.push(format!(
+                "{} -{:?}-> {}: flag={} geometry-says={}",
+                name(conn.origin),
+                conn.dir,
+                name(conn.dest),
+                conn.distorted,
+                geometry_says_distorted,
+            ));
+        }
+    }
+    out
+}
+
+/// One connector's TURN BUDGET: how many bends it draws against the fewest its two anchors
+/// allow (SQ-1332).
+#[derive(Debug, Clone)]
+pub struct BendFinding {
+    pub origin: RoomId,
+    pub dest: RoomId,
+    pub dir: mapper::direction::Direction,
+    /// Turns in the drawn polyline — `ConnectorPlot.path` is already turn-reduced, so this is
+    /// its interior point count.
+    pub bends: usize,
+    /// The Manhattan optimum for this connector's own two anchors: 0 when they share a row or
+    /// column with no room box between, 1 when either L is clear of every box, else 2.
+    pub optimum: usize,
+    pub path: Vec<(i32, i32)>,
+}
+
+impl BendFinding {
+    /// Turns beyond the optimum. Zero means the connector is drawn as tightly as its anchors allow.
+    pub fn excess(&self) -> usize {
+        self.bends.saturating_sub(self.optimum)
+    }
+}
+
+/// Every drawn connector on `layer`, with its bend count and the Manhattan optimum for its
+/// anchors (SQ-1332).
+///
+/// The user's rule, verbatim: *"MANY cases where our path makes unnecessary turns before
+/// reaching the destination … when there is no room in the way it looks messy."* This is the
+/// measurement that rule needs — read from the SAME `ConnectorPlot.path` the renderer draws and
+/// `arrival_approach_report` reads, so it describes the picture rather than the plan.
+///
+/// The optimum is deliberately GEOMETRIC and blind to other connectors: it asks only what the
+/// room boxes permit, so a connector that spends a turn dodging another connector shows up as
+/// excess. That is the point — an excess of 1 is a cost the router paid for something, and the
+/// report is where you go to ask what.
+///
+/// Two kinds of connector are excluded. A **merge stub** ends on its trunk, not at a box, so it
+/// has no arrival anchor and no optimum to compare against. A **pure diagonal** — corner to
+/// corner between two diagonally adjacent boxes — is drawn as one unbroken SLOPE, and the
+/// two-turn staircase this function would otherwise count is the orthogonal fallback for a
+/// terminal without the glyphs, not a turn any reader sees.
+pub fn bend_report(
+    graph: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) -> Vec<BendFinding> {
+    let rm = mapper::render::render_layer(graph, layer);
+    let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+    // Every room box on the layer as a pixel rect, keyed by room, so the two rooms a connector
+    // joins can be excused (its anchors sit ON their own borders).
+    //
+    // Read from `rm.rooms`, NOT from `graph.rooms_in_layer(layer)` — the two disagree since
+    // SQ-1356 (SQ-1360). `render_layer` seats every cross-layer GHOST into the layer's grid and
+    // `seat_adjacent` may open a line to make room, shifting the layer's real rooms with it; the
+    // connectors below are plotted from that same `rm`, so boxes taken from the graph would be a
+    // set of rectangles at the cells the layout used to have, missing every ghost. `optimum` is
+    // "what the boxes between these two anchors permit", and it has to be asked of the boxes the
+    // reader can actually see.
+    let boxes: Vec<(RoomId, (i32, i32, i32, i32))> = rm
+        .rooms
+        .iter()
+        .map(|r| (r.id, r.cell))
+        .map(|(id, p)| {
+            let (x, y) = (cols.room_pixel(p.0), rows.room_pixel(p.1));
+            (id, (x, y, x + cols.box_dim_at(p.0) - 1, y + rows.box_dim_at(p.1) - 1))
+        })
+        .collect();
+    // The same predicate `plot_connector` uses to draw a slope instead of a staircase.
+    let pure_diagonal = |c: &mapper::route::RoutedConnector| {
+        c.points.len() == 3
+            && c.entry_corner.is_some()
+            && mapper::direction::is_diagonal(c.exit_dir)
+    };
+    let mut out = Vec::new();
+    for conn in rm.plan.connectors.iter().filter(|c| !c.merge && !pure_diagonal(c)) {
+        let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+        if plot.path.len() < 2 {
+            continue;
+        }
+        let blocked = |p: (i32, i32)| {
+            boxes.iter().any(|&(id, (x0, y0, x1, y1))| {
+                id != conn.origin
+                    && id != conn.dest
+                    && p.0 >= x0
+                    && p.0 <= x1
+                    && p.1 >= y0
+                    && p.1 <= y1
+            })
+        };
+        let (a, b) = (plot.dep_anchor, plot.arr_anchor);
+        let leg_clear = |p: (i32, i32), q: (i32, i32)| {
+            let (dx, dy) = ((q.0 - p.0).signum(), (q.1 - p.1).signum());
+            let mut c = p;
+            loop {
+                if blocked(c) {
+                    return false;
+                }
+                if c == q {
+                    return true;
+                }
+                c = (c.0 + dx, c.1 + dy);
+            }
+        };
+        let l_clear = |corner: (i32, i32)| leg_clear(a, corner) && leg_clear(corner, b);
+        let optimum = if (a.0 == b.0 || a.1 == b.1) && leg_clear(a, b) {
+            0
+        } else if l_clear((b.0, a.1)) || l_clear((a.0, b.1)) {
+            1
+        } else {
+            2
+        };
+        out.push(BendFinding {
+            origin: conn.origin,
+            dest: conn.dest,
+            dir: conn.exit_dir,
+            bends: plot.path.len() - 2,
+            optimum,
+            path: plot.path.clone(),
+        });
+    }
+    out
 }
 
 /// True unless moving room `id` to `cell` would disturb a well-placed Up/Down relationship: an Up
@@ -2776,7 +4062,7 @@ pub(crate) fn compact_empty_lines_observed(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
     use mapper::direction::Direction;
@@ -2819,35 +4105,26 @@ mod tests {
         )
     }
 
-    /// The two edge-midpoints each half-diagonal reaches, per its Unicode name. Guards the
-    /// bits table against the endpoints actually being somewhere else (SQ-0356).
-    #[test]
-    fn chain_glyph_bits_name_each_half_diagonals_own_endpoints() {
-        let p = crate::symbols::SymbolSet::default().path;
-        // U+1FBA0 upper-centre ↔ middle-left; U+1FBA1 upper-centre ↔ middle-right;
-        // U+1FBA2 middle-left ↔ lower-centre; U+1FBA3 middle-right ↔ lower-centre.
-        assert_eq!(chain_glyph_bits(p.diag_ul, &p), Some(DIR_N | DIR_W));
-        assert_eq!(chain_glyph_bits(p.diag_ur, &p), Some(DIR_N | DIR_E));
-        assert_eq!(chain_glyph_bits(p.diag_ll, &p), Some(DIR_S | DIR_W));
-        assert_eq!(chain_glyph_bits(p.diag_lr, &p), Some(DIR_S | DIR_E));
-        // The fill glyphs a chain also emits reach the same midpoints ─/│ always do.
-        assert_eq!(chain_glyph_bits(p.ns, &p), Some(DIR_N | DIR_S));
-        assert_eq!(chain_glyph_bits(p.ew, &p), Some(DIR_E | DIR_W));
-        // Anything a chain never emits has no merge reading.
-        assert_eq!(chain_glyph_bits(p.nesw, &p), None);
-        assert_eq!(chain_glyph_bits('x', &p), None);
-    }
-
-    /// SQ-0356: a chain cell landing on another connector's orthogonal run must MERGE with it.
+    /// SQ-1331: a chain cell landing on another connector's orthogonal run must YIELD to it — the
+    /// orthogonal keeps its own ordinary glyph (no junction), and the slope shows a one-cell gap
+    /// there, extending the SQ-0525 crossing convention (a vertical run passes through unbroken,
+    /// a horizontal one breaks) to slopes.
     ///
     /// The fixture was originally Zork's "West of House" (#68) / "North of House" (#143) pair,
     /// whose reciprocal NE/SW diagonal collided with a second W edge back between the SAME two
     /// rooms. SQ-0522 collapses same-pair extras into icons, so that shape can no longer produce
     /// two connectors at all. The diagonal is kept and the colliding run now belongs to a
     /// DIFFERENT pair — a column-aligned A/B link that lane-routes past #68 — which is the shape
-    /// this merge exists for anyway: two unrelated connectors wanting one cell.
+    /// this rule exists for anyway: two unrelated connectors wanting one cell.
+    ///
+    /// The two rooms are now DIAGONALLY ADJACENT (SQ-1321): a chain is drawn only for an unbroken
+    /// corner-to-corner slope, so the three-columns-apart pair this used to place drew no chain at
+    /// all and the fixture stopped producing its collision. The A/B link is unchanged and still
+    /// threads #68's own column; it now crosses the one gap that slope occupies, which is the only
+    /// place a chain cell and a foreign run can still meet — the same shape SQ-1316's real Zork I
+    /// map hits between West of House/Stone Barrow and Strange Passage/Living Room.
     #[test]
-    fn a_chain_cell_on_another_connectors_run_merges_into_a_junction() {
+    fn a_chain_cell_on_another_connectors_run_yields_to_it() {
         use mapper::graph::MapGraph;
         use mapper::render::render;
 
@@ -2855,13 +4132,13 @@ mod tests {
         g.upsert_room(68, "West of House".into());
         g.upsert_room(143, "North of House".into());
         g.set_pos(68, (-2, 3));
-        g.set_pos(143, (1, 2));
+        g.set_pos(143, (-1, 2)); // diagonally adjacent: the NE/SW pair is one pure slope
         g.add_edge(68, Direction::NE, 143);
         g.add_edge(143, Direction::SW, 68); // reciprocal: collapses with the NE into one diagonal
         g.upsert_room(300, "A".into());
         g.upsert_room(301, "B".into());
         g.set_pos(300, (-2, -1));
-        g.set_pos(301, (-2, 4)); // same column as #68, which sits between them
+        g.set_pos(301, (-2, 5)); // same column as #68, which sits between them
         g.add_edge(300, Direction::S, 301);
         g.add_edge(301, Direction::N, 300);
 
@@ -2885,10 +4162,8 @@ mod tests {
             chain.keys().filter(|c| orth.contains_key(c)).cloned().collect();
         assert_eq!(hits.len(), 1, "fixture must still produce exactly one collision");
         let hit = hits[0];
-        // The junction both strokes describe: the run's mask ORed with the chain glyph's bits.
-        // Derived the same way the renderer derives it, so this survives a geometry change.
-        let want = glyph_for(orth[&hit] | chain_glyph_bits(chain[&hit], &glyphs).expect("a chain glyph"), &glyphs)
-            .expect("the merged mask has a glyph");
+        // The orthogonal's own glyph, unmixed with anything the chain wanted there.
+        let want_orth = glyph_for(orth[&hit], &glyphs).expect("the orthogonal run has its own glyph");
 
         // Render the whole map off-screen, the way `map_dump::ascii_map` does.
         let ((min_col, min_row), _) = rm.bounds;
@@ -2906,17 +4181,115 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        let sx = hit.0 - cols.room_pixel(min_col - 2);
-        let sy = hit.1 - rows.room_pixel(min_row - 2);
-        let sym = buf.cell((sx as u16, sy as u16)).unwrap().symbol();
+        let sym_at = |c: (i32, i32)| -> String {
+            let sx = c.0 - cols.room_pixel(min_col - 2);
+            let sy = c.1 - rows.room_pixel(min_row - 2);
+            buf.cell((sx as u16, sy as u16)).unwrap().symbol().to_string()
+        };
 
-        // Both strokes must survive as one junction glyph. Neither line may lose the cell —
-        // a bare `│` would be the vertical winning, a bare chain glyph the diagonal winning.
+        // The orthogonal keeps the cell, with its own ordinary glyph — never a manufactured
+        // junction of the two.
         assert_eq!(
-            sym,
-            want.to_string(),
-            "chain-on-run cell must render as the junction carrying both strokes, got {sym:?}"
+            sym_at(hit),
+            want_orth.to_string(),
+            "the orthogonal run must keep the crossing cell with its own glyph, unmixed"
         );
+        // The slope itself must never appear there: no half-diagonal glyph landed on the cell
+        // the orthogonal now owns.
+        let diag_glyphs = [glyphs.diag_ul, glyphs.diag_ur, glyphs.diag_ll, glyphs.diag_lr];
+        assert!(
+            !diag_glyphs.iter().any(|g| sym_at(hit) == g.to_string()),
+            "the slope must yield a gap at the crossing cell, not draw over the orthogonal"
+        );
+        // Every OTHER cell of the chain still renders as its own glyph — the slope has exactly
+        // one gap, not a whole side lost.
+        for (c, ch) in &chain {
+            if *c == hit {
+                continue;
+            }
+            assert_eq!(
+                sym_at(*c),
+                ch.to_string(),
+                "chain cell {c:?} away from the crossing must still render its own glyph"
+            );
+        }
+    }
+
+    /// SQ-1331: two SLOPES crossing in one gap — the Counterfeit Monkey park-corner shape,
+    /// minimised to its four rooms. A 2x2 block with both diagonals of the square drawn
+    /// (TopLeft↔BottomRight, TopRight↔BottomLeft) crosses both pure-diagonal chains through the
+    /// same interior gap. The one plotted FIRST in plan order keeps every shared cell; the other
+    /// yields — never a cell showing both, and never a manufactured junction.
+    #[test]
+    fn two_crossing_slopes_only_the_earlier_one_wins() {
+        use mapper::graph::MapGraph;
+        use mapper::render::render;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "TopLeft".into());
+        g.upsert_room(2, "TopRight".into());
+        g.upsert_room(3, "BottomLeft".into());
+        g.upsert_room(4, "BottomRight".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.set_pos(3, (0, 1));
+        g.set_pos(4, (1, 1));
+        // TopLeft<->BottomRight (SE/NW) and TopRight<->BottomLeft (SW/NE): both diagonals of the
+        // square, each a pure corner-to-corner slope, crossing at the block's own centre.
+        g.add_edge(1, Direction::SE, 4);
+        g.add_edge(4, Direction::NW, 1);
+        g.add_edge(2, Direction::SW, 3);
+        g.add_edge(3, Direction::NE, 2);
+
+        let rm = render(&g);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let glyphs = crate::symbols::SymbolSet::default().path;
+
+        // Every cell more than one connector's chain wants, keyed by which connectors (by plan
+        // index) and what glyph each of them would draw there. Derived from the plots, not
+        // hard-coded, so a geometry change relocates the assertion instead of silently aiming it
+        // at blank space.
+        type Contenders = Vec<(usize, char)>;
+        let mut chain: std::collections::HashMap<(i32, i32), Contenders> = Default::default();
+        for (ci, conn) in rm.plan.connectors.iter().enumerate() {
+            let Some(plot) = plot_connector(conn, &cols, &rows, Some(&glyphs)) else { continue };
+            for (c, ch) in &plot.diag_cells {
+                chain.entry(*c).or_default().push((ci, *ch));
+            }
+        }
+        let crossings: Vec<((i32, i32), Contenders)> =
+            chain.into_iter().filter(|(_, who)| who.len() > 1).collect();
+        assert!(!crossings.is_empty(), "fixture must produce at least one crossing cell");
+
+        let ((min_col, min_row), _) = rm.bounds;
+        let pad_w = cols.room_pixel(min_col) - cols.room_pixel(min_col - 2);
+        let pad_h = rows.room_pixel(min_row) - rows.room_pixel(min_row - 2);
+        let area = Rect::new(
+            0,
+            0,
+            (cols.total_pixels() + pad_w + 30) as u16,
+            (rows.total_pixels() + pad_h + 20) as u16,
+        );
+        let mut state = AppState::default();
+        state.zoom = Zoom::Boxes;
+        state.scroll = (min_col - 2, min_row - 2);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        let sym_at = |c: (i32, i32)| -> String {
+            let sx = c.0 - cols.room_pixel(min_col - 2);
+            let sy = c.1 - rows.room_pixel(min_row - 2);
+            buf.cell((sx as u16, sy as u16)).unwrap().symbol().to_string()
+        };
+
+        for (cell, contenders) in &crossings {
+            let winner_ci = contenders.iter().map(|(ci, _)| *ci).min().expect("non-empty");
+            let winner_ch = contenders.iter().find(|(ci, _)| *ci == winner_ci).unwrap().1;
+            assert_eq!(
+                sym_at(*cell),
+                winner_ch.to_string(),
+                "cell {cell:?}: the earlier-plotted slope (connector {winner_ci}) must keep the cell, exactly one winner"
+            );
+        }
     }
 
     #[test]
@@ -2945,11 +4318,15 @@ mod tests {
         assert!(!text.contains('▲'), "the Up connector must NOT render a filled N arrow");
     }
 
-    /// A--North-->B AND A--Up-->B: only the N line is drawn (SQ-0522 priority). The `\u{2191}` used to be
-    /// re-stamped on the border so vertical access still read, but a glyph with no line attached
-    /// says a staircase exists while pointing nowhere — the room inspector answers that properly.
+    /// A--North-->B AND A--Up-->B: only the N line is drawn, as a STACKED primary — the N
+    /// arrowhead carries the `map.room_stacked_exit` accent and a `MarkerKind::Stacked` hover
+    /// rect sits on it, unchanged since SQ-1276. SQ-1373 restores what SQ-1276 took away for
+    /// this exact shape: the stacked `Up` direction ALSO keeps its own `↑` border badge (the
+    /// same `PendingMarker` collision-stepping SQ-0689's router-level fold uses, landing one
+    /// cell along from N's own arrowhead on room A's border, where `Up` departs from) —
+    /// hovering the stacked arrowhead is no longer the ONLY way "Up also leads there" surfaces.
     #[test]
-    fn a_pair_with_both_a_compass_edge_and_a_staircase_draws_only_the_compass_line() {
+    fn a_pair_with_both_a_compass_edge_and_a_staircase_draws_the_compass_line_plus_a_badge() {
         use mapper::direction::Direction;
         use mapper::graph::MapGraph;
 
@@ -2965,14 +4342,132 @@ mod tests {
         let rm = mapper::render::render(&g);
         let area = Rect::new(0, 0, 60, 30);
         let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
+        let markers = render_map(&rm, &state, area, &mut buf);
 
         let up = state.symbols.portal.up;
         let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
-        // SQ-0689: the staircase loses the LINE to N on priority, but no longer vanishes — it
-        // stamps its ↑ beside the shared line's anchor. One line, both passages visible.
-        assert_eq!(text.matches(up).count(), 1, "the collapsed staircase stamps its glyph");
+        assert_eq!(text.matches(up).count(), 1, "SQ-1373: the stacked Up direction keeps its own border badge");
         assert!(text.contains(state.symbols.arrows.north), "the N passage keeps its own arrowhead");
+
+        let (mid, kind, rect) = markers
+            .iter()
+            .find(|(_, k, _)| matches!(k, MarkerKind::Stacked(_)))
+            .expect("the collapsed staircase publishes a Stacked hover rect");
+        assert_eq!(*mid, 1);
+        assert_eq!(*kind, MarkerKind::Stacked(Direction::N));
+        let arrow_cell = buf.cell((rect.x, rect.y)).unwrap();
+        assert_eq!(arrow_cell.symbol(), state.symbols.arrows.north.to_string());
+        assert!(
+            arrow_cell.modifier.contains(ratatui::style::Modifier::REVERSED),
+            "the stacked primary's own accent (map.room_stacked_exit) defaults to reversed",
+        );
+    }
+
+    /// SQ-1276's colour rule: the stacked primary's arrowhead reads as the room's own BORDER
+    /// reversed, not the exit arrow's accent reversed — `map.room_stacked_exit` derives from
+    /// `map.room` (SQ-1276 follow-up), and `draw_box_room` always strips REVERSED from the
+    /// border it draws, so on an unselected room the arrowhead's raw fg/bg equal the plain
+    /// border cell beside it, with only REVERSED added on top.
+    #[test]
+    fn stacked_primary_arrowhead_matches_the_unselected_borders_colour_reversed() {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(1, Direction::Up, 2);
+
+        let state = AppState::default(); // neither current nor selected
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+
+        let (_, _, rect) = markers
+            .iter()
+            .find(|(_, k, _)| matches!(k, MarkerKind::Stacked(_)))
+            .expect("the collapsed staircase publishes a Stacked hover rect");
+        let arrow_cell = buf.cell((rect.x, rect.y)).unwrap();
+
+        // A plain border cell on the same top-border row, a few columns either side of the
+        // arrowhead — an ordinary `─` (or a corner, at the box's own ends), never the arrow
+        // itself.
+        let neighbor = (rect.x.saturating_sub(3)..=rect.x + 3)
+            .filter(|&x| x != rect.x)
+            .find_map(|x| {
+                let c = buf.cell((x, rect.y))?;
+                (c.symbol() != " ").then_some(c)
+            })
+            .expect("a plain border cell beside the arrowhead");
+
+        assert_eq!(arrow_cell.fg, neighbor.fg, "arrowhead fg matches the plain border fg");
+        assert_eq!(arrow_cell.bg, neighbor.bg, "arrowhead bg matches the plain border bg");
+        assert!(
+            arrow_cell.modifier.contains(ratatui::style::Modifier::REVERSED),
+            "the arrowhead adds REVERSED on top of the border's own colour"
+        );
+        assert!(
+            !neighbor.modifier.contains(ratatui::style::Modifier::REVERSED),
+            "the plain border itself is never reverse-video (draw_box_room strips it)"
+        );
+    }
+
+    /// The same colour rule on a SELECTED CURRENT room. `draw_box_room` always strips REVERSED
+    /// from the border it draws (only a room's INTERIOR ever reverses), so there is no border
+    /// REVERSED for the arrowhead's own REVERSED to cancel against — but this pins the actual
+    /// composed result rather than trusting that reasoning: the arrowhead must still paint a
+    /// real glyph, and its raw fg/bg must differ from the reversed interior beside it, on both
+    /// counts distinct from an invisible cell (fg == bg).
+    #[test]
+    fn stacked_primary_arrowhead_stays_visible_on_a_selected_current_room() {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(1, Direction::Up, 2);
+        g.set_current(1);
+
+        let mut state = AppState::default();
+        state.selected_room = Some(1); // room 1 is both current AND selected
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+
+        let (_, _, rect) = markers
+            .iter()
+            .find(|(_, k, _)| matches!(k, MarkerKind::Stacked(_)))
+            .expect("the collapsed staircase publishes a Stacked hover rect");
+        let arrow_cell = buf.cell((rect.x, rect.y)).unwrap();
+        assert_eq!(
+            arrow_cell.symbol(),
+            state.symbols.arrows.north.to_string(),
+            "a real glyph is drawn, not a blank cell"
+        );
+        assert_ne!(arrow_cell.fg, arrow_cell.bg, "not an invisible cell");
+
+        // An interior cell of the same box (the current+selected room's reversed fill).
+        let room = rm.rooms.iter().find(|r| r.id == 1).expect("room 1 is in the render");
+        let (bx, by) = cell_to_screen(room.cell, state.zoom, state.scroll, area)
+            .expect("room 1's box is on screen");
+        let interior = buf.cell((bx + 1, by + 1)).unwrap();
+        assert!(
+            interior.modifier.contains(ratatui::style::Modifier::REVERSED),
+            "sanity: the current+selected room's interior is itself reverse-video"
+        );
+        assert!(
+            arrow_cell.fg != interior.fg || arrow_cell.bg != interior.bg,
+            "the arrowhead's raw colours differ from the reversed interior beside it"
+        );
     }
     #[test]
     fn reciprocal_updown_connector_draws_glyph_at_both_ends() {
@@ -3024,6 +4519,8 @@ mod tests {
             &state.colors,
             state.symbols.diagonal_corners,
             &edge_kinds(&rm),
+            &std::collections::HashSet::new(),
+            &std::collections::HashMap::new(),
         );
 
         let dep = arrowheads.iter().find(|a| a.room == 1).expect("A's departure glyph");
@@ -3135,7 +4632,7 @@ mod tests {
         use Direction::*;
         let mut g = MapGraph::new();
         for id in [25u16, 26, 27, 74, 75, 76, 77, 78, 79, 80, 81, 136, 143, 180, 193, 201, 203, 239] {
-            g.upsert_room(id, "r".into());
+            g.upsert_room(id.into(), "r".into());
         }
         for (o, d, dst) in [
             (180, N, 81), (81, W, 180), (180, W, 78), (78, N, 143), (143, E, 77), (77, S, 74), (74, S, 76),
@@ -3153,7 +4650,7 @@ mod tests {
         // SQ-0222: the 26/27/136 cluster now routes cleanly, so cleanup clears every illegal overlap.
         assert_eq!(render_overlap_stats(&g).0, 0,
             "cleanup clears all illegal overlaps while keeping protected up/down rooms in place");
-        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        let p = |id: u16| g.room(id.into()).unwrap().pos.unwrap();
         // Up/down-protected column stays aligned: 27 stays directly below 26 (26→Down→27).
         assert_eq!(p(26).0, p(27).0, "26/27 up/down column must stay aligned: 26={:?} 27={:?}", p(26), p(27));
         assert!(p(27).1 > p(26).1, "27 stays south of 26 (below it in the up/down lane)");
@@ -3287,6 +4784,36 @@ mod tests {
         // Notes marker '●' should appear somewhere in the buffer.
         let has_notes_marker = buf.content.iter().any(|c| c.symbol() == "●");
         assert!(has_notes_marker, "notes marker '●' should be drawn for a room with notes");
+        // SQ-1388: the bottom-right interior corner (col w-2 = 9, row h-2 = 3 for room 1 at
+        // screen (0,0)), not the top-right corner it used to claim.
+        let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(sym(9, 3), "●", "notes marker sits in the bottom-right interior corner");
+        assert_ne!(sym(9, 1), "●", "the old top-right corner no longer carries it");
+    }
+
+    /// A room with notes publishes a `MarkerKind::Notes` hover rect at the exact cell the `●`
+    /// marker was drawn to (SQ-1386) — same shape as the alias marker's own rect publish.
+    #[test]
+    fn notes_marker_publishes_a_hover_rect_at_its_own_cell() {
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_pos(1, (0, 0));
+        g.set_notes(1, "some notes".into());
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        let marker_rects = render_map(&rm, &state, area, &mut buf);
+
+        let (room_id, _, rect) = marker_rects
+            .iter()
+            .find(|(_, kind, _)| matches!(kind, MarkerKind::Notes))
+            .unwrap_or_else(|| panic!("no MarkerKind::Notes rect published: {marker_rects:?}"));
+        assert_eq!(*room_id, 1);
+        assert_eq!((rect.width, rect.height), (1, 1), "the notes marker is a single cell");
+        assert_eq!(buf.cell((rect.x, rect.y)).map(|c| c.symbol()), Some("●"), "the rect covers the '●' glyph itself");
     }
 
     #[test]
@@ -3368,6 +4895,526 @@ mod tests {
         assert!(row3.contains("#7"), "row 3 should show the room id '#7'; got '{row3}'");
     }
 
+    /// SQ-1300: a synthetic (Glulx/name-only) room's box shows its small per-map ORDINAL on row
+    /// 3, not the raw hex id underneath it — `#1` for the first room ever discovered, not
+    /// something like `#8000ABCD`.
+    #[test]
+    fn room_box_shows_ordinal_not_hex_for_a_synthetic_room() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        let alley = crate::roomid::synthetic_room_id("Back Alley");
+        g.upsert_room(alley, "Back Alley".into());
+        g.set_pos(alley, (0, 0));
+        let rm = render(&g);
+        let mut state = AppState::default();
+        state.show_room_numbers = true;
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let row3: String = (1u16..=9)
+            .map(|x| buf.cell((x, 3)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(row3.contains("#1"), "row 3 should show the ordinal '#1'; got '{row3}'");
+        let hex = crate::roomid::display_room_id(alley);
+        assert!(
+            !row3.contains(hex.trim_start_matches('#')),
+            "the raw hex id {hex} must not leak onto the box: '{row3}'"
+        );
+    }
+
+    /// SQ-1257 Phase 3: a room the story has renamed three times over (Lost Pig's gnome tunnels
+    /// are the specimen) draws its CURRENT name with a superscript "³" beside it, never dropping
+    /// the marker to fit. Falsify by reverting `draw_box_room`'s marker branch back to the plain
+    /// `wrap_two`/`center` pair and this fails on the `contains('³')` assertion.
+    #[test]
+    fn room_box_shows_the_superscript_alias_count_beside_the_current_name() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(1, "B".into());
+        g.upsert_room(1, "C".into());
+        g.upsert_room(1, "Cave".into()); // current label "Cave"; aliases A, B, C (3 of them)
+        assert_eq!(g.room(1).unwrap().aliases.len(), 3, "sanity: the fixture really has 3 aliases");
+        g.set_pos(1, (0, 0));
+        let rm = render(&g);
+        let state = AppState::default(); // Boxes zoom
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // Interior rows 1-2, cols 1-9 (box width 11, interior width 9).
+        let interior: String = (1u16..=2)
+            .flat_map(|y| (1u16..=9).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(interior.contains('³'), "the superscript count '³' must appear: {interior:?}");
+        assert!(interior.contains("Cave"), "the current name still appears: {interior:?}");
+        assert!(interior.contains("Cave³"), "the marker sits right after the name: {interior:?}");
+    }
+
+    /// The marker is its own themeable element (`map.room_alias_marker`), not a reuse of the
+    /// room's base colour — so styling it in `style.toml` must actually change what is drawn.
+    #[test]
+    fn room_box_alias_marker_uses_its_own_style_selector() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(1, "Cave".into()); // one alias: "A"
+        g.set_pos(1, (0, 0));
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let (_, _, marker_fg) = (1u16..=9)
+            .flat_map(|x| (1u16..=2).map(move |y| (x, y)))
+            .find_map(|(x, y)| buf.cell((x, y)).filter(|c| c.symbol() == "¹").map(|c| (x, y, c.fg)))
+            .expect("the alias marker glyph '¹' must be drawn somewhere in the box");
+        let marker_selector_fg = state.colors.theme.get("map.room_alias_marker").style.fg;
+        assert_eq!(
+            Some(marker_fg), marker_selector_fg,
+            "the drawn marker's colour must come from the map.room_alias_marker selector"
+        );
+        let room_selector_fg = state.colors.theme.get("map.room").style.fg;
+        assert_ne!(
+            marker_selector_fg, room_selector_fg,
+            "sanity: the two selectors resolve to different defaults, so this test can tell them apart"
+        );
+    }
+
+    /// A SELECTED room's box is painted with the selection background; the alias marker must sit
+    /// on that same ground rather than punching a default-background hole through it (reported
+    /// on Lost Pig's Gnome Room, 2026-09-03). Only the marker's colour is its own.
+    #[test]
+    fn room_box_alias_marker_keeps_the_selected_rooms_background() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(1, "Cave".into()); // one alias: "A"
+        g.set_pos(1, (0, 0));
+        let rm = render(&g);
+        let mut state = AppState::default();
+        state.selected_room = Some(1);
+        // A selection background this test can see (the default theme's `map.room_selected`
+        // sets none), and a marker colour that differs from the selected text's.
+        state.colors.theme = theme_with_overrides(&[
+            ("map.room_selected", Style::new().fg(Color::Black).bg(Color::Yellow)),
+            // The marker selector carries a background of its own — as it does under any
+            // theme whose `muted` role sets one — which is exactly what used to punch
+            // through the selection.
+            ("map.room_alias_marker", Style::new().fg(Color::Red).bg(Color::Black)),
+        ]);
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let (mx, my) = (1u16..=9)
+            .flat_map(|x| (1u16..=2).map(move |y| (x, y)))
+            .find(|&(x, y)| buf.cell((x, y)).is_some_and(|c| c.symbol() == "¹"))
+            .expect("the alias marker glyph '¹' must be drawn somewhere in the box");
+        let marker = buf.cell((mx, my)).unwrap();
+        // The cell just before the marker holds the last letter of the name, drawn in the room's
+        // (selected) style — the marker must share its background and modifiers.
+        let name = buf.cell((mx - 1, my)).unwrap();
+        assert_eq!(name.symbol(), "e", "sanity: the marker rides right after 'Cave'");
+        assert_eq!(marker.bg, name.bg, "the marker keeps the selected room's background");
+        assert_eq!(marker.modifier, name.modifier, "…and its modifiers");
+        assert_eq!(marker.bg, Color::Yellow, "…which is the selection background");
+        assert_eq!(marker.fg, Color::Red, "while its colour stays the marker selector's own");
+    }
+
+    /// SQ-1278: a room that is BOTH current and selected gets `room_style`'s REVERSED
+    /// modifier rather than an explicit background — under reversal the terminal paints `fg`
+    /// as the visible background, so `accent_on` must put the accent colour in `bg`, not `fg`,
+    /// or the marker draws as a dark block with the accent as an invisible background colour.
+    /// Falsify by reverting the `reversed` branch in `accent_on`.
+    #[test]
+    fn room_box_alias_marker_on_a_reversed_current_selected_room_swaps_the_accent_into_bg() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(1, "Cave".into()); // one alias: "A"
+        g.set_pos(1, (0, 0));
+        g.set_current(1);
+        let rm = render(&g);
+        let mut state = AppState::default();
+        state.selected_room = Some(1);
+        state.colors.theme = theme_with_overrides(&[
+            ("map.room_alias_marker", Style::new().fg(Color::Red).bg(Color::Black)),
+        ]);
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let (mx, my) = (1u16..=9)
+            .flat_map(|x| (1u16..=2).map(move |y| (x, y)))
+            .find(|&(x, y)| buf.cell((x, y)).is_some_and(|c| c.symbol() == "¹"))
+            .expect("the alias marker glyph '¹' must be drawn somewhere in the box");
+        let marker = buf.cell((mx, my)).unwrap();
+        let name = buf.cell((mx - 1, my)).unwrap();
+        assert_eq!(name.symbol(), "e", "sanity: the marker rides right after 'Cave'");
+        assert!(
+            name.modifier.contains(Modifier::REVERSED),
+            "sanity: a current+selected room is reversed, not painted with an explicit bg"
+        );
+        assert_eq!(marker.modifier, name.modifier, "the marker keeps the room's own REVERSED modifier");
+        assert_eq!(marker.bg, Color::Red, "the accent colour rides in bg under reversal…");
+        assert_eq!(marker.fg, name.fg, "…so the visible ground (fg, under reversal) is unchanged");
+    }
+
+    // ── SQ-1261: `?` random-exit stubs on the room box ──────────────────────────
+
+    /// A `?` mark with no recorded destinations draws the SOUTH arrowhead on the border — the
+    /// same centre-bottom cell a real south exit's arrowhead would take — and a bare `?` one
+    /// cell beyond it; nothing beyond that (SQ-1275).
+    #[test]
+    fn room_box_draws_a_bare_random_stub_with_no_destinations() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        g.mark_random_exit(1, mapper::direction::Direction::S);
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // Box is 11×5 at (0,0): south's border-centre cell is (5, 4), one cell beyond it (5, 5).
+        let arrow = buf.cell((5u16, 4u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(arrow, state.symbols.arrows.south.to_string(), "the border shows the south arrowhead");
+        let count = buf.cell((5u16, 5u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(count, "?", "bare `?`, no destinations recorded, one cell beyond the arrowhead");
+        // Nothing beyond THAT — no connector, no second glyph.
+        assert!(
+            buf.cell((5u16, 6u16)).map(|c| c.symbol()).unwrap_or(" ").trim().is_empty(),
+            "no connector drawn beyond the mark"
+        );
+    }
+
+    /// A `?` mark with recorded destinations draws the superscript count one cell beyond the
+    /// arrowhead instead of the bare `?`. Falsify by reverting `random_stub_marker` to always
+    /// return `"?"` and this fails.
+    #[test]
+    fn room_box_draws_the_superscript_destination_count_on_the_stub() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.upsert_room(2, "A".into());
+        g.upsert_room(3, "B".into());
+        g.set_pos(1, (0, 0));
+        g.mark_random_exit(1, mapper::direction::Direction::S);
+        g.note_random_destination(1, mapper::direction::Direction::S, 2);
+        g.note_random_destination(1, mapper::direction::Direction::S, 3);
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let arrow = buf.cell((5u16, 4u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(arrow, state.symbols.arrows.south.to_string(), "the border keeps the south arrowhead");
+        let count = buf.cell((5u16, 5u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(count, "²", "the superscript count sits one cell beyond the arrowhead, no bare `?`");
+    }
+
+    /// A diagonal `?` mark's arrowhead lands at the box CORNER — the same cell a diagonal
+    /// departure's arrowhead would take — and its count one cell further along the same row
+    /// (SQ-1275).
+    #[test]
+    fn room_box_draws_a_diagonal_random_stub_at_the_corner() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        g.mark_random_exit(1, mapper::direction::Direction::SE);
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // Box is 11×5 at (0,0): the SE corner is (10, 4); the count cell is (11, 4).
+        let arrow = buf.cell((10u16, 4u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(arrow, state.symbols.arrows.se.to_string(), "the diagonal arrowhead overwrites the rounded corner glyph");
+        let count = buf.cell((11u16, 4u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(count, "?", "the bare `?` sits one cell beyond the corner, along the same row");
+    }
+
+    /// The mark is its own themeable element (`map.room_random_stub`), not a reuse of the room's
+    /// base colour — applies to both the arrowhead and the count cell.
+    #[test]
+    fn room_box_random_stub_uses_its_own_style_selector() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        g.mark_random_exit(1, mapper::direction::Direction::S);
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let stub_selector_fg = state.colors.theme.get("map.room_random_stub").style.fg;
+        let arrow_fg = buf.cell((5u16, 4u16)).map(|c| c.fg);
+        assert_eq!(arrow_fg, stub_selector_fg, "the arrowhead's colour must come from map.room_random_stub");
+        let count_fg = buf.cell((5u16, 5u16)).and_then(|c| (c.symbol() == "?").then_some(c.fg));
+        assert!(count_fg.is_some(), "the count glyph must be drawn");
+        assert_eq!(
+            count_fg,
+            stub_selector_fg,
+            "the count's colour must also come from the map.room_random_stub selector"
+        );
+        let room_selector_fg = state.colors.theme.get("map.room").style.fg;
+        assert_ne!(
+            stub_selector_fg, room_selector_fg,
+            "sanity: the two selectors resolve to different defaults, so this test can tell them apart"
+        );
+    }
+
+    /// `random_stub_cells` (SQ-1275) must match a REAL connector's own geometry for every
+    /// compass direction, in both `diagonal_corners` states: the arrowhead lands exactly on
+    /// `plot_connector`'s `dep_anchor`, and the count cell lands exactly on the connector's own
+    /// first step beyond it (the chain's first cell for a diagonal with the toggle on, else the
+    /// first cell of its perpendicular departure leg). Both are derived independently — the
+    /// stub's own cells via `random_stub_cells`, the real ones by routing an actual edge in the
+    /// same direction on a SIBLING room and reading `render_lane_connectors`'s own plotting
+    /// (`plot_connector`) — so this can only pass if the two genuinely agree. Falsify by
+    /// reverting `random_stub_cells` to hand-rolled positions and this fails on the very first
+    /// direction.
+    #[test]
+    fn random_stub_cells_matches_a_real_connectors_geometry_for_every_direction() {
+        use mapper::direction::Direction;
+        let all_dirs = [
+            Direction::N, Direction::S, Direction::E, Direction::W,
+            Direction::NE, Direction::NW, Direction::SE, Direction::SW,
+        ];
+        for &dir in &all_dirs {
+            for &diag_on in &[true, false] {
+                let mut g = mapper::graph::MapGraph::new();
+                g.upsert_room(1, "A".into());
+                g.upsert_room(2, "B".into());
+                g.set_pos(1, (0, 0));
+                let off = mapper::direction::grid_offset(dir).expect("compass direction");
+                g.set_pos(2, (off.0 * 3, off.1 * 3)); // enough gap for a lane/chain to draw
+                g.add_edge(1, dir, 2);
+
+                let plan = mapper::route::route_lanes(&g);
+                let bounds = ((0.min(off.0 * 3), 0.min(off.1 * 3)), (0.max(off.0 * 3), 0.max(off.1 * 3)));
+                let (cols, rows) = boxes_axes(&plan, bounds);
+                let conn = plan.connectors.iter().find(|c| c.origin == 1).expect("the edge routes");
+
+                let sym = crate::symbols::SymbolSet::default();
+                let diag = diag_on.then_some(&sym.path);
+                let plot = plot_connector(conn, &cols, &rows, diag).expect("plots");
+
+                let (bx, by) = (cols.room_pixel(0), rows.room_pixel(0));
+                let (arrow, count) = random_stub_cells(bx, by, BOX_W, BOX_H, dir).expect("planar direction");
+
+                assert_eq!(
+                    arrow, plot.dep_anchor,
+                    "{dir:?} diagonal_corners={diag_on}: arrowhead must match the real departure anchor"
+                );
+
+                // One expectation for both glyph styles, and for every direction (SQ-1321). The
+                // rooms here are three cells apart, so no diagonal between them is the unbroken
+                // corner-to-corner slope that earns diagonal glyphs: every route is drawn
+                // orthogonally, and its first step beyond the anchor is `plot.cells[1]` whichever
+                // style is on. Before SQ-1321 the diagonal-glyph style chained out of the corner
+                // even here, and this had to read the chain's first cell instead.
+                assert!(
+                    plot.diag_cells.is_empty(),
+                    "{dir:?} diagonal_corners={diag_on}: rooms three cells apart are not \
+                     diagonally adjacent, so nothing here is drawn with diagonal glyphs"
+                );
+                let expected_count = plot
+                    .cells
+                    .get(1)
+                    .map(|(c, _)| *c)
+                    .expect("the connector steps at least one cell beyond its anchor");
+                assert_eq!(
+                    count, expected_count,
+                    "{dir:?} diagonal_corners={diag_on}: count cell must match the connector's own first step"
+                );
+            }
+        }
+    }
+
+    /// SQ-1269 hole 4: `random_stub_pos` has no border/corner cell for Up/Down/In/Out — before
+    /// this, a `?`-marked vertical direction showed nowhere on the box at all, only in the matrix
+    /// and the room panel. It now claims the same fixed anchor a real portal edge in that slot
+    /// would (Up → top-centre, the row 1's slot-0 badge position), themed through the same
+    /// `map.room_random_stub` selector the compass stubs use, while the matrix cell itself is
+    /// unaffected by any of this — `classify` reads the graph, never the render layer.
+    #[test]
+    fn room_box_draws_a_marked_up_exit_beside_the_portal_badge() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        g.mark_random_exit(1, mapper::direction::Direction::Up);
+        g.note_random_destination(1, mapper::direction::Direction::Up, 2);
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // Box is 11×5 at (0,0): slot 0 (Up) is the top-centre cell (5, 0) — the same anchor a
+        // real Up portal badge takes.
+        let sym = buf.cell((5u16, 0u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(sym, "¹", "one recorded destination draws its superscript count, same as a border stub");
+
+        assert_eq!(
+            mapper::matrix::classify(&g, 1, mapper::direction::Direction::Up),
+            mapper::matrix::MatrixCell::Random { destinations: 1 },
+            "the matrix cell is unaffected by where the render layer puts the marker"
+        );
+    }
+
+    // ── SQ-1273: room-box marker hover rects ─────────────────────────────────
+
+    /// The alias-count marker publishes its own hover rect, at exactly the glyph cell it was
+    /// drawn into. Falsify by reverting the `marker_rects.push` in the alias branch of
+    /// `draw_box_room` and this fails on the empty-vec assertion.
+    #[test]
+    fn room_box_alias_marker_publishes_a_hover_rect() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(1, "B".into());
+        g.upsert_room(1, "C".into());
+        g.upsert_room(1, "Cave".into()); // current label "Cave"; 3 aliases
+        g.set_pos(1, (0, 0));
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+
+        // Same scan `room_box_alias_marker_uses_its_own_style_selector` uses to find the glyph.
+        let (mx, my) = (1u16..=9)
+            .flat_map(|x| (1u16..=2).map(move |y| (x, y)))
+            .find(|&(x, y)| buf.cell((x, y)).is_some_and(|c| c.symbol() == "³"))
+            .expect("the alias marker glyph '³' must be drawn somewhere in the box");
+        assert_eq!(
+            markers,
+            vec![(1, MarkerKind::Alias, Rect::new(mx, my, 1, 1))],
+            "exactly one alias-marker rect, at the glyph's own cell: {markers:?}"
+        );
+    }
+
+    /// A compass `?` mark publishes ONE hover rect spanning BOTH cells it draws into — the
+    /// arrowhead and the superscript — so hovering either resolves the tooltip (SQ-1275).
+    #[test]
+    fn room_box_random_stub_publishes_a_hover_rect() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.upsert_room(2, "A".into());
+        g.upsert_room(3, "B".into());
+        g.set_pos(1, (0, 0));
+        g.mark_random_exit(1, mapper::direction::Direction::E);
+        g.note_random_destination(1, mapper::direction::Direction::E, 2);
+        g.note_random_destination(1, mapper::direction::Direction::E, 3);
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+
+        // East's border-centre cell on an 11×5 box at (0,0) is (10, 2); the count cell is (11, 2).
+        assert_eq!(
+            markers,
+            vec![(1, MarkerKind::Random(mapper::direction::Direction::E), Rect::new(10, 2, 2, 1))],
+            "{markers:?}"
+        );
+    }
+
+    /// A `?`-marked Up exit publishes its hover rect at the portal-badge anchor it shares with a
+    /// real Up passage (SQ-1269 hole 4).
+    #[test]
+    fn room_box_marked_up_exit_publishes_a_hover_rect_beside_the_portal_badge() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        g.mark_random_exit(1, mapper::direction::Direction::Up);
+        g.note_random_destination(1, mapper::direction::Direction::Up, 2);
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+
+        // Slot 0 (Up) is the top-centre cell (5, 0) on an 11×5 box at (0,0).
+        assert_eq!(
+            markers,
+            vec![(1, MarkerKind::Random(mapper::direction::Direction::Up), Rect::new(5, 0, 1, 1))],
+            "{markers:?}"
+        );
+    }
+
+    /// A room with no alias and no random-exit mark publishes no marker rects at all.
+    #[test]
+    fn room_box_with_no_markers_publishes_no_hover_rects() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Plain Room".into());
+        g.set_pos(1, (0, 0));
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+        assert!(markers.is_empty(), "{markers:?}");
+    }
+
+    /// Markers exist only at Boxes zoom: the same aliased room at Compact zoom draws no
+    /// superscript at all, and so publishes no hover rect for one.
+    #[test]
+    fn compact_zoom_publishes_no_marker_rects_even_for_an_aliased_room() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(1, "Cave".into());
+        g.set_pos(1, (0, 0));
+        let rm = render(&g);
+        let mut state = AppState::default();
+        state.zoom = Zoom::Compact;
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+        assert!(markers.is_empty(), "{markers:?}");
+    }
+
+    /// A direction that carries BOTH a real edge and a stale random mark (a hand-edited or
+    /// pre-upgrade map file — never produced by ordinary play) draws the real edge's line, never
+    /// the stub — [`mapper::render::RenderRoom::random_stubs`] already filters this out, and this
+    /// pins the drawn consequence.
+    #[test]
+    fn room_box_a_real_edge_wins_the_border_slot_over_a_stale_random_mark() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 1)); // south of room 1
+        g.add_edge(1, mapper::direction::Direction::S, 2);
+        g.mark_random_exit(1, mapper::direction::Direction::S); // stale/hand-edited
+        let rm = render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let sym = buf.cell((5u16, 4u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_ne!(sym, "?", "the real edge's arrowhead wins the slot, not the stub: got {sym:?}");
+    }
+
     // connector_has_corner_glyph: removed — called build_connector_mask which is gone;
     // superseded by new tests in Task 4.
 
@@ -3430,6 +5477,13 @@ mod tests {
         g.set_pos(1, (0, 1));
         g.set_pos(2, (1, 0));
         g.add_edge(1, Direction::NE, 2);
+        // SQ-1274: a one-way diagonal never keeps the shared corner any more (an arrival there
+        // would misread as a return path that isn't real) — only a reciprocal, which IS the
+        // return path, still draws the clean corner-to-corner diagonal this fixture's callers
+        // test. Reciprocal here so `diagonal_corners_on_draws_an_unbroken_corner_to_corner_diagonal`
+        // still exercises that glyph chain; the departure-corner assertions the other two callers
+        // make are unaffected either way.
+        g.add_edge(2, Direction::SW, 1);
         g
     }
 
@@ -3617,25 +5671,34 @@ mod tests {
         }
     }
 
+    /// **Which passages are drawn with diagonal glyphs, over all 64 direction pairs** — the whole
+    /// matrix in one case, so the answer can never be inferred from the adjacent NE example alone.
+    ///
+    /// SQ-0314 asked for a half-diagonal wherever EITHER end of a connector was diagonal, and three
+    /// separate faults each silenced a slice of that matrix — `direct_route` anchoring both ends
+    /// with `exit_point` and knowing nothing of corners; `pure_diagonal` testing only the arrival,
+    /// so a cardinal exit took the pure branch with an empty chain; a route wrapping around its
+    /// destination into a channel outside the rooms' bounds, where the diagonal's gutter floor was
+    /// dropped (see `span_over`).
+    ///
+    /// **SQ-1321 narrows the rule to what a diagonal glyph can honestly say.** A connector is drawn
+    /// with half-diagonals only when it is one unbroken corner-to-corner slope, which between two
+    /// adjacent rooms means exactly the four true-reciprocal diagonal pairs — NE↔SW, SW↔NE, NW↔SE,
+    /// SE↔NW, the shape of Zork I's `North of House ↔ Behind House`. Every other pairing here is
+    /// cardinally adjacent, or pairs a diagonal with something that is not its opposite, and the
+    /// route between them bends: it keeps its corner ANCHOR and is drawn orthogonally, exactly as
+    /// the `diagonal_corners = false` style draws it. The user's reading, on the partial chains
+    /// this replaces: "the partial diagonal lines look pretty ugly anyhow".
+    ///
+    /// The three faults above are still pinned, from the other side — each of them made one of
+    /// these four pairs lose its diagonal, so a regression to any of them fails here as an ABSENCE
+    /// rather than as an extra.
     #[test]
-    fn every_diagonal_direction_pair_actually_draws_a_diagonal() {
-        // SQ-0314: sweep all 64 reciprocal direction pairs between two adjacent rooms. If EITHER
-        // end of the connector is diagonal, the render must contain at least one half-diagonal —
-        // the corner is the whole point of the feature, and a diagonal that quietly degrades into
-        // an orthogonal dogleg is the bug this pins.
-        //
-        // Three separate faults each used to silence a slice of this matrix, and none of them were
-        // visible from the adjacent NE case alone:
-        //   * `direct_route` anchors both ends with `exit_point` and knows nothing of corners, so a
-        //     cardinal-out/diagonal-back pair (E out, NW back) never got a corner route at all.
-        //   * `pure_diagonal` only checked the ARRIVAL, so a cardinal exit took the pure branch
-        //     with an empty chain and suppressed the arrival diagonal too.
-        //   * a route that wraps around its destination uses a channel OUTSIDE the rooms' bounds,
-        //     where the diagonal's gutter floor was silently dropped (see `span_over`).
+    fn only_a_corner_to_corner_diagonal_pair_draws_diagonal_glyphs() {
         use Direction::*;
         let dirs = [N, S, E, W, NE, NW, SE, SW];
         let area = Rect::new(0, 0, 120, 40);
-        let mut missing = Vec::new();
+        let mut drawn = Vec::new();
         for d1 in dirs {
             for d2 in dirs {
                 let off = mapper::direction::grid_offset(d1).expect("compass dirs have an offset");
@@ -3653,18 +5716,93 @@ mod tests {
                 state.symbols.diagonal_corners = true;
                 let mut buf = Buffer::empty(area);
                 render_map(&rm, &state, area, &mut buf);
-                let drew = count_diag_glyphs(&buf, area) > 0;
-                let wants = mapper::direction::is_diagonal(d1) || mapper::direction::is_diagonal(d2);
-                if wants && !drew {
-                    missing.push(format!("{d1:?}<->{d2:?}"));
+                if count_diag_glyphs(&buf, area) > 0 {
+                    drawn.push(format!("{d1:?}<->{d2:?}"));
                 }
-                // And the converse: a pair with no diagonal end must not sprout one.
-                if !wants {
-                    assert!(!drew, "{d1:?}<->{d2:?} has no diagonal end but drew a half-diagonal");
-                }
+                // The corner ANCHOR is not what changed: a diagonal end still departs (or arrives
+                // on) the box corner however the line between is drawn, which is what tells the
+                // reader the passage is a diagonal at all. Assert it on the plan, where the glyph
+                // style cannot reach.
+                let corner_ends = rm.plan.connectors.iter().any(|c| {
+                    mapper::direction::is_diagonal(c.exit_dir) || c.entry_corner.is_some()
+                });
+                assert_eq!(
+                    corner_ends,
+                    mapper::direction::is_diagonal(d1) || mapper::direction::is_diagonal(d2),
+                    "{d1:?}<->{d2:?}: a diagonal end must keep its corner anchor",
+                );
             }
         }
-        assert!(missing.is_empty(), "these pairs lost their diagonal: {missing:?}");
+        assert_eq!(
+            drawn,
+            ["NE<->SW", "NW<->SE", "SE<->NW", "SW<->NE"],
+            "only a true-reciprocal diagonal between diagonally-adjacent rooms is drawn diagonally",
+        );
+    }
+
+    /// **A diagonal that is not corner-to-corner keeps its corner but loses its glyphs** (SQ-1321).
+    ///
+    /// Two rooms two cells apart on the true diagonal: the passage is still a diagonal, and still
+    /// departs from — and arrives on — the box CORNER, which is what tells the reader so. What it
+    /// no longer does is start off as a slope and turn orthogonal partway, which is the "partial
+    /// diagonal" the user asked to be rid of. With the glyph style on it draws exactly what the
+    /// style-off render draws, cell for cell.
+    #[test]
+    fn a_diagonal_two_cells_away_keeps_its_corner_and_drops_its_glyphs() {
+        let mut g = mapper::graph::MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 2));
+        g.set_pos(2, (2, 0)); // two cells north-east: on the diagonal, but not adjacent
+        g.add_edge(1, Direction::NE, 2);
+        g.add_edge(2, Direction::SW, 1);
+        let rm = mapper::render::render(&g);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let conn = rm.plan.connectors.iter().find(|c| c.origin == 1).expect("the pair routes");
+        let glyphs = crate::symbols::SymbolSet::default().path;
+        let on = plot_connector(conn, &cols, &rows, Some(&glyphs)).expect("plots with glyphs");
+        let off = plot_connector(conn, &cols, &rows, None).expect("plots without");
+
+        assert!(on.diag_cells.is_empty(), "no half-diagonal is drawn: {:?}", on.diag_cells);
+        assert_eq!(
+            on.dep_anchor,
+            corner_anchor(&cols, &rows, (0, 2), Direction::NE),
+            "it still departs from R1's north-east CORNER",
+        );
+        assert_eq!(
+            conn.entry_corner,
+            Some(Direction::SW),
+            "and still arrives on R2's south-west corner",
+        );
+        assert_eq!(
+            on.arr_anchor,
+            corner_anchor(&cols, &rows, (2, 0), Direction::SW),
+            "…on that corner's own cell",
+        );
+        assert_eq!(on.cells, off.cells, "the glyph style picks glyphs, never geometry");
+        assert_eq!(on.path, off.path, "…and the vector reading is the same polyline");
+
+        // The falsifier for the pair above: the ADJACENT version of the same passage does draw a
+        // slope, so this case is measuring the distance and not some unrelated suppression.
+        let mut adj = mapper::graph::MapGraph::new();
+        adj.upsert_room(1, "R1".into());
+        adj.upsert_room(2, "R2".into());
+        adj.set_pos(1, (0, 1));
+        adj.set_pos(2, (1, 0));
+        adj.add_edge(1, Direction::NE, 2);
+        adj.add_edge(2, Direction::SW, 1);
+        let rm2 = mapper::render::render(&adj);
+        let (c2, r2) = boxes_axes(&rm2.plan, rm2.bounds);
+        let conn2 = rm2.plan.connectors.iter().find(|c| c.origin == 1).expect("routes");
+        let on2 = plot_connector(conn2, &c2, &r2, Some(&glyphs)).expect("plots");
+        assert!(!on2.diag_cells.is_empty(), "diagonally ADJACENT, so it is drawn as a slope");
+        // And that slope is nothing but half-diagonals: a pure run, no orthogonal fill.
+        let halves = [glyphs.diag_ul, glyphs.diag_ur, glyphs.diag_ll, glyphs.diag_lr];
+        assert!(
+            on2.diag_cells.iter().all(|(_, ch)| halves.contains(ch)),
+            "every cell of a pure slope is a half-diagonal: {:?}",
+            on2.diag_cells,
+        );
     }
 
     #[test]
@@ -3828,12 +5966,130 @@ mod tests {
         );
     }
 
+    // ── SQ-1277: guard a Ghostty Nerd Font arrowhead against 2-cell spill ────────
+
+    #[test]
+    fn guard_symbol_spill_replaces_a_plain_space_with_nbsp() {
+        let area = Rect::new(0, 0, 10, 5);
+        let mut buf = Buffer::empty(area);
+        buf.cell_mut((1u16, 0u16)).unwrap().set_symbol(" ");
+        guard_symbol_spill(&mut buf, 0, 0, area);
+        assert_eq!(buf.cell((1u16, 0u16)).unwrap().symbol(), "\u{a0}", "a plain space becomes NBSP");
+    }
+
+    #[test]
+    fn guard_symbol_spill_leaves_a_non_space_glyph_untouched() {
+        let area = Rect::new(0, 0, 10, 5);
+        let mut buf = Buffer::empty(area);
+        buf.cell_mut((1u16, 0u16)).unwrap().set_symbol("─");
+        guard_symbol_spill(&mut buf, 0, 0, area);
+        assert_eq!(buf.cell((1u16, 0u16)).unwrap().symbol(), "─", "a real connector glyph is left alone");
+    }
+
+    #[test]
+    fn guard_symbol_spill_does_nothing_past_the_edge_of_area() {
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        // (1, 0) is outside a 1-wide area — must not panic, must not touch anything in area.
+        guard_symbol_spill(&mut buf, 0, 0, area);
+        assert_eq!(buf.cell((0u16, 0u16)).unwrap().symbol(), " ");
+    }
+
+    /// A real WEST-departing connector, room label shorter than the box interior: the
+    /// second wrapped name line is centred, padding it with a plain space right after the
+    /// west border — the exact Ghostty spill case SQ-1277 fixes. Falsify by removing the
+    /// `guard_symbol_spill` call in `draw_connector_arrows`.
+    #[test]
+    fn west_arrowhead_with_a_short_label_gets_the_nbsp_guard() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Cave".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (1, 0));
+        g.set_pos(2, (0, 0));
+        g.add_edge(1, Direction::W, 2);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let west = state.symbols.arrows.west.to_string();
+        let (ax, ay) = (0..area.width)
+            .flat_map(|x| (0..area.height).map(move |y| (x, y)))
+            .find(|&(x, y)| buf.cell((x, y)).is_some_and(|c| c.symbol() == west))
+            .expect("the west arrowhead is drawn somewhere");
+        assert_eq!(
+            buf.cell((ax + 1, ay)).unwrap().symbol(), "\u{a0}",
+            "the interior padding cell right of the arrowhead is NBSP"
+        );
+    }
+
+    /// The same shape, but the label fills the SECOND wrapped line exactly (no padding to its
+    /// left): the interior cell right of the arrowhead keeps its letter, untouched.
+    #[test]
+    fn west_arrowhead_with_a_label_filling_the_interior_keeps_its_letter() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        // 9-char first word fills line 1 exactly; 9-char second word fills line 2 exactly
+        // (interior width is 9 on an 11-wide box) — centred with zero left padding.
+        g.upsert_room(1, "AAAAAAAAA BBBBBBBBB".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (1, 0));
+        g.set_pos(2, (0, 0));
+        g.add_edge(1, Direction::W, 2);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let west = state.symbols.arrows.west.to_string();
+        let (ax, ay) = (0..area.width)
+            .flat_map(|x| (0..area.height).map(move |y| (x, y)))
+            .find(|&(x, y)| buf.cell((x, y)).is_some_and(|c| c.symbol() == west))
+            .expect("the west arrowhead is drawn somewhere");
+        assert_eq!(
+            buf.cell((ax + 1, ay)).unwrap().symbol(), "B",
+            "the label's own letter is left alone"
+        );
+    }
+
+    /// A real EAST-departing connector's own line always occupies the doorway cell right of
+    /// its arrowhead (`attach_bridge`'s perpendicular leg), so `guard_symbol_spill` must never
+    /// touch it — the guard only ever fires on a cell that is genuinely blank.
+    #[test]
+    fn east_arrowhead_followed_by_a_real_connector_glyph_is_untouched() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let east = state.symbols.arrows.east.to_string();
+        let (ax, ay) = (0..area.width)
+            .flat_map(|x| (0..area.height).map(move |y| (x, y)))
+            .find(|&(x, y)| buf.cell((x, y)).is_some_and(|c| c.symbol() == east))
+            .expect("the east arrowhead is drawn somewhere");
+        let next = buf.cell((ax + 1, ay)).unwrap().symbol().to_string();
+        assert_ne!(next, "\u{a0}", "a real connector's own line art must never be replaced: got {next:?}");
+        assert_ne!(next, " ", "sanity: the departure gutter is not blank either");
+    }
+
     #[test]
     fn arrowhead_at_departure_side() {
         // room1(0,0) →E→ room2(1,0): a filled ▶ arrowhead marks the outgoing east departure
         // EMBEDDED IN room1's right border. The box is 11 wide at x=0, so the right border is
         // column 10; the vertical-centre row is 2. The arrow replaces that border │ at (10,2),
-        // drawn fg Cyan (no bg ribbon). The line then continues perpendicular out (col 11+).
+        // drawn fg Blue — the accent role's default (SQ-1531; was Cyan) — with no bg ribbon.
+        // The line then continues perpendicular out (col 11+).
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -3849,8 +6105,8 @@ mod tests {
 
         let cell = buf.cell((10, 2)).expect("arrow cell must exist");
         assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ embedded in room1's right border");
-        assert_eq!(cell.fg, Color::Cyan, "arrowhead fg should be Cyan; got {:?}", cell.fg);
-        assert_ne!(cell.bg, Color::Cyan, "arrowhead must not sit on a solid ribbon");
+        assert_eq!(cell.fg, Color::Blue, "arrowhead fg should be Blue (accent); got {:?}", cell.fg);
+        assert_ne!(cell.bg, Color::Blue, "arrowhead must not sit on a solid ribbon");
         // No hollow arrowhead is ever drawn.
         let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
         assert!(!has_hollow, "hollow arrowheads must not appear");
@@ -4098,6 +6354,11 @@ mod tests {
     /// same-pair edge reaches the merge-stub path at all and the collapse cannot recur.
     #[test]
     fn an_extra_same_pair_edge_never_becomes_a_collapsible_merge_stub() {
+        // S and E both leave room 1 for room 2 — an SQ-1276 stacked group in its own right, on
+        // top of the SQ-0522/SQ-0689 reciprocal-pairing question this test otherwise probes: S
+        // is now suppressed from routing at the SOURCE (mapper's `collapse_stacked_exits`, which
+        // runs before `select_shared_paths` ever sees the pair), not recorded as a router
+        // `secondary_exit` badge the way an unrelated collapse would be.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -4113,7 +6374,16 @@ mod tests {
         assert_eq!(rm.plan.connectors.len(), 1, "one line for the pair");
         assert!(rm.plan.connectors.iter().all(|c| !c.merge), "and no merge stub to collapse");
         assert_eq!(rm.plan.connectors[0].exit_dir, Direction::S, "the reciprocal S/N pairing wins");
-        assert_eq!(rm.plan.connectors[0].secondary_exit, vec![Direction::E], "E recorded, not drawn");
+        assert!(
+            rm.plan.connectors[0].secondary_exit.is_empty(),
+            "E never reaches select_shared_paths at all now — collapse_stacked_exits already removed it",
+        );
+        let r1 = rm.rooms.iter().find(|r| r.id == 1).unwrap();
+        assert_eq!(
+            r1.stacked_exits,
+            vec![mapper::render::StackedExit { primary: Direction::S, dest: 2, secondary: vec![Direction::E] }],
+            "E is recorded as a stacked secondary instead",
+        );
     }
     #[test]
     fn reciprocal_pairing_outranks_the_edge_order() {
@@ -4135,9 +6405,16 @@ mod tests {
             (Direction::E, Some(Direction::W)),
             "W held the line despite being added last, so the passage runs straight"
         );
-        let mut secs = c.secondary_entry.clone();
+        // SQ-1276 supersedes the router's own `secondary_entry` recording for this shape: N and
+        // S are a stacked group with W (all three lead 239→77), collapsed at the SOURCE before
+        // `select_shared_paths` ever sees the pair.
+        assert!(c.secondary_entry.is_empty(), "N and S never reach select_shared_paths");
+        let r239 = rm.rooms.iter().find(|r| r.id == 239).unwrap();
+        assert_eq!(r239.stacked_exits.len(), 1);
+        assert_eq!(r239.stacked_exits[0].primary, Direction::W, "W bearing-matches the actual, adjacent position");
+        let mut secs = r239.stacked_exits[0].secondary.clone();
         secs.sort_by_key(|d| format!("{d:?}"));
-        assert_eq!(secs, vec![Direction::N, Direction::S], "the extras are recorded, not drawn");
+        assert_eq!(secs, vec![Direction::N, Direction::S], "the extras are recorded as stacked secondaries instead");
     }
     #[test]
     fn four_passages_between_two_rooms_draw_one_line() {
@@ -4200,7 +6477,7 @@ mod tests {
         use Direction::*;
         let mut g = MapGraph::new();
         for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
-            g.upsert_room(id, "r".into());
+            g.upsert_room(id.into(), "r".into());
         }
         for (o, d, dst) in [
             (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
@@ -4213,9 +6490,18 @@ mod tests {
             (239,W,77),(81,N,75),(25,Down,26),
         ] { g.add_edge(o, d, dst); }
         mapper::layout::relayout_auto(&mut g);
-        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        let p = |g: &MapGraph, id: u16| g.room(id.into()).unwrap().pos.unwrap();
         assert_eq!(p(&g,26).0, p(&g,27).0, "precondition: relayout column-aligns the 26↔27 up/down lane");
         cleanup_overlaps(&mut g, 3, 40);
+        // SQ-1274: `74 E 25` (one-way, no back edge, geometrically NE of 74 so its direct route
+        // lands on 25's BOTTOM door) shares that door with `26 Up 25`'s reciprocal Up/Down pair —
+        // and once the one-way is barred from centering there (see `assign_side_slots`), NO offset
+        // slot the arrival alone can take clears the resulting overlap: the reciprocal's own
+        // approach and the arrival's bent one cross somewhere in the shared gutter for every slot
+        // the arrival tries, on this dense 18-room fixture. `assign_side_slots` resolves it by
+        // nesting BOTH sides of that one pairing away from center instead of parking the reciprocal
+        // dead-center for the arrival's bent approach to sweep past (see its
+        // `nest_reciprocal_too` comment) — clean at zero illegal overlaps again.
         assert_eq!(render_overlap_stats(&g).0, 0,
             "cleanup clears all illegal overlaps (SQ-0222 clean routing) while protecting the up/down column");
         assert_eq!(p(&g,26).0, p(&g,27).0,
@@ -4241,7 +6527,7 @@ mod tests {
         use Direction::*;
         let mut g = MapGraph::new();
         for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
-            g.upsert_room(id, "r".into());
+            g.upsert_room(id.into(), "r".into());
         }
         for (o, d, dst) in [
             (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
@@ -4256,9 +6542,12 @@ mod tests {
         mapper::layout::relayout_auto(&mut g);
         cleanup_overlaps(&mut g, 3, 40);
         repair_directional_hints(&mut g, 3, 40);
-        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        let p = |g: &MapGraph, id: u16| g.room(id.into()).unwrap().pos.unwrap();
         assert!(p(&g,78).0 < p(&g,180).0,
             "retidy must place 78 west of 180: 78={:?} 180={:?}", p(&g,78), p(&g,180));
+        // SQ-1274: this is the same A129 fixture as `cleanup_keeps_updown_protected_column_chain_
+        // aligned`, which carries the full diagnosis of the `74 E 25` vs `26 Up 25` shape
+        // `assign_side_slots` resolves by nesting both sides of that pairing away from center.
         assert_eq!(render_overlap_stats(&g).0, 0,
             "repair keeps all illegal overlaps cleared (SQ-0222 clean routing)");
         assert_eq!(p(&g,26).0, p(&g,27).0,
@@ -4393,7 +6682,7 @@ mod tests {
         use Direction::*;
         let mut g = MapGraph::new();
         for id in [1u16, 2, 3, 4, 5] {
-            g.upsert_room(id, "r".into());
+            g.upsert_room(id.into(), "r".into());
         }
         // 1<->2 reciprocal N/S (1 N->2, 2 S->1): column chain.
         g.add_edge(1, N, 2);
@@ -4423,13 +6712,16 @@ mod tests {
         // 74<->76 (74 S->76, 76 N->74) shares a column after relayout; WITHOUT the lock, cleanup's
         // greedy search shifts the (then-unprotected) 76 one column WEST to cut crossings, breaking
         // the reciprocal (verified: 76 moves from x=-1 to x=-2). WITH the lock, 76 can only move in
-        // Y, so it stays on 74's column. All illegal overlaps clear (SQ-0222 clean routing) with the
-        // reciprocal pair still column-locked — the lock constrains 76 without leaving any residual.
+        // Y, so it stays on 74's column.
+        //
+        // SQ-1274: same fixture as `cleanup_keeps_updown_protected_column_chain_aligned`, whose
+        // comment carries the full diagnosis of the `74 E 25` vs `26 Up 25` shape
+        // `assign_side_slots` resolves. The lock still constrains 76 correctly.
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
         for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
-            g.upsert_room(id, "r".into());
+            g.upsert_room(id.into(), "r".into());
         }
         for (o, d, dst) in [
             (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
@@ -4442,13 +6734,14 @@ mod tests {
             (239,W,77),(81,N,75),(25,Down,26),
         ] { g.add_edge(o, d, dst); }
         mapper::layout::relayout_auto(&mut g);
-        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        let p = |g: &MapGraph, id: u16| g.room(id.into()).unwrap().pos.unwrap();
         assert_eq!(p(&g,74).0, p(&g,76).0, "precondition: relayout column-aligns the 74<->76 reciprocal N/S pair");
         cleanup_overlaps(&mut g, 3, 40);
         assert_eq!(p(&g,74).0, p(&g,76).0,
             "76 must stay on 74's column after cleanup (reciprocal N/S locked): 74={:?} 76={:?}", p(&g,74), p(&g,76));
         assert!(p(&g,76).1 > p(&g,74).1, "76 stays south of 74 (only slid along the shared column, if at all)");
-        assert_eq!(render_overlap_stats(&g).0, 0, "all illegal overlaps clear (SQ-0222) with the reciprocal N/S pair still locked");
+        assert_eq!(render_overlap_stats(&g).0, 0,
+            "all illegal overlaps clear (SQ-0222) with the reciprocal N/S pair still locked");
     }
 
     #[test]
@@ -4464,7 +6757,7 @@ mod tests {
         use Direction::*;
         let mut g = MapGraph::new();
         for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
-            g.upsert_room(id, "r".into());
+            g.upsert_room(id.into(), "r".into());
         }
         for (o, d, dst) in [
             (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
@@ -4477,7 +6770,7 @@ mod tests {
             (239,W,77),(81,N,75),(25,Down,26),
         ] { g.add_edge(o, d, dst); }
         mapper::layout::relayout_auto(&mut g);
-        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        let p = |g: &MapGraph, id: u16| g.room(id.into()).unwrap().pos.unwrap();
         let ew_row = [74u16, 79, 203, 193];
         let r0 = p(&g, 74).1;
         assert!(ew_row.iter().all(|&id| p(&g, id).1 == r0),
@@ -4494,7 +6787,7 @@ mod tests {
     fn compact_collapses_empty_interior_column_and_row() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
-        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        for id in [1u16, 2, 3] { g.upsert_room(id.into(), "r".into()); }
         g.set_pos(1, (0, 0));
         g.set_pos(2, (2, 0)); // empty column at x=1
         g.set_pos(3, (0, 2)); // empty row at y=1
@@ -4526,7 +6819,7 @@ mod tests {
         use Direction::*;
         let mut g = MapGraph::new();
         for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
-            g.upsert_room(id, "r".into());
+            g.upsert_room(id.into(), "r".into());
         }
         for (o, d, dst) in [
             (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
@@ -4542,10 +6835,13 @@ mod tests {
         cleanup_overlaps(&mut g, 3, 40);
         repair_directional_hints(&mut g, 3, 40);
         compact_empty_lines(&mut g);
-        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        let p = |g: &MapGraph, id: u16| g.room(id.into()).unwrap().pos.unwrap();
         assert!(p(&g,78).0 < p(&g,180).0, "78 stays west of 180 through compaction");
         assert_eq!(p(&g,26).0, p(&g,27).0, "26↔27 up/down column stays aligned through compaction");
         assert_eq!(p(&g,74).0, p(&g,76).0, "reciprocal N/S pair 74<->76 stays column-locked through compaction");
+        // SQ-1274: same A129 fixture as `cleanup_keeps_updown_protected_column_chain_aligned`,
+        // which carries the full diagnosis of the `74 E 25` vs `26 Up 25` shape
+        // `assign_side_slots` resolves.
         assert_eq!(render_overlap_stats(&g).0, 0,
             "compaction introduces no illegal overlap (SQ-0222 clean routing keeps the cluster clear)");
         // Compaction must leave only GUTTER lines — an empty interior column/row remains only when
@@ -4583,7 +6879,7 @@ mod tests {
         use mapper::layout::relayout_auto;
         let build = || {
             let mut g = MapGraph::new();
-            for id in [1u16, 2, 3, 4, 5] { g.upsert_room(id, "r".into()); }
+            for id in [1u16, 2, 3, 4, 5] { g.upsert_room(id.into(), "r".into()); }
             g.add_edge(1, Direction::E, 2);
             g.add_edge(2, Direction::N, 3);
             g.add_edge(3, Direction::W, 4);
@@ -4638,7 +6934,7 @@ mod tests {
         use mapper::layout::relayout_auto;
         let build = || {
             let mut g = MapGraph::new();
-            for id in [1u16, 2, 3, 4, 5] { g.upsert_room(id, "r".into()); }
+            for id in [1u16, 2, 3, 4, 5] { g.upsert_room(id.into(), "r".into()); }
             g.add_edge(1, Direction::E, 2);
             g.add_edge(2, Direction::N, 3);
             g.add_edge(3, Direction::W, 4);
@@ -4810,19 +7106,21 @@ mod tests {
     }
 
     #[test]
-    fn portal_icon_up_no_longer_shifts_notes_marker() {
-        // The Up icon used to claim the same interior cell as the notes marker (upper-right
-        // corner), forcing the marker to shift one cell left. Now Up shows its glyph on the
-        // connector's border anchor instead, so the interior cell is free and the notes marker
-        // stays in its normal (unshifted) spot.
+    fn portal_icons_do_not_shift_notes_marker() {
+        // Up and Down both show their glyph on the connector's own border anchor rather than
+        // an interior cell (see `draw_portal_icons`'s doc comment), so the notes marker — now
+        // in the bottom-right interior corner (SQ-1388) — never has to shift for either of them.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
         g.upsert_room(2, "Attic".into());
+        g.upsert_room(3, "Cellar".into());
         g.set_pos(1, (0, 0));
         g.set_pos(2, (0, -1));
+        g.set_pos(3, (0, 1));
         g.set_notes(1, "stuff".into());
         g.add_edge(1, Direction::Up, 2);
+        g.add_edge(1, Direction::Down, 3);
         let rm = render(&g);
         let mut state = AppState::default();
         state.show_room_numbers = true; // right-column layout requires numbers shown
@@ -4830,8 +7128,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
         let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
-        assert_eq!(sym(9, 1), "●", "notes marker stays put; the interior up icon is gone");
-        assert_eq!(sym(5, 0), "↑", "up glyph now appears on the top border centre");
+        assert_eq!(sym(9, 3), "●", "notes marker sits unshifted in the bottom-right corner");
+        assert_eq!(sym(5, 0), "↑", "up glyph on the top border centre");
+        assert_eq!(sym(5, 4), "↓", "down glyph on the bottom border centre");
+        // And the id row still reads, clipped clear of the marker's reserved column (col 9).
+        let row3: String = (1..=8).map(|x| sym(x, 3)).collect();
+        assert!(row3.contains('#'), "room id still shows on row 3: {row3:?}");
     }
 
     #[test]
@@ -5013,7 +7315,15 @@ mod tests {
         let rm = render(&g);
         assert_eq!(rm.plan.connectors.len(), 1, "one line for the pair, whatever the directions");
         assert_eq!(rm.plan.connectors[0].exit_dir, Direction::N, "N outranks Up");
-        assert_eq!(rm.plan.connectors[0].secondary_exit, vec![Direction::Up], "Up is recorded, not drawn");
+        // SQ-1276 supersedes the second half of this pin: N+Up to the same destination is now a
+        // STACKED group, suppressed at the source (mapper's `collapse_stacked_exits`) before
+        // `select_shared_paths` ever sees the pair — so there is nothing left for it to record.
+        assert!(rm.plan.connectors[0].secondary_exit.is_empty(), "Up never reaches select_shared_paths");
+        let r1 = rm.rooms.iter().find(|r| r.id == 1).unwrap();
+        assert_eq!(
+            r1.stacked_exits,
+            vec![mapper::render::StackedExit { primary: Direction::N, dest: 2, secondary: vec![Direction::Up] }],
+        );
 
         let mut st = AppState::default();
         st.scroll = rm.bounds.0;
@@ -5022,12 +7332,12 @@ mod tests {
         render_map(&rm, &st, area, &mut buf);
         let dotted = buf.content.iter().filter(|c| matches!(c.symbol(), "\u{250a}" | "\u{2504}")).count();
         assert_eq!(dotted, 0, "no second, dotted line for the passage that lost");
-        // SQ-0689 flips the second half of this pin: the collapsed staircase used to leave no
-        // icon either ("an icon has no line to follow"), which made a real, known Up passage
-        // invisible — Zork's Chasm. It now stamps its portal glyph beside the shared line's
-        // anchor, ON the line it follows.
+        // SQ-1373: Up still draws no SECOND LINE of its own, but it is no longer invisible — it
+        // queues the same portal-badge marker `RoutedConnector::secondary_exit` gets when the
+        // ROUTER folds a passage (SQ-0689), on the border of the room it departs from (room 1,
+        // the same border N's own arrowhead sits on — the pair share one departure room).
         let ups = buf.content.iter().filter(|c| c.symbol() == "\u{2191}").count();
-        assert_eq!(ups, 1, "the collapsed staircase stamps its ↑ beside the shared line");
+        assert_eq!(ups, 1, "the stacked Up direction keeps its own portal-badge marker");
     }
 
     /// SQ-0689, the Zork1 Chasm shape exactly: the winning connector's origin is the OTHER room,
@@ -5465,6 +7775,7 @@ mod tests {
 
         let room = RenderRoom {
             id: 1,
+            ordinal: 1,
             cell: (0, 0),
             label: "Test".into(),
             is_current: true,
@@ -5472,6 +7783,10 @@ mod tests {
             self_loops: Vec::new(),
             has_notes: false,
             align_code: String::new(),
+            alias_count: 0,
+            random_stubs: Vec::new(),
+            stacked_exits: Vec::new(),
+            ghost: None,
         };
 
         let mut state = AppState::default();
@@ -5499,6 +7814,7 @@ mod tests {
 
         let room = RenderRoom {
             id: 2,
+            ordinal: 2,
             cell: (0, 0),
             label: "Test".into(),
             is_current: true,
@@ -5506,6 +7822,10 @@ mod tests {
             self_loops: Vec::new(),
             has_notes: false,
             align_code: String::new(),
+            alias_count: 0,
+            random_stubs: Vec::new(),
+            stacked_exits: Vec::new(),
+            ghost: None,
         };
 
         let mut state = AppState::default();
@@ -5523,6 +7843,7 @@ mod tests {
 
         let room = RenderRoom {
             id: 3,
+            ordinal: 3,
             cell: (0, 0),
             label: "Test".into(),
             is_current: false,
@@ -5530,6 +7851,10 @@ mod tests {
             self_loops: Vec::new(),
             has_notes: false,
             align_code: String::new(),
+            alias_count: 0,
+            random_stubs: Vec::new(),
+            stacked_exits: Vec::new(),
+            ghost: None,
         };
 
         let mut state = AppState::default();
@@ -5562,9 +7887,9 @@ mod tests {
         assert_eq!(buf.cell((5, 5)).unwrap().bg, selection_bg);
 
         // Room 10's arrow; selected_room is None (no selection) — bg must be reset.
-        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 10, shared: false, kind: EdgeKind::Reciprocal }];
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 10, shared: false, kind: EdgeKind::Reciprocal, stacked: None }];
         let colors = ColorScheme::terminal_default();
-        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, None);
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, None, &mut Vec::new());
 
         let after_bg = buf.cell((5, 5)).unwrap().bg;
         assert_ne!(
@@ -5595,8 +7920,8 @@ mod tests {
         ]);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the selected room (not current).
-        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 7, shared: false, kind: EdgeKind::Reciprocal }];
-        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 7, shared: false, kind: EdgeKind::Reciprocal, stacked: None }];
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None, &mut Vec::new());
 
         let cell = buf.cell((5, 5)).unwrap();
         assert_eq!(
@@ -5631,8 +7956,8 @@ mod tests {
         ]);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is BOTH selected AND current.
-        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 7, shared: false, kind: EdgeKind::Reciprocal }];
-        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), Some(7));
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 7, shared: false, kind: EdgeKind::Reciprocal, stacked: None }];
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), Some(7), &mut Vec::new());
 
         let cell = buf.cell((5, 5)).unwrap();
         assert_eq!(
@@ -5665,8 +7990,8 @@ mod tests {
         ]);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the current room, NOT selected.
-        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 7, shared: false, kind: EdgeKind::Reciprocal }];
-        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, Some(7));
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 7, shared: false, kind: EdgeKind::Reciprocal, stacked: None }];
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, Some(7), &mut Vec::new());
 
         let cell = buf.cell((5, 5)).unwrap();
         assert_eq!(
@@ -5696,8 +8021,8 @@ mod tests {
         ]);
 
         // Arrow belongs to room 5; selected room is 7 — different rooms.
-        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 5, shared: false, kind: EdgeKind::Reciprocal }];
-        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 5, shared: false, kind: EdgeKind::Reciprocal, stacked: None }];
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None, &mut Vec::new());
 
         let cell = buf.cell((5, 5)).unwrap();
         assert_ne!(
@@ -6041,74 +8366,179 @@ mod tests {
             .collect()
     }
 
-
-    /// SQ-0363: with portal labels on, a cross-layer COMPASS passage rendered NOTHING — no icon,
-    /// no name. `portal_slot` only ever had to hold Up/Down/In/Out, the four directions that could
-    /// leave a layer before a named seam could cut at compass ones, so a compass edge
-    /// fell through it and was dropped. Each direction must land on the border it leads through,
-    /// with its "Room · Layer" name floating clear on that side.
-    #[test]
-    fn portal_view_shows_a_cross_layer_compass_passage_on_the_border_it_leads_through() {
-        use mapper::graph::MapGraph;
-        use mapper::render::render_layer;
-
-        // (direction, the Vault's cell, the row/col the badge must land on relative to the box)
-        for (dir, cell) in [
-            (Direction::E, (1, 0)),
-            (Direction::W, (-1, 0)),
-            (Direction::N, (0, -1)),
-            (Direction::S, (0, 1)),
-            (Direction::NE, (1, -1)),
-        ] {
-            let mut g = MapGraph::new();
-            g.upsert_room(1, "Here".into());
-            g.upsert_room(2, "Vault".into());
-            g.set_pos(1, (0, 0));
-            g.set_pos(2, cell);
-            g.add_edge(1, dir, 2);
-            g.add_edge(2, mapper::direction::opposite(dir), 1);
-            // Peel the VAULT's side (SQ-0364: a peel takes the selected room's own side), so
-            // Here stays on Main and its `dir` passage is the one that crosses.
-            let region = mapper::layer::region_at_edge(&g, 2, mapper::direction::opposite(dir))
-                .expect("the walked passage is a seam");
-            mapper::layer::move_region(&mut g, &region, mapper::layer::MoveTarget::New)
-                .expect("cut at the seam");
-
-            let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
-            let mut st = AppState::default();
-            st.scroll = (rm.bounds.0 .0 - 1, rm.bounds.0 .1 - 1);
-            st.show_portal_labels = true;
-            let area = Rect::new(0, 0, 46, 26);
-            let mut buf = Buffer::empty(area);
-            render_map(&rm, &st, area, &mut buf);
-
-            let text: String = (0..area.height)
-                .map(|y| {
-                    (0..area.width)
-                        .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" ").to_string())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let arrow = arrow_for_direction(dir, &st.symbols.arrows, &st.symbols.portal);
-            assert!(
-                text.contains(arrow),
-                "{dir:?}: the badge shows the direction travelled ({arrow:?})\n{text}"
-            );
-            assert!(
-                text.contains("Vault · Vault"),
-                "{dir:?}: and names the room and layer it leads to\n{text}"
-            );
-        }
+    /// Every cell of `buf` inside `area`, row by row — what a "does the drawn map say X" assert
+    /// is made against.
+    fn buffer_text(buf: &Buffer, area: Rect) -> String {
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" ").to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
+    // ── SQ-1356: a cross-layer ghost is a room box with a broken border ───────────────────
+
+    /// Everything the drawn map has to say about a ghost, on the simplest crossing there is:
+    /// a two-layer graph, `Hall` above and `Cellar` below, walked both ways.
+    ///
+    /// The ghost is a BOX — same 11x5 as a room's, one cell south of its anchor because that is
+    /// where `Down` points — drawn with the dashed border glyphs and nothing else's, and labelled
+    /// with the plain room name because the crossing is walkable both ways.
     #[test]
-    fn a_cross_layer_compass_badge_shows_its_direction_not_the_unknown_marker() {
-        // SQ-0362. Until a named seam (SQ-0360) could cut at compass passages, only
-        // portals could ever cross layers — so the badge mapped Up/Down/In/Out and let every
-        // compass direction fall through to `unknown`. A room whose east passage leads to another
-        // layer then wore a "?", about a direction we know perfectly well.
+    fn a_cross_layer_ghost_is_a_dashed_room_box_on_the_cell_its_passage_points_at() {
+        use mapper::graph::MapGraph;
+        use mapper::layer::{move_region, planar_region, MoveTarget, MAIN_LAYER};
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 1));
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(2, Direction::Up, 1);
+        let region = planar_region(&g, 2);
+        move_region(&mut g, &region, MoveTarget::New).expect("the cellar peels into its own layer");
+        let rm = mapper::render::render_layer(&g, MAIN_LAYER);
+        let ghost = rm.rooms.iter().find(|r| r.id == 2).expect("the crossing draws a ghost");
+        assert_eq!(ghost.cell, (0, 1), "Down seats it one cell south of the Hall");
+        assert_eq!(ghost.label, "Cellar", "walked both ways: the plain room name");
+
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let text = buffer_text(&buf, area);
+        let sym = SymbolSet::default();
+        assert!(text.contains("Cellar"), "the ghost names the room it stands for:\n{text}");
+        assert!(
+            text.contains(&sym.room_ghost.h.to_string()),
+            "the ghost's border uses the dashed run glyph {:?}:\n{text}",
+            sym.room_ghost.h
+        );
+        assert!(
+            text.contains(&sym.room_ghost.v.to_string()),
+            "…on both axes ({:?}):\n{text}",
+            sym.room_ghost.v
+        );
+        // The layer it really lives on has no room in an 11x5 box — the room card says it
+        // instead, from the graph, because a ghost's id IS that room's id.
+        assert_eq!(
+            crate::render::room_dock::header_line(&g, Some(2), true, &sym)
+                .split("  ")
+                .next()
+                .unwrap_or(""),
+            "Cellar \u{b7} Cellar",
+            "selecting a ghost names its real layer in the room card's header"
+        );
+    }
+
+    /// The `ascii` preset, for a face with no Box Drawing dashes: `-`/`:` runs and `+` corners,
+    /// and not one glyph of the default set anywhere near the ghost.
+    #[test]
+    fn the_ascii_ghost_preset_draws_a_box_out_of_ascii_alone() {
+        let dashed = BoxStyle::ghost_preset("dashed").expect("the default preset");
+        let ascii = BoxStyle::ghost_preset("ascii").expect("the ascii preset");
+        assert_eq!(ascii, BoxStyle { tl: '+', tr: '+', bl: '+', br: '+', h: '-', v: ':' });
+        assert!(ascii.h.is_ascii() && ascii.v.is_ascii() && ascii.tl.is_ascii());
+        assert_eq!(BoxStyle::ghost_preset("dotted").unwrap().h, '\u{2504}');
+        assert_eq!(BoxStyle::ghost_preset("nonsense"), None);
+        assert!(BoxStyle::ghost_preset_names().contains(&"ascii"));
+
+        // …and the preset the player asks for is the one the map draws with.
+        let mut cfg = crate::config::SymbolConfig::default();
+        cfg.ghost_box_style = "ascii".into();
+        assert_eq!(SymbolSet::resolve(&cfg).room_ghost, ascii);
+        cfg.ghost_box_style = "nonsense".into();
+        assert_eq!(SymbolSet::resolve(&cfg).room_ghost, dashed, "an unknown name keeps the default");
+    }
+
+    /// A ghost outranks every other outline, and takes its colour from `map.room_ghost` — but a
+    /// SELECTED ghost takes the selection's, so the box the room card is describing is still the
+    /// one that stands out.
+    #[test]
+    fn a_ghost_takes_the_room_ghost_selector_unless_it_is_selected() {
+        use mapper::render::{GhostKind, GhostRoom, RenderRoom};
+        let ghost_room = |id| RenderRoom {
+            id,
+            ordinal: 1,
+            cell: (0, 0),
+            label: "Cellar".into(),
+            has_notes: false,
+            is_current: false,
+            align_code: String::new(),
+            has_layer_portal: false,
+            self_loops: Vec::new(),
+            alias_count: 0,
+            random_stubs: Vec::new(),
+            stacked_exits: Vec::new(),
+            ghost: Some(GhostRoom {
+                name: "Cellar".into(),
+                layer: 1,
+                layer_name: "Under".into(),
+                kind: GhostKind::TwoWay,
+            }),
+        };
+        let mut st = AppState::default();
+        assert_eq!(
+            room_style(&ghost_room(7), &st),
+            st.colors.theme.get("map.room_ghost").style,
+            "an unselected ghost is drawn in its own selector"
+        );
+        st.selected_room = Some(7);
+        assert_eq!(
+            room_style(&ghost_room(7), &st),
+            st.colors.theme.get("map.room_selected").style,
+            "a selected ghost still shows the selection"
+        );
+
+        let sym = SymbolSet::default();
+        assert_eq!(
+            outline_for(&sym, true, true, true, true),
+            &sym.room_ghost,
+            "the broken border outranks current, portal and selected alike"
+        );
+    }
+
+    /// The label rules, end to end through the drawn map (SQ-1356): `to <room>` where the
+    /// crossing only leaves this layer, `from <room>` where it only arrives, and never both.
+    #[test]
+    fn a_one_way_crossing_says_to_on_one_layer_and_from_on_the_other() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Alcove".into());
+        g.upsert_room(2, "Vault".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2); // one-way: no edge back
+        let deep = g.new_layer(Some(mapper::layer::MAIN_LAYER), "Deep".into());
+        g.set_room_layer(2, deep);
+
+        let draw = |layer| {
+            let rm = mapper::render::render_layer(&g, layer);
+            let mut st = AppState::default();
+            st.scroll = (rm.bounds.0 .0 - 1, rm.bounds.0 .1 - 1);
+            let area = Rect::new(0, 0, 80, 40);
+            let mut buf = Buffer::empty(area);
+            render_map(&rm, &st, area, &mut buf);
+            buffer_text(&buf, area)
+        };
+        let main = draw(mapper::layer::MAIN_LAYER);
+        assert!(main.contains("to"), "the leaving layer says where the passage leads:\n{main}");
+        assert!(main.contains("Vault"), "…and names it:\n{main}");
+        let far = draw(deep);
+        assert!(far.contains("from"), "the arriving layer says where it came from:\n{far}");
+        assert!(far.contains("Alcove"), "…and names it:\n{far}");
+        assert!(!far.contains("to"), "never a two-way to/from form on one box:\n{far}");
+    }
+
+    /// A cross-layer COMPASS passage is routed like any other now: the east arrowhead reaches the
+    /// ghost box, and the `?` unknown marker — which every compass crossing wore before SQ-0362,
+    /// and which the badge path could still reach — never appears.
+    #[test]
+    fn a_cross_layer_compass_passage_is_drawn_as_an_ordinary_east_connector() {
         use mapper::graph::MapGraph;
         use mapper::render::render_layer;
 
@@ -6119,33 +8549,31 @@ mod tests {
         g.set_pos(2, (1, 0));
         g.add_edge(1, Direction::E, 2);
         g.add_edge(2, Direction::W, 1);
-        // Peel THERE's side, so HERE stays on Main and its east passage crosses layers. A peel
-        // takes the selected room's OWN side (SQ-0364), hence standing at the far end.
         let region = mapper::layer::region_at_edge(&g, 2, Direction::W).expect("cut at the seam");
         let peeled = mapper::layer::move_region(&mut g, &region, mapper::layer::MoveTarget::New)
             .expect("and the region moves onto a fresh layer");
         assert_eq!(g.layer_of(2), peeled, "There is now a layer away, across a COMPASS edge");
-        assert_eq!(g.layer_of(1), mapper::layer::MAIN_LAYER, "Here stayed put");
 
         let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
+        let ghost = rm.rooms.iter().find(|r| r.id == 2).expect("a ghost for There");
+        assert_eq!(ghost.cell, (1, 0), "east of Here, where the passage points");
         let mut st = AppState::default();
-        st.scroll = rm.bounds.0;
+        st.scroll = (rm.bounds.0 .0, rm.bounds.0 .1 - 1);
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &st, area, &mut buf);
-
-        let here: Vec<String> = interior_rows(&buf, 0, 0);
-        let joined = here.join("");
-        let east_arrow = st.symbols.arrows.east; // '▶' by default
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("There"), "the ghost names the room across the seam:\n{text}");
         assert!(
-            joined.contains(east_arrow),
-            "the badge shows the direction travelled ({east_arrow:?}): {here:?}"
+            text.contains(st.symbols.arrows.east),
+            "the crossing draws its own east arrowhead:\n{text}"
         );
         assert!(
-            !joined.contains(st.symbols.portal.unknown),
-            "and never the unknown marker for a passage whose direction is known: {here:?}"
+            !text.contains(st.symbols.portal.unknown),
+            "and never the unknown marker for a passage whose direction is known:\n{text}"
         );
     }
+
 
     #[test]
     fn an_in_out_badge_is_pulled_toward_the_room_it_connects_to() {
@@ -6221,45 +8649,6 @@ mod tests {
     }
 
     #[test]
-    fn a_cross_layer_portal_shows_its_direction_of_travel_inside_the_room() {
-        // SQ-0223. A room with a staircase to another layer carries a badge of the direction the
-        // player travels — `Down` → `↓` — placed by SQ-0351's rule. `Down` HAS a bearing, so it is
-        // read straight off the compass and lands on the bottom row; no partner lookup, which
-        // matters because the destination is on another plane entirely.
-        use mapper::graph::MapGraph;
-        use mapper::layer::{move_region, planar_region, MoveTarget, MAIN_LAYER};
-        let mut g = MapGraph::new();
-        g.upsert_room(1, "Hall".into());
-        g.upsert_room(2, "Cellar".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (0, 1));
-        g.add_edge(1, Direction::Down, 2);
-        g.add_edge(2, Direction::Up, 1);
-        let region = planar_region(&g, 2);
-        move_region(&mut g, &region, MoveTarget::New).expect("the cellar peels into its own layer");
-        let rm = mapper::render::render_layer(&g, MAIN_LAYER);
-        assert!(
-            rm.rooms.iter().find(|r| r.id == 1).unwrap().has_layer_portal,
-            "Hall owns the cross-layer portal",
-        );
-        let mut st = AppState::default();
-        st.scroll = rm.bounds.0;
-        let area = Rect::new(0, 0, 80, 40);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &st, area, &mut buf);
-
-        let rows = interior_rows(&buf, 0, 0);
-        assert!(
-            rows[2].contains("↓"),
-            "Down to another layer shows ↓ on the bottom interior row: {rows:?}",
-        );
-        // Before SQ-0223 a cross-layer portal drew NOTHING inside the room — same-layer Up/Down
-        // put their glyph on the connector's border anchor, and a cross-layer stub has no
-        // connector, so it fell through every branch.
-        assert!(!rows[0].contains("↓") && !rows[1].contains("↓"), "only one badge: {rows:?}");
-    }
-
-    #[test]
     fn build_frame_manifest_drawn_in_map_pane() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
@@ -6325,8 +8714,19 @@ mod tests {
         assert!(row(PANEL_H).contains("Foyer"), "manifest should start at row PANEL_H");
     }
 
+    /// This graph's four edges (68 S+SE to 217, 217 W+NW to 68) used to reach the router's
+    /// `select_shared_paths` as an ordinary same-PAIR collapse, painted with `map.shared_path`.
+    /// SQ-1276 supersedes that path for it: S/SE is itself a stacked same-DESTINATION group from
+    /// 68 (so is W/NW from 217), so `collapse_stacked_exits` already removes S and W before
+    /// `select_shared_paths` ever runs — nothing is left for IT to collapse (the router's own
+    /// `secondary_exit`/`secondary_entry` stay empty), and the remaining SE/NW pair is a plain
+    /// reciprocal diagonal, styled with the STACKED accent. SQ-1373 gives the stacked S/W their
+    /// OWN border badges (through the very same `PendingMarker` queue `select_shared_paths`'s own
+    /// fold uses, and so `map.shared_path`-coloured too) — `shared_fg` cells are no longer proof
+    /// of nothing here, so the "collapsed at the source" claim is pinned directly against the
+    /// connector's router-level fields instead of against colour.
     #[test]
-    fn shared_connector_line_uses_shared_path_color() {
+    fn stacked_same_destination_pair_uses_the_stacked_exit_color_not_shared_path() {
         use crate::state::AppState;
         use mapper::graph::MapGraph;
         use mapper::direction::Direction;
@@ -6341,17 +8741,23 @@ mod tests {
         }
         let state = AppState::default(); // Boxes zoom by default
         let rm = mapper::render::render(&g);
+        assert_eq!(rm.plan.connectors.len(), 1, "one line for the pair, whatever the directions");
+        assert!(
+            rm.plan.connectors[0].secondary_exit.is_empty() && rm.plan.connectors[0].secondary_entry.is_empty(),
+            "S and W never reach select_shared_paths — collapse_stacked_exits already removed them",
+        );
         let area = Rect::new(0, 0, 60, 30);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
-        // At least one cell painted with the shared_path fg color exists (the shared line/arrow).
         // Compared via `cell.fg` (not `cell.style() ==`, which can never match a partially-set
         // Style: ratatui's `Cell::set_style` patches rather than replaces, so `Cell::style()`
-        // always synthesizes concrete `bg`/`underline_color`, unlike `shared_path`'s bg: None).
-        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
-        let found = (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
-            .any(|(x, y)| buf.cell((x, y)).map(|c| c.fg == shared_fg).unwrap_or(false));
-        assert!(found, "the collapsed pair's shared path must paint with shared_path color");
+        // always synthesizes concrete `bg`/`underline_color`, unlike these selectors' `bg: None`).
+        let stacked_fg = state.colors.theme.get("map.room_stacked_exit").style.fg.expect("has an fg color");
+        let any_cell = |fg: ratatui::style::Color| {
+            (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
+                .any(|(x, y)| buf.cell((x, y)).map(|c| c.fg == fg).unwrap_or(false))
+        };
+        assert!(any_cell(stacked_fg), "SE/NW's arrowheads must paint with the stacked-exit accent");
     }
 
     #[test]
@@ -6412,9 +8818,2538 @@ mod tests {
         assert!(content.contains('┌'), "has a top-left border corner");
         assert!(content.contains('│'), "has vertical border sides");
     }
+
+    // ── SQ-1273: room-box marker hover tooltip ───────────────────────────────
+
+    /// Cell contents as plain strings within `rect`, concatenated — enough to search for text a
+    /// tooltip box painted. Mirrors `matrix.rs`'s own `buf_contains`.
+    fn buf_contains(buf: &Buffer, rect: Rect, needle: &str) -> bool {
+        let mut joined = String::new();
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                joined.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+        }
+        joined.contains(needle)
+    }
+
+    /// A single tip row's text, trimmed of the box's one-space side padding — for a
+    /// glyphs-only tip (SQ-1276's `MarkerKind::Stacked`) this is the exact content, with no
+    /// surrounding title or room name to trim away.
+    fn tip_row(buf: &Buffer, rect: Rect, row: u16) -> String {
+        (rect.x..rect.right())
+            .map(|x| buf.cell((x, row)).map(|c| c.symbol()).unwrap_or(" ").to_string())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    /// Hovering the alias marker shows "Also seen as:" followed by every alias, in the order the
+    /// graph stores them (first-seen order — see `mapper::graph::Room::rename`).
+    #[test]
+    fn map_hover_tip_lists_aliases_in_stored_order() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Twisty Cave".into());
+        g.upsert_room(1, "Twisty Place".into());
+        g.upsert_room(1, "Maze".into()); // current label; aliases: [Twisty Cave, Twisty Place]
+        g.set_pos(1, (0, 0));
+        let mut state = AppState::default();
+        state.map_hover = Some((1, MarkerKind::Alias, Rect::new(3, 1, 1, 1)));
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let painted = draw_map_hover_tip(&g, &state, area, &mut buf).expect("a tip was painted");
+
+        let text: String = (painted.y..painted.bottom())
+            .flat_map(|y| (painted.x..painted.right()).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+            .collect();
+        let head = text.find("Also seen as:").unwrap_or_else(|| panic!("no header line: {text:?}"));
+        let first = text.find("Twisty Cave").unwrap_or_else(|| panic!("no first alias: {text:?}"));
+        let second = text.find("Twisty Place").unwrap_or_else(|| panic!("no second alias: {text:?}"));
+        assert!(head < first && first < second, "header, then aliases in stored order: {text:?}");
+    }
+
+    /// Hovering a `?` stub with recorded destinations names them the way the room card's exit
+    /// card does — the room's own id prints as "back here" — under a title naming the direction.
+    #[test]
+    fn map_hover_tip_names_random_destinations_with_back_here() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.upsert_room(2, "Forest Path".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.mark_random_exit(1, mapper::direction::Direction::S);
+        g.note_random_destination(1, mapper::direction::Direction::S, 2);
+        g.note_random_destination(1, mapper::direction::Direction::S, 1); // leads back here too
+        let mut state = AppState::default();
+        state.map_hover =
+            Some((1, MarkerKind::Random(mapper::direction::Direction::S), Rect::new(5, 4, 1, 1)));
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let painted = draw_map_hover_tip(&g, &state, area, &mut buf).expect("a tip was painted");
+
+        assert!(buf_contains(&buf, painted, "South"), "titled by the direction");
+        assert!(buf_contains(&buf, painted, "Forest Path"), "names the other destination");
+        assert!(buf_contains(&buf, painted, "back here"), "the room's own id reads \"back here\"");
+    }
+
+    /// A bare `?` with no recorded destinations reads "destination varies — none recorded yet".
+    #[test]
+    fn map_hover_tip_says_none_recorded_yet_for_a_bare_stub() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        g.mark_random_exit(1, mapper::direction::Direction::S);
+        let mut state = AppState::default();
+        state.map_hover =
+            Some((1, MarkerKind::Random(mapper::direction::Direction::S), Rect::new(5, 4, 1, 1)));
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let painted = draw_map_hover_tip(&g, &state, area, &mut buf).expect("a tip was painted");
+        assert!(buf_contains(&buf, painted, "destination varies — none recorded yet"));
+    }
+
+    // ── SQ-1386: notes marker hover tip ───────────────────────────────────────
+
+    /// Hovering the `●` notes marker shows the room's note text with no title — the tip IS the
+    /// note, unlike the alias marker's "Also seen as:" header.
+    #[test]
+    fn map_hover_tip_shows_note_text_with_no_title() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        g.set_notes(1, "Locked door needs a brass key".into());
+        let mut state = AppState::default();
+        state.map_hover = Some((1, MarkerKind::Notes, Rect::new(5, 4, 1, 1)));
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let painted = draw_map_hover_tip(&g, &state, area, &mut buf).expect("a tip was painted");
+
+        assert!(buf_contains(&buf, painted, "Locked door needs a brass key"), "shows the note text");
+        assert_eq!(painted.height, 1, "one note line, no title row");
+    }
+
+    /// A note with an embedded newline (from a multi-line note entry) splits on it into separate
+    /// rows — the newline is honoured before word-wrap ever runs.
+    #[test]
+    fn map_hover_tip_splits_a_multiline_note_on_existing_newlines() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        g.set_notes(1, "First line\nSecond line".into());
+        let mut state = AppState::default();
+        state.map_hover = Some((1, MarkerKind::Notes, Rect::new(5, 4, 1, 1)));
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let painted = draw_map_hover_tip(&g, &state, area, &mut buf).expect("a tip was painted");
+
+        assert_eq!(painted.height, 2, "two source lines, two rows");
+        assert_eq!(tip_row(&buf, painted, painted.y), "First line");
+        assert_eq!(tip_row(&buf, painted, painted.y + 1), "Second line");
+    }
+
+    /// A single note line longer than [`NOTES_TIP_WRAP_WIDTH`] word-wraps into multiple rows,
+    /// none of which exceeds that width — the note is a paragraph, and `tooltip::draw_tip` sizes
+    /// its box to the widest line it is handed rather than wrapping on its own.
+    #[test]
+    fn map_hover_tip_word_wraps_a_long_note_line() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        let long = "This note runs on for quite a while so that it must wrap across more than a single row of the tooltip box";
+        g.set_notes(1, long.into());
+        let mut state = AppState::default();
+        state.map_hover = Some((1, MarkerKind::Notes, Rect::new(5, 4, 1, 1)));
+        let area = Rect::new(0, 0, 70, 20);
+        let mut buf = Buffer::empty(area);
+        let painted = draw_map_hover_tip(&g, &state, area, &mut buf).expect("a tip was painted");
+
+        assert!(painted.height > 1, "a long line wraps into more than one row");
+        for y in painted.y..painted.bottom() {
+            let row = tip_row(&buf, painted, y);
+            assert!(
+                row.chars().count() as u16 <= NOTES_TIP_WRAP_WIDTH,
+                "row {row:?} exceeds the {NOTES_TIP_WRAP_WIDTH}-cell wrap width"
+            );
+        }
+        // Reassembling the rows (word-wrap drops the break space between them, exactly like
+        // `wrap_line`'s own doc says) reconstructs the original text.
+        let joined = (painted.y..painted.bottom()).map(|y| tip_row(&buf, painted, y)).collect::<Vec<_>>().join(" ");
+        assert_eq!(joined, long);
+    }
+
+    // ── SQ-1276: stacked same-destination exits ──────────────────────────────
+
+    /// Two compass directions (N and S) from one room to the same destination: only N's
+    /// arrowhead is drawn as the ROUTED line, styled with `map.room_stacked_exit`, and its hover
+    /// tip is the two arrow glyphs alone — north's, then south's — with no title or room name.
+    /// SQ-1373 gives the stacked `S` its own border badge too (S's own arrow glyph, queued
+    /// through the same `PendingMarker` pass as a router-level fold, landing beside N's
+    /// arrowhead on the SAME border room 1's `N` exit departs from — `S` shares that origin).
+    #[test]
+    fn two_compass_stack_draws_one_reversed_arrowhead_with_a_tooltip_listing_both() {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1)); // due north of room 1 — N bearing-matches, S does not
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(1, Direction::S, 2);
+
+        let state = AppState::default();
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+
+        let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
+        assert_eq!(
+            text.matches(state.symbols.arrows.south).count(),
+            1,
+            "SQ-1373: the stacked S direction keeps its own border badge",
+        );
+        assert_eq!(text.matches(state.symbols.arrows.north).count(), 1, "only N's arrowhead is drawn");
+
+        let (mid, kind, rect) = markers
+            .iter()
+            .find(|(_, k, _)| matches!(k, MarkerKind::Stacked(_)))
+            .expect("a Stacked hover rect is published");
+        assert_eq!(*mid, 1);
+        assert_eq!(*kind, MarkerKind::Stacked(Direction::N));
+
+        let mut st = AppState::default();
+        st.map_hover = Some((1, *kind, *rect));
+        let mut buf2 = Buffer::empty(area);
+        let painted = draw_map_hover_tip(&g, &st, area, &mut buf2).expect("a tip was painted");
+        let expected = format!("{} {}", st.symbols.arrows.north, st.symbols.arrows.south);
+        assert_eq!(
+            tip_row(&buf2, painted, painted.y),
+            expected,
+            "glyphs only — north's arrow first, then south's — no title or room name"
+        );
+
+        // Model-side facts are untouched: the matrix and the graph itself still show both edges.
+        assert_eq!(
+            mapper::matrix::classify(&g, 1, Direction::N),
+            mapper::matrix::MatrixCell::OneWay { dest: 2 },
+        );
+        assert_eq!(
+            mapper::matrix::classify(&g, 1, Direction::S),
+            mapper::matrix::MatrixCell::OneWay { dest: 2 },
+            "the matrix still lists the suppressed direction as a real exit",
+        );
+    }
+
+    /// A compass direction plus Down to the same destination — the exact field-report shape
+    /// (Canyon View's `Down`/`E` both to Rocky Ledge). `draw_portal_icons` still has nothing to
+    /// badge (the suppressed `Down` edge never reaches `route_all`), but SQ-1373 gives the
+    /// stacked-exit marker pass its own border badge for it, one cell along from `E`'s own
+    /// arrowhead on Hall's border, where `Down` departs from. The tooltip is unchanged: exactly
+    /// the two glyphs — East's arrow, then Down's portal icon — primary first, one line, no
+    /// other text.
+    #[test]
+    fn compass_plus_down_stack_draws_its_own_border_badge_and_tooltip_names_it() {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(1, Direction::Down, 2);
+
+        let state = AppState::default();
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+        assert!(
+            !rm.edges.iter().any(|e| e.origin == 1 && e.dir == Direction::Down),
+            "the suppressed Down edge never reaches route_all, so draw_portal_icons has nothing to badge",
+        );
+        let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
+        assert_eq!(
+            text.matches(state.symbols.portal.down).count(),
+            1,
+            "SQ-1373: the stacked Down direction keeps its own border badge",
+        );
+
+        let (_, kind, rect) = markers
+            .iter()
+            .find(|(_, k, _)| matches!(k, MarkerKind::Stacked(_)))
+            .expect("a Stacked hover rect is published");
+        let mut st = AppState::default();
+        st.map_hover = Some((1, *kind, *rect));
+        let mut buf2 = Buffer::empty(area);
+        let painted = draw_map_hover_tip(&g, &st, area, &mut buf2).expect("a tip was painted");
+        let expected = format!("{} {}", st.symbols.arrows.east, st.symbols.portal.down);
+        assert_eq!(
+            tip_row(&buf2, painted, painted.y),
+            expected,
+            "glyphs only — East's arrow first, then Down's portal icon — no other text"
+        );
+    }
+
+    /// The SVG export's own `a_stacked_exit_keeps_its_marker_in_both_renders` fixture, at Boxes
+    /// zoom: room A fans out to room B with `N` (primary), `E` (a second compass member,
+    /// stacked away) and `Down` (a portal member, stacked away too), and B has its own `Up`
+    /// back to A (a router-level fold, SQ-0689 — not SQ-1373's own territory, included so the
+    /// two mechanisms are seen sharing one border without colliding). `E` and `Down` both
+    /// depart FROM A (SQ-1373's own rule for the terminal renderer — unlike the SVG's arrival
+    /// rule), landing beside N's own arrowhead on A's TOP border; `Up` departs from B, landing
+    /// on B's BOTTOM border (SQ-0689, unchanged).
+    #[test]
+    fn a_stacked_exit_keeps_its_glyph_on_the_departure_room_at_boxes_zoom() {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -2)); // north of A, two rows clear — room for three markers in the gap
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(2, Direction::Up, 1);
+
+        let rm = mapper::render::render(&g);
+        let r1 = rm.rooms.iter().find(|r| r.id == 1).unwrap();
+        assert_eq!(
+            r1.stacked_exits,
+            vec![mapper::render::StackedExit {
+                primary: Direction::N,
+                dest: 2,
+                secondary: vec![Direction::E, Direction::Down],
+            }],
+            "fixture check: N must win primary and E/Down must both stack"
+        );
+
+        let mut state = AppState::default(); // Boxes zoom by default
+        state.scroll = rm.bounds.0; // B sits at a negative row; scroll to it like every other case here
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let rects = room_screen_rects(&rm, &state, area);
+        let a_rect = rects.iter().find(|(id, _)| *id == 1).unwrap().1;
+        let b_rect = rects.iter().find(|(id, _)| *id == 2).unwrap().1;
+
+        let find_row = |glyph: char, row: u16| -> usize {
+            (0..area.width)
+                .filter(|&x| buf.cell((x, row)).is_some_and(|c| c.symbol() == glyph.to_string()))
+                .count()
+        };
+        assert_eq!(find_row(state.symbols.arrows.north, a_rect.y), 1, "N's own arrowhead, on A's top border");
+        assert_eq!(
+            find_row(state.symbols.arrows.east, a_rect.y),
+            1,
+            "SQ-1373: E's own glyph, beside N's arrowhead on A's top border (not B's, per the terminal renderer's departure rule)"
+        );
+        assert_eq!(
+            find_row(state.symbols.portal.down, a_rect.y),
+            1,
+            "SQ-1373: Down's own badge, also on A's top border"
+        );
+        let b_bottom = b_rect.y + b_rect.height - 1;
+        assert_eq!(
+            find_row(state.symbols.portal.up, b_bottom),
+            1,
+            "SQ-0689 (unchanged): Up departs from B, so its badge sits on B's bottom border"
+        );
+    }
+
+    /// A destination reached ONLY by a portal (Up here) is unaffected: no Stacked marker, and
+    /// the ordinary Up badge still draws exactly as it always has.
+    #[test]
+    fn portal_only_link_publishes_no_stacked_marker() {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::Up, 2);
+
+        let state = AppState::default();
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        let markers = render_map(&rm, &state, area, &mut buf);
+        assert!(
+            !markers.iter().any(|(_, k, _)| matches!(k, MarkerKind::Stacked(_))),
+            "a single portal link is not a stack: {markers:?}"
+        );
+        let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
+        assert_eq!(text.matches(state.symbols.portal.up).count(), 1, "the ordinary Up badge still draws");
+    }
+
+    /// No hover, or a modal overlay open, paints no tip.
+    #[test]
+    fn no_hover_or_a_modal_overlay_paints_no_map_tip() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Windy Cave".into());
+        g.set_pos(1, (0, 0));
+        let area = Rect::new(0, 0, 60, 20);
+
+        let state = AppState::default();
+        let mut buf = Buffer::empty(area);
+        assert_eq!(draw_map_hover_tip(&g, &state, area, &mut buf), None, "nothing hovered");
+
+        let mut state = AppState::default();
+        state.map_hover = Some((1, MarkerKind::Alias, Rect::new(3, 1, 1, 1)));
+        state.overlays.hotkey_dialog = true;
+        let mut buf = Buffer::empty(area);
+        assert_eq!(
+            draw_map_hover_tip(&g, &state, area, &mut buf),
+            None,
+            "a modal overlay must suppress the tip"
+        );
+    }
+
+    /// The tip flips to stay inside the map pane near an edge — the same placement rule
+    /// `tooltip::draw_tip` gives the matrix's own hover tip, exercised here through the map's
+    /// entry point rather than re-tested at the tooltip layer.
+    #[test]
+    fn map_hover_tip_flips_to_stay_inside_the_pane_near_the_bottom_edge() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(1, "Cave".into());
+        g.set_pos(1, (0, 0));
+        let area = Rect::new(0, 0, 60, 20);
+        let mut state = AppState::default();
+        // Near the pane's bottom edge: a tip preferring to drop below would run off.
+        state.map_hover = Some((1, MarkerKind::Alias, Rect::new(30, area.bottom() - 1, 1, 1)));
+        let mut buf = Buffer::empty(area);
+        let painted = draw_map_hover_tip(&g, &state, area, &mut buf).expect("a tip was painted");
+        assert!(painted.y >= area.y && painted.bottom() <= area.bottom(), "{painted:?} vs {area:?}");
+        assert!(
+            painted.bottom() <= state.map_hover.unwrap().2.y,
+            "flipped above the anchor rather than running off the pane's bottom: {painted:?}"
+        );
+    }
 }
 
 
+
+
+
+
+// ── SQ-1255 ───────────────────────────────────────────────────────────────────
+//
+// Reproduction of the Zork I (release 52) "Canyon View" report of 2026-09-02: the
+// automap threads connectors past/through room boxes around #23 Canyon View. The
+// fixture is the player's own `/dump-map`, quoted below as `DUMP_POS` / `DUMP_DISTORTED`.
+//
+// This module is diagnosis-only and changes no layout, router or cleanup code. Its
+// cases are `#[ignore]`d so they never redden CI while the fix is undecided; run with
+//   cargo nextest run -p lanthorn --lib --features t-render sq1255 --run-ignored all
+#[cfg(all(test, feature = "t-render"))]
+mod sq1255_canyon_view {
+    use super::*;
+    use mapper::direction::Direction::{self, Up, E, N, NW, S, W};
+    use mapper::graph::{MapGraph, RoomId};
+    use mapper::layer::MAIN_LAYER;
+    use mapper::mapper::Mapper;
+
+    /// The 29 edges in the graph's insertion order, exactly as the dump lists them.
+    const WALK: &[(RoomId, Direction, RoomId)] = &[
+        (68, S, 217),
+        (217, W, 68),
+        (217, E, 89),
+        (89, S, 217),
+        (89, W, 28),
+        (28, E, 89),
+        (28, W, 79),
+        (79, E, 28),
+        (89, N, 143),
+        (143, E, 89),
+        (143, W, 68),
+        (68, N, 143),
+        (68, W, 91),
+        (91, N, 167),
+        (167, W, 91),
+        (167, E, 33),
+        (33, S, 134),
+        (134, N, 33),
+        (134, E, 23),
+        (23, NW, 134),
+        (23, E, 22),
+        (22, Up, 23),
+        (23, W, 230),
+        (230, N, 134),
+        (230, W, 91),
+        (230, NW, 217),
+        (134, S, 230),
+        (134, W, 89),
+        (89, E, 134),
+    ];
+
+    /// `pos=` from the dump's ROOMS legend.
+    const DUMP_POS: &[(RoomId, (i32, i32))] = &[
+        (22, (0, 0)),
+        (23, (-1, -1)),
+        (28, (-4, -2)),
+        (33, (-2, -3)),
+        (68, (-6, -2)),
+        (79, (-5, -2)),
+        (89, (-3, -2)),
+        (91, (-7, -2)),
+        (134, (-2, -2)),
+        (143, (-4, -3)),
+        (167, (-3, -3)),
+        (217, (-4, -1)),
+        (230, (-2, 0)),
+    ];
+
+    /// The edges the dump marks `distorted`, as (origin, dest) pairs in WALK order.
+    const DUMP_DISTORTED: &[(RoomId, RoomId)] = &[
+        (68, 217),
+        (217, 68),
+        (217, 89),
+        (89, 217),
+        (89, 143),
+        (143, 89),
+        (143, 68),
+        (68, 143),
+        (68, 91),
+        (91, 167),
+        (167, 91),
+        (134, 23),
+        (23, 22),
+        (23, 230),
+        (230, 91),
+    ];
+
+    fn name(id: RoomId) -> &'static str {
+        match id {
+            22 => "Rocky Ledge",
+            23 => "Canyon View",
+            28 => "Kitchen",
+            33 => "Forest",
+            68 => "West of House",
+            79 => "Living Room",
+            89 => "Behind House",
+            91 => "Forest",
+            134 => "Clearing",
+            143 => "North of House",
+            167 => "Clearing",
+            217 => "South of House",
+            230 => "Forest",
+            _ => "?",
+        }
+    }
+
+    /// `turn.rs::schedule_map_maintenance` + `loop_tick.rs::poll_tidy_jobs`, collapsed
+    /// to one synchronous call. Same predicates, same order, same budgets; the only
+    /// difference from the shipped app is that the tidy lands on this turn rather than
+    /// a frame or two later, which the app's own in-crate tests already do
+    /// (`session.rs::auto_mode_background_cleanup_keeps_map_free_of_illegal_overlaps`).
+    fn maintain(m: &mut Mapper, new_room: bool, new_conn: bool, counter: &mut u32) -> &'static str {
+        let changed = new_room || new_conn;
+        if !crate::tidy::should_schedule_tidy(&m.graph, MAIN_LAYER, changed) {
+            return "-";
+        }
+        let cells = mapper::layout::occupied_cells_in_layer(&m.graph, MAIN_LAYER);
+        let total_rooms = m.graph.rooms_in_layer(MAIN_LAYER).len();
+        let has_overlap = cells.len() < total_rooms;
+        let has_distorted = m.graph.connections().iter().any(|c| {
+            c.distorted
+                && m.graph.layer_of(c.origin) == MAIN_LAYER
+                && m.graph.layer_of(c.dest) == MAIN_LAYER
+        });
+        let overlap = has_overlap || has_distorted;
+        let full = crate::tidy::should_bg_tidy(
+            crate::config::BackgroundTidy::EveryRoom,
+            new_room,
+            overlap,
+            changed,
+            counter,
+        );
+        if full {
+            crate::tidy::tidy_layer_silent(&mut m.graph, MAIN_LAYER);
+            "FULL"
+        } else {
+            crate::tidy::cleanup_overlaps_layer_silent(&mut m.graph, MAIN_LAYER);
+            "cleanup"
+        }
+    }
+
+    /// Replay the first `turns` edges of the walk with the session's per-turn maintenance.
+    ///
+    /// The player's real transcript walked back over known passages between some of these
+    /// crossings. Those turns are layout-INERT and can be skipped safely rather than
+    /// reconstructed: `MapGraph::add_edge` is keyed by `(origin, dir)` for a compass
+    /// passage, so re-walking one adds no connection; `place_incremental` returns early
+    /// for an already-placed destination; and with neither a new room nor a new connection
+    /// `should_schedule_tidy`'s `changed` is false, so no tidy is scheduled. Setting the
+    /// current room directly is therefore exactly what those turns would have left behind.
+    fn replay(turns: usize) -> Mapper {
+        let mut m = Mapper::default();
+        let mut counter = 0u32;
+        // The opening `look` in West of House: an observation with no direction.
+        m.observe(WALK[0].0, name(WALK[0].0), None);
+        maintain(&mut m, true, false, &mut counter);
+        for &(origin, dir, dest) in WALK.iter().take(turns) {
+            m.graph.set_current(origin);
+            let rooms_before = m.graph.rooms().count();
+            let conns_before = m.graph.connections().len();
+            m.observe_moved(dest, name(dest), Some(dir));
+            let new_room = m.graph.rooms().count() > rooms_before;
+            let new_conn = m.graph.connections().len() > conns_before;
+            maintain(&mut m, new_room, new_conn, &mut counter);
+        }
+        m
+    }
+
+    /// Every connector cell that lands inside a room's 11x5 box, in the router's virtual space.
+    ///
+    /// A cell on the border ring of the connector's OWN origin or destination box is the
+    /// legitimate arrival/departure anchor and is not reported. Everything else is a
+    /// connector drawn over a room.
+    /// (room whose box is entered, connector origin, exit direction, connector dest, cell).
+    type Intrusion = (RoomId, RoomId, Direction, RoomId, (i32, i32));
+    /// (room whose ring is occupied, connector origin, exit direction, connector dest, cells).
+    type Hug = (RoomId, RoomId, Direction, RoomId, usize);
+
+    fn box_intrusions(graph: &MapGraph) -> Vec<Intrusion> {
+        let rm = mapper::render::render_layer(graph, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let boxes: Vec<(RoomId, (i32, i32))> = rm
+            .rooms
+            .iter()
+            .map(|r| (r.id, (cols.room_pixel(r.cell.0), rows.room_pixel(r.cell.1))))
+            .collect();
+        let mut out = Vec::new();
+        for conn in rm.plan.connectors.iter() {
+            let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+            for (c, _mask) in &plot.cells {
+                for &(rid, (bx, by)) in &boxes {
+                    let inside = c.0 >= bx && c.0 < bx + BOX_W && c.1 >= by && c.1 < by + BOX_H;
+                    if !inside {
+                        continue;
+                    }
+                    let own = rid == conn.origin || rid == conn.dest;
+                    let on_border =
+                        c.0 == bx || c.0 == bx + BOX_W - 1 || c.1 == by || c.1 == by + BOX_H - 1;
+                    if own && on_border {
+                        continue;
+                    }
+                    out.push((rid, conn.origin, conn.exit_dir, conn.dest, *c));
+                }
+            }
+        }
+        out
+    }
+
+    fn pos_of(m: &Mapper, id: RoomId) -> Option<(i32, i32)> {
+        m.graph.room(id).and_then(|r| r.pos)
+    }
+
+    /// Print the whole replay: per-turn maintenance kind, positions and intrusions.
+    /// Diagnostic only — asserts nothing.
+    #[test]
+    #[ignore = "SQ-1255 diagnostic trace, not a pass/fail case"]
+    fn sq1255_trace() {
+        let mut m = Mapper::default();
+        let mut counter = 0u32;
+        m.observe(WALK[0].0, name(WALK[0].0), None);
+        let k = maintain(&mut m, true, false, &mut counter);
+        println!("turn  0  seed #{}   [{k}]", WALK[0].0);
+        for (i, &(origin, dir, dest)) in WALK.iter().enumerate() {
+            m.graph.set_current(origin);
+            let rooms_before = m.graph.rooms().count();
+            let conns_before = m.graph.connections().len();
+            m.observe_moved(dest, name(dest), Some(dir));
+            let new_room = m.graph.rooms().count() > rooms_before;
+            let new_conn = m.graph.connections().len() > conns_before;
+            let k = maintain(&mut m, new_room, new_conn, &mut counter);
+            let intr = box_intrusions(&m.graph);
+            let (illegal, cross) = render_overlap_stats(&m.graph);
+            let mut ps: Vec<String> = m
+                .graph
+                .rooms()
+                .filter_map(|r| r.pos.map(|p| (r.id, p)))
+                .map(|(id, p)| format!("{id}@{},{}", p.0, p.1))
+                .collect();
+            ps.sort();
+            println!(
+                "turn {:2}  {origin} {dir:?} {dest}{}  [{k}]  illegal={illegal} cross={cross} intrude={}  {}",
+                i + 1,
+                if new_room { " NEW" } else { "    " },
+                intr.len(),
+                ps.join(" ")
+            );
+            for (rid, o, d, de, c) in &intr {
+                println!("          intrusion: {o} {d:?} {de} at {c:?} inside box of #{rid}");
+            }
+        }
+        println!(
+            "\n--- final dump ---\n{}",
+            crate::map_dump::render_dump(&m.graph, &crate::symbols::SymbolSet::default())
+        );
+    }
+
+    /// Does the replay land on the same grid the player's dump recorded?
+    #[test]
+    #[ignore = "SQ-1255 fixture comparison; see the report"]
+    fn sq1255_replay_matches_dump_positions() {
+        let m = replay(WALK.len());
+        let mut bad = Vec::new();
+        for &(id, want) in DUMP_POS {
+            let got = pos_of(&m, id);
+            if got != Some(want) {
+                bad.push(format!("#{id} {}: dump {want:?} replay {got:?}", name(id)));
+            }
+        }
+        assert!(bad.is_empty(), "positions differ from the dump:\n  {}", bad.join("\n  "));
+    }
+
+    /// Does the replay mark the same edges distorted?
+    #[test]
+    #[ignore = "SQ-1255 fixture comparison; see the report"]
+    fn sq1255_replay_matches_dump_distortion() {
+        let m = replay(WALK.len());
+        let got: Vec<(RoomId, RoomId)> = m
+            .graph
+            .connections()
+            .iter()
+            .filter(|c| c.distorted)
+            .map(|c| (c.origin, c.dest))
+            .collect();
+        assert_eq!(got, DUMP_DISTORTED.to_vec(), "distorted set differs from the dump");
+    }
+
+    /// The defect itself: no connector may be drawn inside a room's box.
+    #[test]
+    #[ignore = "SQ-1255: the reported defect — a connector drawn through a room box"]
+    fn sq1255_no_connector_is_drawn_through_a_room_box() {
+        let m = replay(WALK.len());
+        let intr = box_intrusions(&m.graph);
+        let lines: Vec<String> = intr
+            .iter()
+            .map(|(rid, o, d, de, c)| {
+                format!(
+                    "connector {o} {d:?} {de} draws at {c:?} inside the box of #{rid} {}",
+                    name(*rid)
+                )
+            })
+            .collect();
+        assert!(intr.is_empty(), "connectors drawn through room boxes:\n  {}", lines.join("\n  "));
+    }
+
+    /// Foreign connector cells in the one-cell ring around a room box, for one graph.
+    fn hug_count(g: &MapGraph) -> Vec<Hug> {
+        let rm = mapper::render::render_layer(g, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let mut out = Vec::new();
+        for room in rm.rooms.iter() {
+            let (bx, by) = (cols.room_pixel(room.cell.0), rows.room_pixel(room.cell.1));
+            for conn in rm.plan.connectors.iter() {
+                if conn.origin == room.id || conn.dest == room.id {
+                    continue;
+                }
+                let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+                let n = plot
+                    .cells
+                    .iter()
+                    .filter(|(c, _)| {
+                        c.0 >= bx - 1 && c.0 <= bx + BOX_W && c.1 >= by - 1 && c.1 <= by + BOX_H
+                    })
+                    .count();
+                if n > 0 {
+                    out.push((room.id, conn.origin, conn.exit_dir, conn.dest, n));
+                }
+            }
+        }
+        out
+    }
+
+    /// The turn at which each symptom first appears, walked turn by turn.
+    #[test]
+    #[ignore = "SQ-1255 diagnostic: names the turn the defect appears"]
+    fn sq1255_first_bad_turn() {
+        let mut first_intrusion: Option<usize> = None;
+        let mut first_hug: Option<usize> = None;
+        for t in 1..=WALK.len() {
+            let m = replay(t);
+            if first_intrusion.is_none() && !box_intrusions(&m.graph).is_empty() {
+                first_intrusion = Some(t);
+            }
+            let hugs = hug_count(&m.graph);
+            if !hugs.is_empty() {
+                let (o, d, de) = WALK[t - 1];
+                println!("turn {t:2} ({o} {d:?} {de}): {hugs:?}");
+                if first_hug.is_none() {
+                    first_hug = Some(t);
+                }
+            }
+        }
+        println!("first connector drawn INSIDE a box: {first_intrusion:?} (None = never)");
+        println!("first foreign connector HUGGING a box: {first_hug:?}");
+    }
+
+    /// Room boxes, channel widths, per-connector cell extents, foreign connectors hugging
+    /// a box, and multiply-owned cells — the geometry behind the reported picture.
+    #[test]
+    #[ignore = "SQ-1255 diagnostic"]
+    fn sq1255_geometry_report() {
+        let m = replay(WALK.len());
+        let rm = mapper::render::render_layer(&m.graph, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let boxes: Vec<(RoomId, (i32, i32))> = rm
+            .rooms
+            .iter()
+            .map(|r| (r.id, (cols.room_pixel(r.cell.0), rows.room_pixel(r.cell.1))))
+            .collect();
+        println!("== room boxes (virtual) ==");
+        for &(id, (bx, by)) in &boxes {
+            println!("  #{id:<4} x {bx}..{}  y {by}..{}", bx + BOX_W - 1, by + BOX_H - 1);
+        }
+
+        println!("\n== channel gaps ==");
+        let mut xs: Vec<i32> = boxes.iter().map(|b| b.1 .0).collect();
+        xs.sort_unstable();
+        xs.dedup();
+        for w in xs.windows(2) {
+            println!("  cols {}..{} -> {} cells", w[0] + BOX_W, w[1] - 1, w[1] - (w[0] + BOX_W));
+        }
+        let mut ys: Vec<i32> = boxes.iter().map(|b| b.1 .1).collect();
+        ys.sort_unstable();
+        ys.dedup();
+        for w in ys.windows(2) {
+            println!("  rows {}..{} -> {} cells", w[0] + BOX_H, w[1] - 1, w[1] - (w[0] + BOX_H));
+        }
+
+        println!("\n== connectors ==");
+        for conn in rm.plan.connectors.iter() {
+            let Some(plot) = plot_connector(conn, &cols, &rows, None) else {
+                println!("  {} {:?} {} -> NO PLOT", conn.origin, conn.exit_dir, conn.dest);
+                continue;
+            };
+            let cs: Vec<(i32, i32)> = plot.cells.iter().map(|(c, _)| *c).collect();
+            println!(
+                "  {} {:?} {}  dep{:?} arr{:?}  {} cells  x[{}..{}] y[{}..{}]",
+                conn.origin,
+                conn.exit_dir,
+                conn.dest,
+                plot.dep_anchor,
+                plot.arr_anchor,
+                cs.len(),
+                cs.iter().map(|c| c.0).min().unwrap_or(0),
+                cs.iter().map(|c| c.0).max().unwrap_or(0),
+                cs.iter().map(|c| c.1).min().unwrap_or(0),
+                cs.iter().map(|c| c.1).max().unwrap_or(0),
+            );
+        }
+
+        println!("\n== foreign connector cells in the 1-cell ring around a box ==");
+        for &(rid, (bx, by)) in &boxes {
+            let mut hits: Vec<String> = Vec::new();
+            for conn in rm.plan.connectors.iter() {
+                if conn.origin == rid || conn.dest == rid {
+                    continue;
+                }
+                let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+                let n = plot
+                    .cells
+                    .iter()
+                    .filter(|(c, _)| {
+                        c.0 >= bx - 1 && c.0 <= bx + BOX_W && c.1 >= by - 1 && c.1 <= by + BOX_H
+                    })
+                    .count();
+                if n > 0 {
+                    hits.push(format!("{} {:?} {} ({n})", conn.origin, conn.exit_dir, conn.dest));
+                }
+            }
+            if !hits.is_empty() {
+                println!("  #{rid}: {}", hits.join(", "));
+            }
+        }
+
+        println!("\n== multiply-owned cells ==");
+        use std::collections::BTreeMap;
+        let mut owners: BTreeMap<(i32, i32), Vec<(usize, u8)>> = BTreeMap::new();
+        for (ci, conn) in rm.plan.connectors.iter().enumerate() {
+            if let Some(plot) = plot_connector(conn, &cols, &rows, None) {
+                for (c, mask) in &plot.cells {
+                    let e = owners.entry(*c).or_default();
+                    if let Some(slot) = e.iter_mut().find(|(i, _)| *i == ci) {
+                        slot.1 |= *mask;
+                    } else {
+                        e.push((ci, *mask));
+                    }
+                }
+            }
+        }
+        for (c, v) in owners.iter().filter(|(_, v)| v.len() > 1) {
+            let who: Vec<String> = v
+                .iter()
+                .map(|(ci, mask)| {
+                    let k = &rm.plan.connectors[*ci];
+                    format!("{} {:?} {} mask={mask:04b}", k.origin, k.exit_dir, k.dest)
+                })
+                .collect();
+            println!("  {c:?}: {}", who.join(" | "));
+        }
+    }
+
+    /// Report the 134↔230 connector's cell extent and how many of its cells hug #23.
+    fn hug_report(g: &MapGraph, tag: &str) {
+        let rm = mapper::render::render_layer(g, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let b23 = rm
+            .rooms
+            .iter()
+            .find(|r| r.id == 23)
+            .map(|r| (cols.room_pixel(r.cell.0), rows.room_pixel(r.cell.1)));
+        for conn in rm.plan.connectors.iter() {
+            let pair = (conn.origin.min(conn.dest), conn.origin.max(conn.dest));
+            if pair != (134, 230) {
+                continue;
+            }
+            let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+            let xs: Vec<i32> = plot.cells.iter().map(|(c, _)| c.0).collect();
+            let hug = match b23 {
+                Some((bx, by)) => plot
+                    .cells
+                    .iter()
+                    .filter(|(c, _)| {
+                        c.0 >= bx - 1 && c.0 <= bx + BOX_W && c.1 >= by - 1 && c.1 <= by + BOX_H
+                    })
+                    .count(),
+                None => 0,
+            };
+            let (illegal, _) = render_overlap_stats(g);
+            println!(
+                "{tag}: 134<->230 spans x[{}..{}] ({} cells), hugs #23 in {hug} cells; illegal={illegal}",
+                xs.iter().min().unwrap(),
+                xs.iter().max().unwrap(),
+                plot.cells.len(),
+            );
+        }
+        for conn in rm.plan.connectors.iter() {
+            if conn.origin != 230 && conn.dest != 230 {
+                continue;
+            }
+            let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+            println!(
+                "      {} {:?} {}: exit {:?} slot {} / entry {:?} slot {} corner {:?}  dep{:?} arr{:?}",
+                conn.origin,
+                conn.exit_dir,
+                conn.dest,
+                conn.exit,
+                conn.exit_slot,
+                conn.entry,
+                conn.entry_slot,
+                conn.entry_corner,
+                plot.dep_anchor,
+                plot.arr_anchor,
+            );
+        }
+    }
+
+    /// Counterfactuals: is the detour caused by #23's presence, by the two-row gap
+    /// between #134 and #230, or by the `230 NW 217` constraint that opens the gap?
+    #[test]
+    #[ignore = "SQ-1255 diagnostic"]
+    fn sq1255_counterfactuals() {
+        // (0) As shipped.
+        let m = replay(WALK.len());
+        hug_report(&m.graph, "shipped        ");
+
+        // (1) Same layout, #23 moved far away: does the 134<->230 connector still detour?
+        let mut g1 = m.graph.clone();
+        g1.set_pos(23, (3, -1));
+        hug_report(&g1, "#23 moved away ");
+
+        // (2) Same graph, #230 pulled onto the cell directly north (the gap closed).
+        let mut g2 = m.graph.clone();
+        g2.set_pos(230, (-2, -1));
+        hug_report(&g2, "#230 at (-2,-1)");
+
+        // (3) The walk without `230 NW 217` — the edge that pins #230 a row south of
+        //     #217's row and so opens the two-row gap in the 33/134/230 column.
+        let mut m3 = Mapper::default();
+        let mut counter = 0u32;
+        m3.observe(WALK[0].0, name(WALK[0].0), None);
+        maintain(&mut m3, true, false, &mut counter);
+        for &(origin, dir, dest) in WALK.iter() {
+            if (origin, dest) == (230, 217) {
+                continue;
+            }
+            m3.graph.set_current(origin);
+            let rb = m3.graph.rooms().count();
+            let cb = m3.graph.connections().len();
+            m3.observe_moved(dest, name(dest), Some(dir));
+            let nr = m3.graph.rooms().count() > rb;
+            let nc = m3.graph.connections().len() > cb;
+            maintain(&mut m3, nr, nc, &mut counter);
+        }
+        hug_report(&m3.graph, "no 230 NW 217  ");
+
+        // (4) The same 29 edges, discovered in a different order: the two Canyon View
+        //     crossings walked LAST. If the layout is order-stable this changes nothing.
+        let mut order: Vec<(RoomId, Direction, RoomId)> = Vec::new();
+        let late: &[(RoomId, RoomId)] = &[(23, 230), (230, 217)];
+        for &e in WALK {
+            if !late.contains(&(e.0, e.2)) {
+                order.push(e);
+            }
+        }
+        for &e in WALK {
+            if late.contains(&(e.0, e.2)) {
+                order.push(e);
+            }
+        }
+        let mut m4 = Mapper::default();
+        let mut counter = 0u32;
+        m4.observe(order[0].0, name(order[0].0), None);
+        maintain(&mut m4, true, false, &mut counter);
+        for &(origin, dir, dest) in &order {
+            m4.graph.set_current(origin);
+            let rb = m4.graph.rooms().count();
+            let cb = m4.graph.connections().len();
+            m4.observe_moved(dest, name(dest), Some(dir));
+            let nr = m4.graph.rooms().count() > rb;
+            let nc = m4.graph.connections().len() > cb;
+            maintain(&mut m4, nr, nc, &mut counter);
+        }
+        hug_report(&m4.graph, "reordered walk ");
+
+        // (5) The MINIMAL order change: swap the two adjacent crossings 23 (23 W 230)
+        //     and 24 (230 N 134). Both are the first-listed edge of their room pair, so
+        //     the swap is exactly the `ci` tiebreak in `direct_route_losers` and in
+        //     `assign_side_slots`, and nothing else.
+        let mut order5: Vec<(RoomId, Direction, RoomId)> = WALK.to_vec();
+        order5.swap(22, 23);
+        let mut m5 = Mapper::default();
+        let mut counter = 0u32;
+        m5.observe(order5[0].0, name(order5[0].0), None);
+        maintain(&mut m5, true, false, &mut counter);
+        for &(origin, dir, dest) in &order5 {
+            m5.graph.set_current(origin);
+            let rb = m5.graph.rooms().count();
+            let cb = m5.graph.connections().len();
+            m5.observe_moved(dest, name(dest), Some(dir));
+            let nr = m5.graph.rooms().count() > rb;
+            let nc = m5.graph.connections().len() > cb;
+            maintain(&mut m5, nr, nc, &mut counter);
+        }
+        hug_report(&m5.graph, "swap 23<->24   ");
+    }
+
+    /// **The reported defect.** No connector belonging to some OTHER pair of rooms may run
+    /// flush along a room's box border — the one-cell ring around the box must stay clear.
+    ///
+    /// `overlap_stats` (and therefore `cleanup_overlaps`, which minimises it) scores only
+    /// cells owned by two or more CONNECTORS; a connector running alongside a BOX is owned
+    /// by one connector and scores zero, so nothing in the pipeline has a reason to prefer
+    /// the straight route. Fixed by `direct_route_losers`' straightness tiebreak (SQ-1255):
+    /// kept un-ignored as the regression pin.
+    #[test]
+    fn sq1255_no_foreign_connector_hugs_a_room_box() {
+        let m = replay(WALK.len());
+        let rm = mapper::render::render_layer(&m.graph, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let mut bad: Vec<String> = Vec::new();
+        for room in rm.rooms.iter() {
+            let (bx, by) = (cols.room_pixel(room.cell.0), rows.room_pixel(room.cell.1));
+            for conn in rm.plan.connectors.iter() {
+                if conn.origin == room.id || conn.dest == room.id {
+                    continue;
+                }
+                let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+                let n = plot
+                    .cells
+                    .iter()
+                    .filter(|(c, _)| {
+                        c.0 >= bx - 1 && c.0 <= bx + BOX_W && c.1 >= by - 1 && c.1 <= by + BOX_H
+                    })
+                    .count();
+                if n > 0 {
+                    bad.push(format!(
+                        "{} {:?} {} lays {n} cells in the ring around #{} {}",
+                        conn.origin,
+                        conn.exit_dir,
+                        conn.dest,
+                        room.id,
+                        name(room.id)
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "connectors run flush along a room box:\n  {}", bad.join("\n  "));
+    }
+}
+
+// ── SQ-1274 ───────────────────────────────────────────────────────────────────
+//
+// Investigation of the Adventure `advent.blb.save` report of 2026-09-02: two "In
+// Forest" rooms (#55642 at (-3,1), #42746 at (-2,1)) both connect into "In A Valley"
+// #49722 (the hub, at (-1,2)). One connector arrives on the hub's WEST side, the
+// other on its TOP; the farther room's (#55642) path threads past #42746's box on
+// its way to the top doorway and crosses the other connector. Fixture is the
+// player's own `/dump-map`, quoted in SQ-1274's brief.
+//
+// TWO findings, two different outcomes. `sq1274_counterfactuals` (run with
+// `--ignored`) walks the two workarounds the report suggested (swap the rooms'
+// positions; force which side each connector arrives on) plus five more isolating
+// what's actually going on, and neither suggested workaround reliably removes the
+// CROSSING — one makes it worse (case (b): cross 1->2), the other only relocates
+// which room gets hugged (case (a)). The actual cause traces one level deeper:
+// #42746's own DIRECT route to the hub's Top is geometrically clear, and is
+// rejected only because it collides with the unrelated `49722 N 63776` / `63776 S
+// 49722` connector (the hub's own passage to the road) — see `build`'s doc comment
+// and case (i), which fixes it by touching neither of the report's two proposals.
+// A safe local fix for the CROSSING would need to reach into how a rejected DIRECT
+// route falls back to channel routing generally, not just this room pair's
+// arrival-side choice — no such fix shipped; see `sq1274_pinned_crossing_as_reported`.
+//
+// The investigation surfaced a SECOND, narrower and genuinely local defect along the
+// way: the valley's own `?` random-exit marks (SQ-1261) sit on the same border cells
+// a one-way arrival's default (slot 0 / centered) entry would use, so #42746's West
+// arrival landed squarely on the valley's own `W` mark. That one DID get a router
+// fix (`assign_side_slots` / `resolve_entry_corner` in `crates/mapper/src/route/
+// mod.rs`, SQ-1274 scope addition): a one-way arrival now never claims a room's own
+// compass-anchor cell — the mid-side slot a real exit or a `?` mark in that
+// direction would use, or a diagonal's corner — reciprocal connectors are exempt
+// (they ARE the return path). See `sq1274_neither_forest_arrival_lands_on_the_
+// valleys_own_marked_slot` below. See the SQ-1274 side-quest note for the full
+// writeup of both.
+#[cfg(all(test, feature = "t-render"))]
+mod sq1274_forest_valley {
+    use super::*;
+    use mapper::direction::Direction::{self, Down, E, N, S, Up, W};
+    use mapper::graph::{MapGraph, RoomId};
+    use mapper::layer::MAIN_LAYER;
+    use mapper::router::Side;
+
+    const INSIDE_BUILDING: RoomId = 34441;
+    const FOREST_NEAR: RoomId = 42746; // "In Forest", pos (-2,1) — one step NW of the hub
+    const VALLEY: RoomId = 49722; // "In A Valley", the hub, pos (-1,2)
+    const FOREST_FAR: RoomId = 55642; // "In Forest", pos (-3,1) — two steps W of the hub
+    const HILL: RoomId = 61289;
+    const ROAD_END: RoomId = 63776;
+
+    fn name(id: RoomId) -> &'static str {
+        match id {
+            INSIDE_BUILDING => "Inside Building",
+            FOREST_NEAR | FOREST_FAR => "In Forest",
+            VALLEY => "In A Valley",
+            HILL => "At Hill In Road",
+            ROAD_END => "At End Of Road",
+            _ => "?",
+        }
+    }
+
+    /// Push one compass edge, returning its `connections()` index so the caller can mark it
+    /// distorted afterward (the dump marks all three forest<->valley edges `d`).
+    fn push(g: &mut MapGraph, o: RoomId, d: Direction, dest: RoomId) -> usize {
+        let idx = g.connections().len();
+        g.add_edge(o, d, dest);
+        idx
+    }
+
+    /// #42746's whole block: its self-loop badge (N, W, S) plus its `E` and `Down` edges to
+    /// the hub. Returns the `E` edge's index (the one to mark distorted).
+    fn emit_near_block(g: &mut MapGraph) -> usize {
+        g.add_self_loop(FOREST_NEAR, N);
+        let e_idx = push(g, FOREST_NEAR, E, VALLEY);
+        g.add_self_loop(FOREST_NEAR, W);
+        g.add_self_loop(FOREST_NEAR, S);
+        g.add_edge(FOREST_NEAR, Down, VALLEY);
+        e_idx
+    }
+
+    /// #55642's whole block: its `E` and `Down` and `W` edges to the hub. Returns the `E` and
+    /// `W` edges' indices (both marked distorted in the dump).
+    fn emit_far_block(g: &mut MapGraph) -> (usize, usize) {
+        let e_idx = push(g, FOREST_FAR, E, VALLEY);
+        g.add_edge(FOREST_FAR, Down, VALLEY);
+        let w_idx = push(g, FOREST_FAR, W, VALLEY);
+        (e_idx, w_idx)
+    }
+
+    /// Reconstruct the reported graph exactly (ids, positions, edges, self-loops, random
+    /// marks) from the player's dump, quoted in the brief.
+    ///
+    /// `forest_first` selects which forest room's edges to #49722 are inserted first — a
+    /// counterfactual knob for "what if the OTHER room got first pick" (SQ-1274 Part 1.1/1.2).
+    /// It looks like it should decide the outcome (`route_topology`'s compass loop processes
+    /// `graph.connections()` in order, and a one-way arrival that wins a room side keeps it
+    /// against a later contender), but measurement (`sq1274_counterfactuals` cases (0)/(b)/(h)
+    /// vs (i)) shows it ISN'T the deciding factor here: #42746's own `direct_route` to the hub's
+    /// Top is geometrically clear on its own, and is only rejected because it collides with the
+    /// UNRELATED `49722 N 63776` / `63776 S 49722` connector — the hub's own passage to the
+    /// road — which happens to run along the exact room-grid line #42746's direct L would use.
+    /// That stomp, not any contention between the two forest rooms, is what pushes #42746 into
+    /// channel routing where it claims the ruled West side; #55642 (already barred from a direct
+    /// route because #42746's own cell sits between it and the hub) is then the one left
+    /// contending for West, loses, and is pushed to Top — which is what "the farther room's path
+    /// runs under the nearer room's box" actually traces back to. Reordering the two forest
+    /// edges relative to each other (`forest_first`) does not touch that upstream stomp, which
+    /// is why it does not reliably fix — and in the full graph makes WORSE (case (b): cross 1->2)
+    /// — the very crossing it looks like it should resolve. See `sq1274_counterfactuals` case
+    /// (i), which drops only the hub<->road N/S link and reaches `cross=0` with NEITHER
+    /// `forest_first` NOR `swap_positions` touched.
+    ///
+    /// `swap_positions` swaps #42746's and #55642's `pos` — the user's proposed workaround.
+    fn build(forest_first: RoomId, swap_positions: bool) -> MapGraph {
+        let mut g = MapGraph::new();
+        for &id in &[INSIDE_BUILDING, FOREST_NEAR, VALLEY, FOREST_FAR, HILL, ROAD_END] {
+            g.upsert_room(id, name(id).to_string());
+        }
+        g.set_pos(INSIDE_BUILDING, (0, 0));
+        g.set_pos(HILL, (-2, 0));
+        g.set_pos(ROAD_END, (-1, 0));
+        g.set_pos(VALLEY, (-1, 2));
+        if swap_positions {
+            g.set_pos(FOREST_NEAR, (-3, 1));
+            g.set_pos(FOREST_FAR, (-2, 1));
+        } else {
+            g.set_pos(FOREST_NEAR, (-2, 1));
+            g.set_pos(FOREST_FAR, (-3, 1));
+        }
+
+        // Road loop around Inside Building / At Hill In Road / At End Of Road — irrelevant to
+        // the crossing, kept only for a faithful graph.
+        g.add_edge(ROAD_END, E, INSIDE_BUILDING);
+        g.add_edge(INSIDE_BUILDING, W, ROAD_END);
+        g.add_edge(ROAD_END, W, HILL);
+        g.add_edge(HILL, E, ROAD_END);
+
+        let mut distorted: Vec<usize> = Vec::new();
+        if forest_first == FOREST_NEAR {
+            distorted.push(emit_near_block(&mut g));
+            g.add_edge(VALLEY, N, ROAD_END);
+            g.add_edge(ROAD_END, S, VALLEY);
+            let (e, w) = emit_far_block(&mut g);
+            distorted.push(e);
+            distorted.push(w);
+        } else {
+            let (e, w) = emit_far_block(&mut g);
+            distorted.push(e);
+            distorted.push(w);
+            g.add_edge(VALLEY, N, ROAD_END);
+            g.add_edge(ROAD_END, S, VALLEY);
+            distorted.push(emit_near_block(&mut g));
+        }
+        for idx in distorted {
+            g.set_conn_distorted(idx, true);
+        }
+
+        // `49722 random=[W→(#42746,#55642), U→(#42746,#55642), E→(#55642,#42746)]`
+        g.mark_random_exit(VALLEY, W);
+        g.note_random_destination(VALLEY, W, FOREST_NEAR);
+        g.note_random_destination(VALLEY, W, FOREST_FAR);
+        g.mark_random_exit(VALLEY, Up);
+        g.note_random_destination(VALLEY, Up, FOREST_NEAR);
+        g.note_random_destination(VALLEY, Up, FOREST_FAR);
+        g.mark_random_exit(VALLEY, E);
+        g.note_random_destination(VALLEY, E, FOREST_FAR);
+        g.note_random_destination(VALLEY, E, FOREST_NEAR);
+        // `61289 random=[S→(#42746,#55642)]`
+        g.mark_random_exit(HILL, S);
+        g.note_random_destination(HILL, S, FOREST_NEAR);
+        g.note_random_destination(HILL, S, FOREST_FAR);
+
+        g
+    }
+
+    fn side_str(s: Side) -> &'static str {
+        match s {
+            Side::Top => "Top",
+            Side::Bottom => "Bottom",
+            Side::Left => "Left(west)",
+            Side::Right => "Right(east)",
+        }
+    }
+
+    /// The two forest->valley COMPASS connectors (excludes the Down portal lines, which route
+    /// separately). `(room, exit side, entry side, entry slot)`.
+    fn forest_arrivals(graph: &MapGraph) -> Vec<(RoomId, Side, Side, u16)> {
+        let plan = mapper::route::route_lanes(graph);
+        plan.connectors
+            .iter()
+            .filter(|c| {
+                (c.origin == FOREST_NEAR || c.origin == FOREST_FAR)
+                    && c.dest == VALLEY
+                    && mapper::direction::grid_offset(c.exit_dir).is_some()
+            })
+            .map(|c| (c.origin, c.exit, c.entry, c.entry_slot))
+            .collect()
+    }
+
+    /// (room whose box is entered, connector origin, exit direction, connector dest, cell).
+    type Intrusion = (RoomId, RoomId, Direction, RoomId, (i32, i32));
+    /// (room whose ring is occupied, connector origin, exit direction, connector dest, cells).
+    type Hug = (RoomId, RoomId, Direction, RoomId, usize);
+
+    /// Every connector cell that lands inside a room's 11x5 box, in the router's virtual
+    /// space — a connector belonging to some OTHER room pair drawn over a room. Mirrors
+    /// `sq1255_canyon_view::box_intrusions`.
+    fn box_intrusions(graph: &MapGraph) -> Vec<Intrusion> {
+        let rm = mapper::render::render_layer(graph, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let boxes: Vec<(RoomId, (i32, i32))> = rm
+            .rooms
+            .iter()
+            .map(|r| (r.id, (cols.room_pixel(r.cell.0), rows.room_pixel(r.cell.1))))
+            .collect();
+        let mut out = Vec::new();
+        for conn in rm.plan.connectors.iter() {
+            let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+            for (c, _mask) in &plot.cells {
+                for &(rid, (bx, by)) in &boxes {
+                    let inside = c.0 >= bx && c.0 < bx + BOX_W && c.1 >= by && c.1 < by + BOX_H;
+                    if !inside {
+                        continue;
+                    }
+                    let own = rid == conn.origin || rid == conn.dest;
+                    let on_border =
+                        c.0 == bx || c.0 == bx + BOX_W - 1 || c.1 == by || c.1 == by + BOX_H - 1;
+                    if own && on_border {
+                        continue;
+                    }
+                    out.push((rid, conn.origin, conn.exit_dir, conn.dest, *c));
+                }
+            }
+        }
+        out
+    }
+
+    /// Foreign connector cells in the one-cell ring around a room box. Mirrors
+    /// `sq1255_canyon_view::hug_count`.
+    fn hug_count(graph: &MapGraph) -> Vec<Hug> {
+        let rm = mapper::render::render_layer(graph, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let mut out = Vec::new();
+        for room in rm.rooms.iter() {
+            let (bx, by) = (cols.room_pixel(room.cell.0), rows.room_pixel(room.cell.1));
+            for conn in rm.plan.connectors.iter() {
+                if conn.origin == room.id || conn.dest == room.id {
+                    continue;
+                }
+                let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
+                let n = plot
+                    .cells
+                    .iter()
+                    .filter(|(c, _)| {
+                        c.0 >= bx - 1 && c.0 <= bx + BOX_W && c.1 >= by - 1 && c.1 <= by + BOX_H
+                    })
+                    .count();
+                if n > 0 {
+                    out.push((room.id, conn.origin, conn.exit_dir, conn.dest, n));
+                }
+            }
+        }
+        out
+    }
+
+    /// Print the arrival sides, the box intrusions/hugs, and `render_overlap_stats`'
+    /// (illegal, crossings) for one built graph.
+    fn report(graph: &MapGraph, tag: &str) {
+        println!("\n== {tag} ==");
+        for (room, exit, entry, slot) in forest_arrivals(graph) {
+            println!(
+                "  #{room} {} exits {} arrives on hub's {} (slot {slot})",
+                name(room),
+                side_str(exit),
+                side_str(entry)
+            );
+        }
+        let rm = mapper::render::render_layer(graph, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        for conn in rm.plan.connectors.iter() {
+            if !((conn.origin == FOREST_NEAR || conn.origin == FOREST_FAR) && conn.dest == VALLEY)
+                || mapper::direction::grid_offset(conn.exit_dir).is_none()
+            {
+                continue;
+            }
+            if let Some(plot) = plot_connector(conn, &cols, &rows, None) {
+                let xs: Vec<i32> = plot.cells.iter().map(|(c, _)| c.0).collect();
+                let ys: Vec<i32> = plot.cells.iter().map(|(c, _)| c.1).collect();
+                println!(
+                    "    {} {:?} {}: dep{:?} arr{:?} x[{}..{}] y[{}..{}] {} cells",
+                    conn.origin,
+                    conn.exit_dir,
+                    conn.dest,
+                    plot.dep_anchor,
+                    plot.arr_anchor,
+                    xs.iter().min().unwrap(),
+                    xs.iter().max().unwrap(),
+                    ys.iter().min().unwrap(),
+                    ys.iter().max().unwrap(),
+                    plot.cells.len(),
+                );
+            }
+        }
+        let intr = box_intrusions(graph);
+        let hugs = hug_count(graph);
+        let (illegal, cross) = render_overlap_stats(graph);
+        println!("  intrusions={} hugs={:?} illegal={illegal} cross={cross}", intr.len(), hugs);
+        for (rid, o, d, de, c) in &intr {
+            println!("    intrusion: {o} {d:?} {de} at {c:?} inside box of #{rid} {}", name(*rid));
+        }
+    }
+
+    /// Diagnostic trace: the shipped graph plus every counterfactual named in the brief.
+    /// Prints only; the pinning assertions live in the cases below.
+    #[test]
+    #[ignore = "SQ-1274 diagnostic trace, not a pass/fail case"]
+    fn sq1274_counterfactuals() {
+        report(&build(FOREST_NEAR, false), "(0) shipped: near room (#42746) listed first");
+        report(&build(FOREST_FAR, false), "(b) positions unchanged, far room (#55642) listed first");
+        report(&build(FOREST_NEAR, true), "(a) positions swapped, near-room-id-first insertion order kept");
+        report(&build(FOREST_FAR, true), "(c) both: positions swapped AND far room listed first");
+
+        // (d) Is #42746's BOX the cause of the hug, independent of side/order? Move #55642 far
+        // away from the row entirely (sq1255's "#23 moved away" counterfactual) and see whether
+        // the hug follows it or stays put.
+        let mut g_away = build(FOREST_NEAR, false);
+        g_away.set_pos(FOREST_FAR, (-3, 5));
+        report(&g_away, "(d) #55642 moved far away from the row (order/entry unchanged)");
+
+        // (e) Move #55642 OFF the shared row but still near the hub, one row further from the
+        // hub than #42746 (so it no longer shares #42746's row, but is still close by) — tests
+        // whether it's specifically the SHARED ROW (channel) that causes the hug, not mere
+        // proximity.
+        let mut g_row = build(FOREST_NEAR, false);
+        g_row.set_pos(FOREST_FAR, (-3, 0));
+        report(&g_row, "(e) #55642 moved off #42746's row (still nearby, different row)");
+
+        // (f) Is the baseline's one `cross` actually BETWEEN the two forest connectors, or some
+        // unrelated pair (e.g. the 63776<->49722 N/S line)? A minimal 3-room graph with only
+        // the two forest->valley edges settles it: nothing else exists to cross with.
+        let mut g_min = MapGraph::new();
+        g_min.upsert_room(FOREST_NEAR, name(FOREST_NEAR).to_string());
+        g_min.upsert_room(FOREST_FAR, name(FOREST_FAR).to_string());
+        g_min.upsert_room(VALLEY, name(VALLEY).to_string());
+        g_min.set_pos(FOREST_NEAR, (-2, 1));
+        g_min.set_pos(FOREST_FAR, (-3, 1));
+        g_min.set_pos(VALLEY, (-1, 2));
+        g_min.add_edge(FOREST_NEAR, E, VALLEY);
+        g_min.add_edge(FOREST_FAR, E, VALLEY);
+        report(&g_min, "(f) minimal 3-room graph: just the two forest edges and the hub");
+
+        // (g) Do the `?`/superscript-count random-exit stubs on the hub's W/E/Up borders
+        // (SQ-1261) influence the router at all? `mapper::route`/`mapper::router` never
+        // reference `random_exits`/`random_stubs` (grep confirms), so this should be byte-
+        // identical to (0) — a structural check, not a hopeful one.
+        let mut g_no_stub = build(FOREST_NEAR, false);
+        g_no_stub.unmark_random_exit(VALLEY, W);
+        g_no_stub.unmark_random_exit(VALLEY, Up);
+        g_no_stub.unmark_random_exit(VALLEY, E);
+        g_no_stub.unmark_random_exit(HILL, S);
+        report(&g_no_stub, "(g) same as (0) with every random-exit mark removed");
+
+        // (h) Isolate whether the Down-portal edges (42746 D 49722 / 55642 D 49722), routed as
+        // their OWN connectors (SQ-0224) but still counted as "already placed" against the
+        // compass candidates, are why plain reordering (b) failed to reach cross=0 in the full
+        // graph even though it reached cross=0 in the minimal one (f). Same full graph as (b)
+        // (far room's E/W edges listed first) but with both Down edges dropped.
+        let mut g_nodown = MapGraph::new();
+        for &id in &[INSIDE_BUILDING, FOREST_NEAR, VALLEY, FOREST_FAR, HILL, ROAD_END] {
+            g_nodown.upsert_room(id, name(id).to_string());
+        }
+        g_nodown.set_pos(INSIDE_BUILDING, (0, 0));
+        g_nodown.set_pos(HILL, (-2, 0));
+        g_nodown.set_pos(ROAD_END, (-1, 0));
+        g_nodown.set_pos(VALLEY, (-1, 2));
+        g_nodown.set_pos(FOREST_NEAR, (-2, 1));
+        g_nodown.set_pos(FOREST_FAR, (-3, 1));
+        g_nodown.add_edge(ROAD_END, E, INSIDE_BUILDING);
+        g_nodown.add_edge(INSIDE_BUILDING, W, ROAD_END);
+        g_nodown.add_edge(ROAD_END, W, HILL);
+        g_nodown.add_edge(HILL, E, ROAD_END);
+        g_nodown.add_self_loop(FOREST_NEAR, N);
+        g_nodown.add_edge(FOREST_FAR, E, VALLEY);
+        g_nodown.add_edge(FOREST_FAR, W, VALLEY);
+        g_nodown.add_edge(VALLEY, N, ROAD_END);
+        g_nodown.add_edge(ROAD_END, S, VALLEY);
+        g_nodown.add_edge(FOREST_NEAR, E, VALLEY);
+        g_nodown.add_self_loop(FOREST_NEAR, W);
+        g_nodown.add_self_loop(FOREST_NEAR, S);
+        report(&g_nodown, "(h) same as (b) (far room's edges listed first) but no Down edges");
+
+        // (i) Isolate why #42746 doesn't take a DIRECT route to the hub's Top side (its own
+        // `direct_route` is geometrically unobstructed — see the doc comment on `report`'s
+        // caller). Same as (0) but with the hub<->road-end N/S edges (`49722 N 63776` /
+        // `63776 S 49722`) dropped — that vertical connector is drawn BEFORE the forest block
+        // in insertion order and runs along the exact room-grid line #42746's direct route
+        // would use, so it may be stomping the direct route rather than anything about the
+        // forest pair's own contention.
+        let mut g_noroad_link = MapGraph::new();
+        for &id in &[INSIDE_BUILDING, FOREST_NEAR, VALLEY, FOREST_FAR, HILL, ROAD_END] {
+            g_noroad_link.upsert_room(id, name(id).to_string());
+        }
+        g_noroad_link.set_pos(INSIDE_BUILDING, (0, 0));
+        g_noroad_link.set_pos(HILL, (-2, 0));
+        g_noroad_link.set_pos(ROAD_END, (-1, 0));
+        g_noroad_link.set_pos(VALLEY, (-1, 2));
+        g_noroad_link.set_pos(FOREST_NEAR, (-2, 1));
+        g_noroad_link.set_pos(FOREST_FAR, (-3, 1));
+        g_noroad_link.add_edge(ROAD_END, E, INSIDE_BUILDING);
+        g_noroad_link.add_edge(INSIDE_BUILDING, W, ROAD_END);
+        g_noroad_link.add_edge(ROAD_END, W, HILL);
+        g_noroad_link.add_edge(HILL, E, ROAD_END);
+        g_noroad_link.add_self_loop(FOREST_NEAR, N);
+        g_noroad_link.add_edge(FOREST_NEAR, E, VALLEY);
+        g_noroad_link.add_self_loop(FOREST_NEAR, W);
+        g_noroad_link.add_self_loop(FOREST_NEAR, S);
+        g_noroad_link.add_edge(FOREST_FAR, E, VALLEY);
+        g_noroad_link.add_edge(FOREST_FAR, W, VALLEY);
+        // (deliberately no `VALLEY N ROAD_END` / `ROAD_END S VALLEY`)
+        report(&g_noroad_link, "(i) same as (0) but the hub's own N/S link to the road is dropped");
+    }
+
+    /// **The reported CROSSING, pinned** (SQ-1274): with the graph exactly as the player's dump
+    /// has it, #42746 arrives on the hub's `West` and #55642 is pushed to `Top` — reaching `Top`
+    /// means threading past #42746's box, which hugs it and (per `sq1274_counterfactuals` case
+    /// (0) vs (i)) crosses the #42746->hub connector. NOT because #42746 is "listed first" (see
+    /// `build`'s doc comment: `forest_first` alone does not reproduce or remove this) — #42746's
+    /// own direct route to `Top` is rejected by a stomp against the unrelated hub<->road N/S
+    /// link, which is what pushes it into West in the first place. Diagnostic pin, not a
+    /// regression guard for a fix: the CROSSING itself shipped no router change (see the
+    /// side-quest report — a safe local fix would need to reach into direct-route-vs-channel-
+    /// routing fallback generally, not just this room pair), so this documents the CURRENT shape
+    /// for whoever looks at this next, and is `#[ignore]`d for the same reason the rest of this
+    /// module is. A DIFFERENT, narrower defect surfaced during this investigation — a one-way
+    /// arrival landing on the hub's own outgoing-exit/random-mark border cell — DID ship a fix;
+    /// see `sq1274_neither_forest_arrival_lands_on_the_valleys_own_marked_slot` below.
+    #[test]
+    #[ignore = "SQ-1274 diagnostic pin, not a fix regression guard — see the side-quest report"]
+    fn sq1274_pinned_crossing_as_reported() {
+        let g = build(FOREST_NEAR, false);
+        let arrivals = forest_arrivals(&g);
+        let near_entry = arrivals.iter().find(|a| a.0 == FOREST_NEAR).map(|a| a.2);
+        let far_entry = arrivals.iter().find(|a| a.0 == FOREST_FAR).map(|a| a.2);
+        assert_eq!(near_entry, Some(Side::Left), "the nearer room (#42746) arrives on West");
+        assert_eq!(far_entry, Some(Side::Top), "the farther room (#55642) is pushed to Top");
+        let hugs = hug_count(&g);
+        let hugs_42746: usize = hugs.iter().filter(|(rid, ..)| *rid == FOREST_NEAR).map(|h| h.4).sum();
+        assert!(hugs_42746 > 0, "the farther room's Top-bound connector should hug #42746's box");
+    }
+
+    /// **Fixed, and pinned** (SQ-1274 scope addition): the valley (`#49722`) carries `?`
+    /// random-exit marks on `W`, `Up` and `E`, and an outgoing compass exit `N`. Its `W` mark
+    /// sits on the exact border cell a lone one-way arrival's `West` entry would otherwise center
+    /// on (slot 0) — which is precisely where #42746's arrival landed before this fix (see
+    /// `sq1274_pinned_crossing_as_reported` above, from before `assign_side_slots` learned this
+    /// rule: entry_slot 0 there). Neither forest room's arrival may use slot 0 on whichever side
+    /// it lands, on any of the counterfactuals in `sq1274_counterfactuals` — that slot is the
+    /// valley's own compass anchor (its `N` exit, or the `?` marks that share the cardinal
+    /// positions with it), and a one-way arrival there would misread as a return path that does
+    /// not exist.
+    #[test]
+    fn sq1274_neither_forest_arrival_lands_on_the_valleys_own_marked_slot() {
+        for (forest_first, swap_positions, tag) in [
+            (FOREST_NEAR, false, "(0) shipped order"),
+            (FOREST_FAR, false, "(b) far listed first"),
+            (FOREST_NEAR, true, "(a) positions swapped"),
+            (FOREST_FAR, true, "(c) both"),
+        ] {
+            let g = build(forest_first, swap_positions);
+            for (room, _exit, entry, slot) in forest_arrivals(&g) {
+                assert_ne!(
+                    slot, 0,
+                    "{tag}: #{room}'s arrival on {entry:?} must not use the valley's own \
+                     compass-anchor slot (its N exit / its W, Up, E `?` marks)",
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- SQ-1274 follow-up
+    //
+    // The objection this answers: "if each connector simply took its shortest collision-free
+    // path the overlap would not exist — a short L from #42746's east border into the gutter
+    // between the two columns, down one row band, and east into the valley's west border never
+    // touches the road connector, so some router stage is discarding it."
+    //
+    // Measured: NO stage discards it. That L is exactly what #42746 draws
+    // (`sq1274_the_near_forest_already_takes_the_short_gutter_l` below pins the polyline), and it
+    // is the shortest path to the valley's West door — the BFS oracle
+    // (`sq1274_shortest_path_oracle`) finds nothing shorter. What the SQ-1274 report called
+    // "pushed into channel routing" IS this route; the direct-route rejection it describes is
+    // real, and its FALLBACK is the picture the objection asks for.
+    //
+    // The crossing that remains belongs to the OTHER forest, #55642, and it is not a lost short
+    // path either. Once #42746 owns gutter V(-2) (doubled x=-3, y 2..4), every single-bend route
+    // from #55642 to a side a one-way `E` arrival may use — `oneway_entry_side(E)` = Left, plus
+    // `entry_side_alternatives` = Top; never Bottom or Right — must cut that gutter run. A
+    // crossing-free route exists but needs TWO bends (down gutter V(-3) to the channel BELOW the
+    // valley's row, east, then up into the valley's West door from beneath), and
+    // `build_points_orient` emits only single-bend Ls. Adding that shape was prototyped and
+    // measured; see the side-quest report for the blast radius (it regressed
+    // `sq1255_no_foreign_connector_hugs_a_room_box`, and did not by itself reach cross=0 —
+    // `assign_side_slots` then handed the arrival coming from BELOW the upper slot).
+    //
+    // Routing ORDER cannot fix it either: `sq1274_every_routing_order` runs all six emission
+    // orders of the three contended blocks and gets cross=1 whenever the near forest routes
+    // first and cross=2 whenever the far one does — the road link's position never matters. The
+    // shipped order is already the best available, so "shortest-first" would change nothing here.
+
+    /// Every lattice point a doubled-coord polyline passes through.
+    fn trace(points: &[(i32, i32)]) -> Vec<(i32, i32)> {
+        let mut out = vec![points[0]];
+        for w in points.windows(2) {
+            let (dx, dy) = ((w[1].0 - w[0].0).signum(), (w[1].1 - w[0].1).signum());
+            let mut c = w[0];
+            while c != w[1] {
+                c = (c.0 + dx, c.1 + dy);
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn manhattan(pts: &[(i32, i32)]) -> i32 {
+        pts.windows(2).map(|w| (w[0].0 - w[1].0).abs() + (w[0].1 - w[1].1).abs()).sum()
+    }
+
+    fn dump_points(graph: &MapGraph, tag: &str) {
+        println!("\n-- points {tag} --");
+        let plan = mapper::route::route_lanes(graph);
+        for c in &plan.connectors {
+            println!(
+                "   {} {:?} -> {} exit={:?} entry={:?} recip={} merge={} len={} pts={:?}",
+                c.origin,
+                c.exit_dir,
+                c.dest,
+                c.exit,
+                c.entry,
+                c.reciprocal,
+                c.merge,
+                manhattan(&c.points),
+                c.points
+            );
+        }
+    }
+
+    /// Shortest collision-free lattice path from `start` to `goal`, avoiding occupied room
+    /// centres and every lattice cell already used by an obstacle connector.
+    fn bfs_path(
+        start: (i32, i32),
+        goal: (i32, i32),
+        rooms: &std::collections::BTreeSet<(i32, i32)>,
+        blocked: &std::collections::BTreeSet<(i32, i32)>,
+        bound: i32,
+    ) -> Option<Vec<(i32, i32)>> {
+        use std::collections::{BTreeMap, VecDeque};
+        let free = |p: (i32, i32)| -> bool {
+            if p.0.abs() > bound || p.1.abs() > bound {
+                return false;
+            }
+            if p.0 % 2 == 0 && p.1 % 2 == 0 && rooms.contains(&(p.0 / 2, p.1 / 2)) {
+                return false;
+            }
+            !blocked.contains(&p)
+        };
+        let mut prev: BTreeMap<(i32, i32), (i32, i32)> = BTreeMap::new();
+        let mut q = VecDeque::new();
+        q.push_back(start);
+        prev.insert(start, start);
+        while let Some(p) = q.pop_front() {
+            if p == goal {
+                let mut path = vec![p];
+                let mut c = p;
+                while prev[&c] != c {
+                    c = prev[&c];
+                    path.push(c);
+                }
+                path.reverse();
+                return Some(path);
+            }
+            for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let n = (p.0 + dx, p.1 + dy);
+                if prev.contains_key(&n) {
+                    continue;
+                }
+                if n != goal && !free(n) {
+                    continue;
+                }
+                prev.insert(n, p);
+                q.push_back(n);
+            }
+        }
+        None
+    }
+
+    /// The same graph as `build(FOREST_NEAR, false)` but with the three contended blocks —
+    /// the near forest's edges, the far forest's edges, and the hub's own N/S link to the road
+    /// — emitted in an arbitrary order, so a routing ORDER other than insertion order can be
+    /// measured without touching the router (SQ-1274 follow-up, Part 1.3).
+    fn build_in_order(order: [char; 3]) -> MapGraph {
+        let mut g = MapGraph::new();
+        for &id in &[INSIDE_BUILDING, FOREST_NEAR, VALLEY, FOREST_FAR, HILL, ROAD_END] {
+            g.upsert_room(id, name(id).to_string());
+        }
+        g.set_pos(INSIDE_BUILDING, (0, 0));
+        g.set_pos(HILL, (-2, 0));
+        g.set_pos(ROAD_END, (-1, 0));
+        g.set_pos(VALLEY, (-1, 2));
+        g.set_pos(FOREST_NEAR, (-2, 1));
+        g.set_pos(FOREST_FAR, (-3, 1));
+        g.add_edge(ROAD_END, E, INSIDE_BUILDING);
+        g.add_edge(INSIDE_BUILDING, W, ROAD_END);
+        g.add_edge(ROAD_END, W, HILL);
+        g.add_edge(HILL, E, ROAD_END);
+        let mut distorted: Vec<usize> = Vec::new();
+        for tag in order {
+            match tag {
+                'n' => distorted.push(emit_near_block(&mut g)),
+                'f' => {
+                    let (e, w) = emit_far_block(&mut g);
+                    distorted.push(e);
+                    distorted.push(w);
+                }
+                _ => {
+                    g.add_edge(VALLEY, N, ROAD_END);
+                    g.add_edge(ROAD_END, S, VALLEY);
+                }
+            }
+        }
+        for idx in distorted {
+            g.set_conn_distorted(idx, true);
+        }
+        g
+    }
+
+    /// Every emission order of the three contended blocks, with the resulting arrival sides and
+    /// crossing count — the measurement behind "would routing in some other order fix this?"
+    /// **The disputed fact, pinned** (SQ-1274 follow-up): #42746's connector to the valley IS
+    /// the short gutter L — east out of its box into the gutter between columns -2 and -1
+    /// (doubled x = -3), one row band down, east into the valley's West border — and that L is
+    /// the shortest collision-free path there is: `sq1274_shortest_path_oracle`'s BFS, run on the
+    /// same lattice with every other connector's cells as obstacles, returns the same length (4
+    /// doubled units, centre to centre). It never touches the `49722 N 63776` road connector,
+    /// which runs down the valley's own centre column (doubled x = -2, dumped by
+    /// `sq1274_shortest_path_oracle` as `[(-2,4),(-2,3),(-2,1),(-2,0)]`).
+    ///
+    /// So the router does not discard this path — it draws it. The direct-route rejection SQ-1274
+    /// reported is real (#42746's `direct_route` L bends at room cell (-1,1) and then runs down
+    /// the valley's column, sharing doubled cells (-2,2) and (-2,3) with the road connector —
+    /// `polylines_overlap`, `crates/mapper/src/route/mod.rs`), but the channel route it falls back
+    /// to is this one. Guard it so a future router change that quietly lengthens or re-sides it
+    /// has to say so.
+    /// The near forest's short gutter L (pinned above) used to cross VALLEY's own `?` W mark's
+    /// count cell (SQ-1281): the SQ-1275 router-side reservation that had disqualified this exact
+    /// route was removed, so the router drew straight through it and the renderer's draw order was
+    /// what decided the shared cell. `render_map` plots every connector's line-art
+    /// (`render_lane_connectors`) before it draws any room box (`draw_room`/`draw_box_room`, which
+    /// paints a mark's arrowhead + count last within its own box), so the digit always won.
+    ///
+    /// **RE-PINNED at SQ-1390: the crossing is gone, by construction.** A side mark's count digit
+    /// sits in the LAST gutter cell before the box (`box_left - 1`), and a channel lane now sits
+    /// `LANE_BASE` inside the gutter from EITHER end ([`channel_width`]) — so no connector's
+    /// channel run can land on that cell any more, whatever route it takes. Here the L's vertical
+    /// run moved one cell further out (x = 26, not 27), the turn-in leg grew from one cell to two,
+    /// and it crosses the count cell's column one row BELOW the mark, on the slot SQ-1274 gave it.
+    ///
+    /// So this case now pins the OPPOSITE fact — VALLEY's mark draws its arrowhead and its
+    /// superscript with no connector cell contending for either — and the draw-order rule itself
+    /// stays guarded where it is exercised on purpose, by
+    /// [`random_stub_cells_matches_a_real_connectors_geometry_for_every_direction`], where a mark
+    /// and a real departing connector share the anchor by design.
+    #[test]
+    fn sq1274_the_crossing_connector_never_hides_the_valleys_own_mark_count() {
+        let g = build(FOREST_NEAR, false);
+        let rm = mapper::render::render_layer(&g, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let valley_cell = g.room(VALLEY).unwrap().pos.unwrap();
+        let (vbx, vby) = (cols.room_pixel(valley_cell.0), rows.room_pixel(valley_cell.1));
+        let (varrow_at, vcount_at) =
+            random_stub_cells(vbx, vby, BOX_W, BOX_H, W).expect("W is planar");
+
+        // The near forest's own connector no longer touches either of VALLEY's mark cells — the
+        // SQ-1390 clearance put its run a cell further out. Falsify by reverting `channel_width`
+        // to its one-sided `+ 1` and this fails: the run comes back down the count cell's column.
+        let conn = rm
+            .plan
+            .connectors
+            .iter()
+            .find(|c| c.origin == FOREST_NEAR && c.dest == VALLEY && c.exit_dir == E)
+            .expect("the near forest's E connector to the valley");
+        let plot = plot_connector(conn, &cols, &rows, None).expect("it plots");
+        for claimed in [varrow_at, vcount_at] {
+            assert!(
+                !plot.cells.iter().any(|(c, _)| *c == claimed),
+                "the route must clear VALLEY's own W mark cell {claimed:?}, plot={:?}",
+                plot.cells
+            );
+        }
+
+        let mut state = AppState::default();
+        // Default scroll (0,0) views from logical column/row 0 rightward/downward — VALLEY sits
+        // west of that (column -1) and would scroll off-screen. Scroll to the map's own top-left
+        // bound so every room in it, VALLEY included, is on screen.
+        state.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // Translate from the virtual-pixel space above into the screen cells `render_map` actually
+        // drew, the same way it does — via VALLEY's own screen box (`room_screen_rects` is the
+        // production entry point other callers use for exactly this).
+        let (_, valley_rect) = room_screen_rects(&rm, &state, area)
+            .into_iter()
+            .find(|&(id, _)| id == VALLEY)
+            .expect("VALLEY is on screen");
+        let (arrow_at, count_at) = random_stub_cells(
+            valley_rect.x as i32,
+            valley_rect.y as i32,
+            valley_rect.width as i32,
+            valley_rect.height as i32,
+            W,
+        )
+        .expect("W is planar");
+
+        let arrow_sym = buf.cell((arrow_at.0 as u16, arrow_at.1 as u16)).map(|c| c.symbol().to_string());
+        assert_eq!(
+            arrow_sym.as_deref(),
+            Some(state.symbols.arrows.west.to_string()).as_deref(),
+            "the west arrowhead still draws on VALLEY's border"
+        );
+        let count_sym = buf.cell((count_at.0 as u16, count_at.1 as u16)).map(|c| c.symbol().to_string());
+        assert_eq!(
+            count_sym.as_deref(),
+            Some(crate::render::superscript_count(2)).as_deref(),
+            "VALLEY's W mark records 2 destinations (SQ-1275); its superscript draws in the \
+             gutter cell beside the box, with no connector line to lose to"
+        );
+    }
+
+    #[test]
+    fn sq1274_the_near_forest_already_takes_the_short_gutter_l() {
+        let g = build(FOREST_NEAR, false);
+        let plan = mapper::route::route_lanes(&g);
+        let c = plan
+            .connectors
+            .iter()
+            .find(|c| c.origin == FOREST_NEAR && c.dest == VALLEY && c.exit_dir == E)
+            .expect("#42746's E connector to the valley");
+        assert_eq!(c.exit, Side::Right, "it leaves #42746's east border");
+        assert_eq!(c.entry, Side::Left, "it arrives on the valley's west border");
+        assert_eq!(
+            c.points,
+            vec![(-4, 2), (-3, 2), (-3, 4), (-2, 4)],
+            "east into the gutter (doubled x=-3), one row band down, east into the valley",
+        );
+        assert_eq!(manhattan(&c.points), 4, "and nothing shorter reaches that door");
+        // It shares no cell with the road connector, which runs down the valley's own column.
+        let road = plan
+            .connectors
+            .iter()
+            .find(|r| r.origin == VALLEY && r.dest == ROAD_END)
+            .expect("the valley's N link to the road");
+        let road_cells: std::collections::BTreeSet<(i32, i32)> = trace(&road.points).into_iter().collect();
+        let valley_centre = mapper::route::cell_to_doubled(g.room(VALLEY).unwrap().pos.unwrap());
+        for cell in trace(&c.points) {
+            if cell == valley_centre {
+                continue; // both connectors end at the valley's own centre, by definition
+            }
+            assert!(!road_cells.contains(&cell), "the short L must not touch the road connector at {cell:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "SQ-1274 follow-up diagnostic"]
+    fn sq1274_every_routing_order() {
+        for order in [
+            ['n', 'r', 'f'], // (0) shipped
+            ['f', 'r', 'n'], // (b)
+            ['n', 'f', 'r'], // road last
+            ['f', 'n', 'r'],
+            ['r', 'n', 'f'], // road first
+            ['r', 'f', 'n'],
+        ] {
+            let g = build_in_order(order);
+            report(&g, &format!("order {order:?}"));
+        }
+    }
+
+    /// Print every shared render cell (crossing or illegal) with the connectors involved.
+    fn dump_shared_cells(graph: &MapGraph, tag: &str) {
+        use std::collections::{BTreeMap, HashMap};
+        println!("\n-- shared cells {tag} --");
+        let rm = mapper::render::render(graph);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let mut owners: HashMap<(i32, i32), BTreeMap<usize, u8>> = HashMap::new();
+        for (ci, conn) in rm.plan.connectors.iter().enumerate() {
+            if let Some(plot) = plot_connector(conn, &cols, &rows, None) {
+                for (c, mask) in &plot.cells {
+                    *owners.entry(*c).or_default().entry(ci).or_insert(0) |= *mask;
+                }
+            }
+        }
+        let mut keys: Vec<_> = owners.keys().copied().collect();
+        keys.sort();
+        for k in keys {
+            let per = &owners[&k];
+            if per.len() < 2 {
+                continue;
+            }
+            let who: Vec<String> = per
+                .iter()
+                .map(|(&ci, &m)| {
+                    let c = &rm.plan.connectors[ci];
+                    format!("{} {:?} {} mask={m:#06b}", c.origin, c.exit_dir, c.dest)
+                })
+                .collect();
+            println!("   cell {k:?}: {who:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "SQ-1274 follow-up diagnostic"]
+    fn sq1274_shared_cells() {
+        dump_shared_cells(&build(FOREST_NEAR, false), "(0) near first");
+        dump_shared_cells(&build(FOREST_FAR, false), "(b) far first");
+    }
+
+    #[test]
+    #[ignore = "SQ-1274 follow-up diagnostic"]
+    fn sq1274_shortest_path_oracle() {
+        for (ff, tag) in [(FOREST_NEAR, "(0) near first"), (FOREST_FAR, "(b) far first")] {
+            let g = build(ff, false);
+            dump_points(&g, tag);
+            let plan = mapper::route::route_lanes(&g);
+            let rooms: std::collections::BTreeSet<(i32, i32)> =
+                g.rooms().filter_map(|r| r.pos).collect();
+            let want: [(RoomId, RoomId); 3] =
+                [(FOREST_NEAR, VALLEY), (FOREST_FAR, VALLEY), (VALLEY, ROAD_END)];
+            for &(o, d) in &want {
+                let Some(me) = plan.connectors.iter().position(|c| {
+                    c.origin == o
+                        && c.dest == d
+                        && mapper::direction::grid_offset(c.exit_dir).is_some()
+                        && !c.merge
+                }) else {
+                    println!("  !! no connector {o}->{d}");
+                    continue;
+                };
+                let mut blocked: std::collections::BTreeSet<(i32, i32)> =
+                    std::collections::BTreeSet::new();
+                for (i, c) in plan.connectors.iter().enumerate() {
+                    if i == me {
+                        continue;
+                    }
+                    for p in trace(&c.points) {
+                        blocked.insert(p);
+                    }
+                }
+                let conn = &plan.connectors[me];
+                let a = g.room(o).and_then(|r| r.pos).unwrap();
+                let b = g.room(d).and_then(|r| r.pos).unwrap();
+                let start = mapper::route::exit_point(a, conn.exit);
+                println!(
+                    "  {o}->{d} drawn: entry={:?} len={} pts={:?}",
+                    conn.entry,
+                    manhattan(&conn.points),
+                    conn.points
+                );
+                for side in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
+                    let goal = mapper::route::exit_point(b, side);
+                    let mut bl = blocked.clone();
+                    bl.remove(&start);
+                    match bfs_path(start, goal, &rooms, &bl, 20) {
+                        Some(p) => {
+                            println!("      shortest to {:?}: len={} {:?}", side, p.len() - 1, p)
+                        }
+                        None => println!("      shortest to {side:?}: BLOCKED"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "t-render"))]
+mod sq1291_zork_chasm_badges {
+    //! SQ-1291's other half, on screen: which SIDE of the East-West Passage the player's eye
+    //! finds the stairway down on.
+    //!
+    //! A same-layer Up/Down passage is lane-routed like any other, and its glyph rides the
+    //! connector's DEPARTURE ANCHOR on the box border — not [`super::badge_bearing`], which only
+    //! ever sees the CROSS-layer portals (whose partner is by construction on another plane, so
+    //! it is handed no cell to aim at; see that function's own note). The anchor is derived from
+    //! the rooms' cells, so it faces the partner already: the whole of what the player saw wrong
+    //! was the LAYOUT putting the Chasm south. These cases pin both readings of the same three
+    //! edges against the two layouts, so the badge can never quietly stop tracking its partner.
+    use super::*;
+    use mapper::direction::Direction::{Down, Up, E, SW, W};
+    use mapper::graph::{MapGraph, RoomId};
+    use mapper::layer::MAIN_LAYER;
+
+    const PASSAGE: RoomId = 136;
+    const CHASM: RoomId = 112;
+    const TROLL: RoomId = 133;
+    const ROUND: RoomId = 16;
+
+    /// Zork I's cellar row with the chasm at `chasm`: the troll room west of the passage, the
+    /// round room east, and the chasm reached by a stairwell down AND named by its own
+    /// `southwest` return.
+    fn cellar(chasm: (i32, i32)) -> MapGraph {
+        let mut g = MapGraph::new();
+        for (id, name, pos) in [
+            (TROLL, "The Troll Room", (-2, 0)),
+            (PASSAGE, "East-West Passage", (-1, 0)),
+            (ROUND, "Round Room", (0, 0)),
+            (CHASM, "Chasm", chasm),
+        ] {
+            g.upsert_room(id, name.to_string());
+            g.set_pos(id, pos);
+        }
+        for (o, d, t) in [
+            (TROLL, E, PASSAGE),
+            (PASSAGE, W, TROLL),
+            (PASSAGE, Down, CHASM),
+            (CHASM, Up, PASSAGE),
+            (CHASM, SW, PASSAGE),
+            (PASSAGE, E, ROUND),
+            (ROUND, W, PASSAGE),
+        ] {
+            g.add_edge(o, d, t);
+        }
+        g
+    }
+
+    /// Where `glyph` sits on `id`'s box: `(dx, dy)` from the box's top-left corner, plus the
+    /// box's own centre column and row to compare them against.
+    fn badge_at(g: &MapGraph, id: RoomId, glyph: char) -> (i32, i32, i32, i32) {
+        let rm = mapper::render::render_layer(g, MAIN_LAYER);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 70, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let rect = room_screen_rects(&rm, &st, area)
+            .into_iter()
+            .find(|&(r, _)| r == id)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("room #{id} is drawn"));
+        let want = glyph.to_string();
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                if buf.cell((x, y)).is_some_and(|c| c.symbol() == want) {
+                    return (
+                        (x - rect.x) as i32,
+                        (y - rect.y) as i32,
+                        (rect.width / 2) as i32,
+                        (rect.height / 2) as i32,
+                    );
+                }
+            }
+        }
+        panic!("#{id} shows no {glyph:?} anywhere on its box");
+    }
+
+    /// The fix. With the chasm north-east of the passage — where its own `southwest` return puts
+    /// it — the passage's `↓` sits on the passage's NORTH-EAST, so the badge agrees with the
+    /// game's own prose: "a stairway leading down at the north end of the room".
+    #[test]
+    fn the_stairway_down_shows_on_the_side_the_chasm_is_on() {
+        let g = cellar((0, -1)); // north-east of the passage
+        let st = AppState::default();
+        let (dx, dy, cx, cy) = badge_at(&g, PASSAGE, st.symbols.portal.down);
+        assert!(dx > cx, "the ↓ leans EAST toward the chasm (dx={dx}, centre {cx})");
+        assert!(dy < cy, "…and NORTH, the end of the room the stairway is at (dy={dy}, centre {cy})");
+    }
+
+    /// And the chasm's own `southwest` bearing back to the passage lands on the chasm's
+    /// SOUTH-WEST — the two ends of the passage face each other.
+    #[test]
+    fn the_chasms_return_bearing_shows_on_its_south_west() {
+        let g = cellar((0, -1));
+        let st = AppState::default();
+        let (dx, dy, cx, cy) = badge_at(&g, CHASM, diagonal_arrow(SW, &st.symbols.arrows));
+        assert!(dx < cx, "the ↙ leans WEST toward the passage (dx={dx}, centre {cx})");
+        assert!(dy > cy, "…and SOUTH (dy={dy}, centre {cy})");
+    }
+
+    /// The falsifier for the pair above, and the picture the player reported: with the chasm laid
+    /// out SOUTH-east — the cells their `map.json` carried — the very same `↓` sits on the
+    /// passage's SOUTH side. The badge always tracked its partner; it was the LAYOUT that had the
+    /// chasm in the wrong place, which is what SQ-1291's constraint tiers fix.
+    #[test]
+    fn the_reported_layout_put_the_same_badge_on_the_passages_south_side() {
+        let g = cellar((0, 1)); // south-east, as reported
+        let st = AppState::default();
+        let (_, dy, _, cy) = badge_at(&g, PASSAGE, st.symbols.portal.down);
+        assert!(dy > cy, "as reported, the ↓ leans SOUTH (dy={dy}, centre {cy})");
+    }
+}
+
+
+#[cfg(all(test, feature = "t-render"))]
+mod sq1320_arrival_slots {
+    //! **A one-way arrival runs STRAIGHT into the cell its arrowhead lands on** (SQ-1320).
+    //!
+    //! Two things had to change for that, and they are separable — the cases below keep them so.
+    //!
+    //! 1. **The route is aimed at the slot** ([`straighten_arrival`]). The router's polyline ends
+    //!    on the destination's compass anchor, because the fine grid cannot name a cell part-way
+    //!    along a box edge; the slot displacement used to be applied to the ANCHOR alone, leaving
+    //!    [`attach_bridge`] to sidestep across in the one gutter cell outside the box. Where the
+    //!    approach was head-on that read as a little jog right at the room.
+    //! 2. **The rule about WHICH slot was relaxed** (`route::assign_side_slots`). SQ-1274 barred a
+    //!    one-way arrival from the side's centre cell unconditionally; it now yields only to
+    //!    something of the room's OWN — an exit or a `?` mark in that direction, a reciprocal, or
+    //!    a second arrival.
+    //!
+    //! The two Zork I shapes the user reported are `Frigid River --W--> White Cliffs Beach`
+    //! (#47→#192, the beach one row south and one column west) and `Clearing --E--> Forest`
+    //! (#167→#33, two columns east and one row south), both distorted one-ways. They are rebuilt
+    //! here as synthetic graphs of the same shape so the cases run on CI, where `stories/` is
+    //! absent; `sq1316_connector_overlaps` states the same rule over the real map.
+
+    use super::*;
+    use mapper::direction::Direction::{self, E, N, S, W};
+    use mapper::graph::{MapGraph, RoomId};
+    use mapper::layer::MAIN_LAYER;
+
+    const ORIGIN: RoomId = 1;
+    const DEST: RoomId = 2;
+
+    /// The compass direction a room `side`'s CENTRE border cell stands for — the direction an
+    /// exit drawn from that cell points. Mirrors `route`'s own `side_compass`, deliberately
+    /// spelled again here so the case states its own reading of the rule.
+    fn side_compass(side: Side) -> Direction {
+        match side {
+            Side::Top => N,
+            Side::Bottom => S,
+            Side::Left => W,
+            Side::Right => E,
+        }
+    }
+
+    /// What one arrival at `DEST` looks like once plotted.
+    struct Arrival {
+        entry: Side,
+        slot: u16,
+        /// `dep_anchor → … → arr_anchor`, spur-collapsed and reduced to its turns.
+        path: Vec<(i32, i32)>,
+        arr: (i32, i32),
+        /// The cell `arr` would sit on at slot 0 — the room's own compass anchor.
+        centre: (i32, i32),
+    }
+
+    impl Arrival {
+        /// The length in cells of the leg that carries the arrowhead: the last segment of the
+        /// path, which must run perpendicular into the box border.
+        fn final_leg(&self) -> i32 {
+            let n = self.path.len();
+            assert!(n >= 2, "a plotted connector has at least two path points");
+            let (a, b) = (self.path[n - 2], self.path[n - 1]);
+            (a.0 - b.0).abs() + (a.1 - b.1).abs()
+        }
+
+        /// True when the whole final leg lies on the arrowhead's own column (a horizontal side)
+        /// or row (a vertical one) — i.e. the line comes straight in rather than sliding across.
+        fn final_leg_is_straight_in(&self) -> bool {
+            let a = self.path[self.path.len() - 2];
+            match self.entry {
+                Side::Top | Side::Bottom => a.0 == self.arr.0,
+                Side::Left | Side::Right => a.1 == self.arr.1,
+            }
+        }
+    }
+
+    /// Route `g` and plot its one connector into `DEST`.
+    fn arrival(g: &MapGraph) -> Arrival {
+        let rm = mapper::render::render_layer(g, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let conn = rm
+            .plan
+            .connectors
+            .iter()
+            .find(|c| c.dest == DEST && !c.merge && c.entry_corner.is_none())
+            .expect("one connector arrives at DEST on a side doorway");
+        let plot = plot_connector(conn, &cols, &rows, None).expect("it plots");
+        let cell = g.room(DEST).and_then(|r| r.pos).expect("DEST is placed");
+        Arrival {
+            entry: conn.entry,
+            slot: conn.entry_slot,
+            path: plot.path.clone(),
+            arr: plot.arr_anchor,
+            centre: box_edge_anchor(&cols, &rows, cell, conn.entry, 0),
+        }
+    }
+
+    /// One one-way edge `ORIGIN -dir-> DEST` with the two rooms at the given cells, plus whatever
+    /// `claim` adds to the destination.
+    fn one_way(
+        dir: Direction,
+        opos: (i32, i32),
+        dpos: (i32, i32),
+        claim: impl FnOnce(&mut MapGraph),
+    ) -> MapGraph {
+        let mut g = MapGraph::new();
+        g.upsert_room(ORIGIN, "Origin".to_string());
+        g.upsert_room(DEST, "Dest".to_string());
+        g.set_pos(ORIGIN, opos);
+        g.set_pos(DEST, dpos);
+        g.add_edge(ORIGIN, dir, DEST);
+        claim(&mut g);
+        g
+    }
+
+    /// One of the user's reported shapes: `(tag, direction, origin cell, destination cell)`.
+    type Shape = (&'static str, Direction, (i32, i32), (i32, i32));
+
+    /// The user's two shapes.
+    const SHAPES: [Shape; 2] = [
+        ("Frigid River --W--> White Cliffs Beach (#47->#192)", W, (6, 5), (5, 6)),
+        ("Clearing --E--> Forest (#167->#33)", E, (1, 0), (3, 1)),
+    ];
+
+    /// **The reported defect, gone.** On both shapes the connector runs straight into the cell
+    /// its arrowhead lands on: the leg carrying the arrowhead lies on that cell's own column (or
+    /// row) and is longer than the single gutter cell a sidestep would leave it.
+    ///
+    /// One cell is the whole tell. A channel reserves `LANE_BASE` before lane 0 and `LANE_BASE`
+    /// again past its deepest one ([`channel_width`]), so a connector turning in from a real
+    /// channel always has two cells or more to cover, whichever of the channel's two boxes it is
+    /// heading for; a one-cell final leg can only be the slot sidestep, made in the last gutter
+    /// cell before the room. (The far-side half of that clearance is SQ-1390's — before it, the
+    /// deepest lane sat flush against the far box and a one-cell leg there was geometry rather
+    /// than a jog. `sq1390_arrowhead_clearance` states that half.)
+    #[test]
+    fn the_reported_one_ways_run_straight_into_their_arrowhead() {
+        for (tag, dir, opos, dpos) in SHAPES {
+            let a = arrival(&one_way(dir, opos, dpos, |_| {}));
+            assert!(
+                a.final_leg_is_straight_in(),
+                "{tag}: the last leg must lie on the arrowhead's own column/row \
+                 (entry {:?}, arrowhead {:?}, last turn {:?})",
+                a.entry,
+                a.arr,
+                a.path[a.path.len() - 2],
+            );
+            assert!(
+                a.final_leg() >= 2,
+                "{tag}: the arrowhead's leg is {} cell(s) — a one-cell leg is the jog (path {:?})",
+                a.final_leg(),
+                a.path,
+            );
+        }
+    }
+
+    /// **The relaxed rule.** Nothing of the destination's own is on the side these land on, so
+    /// they take its centre cell — which is what makes both of them a plain unbent L.
+    #[test]
+    fn a_free_compass_anchor_is_used() {
+        for (tag, dir, opos, dpos) in SHAPES {
+            let a = arrival(&one_way(dir, opos, dpos, |_| {}));
+            assert_eq!(a.slot, 0, "{tag}: the destination uses nothing on its {:?} side", a.entry);
+            assert_eq!(a.arr, a.centre, "{tag}: …so the arrowhead is on the compass anchor");
+        }
+    }
+
+    /// **And the straightening is not just the free-slot rule wearing a hat.** Mark the
+    /// destination's own `?` exit in the direction the arrival lands from: the arrival yields the
+    /// centre cell (SQ-1274's rule, which SQ-1320 keeps where it means something) and STILL comes
+    /// straight in on the offset cell's own column/row, with no jog in the last gutter.
+    ///
+    /// A `?` mark rather than an edge on purpose — it draws no connector at all, so nothing about
+    /// the ROUTE changes between this case and the one above; only the slot does.
+    #[test]
+    fn a_claimed_compass_anchor_is_yielded_and_still_entered_straight() {
+        for (tag, dir, opos, dpos) in SHAPES {
+            let side = arrival(&one_way(dir, opos, dpos, |_| {})).entry;
+            let claimed = side_compass(side);
+            let a = arrival(&one_way(dir, opos, dpos, |g| g.mark_random_exit(DEST, claimed)));
+            assert_eq!(a.entry, side, "{tag}: the mark does not move the arrival's side");
+            assert_ne!(a.slot, 0, "{tag}: the `?{claimed:?}` mark holds the centre cell");
+            assert_ne!(a.arr, a.centre, "{tag}: …so the arrowhead sits beside it");
+            assert!(
+                a.final_leg_is_straight_in(),
+                "{tag}: the last leg must still lie on the arrowhead's own column/row \
+                 (arrowhead {:?}, last turn {:?})",
+                a.arr,
+                a.path[a.path.len() - 2],
+            );
+            assert!(
+                a.final_leg() >= 2,
+                "{tag}: the arrowhead's leg is {} cell(s) — the jog is back (path {:?})",
+                a.final_leg(),
+                a.path,
+            );
+        }
+    }
+
+    /// The straightening stated as geometry rather than as a claim about a map: which polylines
+    /// it moves, which it leaves exactly as it found them, and that what it emits is still
+    /// orthogonal.
+    #[test]
+    fn straighten_arrival_moves_only_a_displaced_head_on_approach() {
+        // No displacement (a slot-0 arrival): nothing to do.
+        let mut pix = vec![(0, 0), (10, 0), (10, 8), (10, 10)];
+        let before = pix.clone();
+        straighten_arrival(&mut pix, Side::Top, (10, 9), (10, 9));
+        assert_eq!(pix, before, "no displacement, no change");
+        // An approach ALONG the edge: `attach_bridge` absorbs the offset into the stub already.
+        let mut along = vec![(0, 0), (0, 8), (10, 8), (10, 10)];
+        let before = along.clone();
+        straighten_arrival(&mut along, Side::Top, (12, 9), (10, 9));
+        assert_eq!(along, before, "the last run is along the edge; nothing to straighten");
+        // Head-on and displaced: the whole final run moves, turn included, so the leg into the
+        // arrowhead is on the arrowhead's own column and every segment stays orthogonal.
+        let mut head_on = vec![(0, 0), (10, 0), (10, 8), (10, 10)];
+        straighten_arrival(&mut head_on, Side::Top, (12, 9), (10, 9));
+        assert_eq!(head_on, vec![(0, 0), (12, 0), (12, 8), (10, 10)]);
+        // Orthogonal across every segment the plot actually draws. The final point is the
+        // destination's CENTRE, which `plot_connector` trims and replaces with the box-edge
+        // anchor, so it is not one of them.
+        for w in head_on[..head_on.len() - 1].windows(2) {
+            assert!(w[0].0 == w[1].0 || w[0].1 == w[1].1, "still orthogonal: {w:?}");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "t-render"))]
+mod sq1390_arrowhead_clearance {
+    //! **A connector never turns in the cell that touches its arrowhead** (SQ-1390).
+    //!
+    //! The user, looking at the mapgen Lost Pig map: the passage between `Shelf Room` and the
+    //! gnome room came down the gutter beside `Shelf Room` and turned a right angle straight into
+    //! the `◀` on its left border — `└◀`, corner and head in adjacent cells, the line apparently
+    //! bending inside its own arrowhead.
+    //!
+    //! It was never a routing choice. [`channel_width`] reserved `LANE_BASE` before lane 0 and a
+    //! single cell for the deepest lane to stand in, so a channel's NEAR box always had two cells
+    //! of clearance and its FAR box always had one — for every channel on every map, whatever
+    //! route ran through it. With a one-lane channel the whole gutter was `MIN_GUTTER` = 2 cells
+    //! and there was no other lane a route could have taken. So the fix is the width, not the
+    //! router: `LANE_BASE` on both sides of the lane band.
+    //!
+    //! The shape below is the smallest thing that produces it — a passage whose two rooms are not
+    //! adjacent because a third room stands between them, so the route must leave the box, run
+    //! down the gutter past the room in the way, and turn in. That turn is the one that used to
+    //! land against the arrowhead. Both axes, because a width bug fixed for columns and left in
+    //! for rows is still the bug.
+    //!
+    //! `sq1316_connector_overlaps` states the same rule over the real Zork I and Lost Pig maps;
+    //! `arrival_approach_report` is where "a bend in the last channel" is defined, and it grew a
+    //! third complaint here — plus the departure end, since a reciprocal pair is drawn ONCE and
+    //! half the arrowheads on any map are the origin's.
+
+    use super::*;
+    use mapper::direction::Direction::{self, E, S};
+    use mapper::graph::{MapGraph, RoomId};
+    use mapper::layer::MAIN_LAYER;
+
+    const ORIGIN: RoomId = 1;
+    const DEST: RoomId = 2;
+    const BLOCKER: RoomId = 3;
+
+    /// `ORIGIN -dir- DEST` walked from both ends, with `BLOCKER` parked on the cell between them
+    /// so the route has to go around it.
+    fn blocked(dir: Direction, opos: (i32, i32), bpos: (i32, i32), dpos: (i32, i32)) -> MapGraph {
+        let mut g = MapGraph::new();
+        for (id, name) in [(ORIGIN, "Origin"), (DEST, "Dest"), (BLOCKER, "Blocker")] {
+            g.upsert_room(id, name.to_string());
+        }
+        g.set_pos(ORIGIN, opos);
+        g.set_pos(BLOCKER, bpos);
+        g.set_pos(DEST, dpos);
+        g.add_edge(ORIGIN, dir, DEST);
+        g.add_edge(DEST, mapper::direction::opposite(dir), ORIGIN);
+        g
+    }
+
+    /// `(tag, direction, origin cell, blocker cell, destination cell)`.
+    type Shape = (&'static str, Direction, (i32, i32), (i32, i32), (i32, i32));
+
+    /// One shape per axis: the route detours around the blocker in a ROW channel and in a COLUMN
+    /// channel respectively, and each one's turn-in lands on the channel's far box.
+    const SHAPES: [Shape; 2] = [
+        ("S past a blocker", S, (0, 0), (0, 1), (0, 2)),
+        ("E past a blocker", E, (0, 0), (1, 0), (2, 0)),
+    ];
+
+    /// One BENDING connector's two end legs, in cells, with the polyline they came from.
+    struct EndLegs {
+        departure: i32,
+        arrival: i32,
+        path: Vec<(i32, i32)>,
+    }
+
+    /// Every bending side-to-side connector on the layer, measured at both ends. A straight run
+    /// and a corner anchor have no turn to land against a head, so neither is measured.
+    fn end_legs(g: &MapGraph) -> Vec<EndLegs> {
+        let rm = mapper::render::render_layer(g, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let mut out = Vec::new();
+        for c in rm.plan.connectors.iter().filter(|c| !c.merge && c.entry_corner.is_none()) {
+            let Some(plot) = plot_connector(c, &cols, &rows, None) else { continue };
+            let n = plot.path.len();
+            if n < 3 {
+                continue;
+            }
+            let leg = |a: (i32, i32), b: (i32, i32)| (a.0 - b.0).abs() + (a.1 - b.1).abs();
+            out.push(EndLegs {
+                departure: leg(plot.path[0], plot.path[1]),
+                arrival: leg(plot.path[n - 2], plot.path[n - 1]),
+                path: plot.path.clone(),
+            });
+        }
+        out
+    }
+
+    /// **The reported defect, gone, on both axes.** Every bending connector leaves its departure
+    /// arrowhead and reaches its arrival arrowhead with at least two cells of straight line, so no
+    /// corner glyph is ever painted in the cell next to a head.
+    #[test]
+    fn a_detouring_connector_clears_both_of_its_arrowheads() {
+        for (tag, dir, opos, bpos, dpos) in SHAPES {
+            let legs = end_legs(&blocked(dir, opos, bpos, dpos));
+            assert!(!legs.is_empty(), "{tag}: the detouring connector must be plotted and bend");
+            for EndLegs { departure, arrival, path } in legs {
+                assert!(departure >= 2, "{tag}: departure leg is {departure} cell(s) — {path:?}");
+                assert!(arrival >= 2, "{tag}: arrival leg is {arrival} cell(s) — {path:?}");
+            }
+        }
+    }
+
+    /// **And the rule can now SEE it.** [`arrival_approach_report`] blessed the shape above — its
+    /// sidestep test asks whether the segment before the arrowhead's leg is one cell PARALLEL to
+    /// the side, and a genuine gutter run is long — so the defect could sit on a green suite. The
+    /// report reads both ends and both leg lengths now; this is the case that says so.
+    #[test]
+    fn the_report_names_a_turn_that_touches_an_arrowhead() {
+        for (tag, dir, opos, bpos, dpos) in SHAPES {
+            let g = blocked(dir, opos, bpos, dpos);
+            let (checked, excused, findings) = arrival_approach_report(&g, MAIN_LAYER);
+            assert!(checked >= 1, "{tag}: the connector must be measured");
+            assert_eq!(excused, 0, "{tag}: nothing here is on a crowded side");
+            assert!(findings.is_empty(), "{tag}: {}", findings.join("\n"));
+        }
+    }
+
+    /// **The width is symmetric, stated on the arithmetic alone.** Lane 0 clears the channel's
+    /// near box by `LANE_BASE`, and the deepest lane clears its far box by the same, for every
+    /// lane count — which is the invariant the two cases above depend on and the one the old
+    /// `+ 1` broke for every channel in the workspace.
+    #[test]
+    fn every_channel_clears_both_of_its_boxes_equally() {
+        for lanes in 1u16..8 {
+            let w = channel_width(lanes);
+            let deepest = LANE_BASE + (lanes as i32 - 1) * LANE_SPACING;
+            assert_eq!(
+                w - deepest,
+                LANE_BASE + 1,
+                "{lanes} lane(s): the deepest lane sits {} cell(s) from the far box, lane 0 sits \
+                 {} from the near one (width {w})",
+                w - deepest,
+                LANE_BASE + 1,
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "t-render"))]
+mod sq1332_bends {
+    //! **A connector takes no turn the geometry did not force** (SQ-1332).
+    //!
+    //! `crates/mapper/src/route/mod.rs` holds the router's own cases, on its doubled polylines.
+    //! These are the DRAWN reading — [`bend_report`] over `ConnectorPlot.path`, which is what the
+    //! terminal paints and the SVG traces — on synthetic graphs, so they run on CI where
+    //! `stories/` is absent. The real maps are pinned in
+    //! `crates/app/tests/suites/sq1332_connector_bends.rs`.
+
+    use super::*;
+    use mapper::direction::Direction::{E, N, W};
+    use mapper::graph::MapGraph;
+    use mapper::layer::MAIN_LAYER;
+
+    /// Two rooms on one row with a clear gap: a straight line, no turn, and nothing was available
+    /// to save.
+    #[test]
+    fn an_aligned_pair_with_a_clear_gap_draws_no_turn() {
+        let mut g = MapGraph::new();
+        for id in [1, 2] {
+            g.upsert_room(id, "r".into());
+        }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (3, 0));
+        g.add_edge(1, E, 2);
+        g.add_edge(2, W, 1);
+        let r = bend_report(&g, MAIN_LAYER);
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].bends, r[0].optimum), (0, 0), "{:?}", r[0].path);
+    }
+
+    /// Perpendicular anchors with a free corner between them: exactly ONE turn drawn, which is
+    /// also the fewest the boxes allow.
+    #[test]
+    fn a_free_l_draws_exactly_one_turn() {
+        let mut g = MapGraph::new();
+        for id in [1, 2] {
+            g.upsert_room(id, "r".into());
+        }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (3, 3));
+        g.add_edge(1, E, 2);
+        g.add_edge(2, N, 1);
+        let r = bend_report(&g, MAIN_LAYER);
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].bends, r[0].optimum), (1, 1), "{:?}", r[0].path);
+        assert_eq!(r[0].excess(), 0);
+    }
+
+    /// A room box parked on the free L's corner sends the route the OTHER way round rather than
+    /// through it, and the detour costs one turn — no more.
+    ///
+    /// Three rather than one, because the arrowheads bracket it: this pair leaves EAST and arrives
+    /// from ABOVE, so once the eastward corner is occupied the line has to go east, down, east and
+    /// down again. That is the shape a second turn is FOR. What the case forbids is the third and
+    /// fourth: a route that keeps weaving after the box is behind it.
+    #[test]
+    fn a_blocked_corner_sends_the_route_round_rather_than_through() {
+        let mut g = MapGraph::new();
+        for id in [1, 2, 3] {
+            g.upsert_room(id, "r".into());
+        }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (3, 3));
+        g.set_pos(3, (3, 0)); // sits on the horizontal-first corner
+        g.add_edge(1, E, 2);
+        g.add_edge(2, N, 1);
+        let rm = mapper::render::render_layer(&g, MAIN_LAYER);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let conn = rm
+            .plan
+            .connectors
+            .iter()
+            .find(|c| c.origin == 1 && c.dest == 2)
+            .expect("1→2 is drawn");
+        let plot = plot_connector(conn, &cols, &rows, None).expect("it plots");
+        let (bx, by) = (cols.room_pixel(3), rows.room_pixel(0));
+        let (bw, bh) = (cols.box_dim_at(3), rows.box_dim_at(0));
+        for (c, _) in &plot.cells {
+            assert!(
+                !(c.0 > bx && c.0 < bx + bw - 1 && c.1 > by && c.1 < by + bh - 1),
+                "the route runs through room 3's box at {c:?}: {:?}",
+                plot.path
+            );
+        }
+        assert_eq!(plot.path.len() - 2, 3, "east, down, east, down — and no more: {:?}", plot.path);
+    }
+}
 
 
 

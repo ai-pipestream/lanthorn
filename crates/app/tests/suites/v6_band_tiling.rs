@@ -70,6 +70,21 @@ fn frame(session: &GameSession, state: &app::state::AppState) {
     app::render::screen::render_story_pane(&model, false, None, state, PANE, &mut buf);
 }
 
+/// Reap the background band worker (SQ-1188), the way the app's loop tick does.
+/// A changed band's `Upload` op lands HERE, in the change frame's own op epoch —
+/// the next frame's `begin_band_log` would clear it — so a case measuring what a
+/// change sent settles between the change frame and the read.
+fn settle(state: &app::state::AppState) {
+    for _ in 0..500 {
+        let _ = state.graphics_render.borrow_mut().poll_v6_job();
+        if !state.graphics_render.borrow().band_encode_in_flight() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("band encodes never settled");
+}
+
 /// The banner's bands: the ring's TOP strip, which is the one this quest is about.
 ///
 /// Identified by sitting on the pane's first row AND not being pane-tall. The
@@ -149,6 +164,10 @@ fn to_first_turn(session: &mut GameSession, state: &app::state::AppState) {
         let _ = session.take_transcript();
     }
     frame(session, state);
+    // Boot-time band encodes land before any case measures a LATER frame
+    // (SQ-1188): a straggler installing mid-assertion would count as that
+    // frame's upload.
+    settle(state);
 }
 
 /// The partition proof, and it is the whole safety argument: N tiles are pixel-identical
@@ -212,6 +231,10 @@ fn a_one_tile_change_re_uploads_that_tile_and_reuses_the_rest() {
         let _ = session.submit("n");
         let _ = session.take_transcript();
         frame(&session, &state);
+        // SQ-1188: the changed tile's encode runs on the worker; its Upload op
+        // lands in this frame's op epoch when reaped. The unchanged tiles'
+        // Reuse ops are already there — one epoch carries the whole story.
+        settle(&state);
 
         let gr = state.graphics_render.borrow();
         let uploaded = banner(&gr.uploaded_targets());

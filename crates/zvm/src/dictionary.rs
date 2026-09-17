@@ -1,20 +1,36 @@
-// Z-machine dictionary and input tokeniser — ZMSD §13.
-//
-// Dictionary layout (at `mem.dictionary()` base):
-//   1 byte  n            — number of word-separator ZSCII codes
-//   n bytes              — the separator codes
-//   1 byte  entry_length — bytes per entry (≥ 4 for v3, ≥ 6 for v4+)
-//   2 bytes count        — number of entries (i16; negative ⇒ unsorted)
-// Then `count` (abs) entries of `entry_length` bytes each.
-// The first 4 (v3) or 6 (v4+) bytes of each entry are the encoded word key.
+//! Z-machine dictionary and input tokeniser — ZMSD §13.
+//!
+//! Dictionary layout (at `mem.dictionary()` base):
+//!
+//! ```text
+//! 1 byte  n            — number of word-separator ZSCII codes
+//! n bytes              — the separator codes
+//! 1 byte  entry_length — bytes per entry (≥ 4 for v3, ≥ 6 for v4+)
+//! 2 bytes count        — number of entries (i16; negative ⇒ unsorted)
+//! ```
+//!
+//! Then `count` (abs) entries of `entry_length` bytes each.
+//! The first 4 (v3) or 6 (v4+) bytes of each entry are the encoded word key.
 
 use crate::memory::Memory;
 use crate::text::encode::encode_word_mem;
 
+/// A parsed Z-machine parse dictionary (ZMSD §13), ready for word lookup and
+/// input tokenising. Build one with [`load`] (the story's standard dictionary)
+/// or [`load_at`] (a custom dictionary address the `tokenise` opcode supplied).
 pub struct Dictionary {
+    /// Byte length of each entry, header-declared: at least 4 in v1–3, 6 in
+    /// v4+ (ZMSD §13.2). May exceed the key length — the extra bytes are
+    /// game-defined data this crate does not interpret.
     pub entry_length: u8,
+    /// Number of entries in the dictionary (absolute value of the header's
+    /// signed count; always ≥ 1 after loading).
     pub count: u16,       // absolute count (always ≥ 1)
+    /// Byte address of the first entry, immediately after the separator list
+    /// and the entry-length/count header fields.
     pub base: u32,        // byte address of first entry
+    /// Word-separator ZSCII codes (ZMSD §13.1) — punctuation that ends a word
+    /// even without a preceding space, and is itself tokenised as a one-byte word.
     pub separators: Vec<u8>,
     sorted: bool,
     key_len: u8,          // 4 for v3, 6 for v4+
@@ -241,6 +257,7 @@ impl Dictionary {
 }
 
 /// A single parsed token from the input line.
+#[non_exhaustive]
 pub struct Token {
     /// Byte address of the dictionary entry, or 0 if not found.
     pub dict_addr: u16,

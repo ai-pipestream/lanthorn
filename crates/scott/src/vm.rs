@@ -1,4 +1,19 @@
+//! [`Vm`], the mutable play state that turns a static [`crate::Database`]
+//! into a running game: item locations, the player's room, flags, counters,
+//! lamp fuel, and the PRNG occurrence rolls draw from.
+//!
+//! A host drives a session through [`Vm::step`] / [`Vm::supply_line`] and
+//! [`StepResult`] (see the crate-level docs for the full protocol), and
+//! saves it with [`Vm::snapshot`] / [`Vm::restore`] — the latter reporting a
+//! shape mismatch as a [`RestoreError`] rather than corrupting state.
+//!
+//! Verb and command dispatch follow ScottFree's own C source (`main.c`'s
+//! opcode 0-51 conditions and 52+ commands) wherever the database format
+//! leaves room for disagreement between implementations; see individual
+//! method docs for the sites where that mattered.
+
 use crate::*;
+use crate::database::{CARRIED, DARK_FLAG, LAMP_EMPTY_FLAG, LIGHT_SOURCE};
 use std::collections::HashSet;
 
 /// Condition codes 0..=19 implemented by `Vm::eval_condition` below (the
@@ -12,8 +27,12 @@ pub(crate) const CONDITION_CODES: [u8; 20] = [
 ];
 
 /// Command opcodes 52..=89, individually implemented by `Vm::run_commands`
-/// below (0 is a no-op slot; 1..=51 and 102.. print a message; 90..=101 are
-/// unimplemented/no-op — see the `_ => {}` arm there). Test-only, for the
+/// below (0 is a no-op slot; 1..=51 and 102.. print a message; 91..=101 are
+/// unimplemented/no-op — see the `_ => {}` arm there). Opcode 90 is not
+/// listed here even though `run_commands` has a dedicated arm for it: it is
+/// implemented only for US S.A.G.A. databases (`Database::saga_us.is_some()`,
+/// spec §12.8/§12.11, SQ-1472) and is a no-op for every other dialect, unlike
+/// the opcodes below which behave the same everywhere. Test-only, for the
 /// same reason as `CONDITION_CODES` above. Kept in sync by hand.
 #[cfg(test)]
 pub(crate) const FIXED_COMMAND_OPCODES: [u16; 38] = [
@@ -21,18 +40,125 @@ pub(crate) const FIXED_COMMAND_OPCODES: [u16; 38] = [
     75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89,
 ];
 
+/// What the host should do after [`Vm::step`] runs a turn (or does nothing,
+/// if no command was buffered) — see the crate-level docs for the full
+/// `step`/`supply_line` protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StepResult {
+    /// Reserved for a future "keep stepping, no new input needed yet"
+    /// outcome; [`Vm::step`] never actually returns this today — every call
+    /// resolves to [`StepResult::NeedLine`] or [`StepResult::Quit`] (see the
+    /// crate-level docs' "no separate engine-fault outcome" note).
     Continue,
+    /// The turn ran to completion and the VM is waiting on the player's next
+    /// command. Read what it printed with [`Vm::take_output`], then hand the
+    /// next line to [`Vm::supply_line`].
     NeedLine,
+    /// The game has ended (a win, a death, or the QUIT command). The host
+    /// should stop calling [`Vm::step`].
     Quit,
 }
 
-#[derive(Debug, Clone)]
-pub enum Input {
-    Line(String),
+/// Why [`Vm::restore`] rejected a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RestoreError {
+    /// The byte buffer ended before every field of the snapshot was read.
+    Truncated,
+    /// A room or counter index encoded in the snapshot does not fit this
+    /// game's room table.
+    OutOfRange,
+    /// The item count encoded in the snapshot does not match this game's own
+    /// item table — the usual sign of a version/format mismatch (a snapshot
+    /// taken against a different compiled `.dat`).
+    ItemCountMismatch,
+    /// Bytes remained in the buffer after every field was read.
+    TrailingData,
+    /// The first four bytes are not [`Vm::SNAPSHOT_MAGIC`] — not a
+    /// [`Vm::snapshot`] blob at all, foreign data, or (pre-release, no
+    /// back-compat) the headerless form this crate produced before SQ-1402.
+    BadMagic,
+    /// The snapshot declares a format version newer than this build of
+    /// `scott` understands: `found` is what the file's header says,
+    /// `supported` is the newest version this build can restore
+    /// ([`Vm::SNAPSHOT_VERSION`]). Restoring it would misread every field
+    /// after the header, so this is refused before touching any of them.
+    NewerVersion {
+        /// The format version number the snapshot's header declares.
+        found: u16,
+        /// The newest format version this build can restore
+        /// ([`Vm::SNAPSHOT_VERSION`]).
+        supported: u16,
+    },
+    /// [`Vm::restore_scottfree`] only: the input is not a well-formed
+    /// ScottFree save (not ASCII text, or a token that isn't the integer the
+    /// format expects at that position). Carries a short, fixed reason.
+    ScottFreeMalformed(&'static str),
 }
 
+impl std::fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RestoreError::Truncated => write!(f, "save data ended before the snapshot was fully read"),
+            RestoreError::OutOfRange => write!(f, "save data names a room or counter index outside this game"),
+            RestoreError::ItemCountMismatch => write!(f, "save data's item count does not match this game"),
+            RestoreError::TrailingData => write!(f, "save data has extra bytes after the snapshot"),
+            RestoreError::BadMagic => write!(f, "save data is not a scott snapshot (bad magic)"),
+            RestoreError::NewerVersion { found, supported } => {
+                write!(f, "save data is format version {found}, newer than this build supports (version {supported})")
+            }
+            RestoreError::ScottFreeMalformed(reason) => {
+                write!(f, "not a valid ScottFree save: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {}
+
+/// One `draw picture N` request opcode 90 queued during the CURRENT turn's
+/// action processing (US S.A.G.A. databases only, spec §12.8/§12.11) — the
+/// door for a scene that draws SEVERAL pictures in one turn, each waiting for
+/// the player to press ENTER before the next one shows (*The Hulk*'s "bite
+/// lip" opening cutscene is the specimen, SQ-1487). `output_len` is
+/// `self.out.len()` at the moment the opcode ran, so a host can split the
+/// turn's accumulated transcript at each picture and show only the text
+/// ahead of it before pausing.
+///
+/// Transient per-turn state, exactly like the opcode-89 override `Vm` keeps
+/// privately: drained by [`Vm::take_picture_shows`] and cleared at the top of
+/// every turn in [`Vm::step`] — **not** part of the snapshot/restore format.
+/// A `Vm` nobody drains never grows this past one turn's worth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PictureShow {
+    /// The picture number opcode 90 named.
+    pub(crate) picture: u16,
+    /// `self.out.len()` at the moment this opcode ran — where in the turn's
+    /// transcript this picture belongs.
+    pub(crate) output_len: usize,
+}
+
+impl PictureShow {
+    /// The picture number opcode 90 named.
+    pub fn picture(&self) -> u16 {
+        self.picture
+    }
+
+    /// `self.out.len()` at the moment this opcode ran — where in the turn's
+    /// transcript this picture belongs.
+    pub fn output_len(&self) -> usize {
+        self.output_len
+    }
+}
+
+/// A running Scott Adams game: a [`Database`] plus every piece of mutable
+/// play state it needs — item locations, the player's room, flags,
+/// counters, lamp fuel, and the PRNG. A host drives it through
+/// [`Vm::step`]/[`Vm::supply_line`] and saves it with
+/// [`Vm::snapshot`]/[`Vm::restore`]; see the crate-level docs for the full
+/// protocol.
 pub struct Vm {
     pub(crate) db: Database,
     pub(crate) item_loc: Vec<i32>, // per item: current location (room index; -1/255 = carried; 0 = nowhere)
@@ -57,6 +183,20 @@ pub struct Vm {
     // the default room picture until the next command. Cosmetic, host-read via
     // `current_picture`; excluded from snapshot/restore.
     pub(crate) pending_picture: Option<u16>,
+    // The sequence of opcode-90 "draw picture N" requests queued THIS turn
+    // (US S.A.G.A. databases only, spec §12.11, SQ-1487) — see
+    // `PictureShow`'s doc. Drained by `take_picture_shows`, cleared at the
+    // top of every turn alongside `pending_picture` above; transient host
+    // presentation state, excluded from snapshot/restore for the same reason.
+    pub(crate) pending_picture_shows: Vec<PictureShow>,
+    // The LOOK close-up table of a scrambled Apple II release, or `None`
+    // (SQ-1499). Set by the HOST after construction rather than carried on
+    // `Database`, because it is not in the database at all — it is three
+    // columns in the release's own `M2` on the boot disk, which only a host
+    // that mounted that disk can read. See `Vm::set_look_table`. Not game
+    // state: a snapshot restores into a `Vm` the host built and set up the
+    // same way, exactly as `options` is.
+    look_table: Option<crate::apple_pictures::AppleLookTable>,
     // --- SQ-0464 debug-inspector support: fired-action tracing. Off by
     // default; every field below is a no-op / stays empty unless a host opts
     // in via `set_trace_fired`, so there is zero cost in normal play beyond a
@@ -74,6 +214,47 @@ pub struct Vm {
     /// player-command actions whose verb/noun matched but a condition blocked
     /// them. Cleared every turn; only populated while `trace_fired` is on.
     pub(crate) last_blocked: Vec<(usize, usize)>,
+    /// ScottFree's `-y`/`-s`/`-t`/`-p` runtime flags plus this crate's own
+    /// [`Presentation`] choice (SQ-1413) — see [`crate::options`] for the
+    /// full doc. Fixed for the life of a `Vm`: set at construction
+    /// ([`Vm::new_full`]) because the opening occurrence pass (also run in
+    /// the constructor) can print option-gated wording.
+    pub(crate) options: Options,
+    /// Whether the TI-99/4A automatic inventory listing is on — see
+    /// [`Vm::auto_inventory`]. Real game state, not presentation: opcodes
+    /// 214 and 215 change it and spec §9.1 requires it to survive save and
+    /// restore, so unlike `save_requested` and `pending_picture` it IS part
+    /// of the snapshot.
+    pub(crate) auto_inventory: bool,
+}
+
+/// How many operand bytes the TI-99/4A command opcode `op` consumes
+/// (`docs/internals/scott-dialects-spec.md` §3.7's command table). Every
+/// operand is a whole byte immediately after its opcode; there is no
+/// operand-smuggling mechanism and nothing is multiplied by 150 or by 20.
+///
+/// Only the commands appear here. Conditions are 183-201 and take one
+/// operand except 195 and 196, which take none; 202-211 and 213 are
+/// unassigned and their counts are unknown, which is why a record that
+/// meets one is abandoned rather than stepped over.
+///
+/// `pub(crate)` so `ti994a::read_chain` can reuse this as the one source of
+/// truth for command arities when it has to recover a link-0 record's extent
+/// by walking the opcode stream (spec §3.7); see that module's
+/// `walk_ti99_ops`.
+pub(crate) fn ti99_command_operands(op: u8) -> usize {
+    match op {
+        218..=222 | 225 | 226 | 237 | 245..=247 | 249 | 250 => 1,
+        230 | 236 | 238 => 2,
+        _ => 0,
+    }
+}
+
+/// Whether `text` already ends in the sentence punctuation the TI-99/4A
+/// listing rules treat as "already terminated" — `.` or `!`
+/// (`docs/internals/scott-dialects-spec.md` §9.1's inventory rule).
+fn ends_in_sentence_punctuation(text: &str) -> bool {
+    matches!(text.chars().next_back(), Some('.') | Some('!'))
 }
 
 impl Vm {
@@ -91,9 +272,10 @@ impl Vm {
 
     /// Like [`Vm::new`], but with fired-action tracing enabled from the very
     /// first instruction — so the opening occurrence pass (run inside this
-    /// constructor, before any host code can call [`set_trace_fired`]) is
-    /// captured too. The app's `--debug` boot path uses this so a Scott story's
-    /// start-of-game auto-events show up as fired from the first frame.
+    /// constructor, before any host code can call [`Vm::set_trace_fired`]) is
+    /// captured too. A host's debug-boot path (lanthorn's `--debug` flag, for
+    /// instance) uses this so a Scott story's start-of-game auto-events show up
+    /// as fired from the first frame.
     pub fn new_with_trace(db: Database, trace_fired: bool) -> Vm {
         Vm::new_seeded(db, trace_fired, Vm::DEFAULT_RNG_SEED)
     }
@@ -103,9 +285,52 @@ impl Vm {
     /// A seed belongs in the CONSTRUCTOR, not in a `seed_rng` call after it: the
     /// opening occurrence pass runs below, inside this function, and occurrences
     /// roll percentage chances — so a game seeded afterwards has already had its
-    /// first random events decided by the default seed. lanthorn passes the
-    /// `random_seed` config key here, or an entropy draw when that key is unset.
+    /// first random events decided by the default seed. The host supplies the
+    /// seed here — lanthorn passes its `random_seed` config key, or an entropy
+    /// draw when that key is unset.
+    ///
+    /// Uses ScottFree's own default [`Options`] (every `-y`/`-s`/`-t`/`-p` flag
+    /// off) — a host that wants one of them set uses [`Vm::new_full`] instead.
     pub fn new_seeded(db: Database, trace_fired: bool, seed: u32) -> Vm {
+        Vm::new_full(db, trace_fired, seed, Options::default())
+    }
+
+    /// The fullest constructor: [`Vm::new_seeded`] plus ScottFree's `-y`/`-s`/
+    /// `-t`/`-p` [`Options`] (SQ-1413). `options` is a constructor argument
+    /// for the same reason `seed` is (see [`Vm::new_seeded`]'s doc): the
+    /// opening occurrence pass below can print option-gated wording (an
+    /// occurrence that kills the player on turn one, say), so a `Vm` set up
+    /// with the wrong options and corrected afterward would already have
+    /// shown the wrong text.
+    pub fn new_full(db: Database, trace_fired: bool, seed: u32, options: Options) -> Vm {
+        // The dialect specification's Appendix A: the runtime differences of
+        // its §9 "are properties of the *database*, not of the host, and
+        // have to travel with it". So a TI-99/4A database overrides what the
+        // host asked for, in the three places §9 names — the two lamp flags
+        // §9.2 says "every TI-99/4A release forces on", and the message set
+        // and layout §9.1 calls "this dialect's own". `you_are` is left
+        // alone: it is not one of them.
+        let options = if db.ti99.is_some() {
+            options
+                .with_scott_light(true)
+                .with_prehistoric_lamp(true)
+                .with_presentation(Presentation::Ti994a)
+        } else {
+            options
+        };
+        // The same rule for the Mysterious Adventures series (SQ-1414): §9.2
+        // says "every Mysterious Adventures release and every TI-99/4A
+        // release forces both on", and gives the black-box test — at zero
+        // fuel the lamp must both announce that it has run out AND cease to
+        // be in the inventory. Only the two LAMP flags: unlike the TI-99/4A
+        // dialect these releases carry no message set of their own to force
+        // (see `Database::mysterious`), so `you_are` and `presentation` stay
+        // the host's.
+        let options = if db.mysterious {
+            options.with_scott_light(true).with_prehistoric_lamp(true)
+        } else {
+            options
+        };
         let item_loc = db.items.iter().map(|i| i.start_loc).collect();
         let player = db.start_room;
         let lamp = db.light_time;
@@ -127,30 +352,113 @@ impl Vm {
             pending_line: None,
             save_requested: false,
             pending_picture: None,
+            pending_picture_shows: Vec::new(),
+            look_table: None,
             trace_fired,
             fired_actions: Vec::new(),
             ever_fired: HashSet::new(),
             last_blocked: Vec::new(),
+            options,
+            // Spec §9.1: "Automatic inventory is on by default."
+            auto_inventory: true,
         };
         // Run the opening occurrence pass before the first prompt, so auto-events
         // that fire at game start (e.g. "A Voice BOOOMS out:") are shown on load —
         // matching ScottFree/Gargoyle, where occurrences run at the top of the turn
         // loop rather than only when a command is entered.
-        vm.run_occurrences();
+        vm.run_automatic_pass();
         vm.needs_line = true;
         vm
     }
 
+    /// The [`Options`] this `Vm` was constructed with.
+    pub fn options(&self) -> &Options {
+        &self.options
+    }
+
+    /// [`Wording::for_options`] for this `Vm`'s own [`Options`] — the ONE
+    /// call site every message-printing method below reads through.
+    fn wording(&self) -> Wording {
+        Wording::for_options(&self.options)
+    }
+
     // --- accessors used by later tasks + the host adapter ---
+    /// Take (read and clear) the transcript text accumulated since the last
+    /// call — room descriptions, action messages, and prompts. The host
+    /// calls this after [`Vm::step`] returns [`StepResult::NeedLine`] (or
+    /// [`StepResult::Quit`]) to get what it should show the player.
     pub fn take_output(&mut self) -> String {
         std::mem::take(&mut self.out)
     }
+    /// The room index the player currently occupies — an index into
+    /// [`Database::rooms`].
     pub fn current_room(&self) -> usize {
         self.player
     }
+    /// Room `r`'s raw description text, exactly as the database stores it —
+    /// no "I'm in a " prefix (see [`Self::room_is_literal`]) and no darkness
+    /// check. `""` for an out-of-range room.
     pub fn room_name(&self, r: usize) -> &str {
         self.db.rooms.get(r).map(|room| room.desc.as_str()).unwrap_or("")
     }
+
+    /// Whether the current room's description is `*`-literal — printed
+    /// exactly as stored, with no "I'm in a " prefix in front of it. Scott's
+    /// convention for a room whose text does not read naturally after that
+    /// phrase (e.g. "Outside a large gothic looking building.").
+    pub fn room_is_literal(&self) -> bool {
+        self.db.rooms.get(self.player).is_some_and(|room| room.literal)
+    }
+
+    /// The current room's exits, as `(direction name, destination room)`
+    /// pairs for every direction the room actually has (`Room::exits[i] !=
+    /// 0`), in the classic Scott Adams order the format encodes them:
+    /// North, South, East, West, Up, Down.
+    pub fn room_exits(&self) -> Vec<(&'static str, usize)> {
+        const NAMES: [&str; 6] = ["North", "South", "East", "West", "Up", "Down"];
+        self.db.rooms.get(self.player).map_or(Vec::new(), |room| {
+            room.exits
+                .iter()
+                .enumerate()
+                .filter(|(_, &dest)| dest != 0)
+                .map(|(i, &dest)| (NAMES[i], dest))
+                .collect()
+        })
+    }
+
+    /// Items visible in the current room — present there, not carried by the
+    /// player. See [`Self::item_loc`] for an item's raw location.
+    pub fn items_in_room(&self) -> Vec<&str> {
+        self.db
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.item_in_room(*i))
+            .map(|(_, it)| it.text.as_str())
+            .collect()
+    }
+    /// Item **indices** visible in the current room — present there, not
+    /// carried by the player — in table order.
+    ///
+    /// [`Self::items_in_room`] with the same filter answers each item's
+    /// TEXT, which is what a room panel prints. A host drawing pictures needs
+    /// the index instead, because that is what §8.6 associates artwork with:
+    /// "a *room object* picture overlays [the room picture] when the item
+    /// with that index is in the player's room" (spec §12.11, SQ-1482). Table
+    /// order, not draw order — which record is drawn over which is the
+    /// picture set's own gather order, and only the host has that.
+    pub fn item_indices_in_room(&self) -> Vec<usize> {
+        (0..self.item_loc.len()).filter(|&i| self.item_in_room(i)).collect()
+    }
+    /// Item **indices** the player is carrying, in table order — the other
+    /// half of [`Self::item_indices_in_room`], and what §12.11's inventory
+    /// picture screen is drawn from: "draws the inventory-object picture of
+    /// every carried item".
+    pub fn carried_item_indices(&self) -> Vec<usize> {
+        (0..self.item_loc.len()).filter(|&i| self.item_carried(i)).collect()
+    }
+    /// Whether the game has ended (matches [`StepResult::Quit`]) — the
+    /// host's cue to stop driving the session.
     pub fn has_quit(&self) -> bool {
         self.quit
     }
@@ -160,12 +468,115 @@ impl Vm {
     pub fn take_save_request(&mut self) -> bool {
         std::mem::take(&mut self.save_requested)
     }
-    /// The picture the host should display: an opcode-89 override if one was set
-    /// this turn, else the current room's own picture (by convention, picture
-    /// number == room number). The host maps this to a blorb `Pict` resource and
-    /// shows nothing when none exists.
+    /// Take (drain) this turn's queue of opcode-90 "draw picture N" requests
+    /// (US S.A.G.A. databases only, spec §12.11, SQ-1487) — see
+    /// [`PictureShow`]'s doc for the shape and [`Vm::current_picture`]'s doc
+    /// for why this is a SEPARATE door from opcode 89's. Empty for every
+    /// other dialect and for a turn that queued none. The host calls this
+    /// once, right after [`Vm::step`] — like [`Vm::take_save_request`], it
+    /// does not survive to the next call.
+    pub fn take_picture_shows(&mut self) -> Vec<PictureShow> {
+        std::mem::take(&mut self.pending_picture_shows)
+    }
+
+    /// Give this game the **LOOK close-up table** of a scrambled Apple II
+    /// release (SQ-1499), so that LOOKing at one of the things it names shows
+    /// the release's own full-window drawing of it.
+    ///
+    /// # Why the host sets this and the database does not carry it
+    ///
+    /// *Voodoo Castle*, *The Count* and *Claymorgue Castle* on the Apple II
+    /// keep their artwork on a side A with no filesystem, and the pairing
+    /// between a picture and the item it draws is in neither the database
+    /// (spec §12.10 is right that it says nothing) nor the picture side: it is
+    /// three columns in the release's own `M2` file on the BOOT side, which
+    /// only a host that mounted that disk can read
+    /// ([`crate::apple_look_table`] parses them). So it arrives the way the
+    /// picture files themselves do — from the host, after the `Vm` is built —
+    /// rather than as a `Database` field every other dialect would carry
+    /// empty.
+    ///
+    /// # What it does to a turn
+    ///
+    /// When the player's command parses to this table's verb and to a noun the
+    /// table names, and the item that row names is **present** — carried, or
+    /// in the player's room — the turn queues a [`PictureShow`] for the row's
+    /// picture before the action table runs. That is the same door opcode 90
+    /// uses ([`Vm::take_picture_shows`]), so a host already presenting a
+    /// picture-show sequence needs nothing new: the close-up is drawn over the
+    /// whole graphics window and waits for the player, and the turn's own text
+    /// — whatever the game's LOOK actions print — follows exactly as it does
+    /// with no table set.
+    ///
+    /// **Present, not merely in play**, and that is the release's own test:
+    /// its lookup reads the item's location byte and takes it if it is the
+    /// carried sentinel or the current room, and otherwise goes on scanning.
+    /// A close-up of something two rooms away never shows.
+    ///
+    /// Setting it on any other release is harmless and does nothing that
+    /// matters — an [`AppleLookTable`](crate::AppleLookTable) with no rows can
+    /// never match — but there is nothing to set: the four plain Apple II
+    /// releases and every other dialect have no such table
+    /// ([`crate::apple_look_table`] refuses them).
+    pub fn set_look_table(&mut self, table: crate::apple_pictures::AppleLookTable) {
+        self.look_table = Some(table);
+    }
+
+    /// The [`PictureShow`] this turn's parsed command asks for through the
+    /// LOOK close-up table, or `None` (SQ-1499; see [`Vm::set_look_table`]).
+    ///
+    /// Split out of `run_turn` because it is the whole of the rule and reads
+    /// as one sentence: the verb, the noun, and the item being present.
+    fn look_close_up(&self, verb: u16, noun: i32) -> Option<PictureShow> {
+        let table = self.look_table.as_ref()?;
+        if verb != table.verb || noun < 0 {
+            return None;
+        }
+        let row = table.rows.iter().find(|r| i32::from(r.noun) == noun)?;
+        self.item_present(usize::from(row.item))
+            .then_some(PictureShow { picture: row.picture, output_len: self.out.len() })
+    }
+    /// The picture the host should display for the ROOM VIEW, or `None` for
+    /// none. Unaffected by opcode 90's queue (see [`Vm::take_picture_shows`]):
+    /// a host presenting a picture-show sequence tracks which picture is on
+    /// screen itself, one at a time, and calls this only once the sequence
+    /// has finished to resume the ordinary room view.
+    ///
+    /// Three cases, in this order:
+    ///
+    /// 1. An **override set this turn** by opcode 89 (reference-format
+    ///    databases only — `Database::saga_us.is_none()`; a US S.A.G.A.
+    ///    database's own opcode 89 makes no state change at all, spec
+    ///    §12.8). It wins over darkness: it is a command the game issued
+    ///    deliberately, and the next turn clearing `pending_picture`
+    ///    reverts it to the room's own.
+    /// 2. **Darkness.** Most dialects show nothing, and this answers `None`
+    ///    for them. A US S.A.G.A. release instead draws a dedicated darkness
+    ///    image: §12.11, "where other dialects paint black, these draw picture
+    ///    index 0" ([`crate::DARKNESS_PICTURE`]).
+    /// 3. Otherwise **the current room's picture**. For most dialects that is
+    ///    the room number itself (by convention, picture number == room
+    ///    number); for a US S.A.G.A. release it is
+    ///    [`SagaUs::room_picture`](crate::SagaUs::room_picture), which is also
+    ///    the room number except for the *Hulk*'s five remapped pairs
+    ///    (§12.11).
+    ///
+    /// The host maps the answer to a picture of its own — a blorb `Pict`
+    /// resource, a decoded family-B display list, a family-C record off the
+    /// release disk — and shows nothing when there is none.
     pub fn current_picture(&self) -> Option<u16> {
-        self.pending_picture.or(Some(self.player as u16))
+        if let Some(p) = self.pending_picture {
+            return Some(p);
+        }
+        match self.db.saga_us {
+            Some(saga) => Some(if self.is_dark() {
+                crate::DARKNESS_PICTURE as u16
+            } else {
+                saga.room_picture(self.player) as u16
+            }),
+            None if self.is_dark() => None,
+            None => Some(self.player as u16),
+        }
     }
     /// Current location of item `idx` (-1/255 = carried, 0 = nowhere, else room index).
     pub fn item_loc(&self, idx: usize) -> i32 {
@@ -227,12 +638,32 @@ impl Vm {
         &self.last_blocked
     }
 
-    /// Serialize mutable game state: item locations, player room, flags,
-    /// the live current counter, backup counters, the op-80 saved room, the
-    /// op-87 saved-room registers, and lamp fuel. Manual little-endian byte
-    /// encoding, zero-dep.
+    /// The 4 bytes every [`Vm::snapshot`] blob starts with — the first thing
+    /// [`Vm::restore`] checks, so foreign data (or the headerless form this
+    /// crate produced before SQ-1402, which never carried one) is rejected
+    /// with [`RestoreError::BadMagic`] before any field is read.
+    pub const SNAPSHOT_MAGIC: [u8; 4] = *b"ScSv";
+
+    /// The snapshot format version [`Vm::snapshot`] writes and [`Vm::restore`]
+    /// requires (a `u16`, right after [`Self::SNAPSHOT_MAGIC`]). Bump this
+    /// whenever a field is added, removed, or reordered below; `restore`
+    /// refuses anything newer with [`RestoreError::NewerVersion`] rather than
+    /// misreading it — there is no back-compat requirement pre-release, so an
+    /// older-versioned file is read as this version's own layout, byte for
+    /// byte, unless a future bump adds real per-version branching.
+    pub const SNAPSHOT_VERSION: u16 = 2;
+
+    /// Serialize mutable game state: a 4-byte magic and a `u16` format
+    /// version ([`Self::SNAPSHOT_MAGIC`]/[`Self::SNAPSHOT_VERSION`]), then
+    /// item locations, player room, flags, the live current counter, backup
+    /// counters, the op-80 saved room, the op-87 saved-room registers, lamp
+    /// fuel, and the TI-99/4A automatic-inventory flag
+    /// ([`Vm::auto_inventory`], version 2 — spec §9.1 requires it to survive
+    /// a save and restore). Manual little-endian byte encoding, zero-dep.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut buf = Vec::new();
+        buf.extend_from_slice(&Self::SNAPSHOT_MAGIC);
+        buf.extend_from_slice(&Self::SNAPSHOT_VERSION.to_le_bytes());
         buf.extend_from_slice(&(self.item_loc.len() as u32).to_le_bytes());
         for v in &self.item_loc {
             buf.extend_from_slice(&v.to_le_bytes());
@@ -250,27 +681,45 @@ impl Vm {
             buf.extend_from_slice(&(r as u32).to_le_bytes());
         }
         buf.extend_from_slice(&self.lamp.to_le_bytes());
+        buf.push(self.auto_inventory as u8);
         buf
     }
 
-    /// Restore state from `snapshot` bytes. Rejects short/malformed input, a
+    /// Restore state from `snapshot` bytes. Checks the magic and format
+    /// version first ([`RestoreError::BadMagic`] /
+    /// [`RestoreError::NewerVersion`]), then rejects short/malformed input, a
     /// mismatched item count, or an out-of-range room/counter index.
-    #[allow(clippy::result_unit_err)]
-    pub fn restore(&mut self, bytes: &[u8]) -> Result<(), ()> {
-        fn read_u32(bytes: &[u8], pos: &mut usize) -> Result<u32, ()> {
-            let end = pos.checked_add(4).ok_or(())?;
-            let slice = bytes.get(*pos..end).ok_or(())?;
+    pub fn restore(&mut self, bytes: &[u8]) -> Result<(), RestoreError> {
+        fn read_u32(bytes: &[u8], pos: &mut usize) -> Result<u32, RestoreError> {
+            let end = pos.checked_add(4).ok_or(RestoreError::Truncated)?;
+            let slice = bytes.get(*pos..end).ok_or(RestoreError::Truncated)?;
             *pos = end;
             Ok(u32::from_le_bytes(slice.try_into().unwrap()))
         }
-        fn read_i32(bytes: &[u8], pos: &mut usize) -> Result<i32, ()> {
+        fn read_i32(bytes: &[u8], pos: &mut usize) -> Result<i32, RestoreError> {
             read_u32(bytes, pos).map(|v| v as i32)
+        }
+        fn read_u16(bytes: &[u8], pos: &mut usize) -> Result<u16, RestoreError> {
+            let end = pos.checked_add(2).ok_or(RestoreError::Truncated)?;
+            let slice = bytes.get(*pos..end).ok_or(RestoreError::Truncated)?;
+            *pos = end;
+            Ok(u16::from_le_bytes(slice.try_into().unwrap()))
         }
 
         let mut pos = 0usize;
+        let magic = bytes.get(pos..pos + 4).ok_or(RestoreError::Truncated)?;
+        if magic != Self::SNAPSHOT_MAGIC {
+            return Err(RestoreError::BadMagic);
+        }
+        pos += 4;
+        let version = read_u16(bytes, &mut pos)?;
+        if version > Self::SNAPSHOT_VERSION {
+            return Err(RestoreError::NewerVersion { found: version, supported: Self::SNAPSHOT_VERSION });
+        }
+
         let item_count = read_u32(bytes, &mut pos)? as usize;
         if item_count != self.item_loc.len() {
-            return Err(());
+            return Err(RestoreError::ItemCountMismatch);
         }
         let mut item_loc = Vec::with_capacity(item_count);
         for _ in 0..item_count {
@@ -278,9 +727,9 @@ impl Vm {
         }
         let player = read_u32(bytes, &mut pos)? as usize;
         if player >= self.db.rooms.len() {
-            return Err(());
+            return Err(RestoreError::OutOfRange);
         }
-        let flags_slice = bytes.get(pos..pos + 32).ok_or(())?;
+        let flags_slice = bytes.get(pos..pos + 32).ok_or(RestoreError::Truncated)?;
         let mut flags = [false; 32];
         for (i, &b) in flags_slice.iter().enumerate() {
             flags[i] = b != 0;
@@ -293,20 +742,22 @@ impl Vm {
         }
         let saved_room = read_u32(bytes, &mut pos)? as usize;
         if saved_room >= self.db.rooms.len() {
-            return Err(());
+            return Err(RestoreError::OutOfRange);
         }
         let mut saved_rooms = [0usize; 16];
         for r in saved_rooms.iter_mut() {
             let v = read_u32(bytes, &mut pos)? as usize;
             if v >= self.db.rooms.len() {
-                return Err(());
+                return Err(RestoreError::OutOfRange);
             }
             *r = v;
         }
         let lamp = read_i32(bytes, &mut pos)?;
+        let auto_inventory = *bytes.get(pos).ok_or(RestoreError::Truncated)? != 0;
+        pos += 1;
 
         if pos != bytes.len() {
-            return Err(());
+            return Err(RestoreError::TrailingData);
         }
 
         self.item_loc = item_loc;
@@ -317,6 +768,7 @@ impl Vm {
         self.saved_room = saved_room;
         self.saved_rooms = saved_rooms;
         self.lamp = lamp;
+        self.auto_inventory = auto_inventory;
         Ok(())
     }
 
@@ -327,8 +779,12 @@ impl Vm {
         }
         if let Some(cmd) = self.pending_line.take() {
             // A new command starts a fresh turn: drop any opcode-89 override from
-            // the previous turn so the picture reverts to the room's own.
+            // the previous turn so the picture reverts to the room's own, and any
+            // opcode-90 picture-show requests a host did not drain from the last
+            // turn (SQ-1487) — this turn's own action processing may queue a fresh
+            // sequence below.
             self.pending_picture = None;
+            self.pending_picture_shows.clear();
             self.run_turn(&cmd);
             if self.quit {
                 return StepResult::Quit;
@@ -389,6 +845,16 @@ impl Vm {
             13 => self.item_in_play(value),
             14 => !self.item_in_play(value),
             15 => self.current_counter <= c.value as i32,
+            // SQ-1413 documented disagreement #1: condition 16 is `>` in
+            // ScottFree 1.14's and Spatterlight's own observed behaviour
+            // (both black-box: condition 16 passes only when CurrentCounter
+            // is strictly greater than the operand), but the Swansea
+            // "Definition" document states it as `>=`. This crate follows
+            // the observed interpreter behaviour (`>`), consistent with the
+            // crate-level doc's stated priority: ScottFree's actual
+            // behaviour outranks the Definition wherever the two disagree,
+            // because every commercial `.dat` was authored and tested
+            // against ScottFree, not the prose.
             16 => self.current_counter > c.value as i32,
             19 => self.current_counter == c.value as i32,
             17 => self.item_at_start(value),
@@ -462,10 +928,20 @@ impl Vm {
                 102..=u16::MAX => self.print_message(n as usize - 50),
                 52 => {
                     let item = p.next().unwrap_or(0) as usize;
-                    if self.carried_count() < self.db.max_carry {
-                        self.set_item_loc(item, CARRIED);
+                    // ScottFree's own observed behaviour refuses only at
+                    // EXACT capacity, not `>=` — the two only disagree when
+                    // something has already pushed the count past the limit
+                    // some other way, but matching the exact comparison
+                    // keeps this opcode faithful to the reference's observed
+                    // behaviour, pinned by
+                    // `cmd_get_op52_refuses_only_at_exact_capacity_not_over`
+                    // below. Wording: `too_much_bang` ends "!", distinct
+                    // from opcode 74/GET's period-terminated refusal.
+                    if self.carried_count() == self.db.max_carry {
+                        let msg = self.wording().too_much_bang;
+                        self.out.push_str(msg);
                     } else {
-                        self.out.push_str("You are carrying too much.\n");
+                        self.set_item_loc(item, CARRIED);
                     }
                 }
                 53 => {
@@ -497,7 +973,14 @@ impl Vm {
                     self.flag_set(flag, false);
                 }
                 61 => {
-                    self.out.push_str("You have died.\n");
+                    // ScottFree's own observed behaviour: the `-y`/YOUARE
+                    // option prints "You are dead."; the plain default
+                    // prints "I am dead." (SQ-1413's `Options::you_are`),
+                    // pinned by
+                    // `you_are_option_swaps_death_and_inventory_wording` in
+                    // scottfree_parity.rs.
+                    let msg = self.wording().dead;
+                    self.out.push_str(msg);
                     self.flag_set(DARK_FLAG, false);
                     if let Some(last) = self.db.rooms.len().checked_sub(1) {
                         self.player = last;
@@ -510,7 +993,15 @@ impl Vm {
                         self.set_item_loc(item, room as i32);
                     }
                 }
-                63 => self.quit = true,
+                63 => {
+                    // ScottFree's own observed behaviour (pinned by
+                    // `golden_transcript`'s "The game is now over." line in
+                    // golden.rs), reached both directly by opcode 63 and via
+                    // opcode 65's win check below.
+                    let msg = self.wording().game_now_over;
+                    self.out.push_str(msg);
+                    self.quit = true;
+                }
                 64 => { /* LOOK: the host redraws the room panel every frame */ }
                 65 => self.print_score(),
                 66 => self.print_inventory(),
@@ -546,13 +1037,27 @@ impl Vm {
                     }
                 }
                 76 => { /* LOOK (redraw): the host room panel is always current */ }
+                // SQ-1413 documented disagreement #2: ScottFree 1.14's own
+                // observed behaviour floors the decrement at -1 (the guard
+                // only blocks the step once the counter is ALREADY -1, so -1
+                // is the lowest value it ever reaches — pinned by
+                // `cmd_counter_floors_at_minus_one` below); Spatterlight's
+                // own observed behaviour floors at 0 instead. This crate
+                // follows ScottFree — `.max(-1)` below gives the identical
+                // result to ScottFree's own observed conditional decrement
+                // for every input (both stop exactly at -1), it is just
+                // expressed without the branch.
                 77 => {
                     self.current_counter = (self.current_counter - 1).max(-1);
                 }
                 78 => {
+                    // ScottFree's own observed behaviour: a trailing space,
+                    // no newline, pinned by
+                    // `cmd_tally_op78_prints_a_trailing_space_not_a_newline`
+                    // below.
                     let v = self.current_counter;
                     self.out.push_str(&v.to_string());
-                    self.out.push('\n');
+                    self.out.push(' ');
                 }
                 79 => {
                     self.current_counter = p.next().unwrap_or(0) as i32;
@@ -574,6 +1079,11 @@ impl Vm {
                     self.current_counter = (self.current_counter - v).max(-1);
                 }
                 84 => {
+                    // ScottFree's own observed behaviour echoes the typed
+                    // noun exactly as the player typed it, not uppercased —
+                    // see `last_noun`'s assignment above, pinned by
+                    // `cmd_print_noun_op84_85_echo_the_typed_case_not_uppercased`
+                    // below.
                     let noun = self.last_noun.clone();
                     self.out.push_str(&noun);
                 }
@@ -588,8 +1098,54 @@ impl Vm {
                     std::mem::swap(&mut self.player, &mut self.saved_rooms[idx]);
                 }
                 88 => { /* pause: host handles timing */ }
-                89 => self.pending_picture = Some(p.next().unwrap_or(0)), // draw picture N
-                _ => {} // 90..=101 unused
+                // SQ-1413 documented disagreement #3: opcode 89 is the SAGA
+                // "draw picture N" command in both ScottFree 1.14's own
+                // observed behaviour and the Swansea Definition, but
+                // Spatterlight renumbered it to opcode 90 in its own action
+                // table to make room for an extra opcode elsewhere in its
+                // fork. This crate follows ScottFree/the Definition for every
+                // database EXCEPT the US S.A.G.A. binary ones — there, 89 and
+                // 90 both occur in the SAME action tables, so 90 is not a
+                // renumbering of 89 but a real command of its own, and the
+                // two opcodes' operand counts are the reference format's
+                // swapped (spec §12.8/§12.11, SQ-1472): 89 takes NO operand
+                // and 90 takes ONE. Get this backwards and every later
+                // command in the same action record receives the wrong
+                // operand — Adventureland's `RUB LAMP` conjures the wrong
+                // item and clears the darkness flag instead of the right
+                // one; Pirate Adventure's `SET SAIL` sets the wrong flag.
+                89 => {
+                    if self.db.saga_us.is_none() {
+                        self.pending_picture = Some(p.next().unwrap_or(0)); // draw picture N
+                    }
+                    // S.A.G.A.: no operand, and 89's drawing effect is
+                    // undetermined (spec §12.8) — no other state change
+                    // either (spec §12.11).
+                }
+                // S.A.G.A. only (spec §12.8/§12.11): draw the room-usage
+                // picture the operand names, over the whole graphics window,
+                // then wait for the player to press ENTER before the room
+                // view returns. This crate draws no pictures itself — like
+                // opcode 88's pause above, presenting one is the host's job.
+                //
+                // SQ-1487: a SINGLE action can run 90 more than once (*The
+                // Hulk*'s "bite lip" opening shows several scenes in
+                // sequence, each ENTER-gated) — `pending_picture` is one
+                // slot and a second 90 would silently overwrite the first,
+                // which is exactly the bug report. So this queues onto
+                // `pending_picture_shows` instead (a SEPARATE door from
+                // opcode 89's `pending_picture`/`current_picture()` one
+                // above) rather than setting `pending_picture` — a host
+                // drains the queue and presents each picture itself, one
+                // ENTER at a time; waiting for the keypress is host UI, not
+                // VM state, exactly as opcode 88's timing is. The reference
+                // format never uses opcode 90 — it falls into the `_` arm
+                // below, a no-op.
+                90 if self.db.saga_us.is_some() => {
+                    let picture = p.next().unwrap_or(0);
+                    self.pending_picture_shows.push(PictureShow { picture, output_len: self.out.len() });
+                }
+                _ => {} // 90..=101 unused (90 outside S.A.G.A.; 91..=101 always)
             }
         }
         did_continue
@@ -609,8 +1165,50 @@ impl Vm {
             self.last_blocked.clear();
         }
         let mut w = cmd.split_whitespace();
-        let w1 = w.next();
-        let w2 = w.next();
+        // ScottFree's own observed behaviour caps each typed word at 9
+        // characters individually, applied before vocabulary lookup, before
+        // single-letter expansion, and independent of `word_length` (which
+        // truncates for COMPARISON only, deeper in
+        // `match_verb`/`match_noun`) — pinned by
+        // `typed_words_are_capped_at_nine_characters_before_becoming_the_last_noun`
+        // in scottfree_parity.rs. A char count, not a byte count — a real
+        // ScottFree build counts bytes there, but this crate's `.dat`/vocab
+        // all lex as ASCII by the time they reach comparison, so the two
+        // coincide.
+        const SCOTTFREE_WORD_CAP: usize = 9;
+        fn cap9(s: &str) -> &str {
+            match s.char_indices().nth(SCOTTFREE_WORD_CAP) {
+                Some((byte_idx, _)) => &s[..byte_idx],
+                None => s,
+            }
+        }
+        let w1_raw = w.next().map(cap9);
+        let w2 = w.next().map(cap9);
+        // ScottFree's own observed behaviour expands a LONE single-character
+        // command word — no second word typed — to the full
+        // direction/INVENTORY verb BEFORE any vocabulary lookup or
+        // word-length truncation: `n/e/s/w/u/d` to NORTH/EAST/SOUTH/WEST/
+        // UP/DOWN, and `i` to INVENTORY (the Brian Howarth extension), pinned
+        // by
+        // `single_letter_directions_and_inventory_expand_before_vocab_lookup`
+        // in scottfree_parity.rs. Only fires when no second word was typed
+        // and the first is exactly one character, so "n" alone expands but
+        // "n x" does not.
+        let w1: Option<&str> = match (w1_raw, w2) {
+            (Some(s), None) if s.chars().count() == 1 => {
+                Some(match s.chars().next().unwrap().to_ascii_lowercase() {
+                    'n' => "NORTH",
+                    'e' => "EAST",
+                    's' => "SOUTH",
+                    'w' => "WEST",
+                    'u' => "UP",
+                    'd' => "DOWN",
+                    'i' => "INVENTORY",
+                    _ => s,
+                })
+            }
+            _ => w1_raw,
+        };
         // ScottFree's GetInput tries the FIRST word against the noun list
         // before anything else: a direction noun (1..=6) is "the Scott Adams
         // system['s] hack to avoid typing 'go'" — it becomes GO <dir> and the
@@ -635,23 +1233,58 @@ impl Vm {
                 .unwrap_or(-1);
             (vb, no)
         } else {
-            self.out.push_str("You use word(s) I don't know!\n");
+            let msg = self.wording().unknown_words;
+            self.out.push_str(msg);
             self.needs_line = true;
             return;
         };
-        // ScottFree keeps NounText = the second word only (empty for a
-        // one-word command), for the print-noun opcodes and the GET/DROP hack.
-        self.last_noun = w2.unwrap_or("").to_uppercase();
+        // ScottFree's own observed behaviour keeps `last_noun` = the second
+        // word only (empty for a one-word command), for the print-noun
+        // opcodes and the GET/DROP hack. Kept in its ORIGINAL case, not
+        // uppercased — opcodes 84/85 echo it back that way, pinned by
+        // `cmd_print_noun_op84_85_echo_the_typed_case_not_uppercased` — and
+        // vocabulary lookup (`match_noun`/`match_up_item`'s `trunc`) already
+        // uppercases its own comparison internally, so nothing here depends
+        // on this being pre-uppercased.
+        self.last_noun = w2.unwrap_or("").to_string();
+
+        // SQ-1499: a scrambled Apple II release's LOOK close-up, queued from
+        // the parsed command rather than from any action — the release does
+        // it in its own parser, before the action table, and there is no
+        // opcode for it. `set_look_table` states the rule; everything else
+        // about the turn proceeds untouched, so the game's own LOOK actions
+        // print exactly what they printed before.
+        if let Some(show) = self.look_close_up(vb, no) {
+            self.pending_picture_shows.push(show);
+        }
 
         // ScottFree resolves GO + a compass direction from the room's exit table
         // BEFORE consulting the action table, so a catch-all "GO <anything>"
         // action (verb 1, noun 0) can't intercept ordinary movement. A GO with a
         // non-direction noun (e.g. GO TENT) still falls through to the actions.
         let mut handled = false;
+        // Whether the action-table search (below, or in `try_action_table`)
+        // found at least one action whose verb+noun matched at all, even if
+        // its conditions then blocked it — ScottFree's own observed
+        // behaviour, pinned by
+        // `matched_but_blocked_action_replies_cant_do_that_yet_not_dont_understand`
+        // in scottfree_parity.rs. Read by the `if !handled` fallback below
+        // to choose between `Wording::dont_understand` and
+        // `Wording::cant_do_that_yet` (SQ-1413 item 3).
+        let mut any_matched_vocab = false;
         if vb == 1 && (1..=6).contains(&no) {
             let dir = no as usize - 1;
-            if self.is_dark() {
-                self.out.push_str("It is dangerous to move in the dark!\n");
+            // ScottFree's own observed behaviour recomputes darkness for the
+            // move itself — dark only if the dark flag is set AND the light
+            // source is neither carried nor in the room, which is exactly
+            // `is_dark()` — and the warning prints whether or not the move
+            // then succeeds (pinned by
+            // `death_in_the_dark_matches_scottfree_wording_and_ends_the_game`
+            // in scottfree_parity.rs).
+            let dark = self.is_dark();
+            if dark {
+                let msg = self.wording().dangerous_in_dark;
+                self.out.push_str(msg);
             }
             let dest = self
                 .db
@@ -665,156 +1298,273 @@ impl Vm {
             // nonexistent room (SQ-0629).
             if dest != 0 && dest < self.db.rooms.len() {
                 self.player = dest;
+                // Spec §9.1: "Movement is acknowledged. A successful compass
+                // move prints `OK. ` before the new room is described."
+                // Empty for every ScottFree-derived wording, so this costs
+                // those sets nothing.
+                let msg = self.wording().move_ok;
+                self.out.push_str(msg);
+            } else if dark {
+                // No exit while dark: ScottFree's own observed behaviour
+                // ends the game right here — no "The game is now over."
+                // line, that belongs to opcode 63's `doneit` label, not this
+                // direct death.
+                let msg = self.wording().fell_and_broke_neck;
+                self.out.push_str(msg);
+                self.quit = true;
             } else {
-                self.out.push_str("I can't go in that direction.\n");
+                let msg = self.wording().cant_go_that_direction;
+                self.out.push_str(msg);
             }
             handled = true;
         } else if vb == 1 && no == -1 {
-            // ScottFree: GO with no (or an unknown) noun is answered "Give me
-            // a direction too." BEFORE the action table — a catch-all
-            // "GO ANY" action must not swallow a bare GO.
-            self.out.push_str("I need a direction.\n");
+            // ScottFree's own observed behaviour: GO with no (or an unknown)
+            // noun is answered "Give me a direction too." BEFORE the action
+            // table — a catch-all "GO ANY" action must not swallow a bare
+            // GO, pinned by
+            // `bare_go_asks_for_a_direction_before_the_action_table` in
+            // scottfree_parity.rs.
+            let msg = self.wording().direction_needed;
+            self.out.push_str(msg);
             handled = true;
         } else if vb != 0 {
             // Only a recognized verb consults the command actions. Verb 0 is
             // reserved for occurrences (the top-of-turn auto-event pass), so an
             // unrecognized command must NOT match them here — otherwise an
             // occurrence (e.g. a conditional death) fires as if it were the reply.
-            // Manual loop (rather than `.iter().find(..)`) so a verb/noun match
-            // whose conditions block it can be recorded for the debug
-            // inspector's `last_blocked` (SQ-0464). `conditions` is copied out
-            // of the borrowed `Action` (it's `Copy`, five small structs) so
-            // the borrow ends before `eval_condition(&self)` is called —
-            // otherwise short-circuits/perf are unchanged from `.find`.
-            let mut matched = None;
-            let mut blocked: Vec<(usize, usize)> = Vec::new();
-            for i in 0..self.db.actions.len() {
-                let a = &self.db.actions[i];
-                let (av, an, conditions) = (a.verb, a.noun, a.conditions);
-                // ScottFree's vocab match: `nv==no || nv==0` — a noun-0
-                // wildcard also matches the unknown-noun sentinel (-1).
-                if av != vb || (an as i32 != no && an != 0) {
-                    continue;
-                }
-                let mut first_fail = None;
-                for (slot, c) in conditions.iter().enumerate() {
-                    if !self.eval_condition(c) {
-                        first_fail = Some(slot);
-                        break;
-                    }
-                }
-                match first_fail {
-                    None => {
-                        matched = Some(i);
-                        break;
-                    }
-                    Some(slot) if self.trace_fired => blocked.push((i, slot)),
-                    Some(_) => {}
-                }
-            }
-            if self.trace_fired {
-                self.last_blocked = blocked;
-            }
-            if let Some(idx) = matched {
-                self.run_action_chain(idx);
-                handled = true;
-            }
+            // A TI-99/4A database has no reference-format action table at
+            // all (`Database::actions` is empty); its verb chains are what
+            // answer a command. Spec §3.7.
+            let r = if self.db.ti99.is_some() {
+                self.try_ti99_chain(vb, no)
+            } else {
+                self.try_action_table(vb, no)
+            };
+            handled = r.0;
+            any_matched_vocab = r.1;
         }
 
         if !handled {
-            if vb == 1 {
-                self.out.push_str("I need a direction.\n");
-            } else if vb == 10 {
-                if self.last_noun == "ALL" {
+            if vb == 10 {
+                // ScottFree's own observed behaviour compares NounText
+                // case-insensitively — `last_noun` above is kept in its
+                // original typed case, so the comparison here must be too.
+                if self.last_noun.eq_ignore_ascii_case("ALL") {
                     self.get_all();
                 } else if no == -1 {
                     // ScottFree: GET with an unknown noun is "What ?", never a grab.
-                    self.out.push_str("What?\n");
-                } else if self.carried_count() >= self.db.max_carry {
-                    // ScottFree checks the carry limit before matching the item.
-                    self.out.push_str("You are carrying too much.\n");
+                    let msg = self.wording().what;
+                    self.out.push_str(msg);
+                } else if self.carried_count() == self.db.max_carry {
+                    // ScottFree's own observed behaviour checks the carry
+                    // limit before matching the item, at EXACT capacity like
+                    // opcode 52, with the PERIOD-terminated wording —
+                    // distinct from opcode 52's bang-terminated one.
+                    let msg = self.wording().too_much_period;
+                    self.out.push_str(msg);
                 } else {
                     match self.match_up_item(false) {
                         Some(idx) => {
                             self.set_item_loc(idx, CARRIED);
-                            self.out.push_str("OK.\n");
+                            let msg = self.wording().ok;
+                            self.out.push_str(msg);
                         }
-                        None => self.out.push_str("It's beyond my power to do that.\n"),
+                        None => {
+                            let msg = self.wording().beyond_power_get;
+                            self.out.push_str(msg);
+                        }
                     }
                 }
             } else if vb == 18 {
-                if self.last_noun == "ALL" {
+                // ScottFree's own observed behaviour compares NounText
+                // case-insensitively — `last_noun` above is kept in its
+                // original typed case, so the comparison here must be too.
+                if self.last_noun.eq_ignore_ascii_case("ALL") {
                     self.drop_all();
                 } else if no == -1 {
-                    self.out.push_str("What?\n");
+                    let msg = self.wording().what;
+                    self.out.push_str(msg);
                 } else {
                     match self.match_up_item(true) {
                         Some(idx) => {
                             self.set_item_loc(idx, self.player as i32);
-                            self.out.push_str("OK.\n");
+                            let msg = self.wording().ok;
+                            self.out.push_str(msg);
                         }
-                        None => self.out.push_str("It's beyond my power to do that.\n"),
+                        None => {
+                            let msg = self.wording().beyond_power_drop;
+                            self.out.push_str(msg);
+                        }
                     }
                 }
             } else {
-                self.out.push_str("I don't understand your command.\n");
+                // ScottFree's own observed `-1`/`-2` fallback behaviour:
+                // `-2` ("I can't do that yet.") when a candidate action's
+                // verb+noun matched but every one's conditions blocked it;
+                // `-1` ("I don't understand your command.") when nothing
+                // with this verb was even a candidate — pinned by
+                // `matched_but_blocked_action_replies_cant_do_that_yet_not_dont_understand`
+                // in scottfree_parity.rs. Previously collapsed into the `-1`
+                // wording unconditionally — SQ-1413 item 3 (audit item 7).
+                let msg = if any_matched_vocab {
+                    self.wording().cant_do_that_yet
+                } else {
+                    self.wording().dont_understand
+                };
+                self.out.push_str(msg);
             }
         }
 
-        if self.db.light_time != -1 && self.item_in_play(LIGHT_SOURCE) && self.lamp > 0 {
+        // ScottFree's own observed main-loop behaviour, matched field for
+        // field: the LIVE fuel value gates ticking — `self.lamp != -1`, not
+        // the database's original `light_time` — so an infinite lamp
+        // (lamp starts at -1) never ticks, and a finite one stops ticking
+        // once IT reaches -1, not once it reaches 0. That is also what makes
+        // the run-out message fire exactly twice: fuel 1 decrements to 0
+        // (message fires, `lamp<1`), the NEXT turn 0 decrements to -1
+        // (message fires again), and the turn after that the `!= -1` guard
+        // stops the tick before it would fire a third time — pinned by
+        // `lamp_countdown_dims_once_and_runs_out_exactly_twice` in
+        // scottfree_parity.rs. Both messages are shown only while the lamp
+        // is carried or in the current room, but the tick itself (and the
+        // empty flag / PREHISTORIC_LAMP-less destruction, which
+        // `item_in_play` already checks) happens regardless of location.
+        if self.lamp != -1 && self.item_in_play(LIGHT_SOURCE) {
             self.lamp -= 1;
-            if self.lamp == 0 {
+            let lit_here = self.item_present(LIGHT_SOURCE);
+            let w = self.wording();
+            if self.lamp < 1 {
                 self.flag_set(LAMP_EMPTY_FLAG, true);
-                self.out.push_str("Your light has run out.\n");
+                if lit_here {
+                    self.out.push_str(w.light_out);
+                }
+                // `-p`/`Options::prehistoric_lamp`: ScottFree's own
+                // observed behaviour destroys the light source the instant
+                // its fuel reaches zero — unconditional on `lit_here`,
+                // unlike the message above. `item_in_play` treats location 0
+                // as "gone", the same sentinel ScottFree uses, so this also
+                // naturally stops the tick (and any further message) on
+                // every later turn — pinned by
+                // `prehistoric_lamp_option_destroys_the_light_source_on_run_out`
+                // in scottfree_parity.rs.
+                if self.options.prehistoric_lamp {
+                    self.set_item_loc(LIGHT_SOURCE, 0);
+                }
+            } else if self.lamp < 25 && lit_here {
+                if self.options.scott_light {
+                    // `-s`/`Options::scott_light`: ScottFree's own observed
+                    // behaviour shows a running countdown EVERY turn under
+                    // 25 fuel (not just every 5th) — pinned by
+                    // `scott_light_option_shows_a_running_countdown_instead_of_growing_dim`
+                    // in scottfree_parity.rs.
+                    self.out.push_str(w.light_runs_out_prefix);
+                    self.out.push_str(&self.lamp.to_string());
+                    self.out.push_str(w.light_runs_out_suffix);
+                } else if self.lamp % 5 == 0 {
+                    self.out.push_str(w.light_dim);
+                }
             }
         }
 
         // Occurrences for the next prompt (ScottFree's top-of-loop pass), unless the
         // command ended the game.
         if !self.quit {
-            self.run_occurrences();
+            self.run_automatic_pass();
         }
 
         self.needs_line = true;
     }
 
-    /// GET ALL: take every item in the current room that has an auto-get noun,
-    /// respecting MaxCarry. Reports each taken item; a full pack stops the sweep.
+    /// An item's auto-get noun, matched against the noun vocabulary — the
+    /// `no` ScottFree's own observed GET-ALL/DROP-ALL behaviour passes into
+    /// its own recursive per-item dispatch, pinned by
+    /// `get_all_runs_each_items_own_get_action_then_takes_it_and_skips_star_marked_items`
+    /// in scottfree_parity.rs.
+    fn auto_noun_word(&self, idx: usize) -> Option<i32> {
+        let noun = self.db.items.get(idx)?.auto_noun.as_deref()?;
+        self.db.match_noun(noun).map(|n| n as i32)
+    }
+
+    /// GET ALL: ScottFree's own observed behaviour takes every item in the
+    /// current room with an auto-get noun not itself starting with `*` (a
+    /// game's way of marking an item ALL should skip even though it has a
+    /// direct noun), respecting MaxCarry — pinned by
+    /// `get_all_runs_each_items_own_get_action_then_takes_it_and_skips_star_marked_items`
+    /// in scottfree_parity.rs.
+    ///
+    /// A dark room refuses the whole sweep up front rather than reporting
+    /// per item, pinned by `get_all_short_circuits_in_a_dark_room`. For each
+    /// remaining item, ScottFree first runs that item's OWN GET action
+    /// through the action table (guarded so the recursive call cannot
+    /// itself re-enter this system fallback — exactly what
+    /// `try_action_table` already excludes, being only the table search) —
+    /// so a game's custom "GET LAMP" trap fires even under GET ALL — and
+    /// only THEN takes the item, unconditionally on what that action did.
     fn get_all(&mut self) {
+        if self.is_dark() {
+            let msg = self.wording().it_is_dark;
+            self.out.push_str(msg);
+            return;
+        }
         let mut took_any = false;
         for i in 0..self.item_loc.len() {
-            if self.item_in_room(i) && self.db.items[i].auto_noun.is_some() {
-                if self.carried_count() < self.db.max_carry {
-                    self.set_item_loc(i, CARRIED);
-                    let text = self.db.items[i].text.clone();
-                    self.out.push_str(&text);
-                    self.out.push_str(": OK.\n");
-                    took_any = true;
-                } else {
-                    self.out.push_str("You are carrying too much.\n");
-                    return;
-                }
+            let skip_all = self.db.items[i]
+                .auto_noun
+                .as_deref()
+                .is_some_and(|n| n.starts_with('*'));
+            if !self.item_in_room(i) || self.db.items[i].auto_noun.is_none() || skip_all {
+                continue;
             }
+            if let Some(no) = self.auto_noun_word(i) {
+                self.try_action_table(10, no);
+            }
+            if self.carried_count() == self.db.max_carry {
+                let msg = self.wording().too_much_period;
+                self.out.push_str(msg);
+                return;
+            }
+            self.set_item_loc(i, CARRIED);
+            let text = self.db.items[i].text.clone();
+            self.out.push_str(&text);
+            let suffix = self.wording().ok_all_suffix;
+            self.out.push_str(suffix);
+            took_any = true;
         }
         if !took_any {
-            self.out.push_str("I don't understand your command.\n");
+            let msg = self.wording().nothing_taken;
+            self.out.push_str(msg);
         }
     }
 
-    /// DROP ALL: drop every carried item that has an auto-get noun.
+    /// DROP ALL: ScottFree's own observed behaviour drops every carried
+    /// item with an auto-get noun not itself `*`-prefixed (see
+    /// [`Vm::get_all`]'s doc) — no darkness check (dropping in the dark is
+    /// always allowed), pinned by
+    /// `get_all_and_drop_all_report_nothing_with_scottfrees_exact_punctuation`
+    /// in scottfree_parity.rs.
     fn drop_all(&mut self) {
         let mut dropped_any = false;
         for i in 0..self.item_loc.len() {
-            if self.item_carried(i) && self.db.items[i].auto_noun.is_some() {
-                self.set_item_loc(i, self.player as i32);
-                let text = self.db.items[i].text.clone();
-                self.out.push_str(&text);
-                self.out.push_str(": OK.\n");
-                dropped_any = true;
+            let skip_all = self.db.items[i]
+                .auto_noun
+                .as_deref()
+                .is_some_and(|n| n.starts_with('*'));
+            if !self.item_carried(i) || self.db.items[i].auto_noun.is_none() || skip_all {
+                continue;
             }
+            if let Some(no) = self.auto_noun_word(i) {
+                self.try_action_table(18, no);
+            }
+            self.set_item_loc(i, self.player as i32);
+            let text = self.db.items[i].text.clone();
+            self.out.push_str(&text);
+            let suffix = self.wording().ok_all_suffix;
+            self.out.push_str(suffix);
+            dropped_any = true;
         }
         if !dropped_any {
-            self.out.push_str("I don't understand your command.\n");
+            let msg = self.wording().nothing_dropped;
+            self.out.push_str(msg);
         }
     }
 
@@ -829,9 +1579,12 @@ impl Vm {
         // Scott matching is significant only to `word_length` characters, so the
         // typed noun and the item's auto-noun must be compared truncated — a full
         // typed word (e.g. "LAMP") still matches a shorter auto-noun ("LAM") when
-        // word_length is 3.
+        // word_length is 3. `word_length` 0 means "compare the whole word", not
+        // "truncate to nothing" (spec §2.5) — `database::trunc_upper` already
+        // carries that rule for `match_verb`/`match_noun`; reuse it here so the
+        // two comparisons can't disagree.
         let wl = self.db.word_length;
-        let trunc = |s: &str| s.trim().to_uppercase().chars().take(wl).collect::<String>();
+        let trunc = |s: &str| database::trunc_upper(s, wl);
         // ScottFree first maps the typed noun through the vocabulary
         // (MapSynonym): a `*`-synonym resolves to its group's canonical word
         // before being compared against the items' auto-get nouns. A word not
@@ -858,11 +1611,115 @@ impl Vm {
         })
     }
 
+    /// The action-table half of a Scott Adams turn — what ScottFree's
+    /// `PerformActions` observably does before its system GET/DROP fallback —
+    /// for one `(vb, no)` pair: find and run the first action whose verb matches
+    /// `vb`, whose noun matches `no` (or is the noun-0 wildcard), and whose
+    /// conditions all pass. Does NOT include the vb==10/vb==18 system
+    /// GET/DROP fallback at the bottom of `PerformActions` — callers
+    /// needing that run it themselves (`run_turn`'s `if !handled` block) —
+    /// which is exactly what lets [`Vm::get_all`]/[`Vm::drop_all`] reuse
+    /// this for their own per-item recursive dispatch (ScottFree's own
+    /// guarded-recursion behaviour, pinned by
+    /// `get_all_runs_each_items_own_get_action_then_takes_it_and_skips_star_marked_items`):
+    /// this method IS the guarded subset, so no separate recursion lock is
+    /// needed.
+    ///
+    /// Returns `(handled, any_matched)`: `handled` is whether an action ran;
+    /// `any_matched` is whether at least one action's verb+noun matched at
+    /// all, even if blocked by a condition — ScottFree's own observed
+    /// behaviour, pinned by
+    /// `matched_but_blocked_action_replies_cant_do_that_yet_not_dont_understand`,
+    /// which `run_turn`'s fallback reads to choose between
+    /// `Wording::dont_understand` and `Wording::cant_do_that_yet` (SQ-1413
+    /// item 3). Also records blocked matches for the debug inspector's
+    /// `last_blocked` (SQ-0464) when tracing is on.
+    ///
+    /// Manual loop (rather than `.iter().find(..)`) so a verb/noun match
+    /// whose conditions block it can be recorded. `conditions` is copied out
+    /// of the borrowed `Action` (it's `Copy`, five small structs) so the
+    /// borrow ends before `eval_condition(&self)` is called — otherwise
+    /// short-circuits/perf are unchanged from `.find`.
+    fn try_action_table(&mut self, vb: u16, no: i32) -> (bool, bool) {
+        let mut matched = None;
+        let mut any_matched = false;
+        let mut blocked: Vec<(usize, usize)> = Vec::new();
+        for i in 0..self.db.actions.len() {
+            let a = &self.db.actions[i];
+            let (av, an, conditions) = (a.verb, a.noun, a.conditions);
+            // ScottFree's vocab match: `nv==no || nv==0` — a noun-0
+            // wildcard also matches the unknown-noun sentinel (-1).
+            if av != vb || (an as i32 != no && an != 0) {
+                continue;
+            }
+            any_matched = true;
+            let mut first_fail = None;
+            for (slot, c) in conditions.iter().enumerate() {
+                if !self.eval_condition(c) {
+                    first_fail = Some(slot);
+                    break;
+                }
+            }
+            match first_fail {
+                None => {
+                    matched = Some(i);
+                    break;
+                }
+                Some(slot) if self.trace_fired => blocked.push((i, slot)),
+                Some(_) => {}
+            }
+        }
+        if self.trace_fired {
+            self.last_blocked = blocked;
+        }
+        let handled = if let Some(idx) = matched {
+            self.run_action_chain(idx);
+            true
+        } else {
+            false
+        };
+        (handled, any_matched)
+    }
+
     /// Occurrence pass: walk actions in order; for each verb==0 action, evaluate
     /// its conditions AT THAT POINT (so an earlier fired occurrence's state change
     /// is visible to a later guard), then fire it iff a d100 roll passes the
     /// noun-as-percent chance. A roll against 0 never passes, so noun==0 never
     /// fires standalone (those are continuation targets reached only via opcode 73).
+    ///
+    /// **Documented divergence (SQ-1413 item 3, reference audit item 13):**
+    /// ScottFree's own observed behaviour rolls the percentage chance FIRST
+    /// and only evaluates a line's conditions afterward, if the roll
+    /// passes, short-circuiting entirely on a failed roll (no covering
+    /// parity case found for this ordering; black-box, unverified by test).
+    /// This crate evaluates conditions first and only rolls if they pass,
+    /// the opposite order. Both give the same FIRE/DON'T-FIRE answer for
+    /// any one occurrence — a roll and an
+    /// all-conditions-true check are each necessary — but consume the PRNG
+    /// stream differently: ScottFree draws one value per occurrence
+    /// CANDIDATE regardless of its conditions, this crate draws one only
+    /// when conditions already passed. Reordering to match would perturb
+    /// exactly which draw lands on which occurrence for every seeded game
+    /// with more than one occurrence action — including this crate's own
+    /// pinned `golden.rs` transcript — for a PRNG stream that already
+    /// doesn't match ScottFree's `rand()` bit-for-bit (this crate seeds and
+    /// steps an independent xorshift32), so there is no fidelity gained by
+    /// matching the order and a real transcript diff on every existing
+    /// seeded fixture to be paid for it. Left as a documented divergence
+    /// rather than changed.
+    /// The once-per-turn automatic pass, whichever encoding this database
+    /// carries: [`Vm::run_ti99_automatic`] for a TI-99/4A script,
+    /// [`Vm::run_occurrences`] for the reference format's verb-0 lines. The
+    /// two have genuinely different semantics — see the former's doc — so
+    /// this is the only place that chooses between them.
+    fn run_automatic_pass(&mut self) {
+        if self.db.ti99.is_some() {
+            self.run_ti99_automatic();
+        } else {
+            self.run_occurrences();
+        }
+    }
+
     fn run_occurrences(&mut self) {
         for idx in 0..self.db.actions.len() {
             let (is_occ, noun, pass) = {
@@ -928,6 +1785,421 @@ impl Vm {
         did_continue
     }
 
+    // ------------------------------------------------------------------
+    // The TI-99/4A tokenised action script
+    // (`docs/internals/scott-dialects-spec.md` §3.7 and §9.1). Reached only
+    // when `Database::ti99` is `Some`, in which case `Database::actions` is
+    // empty and none of the reference-format paths above run at all — see
+    // `crate::ti994a` for why the two tables cannot be the same table.
+    // ------------------------------------------------------------------
+
+    /// Walks the chain for a parsed verb and noun (spec §3.7, "Record
+    /// selection"), returning the same `(handled, any_matched_vocab)` pair
+    /// as [`Vm::try_action_table`] so `run_turn`'s fallback is unchanged.
+    ///
+    /// A record matches if its noun byte equals the parsed noun or is 0.
+    /// **A matching record runs; if it succeeds the search ends, and if it
+    /// fails the walk continues** — a failed record does not end the search,
+    /// which is the opposite of nothing in the reference format and the
+    /// reason the three outcomes spec §9.1 names are distinguishable:
+    /// succeeded, ran the whole chain having matched at least one record
+    /// ("I can't do that yet."), and ran the whole chain having matched
+    /// nothing, which includes a verb with a zero dispatch entry ("I don't
+    /// understand the command.").
+    ///
+    /// The verb index is bounds-checked (spec §3.7, §11): a verb beyond the
+    /// header's highest verb index is reachable, because the effective word
+    /// count is the larger of the two dictionary counts.
+    fn try_ti99_chain(&mut self, vb: u16, no: i32) -> (bool, bool) {
+        let mut any_matched = false;
+        let mut index = 0usize;
+        loop {
+            let ops = {
+                let Some(script) = self.db.ti99.as_ref() else {
+                    return (false, false);
+                };
+                let Some(chain) = script.verb_chains.get(usize::from(vb)) else {
+                    return (false, false);
+                };
+                match chain.get(index) {
+                    None => return (false, any_matched),
+                    Some(rec) if rec.key != 0 && i32::from(rec.key) != no => None,
+                    // Cloned so the record can run against `&mut self`. Only
+                    // a record that actually matches is cloned, and a record
+                    // is at most a couple of hundred bytes.
+                    Some(rec) => Some(rec.ops.clone()),
+                }
+            };
+            if let Some(ops) = ops {
+                any_matched = true;
+                if self.run_ti99_record(&ops) {
+                    if self.trace_fired {
+                        self.fired_actions.push(index);
+                        self.ever_fired.insert(index);
+                    }
+                    return (true, true);
+                }
+            }
+            index += 1;
+        }
+    }
+
+    /// The automatic pass (spec §3.7, "Implicit execution"): every record in
+    /// the implicit chain is visited in order, once per turn, and a
+    /// percentage roll against its key byte decides whether its opcode
+    /// stream runs.
+    ///
+    /// **Success or failure has no effect on whether later records are
+    /// visited**: there is no early exit, no chaining, and no continuation
+    /// opcode. This differs fundamentally from the reference format, where
+    /// automatic lines are ordinary action lines with verb 0 and where a
+    /// continuation command makes subsequent zero-keyed lines part of the
+    /// same logical action — which is why this is a separate function from
+    /// [`Vm::run_occurrences`] rather than a branch inside it.
+    fn run_ti99_automatic(&mut self) {
+        let mut index = 0usize;
+        loop {
+            let (key, ops) = {
+                let Some(script) = self.db.ti99.as_ref() else {
+                    return;
+                };
+                match script.automatic.get(index) {
+                    None => return,
+                    Some(rec) => (rec.key, rec.ops.clone()),
+                }
+            };
+            if self.roll_100() < u32::from(key) {
+                self.run_ti99_record(&ops);
+                if self.trace_fired {
+                    self.fired_actions.push(index);
+                    self.ever_fired.insert(index);
+                }
+            }
+            index += 1;
+        }
+    }
+
+    /// Runs one record's opcode stream, returning whether it **succeeded**
+    /// (spec §3.7, "Success, failure and the handler stack").
+    ///
+    /// A record's result is failure unless it reaches opcode 255. The first
+    /// condition that does not hold terminates the record with failure
+    /// immediately — so commands earlier in the stream have already taken
+    /// effect and are **not undone**, which is spec §9.1's "condition
+    /// evaluation is interleaved, and side effects persist" and the one
+    /// place this dialect and the reference format's all-conditions-first
+    /// rule (spec §9.4) give different answers for the same logic.
+    ///
+    /// Opcode 218 pushes a failure handler whose operand encodes a resume
+    /// position: *target* = the position of the operand byte within the
+    /// opcode stream, plus the value of the operand byte. Handlers stack, to
+    /// a depth of 32. When a record terminates in failure and the stack is
+    /// not empty, the most recently pushed handler is popped and execution
+    /// resumes at its target, the result still failure until some later
+    /// opcode 255 sets it. Reaching 255 clears the whole stack, so a handler
+    /// can only ever be entered by failure, never by falling into it: the
+    /// construct is an if/else.
+    fn run_ti99_record(&mut self, ops: &[u8]) -> bool {
+        /// Spec §3.7: handlers stack to a depth of 32; exceeding that is a
+        /// malformed record.
+        const MAX_HANDLERS: usize = 32;
+        let mut handlers: Vec<usize> = Vec::new();
+        let mut pc = 0usize;
+        // Spec §3.7: "A byte in the message range that exceeds the derived
+        // message count + 1 is not a message and must be treated as
+        // unrecognised." `messages.len()` is that highest index plus one.
+        let message_ceiling = self.db.messages.len();
+        loop {
+            // Running off the end without reaching 255 is failure, and a
+            // handler may still resume the record.
+            let Some(&op) = ops.get(pc) else {
+                match handlers.pop() {
+                    Some(target) => {
+                        pc = target;
+                        continue;
+                    }
+                    None => return false,
+                }
+            };
+            // The one operand byte a condition or command consumes, and the
+            // second where one takes two. Absent means the stream is
+            // truncated, which is a malformed record: abandon it.
+            let p1 = ops.get(pc + 1).copied();
+            let p2 = ops.get(pc + 2).copied();
+            let mut failed = false;
+            match op {
+                255 => {
+                    handlers.clear();
+                    return true;
+                }
+                // Spec §3.7: bytes 0-182 print the message with this number.
+                0..=182 => {
+                    if usize::from(op) > message_ceiling {
+                        // Not a message and not any other class: unrecognised.
+                        return false;
+                    }
+                    self.print_message(usize::from(op));
+                    pc += 1;
+                }
+                // Conditions (spec §3.7). The right-hand comment on each is
+                // the equivalent reference-format condition code, since the
+                // two numeric orders are unrelated.
+                183..=201 => {
+                    // 195 and 196 are the two that take NO operand, which
+                    // breaks any assumption that a condition always carries
+                    // one.
+                    let holds = match op {
+                        195 => (0..self.item_loc.len()).any(|i| self.item_carried(i)), // 10
+                        196 => !(0..self.item_loc.len()).any(|i| self.item_carried(i)), // 11
+                        _ => {
+                            let Some(v) = p1 else { return false };
+                            let value = usize::from(v);
+                            match op {
+                                183 => self.item_carried(value),               // 1
+                                184 => self.item_in_room(value),               // 2
+                                185 => self.item_present(value),               // 3
+                                186 => !self.item_in_room(value),              // 5
+                                187 => !self.item_carried(value),              // 6
+                                188 => !self.item_present(value),              // 12
+                                189 => self.item_in_play(value),               // 13
+                                190 => !self.item_in_play(value),              // 14
+                                191 => self.player == value,                   // 4
+                                192 => self.player != value,                   // 7
+                                193 => self.flag_get(value),                   // 8
+                                194 => !self.flag_get(value),                  // 9
+                                197 => self.current_counter <= i32::from(v),   // 15
+                                198 => self.current_counter > i32::from(v),    // 16
+                                199 => self.current_counter == i32::from(v),   // 19
+                                200 => self.item_at_start(value),              // 17
+                                _ => !self.item_at_start(value),               // 201 -> 18
+                            }
+                        }
+                    };
+                    pc += 1 + usize::from(!matches!(op, 195 | 196));
+                    failed = !holds;
+                }
+                // Spec §11: opcodes 202-211 and 213 are unassigned and their
+                // operand counts are unknown, so encountering one makes the
+                // REST of the record undecodable. Abandon the record rather
+                // than skipping the byte as a no-op — and without consulting
+                // the handler stack, since a resume target inside an
+                // undecodable remainder is meaningless.
+                202..=211 | 213 => return false,
+                // Commands (spec §3.7). Operand counts are 0, 1 or 2 and are
+                // fixed per opcode.
+                _ => {
+                    let one = |v: Option<u8>| v.map(usize::from);
+                    match op {
+                        212 => self.out.clear(),                            // 70
+                        214 => self.auto_inventory = true,                  // no ref code
+                        215 => self.auto_inventory = false,                 // no ref code
+                        216 | 217 | 239 | 241 => {}                         // no effect
+                        218 => {
+                            // The resume target is counted from the first
+                            // byte of the opcode stream, so an operand value
+                            // of 0 targets the operand byte itself.
+                            let Some(v) = p1 else { return false };
+                            if handlers.len() >= MAX_HANDLERS {
+                                return false;
+                            }
+                            handlers.push(pc + 1 + usize::from(v));
+                        }
+                        219 => {
+                            // Take, RESPECTING the carry limit; on refusal
+                            // print the "carrying too much" message and fail
+                            // the record — the one command that can end a
+                            // record in failure.
+                            let Some(item) = one(p1) else { return false };
+                            if self.carried_count() == self.db.max_carry {
+                                let msg = self.wording().too_much_bang;
+                                self.out.push_str(msg);
+                                failed = true;
+                            } else {
+                                self.set_item_loc(item, CARRIED);
+                            }
+                        }
+                        220 => {
+                            let Some(item) = one(p1) else { return false };
+                            self.set_item_loc(item, self.player as i32);     // 53
+                        }
+                        221 => {
+                            let Some(room) = one(p1) else { return false };
+                            if room < self.db.rooms.len() {
+                                self.player = room;                          // 54
+                            }
+                        }
+                        222 => {
+                            let Some(item) = one(p1) else { return false };
+                            self.set_item_loc(item, 0);                      // 55 / 59
+                        }
+                        223 => self.flag_set(DARK_FLAG, true),               // 56
+                        224 => self.flag_set(DARK_FLAG, false),              // 57
+                        225 => {
+                            let Some(flag) = one(p1) else { return false };
+                            self.flag_set(flag, true);                       // 58
+                        }
+                        226 => {
+                            let Some(flag) = one(p1) else { return false };
+                            self.flag_set(flag, false);                      // 60
+                        }
+                        227 => self.flag_set(0, true),                       // 67
+                        228 => self.flag_set(0, false),                      // 68
+                        229 => {
+                            // Spec §9.1: "Death is a side effect, not a
+                            // return." The death text prints, light is
+                            // restored, the player is moved to the
+                            // highest-numbered room and the end-of-game
+                            // sequence runs — AND THEN THE REST OF THE
+                            // RECORD CONTINUES TO EXECUTE. `quit` is only
+                            // read by `step` after the turn, so setting it
+                            // here ends the game without ending the record;
+                            // opcode 231 is the one that stops a record
+                            // immediately.
+                            let msg = self.wording().dead;
+                            self.out.push_str(msg);
+                            self.flag_set(DARK_FLAG, false);
+                            if let Some(last) = self.db.rooms.len().checked_sub(1) {
+                                self.player = last;
+                            }
+                            let over = self.wording().game_now_over;
+                            self.out.push_str(over);
+                            self.quit = true;
+                        }
+                        230 => {
+                            // TWO operands, and this is the load-bearing
+                            // order fact: **room first, then item**, the
+                            // reverse of the reference format's opcode 62.
+                            let (Some(room), Some(item)) = (one(p1), one(p2)) else {
+                                return false;
+                            };
+                            if room < self.db.rooms.len() {
+                                self.set_item_loc(item, room as i32);
+                            }
+                        }
+                        231 => {
+                            // End the game IMMEDIATELY: unlike 229 this also
+                            // stops the record. Reported as success so the
+                            // caller does not append a refusal after it.
+                            let msg = self.wording().game_now_over;
+                            self.out.push_str(msg);
+                            self.quit = true;
+                            return true;
+                        }
+                        232 => self.print_score(),                           // 65
+                        233 => self.print_inventory(),                       // 66
+                        234 => {
+                            // Refill the light source (69).
+                            self.lamp = self.db.light_time;
+                            self.set_item_loc(LIGHT_SOURCE, CARRIED);
+                            self.flag_set(LAMP_EMPTY_FLAG, false);
+                        }
+                        235 => self.save_requested = true,                   // 71
+                        236 => {
+                            // Exchange the locations of two items (72); the
+                            // acting item is first, unlike 230.
+                            let (Some(a), Some(b)) = (one(p1), one(p2)) else {
+                                return false;
+                            };
+                            if let (Some(&la), Some(&lb)) =
+                                (self.item_loc.get(a), self.item_loc.get(b))
+                            {
+                                self.set_item_loc(a, lb);
+                                self.set_item_loc(b, la);
+                            }
+                        }
+                        237 => {
+                            // Take IGNORING the carry limit (74).
+                            let Some(item) = one(p1) else { return false };
+                            self.set_item_loc(item, CARRIED);
+                        }
+                        238 => {
+                            // Move item p1 to the location of item p2 (75).
+                            let (Some(a), Some(b)) = (one(p1), one(p2)) else {
+                                return false;
+                            };
+                            if let Some(&lb) = self.item_loc.get(b) {
+                                self.set_item_loc(a, lb);
+                            }
+                        }
+                        240 => { /* redescribe: the host redraws every frame (64/76) */ }
+                        242 => {
+                            // INCREMENT. The reference format has no
+                            // equivalent — its only counter step is the
+                            // decrement this dialect spells 243.
+                            self.current_counter += 1;
+                        }
+                        // Floored at 0 here, where the reference format's
+                        // opcode 77 floors at -1 (spec §3.7's table).
+                        243 => self.current_counter = (self.current_counter - 1).max(0),
+                        244 => {
+                            let v = self.current_counter;                    // 78
+                            self.out.push_str(&v.to_string());
+                            self.out.push(' ');
+                        }
+                        245 => {
+                            let Some(v) = p1 else { return false };
+                            self.current_counter = i32::from(v);             // 79
+                        }
+                        246 => {
+                            let Some(v) = p1 else { return false };
+                            self.current_counter += i32::from(v);            // 82
+                        }
+                        247 => {
+                            let Some(v) = p1 else { return false };
+                            self.current_counter =
+                                (self.current_counter - i32::from(v)).max(-1); // 83
+                        }
+                        248 => std::mem::swap(&mut self.player, &mut self.saved_room), // 80
+                        249 => {
+                            let Some(v) = one(p1) else { return false };     // 87
+                            let idx = v.min(self.saved_rooms.len() - 1);
+                            std::mem::swap(&mut self.player, &mut self.saved_rooms[idx]);
+                        }
+                        250 => {
+                            // Slots 0-15; higher values clamp to 15 (81).
+                            let Some(v) = one(p1) else { return false };
+                            let idx = v.min(self.counters.len() - 1);
+                            std::mem::swap(&mut self.current_counter, &mut self.counters[idx]);
+                        }
+                        251 => {
+                            let noun = self.last_noun.clone();               // 84
+                            self.out.push_str(&noun);
+                        }
+                        252 => {
+                            let noun = self.last_noun.clone();               // 85
+                            self.out.push_str(&noun);
+                            self.out.push('\n');
+                        }
+                        253 => self.out.push('\n'),                          // 86
+                        254 => { /* pause: the host handles timing (88) */ }
+                        _ => unreachable!("every byte from 212 to 254 is listed above"),
+                    }
+                    pc += 1 + ti99_command_operands(op);
+                }
+            }
+            if failed {
+                match handlers.pop() {
+                    Some(target) => pc = target,
+                    None => return false,
+                }
+            }
+        }
+    }
+
+    /// Whether the automatic inventory listing is on — displayed after every
+    /// room description in a TI-99/4A release, **on by default**, and
+    /// toggled by opcodes 214 and 215 (spec §9.1).
+    ///
+    /// A property of play, not of presentation: this crate has no terminal
+    /// of its own, so a host renders the listing itself — from
+    /// [`Vm::database`] and [`Vm::item_loc`] — when this answers `true`. It
+    /// survives save and restore, which spec §9.1 gives a test for.
+    /// Always `true` for a database from any other dialect, none of which
+    /// has the two opcodes that change it.
+    pub fn auto_inventory(&self) -> bool {
+        self.auto_inventory
+    }
+
     fn print_message(&mut self, n: usize) {
         if let Some(msg) = self.db.messages.get(n) {
             self.out.push_str(msg);
@@ -942,50 +2214,71 @@ impl Vm {
             && !(self.item_carried(LIGHT_SOURCE) || self.item_in_room(LIGHT_SOURCE))
     }
 
-    /// The current room's display block, in the classic Scott Adams "top window"
-    /// form: the room line, then "Obvious exits:", then "I can also see:". The host
-    /// shows this as a persistent panel above the scrolling transcript (the CLI
-    /// prints it inline), so it is a pure query and never touches `out`.
+    /// The current room's display block. The host shows this as a persistent
+    /// panel above the scrolling transcript (the CLI prints it inline), so it
+    /// is a pure query and never touches `out`. Laid out per
+    /// [`Options::presentation`] — see [`Presentation`]'s doc for the three
+    /// choices and why this crate's own default ([`Presentation::C64`])
+    /// differs from ScottFree's.
     ///
-    /// A `*`-literal room prints verbatim; a non-literal room gets the "I'm in a "
-    /// prefix. When the room is dark, only the darkness line is returned.
+    /// One convenience layout of [`Self::room_name`], [`Self::room_is_literal`],
+    /// [`Self::room_exits`] and [`Self::items_in_room`] — a host with a
+    /// different panel shape reads those directly instead of parsing this
+    /// string back apart.
     pub fn room_block(&self) -> String {
+        match self.options.presentation {
+            Presentation::C64 => self.room_block_c64(),
+            Presentation::ScottFree => self.room_block_scottfree(false),
+            Presentation::Trs80 => self.room_block_scottfree(true),
+            Presentation::Ti994a => self.room_block_ti994a(),
+        }
+    }
+
+    /// This crate's own pre-existing layout (matches neither of ScottFree's,
+    /// see [`Presentation::C64`]'s doc): exits joined ". ", items each on
+    /// their own indented line under "I can also see:". A `*`-literal room
+    /// prints verbatim; a non-literal room gets the "I'm in a " prefix. When
+    /// the room is dark, only the darkness line is returned.
+    ///
+    /// **Its two person-bearing strings come from [`Wording`], like every
+    /// other layout's** (SQ-1478). They used to be literals here, which meant
+    /// this layout — the crate's DEFAULT, and what both lanthorn and
+    /// `scott-cli` show — printed `I'm in a ` and `I can also see:` however
+    /// the wording was set, so `Options::you_are` reached the death and
+    /// inventory replies and stopped at the room block: a host asking for
+    /// second person got it everywhere except the two lines a player reads
+    /// every single turn. Nothing changes with the option off, which is the
+    /// default and what every dialect this crate loads wants: the `!you_are`
+    /// forms of both fields are the literals this layout carried.
+    fn room_block_c64(&self) -> String {
+        let w = self.wording();
         if self.is_dark() {
             return "It is too dark to see.".to_string();
         }
         let mut s = String::new();
-        if let Some(room) = self.db.rooms.get(self.player) {
-            if room.literal {
-                s.push_str(&room.desc);
+        if self.db.rooms.get(self.player).is_some() {
+            if self.room_is_literal() {
+                s.push_str(self.room_name(self.player));
             } else {
-                s.push_str("I'm in a ");
-                s.push_str(&room.desc);
+                s.push_str(w.room_prefix);
+                s.push_str(self.room_name(self.player));
             }
-            let names = ["North", "South", "East", "West", "Up", "Down"];
-            let exits: Vec<&str> = room
-                .exits
-                .iter()
-                .enumerate()
-                .filter(|(_, &dest)| dest != 0)
-                .map(|(i, _)| names[i])
-                .collect();
+            let exits = self.room_exits();
             s.push_str("\n\nObvious exits: ");
             s.push_str(&if exits.is_empty() {
                 "none".to_string()
             } else {
-                format!("{}.", exits.join(". "))
+                let names: Vec<&str> = exits.iter().map(|&(name, _)| name).collect();
+                format!("{}.", names.join(". "))
             });
         }
-        let visible: Vec<&str> = self
-            .db
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| self.item_in_room(*i))
-            .map(|(_, it)| it.text.as_str())
-            .collect();
+        let visible = self.items_in_room();
         if !visible.is_empty() {
-            s.push_str("\n\nI can also see:");
+            s.push_str("\n\n");
+            // `see_also_header` carries its own leading newline and trailing
+            // space for the other layouts; this one puts each item on its own
+            // indented line, so it takes the sentence and neither.
+            s.push_str(w.see_also_header.trim());
             for item in &visible {
                 s.push_str("\n  ");
                 s.push_str(item);
@@ -994,6 +2287,116 @@ impl Vm {
         s
     }
 
+    /// The TI-99/4A releases' own layout
+    /// (`docs/internals/scott-dialects-spec.md` §9.1): the room prefix
+    /// `I am in a `, the two headers `Obvious exits : ` and
+    /// `Visible items are : `, and `", "` between the entries of both lists
+    /// — that section states each of those literally, including that this
+    /// dialect's exits delimiter is `", "` rather than the reference set's.
+    ///
+    /// It also states that "the room description is terminated with a period
+    /// when any items are visible", which is applied below with one guard
+    /// the section does not spell out for descriptions but does spell out
+    /// two sentences later for the inventory listing: a text already ending
+    /// in `.` or `!` is left alone rather than given a second period. Most
+    /// room descriptions in the twelve specimens already end in `.`
+    /// (`dismal swamp.`), so the unguarded reading would double the
+    /// punctuation on nearly every frame.
+    fn room_block_ti994a(&self) -> String {
+        let w = self.wording();
+        if self.is_dark() {
+            return w.too_dark_to_see.trim_end().to_string();
+        }
+        let mut s = String::new();
+        let visible = self.items_in_room();
+        if self.db.rooms.get(self.player).is_some() {
+            if !self.room_is_literal() {
+                s.push_str(w.room_prefix);
+            }
+            s.push_str(self.room_name(self.player));
+            if !visible.is_empty() && !ends_in_sentence_punctuation(&s) {
+                s.push('.');
+            }
+            let exits = self.room_exits();
+            s.push_str("\n\nObvious exits : ");
+            if exits.is_empty() {
+                s.push_str("none");
+            } else {
+                let names: Vec<&str> = exits.iter().map(|&(name, _)| name).collect();
+                s.push_str(&names.join(", "));
+            }
+        }
+        if !visible.is_empty() {
+            s.push_str("\n\n");
+            s.push_str(w.see_also_header.trim_start());
+            s.push_str(&visible.join(", "));
+        }
+        s
+    }
+
+    /// ScottFree's own observed `Look()` layout: exits joined ", " with a
+    /// trailing period, "none" when there are no exits; a `you_are`-gated
+    /// room prefix and "I/you can also see" header; items joined " - "
+    /// ([`Presentation::ScottFree`]) or each suffixed ". "
+    /// ([`Presentation::Trs80`]). `Trs80` also frames the whole block with
+    /// ScottFree's TRS-80 rule — dark room included, matching `Look()`'s
+    /// early return — pinned by
+    /// `presentation_option_selects_room_block_layout` in
+    /// scottfree_parity.rs.
+    fn room_block_scottfree(&self, trs80: bool) -> String {
+        const TRS80_LINE: &str = "\n<------------------------------------------------------------>\n";
+        let w = self.wording();
+        if self.is_dark() {
+            let mut s = w.too_dark_to_see.trim_end().to_string();
+            if trs80 {
+                s.push_str(TRS80_LINE);
+            }
+            return s;
+        }
+        let mut s = String::new();
+        if self.db.rooms.get(self.player).is_some() {
+            if self.room_is_literal() {
+                s.push_str(self.room_name(self.player));
+            } else {
+                s.push_str(w.room_prefix);
+                s.push_str(self.room_name(self.player));
+            }
+            let exits = self.room_exits();
+            s.push_str("\n\nObvious exits: ");
+            if exits.is_empty() {
+                s.push_str("none");
+            } else {
+                let names: Vec<&str> = exits.iter().map(|&(name, _)| name).collect();
+                s.push_str(&names.join(", "));
+            }
+            s.push('.');
+        }
+        let visible = self.items_in_room();
+        if !visible.is_empty() {
+            s.push_str("\n\n");
+            s.push_str(w.see_also_header.trim_start());
+            if trs80 {
+                for item in &visible {
+                    s.push_str(item);
+                    s.push_str(". ");
+                }
+            } else {
+                s.push_str(&visible.join(w.carrying_sep));
+            }
+        }
+        if trs80 {
+            s.push_str(TRS80_LINE);
+        }
+        s
+    }
+
+    /// Inventory command (case 66): ScottFree's own observed behaviour
+    /// prints a header, then every carried item joined by
+    /// [`Wording::carrying_sep`] (`" - "`, no separator before the first
+    /// item), or [`Wording::nothing_carried`] when the pack is empty —
+    /// either way, a final `".\n"` unconditionally — pinned by
+    /// `you_are_option_swaps_death_and_inventory_wording` in
+    /// scottfree_parity.rs.
     fn print_inventory(&mut self) {
         let carried: Vec<&str> = self
             .db
@@ -1003,13 +2406,70 @@ impl Vm {
             .filter(|(i, _)| self.item_carried(*i))
             .map(|(_, it)| it.text.as_str())
             .collect();
-        if carried.is_empty() {
-            self.out.push_str("You are carrying nothing.\n");
+        let w = self.wording();
+        self.out.push_str(w.carrying_header);
+        let last_needs_stop = if carried.is_empty() {
+            self.out.push_str(w.nothing_carried);
+            true
         } else {
-            self.out.push_str("You are carrying: ");
-            self.out.push_str(&carried.join(", "));
-            self.out.push('\n');
+            self.out.push_str(&carried.join(w.carrying_sep));
+            !ends_in_sentence_punctuation(carried[carried.len() - 1])
+        };
+        if self.options.presentation == Presentation::Ti994a {
+            // Spec §9.1: "the inventory listing appends a period (unless the
+            // last item's text already ends in `.` or `!`) followed by a
+            // space" — a trailing SPACE where every other set ends the line.
+            if last_needs_stop {
+                self.out.push('.');
+            }
+            self.out.push(' ');
+        } else {
+            self.out.push_str(".\n");
         }
+        // Spec §12.11, SQ-1482: "**The inventory command draws a picture.**
+        // BEYOND listing what is carried, it clears the graphics window,
+        // draws picture index 98 as a room picture, then draws the
+        // inventory-object picture of every carried item, and waits for the
+        // player to press ENTER before restoring the room view."
+        //
+        // "Beyond listing what is carried" fixes the order: the listing is
+        // printed and the picture comes after it, which is why this is the
+        // LAST thing the function does — `output_len` is taken here, so a
+        // host splitting the turn's transcript at the offset shows the whole
+        // listing alongside the picture and reveals whatever follows on the
+        // keypress.
+        //
+        // The SAME door opcode 90 uses (§12.11 says so outright: "the same
+        // door the inventory picture above goes through"), so a host needs no
+        // second mechanism and the ENTER wait is the one it already has.
+        // Which items are drawn over the backdrop is the host's — it holds
+        // the picture files — from `Vm::carried_item_indices`.
+        if self.draws_saga_pictures() {
+            self.pending_picture_shows.push(PictureShow {
+                picture: crate::INVENTORY_PICTURE as u16,
+                output_len: self.out.len(),
+            });
+        }
+    }
+
+    /// Does this database obey §12.11's US S.A.G.A. picture rules?
+    ///
+    /// Two ways to be one, because the same game ships in two encodings. A
+    /// §12 BINARY database says so itself
+    /// ([`Database::saga_us`](crate::Database::saga_us)). The MS-DOS release
+    /// is the plain reference TEXT format (§10.7) and says nothing about
+    /// itself at all, so it is identified from its own header counts instead
+    /// — [`crate::saga_dos::identify`], the same door the host's picture
+    /// source is resolved through, so the two cannot disagree about which
+    /// release this is.
+    ///
+    /// Note the asymmetry with [`Vm::current_picture`], which keys on
+    /// `saga_us` alone: the room-picture rules can be applied by the host
+    /// after the fact (it knows the release), but a queued
+    /// [`PictureShow`] cannot be invented by a host that never saw the
+    /// command run.
+    fn draws_saga_pictures(&self) -> bool {
+        self.db.saga_us.is_some() || crate::saga_dos::identify(&self.db).is_some()
     }
 
     /// The player's score as Scott counts it: treasures deposited in the
@@ -1030,11 +2490,43 @@ impl Vm {
         (stored, self.db.num_treasures)
     }
 
+    /// ScottFree's own observed case-65 (SCORE) behaviour, matched
+    /// literally including its trailing-space-no-newline number-printing
+    /// quirk (same primitive opcode 78 also uses, pinned by
+    /// `golden_transcript` in golden.rs): each number is followed by its own
+    /// trailing space AND the fixed text
+    /// around it supplies another, so the rendered line carries a genuine
+    /// double space (`"...stored 0  treasures..."`, `"...rates 0 .\n"`) —
+    /// not cleaned up here, to stay a faithful byte-for-byte match rather
+    /// than a paraphrase.
+    ///
+    /// `total > 0` guards the percentage (`(n*100)/GameHeader.Treasures`)
+    /// against a `num_treasures == 0` database, which ScottFree's own C
+    /// would divide by zero on (undefined behaviour there; a guard here
+    /// instead — see the crate's "NOT defects" note on this in
+    /// `scottfree_parity.rs`) and which would otherwise satisfy
+    /// `in_treasure_room == total` trivially and auto-win on the very first
+    /// SCORE call.
     fn print_score(&mut self) {
         let (in_treasure_room, total) = self.treasures_stored();
-        self.out.push_str(&format!(
-            "You have {in_treasure_room} out of {total} treasures.\n"
-        ));
+        let w = self.wording();
+        self.out.push_str(w.stored_prefix);
+        self.out.push_str(&in_treasure_room.to_string());
+        self.out.push(' ');
+        self.out.push_str(" treasures.  On a scale of 0 to 100, that rates ");
+        let pct = if total > 0 { (in_treasure_room * 100) / total } else { 0 };
+        self.out.push_str(&pct.to_string());
+        self.out.push(' ');
+        self.out.push_str(".\n");
+        // ScottFree's case 65, after printing the rating: when every
+        // treasure is stored, print "Well done." and fall through to
+        // opcode 63's `doneit` label ("The game is now over." then quit) —
+        // `goto doneit`, not a separate ending.
+        if total > 0 && in_treasure_room == total {
+            self.out.push_str(w.well_done);
+            self.out.push_str(w.game_now_over);
+            self.quit = true;
+        }
     }
 
     // --- test-only helpers (or make fields pub(crate) and set directly) ---
@@ -1095,6 +2587,9 @@ mod tests {
             messages: vec!["".into()],
             items,
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         };
         let mut vm = Vm::new(db);
         vm.set_player(player);
@@ -1328,6 +2823,9 @@ mod tests {
             messages: vec![String::new(), "Sorry".into()],
             items: one_item(),
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         };
         let mut vm = Vm::new(db);
         vm.take_output();
@@ -1365,6 +2863,9 @@ mod tests {
             messages: vec![String::new()],
             items: one_item(),
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         };
         let mut vm = Vm::new(db);
         vm.take_output();
@@ -1390,6 +2891,461 @@ mod tests {
         assert_eq!(vm.current_picture(), Some(1), "reverts to the room picture");
     }
 
+    // --- SQ-1472: opcodes 89/90's operand counts are swapped in US S.A.G.A.
+    // databases from the reference format's own (spec §12.8/§12.11) ---
+
+    fn saga_vm_with(items: Vec<Item>, rooms: Vec<Room>, player: usize) -> Vm {
+        let db = Database {
+            max_carry: 6,
+            start_room: player,
+            num_treasures: 0,
+            word_length: 3,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![],
+            verbs: vec!["".into()],
+            nouns: vec!["".into()],
+            rooms,
+            messages: vec!["".into()],
+            items,
+            adventure_number: 0,
+            mysterious: false,
+            saga_us: Some(SagaUs { version: 416, adventure: 1, platform: SagaPlatform::Atari8Bit }),
+            ti99: None,
+        };
+        let mut vm = Vm::new(db);
+        vm.set_player(player);
+        vm
+    }
+
+    // The reference format's own opcode 89 (draw picture) consumes one
+    // operand and 90 is unused, both unaffected by `saga_us` being `None`.
+    #[test]
+    fn reference_format_op89_still_draws_its_operand_and_op90_is_unused() {
+        let mut vm = vm_with(one_item(), rooms4(), 0);
+        vm.run_commands(&[89, 58, 90, 0], &[3, 5]); // 89 draws 3, 58 <- next param (5)
+        assert_eq!(vm.current_picture(), Some(3), "89 draws its own operand");
+        assert!(vm.flag_at(5), "58 got the SECOND param — 89 took the first");
+    }
+
+    // §12.8/§12.11: in a S.A.G.A. database, 89 takes NO operand (its drawing
+    // effect is undetermined and it makes no state change) and 90 takes ONE
+    // (queues the room-usage picture it names onto `pending_picture_shows`,
+    // via `take_picture_shows` — SQ-1487 moved this off the
+    // `pending_picture`/`current_picture()` door opcode 89 above uses, since
+    // a single action can run 90 more than once in one turn). Both opcodes
+    // occur in the same action tables, so getting the arity backwards hands
+    // every later command in the record the wrong operand — this is the
+    // arity the falsifying example in §12.8 (Adventureland's `RUB LAMP`,
+    // Pirate Adventure's `SET SAIL`) catches.
+    #[test]
+    fn saga_us_op89_takes_no_operand_and_op90_takes_one() {
+        let items: Vec<Item> = (0..7)
+            .map(|i| Item { text: format!("item{i}"), treasure: false, auto_noun: None, start_loc: 0 })
+            .collect();
+        let mut vm = saga_vm_with(items, rooms4(), 0);
+        // 89 (nothing), 58 <- first param, 90 draws the second param, 74 <- third.
+        vm.run_commands(&[89, 58, 90, 74], &[5, 22, 6]);
+        assert!(vm.flag_at(5), "58 got the FIRST param — S.A.G.A.'s 89 took none");
+        assert_eq!(
+            vm.take_picture_shows(),
+            vec![PictureShow { picture: 22, output_len: 0 }],
+            "90 draws the operand AFTER 58's, not 89's"
+        );
+        assert_eq!(vm.item_loc_at(6), CARRIED, "74 got the operand after 90's own, not stolen by 89");
+    }
+
+    // §12.11: "darkness does not blank the graphics window. Where other
+    // dialects paint black, these draw picture index 0" — a dedicated darkness
+    // image. Every other dialect shows nothing, and `current_picture` is the
+    // one place that difference is decided, so a host has no rule of its own
+    // to keep in step (SQ-1475).
+    #[test]
+    fn saga_us_darkness_draws_the_darkness_picture() {
+        let items: Vec<Item> = (0..12)
+            .map(|i| Item { text: format!("item{i}"), treasure: false, auto_noun: None, start_loc: 0 })
+            .collect();
+        let mut saga = saga_vm_with(items.clone(), rooms4(), 2);
+        assert_eq!(saga.current_picture(), Some(2), "premise: room 2's own picture");
+        saga.flag_set(DARK_FLAG, true);
+        assert!(saga.is_dark(), "premise: no light source is carried or here");
+        assert_eq!(
+            saga.current_picture(),
+            Some(crate::DARKNESS_PICTURE as u16),
+            "§12.11: the dedicated darkness image, not nothing"
+        );
+        // SQ-1487: an opcode-90 draw no longer reaches `current_picture` at
+        // all — it queues onto `pending_picture_shows` instead (a host
+        // presenting a picture-show sequence tracks the on-screen picture
+        // itself), so darkness's answer is unaffected by one having run.
+        saga.run_commands(&[90, 0, 0, 0], &[22]);
+        assert_eq!(
+            saga.current_picture(),
+            Some(crate::DARKNESS_PICTURE as u16),
+            "90 no longer overrides current_picture — it queues a show instead"
+        );
+        assert_eq!(saga.take_picture_shows(), vec![PictureShow { picture: 22, output_len: 0 }]);
+
+        // Every other dialect: dark means no picture at all.
+        let mut plain = vm_with(items, rooms4(), 2);
+        assert_eq!(plain.current_picture(), Some(2));
+        plain.flag_set(DARK_FLAG, true);
+        assert_eq!(plain.current_picture(), None, "no darkness image outside the S.A.G.A. releases");
+    }
+
+    // SQ-1487 (user-reported): *The Hulk*'s "bite lip" opening runs opcode 90
+    // more than once in a SINGLE action, each followed by its own text —
+    // `pending_picture` being one slot meant the second 90 silently
+    // overwrote the first, so a host asking `current_picture()` only ever
+    // saw the LAST scene. `take_picture_shows` must return every request, in
+    // order, each carrying the transcript offset it ran at — so a host can
+    // split the turn's output and show each scene before its own picture.
+    #[test]
+    fn saga_us_op90_queues_every_picture_the_turn_draws_with_a_split_offset_each() {
+        let items: Vec<Item> = (0..1)
+            .map(|i| Item { text: format!("item{i}"), treasure: false, auto_noun: None, start_loc: 0 })
+            .collect();
+        let mut vm = saga_vm_with(items, rooms4(), 0);
+        vm.db.messages = vec!["".into(), "First scene.".into(), "Second scene.".into()];
+        vm.take_output(); // clear anything the constructor's opening pass printed
+        let room_picture_before = vm.current_picture();
+
+        // One action's 4 command slots: 90 draws picture 10, PRINT message 1,
+        // 90 draws picture 20, PRINT message 2 — the Hulk's own shape (several
+        // 90s in one turn, each followed by text).
+        vm.run_commands(&[90, 1, 90, 2], &[10, 20]);
+
+        let out = vm.take_output();
+        assert_eq!(out, "First scene.\nSecond scene.\n", "print_message terminates each with a newline");
+        assert_eq!(
+            vm.take_picture_shows(),
+            vec![
+                PictureShow { picture: 10, output_len: 0 },
+                PictureShow { picture: 20, output_len: "First scene.\n".len() },
+            ],
+            "both requests queued in order, with the offset each ran at — SQ-1487's bug \
+             was `pending_picture` holding only the LAST one"
+        );
+        assert_eq!(
+            vm.current_picture(),
+            room_picture_before,
+            "current_picture is untouched by opcode 90 — a host tracks the on-screen \
+             picture itself while presenting the queued shows"
+        );
+
+        // A fresh turn starts the queue empty again, exactly like `pending_picture`.
+        vm.supply_line("look");
+        vm.step();
+        assert!(vm.take_picture_shows().is_empty(), "a turn that ran no 90 queues nothing");
+    }
+
+    // --- SQ-1482: §12.11's object overlays and the inventory picture screen.
+    // What the VM owes a host drawing them is two lists of item INDICES and
+    // one queued show; which artwork each index reaches, and whether the
+    // release ships it, is the host's. ---
+
+    /// The two index queries are the picture-drawing half of
+    /// `items_in_room`/`print_inventory`, and they must track a move the
+    /// instant it happens — an overlay set computed from a stale list draws
+    /// the gem the player just picked up (spec §12.11).
+    #[test]
+    fn item_index_queries_follow_an_item_from_the_room_into_the_pack() {
+        let items: Vec<Item> = (0..5)
+            .map(|i| Item {
+                text: format!("item{i}"),
+                treasure: false,
+                // Items 1 and 3 start in room 2, where the player is.
+                start_loc: if i == 1 || i == 3 { 2 } else { 0 },
+                auto_noun: None,
+            })
+            .collect();
+        let mut vm = saga_vm_with(items, rooms4(), 2);
+        assert_eq!(vm.item_indices_in_room(), vec![1, 3], "table order, not disk order");
+        assert!(vm.carried_item_indices().is_empty(), "nothing carried at the start");
+
+        vm.set_item_loc(1, CARRIED);
+        assert_eq!(vm.item_indices_in_room(), vec![3], "the taken item leaves the room");
+        assert_eq!(vm.carried_item_indices(), vec![1], "…and joins the pack");
+
+        vm.set_item_loc(1, 3); // dropped in a room the player is NOT in
+        assert_eq!(vm.item_indices_in_room(), vec![3], "another room's items are not here");
+        assert!(vm.carried_item_indices().is_empty());
+    }
+
+    /// §12.11: "**The inventory command draws a picture.** Beyond listing
+    /// what is carried, it … draws picture index 98." Beyond LISTING fixes
+    /// the order, and `output_len` is what carries it to a host: the whole
+    /// listing sits ahead of the offset.
+    #[test]
+    fn saga_inventory_queues_picture_98_after_the_listing() {
+        let items: Vec<Item> = (0..3)
+            .map(|i| Item {
+                text: format!("item{i}"),
+                treasure: false,
+                start_loc: if i == 2 { CARRIED } else { 0 },
+                auto_noun: None,
+            })
+            .collect();
+        let mut vm = saga_vm_with(items, rooms4(), 1);
+        vm.take_output();
+        vm.run_commands(&[66, 0, 0, 0], &[]); // 66 = INVENTORY
+        let shows = vm.take_picture_shows();
+        let text = vm.take_output();
+        assert!(text.contains("item2"), "the listing ran: {text:?}");
+        assert_eq!(
+            shows,
+            vec![PictureShow {
+                picture: crate::INVENTORY_PICTURE as u16,
+                output_len: text.len()
+            }],
+            "one show, index 98, queued at the END of the listing"
+        );
+    }
+
+    /// …and no other dialect draws one. A reference-format database that is
+    /// not one of §10.7's releases queues nothing, so a plain `.dat` never
+    /// stops for a keypress it has no picture for.
+    #[test]
+    fn reference_format_inventory_queues_no_picture_show() {
+        let mut vm = Vm::new(tiny_world());
+        vm.take_output();
+        vm.run_commands(&[66, 0, 0, 0], &[]);
+        assert!(
+            vm.take_picture_shows().is_empty(),
+            "§12.11's inventory picture is a US S.A.G.A. rule, not a general one"
+        );
+    }
+
+    /// The MS-DOS *Hulk* is the reference TEXT format (§10.7) and still obeys
+    /// §12.11, so the queue has to key on the RELEASE and not the encoding —
+    /// `saga_dos::identify`, the same door the host resolves its picture
+    /// files through.
+    #[test]
+    fn the_ms_dos_hulks_header_counts_queue_the_inventory_show_too() {
+        let mut db = tiny_world();
+        // §10.7's eleven counts, spelled as table lengths (each is the
+        // highest INDEX plus the entry-0 slot, §2.2).
+        db.items = (0..55)
+            .map(|i| Item {
+                text: format!("item{i}"),
+                treasure: false,
+                start_loc: 0,
+                auto_noun: None,
+            })
+            .collect();
+        db.actions = vec![
+            Action {
+                verb: 0,
+                noun: 0,
+                conditions: [Condition { code: 0, value: 0 }; 5],
+                commands: [0; 4]
+            };
+            262
+        ];
+        db.verbs = vec![String::new(); 129];
+        db.rooms = (0..21)
+            .map(|i| Room { exits: [0; 6], desc: format!("room{i}"), literal: true })
+            .collect();
+        db.max_carry = 10;
+        db.start_room = 1;
+        db.num_treasures = 17;
+        db.word_length = 4;
+        db.light_time = 150;
+        db.messages = vec![String::new(); 100];
+        db.treasure_room = 16;
+        assert!(db.saga_us.is_none(), "premise: the text format says nothing about itself");
+        assert!(crate::saga_dos::identify(&db).is_some(), "premise: the counts name the release");
+
+        let mut vm = Vm::new(db);
+        vm.take_output();
+        vm.run_commands(&[66, 0, 0, 0], &[]);
+        assert_eq!(
+            vm.take_picture_shows().first().map(|s| s.picture),
+            Some(crate::INVENTORY_PICTURE as u16),
+            "the same rule reaches the release in its other encoding"
+        );
+    }
+
+    // §12.11's Hulk remap reaches `current_picture`, so a host asking "what
+    // should I draw?" never has to know about it (SQ-1475). Rooms 5 and 6 draw
+    // picture 3; every other room draws its own number.
+    #[test]
+    fn saga_us_current_picture_applies_the_hulk_remap() {
+        let items: Vec<Item> = (0..12)
+            .map(|i| Item { text: format!("item{i}"), treasure: false, auto_noun: None, start_loc: 0 })
+            .collect();
+        let rooms: Vec<Room> = (0..8)
+            .map(|i| Room { exits: [0; 6], desc: format!("room{i}"), literal: true })
+            .collect();
+        for (release, room, want) in [
+            // The Hulk on the Commodore 64: room 5 draws picture 3.
+            ((127u16, 1u16, SagaPlatform::Commodore64), 5usize, 3u16),
+            ((127, 1, SagaPlatform::Commodore64), 7, 4),
+            ((127, 1, SagaPlatform::Commodore64), 1, 1),
+            // Not on the Apple II, and not for another title.
+            ((127, 1, SagaPlatform::AppleII), 5, 5),
+            ((416, 1, SagaPlatform::Commodore64), 5, 5),
+        ] {
+            let db = Database {
+                max_carry: 6,
+                start_room: room,
+                num_treasures: 0,
+                word_length: 3,
+                light_time: -1,
+                treasure_room: 0,
+                actions: vec![],
+                verbs: vec!["".into()],
+                nouns: vec!["".into()],
+                rooms: rooms.clone(),
+                messages: vec!["".into()],
+                items: items.clone(),
+                adventure_number: 0,
+                mysterious: false,
+                saga_us: Some(SagaUs {
+                    version: release.0,
+                    adventure: release.1,
+                    platform: release.2,
+                }),
+                ti99: None,
+            };
+            let mut vm = Vm::new(db);
+            vm.set_player(room);
+            assert_eq!(vm.current_picture(), Some(want), "{release:?} room {room}");
+        }
+    }
+
+    /// The `stories/scott-dialects` corpus, wherever the workspace symlinks or
+    /// mounts it — the same two candidate paths `tests/saga_us_specimens.rs`'s
+    /// own `fixtures()` uses (both a unit-test and an integration-test binary
+    /// run with `crates/scott` as their working directory).
+    fn saga_dialect_fixtures() -> Option<std::path::PathBuf> {
+        [
+            std::env::var_os("SCOTT_DIALECT_FIXTURES").map(std::path::PathBuf::from),
+            Some(std::path::PathBuf::from("stories/scott-dialects")),
+            Some(std::path::PathBuf::from("../../stories/scott-dialects")),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_dir())
+    }
+
+    /// The code-0 condition slots an action's commands consume left to right
+    /// (mirrors `decompile::command_params`, private to that module).
+    fn action_params(a: &Action) -> Vec<u16> {
+        a.conditions.iter().filter(|c| c.code == 0).map(|c| c.value).collect()
+    }
+
+    // spec §12.8's own falsifying example, action 107 (`RUB LAMP`): with the
+    // corrected arity, S.A.G.A. Adventureland's action table reproduces
+    // `adv01.dat`'s effect exactly — the diamond ring (item 48) dropped in
+    // the player's room and flag 8 set — even though the S.A.G.A. record
+    // carries an extra opcode 89 the twin doesn't. Real specimens, gated on
+    // `stories/scott-dialects` like every other S.A.G.A. suite; skips
+    // vacuously with an explanation when the corpus is absent. SQ-1472.
+    #[test]
+    fn saga_us_adventureland_rub_lamp_matches_the_dat_twin() {
+        let Some(root) = saga_dialect_fixtures() else {
+            eprintln!(
+                "SKIP: no stories/scott-dialects corpus (see tests/saga_us_specimens.rs for how \
+                 to build it)"
+            );
+            return;
+        };
+        let Some(saga_bytes) = ["atari", "apple"]
+            .iter()
+            .find_map(|platform| std::fs::read(root.join(platform).join("db").join("adventureland.bin")).ok())
+        else {
+            eprintln!("SKIP: no extracted Adventureland S.A.G.A. database");
+            return;
+        };
+        let Ok(dat_bytes) = std::fs::read(root.join("..").join("adv01.dat")) else {
+            eprintln!("SKIP: no adv01.dat");
+            return;
+        };
+        let saga_db = Database::parse(&saga_bytes).expect("the S.A.G.A. database parses");
+        let dat_db = Database::parse(&dat_bytes).expect("adv01.dat parses");
+        assert!(saga_db.saga_us.is_some(), "detected as a S.A.G.A. database");
+        assert!(
+            saga_db.items[48].text.to_uppercase().contains("DIAMOND RING"),
+            "{:?}",
+            saga_db.items[48].text
+        );
+
+        let saga_action = saga_db.actions[107].clone();
+        let dat_action = dat_db.actions[107].clone();
+        assert_eq!(
+            (saga_action.verb, saga_action.noun),
+            (dat_action.verb, dat_action.noun),
+            "action 107 is the same record in both"
+        );
+        assert_eq!(saga_action.conditions, dat_action.conditions, "same three operand slots (48, 8, 0)");
+        assert_eq!(saga_action.commands, [49, 89, 53, 58], "the database carries the extra opcode 89");
+
+        let mut saga_vm = Vm::new(saga_db);
+        let mut dat_vm = Vm::new(dat_db);
+        assert_eq!(saga_vm.current_room(), dat_vm.current_room(), "same start room");
+        saga_vm.run_commands(&saga_action.commands, &action_params(&saga_action));
+        dat_vm.run_commands(&dat_action.commands, &action_params(&dat_action));
+
+        let room = saga_vm.current_room() as i32;
+        assert_eq!(saga_vm.item_loc_at(48), room, "the diamond ring is dropped in the player's room");
+        assert!(saga_vm.flag_at(8), "flag 8 is set");
+        assert!(!saga_vm.flag_at(0), "the darkness flag must not be touched");
+        assert_eq!(saga_vm.item_loc_at(48), dat_vm.item_loc_at(48), "S.A.G.A. now agrees with the .dat twin");
+        assert_eq!(saga_vm.flag_at(8), dat_vm.flag_at(8));
+        assert_eq!(saga_vm.flag_at(0), dat_vm.flag_at(0));
+    }
+
+    // Pirate Adventure's action 104 (`SET SAIL`), §12.8's third falsifying
+    // example: sets flag 4 and moves the pirate ship (item 37) to room 21,
+    // matching `adv02.dat`'s own action 104 — which spells the extra command
+    // as opcode 70 (CLEAR_OUTPUT) rather than dropping the slot, but that is
+    // still arity 0, so the operand routing agrees either way. SQ-1472.
+    #[test]
+    fn saga_us_pirate_adventure_set_sail_matches_the_dat_twin() {
+        let Some(root) = saga_dialect_fixtures() else {
+            eprintln!(
+                "SKIP: no stories/scott-dialects corpus (see tests/saga_us_specimens.rs for how \
+                 to build it)"
+            );
+            return;
+        };
+        let Some(saga_bytes) = ["atari", "apple"]
+            .iter()
+            .find_map(|platform| std::fs::read(root.join(platform).join("db").join("pirate.bin")).ok())
+        else {
+            eprintln!("SKIP: no extracted Pirate Adventure S.A.G.A. database");
+            return;
+        };
+        let Ok(dat_bytes) = std::fs::read(root.join("..").join("adv02.dat")) else {
+            eprintln!("SKIP: no adv02.dat");
+            return;
+        };
+        let saga_db = Database::parse(&saga_bytes).expect("the S.A.G.A. database parses");
+        let dat_db = Database::parse(&dat_bytes).expect("adv02.dat parses");
+        assert!(saga_db.saga_us.is_some(), "detected as a S.A.G.A. database");
+
+        let saga_action = saga_db.actions[104].clone();
+        let dat_action = dat_db.actions[104].clone();
+        assert_eq!(
+            (saga_action.verb, saga_action.noun),
+            (dat_action.verb, dat_action.noun),
+            "action 104 is the same record in both"
+        );
+        assert_eq!(saga_action.conditions, dat_action.conditions);
+        assert_eq!(saga_action.commands, [89, 39, 58, 62], "the database carries the extra opcode 89");
+
+        let mut saga_vm = Vm::new(saga_db);
+        let mut dat_vm = Vm::new(dat_db);
+        saga_vm.run_commands(&saga_action.commands, &action_params(&saga_action));
+        dat_vm.run_commands(&dat_action.commands, &action_params(&dat_action));
+
+        assert!(saga_vm.flag_at(4), "flag 4 is set, not flag 37");
+        assert_eq!(saga_vm.item_loc_at(37), 21, "the ship moves to room 21");
+        assert_eq!(saga_vm.flag_at(4), dat_vm.flag_at(4));
+        assert_eq!(saga_vm.item_loc_at(37), dat_vm.item_loc_at(37));
+    }
+
     // Action codes >= 102 print message (code - 50) with no upper cap: a game
     // with 100+ messages emits them via codes >= 152, which must not be dropped.
     #[test]
@@ -1410,6 +3366,9 @@ mod tests {
             messages,
             items: one_item(),
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         };
         let mut vm = Vm::new(db);
         vm.take_output();
@@ -1473,6 +3432,9 @@ mod tests {
             messages: vec![String::new()],
             items,
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         };
         let mut vm = Vm::new(db);
         vm.take_output();
@@ -1517,6 +3479,42 @@ mod tests {
         assert_eq!(vm.current_room(), 0);
     }
 
+    // SQ-1402: the snapshot format grew a 4-byte magic + u16 version header.
+    // Four cases: round-trip already lives above
+    // (`snapshot_restore_counter_and_room`, unaffected by the header — it
+    // drives the public API only); these cover the header's own failure modes.
+
+    #[test]
+    fn restore_rejects_bad_magic() {
+        let mut vm = vm_with(one_item(), rooms4(), 1);
+        let mut blob = vm.snapshot();
+        blob[0] ^= 0xFF; // corrupt the magic, leave everything else intact
+        assert_eq!(vm.restore(&blob), Err(RestoreError::BadMagic));
+    }
+
+    #[test]
+    fn restore_rejects_a_newer_format_version() {
+        let mut vm = vm_with(one_item(), rooms4(), 1);
+        let mut blob = vm.snapshot();
+        // The version is the u16 right after the 4-byte magic, LE.
+        let newer = Vm::SNAPSHOT_VERSION + 1;
+        blob[4..6].copy_from_slice(&newer.to_le_bytes());
+        assert_eq!(
+            vm.restore(&blob),
+            Err(RestoreError::NewerVersion { found: newer, supported: Vm::SNAPSHOT_VERSION }),
+            "both numbers are named, not just a bare refusal",
+        );
+    }
+
+    #[test]
+    fn restore_rejects_a_truncated_header() {
+        let mut vm = vm_with(one_item(), rooms4(), 1);
+        let blob = vm.snapshot();
+        assert_eq!(vm.restore(&[]), Err(RestoreError::Truncated), "nothing at all");
+        assert_eq!(vm.restore(&blob[..3]), Err(RestoreError::Truncated), "magic itself cut short");
+        assert_eq!(vm.restore(&blob[..5]), Err(RestoreError::Truncated), "version cut short");
+    }
+
     #[test]
     fn cmd_message_ranges() {
         let mut messages = vec!["".to_string(); 53];
@@ -1546,6 +3544,9 @@ mod tests {
             messages,
             items,
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         };
         let mut vm = Vm::new(db);
 
@@ -1636,6 +3637,9 @@ mod tests {
             messages: vec![String::new()],
             items,
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         }
     }
 
@@ -1677,6 +3681,45 @@ mod tests {
         assert_eq!(vm.room_block(), "It is too dark to see.");
     }
 
+    /// `room_block` is documented as one convenience layout of
+    /// [`Vm::room_name`], [`Vm::room_is_literal`], [`Vm::room_exits`] and
+    /// [`Vm::items_in_room`] — this composes them by hand and checks the two
+    /// agree, so a host reading the structured pieces directly gets exactly
+    /// what the panel string would have shown.
+    #[test]
+    fn room_block_equals_the_composition_of_its_pieces() {
+        let mut db = tiny_world();
+        db.rooms[1].literal = false;
+        db.rooms[1].desc = "forest".into();
+        db.rooms[1].exits = [2, 0, 0, 0, 0, 3];
+        let vm = Vm::new(db);
+
+        let mut expected = if vm.room_is_literal() {
+            vm.room_name(vm.current_room()).to_string()
+        } else {
+            format!("I'm in a {}", vm.room_name(vm.current_room()))
+        };
+        let exit_names: Vec<&str> = vm.room_exits().iter().map(|&(name, _)| name).collect();
+        expected.push_str("\n\nObvious exits: ");
+        expected.push_str(&if exit_names.is_empty() {
+            "none".to_string()
+        } else {
+            format!("{}.", exit_names.join(". "))
+        });
+        let visible = vm.items_in_room();
+        if !visible.is_empty() {
+            expected.push_str("\n\nI can also see:");
+            for item in &visible {
+                expected.push_str("\n  ");
+                expected.push_str(item);
+            }
+        }
+        assert_eq!(vm.room_block(), expected);
+        // Non-vacuous: this room actually has exits and a visible item, so the
+        // composition exercised both branches room_block's darkness case skips.
+        assert!(!exit_names.is_empty() && !visible.is_empty());
+    }
+
     #[test]
     fn get_specific_item_matches_at_word_length() {
         let mut db = tiny_world(); // word_length 3
@@ -1688,10 +3731,36 @@ mod tests {
         vm.supply_line("get lamp");
         vm.step();
         let out = vm.take_output();
-        assert!(out.contains("OK."), "get lamp succeeds: {out:?}");
+        // GET success is ScottFree's own observed "O.K. " (case 10
+        // fallback), not "OK.\n" (SQ-1413) — also pinned by
+        // `golden_transcript` in golden.rs.
+        assert!(out.contains("O.K."), "get lamp succeeds: {out:?}");
         assert!(vm.item_carried(9), "the lamp is now carried");
 
         // And dropping it by the full word works too.
+        vm.supply_line("drop lamp");
+        vm.step();
+        assert!(!vm.item_carried(9), "the lamp was dropped");
+    }
+
+    #[test]
+    fn get_specific_item_matches_at_word_length_zero() {
+        // Spec §2.5 (docs/internals/scott-dialects-spec.md): "a word length of 0
+        // in the header would make every comparison vacuously true; no real
+        // database has one, and a conforming loader should treat 0 as 'compare
+        // the whole word'." `Database::match_verb`/`match_noun` already carry
+        // that rule (`database::trunc_upper`); this pins `Vm::match_up_item`
+        // doing the same, rather than truncating every word to zero characters
+        // (which made `key` empty and GET/DROP fail unconditionally — SQ-1456).
+        let mut db = tiny_world();
+        db.word_length = 0;
+        let mut vm = Vm::new(db);
+        vm.supply_line("get lamp");
+        vm.step();
+        let out = vm.take_output();
+        assert!(out.contains("O.K."), "get lamp succeeds at word_length 0: {out:?}");
+        assert!(vm.item_carried(9), "the lamp is now carried");
+
         vm.supply_line("drop lamp");
         vm.step();
         assert!(!vm.item_carried(9), "the lamp was dropped");
@@ -1778,6 +3847,9 @@ mod tests {
             messages: vec![String::new(), "Click.".into()],
             items: one_item(),
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         };
         let mut vm = Vm::new(db);
         assert!(!vm.trace_fired(), "tracing is off by default");
@@ -1820,6 +3892,9 @@ mod tests {
             messages: vec![String::new(), "Click.".into(), "Clunk.".into()],
             items: one_item(),
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         };
         let mut vm = Vm::new(db);
         vm.set_trace_fired(true);
@@ -1868,6 +3943,9 @@ mod tests {
             messages: vec![String::new(), "It opens.".into()],
             items: one_item(),
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         };
         let mut vm = Vm::new(db);
         vm.set_trace_fired(true);
@@ -1894,4 +3972,250 @@ mod tests {
         assert!(vm.ever_fired().contains(&3));
         assert!(vm.ever_fired().contains(&7));
     }
+
+    // --- SQ-1412: ScottFree parity for opcodes 52, 78, 84/85 -----------------
+
+    // ScottFree's own observed case-52 behaviour refuses ONLY when carried
+    // count EQUALS MaxCarry, not `>=`. The two comparisons only disagree
+    // once a database is already OVER capacity — unreachable by ordinary
+    // play, but reachable by hand-building a `Database`, which is exactly
+    // what this test pins: the exact observed comparison rather than an
+    // equivalent-at-the-boundary `>=` guard.
+    #[test]
+    fn cmd_get_op52_refuses_only_at_exact_capacity_not_over() {
+        let items = vec![
+            Item { text: "a".into(), treasure: false, auto_noun: None, start_loc: CARRIED },
+            Item { text: "b".into(), treasure: false, auto_noun: None, start_loc: CARRIED },
+            Item { text: "c".into(), treasure: false, auto_noun: None, start_loc: 1 },
+        ];
+        let db = Database {
+            max_carry: 1, // already over capacity: 2 carried > 1
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 3,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![],
+            verbs: vec![String::new()],
+            nouns: vec![String::new()],
+            rooms: rooms4(),
+            messages: vec![String::new()],
+            items,
+            adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
+        };
+        let mut vm = Vm::new(db);
+        vm.run_commands(&[52, 0, 0, 0], &[2]);
+        assert_eq!(
+            vm.item_loc_at(2),
+            CARRIED,
+            "GET succeeds when OVER (not AT) capacity — exact `==`, not `>=`"
+        );
+        assert!(!vm.take_output().contains("too much"));
+    }
+
+    // ScottFree's own observed opcode-78 (TALLY) behaviour: a trailing
+    // space, never a newline.
+    #[test]
+    fn cmd_tally_op78_prints_a_trailing_space_not_a_newline() {
+        let mut vm = vm_with(one_item(), rooms4(), 0);
+        vm.run_commands(&[79, 0, 0, 0], &[42]); // current = 42
+        vm.take_output();
+        vm.run_commands(&[78, 0, 0, 0], &[]);
+        assert_eq!(vm.take_output(), "42 ");
+    }
+
+    // ScottFree's own observed behaviour echoes the noun exactly as the
+    // player typed it — case 84/85 must not uppercase it, matching
+    // `last_noun`'s own assignment in `run_turn`.
+    #[test]
+    fn cmd_print_noun_op84_85_echo_the_typed_case_not_uppercased() {
+        let mut verbs = vec![String::new(); 3];
+        verbs[2] = "LOOK".into();
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 4,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![],
+            verbs,
+            nouns: vec![String::new(); 1],
+            rooms: rooms4(),
+            messages: vec![String::new()],
+            items: one_item(),
+            adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
+        };
+        let mut vm = Vm::new(db);
+        vm.take_output();
+        vm.supply_line("look Widget"); // mixed-case second word
+        vm.step();
+        vm.take_output();
+
+        vm.run_commands(&[84, 0, 0, 0], &[]);
+        assert_eq!(vm.take_output(), "Widget", "op84 preserves the typed case, no newline");
+
+        vm.run_commands(&[85, 0, 0, 0], &[]);
+        assert_eq!(vm.take_output(), "Widget\n", "op85 preserves the typed case, with a newline");
+    }
+
+    // ── SQ-1499: the scrambled Apple II LOOK close-ups ───────────────────
+
+    /// A game with one LOOK close-up: verb 2 is `LOOK`, noun 2 is `DOLL`,
+    /// item 1 is the doll, and picture 80 draws it.
+    ///
+    /// Verb 3 (`RUB`) and noun 3 (`ROCK`) are the near misses — a table that
+    /// keyed on the noun alone, or on the verb alone, would fire on one of
+    /// them.
+    fn look_close_up_vm(doll_at: i32) -> Vm {
+        let items = vec![
+            Item { text: "nothing".into(), treasure: false, auto_noun: None, start_loc: 0 },
+            Item {
+                text: "Doll".into(),
+                treasure: false,
+                auto_noun: Some("DOL".into()),
+                start_loc: doll_at,
+            },
+        ];
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 3,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![],
+            // `*EXA` is a SYNONYM of `LOO`, so the parser resolves it to
+            // verb 2 before the table is consulted — which is why the table
+            // stores an index and not a word, and why EXAMINE works.
+            verbs: vec!["".into(), "GET".into(), "LOO".into(), "*EXA".into(), "RUB".into()],
+            nouns: vec!["".into(), "ANY".into(), "DOL".into(), "ROC".into()],
+            rooms: rooms4(),
+            messages: vec!["".into()],
+            items,
+            adventure_number: 4,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
+        };
+        let mut vm = Vm::new(db);
+        vm.set_player(1);
+        vm.set_look_table(crate::AppleLookTable {
+            verb: 2,
+            rows: vec![crate::AppleLookPicture { noun: 2, item: 1, picture: 80 }],
+        });
+        vm
+    }
+
+    /// LOOKing at a thing the table names queues its close-up — and only when
+    /// the thing is actually there (SQ-1499).
+    ///
+    /// The release's own lookup takes the item's location byte and accepts it
+    /// if it is the carried sentinel or the current room, and otherwise goes
+    /// on scanning; `Vm::look_close_up` is that test. The three negatives
+    /// below are what a table keyed on less than all three facts would get
+    /// wrong.
+    #[test]
+    fn a_look_close_up_queues_when_the_verb_the_noun_and_the_item_all_line_up() {
+        // In the room.
+        let mut vm = look_close_up_vm(1);
+        vm.supply_line("LOOK DOLL");
+        vm.step();
+        assert_eq!(
+            vm.take_picture_shows(),
+            vec![PictureShow { picture: 80, output_len: 0 }],
+            "the doll is in the room"
+        );
+
+        // Carried.
+        let mut vm = look_close_up_vm(CARRIED);
+        vm.supply_line("LOOK DOLL");
+        vm.step();
+        assert_eq!(
+            vm.take_picture_shows(),
+            vec![PictureShow { picture: 80, output_len: 0 }],
+            "…and carrying it is just as good"
+        );
+
+        // Two rooms away.
+        let mut vm = look_close_up_vm(3);
+        vm.supply_line("LOOK DOLL");
+        vm.step();
+        assert!(vm.take_picture_shows().is_empty(), "a close-up of something elsewhere never shows");
+
+        // Out of play entirely (location 0).
+        let mut vm = look_close_up_vm(0);
+        vm.supply_line("LOOK DOLL");
+        vm.step();
+        assert!(vm.take_picture_shows().is_empty(), "nor of something out of play");
+
+        // The right noun with the wrong verb, and the right verb with the
+        // wrong noun.
+        let mut vm = look_close_up_vm(1);
+        vm.supply_line("RUB DOLL");
+        vm.step();
+        assert!(vm.take_picture_shows().is_empty(), "another verb draws nothing");
+        vm.supply_line("LOOK ROCK");
+        vm.step();
+        assert!(vm.take_picture_shows().is_empty(), "another noun draws nothing");
+        // …and the verb with no noun at all, which parses to noun -1.
+        vm.supply_line("LOOK");
+        vm.step();
+        assert!(vm.take_picture_shows().is_empty(), "a bare LOOK draws nothing");
+    }
+
+    /// A synonym of the table's verb reaches it, because the parser resolves
+    /// one to its canonical index before anything else sees it — which is why
+    /// the table stores an index and not a word (SQ-1499). Both releases that
+    /// have rows spell the verb `LOO` with `*EXA` beside it, so EXAMINE has to
+    /// work.
+    #[test]
+    fn a_synonym_of_the_look_verb_reaches_the_close_up() {
+        let mut vm = look_close_up_vm(1);
+        vm.supply_line("EXAMINE DOLL");
+        vm.step();
+        assert_eq!(vm.take_picture_shows(), vec![PictureShow { picture: 80, output_len: 0 }]);
+    }
+
+    /// A game with NO table — every other dialect, and the four plain Apple II
+    /// releases — queues nothing whatever the player types (SQ-1499).
+    #[test]
+    fn a_release_with_no_look_table_queues_no_close_up() {
+        let items = vec![Item {
+            text: "Doll".into(),
+            treasure: false,
+            auto_noun: Some("DOL".into()),
+            start_loc: 1,
+        }];
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 3,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![],
+            verbs: vec!["".into(), "GET".into(), "LOO".into()],
+            nouns: vec!["".into(), "ANY".into(), "DOL".into()],
+            rooms: rooms4(),
+            messages: vec!["".into()],
+            items,
+            adventure_number: 1,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
+        };
+        let mut vm = Vm::new(db);
+        vm.set_player(1);
+        vm.supply_line("LOOK DOLL");
+        vm.step();
+        assert!(vm.take_picture_shows().is_empty(), "no table, no close-up");
+    }
+
 }

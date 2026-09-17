@@ -9,8 +9,9 @@
 #   1. In YOUR terminal (full fidelity — kitty graphics pass straight through):
 #        docker run -it --rm -v ~/if-games:/stories -v lanthorn-data:/data lanthorn
 #
-#   2. As a WEB SERVER (ttyd wraps lanthorn; point a browser at port 7681):
-#        docker run -d -p 7681:7681 -v ~/if-games:/stories -v lanthorn-data:/data lanthorn serve
+#   2. As a WEB SERVER (ttyd wraps lanthorn; point a browser at port 7681;
+#      7682 carries the game's sound to the browser):
+#        docker run -d -p 7681:7681 -p 7682:7682 -v ~/if-games:/stories -v lanthorn-data:/data lanthorn serve
 #
 # `/stories` is the game library (the story picker opens on it by default) and
 # `/data` is $HOME — saves, config, and map archives live in /data/.lanthorn.
@@ -40,14 +41,24 @@ COPY . .
 # The cache mounts keep the registry, the toolchain download, and incremental
 # build artifacts across image rebuilds; the binaries are copied out because
 # a cache mount's contents are not part of the image.
+# The repo builds into `target.noindex` on a developer Mac; the image wants the
+# conventional path so the `cp target/release/...` below holds.
+#
+# `lanthorn-mapgen` (SQ-1306) is deliberately NOT copied out, though `-p
+# lanthorn` builds it: this image is the browser/ttyd wrapper — it exists to
+# serve a PLAYABLE session over a web terminal, and a developer tool that writes
+# map files into a container filesystem nobody can reach has no role in it. It
+# ships in the release archives and via `cargo install lanthorn` instead.
+ENV CARGO_TARGET_DIR=target
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/rustup \
     --mount=type=cache,target=/src/target \
     CARGO_BUILD_JOBS="$(nproc)" \
-    cargo build --release --locked -p app -p zvm-cli -p gvm-cli -p scott-cli \
+    cargo build --release --locked -p lanthorn -p lanthorn-zvm-cli -p lanthorn-gvm-cli -p lanthorn-scott-cli -p audio-relay \
     && mkdir -p /out \
     && cp target/release/lanthorn target/release/zvm-cli \
-          target/release/gvm-cli target/release/scott-cli /out/
+          target/release/gvm-cli target/release/scott-cli \
+          target/release/lanthorn-audio-relay /out/
 
 # ttyd (the web-terminal server behind `serve` mode) is not packaged by
 # Debian; its releases ship static per-arch binaries, so fetch a pinned one.
@@ -66,6 +77,43 @@ RUN arch="$(dpkg --print-architecture)" \
     && curl -fsSL -o /ttyd \
          "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${t}" \
     && chmod +x /ttyd
+# ttyd's page is compiled into its binary. Serve it once here and save the
+# result: the entrypoint injects the browser-audio script into this copy and
+# hands it back to ttyd with --index.
+RUN sh -c '/ttyd -p 7999 true & pid=$!; sleep 1; curl -fsS -o /ttyd-index.html http://127.0.0.1:7999/; kill $pid' \
+    && grep -q "</head>" /ttyd-index.html
+
+# The browser page ships its own font, so a visitor's default monospace stops
+# deciding whether lanthorn's Nerd Font icons and the map's Legacy Computing
+# half-diagonals (U+1FBA0-1FBA3) render at all. IosevkaTerm Nerd Font Mono is
+# the one Nerd Font that carries those diagonals. Iosevka itself is OFL-1.1;
+# the Nerd Fonts patch is MIT; both redistributable, and the licence text
+# ships in the image below, with the release README that attributes the icon
+# sets (two are CC BY 4.0). See THIRD-PARTY-NOTICES.md. Fetched and pinned the same way as ttyd above —
+# a release asset, verified by SHA-256 before anything unpacks it.
+FROM debian:trixie-slim AS font-fetch
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl unzip woff2 \
+    && rm -rf /var/lib/apt/lists/*
+ARG NERD_FONTS_VERSION=3.5.1
+ARG NERD_FONTS_SHA256=b0dfd98968b7c7743080431257bfd082c5ef7dd4d1c674d3ce16bc5520c10cdc
+# Only the two static weights the page needs (Regular/Bold) are pulled out of
+# the release zip — it ships every weight and both upright and oblique/italic
+# variants, ~1.1 GB unpacked. Converted to woff2 here (the `woff2` Debian
+# package's woff2_compress) so the served page embeds a few MB, not ~14 MB
+# per face of raw TTF.
+RUN curl -fsSL -o /tmp/IosevkaTerm.zip \
+         "https://github.com/ryanoasis/nerd-fonts/releases/download/v${NERD_FONTS_VERSION}/IosevkaTerm.zip" \
+    && printf '%s  /tmp/IosevkaTerm.zip\n' "${NERD_FONTS_SHA256}" > /tmp/IosevkaTerm.zip.sha256 \
+    && sha256sum -c /tmp/IosevkaTerm.zip.sha256 \
+    && mkdir -p /fonts \
+    && unzip -o -j /tmp/IosevkaTerm.zip \
+         IosevkaTermNerdFontMono-Regular.ttf IosevkaTermNerdFontMono-Bold.ttf LICENSE.md README.md \
+         -d /fonts \
+    && woff2_compress /fonts/IosevkaTermNerdFontMono-Regular.ttf \
+    && woff2_compress /fonts/IosevkaTermNerdFontMono-Bold.ttf \
+    && rm /fonts/IosevkaTermNerdFontMono-Regular.ttf /fonts/IosevkaTermNerdFontMono-Bold.ttf \
+          /tmp/IosevkaTerm.zip /tmp/IosevkaTerm.zip.sha256
 
 # trixie-slim to match the builder's glibc (rust:1-slim-trixie above).
 FROM debian:trixie-slim
@@ -73,33 +121,51 @@ FROM debian:trixie-slim
 # libasound2t64 (trixie's name for libasound2): the release binaries link ALSA
 # (harmless without a sound device — the app degrades to silent).
 # ca-certificates: HTTPS for the picker's built-in IFDB story downloads.
+# dtach: the session detacher that lets a game outlive the websocket that
+#   started it (SQ-1323) — 0.9-7 in trixie, GPL-2, one binary, no libraries
+#   beyond libc. `abduco` would have been the smaller choice but is NOT
+#   packaged for trixie (it is in forky/sid only), and a source-built C
+#   program in the runtime image costs more than it saves here.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libasound2t64 ca-certificates \
+    && apt-get install -y --no-install-recommends libasound2t64 ca-certificates dtach \
     && rm -rf /var/lib/apt/lists/*
 
-# A container has no sound card. Point ALSA's default device at the null
-# plugin so audio opens cleanly (and plays silently) instead of libasound
-# dumping a screenful of probe errors to the terminal when lanthorn exits.
-RUN printf 'pcm.!default {\n  type null\n}\nctl.!default {\n  type null\n}\n' > /etc/asound.conf
+# A container has no sound card. ALSA's default device is the `file` plugin
+# writing to the path in LANTHORN_AUDIO_OUT, or /dev/null when unset: silent
+# and clean in a terminal, and in serve mode the session wrapper points it at
+# a FIFO that lanthorn-audio-relay streams to the browser. See the file.
+COPY docker/asound.conf /etc/asound.conf
 
 COPY --from=builder /out/ /usr/local/bin/
 COPY --from=ttyd-fetch /ttyd /usr/local/bin/ttyd
+COPY --from=ttyd-fetch /ttyd-index.html /usr/local/share/lanthorn/ttyd-index.html
+COPY --from=font-fetch /fonts/ /usr/local/share/lanthorn/fonts/
+COPY docker/web-session.js /usr/local/share/lanthorn/web-session.js
+COPY docker/web-audio.js /usr/local/share/lanthorn/web-audio.js
+COPY docker/web-touch.js /usr/local/share/lanthorn/web-touch.js
+COPY docker/web-font.js /usr/local/share/lanthorn/web-font.js
 COPY docker/entrypoint.sh /usr/local/bin/lanthorn-entrypoint
+COPY docker/serve-session.sh /usr/local/bin/lanthorn-serve-session
+COPY docker/session-run.sh /usr/local/bin/lanthorn-session-run
 
 # /data is $HOME (saves, config, archives under /data/.lanthorn); /stories is
 # the library the picker opens on. Both are meant to be volume-mounted.
 RUN useradd --uid 1000 --create-home --home-dir /data lanthorn \
     && mkdir -p /stories \
     && chown lanthorn:lanthorn /stories \
-    && chmod +x /usr/local/bin/lanthorn-entrypoint
+    && mkdir -p /tmp/lanthorn-sessions \
+    && chown lanthorn:lanthorn /tmp/lanthorn-sessions \
+    && chmod +x /usr/local/bin/lanthorn-entrypoint /usr/local/bin/lanthorn-serve-session \
+                /usr/local/bin/lanthorn-session-run
 
 USER lanthorn
 ENV HOME=/data \
     TERM=xterm-256color \
-    LANTHORN_WEB_PORT=7681
+    LANTHORN_WEB_PORT=7681 \
+    LANTHORN_WEB_AUDIO_PORT=7682
 
 VOLUME ["/data", "/stories"]
-EXPOSE 7681
+EXPOSE 7681 7682
 
 ENTRYPOINT ["/usr/local/bin/lanthorn-entrypoint"]
 # Default: open the story picker on the library mount. Replace with `serve`

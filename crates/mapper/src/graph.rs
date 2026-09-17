@@ -4,7 +4,7 @@ use crate::direction::Direction;
 use crate::layer::{LayerId, LayerMeta, MapView, MAIN_LAYER};
 use crate::suggest::{SeamDecision, SeamKey};
 
-pub type RoomId = u16;
+pub type RoomId = u32;
 
 /// Sentinel used only on the wire: a room whose save predates SQ-0685 has no `seq` field at all,
 /// and deserializes to this rather than a real ordinal. [`MapGraph::from_parts`] recognises it and
@@ -60,6 +60,68 @@ pub struct Room {
     /// most twelve long. Absent from older map files, hence `serde(default)`.
     #[serde(default)]
     pub probed: Vec<Direction>,
+    /// Compass directions this room's own map data declared a FIXED
+    /// destination for, that the player nonetheless left through and arrived
+    /// somewhere else (SQ-1257) — Lost Pig's gnome tunnels, where the story's
+    /// exit table names nothing and a "before going" rule sends the player to
+    /// a random cave. Recorded as a fact about the ROOM, not an edge: a
+    /// destination that varies is not a passage `Reciprocal`/`OneWay`/`SelfLoop`
+    /// could name truthfully, so the matrix reports a separate cell
+    /// ([`crate::matrix::MatrixCell::Random`]) instead of inventing one.
+    ///
+    /// A `Vec` for the same reason as `tried`/`probed`. Absent from older map
+    /// files, hence `serde(default)`.
+    #[serde(default)]
+    pub random_exits: Vec<Direction>,
+    /// Every distinct room a marked direction (see [`Room::random_exits`]) has actually landed
+    /// in, first-seen order, no duplicates (SQ-1261). One entry per marked direction; a direction
+    /// not yet in [`Room::random_exits`] has no entry here either.
+    ///
+    /// A `?` mark records only that a direction is random — this is what lets the room card and
+    /// the map say WHERE it has sent the player, without pretending the list is exhaustive (the
+    /// story may still have destinations nobody has landed in yet) or that any one of them is the
+    /// "real" answer. Never touched by a rename-loop: a same-room arrival under a new name has no
+    /// destination to record, since the room the player is standing in is the origin itself.
+    ///
+    /// A `Vec<(Direction, Vec<RoomId>)>` rather than a map, for the same reason as `tried` and
+    /// `random_exits` — [`Direction`] is deliberately not `Ord` — and because the whole thing is
+    /// at most eight entries long. Absent from a map file written before this existed, hence
+    /// `serde(default)`.
+    #[serde(default)]
+    pub random_destinations: Vec<(Direction, Vec<RoomId>)>,
+    /// Directions whose `?` mark was INHERITED from a pool the map already knew rather than
+    /// observed on this direction itself (SQ-1370).
+    ///
+    /// Adventure randomises on the ARRIVAL side — `In_Forest_1`'s own `initial` routine reroutes
+    /// half of every arrival on to `In_Forest_2` — so every way INTO those rooms is random, not
+    /// just the first one the player happened to walk twice. The first walk of a new direction
+    /// that lands in a room some other direction's pool already names is therefore marked on the
+    /// spot, with that pool copied (`app::session::inherited_random_pool`), instead of minting a
+    /// confident arrow and waiting for a second, contradicting walk to take it back.
+    ///
+    /// That is a hypothesis, not evidence, and this is what says so: a mark listed here is
+    /// PROVISIONAL. `random_exit_probe::deliver_upgrade` reads it to know that SQ-1269's flicker
+    /// guard — a pool of two or more rooms outweighs one agreeing pair of reseeded attempts — is
+    /// about a pool this direction EARNED, and must not lock in a pool it merely inherited; an
+    /// inherited mark can still be cleared by agreeing re-walks, which is how a genuinely fixed
+    /// passage into a random room repairs itself. Any evidence of this direction's own
+    /// ([`MapGraph::mark_random_exit`] from a probe or a contradiction, a disagreeing upgrade)
+    /// promotes the mark by dropping it from this list.
+    ///
+    /// A `Vec` for the same reason as `random_exits`. Absent from older map files, hence
+    /// `serde(default)`.
+    #[serde(default)]
+    pub random_inherited: Vec<Direction>,
+    /// Every distinct name the game has printed for this room, other than its CURRENT label
+    /// (SQ-1257 Phase 3) — Lost Pig's gnome tunnels reroll a fresh name on every compass move,
+    /// and this is where the others go so the map can keep saying "this is the same room" while
+    /// showing what the story is calling it right now. First-seen order, no duplicates; the
+    /// current label is never a member of its own list.
+    ///
+    /// Maintained by [`Room::note_name_change`], the one place a name transition happens.
+    /// Absent from a map file written before this existed, hence `serde(default)`.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// Monotonic discovery order, stamped once by [`MapGraph::upsert_room`] the first time this
     /// room is minted and never touched again (SQ-0685). This — not the room id, which for a
     /// Z-machine game is the story's own object number and has nothing to do with when the player
@@ -80,6 +142,35 @@ impl Room {
             None => self.name.as_str(),
         }
     }
+
+    /// This room's 1-based per-map ordinal — "1" for the first room ever discovered, "2" for the
+    /// second, and so on (SQ-1300). Exactly `seq + 1`: `seq` already stamps first-discovery order
+    /// once and never renumbers a room afterward (survives a rename, a re-key, a tidy pass), which
+    /// is everything a small per-map number for a synthetic (Glulx/name-only) room needs — so this
+    /// reuses it rather than carrying a second, parallel counter that could drift from the first.
+    /// `app::roomid::room_label_no` is the one place this is ever shown to a player.
+    pub fn ordinal(&self) -> u64 {
+        self.seq + 1
+    }
+
+    /// Record that this room's printed name is about to change to `new_name` (SQ-1257 Phase 3).
+    /// Only called when the name is genuinely different — [`MapGraph::upsert_room`]'s revisit
+    /// branch checks that before calling this, so it never has to no-op on a same-name
+    /// observation.
+    ///
+    /// The raw name this room carried a moment ago joins `aliases` (deduplicated) and
+    /// `new_name` is pulled back out of `aliases` if an earlier rename had put it there: the
+    /// list holds every OTHER printed name, never the room's current one. Tracked against the
+    /// raw `name` field rather than [`Room::label`] — a `label_override` pins the DISPLAY, but
+    /// the story keeps printing its own names underneath it, and those are still worth
+    /// remembering as aliases even while the override hides the churn.
+    fn note_name_change(&mut self, new_name: String) {
+        let old_name = std::mem::replace(&mut self.name, new_name.clone());
+        self.aliases.retain(|a| *a != new_name);
+        if !self.aliases.contains(&old_name) {
+            self.aliases.push(old_name);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -88,6 +179,59 @@ pub struct Connection {
     pub dir: Direction,
     pub dest: RoomId,
     pub distorted: bool,
+    /// How firm a claim this passage makes about GEOMETRY (SQ-1312).
+    ///
+    /// A gated passage is still a real passage: it is drawn, routed, aligned, tightened,
+    /// chained and distortion-flagged exactly like any other, and while nothing contradicts
+    /// it the map honours it in full. The weight decides one thing only — **who yields when
+    /// a cycle closes and something must give**. `build_axis_constraints` inserts constraints
+    /// weakest-last, so a gated passage is the first one `creates_cycle` drops; and a room may
+    /// stand between two members of a run only where the link it stands in is gated
+    /// (`layout::splits_a_run`).
+    ///
+    /// The order is the author's own: a plain passage states that two rooms are neighbours; a
+    /// DOOR is a real walkable way through the geography that happens to need opening; a
+    /// CONDITIONAL exit is typically a secret — Zork I's magic-word `Strange Passage`, the
+    /// rainbow — put there because the fiction wanted it, and is the first thing to bend.
+    pub weight: PassageWeight,
+}
+
+/// How firm a claim a [`Connection`] makes about geometry — `Hard` strongest, `Conditional`
+/// weakest (SQ-1312). See [`Connection::weight`].
+///
+/// The derived `Ord` is the ordering the layout sorts by: `Hard < Door < Conditional` reads as
+/// "surrender the later one first".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Serialize, serde::Deserialize)]
+pub enum PassageWeight {
+    /// A plain passage: the game's own statement that these two rooms are neighbours.
+    #[default]
+    Hard,
+    /// Through a door object. A real walkable way through the geography — it just needs opening.
+    Door,
+    /// A gated exit the story opens only under its own conditions (ZIL's `CEXIT`): usually a
+    /// secret passage, and the first claim the layout gives up.
+    Conditional,
+}
+
+impl PassageWeight {
+    /// True for anything the story gates — i.e. anything but [`PassageWeight::Hard`].
+    pub fn is_gated(self) -> bool {
+        self != PassageWeight::Hard
+    }
+
+    /// True for a passage that may be drawn REACHING past an intervening room — only
+    /// [`PassageWeight::Conditional`] (SQ-1312).
+    ///
+    /// This is the one place the two gated levels part company, and it is why they are an
+    /// ordering rather than a flag. A DOOR is a real walkable way through the geography that
+    /// happens to need opening: Zork I's kitchen window joins two rooms that genuinely are
+    /// next to each other, and drawing a third room in between would be as much a lie as it
+    /// would for a plain corridor. A CONDITIONAL exit is typically a secret — the magic-word
+    /// `Strange Passage`, the rainbow — and a secret passage reaching past the rooms above it
+    /// is a fair drawing of a secret passage.
+    pub fn may_reach_past_a_room(self) -> bool {
+        self == PassageWeight::Conditional
+    }
 }
 
 impl Connection {
@@ -128,6 +272,11 @@ pub struct MapGraph {
     /// asking about the trapdoor", so unlike everything else the detector uses, this has to be
     /// carried in the save.
     seam_decisions: BTreeMap<SeamKey, SeamDecision>,
+    /// "Never for this story" (SQ-1298): the player has said the layer-suggestion prompt itself is
+    /// unwelcome on this map, not merely at one seam. Unlike `seam_decisions` this is a single flag
+    /// rather than something keyed — there is only one story per graph — but it is the same kind of
+    /// thing: a DECISION nothing can recompute, so it is carried in the save alongside them.
+    suggestions_disabled: bool,
 }
 
 impl Default for MapGraph {
@@ -143,6 +292,7 @@ impl Default for MapGraph {
             next_seq: 0,
             last_visited: BTreeMap::new(),
             seam_decisions: BTreeMap::new(),
+            suggestions_disabled: false,
         }
     }
 }
@@ -211,6 +361,10 @@ impl MapGraph {
             // Restored separately (`restore_seam_decisions`) rather than as an eighth positional
             // argument: this list validates against the rooms `from_parts` has just settled.
             seam_decisions: BTreeMap::new(),
+            // Restored separately too (`set_suggestions_disabled`) — a bare bool has nothing to
+            // validate against the rooms, but going through the same setter as every other caller
+            // keeps this one path the only place the flag is ever written.
+            suggestions_disabled: false,
         }
     }
 
@@ -245,6 +399,18 @@ impl MapGraph {
             .into_iter()
             .filter(|(k, _)| self.rooms.contains_key(&k.from))
             .collect();
+    }
+
+    /// True once the player has told the layer-suggestion prompt "Never for this story" (SQ-1298).
+    /// Unlike a per-seam [`SeamDecision::Ignored`] this is not keyed to any one passage: it stops
+    /// `mapper::suggest` from minting a suggestion at all, structural or maze-name alike.
+    pub fn suggestions_disabled(&self) -> bool {
+        self.suggestions_disabled
+    }
+
+    /// Set/clear the story-wide "never suggest layers" flag.
+    pub fn set_suggestions_disabled(&mut self, disabled: bool) {
+        self.suggestions_disabled = disabled;
     }
 
     pub fn room(&self, id: RoomId) -> Option<&Room> {
@@ -340,7 +506,10 @@ impl MapGraph {
         use std::collections::btree_map::Entry;
         match self.rooms.entry(id) {
             Entry::Occupied(e) => {
-                e.into_mut().name = name;
+                let room = e.into_mut();
+                if room.name != name {
+                    room.note_name_change(name);
+                }
             }
             Entry::Vacant(e) => {
                 let seq = self.next_seq;
@@ -355,6 +524,10 @@ impl MapGraph {
                     loc_method: None,
                     tried: Vec::new(),
                     probed: Vec::new(),
+                    random_exits: Vec::new(),
+                    random_destinations: Vec::new(),
+                    random_inherited: Vec::new(),
+                    aliases: Vec::new(),
                     seq,
                 });
             }
@@ -363,6 +536,18 @@ impl MapGraph {
     }
 
     pub fn add_edge(&mut self, origin: RoomId, dir: Direction, dest: RoomId) {
+        self.add_edge_weighted(origin, dir, dest, PassageWeight::Hard);
+    }
+
+    /// [`MapGraph::add_edge`], stating how firm a claim the passage makes about geometry — a
+    /// gated one is the first the layout gives up (see [`Connection::weight`]).
+    pub fn add_edge_weighted(
+        &mut self,
+        origin: RoomId,
+        dir: Direction,
+        dest: RoomId,
+        weight: PassageWeight,
+    ) {
         // A compass direction (or Up/Down/In/Out) can only lead one place, so those edges are
         // keyed (origin, dir) and a repeat observation updates the destination. Unknown is not a
         // direction but a bucket: a room can hold SEVERAL non-compass passages (xyzzy and pray
@@ -378,14 +563,15 @@ impl MapGraph {
         // to `↩` — rather than silently picking a winner.
         if dir == Direction::Unknown || origin == dest {
             if !self.conns.iter().any(|c| c.origin == origin && c.dir == dir && c.dest == dest) {
-                self.conns.push(Connection { origin, dir, dest, distorted: false });
+                self.conns.push(Connection { origin, dir, dest, distorted: false, weight });
             }
         } else if let Some(conn) =
             self.conns.iter_mut().find(|c| c.origin == origin && c.dir == dir && c.dest != c.origin)
         {
             conn.dest = dest;
+            conn.weight = weight;
         } else {
-            self.conns.push(Connection { origin, dir, dest, distorted: false });
+            self.conns.push(Connection { origin, dir, dest, distorted: false, weight });
         }
     }
 
@@ -563,6 +749,116 @@ impl MapGraph {
         self.rooms.get(&id).is_some_and(|r| r.probed.contains(&dir))
     }
 
+    /// Record that `dir` out of `id` is a RANDOM exit (SQ-1257): the room's own map data named a
+    /// fixed destination and the player was sent somewhere else. Also marks `dir` tried — the
+    /// player DID try it, just not to a destination the map can name — so it never shows as an
+    /// unexplored frontier. A no-op for an unknown room or [`Direction::Unknown`].
+    pub fn mark_random_exit(&mut self, id: RoomId, dir: Direction) {
+        if dir == Direction::Unknown {
+            return;
+        }
+        self.mark_tried(id, dir);
+        if let Some(r) = self.rooms.get_mut(&id) {
+            if !r.random_exits.contains(&dir) {
+                r.random_exits.push(dir);
+            }
+            // SQ-1370: this call is evidence about THIS direction — a probe disagreement, a
+            // contradicted edge, a rename loop. Whatever the mark used to rest on, it rests on
+            // that now, so a provisional inherited mark is promoted rather than left provisional.
+            r.random_inherited.retain(|&d| d != dir);
+        }
+    }
+
+    /// [`MapGraph::mark_random_exit`], but recording the mark as INHERITED (SQ-1370): the map has
+    /// not seen THIS direction vary — it has seen the room it lands in named by some other
+    /// direction's pool, and Adventure's forests randomise on arrival, so every way in is random.
+    ///
+    /// Marks exactly the same `?`. The difference is only in what may later undo it: see
+    /// [`Room::random_inherited`] and `random_exit_probe::deliver_upgrade`.
+    pub fn mark_random_exit_inherited(&mut self, id: RoomId, dir: Direction) {
+        if dir == Direction::Unknown {
+            return;
+        }
+        self.mark_random_exit(id, dir);
+        if let Some(r) = self.rooms.get_mut(&id) {
+            if r.random_exits.contains(&dir) && !r.random_inherited.contains(&dir) {
+                r.random_inherited.push(dir);
+            }
+        }
+    }
+
+    /// True when `dir` out of `id` is marked random on an INHERITED pool alone (SQ-1370) — a
+    /// provisional mark no walk of this direction has yet earned. See [`Room::random_inherited`].
+    pub fn is_inherited_random_exit(&self, id: RoomId, dir: Direction) -> bool {
+        self.rooms.get(&id).is_some_and(|r| r.random_inherited.contains(&dir))
+    }
+
+    /// Promote an inherited mark to an earned one (SQ-1370): this direction has now produced
+    /// evidence of its own, so the mark stops being provisional while staying exactly as set.
+    /// A no-op when the mark was never inherited.
+    pub fn promote_inherited_random_exit(&mut self, id: RoomId, dir: Direction) {
+        if let Some(r) = self.rooms.get_mut(&id) {
+            r.random_inherited.retain(|&d| d != dir);
+        }
+    }
+
+    /// True when `dir` out of `id` is recorded as a random exit (SQ-1257). Read by
+    /// [`crate::matrix::classify`] — beaten by a real edge in the same direction, since a later
+    /// direction that behaves deterministically is the stronger fact.
+    pub fn is_random_exit(&self, id: RoomId, dir: Direction) -> bool {
+        self.rooms.get(&id).is_some_and(|r| r.random_exits.contains(&dir))
+    }
+
+    /// Undo a [`MapGraph::mark_random_exit`] — `dir` out of `id` turned out to behave
+    /// deterministically after all (SQ-1257 Phase 2: a reseeded re-probe of a random-marked
+    /// direction agreed with the live game on every attempt). Called by
+    /// `random_exit_probe::deliver` in the same stroke it mints the now-confirmed edge; a no-op
+    /// if the direction was never marked. Does NOT touch `tried` — the direction was and remains
+    /// tried, whichever way this resolves.
+    pub fn unmark_random_exit(&mut self, id: RoomId, dir: Direction) {
+        if let Some(r) = self.rooms.get_mut(&id) {
+            r.random_exits.retain(|&d| d != dir);
+            // SQ-1370: an inherited mark is a mark; clearing one clears what it rested on too.
+            r.random_inherited.retain(|&d| d != dir);
+            // The destinations recorded against this direction were evidence for a fact that no
+            // longer holds — the direction is confirmed deterministic now, and re-marking it
+            // later (SQ-1257 Phase 2's upgrade can be undone by a subsequent disagreement) starts
+            // the list over rather than resuming a stale one from before the confirmation.
+            r.random_destinations.retain(|(d, _)| *d != dir);
+        }
+    }
+
+    /// Record that `dir` out of `id` — already marked random — has been seen to land in `dest`
+    /// (SQ-1261). First-seen order, no duplicates; a no-op for [`Direction::Unknown`] or an
+    /// unknown room. Deliberately does NOT require `dir` to already be marked random: the note
+    /// and the mark are two different facts, and callers can order the mark first without this
+    /// silently depending on it.
+    pub fn note_random_destination(&mut self, id: RoomId, dir: Direction, dest: RoomId) {
+        if dir == Direction::Unknown {
+            return;
+        }
+        let Some(r) = self.rooms.get_mut(&id) else { return };
+        match r.random_destinations.iter_mut().find(|(d, _)| *d == dir) {
+            Some((_, dests)) => {
+                if !dests.contains(&dest) {
+                    dests.push(dest);
+                }
+            }
+            None => r.random_destinations.push((dir, vec![dest])),
+        }
+    }
+
+    /// Every distinct room `dir` out of `id` has been seen to land in, first-seen order — empty
+    /// when the direction is not marked random, or is but nothing has landed anywhere recorded
+    /// yet (SQ-1261). See [`Room::random_destinations`].
+    pub fn random_destinations(&self, id: RoomId, dir: Direction) -> &[RoomId] {
+        self.rooms
+            .get(&id)
+            .and_then(|r| r.random_destinations.iter().find(|(d, _)| *d == dir))
+            .map(|(_, dests)| dests.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Which directions are worth probing out of `room`, best first (SQ-0785).
     ///
     /// **The one place the two records meet.** A caller that assembled this from `tried` and
@@ -578,22 +874,34 @@ impl MapGraph {
     /// do not reciprocate:
     ///
     /// 1. `opposite(moved)`
-    /// 2. the two directions perpendicular to it (±90°)
-    /// 3. the two diagonals adjacent to it (±45°)
-    /// 4. everything else that survives the filter
+    /// 2. the two directions perpendicular to it (±90°) — only when step 1 has a bearing
+    /// 3. the two diagonals adjacent to it (±45°) — only when step 1 has a bearing
+    /// 4. everything else that survives the filter: the eight compass points, and NOTHING else
     ///
-    /// With no direction to seed from (`climb tree`), there is no opposite and no bearing, so the
-    /// order is simply the likeliest shapes first: cardinals, diagonals, up/down, in/out.
-    /// Steps 2 and 3 are defined by BEARING rather than by a table, so they mean the same thing
-    /// for a diagonal opposite as for a cardinal one; Up/Down/In/Out have no bearing and fall
-    /// through to step 4 together.
+    /// With no direction to seed from (`climb tree`), there is no opposite, so the order is simply
+    /// the eight compass points, cardinals then diagonals ([`crate::direction::PROBE_FALLBACK_DIRS`]).
+    /// Steps 2 and 3 are defined by BEARING rather than by a table, so they mean the same thing for
+    /// a diagonal opposite as for a cardinal one.
     ///
-    /// Starting at all twelve is deliberate — narrowing is a measurement decision, not a guess.
+    /// **Up/Down/In/Out are asked ONLY as `opposite(moved)` when `moved` was itself one of them
+    /// (SQ-1290)** — climb down and the seed is Up; walk in and the seed is Out — never as a
+    /// fallback once the compass words run out. Reaching a portal in step 4 would mean revealing
+    /// an unexplored exit the player has not walked: on an ordinary compass map the only way back
+    /// from some room may genuinely be `up`, and finding that BEFORE the player has ever gone up
+    /// is not this search's business. [`crate::direction::PROBE_FALLBACK_DIRS`], the list step 4
+    /// draws from, carries only the eight compass points for exactly this reason; a portal never
+    /// reaches step 4 no matter what `moved` was, because it is not IN that list to reach. The
+    /// full [`crate::direction::PROBE_DIRS`] (all twelve) is unaffected — this fallback step is
+    /// the only caller narrowed.
+    ///
+    /// Starting at all eight compass points (nine when `moved` seeded a portal reciprocal) is
+    /// deliberate — narrowing further is a measurement decision, not a guess.
     pub fn probe_candidates(&self, room: RoomId, moved: Option<Direction>) -> Vec<Direction> {
         if !self.rooms.contains_key(&room) {
             return Vec::new();
         }
-        let mut order: Vec<Direction> = Vec::with_capacity(crate::direction::PROBE_DIRS.len());
+        // Up to eight compass points, plus one portal reciprocal when `moved` seeded one.
+        let mut order: Vec<Direction> = Vec::with_capacity(crate::direction::PROBE_FALLBACK_DIRS.len() + 1);
         let push = |order: &mut Vec<Direction>, d: Direction| {
             if !order.contains(&d) {
                 order.push(d);
@@ -614,7 +922,7 @@ impl MapGraph {
                 }
             }
         }
-        for d in crate::direction::PROBE_DIRS {
+        for d in crate::direction::PROBE_FALLBACK_DIRS {
             push(&mut order, d);
         }
         order.into_iter().filter(|d| !self.is_tried(room, *d) && !self.is_probed(room, *d)).collect()
@@ -747,6 +1055,7 @@ impl MapGraph {
             last_visited: BTreeMap::new(),
             // A routing scratch graph never prompts, so it carries no prompt answers either.
             seam_decisions: BTreeMap::new(),
+            suggestions_disabled: false,
         }
     }
 
@@ -803,6 +1112,35 @@ mod tests {
             "re-keying ONTO an existing room would be a merge, not a rename, and must be refused"
         );
         assert_eq!(g.room(2).map(|r| r.name.as_str()), Some("Cave"), "the refused merge changed nothing");
+    }
+
+    /// SQ-1300: a room's ordinal (its display number, `seq + 1`) is a property of the room NODE,
+    /// so a re-key — the Glulx lock landing on a name-derived id and swapping it for the room's
+    /// real object address — must carry it across unchanged, exactly like the name and the edges
+    /// already do. A room re-keyed a third of the way into a session must keep reading "1", "2",
+    /// "3" … in true discovery order rather than picking up a fresh number at its new id.
+    #[test]
+    fn rekey_room_carries_the_ordinal_with_it() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cave".into());
+        g.upsert_room(3, "Loft".into());
+        assert_eq!(g.room(1).unwrap().ordinal(), 1, "first room discovered");
+        assert_eq!(g.room(2).unwrap().ordinal(), 2);
+        assert_eq!(g.room(3).unwrap().ordinal(), 3);
+
+        assert!(g.rekey_room(2, 0x8000_5678), "re-key the middle room onto a far-away new id");
+        assert_eq!(
+            g.room(0x8000_5678).unwrap().ordinal(),
+            2,
+            "the ordinal moved with the room, not with the numeric id"
+        );
+        assert_eq!(g.room(1).unwrap().ordinal(), 1, "untouched rooms keep their own ordinals");
+        assert_eq!(g.room(3).unwrap().ordinal(), 3);
+
+        // A room discovered AFTER the re-key still gets the next ordinal in true order.
+        g.upsert_room(4, "Attic".into());
+        assert_eq!(g.room(4).unwrap().ordinal(), 4, "next_seq was not disturbed by the re-key");
     }
 
     use super::*;
@@ -938,6 +1276,171 @@ mod tests {
         assert_eq!(g.room(10).unwrap().notes, "has lamp"); // edits preserved
     }
 
+    // ── SQ-1257 Phase 3: aliases ─────────────────────────────────────────────
+
+    /// A room renamed several times over collects every OLD name as an alias, in the order it
+    /// was first seen, and the current label is never one of them (Lost Pig's gnome tunnels:
+    /// "Twisty Cave" → "Confusing Passage" → "Strange Place" → "Twisty Place").
+    #[test]
+    fn a_repeatedly_renamed_room_collects_its_old_names_as_aliases_in_first_seen_order() {
+        let mut g = MapGraph::new();
+        g.upsert_room(183, "Twisty Cave".into());
+        assert!(g.room(183).unwrap().aliases.is_empty(), "nothing to alias yet on first sight");
+
+        g.upsert_room(183, "Confusing Passage".into());
+        assert_eq!(g.room(183).unwrap().name, "Confusing Passage");
+        assert_eq!(g.room(183).unwrap().aliases, vec!["Twisty Cave"]);
+
+        g.upsert_room(183, "Strange Place".into());
+        assert_eq!(
+            g.room(183).unwrap().aliases,
+            vec!["Twisty Cave", "Confusing Passage"],
+            "first-seen order, oldest first"
+        );
+
+        g.upsert_room(183, "Twisty Place".into());
+        assert_eq!(
+            g.room(183).unwrap().aliases,
+            vec!["Twisty Cave", "Confusing Passage", "Strange Place"]
+        );
+        assert!(
+            !g.room(183).unwrap().aliases.contains(&"Twisty Place".to_string()),
+            "the current label is never also an alias"
+        );
+
+        // A same-name re-observation (no rename) must not touch the list at all.
+        g.upsert_room(183, "Twisty Place".into());
+        assert_eq!(g.room(183).unwrap().aliases.len(), 3, "no change on a repeat observation");
+    }
+
+    /// A rename back to a PREVIOUSLY-seen name pulls that name back out of the alias list (it is
+    /// current again) and files the label it just left in its place — no duplicates either way.
+    #[test]
+    fn renaming_back_to_a_former_name_moves_it_out_of_aliases_and_the_displaced_one_in() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(1, "B".into()); // aliases: [A]
+        assert_eq!(g.room(1).unwrap().aliases, vec!["A"]);
+
+        g.upsert_room(1, "A".into()); // back to A: aliases lose A, gain B
+        assert_eq!(g.room(1).unwrap().name, "A");
+        assert_eq!(g.room(1).unwrap().aliases, vec!["B"], "B is now the alias, not A");
+    }
+
+    /// A `label_override` pins the map's display regardless of what the story prints
+    /// underneath it, so a name change while one is set changes the room's raw `name` but must
+    /// not perturb the aliases the player actually SEES (the override itself is never displaced
+    /// into `aliases`, since it is still the current label after the rename).
+    #[test]
+    fn a_label_override_is_never_displaced_into_aliases_by_a_name_change_underneath_it() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Twisty Cave".into());
+        g.set_label_override(1, Some("My Landmark".into()));
+        assert_eq!(g.room(1).unwrap().label(), "My Landmark");
+
+        g.upsert_room(1, "Confusing Passage".into()); // the story reroll happens underneath
+        assert_eq!(g.room(1).unwrap().label(), "My Landmark", "the override still wins");
+        assert_eq!(
+            g.room(1).unwrap().aliases,
+            vec!["Twisty Cave"],
+            "the raw name the room had before the rename is recorded, not the override"
+        );
+    }
+
+    // ── SQ-1261: random-exit destinations ───────────────────────────────────
+
+    /// Landing in a new room notes it; landing there again does not duplicate it; a different
+    /// room joins the list after it, in the order each was first seen.
+    #[test]
+    fn note_random_destination_dedupes_and_keeps_first_seen_order() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Tunnel".into());
+        g.mark_random_exit(1, Direction::N);
+        assert!(g.random_destinations(1, Direction::N).is_empty(), "nothing recorded yet");
+
+        g.note_random_destination(1, Direction::N, 2);
+        assert_eq!(g.random_destinations(1, Direction::N), &[2]);
+
+        g.note_random_destination(1, Direction::N, 2); // same room again
+        assert_eq!(g.random_destinations(1, Direction::N), &[2], "no duplicate");
+
+        g.note_random_destination(1, Direction::N, 3);
+        assert_eq!(g.random_destinations(1, Direction::N), &[2, 3], "first-seen order");
+
+        // A different direction out of the same room keeps its own list.
+        assert!(g.random_destinations(1, Direction::S).is_empty());
+    }
+
+    /// [`Direction::Unknown`] and an unknown room are both no-ops, matching every other
+    /// random-exit mutator's guard.
+    #[test]
+    fn note_random_destination_is_a_no_op_for_unknown_direction_or_room() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Tunnel".into());
+        g.note_random_destination(1, Direction::Unknown, 2);
+        assert!(g.random_destinations(1, Direction::Unknown).is_empty());
+        g.note_random_destination(404, Direction::N, 2);
+        assert!(g.random_destinations(404, Direction::N).is_empty());
+    }
+
+    /// SQ-1370: an INHERITED mark is the same `?` with a note saying no walk of this direction
+    /// earned it — and any evidence of this direction's own takes the note away, whichever
+    /// direction that evidence points. See [`Room::random_inherited`].
+    #[test]
+    fn an_inherited_random_mark_is_promoted_by_this_directions_own_evidence() {
+        let mut g = MapGraph::default();
+        g.upsert_room(1, "Valley".into());
+
+        g.mark_random_exit_inherited(1, Direction::W);
+        assert!(g.is_random_exit(1, Direction::W), "it marks the direction like any other");
+        assert!(g.is_tried(1, Direction::W), "and marks it tried like any other");
+        assert!(g.is_inherited_random_exit(1, Direction::W), "recorded as inherited");
+        assert!(!g.is_inherited_random_exit(1, Direction::N), "and only for the direction marked");
+
+        // Evidence about THIS direction — a contradiction, a probe disagreement — re-marks it,
+        // and that promotes it.
+        g.mark_random_exit(1, Direction::W);
+        assert!(g.is_random_exit(1, Direction::W), "still marked");
+        assert!(!g.is_inherited_random_exit(1, Direction::W), "no longer provisional");
+
+        // The explicit promotion is the same fact, for a caller with nothing to re-mark.
+        g.mark_random_exit_inherited(1, Direction::E);
+        g.promote_inherited_random_exit(1, Direction::E);
+        assert!(g.is_random_exit(1, Direction::E) && !g.is_inherited_random_exit(1, Direction::E));
+
+        // And clearing the mark clears what it rested on.
+        g.mark_random_exit_inherited(1, Direction::S);
+        g.unmark_random_exit(1, Direction::S);
+        assert!(!g.is_random_exit(1, Direction::S) && !g.is_inherited_random_exit(1, Direction::S));
+
+        // An unknown room or direction is a no-op, matching every other random-exit mutator.
+        g.mark_random_exit_inherited(404, Direction::N);
+        g.mark_random_exit_inherited(1, Direction::Unknown);
+        assert!(!g.is_inherited_random_exit(404, Direction::N));
+        assert!(!g.is_inherited_random_exit(1, Direction::Unknown));
+    }
+
+    /// Undoing a random mark (SQ-1257 Phase 2's upgrade path) clears the destinations recorded
+    /// against it too — they were evidence for a fact that no longer holds, and a later re-mark
+    /// of the same direction must not resume a stale list from before the confirmation.
+    #[test]
+    fn unmark_random_exit_clears_its_recorded_destinations() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Tunnel".into());
+        g.mark_random_exit(1, Direction::N);
+        g.note_random_destination(1, Direction::N, 2);
+        g.note_random_destination(1, Direction::N, 3);
+        assert_eq!(g.random_destinations(1, Direction::N).len(), 2);
+
+        g.unmark_random_exit(1, Direction::N);
+        assert!(g.random_destinations(1, Direction::N).is_empty(), "cleared along with the mark");
+
+        // Re-marking starts the list over, not from where it left off.
+        g.mark_random_exit(1, Direction::N);
+        g.note_random_destination(1, Direction::N, 4);
+        assert_eq!(g.random_destinations(1, Direction::N), &[4]);
+    }
+
     /// SQ-0632: a room can hold several non-compass passages (xyzzy AND pray). Keying Unknown
     /// edges by (origin, dir) alone made the second silently overwrite the first's destination,
     /// losing a recorded passage. Unknown edges to DIFFERENT destinations must coexist; an exact
@@ -1002,7 +1505,7 @@ mod tests {
         // A→B Unknown must survive when only the REVERSE B→A is directional (return trips are
         // not guaranteed to be the geometric opposite), and when it has no known counterpart.
         let mut g = MapGraph::new();
-        for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        for id in [1u16, 2, 3, 4] { g.upsert_room(id.into(), "r".into()); }
         g.add_edge(1, Direction::Unknown, 2); // reverse-only pair
         g.add_edge(2, Direction::S, 1); // return trip is directional, forward was Unknown
         g.add_edge(3, Direction::Unknown, 4); // lone Unknown, no known counterpart
@@ -1015,7 +1518,7 @@ mod tests {
     fn collapse_unknown_ignores_known_edge_to_a_different_dest() {
         // A→B Unknown is not affected by a known A→C edge (same origin, different dest).
         let mut g = MapGraph::new();
-        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        for id in [1u16, 2, 3] { g.upsert_room(id.into(), "r".into()); }
         g.add_edge(1, Direction::Unknown, 2);
         g.add_edge(1, Direction::N, 3);
         let removed = g.collapse_unknown_edges();
@@ -1060,6 +1563,10 @@ mod tests {
             loc_method: None,
             tried: Vec::new(),
             probed: Vec::new(),
+            random_exits: Vec::new(),
+            random_destinations: Vec::new(),
+            random_inherited: Vec::new(),
+            aliases: Vec::new(),
             seq: ROOM_SEQ_MISSING,
         };
         let rooms = vec![mk(5), mk(2), mk(9)];
@@ -1089,6 +1596,10 @@ mod tests {
             loc_method: None,
             tried: Vec::new(),
             probed: Vec::new(),
+            random_exits: Vec::new(),
+            random_destinations: Vec::new(),
+            random_inherited: Vec::new(),
+            aliases: Vec::new(),
             seq,
         };
         // Array order (2, 1) deliberately disagrees with seq order (1, 0): if the backfill fired
@@ -1150,7 +1661,9 @@ mod probe_record_tests {
     fn candidates_lead_with_the_way_back_then_widen_by_bearing() {
         let g = two_rooms();
         let c = g.probe_candidates(2, Some(Direction::N));
-        assert_eq!(c.len(), 12, "all twelve to begin with: {c:?}");
+        // Eight, not twelve (SQ-1290): a compass-seeded search never reaches a portal, because
+        // step 4 now draws from `PROBE_FALLBACK_DIRS`, which carries none.
+        assert_eq!(c.len(), 8, "the eight compass points, no portal among them: {c:?}");
         assert_eq!(c[0], Direction::S, "the opposite of the move");
         assert_eq!(
             c[..5],
@@ -1168,19 +1681,51 @@ mod probe_record_tests {
 
     /// `enter window` parses as In, so its opposite is Out and it is treated as directional.
     /// A command that names no direction at all has no bearing to seed from and falls back to
-    /// cardinals → diagonals → up/down → in/out.
+    /// the eight compass points, cardinals then diagonals.
     #[test]
     fn a_move_with_no_direction_falls_back_to_the_plain_order() {
         let g = two_rooms();
         assert_eq!(g.probe_candidates(2, Some(Direction::In))[0], Direction::Out);
         let c = g.probe_candidates(2, None);
-        assert_eq!(c, crate::direction::PROBE_DIRS.to_vec());
+        // SQ-1290: with nothing to seed from there is no portal reciprocal either, so this is
+        // exactly `PROBE_FALLBACK_DIRS` — not the full `PROBE_DIRS`, which still carries the four
+        // portals for callers that want every direction word.
+        assert_eq!(c, crate::direction::PROBE_FALLBACK_DIRS.to_vec());
         assert_eq!(c[..4], [Direction::N, Direction::E, Direction::S, Direction::W]);
-        assert_eq!(c[8..], [Direction::Up, Direction::Down, Direction::In, Direction::Out]);
+        assert_eq!(c.len(), 8, "no portal fallback with nothing to seed from: {c:?}");
+        for portal in [Direction::Up, Direction::Down, Direction::In, Direction::Out] {
+            assert!(!c.contains(&portal), "{portal:?} must not appear unseeded: {c:?}");
+        }
+    }
+
+    /// Up/Down/In/Out are asked ONLY as the direct reciprocal of a portal move the player just
+    /// made — never as a fallback once the compass words run out (SQ-1290). A search seeded by a
+    /// COMPASS move must find no portal anywhere in its list; a search seeded by a portal move
+    /// must find that one portal and no other.
+    #[test]
+    fn portals_are_never_a_fallback_only_ever_the_seeded_reciprocal() {
+        let g = two_rooms();
+        let compass_seeded = g.probe_candidates(2, Some(Direction::N));
+        for portal in [Direction::Up, Direction::Down, Direction::In, Direction::Out] {
+            assert!(
+                !compass_seeded.contains(&portal),
+                "a compass move must never fall through to a portal: {compass_seeded:?}"
+            );
+        }
+
+        let portal_seeded = g.probe_candidates(2, Some(Direction::Down));
+        assert_eq!(portal_seeded[0], Direction::Up, "the reciprocal of the player's own move");
+        for other in [Direction::Down, Direction::In, Direction::Out] {
+            assert!(
+                !portal_seeded.contains(&other),
+                "no OTHER portal — only the one reciprocal to what was walked: {portal_seeded:?}"
+            );
+        }
+        assert_eq!(portal_seeded.len(), 9, "the seeded Up, plus all eight compass points");
     }
 
     /// Both records filter, and the order survives the filtering. An unknown room offers
-    /// nothing rather than twelve directions into the void.
+    /// nothing rather than a directions list into the void.
     #[test]
     fn candidates_are_filtered_by_both_records() {
         let mut g = two_rooms();
@@ -1191,7 +1736,7 @@ mod probe_record_tests {
         for gone in [Direction::S, Direction::E, Direction::W] {
             assert!(!c.contains(&gone), "{gone:?} should be filtered out of {c:?}");
         }
-        assert_eq!(c.len(), 9);
+        assert_eq!(c.len(), 5, "eight compass points minus the three filtered away");
         assert_eq!(c[0], Direction::SE, "the surviving head of the priority order");
         assert!(g.probe_candidates(404, None).is_empty());
     }

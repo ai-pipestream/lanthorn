@@ -21,7 +21,7 @@ use app::state::{AppState, TranscriptKind};
 // ── Fixtures. `stories/` is gitignored; every case here skips vacuously. ────
 
 fn story(name: &str) -> Option<Vec<u8>> {
-    let path: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(name);
+    let path: PathBuf = crate::fixture_paths::fixture_path(name);
     match std::fs::read(&path) {
         Ok(b) => Some(b),
         Err(_) => {
@@ -82,6 +82,52 @@ impl Play {
         )
         .expect("zork1-r88-s840726.z3 boots without a ZError");
         s.set_strip_prompt(false);
+        let mut state = AppState::default();
+        state.assist_preamble_shown = true;
+        state.probe.arm(recipe(&bytes));
+        Some(Play { state, session: Box::new(s) })
+    }
+
+    /// SQ-1206's own fixture for the `hasten north` false positive, and one of
+    /// the two the research noted vets normally (SQ-1232).
+    fn savoir_faire() -> Option<Play> {
+        let bytes = story("Savoir-Faire.zblorb")?;
+        let app::hints::LoadedStory::ZCode(story_bytes) =
+            app::hints::extract_story(bytes.clone()).expect("Savoir-Faire.zblorb is readable")
+        else {
+            panic!("Savoir-Faire.zblorb is a Z-code story");
+        };
+        let mut s = app::session::GameSession::new_with_trace(
+            story_bytes, true, false, None, false, Vec::new(), None, None, Some((25, 80)),
+        )
+        .expect("Savoir-Faire.zblorb boots without a ZError");
+        s.set_strip_prompt(false);
+        let mut state = AppState::default();
+        state.assist_preamble_shown = true;
+        // `recipe` re-extracts from the ORIGINAL container bytes, exactly as
+        // `ShadowRecipe::story_bytes` requires (see its own docs).
+        state.probe.arm(recipe(&bytes));
+        Some(Play { state, session: Box::new(s) })
+    }
+
+    /// A bare `.z5` that opens on a keypress gate, booted the way
+    /// `guidance_scan` boots one (SQ-1248's two fixtures).
+    ///
+    /// The gate matters: both stories print a banner and wait for a key, and a
+    /// harness that types a LINE into a char prompt never reaches the game at
+    /// all — every case built on it then passes vacuously on an empty screen.
+    fn gated_z5(name: &str) -> Option<Play> {
+        let bytes = story(name)?;
+        let mut s = app::session::GameSession::new_with_trace(
+            bytes.clone(), true, false, None, false, Vec::new(), None, None, Some((25, 80)),
+        )
+        .unwrap_or_else(|e| panic!("{name} boots without a ZError: {e:?}"));
+        s.set_strip_prompt(false);
+        let mut keys = 0;
+        while s.pending_input() == app::session::InputKind::Char && keys < 12 {
+            let _ = s.submit_key(app::engine::KeyInput::Char(' '));
+            keys += 1;
+        }
         let mut state = AppState::default();
         state.assist_preamble_shown = true;
         state.probe.arm(recipe(&bytes));
@@ -178,11 +224,138 @@ fn a_dropped_offer_does_not_spend_the_words_one_answer() {
     assert_eq!(p.assists(), vec!["try instead — light"]);
 }
 
+// ── A direction object defeats the noun control (SQ-1232) ──────────────────
+
+/// **The false positive SQ-1206's research found in 17 of 30 stories.**
+/// `hasten` is one keystroke from `fasten`, which Savoir-Faire's grammar
+/// spells `fasten`/`attach`/`fix` — one verb, three ways in. Every one of
+/// them answers `fasten north`, `attach north` and `fix north` alike with
+/// "You would achieve nothing by this.", but the noun-based control alone
+/// never learns that shape: `fasten <absent noun>` gets "You can't see any
+/// such thing.", a different sentence, so the candidate reads as a success
+/// and the light offered `fasten` for a plain compass direction.
+///
+/// Falsify by reverting the direction control added to `vetting_plan`
+/// (`vocab.rs`'s `dir_words`/`dir_pair`): this assertion then fails with
+/// `fasten` present in the offer, which was the reported symptom.
+#[test]
+fn a_direction_object_no_longer_earns_a_false_positive() {
+    let Some(mut p) = Play::savoir_faire() else { return };
+    p.turn("look");
+    p.turn("hasten north");
+    eprintln!("--- Savoir-Faire, Kitchen Garden, `hasten north` ---\n{}\n", p.screen());
+    assert!(
+        !p.assists().iter().any(|l| l.contains("fasten")),
+        "`fasten` must never be offered for a direction object: {:?}",
+        p.assists()
+    );
+}
+
+// ── A shadow has no status line (SQ-1248) ──────────────────────────────────
+
+/// **Every offer on these two stories came out unvetted although the probe
+/// ran** — 58 commands into `curses.z5` and 42 into `suvehnux.z5`, all of them
+/// answered, and `judge` returned `None` every time.
+///
+/// The shadow restores a save, and a save carries no screen; `restore_state`
+/// blanks the upper window on purpose (SQ-0785). Above v3 `current_location` is
+/// read off that status line, and neither of these stories repaints the whole
+/// bar during a probe turn — Curses rewrites only the fields that changed, so
+/// its room row stays blank, and Suvehnux never splits the window again after
+/// `Initialise`. The location the LIVE engine could read and the shadow could
+/// not sat inside one `WorldPrint` hash, so every step "moved", every control
+/// was disqualified, and no refusal signature could be learned.
+///
+/// Falsify by folding `WorldPrint`'s three facts back into one hash: this
+/// assertion then reads `this story knows — …`, which is the reported symptom.
+#[test]
+fn a_story_that_does_not_repaint_its_status_bar_is_still_vetted() {
+    for (name, cmd, want) in [
+        ("curses.z5", "inspect hinged", "try instead — examine · describe · watch"),
+        ("suvehnux.z5", "inspect vault", "try instead — examine · describe · watch"),
+    ] {
+        let Some(mut p) = Play::gated_z5(name) else { continue };
+        p.turn("look");
+        assert!(
+            p.session.current_location().is_some(),
+            "{name}: the fixture never reached a room — the gate was not cleared"
+        );
+        p.turn(cmd);
+        eprintln!("--- {name}, `{cmd}` ---\n{}\n", p.screen());
+        assert_eq!(p.assists(), vec![want.to_string()], "{name}");
+    }
+}
+
+/// The other half of the same claim: the vetting now REJECTS on these stories
+/// too. `hasten north` is SQ-1232's direction case — both stories answer
+/// `fasten north` with what they answer two other directions with, so every
+/// candidate is dropped and the light says nothing.
+///
+/// Before SQ-1248 both offers appeared, unvetted, naming every candidate.
+#[test]
+fn a_candidate_that_does_nothing_is_dropped_there_too() {
+    for name in ["curses.z5", "suvehnux.z5"] {
+        let Some(mut p) = Play::gated_z5(name) else { continue };
+        p.turn("look");
+        p.turn("hasten north");
+        eprintln!("--- {name}, `hasten north` ---\n{}\n", p.screen());
+        assert_eq!(
+            p.assists(),
+            Vec::<String>::new(),
+            "{name}: a direction candidate that does nothing was offered anyway"
+        );
+    }
+}
+
+/// **A daemon rides one control and not the other** (SQ-1248's second half, on
+/// the fixture that found it). Suvehnux answers `fasten east` and `fasten south`
+/// identically and then appends `Something brushes past your foot.` to whichever
+/// turn its daemon happens to fire on. Demanding that the WHOLE reply match made
+/// that pair teach nothing on exactly those turns, and `fasten north` read as a
+/// success — which is why the corpus scan showed the offer in the Vault at turn
+/// ten and not at turn two. The pair now learns the sentences the two replies
+/// agree on, so the daemon's tail costs nothing.
+///
+/// The wait turns are the fixture: one room, many attempts, so the daemon's
+/// schedule is crossed rather than guessed at.
+///
+/// Falsify by restoring `refusal_from_pair`'s whole-reply equality: `fasten`
+/// is offered on one of these turns.
+#[test]
+fn a_daemon_on_one_control_does_not_silence_the_pair() {
+    let Some(mut p) = Play::gated_z5("suvehnux.z5") else { return };
+    p.turn("look");
+    for _ in 0..12 {
+        p.turn("wait");
+        p.turn("hasten north");
+        assert!(
+            !p.assists().iter().any(|l| l.contains("fasten")),
+            "`fasten` was offered for a direction the story refuses:\n{}",
+            p.screen()
+        );
+    }
+    assert!(
+        p.state.probe.probes > 100,
+        "the case is vacuous unless the shadow actually ran every attempt"
+    );
+}
+
 // ── The claim matches what was actually done ────────────────────────────────
 
 /// With the probe switched off the offer still appears — and says the modest
 /// thing it can still support. `try instead` is a recommendation and is earned
 /// by the vetting; naming the dictionary is a fact and is not.
+///
+/// **SQ-1238 briefly added `light up` to this line** — a member of
+/// `illuminate`'s synonym group whose every WORD (`light`, `up`) Zork's
+/// dictionary genuinely holds, which was all that quest's per-word check
+/// asked. **SQ-1240 removed it again**: a multi-word member also needs the
+/// story's own GRAMMAR to pair the verb with the rest as a preposition, and
+/// `light`'s only grammar line is `light OBJ with OBJ` — `up` is nowhere in
+/// it. The two `try instead` cases just above this one already pinned that
+/// the STRONGER, vetted claim never named `light up` in the first place;
+/// this is the weaker, unvetted claim catching up to the same fact from the
+/// dictionary-and-grammar side.
 #[test]
 fn without_the_probe_the_line_makes_the_weaker_claim() {
     let Some(mut p) = Play::zork1() else { return };
@@ -195,6 +368,9 @@ fn without_the_probe_the_line_makes_the_weaker_claim() {
 /// And an unarmed seam — every `AppState::default()`, and any session whose
 /// story bytes were never kept — is the same case: no vetting happened, so no
 /// vetted claim is made. This is what keeps `vocabulary_offer.rs` honest.
+///
+/// See the note on `without_the_probe_the_line_makes_the_weaker_claim` for why
+/// `light up` no longer belongs on this line.
 #[test]
 fn an_unarmed_seam_makes_the_weaker_claim_too() {
     let Some(mut p) = Play::zork1() else { return };
@@ -360,8 +536,17 @@ fn the_cost_of_a_vetted_offer_on_the_z_machine() {
         save.bytes.len(),
         p.state.probe.probes - n1,
     );
+    // This is genuinely a latency claim — `p.turn` calls `settle_vocabulary_offer`,
+    // which blocks on the worker's real submit-and-hash work for every probe — so
+    // there is no deterministic stand-in for "must not stall the turn" the way
+    // `asking_costs_the_players_turn_a_snapshot_and_nothing_else` has for the
+    // caller-thread half (SQ-1440). One one-sided bound, kept generous: measured
+    // 2026-09-08 on a quiet machine, `second` is 12.0 ms over a handful of
+    // probes. 1000 ms is about 80x that — well past what a scheduler hiccup on a
+    // fully loaded 12-core machine running the whole app suite could cost, while
+    // still catching an actual multi-second regression.
     assert!(
-        second < std::time::Duration::from_millis(500),
+        second < std::time::Duration::from_millis(1000),
         "a warm vetted offer must not stall the turn: {second:?}"
     );
 }
@@ -385,23 +570,36 @@ fn the_cost_of_a_vetted_offer_on_the_z_machine() {
 /// The case measures all three: the live cold boot that writes the cache, the
 /// live warm boot that reads it, and a shadow booted each way. Numbers, not an
 /// estimate — it prints them.
+///
+/// It counts OPCODES and asserts on those; the wall times are printed beside
+/// them and asserted on nowhere (SQ-1400 — the ratios it used to assert were a
+/// flake under a parallel run). "Booting the way the live game boots" is a
+/// statement about which code the shadow runs, and a dispatched-opcode count
+/// says that exactly, identically on a loaded machine and a quiet one.
+///
+/// Release-agnostic (SQ-1454's disposition table): the cache-vs-cold-boot shape
+/// is a fact about the shadow-boot seam, not about one compile, so this runs
+/// against the IF Archive's release 10 — local `stories/` first, the fetched
+/// fixture otherwise (`fixture_path`, via `story` above).
 #[test]
 fn counterfeit_monkeys_shadow_boots_the_way_the_live_game_boots() {
-    let Some(bytes) = story("CounterfeitMonkey-11.gblorb") else { return };
+    let Some(bytes) = story("CounterfeitMonkey-10.gblorb") else { return };
     let app::hints::LoadedStory::Glulx(image) = app::hints::extract_story(bytes.clone())
-        .expect("CounterfeitMonkey-11.gblorb is a readable container")
+        .expect("CounterfeitMonkey-10.gblorb is a readable container")
     else {
-        panic!("CounterfeitMonkey-11.gblorb is a Glulx story");
+        panic!("CounterfeitMonkey-10.gblorb is a Glulx story");
     };
 
-    let dir = std::env::temp_dir().join(format!("lanthorn-sq1124-cm-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("temp game_dir");
+    // Unique per CALL, not per process (CLAUDE.md / SQ-1131): a pid-keyed name
+    // is one directory shared by every caller in the binary, and this case both
+    // writes a cache into it and asserts on what is there afterwards.
+    let dir = app::scratch_dir("sq1124-cm");
 
     // The live session, twice, against a persistent store it may write: the
     // first launch runs the initialisation and leaves the cache, the second
-    // restores it. If the second is not dramatically faster, this fixture is not
-    // the game the finding is about and every number below is meaningless.
+    // restores it. If the second does not run dramatically fewer opcodes, this
+    // fixture is not the game the finding is about and every number below is
+    // meaningless.
     let live_in = |dir: PathBuf, vfs: &[u8]| {
         let b = blorb::Blorb::parse(bytes.clone()).ok();
         app::glulx_session::GlulxSession::new_in(
@@ -412,51 +610,57 @@ fn counterfeit_monkeys_shadow_boots_the_way_the_live_game_boots() {
     };
     let t = std::time::Instant::now();
     let cold_session = live_in(dir.clone(), &[]);
-    let live_cold = t.elapsed();
+    let (live_cold, live_cold_ops) = (t.elapsed(), cold_session.insn_count());
     let vfs = app::engine::Engine::vfs_bytes(&cold_session);
     eprintln!("  vfs after the cold boot: {} bytes, dirty={}", vfs.len(),
         app::engine::Engine::vfs_dirty(&cold_session));
     drop(cold_session);
     let t = std::time::Instant::now();
     let live = live_in(dir.clone(), &vfs);
-    let live_warm = t.elapsed();
+    let (live_warm, live_warm_ops) = (t.elapsed(), live.insn_count());
     let save = live.save_state();
     let cached: Vec<String> = std::fs::read_dir(&dir)
         .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into()).collect())
         .unwrap_or_default();
 
-    // SQ-1121's shadow: no store at all.
-    let mut blind = app::probe::ShadowProbe::default();
-    blind.arm(recipe(&bytes));
+    // The shadow, booted each way, through the very constructor the probe's
+    // worker calls (`probe::build`) with the very fields the recipe carries —
+    // so what is counted here is the shadow's own boot, not a lookalike.
+    // SQ-1121's shadow is the first: no store at all.
+    let shadow_ops = |store: PathBuf, vfs: &[u8]| {
+        app::glulx_session::GlulxSession::new_shadow(store, image.clone(), 80, 24, true, vfs, None)
+            .expect("the shadow boots")
+            .insn_count()
+    };
     let t = std::time::Instant::now();
-    let blind_run = blind.run(&live, &["take zqxwvj".to_string()]);
-    let blind_cold = t.elapsed();
-
+    let blind_ops = shadow_ops(PathBuf::new(), &[]);
+    let blind_boot = t.elapsed();
     // SQ-1124's shadow: the live game's own store, read-only.
+    let t = std::time::Instant::now();
+    let store_ops = shadow_ops(dir.clone(), &vfs);
+    let store_boot = t.elapsed();
+
+    // And the seam end to end on that same recipe, which is the behaviour the
+    // fix is for: the corpus's biggest game gets its offers vetted.
     let mut probe = app::probe::ShadowProbe::default();
     probe.arm(recipe_in(&bytes, dir.clone(), vfs.clone()));
-    let t = std::time::Instant::now();
     let first = probe.run(&live, &["take zqxwvj".to_string()]);
-    let cold = t.elapsed();
-    let t = std::time::Instant::now();
     let second = probe.run(&live, &["take zqxwvj".to_string()]);
-    let warm = t.elapsed();
 
     eprintln!(
-        "Glulx (Counterfeit Monkey 11, {} KiB container): \n  \
-         live boot cold {live_cold:?}, warm {live_warm:?} (cache: {cached:?})\n  \
+        "Glulx (Counterfeit Monkey, {} KiB container): \n  \
+         live boot cold {live_cold_ops} opcodes ({live_cold:?}), \
+         warm {live_warm_ops} opcodes ({live_warm:?}) (cache: {cached:?})\n  \
          snapshot {} bytes\n  \
-         shadow, NO store (SQ-1121):   first probe {blind_cold:?}, answered={}\n  \
-         shadow, live store read-only: first probe {cold:?}, answered={}; \
-         warm probe {warm:?}, answered={}\n  \
-         seam armed={} after {} probes",
+         shadow, NO store (SQ-1121):   {blind_ops} opcodes ({blind_boot:?})\n  \
+         shadow, live store read-only: {store_ops} opcodes ({store_boot:?})\n  \
+         seam armed={} after {} probes, answered={} then {}",
         bytes.len() / 1024,
         save.bytes.len(),
-        blind_run.is_some(),
-        first.is_some(),
-        second.is_some(),
         probe.is_armed(),
         probe.probes,
+        first.is_some(),
+        second.is_some(),
     );
 
     // Non-vacuity: the cache has to exist, or the shadow read nothing and the
@@ -466,17 +670,40 @@ fn counterfeit_monkeys_shadow_boots_the_way_the_live_game_boots() {
         "Counterfeit Monkey wrote no fixed-name save, so there was no cache to read: {cached:?}"
     );
     assert!(!vfs.is_empty(), "and no VFS marker, which is the half that makes it ASK");
+    // **Opcodes, not a clock** (SQ-1400). The elapsed times above are printed
+    // and never asserted on. This case used to compare four Counterfeit Monkey
+    // boots by wall time as ratios, and as cold boot got faster both margins
+    // narrowed to about 5% — so a parallel `-p lanthorn` run failed it on
+    // scheduling noise alone, while it passed in isolation. A dispatched-opcode
+    // count is the same number on a quiet machine and under load, and it is
+    // what the claim is actually about: a boot that `@restore`s the init cache
+    // does not EXECUTE the initialisation. The margins are order-of-magnitude
+    // rather than 1.5x because that is what the counts really differ by.
     assert!(
-        live_warm * 2 < live_cold,
-        "the live warm boot ({live_warm:?}) is not meaningfully faster than the cold one \
-         ({live_cold:?}) — this fixture does not use the cache and the finding does not apply"
+        live_warm_ops * 4 < live_cold_ops,
+        "the live warm boot ({live_warm_ops} opcodes) did not skip the initialisation the cold \
+         one ran ({live_cold_ops}) — this fixture does not use the cache and the finding does \
+         not apply"
     );
     // The claim.
     assert!(first.is_some(), "the shadow answered nothing");
     assert!(probe.is_armed(), "the seam gave up on a story it can now afford");
-    assert!(
-        cold * 2 < blind_cold,
-        "reading the live game's store bought nothing: {cold:?} against {blind_cold:?}"
+    // And the title of the case, spelled exactly: the shadow that reads the live
+    // game's store dispatches the SAME opcodes the live warm boot dispatched,
+    // and a shadow without one dispatches the same as the live COLD boot — the
+    // whole initialisation, which is SQ-1121's defect. Equality, not a band:
+    // both sides are the same story booted through the same `new_with_store`
+    // with the same screen, so any difference is a difference in path and worth
+    // failing on. (If a legitimate change gives the shadow a different screen
+    // or a different acceleration setting, these are the numbers to re-measure.)
+    assert_eq!(
+        store_ops, live_warm_ops,
+        "the shadow reading the live game's store did not take the live game's warm boot path"
+    );
+    assert_eq!(
+        blind_ops, live_cold_ops,
+        "a shadow with no store did not re-run the initialisation, so the pair above is not \
+         measuring the store at all"
     );
 
     // And it wrote nothing while doing it: the store holds exactly what the live
@@ -503,6 +730,25 @@ fn a_lighter_glulx_story_is_still_probed() {
             .expect("Coloratura boots");
     let mut probe = app::probe::ShadowProbe::default();
     probe.arm(recipe(&bytes));
+    // Coloratura opens on three keypress pages of prose before its first `>`, and since
+    // SQ-1349 the seam declines any story that is not waiting for a LINE — its question is a
+    // typed command and a story parked on `read_char` cannot be asked one. Drive to the prompt
+    // the way a player does before probing; without this the "reply" measured here was an
+    // intro page turning under the command's first letter, which is an answer about the
+    // story's key handling rather than about the command.
+    let mut live = live;
+    for _ in 0..8 {
+        if live.pending_input() == app::session::InputKind::Line {
+            break;
+        }
+        let _ = live.submit("");
+    }
+    assert_eq!(
+        live.pending_input(),
+        app::session::InputKind::Line,
+        "Coloratura must reach its own line prompt before the seam has any question for it"
+    );
+
     let t = std::time::Instant::now();
     let run = probe.run(&live, &["zqxwvj".to_string(), "take zqxwvj".to_string()]);
     eprintln!(
@@ -598,12 +844,38 @@ fn asking_costs_the_players_turn_a_snapshot_and_nothing_else() {
 
     // Cold — the ask that also causes the shadow's boot, which is the worst case
     // and still costs the caller only the snapshot.
+    let probes_before = p.state.probe.probes;
     let t = std::time::Instant::now();
     let token = p.state.probe.ask(&*p.session, &cmds).expect("the seam is armed");
     let ask_cold = t.elapsed();
+    // Deterministic form of "the ask paid for the boot, which is exactly what it
+    // must not do" (SQ-1440 replaces a `ask_cold < worker_cold` wall-clock ratio,
+    // which is exactly the shape CLAUDE.md's testing guidance forbids — a race
+    // between two timings on two different threads, narrow enough that a
+    // scheduler hiccup under a loaded `-p lanthorn` run could flip it).
+    // `ask()` only takes a snapshot on the CALLER's thread and hands the job to
+    // the worker over a channel (`probe.rs::send_job`); the boot itself runs on
+    // the worker and its cost is folded into `probes`/`phases` only by
+    // `settled()`, which only `poll()`/`settle()` call. So if `ask()` ever ran
+    // the boot — or any step — inline, these would already be nonzero right
+    // here, before either of those runs.
+    assert_eq!(p.state.probe.probes, probes_before, "ask() ran a step on the caller's thread");
+    assert_eq!(
+        p.state.probe.phases.boot,
+        std::time::Duration::ZERO,
+        "ask() paid for the worker's boot on the caller's thread"
+    );
     let t = std::time::Instant::now();
     let answered = p.state.probe.settle().is_some();
     let worker_cold = t.elapsed();
+    // Non-vacuity: the boot cost must be real and folded in once collected, or
+    // the pair of asserts above proved nothing (a fixture that never actually
+    // booted a shadow would pass them by accident).
+    assert!(
+        p.state.probe.phases.boot > std::time::Duration::ZERO,
+        "the worker's boot cost was never folded in — this fixture never booted a shadow, so \
+         the check above proves nothing"
+    );
 
     let t = std::time::Instant::now();
     p.state.probe.ask(&*p.session, &cmds).expect("the seam is still armed");
@@ -619,13 +891,17 @@ fn asking_costs_the_players_turn_a_snapshot_and_nothing_else() {
     );
     // The number that matters: what the player waits for. A snapshot of a .z3 is
     // a few hundred bytes and a world print is a handful of hashes.
+    //
+    // Measured 2026-09-08 on a quiet machine: ask_warm 1.23 ms. The old 5 ms
+    // bound was under 4x that — a scheduler hiccup on a loaded machine (e.g. a
+    // parallel `-p lanthorn` run) clears it easily (SQ-1440). 250 ms is about
+    // 200x the measured value: generous enough to survive a fully loaded
+    // 12-core machine while still catching an `ask()` that regresses into doing
+    // real work inline (the deterministic asserts above already cover that
+    // regression directly; this is a backstop on latency itself).
     assert!(
-        ask_warm < std::time::Duration::from_millis(5),
+        ask_warm < std::time::Duration::from_millis(250),
         "asking is supposed to be free: {ask_warm:?}"
-    );
-    assert!(
-        ask_cold < worker_cold,
-        "the ask paid for the boot, which is exactly what it must not do"
     );
 }
 
@@ -742,4 +1018,38 @@ fn the_scope_test_asks_the_story_instead_of_reading_its_prose() {
         "the printed-name rule agreed with the story everywhere here, so this room \
          cannot show the difference — pick another"
     );
+}
+
+/// **SQ-1252.** `vespers.z8`'s Entrance Hall silently disambiguates `fix south`
+/// (there are two doors) and prints a parenthesised echo — `(the outside
+/// door)` — before its refusal, while `fix north` (no ambiguity) prints the
+/// refusal straight away. `refusal_from_pair` compares the two replies from
+/// their FIRST sentence, so with the echo still in it the pair disagrees
+/// immediately, learns nothing, and `hasten south` — corrected to `fasten` /
+/// `attach` / `fix` — reads as a candidate that "did something" and survives
+/// vetting unearned.
+///
+/// The walk: the story gates on a keypress, then `west` from the starting
+/// Bedroom reaches the Entrance Hall in one move.
+///
+/// Falsify by reverting [`app::probe`]'s echo strip: `p.assists()` then
+/// contains a `try instead` line naming `fasten`/`attach`/`fix`.
+#[test]
+fn a_disambiguation_echo_does_not_survive_vetting_in_the_entrance_hall() {
+    let Some(mut p) = Play::gated_z5("vespers.z8") else { return };
+    p.turn("west");
+    assert_eq!(
+        p.session.current_location().map(|l| l.name),
+        Some("Entrance Hall".to_string()),
+        "the fixture never reached the room the bug was found in:\n{}",
+        p.screen()
+    );
+    p.turn("hasten south");
+    eprintln!("--- vespers.z8, Entrance Hall, `hasten south` ---\n{}\n", p.screen());
+    for line in p.assists() {
+        assert!(
+            !["fasten", "attach", "fix"].iter().any(|w| line.contains(w)),
+            "an offer the direction control pair should have vetted survived: {line:?}"
+        );
+    }
 }

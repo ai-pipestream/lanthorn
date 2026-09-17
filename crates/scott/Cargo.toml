@@ -1,16 +1,34 @@
 [package]
-name = "scott"
+name = "lanthorn-scott"
+description = "A zero-dependency virtual machine for Scott Adams (ScottFree .dat) format interactive fiction"
 version.workspace = true
 edition = "2021"
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["interactive-fiction", "scott-adams", "text-adventure", "emulator"]
+categories = ["emulators", "parser-implementations"]
+include = ["src/**", "examples/**", "Cargo.toml", "README.md"]
 
 [lib]
-# No doctests here; skip the rustdoc doctest pass (seconds of harness
-# compilation for zero tests). Remove if real doctests are added.
-doctest = false
+# Package renamed for crates.io (SQ-1250); the crate name every `use
+# scott::…` in the workspace resolves to stays "scott", and every `-p scott`
+# in CI/docs became `-p lanthorn-scott` instead (cargo's `-p` matches package
+# name, not this field).
+name = "scott"
 
 [dependencies]
 # The shared answer type both VM crates already return (SQ-1103/SQ-1118) — an
 # internal, zero-dependency workspace crate, so this stays a zero-EXTERNAL-
 # dependency crate exactly as before.
-grammar-model = { path = "../grammar-model" }
+grammar-model = { package = "lanthorn-grammar-model", path = "../grammar-model", version = "0.7.0" }
+
+# The timing harness (SQ-1428). `test = true` so `cargo test`/`cargo nextest`
+# compile it and run its `#[cfg(test)]` smoke — a benchmark nobody builds is a
+# benchmark that stops compiling. The smoke asserts turns played, never
+# elapsed time; real numbers are taken by hand per `docs/internals/performance.md`.
+[[example]]
+name = "bench"
+test = true

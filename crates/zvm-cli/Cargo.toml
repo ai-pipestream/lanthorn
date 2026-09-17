@@ -1,15 +1,29 @@
 [package]
-name = "zvm-cli"
+name = "lanthorn-zvm-cli"
+description = "A no-map, DOS-style command-line Z-machine player (interactive fiction), including original release disk images"
 version.workspace = true
 edition = "2021"
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords = ["z-machine", "interactive-fiction", "cli", "infocom"]
+categories = ["command-line-utilities", "games"]
+include = ["src/**", "Cargo.toml"]
+
+[[bin]]
+# Package renamed for crates.io (SQ-1250 follow-up); the installed binary stays
+# "zvm-cli" (release.yml's archives and the CLI's own --help/--version name
+# it that way).
+name = "zvm-cli"
+path = "src/main.rs"
 
 [dependencies]
-buildinfo = { path = "../buildinfo" }
-cli-host = { path = "../cli-host" }
-zvm = { path = "../zvm" }
-blorb = { path = "../blorb" }
-audio = { path = "../audio" }
+buildinfo = { package = "lanthorn-buildinfo", path = "../buildinfo", version = "0.7.0" }
+cli-host = { package = "lanthorn-cli-host", path = "../cli-host", version = "0.7.0" }
+zvm = { package = "lanthorn-zvm", path = "../zvm", version = "0.7.0" }
+blorb = { package = "lanthorn-blorb", path = "../blorb", version = "0.7.0" }
+audio = { package = "lanthorn-audio", path = "../audio", version = "0.7.0" }
 crossterm = "0.29"
 
 # SQ-0909: the terminal itself is the scrollback, and a DECSTBM scroll region is
@@ -20,7 +34,6 @@ crossterm = "0.29"
 # `app` for the same reason (SQ-0764). Used from `screen.rs`'s own test module, so
 # the proof runs against `enter_region`/`leave_region` themselves rather than against
 # copies of their output. TESTS ONLY: the shipped binary must never gain it
-# (`cargo tree -p zvm-cli -e normal | grep -c qwertty` must print 0).
+# (`cargo tree -p lanthorn-zvm-cli -e normal | grep -c qwertty` must print 0).
 [dev-dependencies]
 qwertty-term-vt = "0.4.0"
-

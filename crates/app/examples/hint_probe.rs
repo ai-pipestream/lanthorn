@@ -9,7 +9,7 @@
 //! see any of these defects.
 //!
 //! Usage:
-//!   cargo run -p app --example hint_probe -- --story <path> [--entry N|NAME]
+//!   cargo run -p lanthorn --example hint_probe -- --story <path> [--entry N|NAME]
 //!       [--pane 132x60] [--route 'L:;L:hint;C:y;C:13;C:13']
 
 use app::engine::{Engine, WinNode};
@@ -95,7 +95,6 @@ fn main() {
     let mut picts = app::graphics::PictSource::resolve(p, entry);
     let (profile, source) =
         app::interpreter::InterpreterProfile::resolve_with_source(p, None, None, medium);
-    let _g = app::v6_palette(profile.palette());
     let dims = picts.all_pict_dims();
     let face = app::native_font::resolve(&app::native_font::FaceRequest {
         story_path: p,
@@ -113,6 +112,8 @@ fn main() {
         profile.default_colours(),
         true,
         face,
+        zvm::screen::Palette::Standard,
+        None,
     );
     let art_scale = boot.art_scale;
     let text_face = boot.text_face();
@@ -256,7 +257,7 @@ fn report(
     }
 
     if opts.trace {
-        for line in s.machine.screen_trace.iter() {
+        for line in s.machine.screen_trace().iter() {
             if line.contains("output_stream") || line.contains("window_style") || line.contains("put_wind_prop") || line.contains("window_size") || line.contains("set_window") {
                 println!("       trace {line}");
             }

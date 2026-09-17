@@ -1,5 +1,9 @@
-//! Zero-dependency parser for the IFF "Blorb" interactive-fiction resource
-//! container. Exposes the embedded executable and a generic resource accessor.
+//! Parser for the IFF "Blorb" interactive-fiction resource container.
+//! Exposes the embedded executable and a generic resource accessor.
+//!
+//! Zero external dependencies except [`depack`]'s `regenerator2000-core`
+//! (SQ-1488, see its `Cargo.toml` dependency comment) — every reader in this
+//! crate is still hand-rolled.
 
 pub mod adf;
 pub mod amiga_font;
@@ -11,7 +15,10 @@ pub mod bpal;
 /// Partition Map. Private because it is a wrapper rather than a reader: what it
 /// finds is handed to [`hfs`], and nothing outside this crate asks for it.
 mod cd;
+pub mod atr;
 pub mod d64;
+pub mod depack;
+pub mod dos33;
 pub mod dos_order;
 pub mod fat12;
 pub mod g64;
@@ -23,6 +30,7 @@ pub mod infocom_sound;
 pub mod iso9660;
 pub mod medium;
 pub mod prodos;
+pub mod xex;
 
 /// Errors that can arise while parsing a Blorb container.
 #[derive(Debug, PartialEq, Eq)]
@@ -369,7 +377,7 @@ impl Blorb {
         }
     }
 
-    /// Public counterpart of [`Blorb::chunk_data`]: the raw data bytes for
+    /// Public counterpart of `Blorb::chunk_data`: the raw data bytes for
     /// resource `e` (post 8-byte chunk header, pre pad byte — but a `FORM`
     /// resource retains its `FORM`+length header). For callers that need to
     /// inspect a resource's raw bytes (e.g. format-detail parsing).
@@ -588,9 +596,9 @@ pub fn resolve_resource_blorb(
 /// The associated resource-blorb sibling of `story_path`, matched by FILENAME
 /// ONLY (no file read), for the cheap per-row "(blorb)" tag which can't afford
 /// to parse every blorb. Same match order and rule as [`resolve_resource_blorb`],
-/// over the same [`RESOURCE_BLORB_EXTS`] (SQ-1067 — this sentence used to name a
+/// over the same `RESOURCE_BLORB_EXTS` (SQ-1067 — this sentence used to name a
 /// third set, matching neither function): an exact same-stem sibling first, else
-/// the best unambiguous [`stem_prefix_match`] among the directory's blorbs —
+/// the best unambiguous `stem_prefix_match` among the directory's blorbs —
 /// `None` if there is none or the longest prefix is a tie. Unlike
 /// `resolve_resource_blorb` it does not read the file, so it can't require the
 /// blorb to actually carry resources — filename agreement is the whole signal.

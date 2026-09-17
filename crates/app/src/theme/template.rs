@@ -168,7 +168,7 @@ fn role_line(name: &str) -> String {
         "text" => ("{ fg = \"foreground\" }", "body ink on the page (scheme foreground)"),
         "chrome" => ("{ fg = \"foreground\", bg = \"background\" }", "ink on a UI surface: bars, panels, upper window"),
         "line" => ("{ fg = \"palette:6\" }", "lines, frames, rules, dividers (scheme cyan slot)"),
-        "accent" => ("{ fg = \"palette:6\" }", "highlights: links, selection, current room, badges"),
+        "accent" => ("{ fg = \"palette:4\" }", "highlights: links, selection, current room, badges (scheme blue slot)"),
         "muted" => ("{ fg = \"palette:8\" }", "dim / secondary text (scheme bright-black slot)"),
         "alert" => ("{ fg = \"palette:3\" }", "warnings and errors (scheme yellow slot)"),
         "heading" => ("{ fg = \"foreground\", bold = true }", "titles and headers (bold)"),
@@ -184,7 +184,8 @@ fn role_line(name: &str) -> String {
 fn enum_hint(row: &RegRow) -> &'static str {
     match row.name {
         "map.box_style" => "   # rounded | thick | double | solid | super-thick | ascii | borderless",
-        "map.arrow_set" => "   # filled | line | nerdfont | nf-bold | nf-box | nf-chevron | nf-circle | nf-outline",
+        "map.ghost_box_style" => "   # dashed | dotted | ascii   (the broken border of a room on ANOTHER layer)",
+        "map.arrow_set" => "   # filled | line | nerdfont | nf-bold | nf-box | nf-chevron | nf-circle | nf-outline | nf-thick | nf-wind | nf-thin",
         "map.portal_icons" => "   # ascii | nerdfont | nerdfont-stairs",
         "map.path_style" | "map.portal_path_style" => "   # light | heavy | dotted",
         "map.control_icons" => "   # plain | nerdfont   (every border control: both panes' clusters and the tooltip pointer)",
@@ -309,7 +310,7 @@ const MAP_OVERRIDES_BLOCK: &str = r#"
 # "portal.up" = "↑"          # portal markers: portal.<up|down|in|out|marker|path|unknown>
 # "gutter.meta" = "▏"        # transcript gutter marks: gutter.<meta|warning|assist>
 # "gutter.assist" = "●"      # the mark of Lanthorn's Guiding Light (a patched font's lamp: U+F1A60)
-# "control.map_hide" = "▶"   # border toggles: control.<map_show|map_hide|band_show|band_hide>
+# "control.map_hide" = "▶"   # border toggles: control.<map_show|map_hide|band_show|band_hide|inventory_open>
 # "control.guidance_on" = "●" # …control.<guidance_on|guidance_off>
 # "control.lock_on" = "▣"    # …control.<render_hybrid|render_raster|render_extended|lock_on|lock_off>
 # "map_control.centre" = "¤" # map border cluster: map_control.<room_numbers_on|room_numbers_off|centre|zoom_out|zoom_in|view_matrix|view_drawn>
@@ -351,7 +352,7 @@ const STATIC_EXAMPLES: &str = r#"# ── Story-line styling rules: recolour who
 # align = "right"
 "#;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-theme"))]
 mod tests {
     use super::*;
     use crate::colors::GhosttyScheme;
@@ -406,6 +407,7 @@ mod tests {
     fn terminal_default_scheme() -> GhosttyScheme {
         let mut scheme = GhosttyScheme { foreground: Color::White, ..GhosttyScheme::default() };
         scheme.palette[3] = Color::Yellow;
+        scheme.palette[4] = Color::Blue; // accent slot, SQ-1531
         scheme.palette[6] = Color::Cyan;
         scheme.palette[8] = Color::DarkGray;
         scheme
@@ -631,26 +633,6 @@ mod tests {
         names
     }
 
-    /// Rows whose `parent` re-root the sweep cannot prove, and why.
-    ///
-    /// Both entries are **SQ-1169**: the row's registry `Delta` pins BOTH `fg`
-    /// and `bg`, and `resolve_row` applies that Delta on top of the resolved
-    /// parent before any user layer — so a re-root resolves, warns about
-    /// nothing, and moves no colour at all. That is the exact shape of the
-    /// tooltip defect a user reported (`a9898db9`).
-    ///
-    /// SQ-1169 lists seven live rows, and only these two are TOTAL no-ops. The
-    /// other five — `status_header`, the three `debug.disasm_*` tiers and
-    /// `dialog.shadow` — pin one channel and inherit the other, so a re-root
-    /// still moves that other one and clears the bar below. They are masked, not
-    /// inert; the quest's own list is the record of that, not this one.
-    ///
-    /// The cure is a design question with three answers written up on SQ-1169
-    /// (suppress the Delta's colours on a re-root / stop pinning them in the
-    /// registry / warn), and the choice is the user's, not this test's. Named
-    /// here so the exemption is reviewable rather than a silent gap.
-    const PARENT_REROOT_UNPROVABLE: &[&str] = &["dialog.list_selected", "transcript_search_highlight"];
-
     #[test]
     fn every_key_the_template_documents_takes_effect_when_uncommented() {
         use ratatui::style::Modifier;
@@ -771,14 +753,13 @@ mod tests {
             // whole family at once, and the one the tooltip defect hid in.
             //
             // The bar is that re-rooting must move at least one COLOUR — not
-            // that it must move every colour, which would be picking SQ-1169's
-            // option (a) on the user's behalf, and not merely that it changes
-            // the style, which a bold `heading` parent satisfies while the
-            // colours stay pinned (that weaker bar passed the tooltip defect
-            // itself, so it is no bar at all).
-            if PARENT_REROOT_UNPROVABLE.contains(&name) {
-                continue;
-            }
+            // that it must move every colour, and not merely that it changes the
+            // style, which a bold `heading` parent would satisfy while the
+            // colours stayed pinned (that weaker bar passed the tooltip defect
+            // itself, so it is no bar at all). SQ-1169 made this bar clearable
+            // for every row: `resolve_row` now skips the registry default
+            // delta's `fg`/`bg` on any row a user layer re-roots, so a pinned
+            // colour no longer survives on top of the new parent.
             let landed = super::super::registry::ROLE_NAMES.iter().any(|p| {
                 let got = theme_of(&probe(&format!("{{ parent = \"{p}\" }}"))).get(name);
                 got.style.fg != base.style.fg || got.style.bg != base.style.bg
@@ -786,8 +767,7 @@ mod tests {
             assert!(
                 landed,
                 "the template documents `parent` on row {name:?}, but re-rooting it onto any of \
-                 the seven roles changes nothing — see SQ-1169's pinned-Delta mechanism, and add \
-                 it to PARENT_REROOT_UNPROVABLE only if that is why"
+                 the seven roles changes nothing — see SQ-1169's re-root rule in resolve_row"
             );
         }
     }

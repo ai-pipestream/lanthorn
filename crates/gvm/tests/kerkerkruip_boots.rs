@@ -82,7 +82,7 @@ fn kerkerkruip_boots_past_storage_menu() {
                 reached_input = true;
                 break;
             }
-            StepResult::Quit => {
+            StepResult::Quit | StepResult::Fault => {
                 quit_before_input = true;
                 break;
             }
@@ -95,6 +95,7 @@ fn kerkerkruip_boots_past_storage_menu() {
                 // first input; treat as a boot failure to investigate.
                 panic!("unexpected @save/@restore during Kerkerkruip boot");
             }
+            _ => break,
         }
     }
 
@@ -104,7 +105,7 @@ fn kerkerkruip_boots_past_storage_menu() {
         .downcast_mut::<TestBackend>()
         .unwrap()
         .all_text();
-    let diags = m.diagnostics.join("\n");
+    let diags = m.diagnostics().join("\n");
 
     // (c) It did not quit/halt before asking for input.
     assert!(
@@ -132,7 +133,7 @@ fn kerkerkruip_boots_past_storage_menu() {
     eprintln!(
         "Kerkerkruip booted to first input in {steps} steps; {} transcript chars, {} diagnostics",
         text.chars().count(),
-        m.diagnostics.len()
+        m.diagnostics().len()
     );
     eprintln!("--- transcript tail ---\n{}", tail(&text));
 }

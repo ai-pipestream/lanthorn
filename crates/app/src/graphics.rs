@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
+use image::{DynamicImage, Rgba, RgbaImage};
 
 
 /// Unpack a Glk 24-bit `0xRRGGBB` color into an opaque RGBA pixel.
@@ -179,6 +179,29 @@ impl Canvas {
     pub fn arc(&self) -> Arc<RgbaImage> { Arc::clone(&self.img) }
 }
 
+/// Scale a decoded picture into unit space, nearest-neighbour (the DOS-authentic
+/// crisp pixel double) — the resample [`PictSource::scaled_cached`] runs once
+/// per distinct decode and caches, formerly `session::v6_scaled_art`, which ran
+/// it fresh on every draw and every replay op (SQ-1196).
+///
+/// `scale == (1, 1)` is the identity: no resize, and — the other half of
+/// SQ-1196 — no copy either. The old function `.clone()`d a full `DynamicImage`
+/// here even though the pixels are untouched; this hands back the SOURCE `Arc`
+/// itself.
+fn scale_art(img: &Arc<DynamicImage>, scale: (u32, u32)) -> Arc<DynamicImage> {
+    use image::GenericImageView;
+    if scale == (1, 1) {
+        return Arc::clone(img);
+    }
+    let (w, h) = img.dimensions();
+    Arc::new(DynamicImage::ImageRgba8(image::imageops::resize(
+        img.as_ref(),
+        w * scale.0,
+        h * scale.1,
+        image::imageops::FilterType::Nearest,
+    )))
+}
+
 /// Resolves + caches decoded images by Blorb `Pict` resource number.
 ///
 /// Adaptive palettes (Blorb spec §11.3): pictures listed in the container's
@@ -203,6 +226,159 @@ impl Canvas {
 /// this field — so a native archive feeds the machinery below through the same
 /// `adaptive` set and the same Current Palette, expressed in the same RGB
 /// triples a `PLTE` holds. (SQ-0743)
+/// One US S.A.G.A. release's picture files, kept **both** by name and in the
+/// order the container listed them (SQ-1482).
+///
+/// A `HashMap` alone was enough while a picture number resolved to exactly one
+/// file. §12.11's object overlays need the other half: "after [the room
+/// picture], every object picture whose item index names an item presently in
+/// the room is drawn over it, **in the order the picture files were
+/// gathered**" — and §8.6 says why the order is not cosmetic, "the order is
+/// observable, because later pictures overwrite earlier ones". A `HashMap`'s
+/// iteration order is not the disk's and is not even stable, so the sequence
+/// is kept beside it.
+///
+/// Each entry carries what its NAME says it is ([`scott::PictureFile`] —
+/// usage and index), parsed once at load rather than re-parsed per frame;
+/// entries whose name no rule recognises are held for the record lookup and
+/// left out of [`Self::overlays_for`].
+#[derive(Debug)]
+struct SagaRecords {
+    by_name: HashMap<String, Vec<u8>>,
+    /// `(name, what the name says it is)` in container order.
+    order: Vec<(String, scott::PictureFile)>,
+}
+
+/// A US S.A.G.A. **Atari 8-bit** release's own family-C picture TABLE and
+/// companion side (spec §8.3, §12.10, SQ-1496), used instead of
+/// [`SagaRecords`]'s by-NAME lookup because the Atari companion side has no
+/// filesystem at all — `scott::saga_atari`'s module docs.
+///
+/// Records are found by the (usage, index) table
+/// [`scott::saga_atari::read_picture_table`] reads off side A, keyed by a
+/// FILE OFFSET into side B rather than by name — so overlays are identified
+/// here by a synthetic `"atari:<hex file offset>"` string
+/// ([`atari_overlay_name`]/[`atari_overlay_offset`]) instead of a real disk
+/// file name, which lets every other piece of overlay plumbing
+/// (`Self::scott_overlays`, `ScottSession::current_overlays`,
+/// `Self::scott_composite`) go on treating an overlay as "a name the
+/// container holds" without knowing this platform has no names at all.
+#[derive(Debug)]
+struct AtariSagaPictures {
+    /// Side B with the volume table of contents excised
+    /// (`scott::saga_atari::splice_vtoc`) — every file offset `table` names
+    /// is decoded against this buffer, through `spliced_of`.
+    side_b_spliced: Vec<u8>,
+    table: scott::saga_atari::AtariPictureTable,
+    scheme: scott::saga_pictures::FamilyCScheme,
+}
+
+/// The synthetic overlay "name" for an Atari picture record at `file_offset`
+/// — see [`AtariSagaPictures`]'s own doc for why there is no real name to use
+/// instead.
+fn atari_overlay_name(file_offset: usize) -> String {
+    format!("atari:{file_offset:05x}")
+}
+
+/// The inverse of [`atari_overlay_name`], or `None` for a name that is not
+/// one of these synthetic ones (every real disk file name is, since none of
+/// them starts with `atari:`).
+fn atari_overlay_offset(name: &str) -> Option<usize> {
+    usize::from_str_radix(name.strip_prefix("atari:")?, 16).ok()
+}
+
+/// An Atari 8-bit US S.A.G.A. release's own LINE-ART companion side (spec
+/// §8.3, SQ-1524, SQ-1525) — *Adventureland*, *Pirate Adventure*, *Mission
+/// Impossible* and *Strange Odyssey*, the four titles whose side B is a
+/// line-drawing token stream rather than [`AtariSagaPictures`]'s family-C
+/// bitmaps.
+///
+/// **Keeps a running [`scott::saga_atari_lineart::LineArtCanvas`], never a
+/// fresh one per draw.** SQ-1525's own investigation note names two host-side
+/// facts a wiring has to carry: an object picture draws over its own room
+/// because the pen, the fill colours and the two bitmaps are not reset
+/// between records, and six named room records never clear the screen at all
+/// — they draw over whatever the machine's own un-reset screen already held.
+/// [`PictSource::scott_line_art_composite`] is the only place this canvas is
+/// drawn onto, in table order (room, then each overlay), so it always reads
+/// as "the machine's own screen, one record at a time" rather than as a set
+/// of independently-decoded pictures pasted together — the shape
+/// [`AtariSagaPictures`]'s per-record `decode_table_picture` correctly uses
+/// for family C, which resets per record because family C's records do not
+/// depend on one another.
+#[derive(Debug)]
+struct AtariLineArtPictures {
+    /// Side B with the volume table of contents excised
+    /// (`scott::saga_atari::splice_vtoc`), exactly as [`AtariSagaPictures`]
+    /// keeps its own.
+    side_b_spliced: Vec<u8>,
+    table: scott::saga_atari::LineArtPictureTable,
+    /// The machine's own running screen state — see the struct doc.
+    canvas: scott::saga_atari_lineart::LineArtCanvas,
+    /// The supersample every draw through this source is played at (SQ-1526)
+    /// — [`scott_atari_line_art_scale`] band-fitted the same way
+    /// `scott_c64_scale` picks family B's, or 1 under
+    /// [`ScottPictureResolution::Original`]. Carried per-source rather than
+    /// per-draw for the same reason `scott_c64`'s scale is: it is fixed once
+    /// at construction from the picture band's own device height, not a fact
+    /// that varies record to record.
+    scale: u32,
+}
+
+/// One decoded line-art picture ([`scott::saga_atari_lineart::LineArtPicture`])
+/// as the same opaque RGBA shape [`picture_to_image`] gives family C, D and E
+/// — a fourth conversion because the type is a fourth shape (a different
+/// canvas size, a sixteen-entry pair palette), not because the rule differs.
+fn line_art_picture_to_image(pic: &scott::saga_atari_lineart::LineArtPicture) -> DynamicImage {
+    let mut buf = RgbaImage::new(pic.width() as u32, pic.height() as u32);
+    for y in 0..pic.height() {
+        for x in 0..pic.width() {
+            let (r, g, b) = pic.rgb(x, y).unwrap_or((0, 0, 0));
+            buf.put_pixel(x as u32, y as u32, Rgba([r, g, b, 255]));
+        }
+    }
+    DynamicImage::ImageRgba8(buf)
+}
+
+impl SagaRecords {
+    /// `parse` is the family's own naming rule — §8.3's for the Commodore 64
+    /// and Atari, §8.4's for the Apple II, §8.5's for MS-DOS.
+    fn new(
+        files: Vec<(String, Vec<u8>)>,
+        parse: impl Fn(&str) -> Option<scott::PictureFile>,
+    ) -> SagaRecords {
+        let order =
+            files.iter().filter_map(|(n, _)| Some((n.clone(), parse(n)?))).collect();
+        SagaRecords { by_name: files.into_iter().collect(), order }
+    }
+
+    fn record(&self, name: &str) -> Option<&Vec<u8>> {
+        self.by_name.get(name)
+    }
+
+    fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    /// The names of every record with `usage` whose index appears in
+    /// `indices`, **in container order** — §12.11's draw order.
+    ///
+    /// Driven off the gathered list rather than off a name spelled from the
+    /// index, because only two of the six naming conventions in play have an
+    /// inverse at all (§8.3's `R01nnn` and §8.5's `R01nn`, both room-only):
+    /// an object record's name carries a usage letter on one release and not
+    /// on another (§10.7), and the Apple II's carries the adventure number.
+    /// Reading the name the container actually holds cannot get any of that
+    /// wrong.
+    fn overlays_for(&self, usage: scott::PictureUsage, indices: &[u16]) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|(_, pf)| pf.usage() == usage && indices.contains(&pf.index()))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+}
+
 #[derive(Debug)]
 pub struct PictSource {
     blorb: Option<blorb::Blorb>,
@@ -225,11 +401,135 @@ pub struct PictSource {
     palette_gen: u64,
     /// Adaptive decodes keyed by `(resnum, palette_gen)`.
     adaptive_cache: HashMap<(u32, u64), Option<Arc<DynamicImage>>>,
+    /// [`Self::scaled_image`]/[`Self::scaled_image_under_current_palette`]
+    /// results for non-palette-dependent pictures, keyed like `cache` (SQ-1196):
+    /// `session::v6_scaled_art` used to re-run the resize on every draw and every
+    /// replay op, even though a source picture's scaled pixels never change once
+    /// decoded. Cleared everywhere `cache` is (today, just [`Self::set_fuse_dither`]).
+    scaled_cache: HashMap<u32, Arc<DynamicImage>>,
+    /// The same cache for palette-dependent pictures, keyed like `adaptive_cache`
+    /// — evicted the same generation-boundary way, by
+    /// [`Self::evict_stale_adaptive_cache`], so a stale palette's scaled pixels
+    /// never outlive the decode they were resampled from.
+    adaptive_scaled_cache: HashMap<(u32, u64), Arc<DynamicImage>>,
+    /// Decoded palette-INDEX planes of a NATIVE archive, keyed by resnum
+    /// (SQ-1197) — the expensive half of a native draw, and the half a palette
+    /// change does not touch.
+    ///
+    /// `blorb::infocom_pics::Picture` is already exactly this: `width`,
+    /// `height`, one index per pixel, the picture's own table and its
+    /// transparent index. Producing one costs a Huffman/LZW/Apple decompress
+    /// plus the run-length and per-line XOR stages
+    /// ([`InfocomPics::decode`](blorb::infocom_pics::InfocomPics::decode));
+    /// turning one into RGBA costs a table lookup per pixel
+    /// ([`Picture::rgba_with`](blorb::infocom_pics::Picture::rgba_with)).
+    /// A palette bump only changes the second, so retaining the first makes a
+    /// palette swap — and the display-list replay
+    /// `session::replay_under_current_palette` runs on one, up to
+    /// `session::V6_OPS_CAP` (512) ops per window — a RE-MAP rather than a
+    /// re-decode.
+    ///
+    /// Unbounded, like [`Self::cache`], and for a smaller price: a plane is one
+    /// byte per pixel where a decode is four, so this pins at most a quarter of
+    /// what the RGBA cache beside it already pins for the same pictures — and
+    /// only for pictures a draw actually asked for, since `dims`/`info` answer
+    /// from the directory header and never reach here (SQ-1194). The ceiling is
+    /// the archive: the widest native picture space is the Macintosh's 480x300
+    /// (144 KB) and a v6 session draws a few dozen distinct pictures.
+    ///
+    /// `None` for a resnum the archive cannot decode, so a failure is
+    /// remembered rather than retried on every draw — the same shape `cache`
+    /// uses.
+    index_planes: HashMap<u32, Option<Arc<blorb::infocom_pics::Picture>>>,
     /// The colour table this source's video hardware fixed, when it had one
     /// (SQ-0794) — `blorb::infocom_pics::InfocomPics::hardware_palette`. `None`
     /// for a Blorb, an Amiga/Mac `Pic.data` and an MCGA `.MG1` alike, all of
     /// which carry their colours per picture.
     hw_palette: Option<[blorb::infocom_pics::Rgb; 16]>,
+    /// A Commodore 64 or ZX Spectrum *Mysterious Adventures* release's own
+    /// room artwork as the DISPLAY LISTS it is stored as
+    /// (`scott::c64::decode_family_b_picture_lists`,
+    /// `scott::zx_mysterious::decode_picture_lists`, SQ-1414/SQ-1463/SQ-1480),
+    /// used when a Scott Adams game was loaded straight off a release image
+    /// rather than a reference-format `.dat` beside a `.blb`. Paired with the
+    /// supersample [`PictSource::from_scott_family_b`] chose for this band and
+    /// with which platform's palette reads the stored indices — the two
+    /// platforms store the IDENTICAL §8.2 display lists and differ only there
+    /// (`ScottFamilyBPlatform`).
+    ///
+    /// Lists rather than rasters, because these pictures are vectors and
+    /// nothing in the data fixes a size (SQ-1467): the whole game's artwork is
+    /// a few tens of kilobytes of line and fill ops here, and a room is drawn —
+    /// once, at the size it will be shown — only when it is first asked for.
+    /// Decoding every room to a 4x canvas up front would have been ~17 MB of
+    /// indexed pixels for a game the player may never finish.
+    ///
+    /// `None` for every other source.
+    scott_c64: Option<(Vec<scott::c64::PictureList>, u32, ScottFamilyBPlatform)>,
+    /// A US S.A.G.A. release's own family-C strip bitmaps (spec §8.3,
+    /// SQ-1475) as the RAW RECORDS they are stored as, keyed by the file name
+    /// the release disk holds them under, with the platform whose colour table
+    /// reads them.
+    ///
+    /// Records rather than pictures, for the same reason `scott_c64` holds
+    /// display lists: the *Hulk*'s seventy records are about 90 KB compressed
+    /// and 3 MB of indexed pixels decoded, and a player may never see most of
+    /// them. [`Self::get`] decodes one the first time it is drawn and the
+    /// cache beside it keeps the result.
+    ///
+    /// Keyed by NAME rather than by picture number because the name is what
+    /// the disk supplies and what [`scott::room_picture_file_name`] answers;
+    /// the usage letter is part of it, so a room picture and an object overlay
+    /// with the same index cannot collide.
+    ///
+    /// The **release**, not the platform, because the Apple II's names carry
+    /// the adventure number as well (SQ-1476) — see
+    /// [`scott::room_picture_file_name`].
+    ///
+    /// `None` for every other source.
+    scott_saga: Option<(SagaRecords, scott::SagaUs)>,
+    /// An Atari 8-bit US S.A.G.A. release's own family-C picture TABLE and
+    /// companion side (SQ-1496) — see [`AtariSagaPictures`]'s own doc for why
+    /// this is a separate field from `scott_saga` rather than a fourth shape
+    /// that struct's by-name lookup tries to cover: the Atari has no names to
+    /// key by at all.
+    ///
+    /// `None` for every other source, and for an Atari release whose
+    /// companion side is missing, unpaired, or whose table this crate could
+    /// not verify ([`PictSource::from_scott_saga_atari`] refuses rather than
+    /// guesses).
+    scott_saga_atari: Option<(AtariSagaPictures, scott::SagaUs)>,
+    /// An Atari 8-bit US S.A.G.A. release's own LINE-ART companion side
+    /// (SQ-1524, SQ-1525) — see [`AtariLineArtPictures`]'s own doc. A
+    /// separate field from `scott_saga_atari` rather than a third shape that
+    /// one tries to cover: the two formats share nothing (a running canvas
+    /// against independently-decoded strip records) and a release is always
+    /// exactly one of them (`scott::AtariPictureFormat`).
+    ///
+    /// `None` for every other source, and for a line-art release whose
+    /// companion side is missing, unpaired, or whose table this crate could
+    /// not verify ([`PictSource::from_scott_saga_atari_lineart`] refuses
+    /// rather than guesses).
+    scott_saga_atari_lineart: Option<(AtariLineArtPictures, scott::SagaUs)>,
+    /// The MS-DOS *Questprobe* release's own **family-E** CGA bitmaps (spec
+    /// §8.5, SQ-1477) as the raw `.PAK` files they are stored as, keyed by
+    /// the name the zip holds them under, with the release whose room-picture
+    /// remap reads them (§12.11).
+    ///
+    /// Undecoded for the same reason `scott_saga` is: the *Hulk*'s
+    /// sixty-eight files are about 100 KB of zip and 3 MB of indexed pixels,
+    /// and [`Self::get`] decodes the ones a player actually reaches.
+    ///
+    /// A separate field from `scott_saga` rather than a fourth arm of it
+    /// because family E shares NO arithmetic with family C — different
+    /// storage order, different compression, a fixed palette instead of four
+    /// stored colour bytes — and because the file names differ too (§8.5's
+    /// `R01nn.PAK` against §8.3's `R01nnn`). What they do share is the
+    /// [`scott::saga_pictures::Picture`] they decode to, which is why a
+    /// caller of [`Self::get`] cannot tell them apart.
+    ///
+    /// `None` for every other source.
+    scott_saga_dos: Option<(SagaRecords, scott::DosRelease)>,
     /// Does this source's art need [`blend_half_width_columns`] on the way out —
     /// i.e. is it a SIXTEEN-colour 640-wide rendition, whose pixels are half as
     /// wide as the unit screen's and whose dithers the card fused (SQ-0797)?
@@ -267,7 +567,15 @@ impl PictSource {
             current_plte: None,
             palette_gen: 0,
             adaptive_cache: HashMap::new(),
+            scaled_cache: HashMap::new(),
+            adaptive_scaled_cache: HashMap::new(),
+            index_planes: HashMap::new(),
             hw_palette: None,
+            scott_c64: None,
+            scott_saga: None,
+            scott_saga_atari: None,
+            scott_saga_atari_lineart: None,
+            scott_saga_dos: None,
             blend_columns: false,
             screen_palette: false,
         }
@@ -305,6 +613,475 @@ impl PictSource {
         // card's business, not the terminal's — see `blend_half_width_columns`.
         src.blend_columns = src.art_scale().is_some_and(|(sx, _)| sx == 1) && !src.is_monochrome();
         src
+    }
+
+    /// A source backed by a Commodore 64 Mysterious Adventures game's own
+    /// artwork — decoded once from the same PRG/D64 image the story loaded
+    /// from, rather than a Blorb (SQ-1463). [`Self::from_scott_family_b`] with
+    /// [`ScottFamilyBPlatform::C64`]; see that for the general case and
+    /// [`ScottFamilyBPlatform::Zx`] for the Spectrum releases of the same
+    /// eleven titles (SQ-1480).
+    pub fn from_scott_c64(
+        pictures: Vec<scott::c64::PictureList>,
+        band_px_high: u32,
+        resolution: ScottPictureResolution,
+    ) -> PictSource {
+        PictSource::from_scott_family_b(pictures, band_px_high, resolution, ScottFamilyBPlatform::C64)
+    }
+
+    /// A source backed by a Commodore 64 or ZX Spectrum *Mysterious
+    /// Adventures* release's own artwork — decoded once from the same
+    /// PRG/D64/`.z80` image the story loaded from, rather than a Blorb
+    /// (SQ-1463, SQ-1480). `pictures` is
+    /// `scott::c64::decode_family_b_picture_lists`'s or
+    /// `scott::zx_mysterious::decode_picture_lists`'s output — the SAME §8.2
+    /// display-list format either way, one drawing per room in the decoder's
+    /// own order (room *n* → `pictures[n - 1]`, §8.6's pure identity) —
+    /// [`Self::get`] applies that offset, so a caller indexes by **picture
+    /// number** (`scott::Vm::current_picture()`, "by convention, picture
+    /// number == room number") exactly as it does against a Blorb `Pict`
+    /// resource.
+    ///
+    /// `platform` says which of the two tables a stored index resolves
+    /// through ([`ScottFamilyBPlatform::palette`]) and names the source in
+    /// `/dump-windows` — the only fact that differs between the two.
+    ///
+    /// No adaptive palette, no hardware table, no art-scale opinion: these
+    /// releases carry one fully-opaque drawing per room and nothing else in
+    /// this struct's machinery applies to them.
+    ///
+    /// `band_px_high` is how many DEVICE PIXELS tall the picture band is —
+    /// its row count times the terminal's cell height — and picks the
+    /// supersample when `resolution` is [`ScottPictureResolution::HiRes`]; see
+    /// [`scott_c64_scale`]. [`ScottPictureResolution::Original`] (SQ-1473)
+    /// ignores the band entirely and draws at the release's own scale 1.
+    pub fn from_scott_family_b(
+        pictures: Vec<scott::c64::PictureList>,
+        band_px_high: u32,
+        resolution: ScottPictureResolution,
+        platform: ScottFamilyBPlatform,
+    ) -> PictSource {
+        let scale = match resolution {
+            ScottPictureResolution::HiRes => scott_c64_scale(band_px_high),
+            ScottPictureResolution::Original => 1,
+        };
+        PictSource { scott_c64: Some((pictures, scale, platform)), ..PictSource::new(None) }
+    }
+
+    /// The supersample this source draws its family-B vector artwork at, or
+    /// `None` when it holds none — `/dump-windows` prints it beside the canvas
+    /// size so a frame says which resolution produced it (SQ-1467).
+    pub fn scott_c64_scale(&self) -> Option<u32> {
+        self.scott_c64.as_ref().map(|(_, scale, _)| *scale)
+    }
+
+    /// Which platform's palette this source's family-B artwork resolves
+    /// through, or `None` when it holds none — `/dump-windows`'s "source="
+    /// line names it (SQ-1480).
+    pub fn scott_family_b_platform(&self) -> Option<ScottFamilyBPlatform> {
+        self.scott_c64.as_ref().map(|(_, _, platform)| *platform)
+    }
+
+    /// Is this source [`Self::from_scott_c64`]'s native decode rather than a
+    /// Blorb (or nothing)? `ScottSession::window_dump`'s `/dump-windows` line
+    /// reads this to name which of the two picture sources a room's art came
+    /// from (SQ-1463).
+    pub fn is_scott_c64(&self) -> bool {
+        self.scott_family_b_platform() == Some(ScottFamilyBPlatform::C64)
+    }
+
+    /// A source backed by a US S.A.G.A. release's own **family-C** strip
+    /// bitmaps (spec §8.3, SQ-1475), taken off the same disk image the
+    /// database was mounted from.
+    ///
+    /// `files` is `(name, record)` for every picture file the container holds
+    /// — `crate::hints`' disk walk collects them with
+    /// [`scott::is_picture_file_name`] at open time, because the mount does
+    /// not outlive it. [`Self::get`] takes a **picture number** and asks
+    /// [`scott::picture_file_name`] for the room-usage file name, so a caller
+    /// indexes it exactly as it indexes a Blorb `Pict` resource or the
+    /// family-B lists.
+    ///
+    /// `platform` is which colour table reads a record's four colour bytes —
+    /// §8.3 gives the Commodore 64 a bare thirteen-colour lookup and the Atari
+    /// a 256-entry hardware palette. Nothing about geometry varies by
+    /// platform.
+    ///
+    /// No band-height argument and no resolution choice, unlike
+    /// [`Self::from_scott_c64`]: these are BITMAPS with a fixed
+    /// 280x160 canvas, so there is no supersample to pick — the renderer's
+    /// aspect-preserving fit into the picture band is the whole of the
+    /// scaling, the same way it is for a Blorb's pre-rendered pictures.
+    pub fn from_scott_saga(files: Vec<(String, Vec<u8>)>, release: scott::SagaUs) -> PictSource {
+        let records = SagaRecords::new(files, |name| match release.platform {
+            scott::SagaPlatform::AppleII => {
+                scott::parse_apple_picture_file_name(name).map(|(_, pf)| pf)
+            }
+            _ => scott::parse_picture_file_name(name),
+        });
+        PictSource { scott_saga: Some((records, release)), ..PictSource::new(None) }
+    }
+
+    /// A source backed by an **Atari 8-bit** US S.A.G.A. release's own
+    /// family-C picture TABLE and companion side (spec §8.3, §12.10,
+    /// SQ-1496) — [`Self::from_scott_saga`] with no filesystem to walk, so
+    /// this reads the (usage, index) association off side A's own table
+    /// instead (`scott::saga_atari::read_picture_table`) and locates records
+    /// on side B by header rather than by name.
+    ///
+    /// `side_a` is the whole database side — the same bytes
+    /// `ScottSession::new_with_options` already parsed the database from —
+    /// and `side_b` is the companion picture side
+    /// [`crate::hints::saga_companion_side`] pairs it with.
+    ///
+    /// `None` when the table cannot be read at all — side A's own marker in
+    /// front of it does not match this release's Adventure International
+    /// number (a differently-mastered disk), or `side_a` is too short to
+    /// hold it — refused rather than drawn, the same rule every record in
+    /// this table is individually held to.
+    pub fn from_scott_saga_atari(
+        side_a: &[u8],
+        side_b: &[u8],
+        release: scott::SagaUs,
+    ) -> Option<PictSource> {
+        let scheme = release.picture_scheme();
+        let side_b_spliced = scott::saga_atari::splice_vtoc(side_b);
+        let table = scott::saga_atari::read_picture_table(
+            side_a,
+            &side_b_spliced,
+            scheme,
+            release.adventure,
+        )?;
+        Some(PictSource {
+            scott_saga_atari: Some((AtariSagaPictures { side_b_spliced, table, scheme }, release)),
+            ..PictSource::new(None)
+        })
+    }
+
+    /// A source backed by an **Atari 8-bit** US S.A.G.A. release's own
+    /// LINE-ART companion side (spec §8.3, SQ-1524, SQ-1525) —
+    /// [`Self::from_scott_saga_atari`]'s sibling for the four titles that do
+    /// not carry family-C bitmaps. Unlike that constructor there is no side-A
+    /// argument: this format's table lives on `side_b` itself
+    /// (`scott::saga_atari::read_line_art_table`), and the records it names
+    /// are drawing-token streams rather than bitmap strips
+    /// (`scott::saga_atari_lineart`).
+    ///
+    /// `None` when the table cannot be read at all — its own marker does not
+    /// match this release's Adventure International number (a
+    /// differently-mastered disk), or `side_b` is too short to hold it —
+    /// refused rather than drawn, the same rule every entry in the table is
+    /// individually held to.
+    ///
+    /// `band_px_high` and `resolution` are [`Self::from_scott_family_b`]'s
+    /// own two facts, taken the same way (SQ-1526): `band_px_high` is how
+    /// many DEVICE PIXELS tall the picture band is, and picks the
+    /// supersample under [`ScottPictureResolution::HiRes`]
+    /// ([`scott_atari_line_art_scale`]); [`ScottPictureResolution::Original`]
+    /// ignores the band and draws at the release's own scale 1.
+    pub fn from_scott_saga_atari_lineart(
+        side_b: &[u8],
+        release: scott::SagaUs,
+        band_px_high: u32,
+        resolution: ScottPictureResolution,
+    ) -> Option<PictSource> {
+        let side_b_spliced = scott::saga_atari::splice_vtoc(side_b);
+        let table = scott::saga_atari::read_line_art_table(&side_b_spliced, release.adventure)?;
+        let scale = match resolution {
+            ScottPictureResolution::HiRes => scott_atari_line_art_scale(band_px_high),
+            ScottPictureResolution::Original => 1,
+        };
+        Some(PictSource {
+            scott_saga_atari_lineart: Some((
+                AtariLineArtPictures {
+                    side_b_spliced,
+                    table,
+                    canvas: scott::saga_atari_lineart::LineArtCanvas::new(),
+                    scale,
+                },
+                release,
+            )),
+            ..PictSource::new(None)
+        })
+    }
+
+    /// The supersample this source draws its line-art artwork at, or `None`
+    /// when it holds none (SQ-1526) — `/dump-windows` prints it beside the
+    /// canvas size the same way [`Self::scott_c64_scale`] does for family B.
+    pub fn scott_saga_atari_line_art_scale(&self) -> Option<u32> {
+        self.scott_saga_atari_lineart.as_ref().map(|(pics, _)| pics.scale)
+    }
+
+    /// Which platform's family-C artwork this source holds, or `None` when it
+    /// holds none — `/dump-windows` names it so a frame says where a room's
+    /// picture came from (SQ-1475).
+    pub fn scott_saga_platform(&self) -> Option<scott::SagaPlatform> {
+        self.scott_saga
+            .as_ref()
+            .map(|(_, release)| release.platform)
+            .or_else(|| self.scott_saga_atari.as_ref().map(|_| scott::SagaPlatform::Atari8Bit))
+            .or_else(|| self.scott_saga_atari_lineart.as_ref().map(|_| scott::SagaPlatform::Atari8Bit))
+    }
+
+    /// How many family-C picture records this source holds. `None` when it is
+    /// not a family-C source at all; `Some(0)` cannot happen, since
+    /// [`ScottSession`](crate::scott_session::ScottSession) only builds one
+    /// from a non-empty walk.
+    pub fn scott_saga_count(&self) -> Option<usize> {
+        self.scott_saga
+            .as_ref()
+            .map(|(files, _)| files.len())
+            .or_else(|| self.scott_saga_atari.as_ref().map(|(pics, _)| pics.table.entries().len()))
+            .or_else(|| {
+                self.scott_saga_atari_lineart.as_ref().map(|(pics, _)| pics.table.entries().len())
+            })
+    }
+
+    /// Is this an Atari 8-bit LINE-ART source (SQ-1524, SQ-1525) rather than
+    /// family C's bitmaps? `/dump-windows` uses this to name the right format
+    /// — the two share nothing but the platform, and `scott_saga_platform`
+    /// answers [`scott::SagaPlatform::Atari8Bit`] for either one.
+    pub fn scott_saga_atari_is_line_art(&self) -> bool {
+        self.scott_saga_atari_lineart.is_some()
+    }
+
+    /// A source backed by an MS-DOS *Questprobe* release's own **family-E**
+    /// CGA bitmaps (spec §8.5, SQ-1477), taken out of the same zip the
+    /// database was opened from.
+    ///
+    /// `files` is `(name, record)` for every `.PAK` entry the archive holds —
+    /// `crate::hints::saga_picture_files` collects them at open time, because
+    /// the archive is not re-opened afterwards — and `release` is what
+    /// `scott::saga_dos::identify` made of the database, so [`Self::get`] can
+    /// apply §12.11's *Hulk* room-picture remap to a number that arrived as a
+    /// room.
+    ///
+    /// No band-height argument and no resolution choice, for the same reason
+    /// [`Self::from_scott_saga`] takes neither: a family-E record IS a bitmap
+    /// on a fixed canvas, so the renderer's aspect-preserving fit into the
+    /// picture band is the whole of the scaling.
+    pub fn from_scott_dos_saga(
+        files: Vec<(String, Vec<u8>)>,
+        release: scott::DosRelease,
+    ) -> PictSource {
+        let records = SagaRecords::new(files, scott::saga_dos::parse_picture_file_name);
+        PictSource { scott_saga_dos: Some((records, release)), ..PictSource::new(None) }
+    }
+
+    /// Which MS-DOS release's family-E artwork this source holds, or `None`
+    /// when it holds none. The room-picture remap `ScottSession` applies
+    /// (§12.11) and the name `/dump-windows` prints both come off this.
+    pub fn scott_dos_release(&self) -> Option<scott::DosRelease> {
+        self.scott_saga_dos.as_ref().map(|(_, release)| *release)
+    }
+
+    /// How many family-E `.PAK` records this source holds; `None` when it is
+    /// not a family-E source at all.
+    pub fn scott_saga_dos_count(&self) -> Option<usize> {
+        self.scott_saga_dos.as_ref().map(|(files, _)| files.len())
+    }
+
+    /// The picture records this source would draw OVER a room picture (or
+    /// over the inventory backdrop), in the order §12.11 draws them
+    /// (SQ-1482).
+    ///
+    /// `usage` picks which half of §8.6's object artwork is wanted —
+    /// [`scott::PictureUsage::ObjectInRoom`] for the room band,
+    /// [`scott::PictureUsage::ObjectInInventory`] for the inventory screen —
+    /// and `indices` is the set of picture indices the caller resolved from
+    /// the items it is drawing (`SagaUs::object_picture` /
+    /// `DosRelease::object_picture` have already applied the *Hulk*'s three
+    /// overrides by then). Names, not numbers, because a name is what the
+    /// container holds and what [`Self::scott_composite`] and
+    /// `/dump-windows` both want.
+    ///
+    /// Empty for every source that is not a S.A.G.A. one, which is what makes
+    /// this safe to call unconditionally: a Blorb game, a family-B memory
+    /// image and a text-only `.dat` all answer with no overlays.
+    pub fn scott_overlays(
+        &self,
+        usage: scott::PictureUsage,
+        indices: &[u16],
+    ) -> Vec<String> {
+        if let Some((pics, _)) = &self.scott_saga_atari_lineart {
+            // SQ-1525: the renderer draws item index HIGH TO LOW — item 0
+            // last, on top — read off `$8BD5` and pinned by
+            // `scott_line_art_object_overlays_draw_high_to_low` rather than
+            // exercised before now. `scott_composite`'s line-art path draws
+            // `overlays` in the order this returns them, so DESCENDING here
+            // is what puts item 0 last.
+            let mut entries: Vec<_> = pics
+                .table
+                .entries()
+                .iter()
+                .filter(|e| !matches!(e.usage, scott::PictureUsage::Room) && indices.contains(&e.index))
+                .collect();
+            entries.sort_by_key(|e| std::cmp::Reverse(e.index));
+            return entries.into_iter().map(|e| atari_overlay_name(e.file_offset)).collect();
+        }
+        if let Some((pics, _)) = &self.scott_saga_atari {
+            return pics
+                .table
+                .entries()
+                .iter()
+                .filter(|e| e.usage == usage && indices.contains(&e.index))
+                .map(|e| atari_overlay_name(e.file_offset))
+                .collect();
+        }
+        match (&self.scott_saga, &self.scott_saga_dos) {
+            (Some((files, _)), _) | (None, Some((files, _))) => {
+                files.overlays_for(usage, indices)
+            }
+            (None, None) => Vec::new(),
+        }
+    }
+
+    /// `base`'s decoded picture with each named object record painted over
+    /// its **own** rectangle, in the order given (§12.11, SQ-1482).
+    ///
+    /// Overlays are sub-images on the same 280x160 canvas the room picture is
+    /// on, and each one knows where it belongs (§8.6: "each object picture
+    /// carries its own absolute placement"). Only the rectangle a record
+    /// actually painted is copied — [`scott::saga_pictures::Picture::painted`]
+    /// — because everything outside it is pixel value 0, which §8.3 forces to
+    /// BLACK rather than to transparent: copy the whole canvas and a
+    /// postage-stamp gem blanks the room around it.
+    ///
+    /// Each overlay is drawn through **its own** palette, not the room
+    /// picture's. The two disagree on the specimen — the *Hulk*'s `B01013R`
+    /// stores 214/135/58 where the room picture it lands on stores 214/15/14
+    /// — and the original hardware's global colour registers are exactly
+    /// what §8.3 says lanthorn's colour handling already deviates from
+    /// ("the fourth colour register of every family C picture is discarded
+    /// and pixel value 0 is forced to black"). Drawing each record in the
+    /// colours its own author chose is the reading that needs no further
+    /// guess.
+    ///
+    /// With no overlays this is [`Self::image`] and shares its cached `Arc`,
+    /// so the ordinary picture path costs nothing.
+    pub fn scott_composite(
+        &mut self,
+        base: u32,
+        overlays: &[String],
+    ) -> Option<Arc<DynamicImage>> {
+        if self.scott_saga_atari_lineart.is_some() {
+            return self.scott_line_art_composite(base, overlays);
+        }
+        let under = self.image(base)?;
+        if overlays.is_empty() {
+            return Some(under);
+        }
+        let mut canvas = under.to_rgba8();
+        for name in overlays {
+            let Some(pic) = self.scott_record_picture(name) else { continue };
+            let Some(area) = pic.painted() else { continue };
+            let (width, height) = pic.dims();
+            for y in area.top()..=area.bottom().min(height.saturating_sub(1)) {
+                for x in area.left()..=area.right().min(width.saturating_sub(1)) {
+                    if let (Some((r, g, b)), true) =
+                        (pic.rgb(x, y), (x as u32) < canvas.width() && (y as u32) < canvas.height())
+                    {
+                        canvas.put_pixel(x as u32, y as u32, Rgba([r, g, b, 255]));
+                    }
+                }
+            }
+        }
+        Some(Arc::new(DynamicImage::ImageRgba8(canvas)))
+    }
+
+    /// [`Self::scott_composite`]'s path for an Atari 8-bit LINE-ART release
+    /// (SQ-1524, SQ-1525) — plays `base`'s room record, then each of
+    /// `overlays` (already sorted item-index-descending by
+    /// [`Self::scott_overlays`]), onto [`AtariLineArtPictures::canvas`] IN
+    /// PLACE and hands back a snapshot of it, rather than decoding `base`
+    /// independently and pasting rectangles over it the way the family-C/D/E
+    /// path above does.
+    ///
+    /// That running canvas is what carries SQ-1525's own two host-side facts
+    /// through to the picture band: an object drawn straight after its room
+    /// inherits whatever fill colour and pen the room's own record left (the
+    /// state is never reset between plays), and the six room records the
+    /// investigation names as never clearing the screen draw over whatever
+    /// this canvas already held — the previous room and its objects — instead
+    /// of over a black one.
+    ///
+    /// The shared darkness card (`base == scott::DARKNESS_PICTURE`) is its own
+    /// case: [`scott::saga_atari::draw_darkness_card`] still plays the record
+    /// onto the SAME running canvas (so its own true end state — genuinely
+    /// black — is what the next record draws over), but hands back the
+    /// animation's last PAUSED frame rather than that final black one, which
+    /// is what a host should actually show (module docs, SQ-1525). No object
+    /// is ever drawn in the dark (`ScottSession::room_overlays` returns
+    /// nothing when the room is dark), so `overlays` is not consulted there.
+    ///
+    /// `None` when this is not a line-art source, or when `base` names no
+    /// room this table resolves.
+    fn scott_line_art_composite(&mut self, base: u32, overlays: &[String]) -> Option<Arc<DynamicImage>> {
+        let (pics, _) = self.scott_saga_atari_lineart.as_mut()?;
+        if base as usize == scott::DARKNESS_PICTURE {
+            let off = pics.table.find(scott::PictureUsage::Room, base as u16)?;
+            let shown = scott::saga_atari::draw_darkness_card_at(
+                &mut pics.canvas,
+                &pics.side_b_spliced,
+                off,
+                pics.scale,
+            )
+            .ok()?;
+            return Some(Arc::new(line_art_picture_to_image(&shown)));
+        }
+        let off = pics.table.find(scott::PictureUsage::Room, base as u16)?;
+        // SQ-1526: one shared accumulator for the room AND every overlay, so
+        // the final supersample (`picture_from_lines_at`) learns about every
+        // stroke that went into this render rather than only the last
+        // record's own — see `LineArtCanvas::draw_tracking`'s doc for why it
+        // is built fresh here rather than kept on the canvas itself.
+        let mut lines = Vec::new();
+        scott::saga_atari::draw_line_art_record_tracking(
+            &mut pics.canvas,
+            &pics.side_b_spliced,
+            off,
+            &mut lines,
+        )
+        .ok()?;
+        for name in overlays {
+            let Some(off) = atari_overlay_offset(name) else { continue };
+            let _ = scott::saga_atari::draw_line_art_record_tracking(
+                &mut pics.canvas,
+                &pics.side_b_spliced,
+                off,
+                &mut lines,
+            );
+        }
+        let pic = pics.canvas.picture_from_lines_at(&lines, pics.scale);
+        Some(Arc::new(line_art_picture_to_image(&pic)))
+    }
+
+    /// Decode the record stored under `name` through whichever family this
+    /// source holds. `None` for a name the container does not carry, or a
+    /// record its own family's decoder refuses (§11).
+    fn scott_record_picture(&self, name: &str) -> Option<OverlayRecord> {
+        if let Some((pics, _)) = &self.scott_saga_atari {
+            let file_offset = atari_overlay_offset(name)?;
+            let pic =
+                scott::saga_atari::decode_table_picture(&pics.side_b_spliced, file_offset, pics.scheme)?;
+            return Some(OverlayRecord::Strips(pic));
+        }
+        if let Some((files, release)) = &self.scott_saga {
+            let record = files.record(name)?;
+            return match release.platform {
+                // SQ-1489: family D answers a six-colour picture of its own
+                // rather than family C's four-value one, so an overlay off an
+                // Apple II disk arrives in the other arm of `OverlayRecord`.
+                scott::SagaPlatform::AppleII => scott::decode_family_d(record, release.platform)
+                    .ok()
+                    .map(OverlayRecord::HiRes),
+                platform => {
+                    scott::decode_family_c(record, platform).ok().map(OverlayRecord::Strips)
+                }
+            };
+        }
+        let (files, _) = self.scott_saga_dos.as_ref()?;
+        scott::decode_family_e(files.record(name)?).ok().map(OverlayRecord::Strips)
     }
 
     /// Resolve the picture source for `story_path` (SQ-0734's tiers 1 and 2).
@@ -382,6 +1159,35 @@ impl PictSource {
         self.palette_gen
     }
 
+    /// How many decoded pixel buffers the unbounded [`Self::cache`](field)
+    /// currently pins, for a test to assert a size-query path never grew it
+    /// (SQ-1194).
+    #[cfg(all(test, feature = "t-render"))]
+    pub(crate) fn decode_cache_len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// The `(resnum, palette_gen)` keys currently pinned in the adaptive
+    /// decode cache, for a test to assert a stale generation was evicted
+    /// (SQ-1193).
+    #[cfg(all(test, feature = "t-render"))]
+    pub(crate) fn adaptive_cache_keys(&self) -> Vec<(u32, u64)> {
+        self.adaptive_cache.keys().copied().collect()
+    }
+
+    /// The index plane currently pinned for `resnum`, WITHOUT decoding one —
+    /// for a test to assert, by `Arc::ptr_eq`, that a palette bump re-mapped an
+    /// existing plane rather than decoding a fresh one (SQ-1197). `None` both
+    /// for "not decoded yet" and for "decoded and failed"; a test that cares
+    /// distinguishes them by ordering.
+    #[cfg(all(test, feature = "t-render"))]
+    pub(crate) fn cached_index_plane(
+        &self,
+        resnum: u32,
+    ) -> Option<Arc<blorb::infocom_pics::Picture>> {
+        self.index_planes.get(&resnum).and_then(|o| o.clone())
+    }
+
     /// Keep this source's dither UNFUSED, or fuse it (SQ-0816).
     ///
     /// `fuse` is the player's `fuse_art_dither` preference, and it can only ever
@@ -404,6 +1210,16 @@ impl PictSource {
         self.blend_columns = want;
         self.cache.clear();
         self.adaptive_cache.clear();
+        // Every scaled pixel was resampled from a decode this just invalidated.
+        self.scaled_cache.clear();
+        self.adaptive_scaled_cache.clear();
+        // The INDICES do not depend on the fuse — `blend_half_width_columns`
+        // runs on the RGBA, after colourisation — so this clear buys nothing
+        // today. It is here so that every decode cache on this source has ONE
+        // invalidation story ("cleared wherever `cache` is"), rather than one
+        // cache with a footnote; a fuse toggle is a settings edit, and paying a
+        // re-decode for it once is not a cost worth reasoning about. SQ-1197.
+        self.index_planes.clear();
     }
 
     /// Is this source fusing a 640-wide rendition's dither on the way out?
@@ -543,7 +1359,21 @@ impl PictSource {
         if self.current_plte != plte {
             self.current_plte = plte;
             self.palette_gen += 1;
+            self.evict_stale_adaptive_cache();
         }
+    }
+
+    /// Drop every adaptive decode cached against a palette generation OTHER
+    /// than the current one. Call immediately after `palette_gen` bumps
+    /// (SQ-1193): `adaptive_cache` is keyed `(resnum, palette_gen)` and the
+    /// generation only ever climbs, so on a `screen_palette` machine — where
+    /// every drawn picture routes through the adaptive path (SQ-0887) — a
+    /// long session otherwise accumulates a full RGBA per (pic, scene
+    /// palette) it will never be asked to decode through again.
+    fn evict_stale_adaptive_cache(&mut self) {
+        let gen = self.palette_gen;
+        self.adaptive_cache.retain(|&(_, g), _| g == gen);
+        self.adaptive_scaled_cache.retain(|&(_, g), _| g == gen);
     }
 
     /// Decode `resnum` for a replay WITHOUT establishing a new Current Palette —
@@ -788,25 +1618,133 @@ impl PictSource {
         Some(((unit_w / space_w).max(1), (unit_h / space_h).max(1)))
     }
 
+    /// `resnum`'s decoded PALETTE-INDEX plane from the native archive, decoding
+    /// it once and retaining it (SQ-1197). `None` for a Blorb source (whose
+    /// pictures are PNGs — see [`Self::index_planes`](field)), an unknown id, a
+    /// size-only placeholder, or a compression variant `blorb` does not decode.
+    ///
+    /// This is the only caller of `InfocomPics::decode` under `crates/app/src`
+    /// (test suites call it directly as an oracle), so a plane cached here is a
+    /// decompress that never runs again for the life of the source.
+    fn index_plane(&mut self, resnum: u32) -> Option<Arc<blorb::infocom_pics::Picture>> {
+        if !self.index_planes.contains_key(&resnum) {
+            let decoded = self.native.as_ref().and_then(|pics| {
+                let id = u16::try_from(resnum).ok()?;
+                pics.decode(id).ok()
+            });
+            self.index_planes.insert(resnum, decoded.map(Arc::new));
+        }
+        self.index_planes.get(&resnum).and_then(|o| o.clone())
+    }
+
     fn get(&mut self, resnum: u32) -> Option<&Arc<DynamicImage>> {
         if !self.cache.contains_key(&resnum) {
-            let decoded = match (&self.blorb, &self.native) {
-                (Some(b), _) => b
+            let decoded = match &self.blorb {
+                Some(b) => b
                     .resource(b"Pict", resnum)
                     .and_then(|(_ty, bytes)| crate::cover::decode(bytes)),
-                (None, Some(pics)) => {
-                    native_image(pics, resnum, self.hw_palette.as_ref(), self.blend_columns)
+                None if self.native.is_some() => self
+                    .index_plane(resnum)
+                    .and_then(|pic| native_image(&pic, self.hw_palette.as_ref(), self.blend_columns)),
+                // SQ-1475: a family-C picture number names a FILE — §8.3's
+                // `R01nnn` for the room usage — and the release disk either
+                // holds it or does not. Unlike family B there is no offset to
+                // apply: §12.10's "a room's picture index IS the room number"
+                // has already been resolved (and the Hulk's remap applied) by
+                // `scott::Vm::current_picture`, so `resnum` is the index the
+                // file name spells. A record the platform's decoder refuses
+                // (§11) is remembered as `None` rather than retried.
+                // SQ-1477: family E names a FILE too, `R01nn.PAK` (§8.5), and
+                // `resnum` is already the picture index — `ScottSession`
+                // applied §12.11's *Hulk* remap on the way in, where it knows
+                // the number came from the room rather than from an explicit
+                // draw-picture opcode.
+                None if self.scott_saga_dos.is_some() => {
+                    self.scott_saga_dos.as_ref().and_then(|(files, _)| {
+                        let name = scott::saga_dos::picture_file_name(resnum as usize)?;
+                        scott_dos_saga_image(files.record(&name)?)
+                    })
                 }
-                (None, None) => None,
+                None if self.scott_saga.is_some() => {
+                    self.scott_saga.as_ref().and_then(|(files, release)| {
+                        let name = scott::room_picture_file_name(release, resnum as usize)?;
+                        let record = files.record(&name)?;
+                        scott_saga_image(record, release.platform)
+                    })
+                }
+                // SQ-1496: the Atari companion side has no name to look up at
+                // all, so `resnum` is resolved through the picture table
+                // instead. `INVENTORY_PICTURE` (98) is the one index the
+                // table itself leaves unused — the real inventory backdrop is
+                // a fixed pointer elsewhere on side A (see the table's own
+                // doc) — so it is special-cased here rather than in the
+                // table reader, exactly as every other index is resolved by
+                // asking the table for (Room, resnum).
+                None if self.scott_saga_atari.is_some() => {
+                    self.scott_saga_atari.as_ref().and_then(|(pics, _)| {
+                        let file_offset = if resnum as usize == scott::saga_us::INVENTORY_PICTURE {
+                            pics.table.inventory_backdrop_file_offset()?
+                        } else {
+                            pics.table.find(scott::PictureUsage::Room, resnum as u16)?
+                        };
+                        let pic = scott::saga_atari::decode_table_picture(
+                            &pics.side_b_spliced,
+                            file_offset,
+                            pics.scheme,
+                        )?;
+                        Some(picture_to_image(&pic))
+                    })
+                }
+                // SQ-1524/SQ-1525: a STANDALONE decode, on a throwaway
+                // canvas — for a one-off existence/geometry query (the title
+                // card check at session boot, `/dump-windows`), not for the
+                // picture band itself. The band's own render goes through
+                // `Self::scott_composite`'s line-art path, which keeps the
+                // machine's own running canvas rather than a fresh one every
+                // time (see `AtariLineArtPictures`'s doc) — this cache-backed
+                // path cannot do that (a cached image is not a canvas state
+                // to keep drawing onto), so it would answer wrong for one of
+                // the six never-clearing room records or for a subsequent
+                // visit that should inherit prior state. Good enough for a
+                // query that only wants to know whether SOMETHING is there.
+                None if self.scott_saga_atari_lineart.is_some() => {
+                    self.scott_saga_atari_lineart.as_ref().and_then(|(pics, _)| {
+                        let off = pics.table.find(scott::PictureUsage::Room, resnum as u16)?;
+                        let mut canvas = scott::saga_atari_lineart::LineArtCanvas::new();
+                        let pic = if resnum as usize == scott::DARKNESS_PICTURE {
+                            scott::saga_atari::draw_darkness_card(&mut canvas, &pics.side_b_spliced, off)
+                                .ok()?
+                        } else {
+                            scott::saga_atari::draw_line_art_record(&mut canvas, &pics.side_b_spliced, off)
+                                .ok()?
+                        };
+                        Some(line_art_picture_to_image(&pic))
+                    })
+                }
+                // SQ-1463: room n's picture is `pictures[n - 1]` (the decoder's
+                // own identity mapping, §8.6) — `resnum` here is the picture
+                // number, "by convention, picture number == room number", so
+                // room 0 (no picture, per `checked_sub`) and an index past the
+                // end (a truncated decode, §11) both fall through to `None`.
+                None => self.scott_c64.as_ref().and_then(|(lists, scale, platform)| {
+                    let list = lists.get(resnum.checked_sub(1)? as usize)?;
+                    Some(scott_c64_image(list, *scale, *platform))
+                }),
             };
             self.cache.insert(resnum, decoded.map(Arc::new));
         }
         self.cache.get(&resnum).and_then(|o| o.as_ref())
     }
 
-    /// `(width, height)` of a Pict, or `None`.
+    /// `(width, height)` of a Pict, or `None`. Answers from the header sniffer
+    /// ([`Self::dims`]) rather than a full decode: `image_info` (Glk selector
+    /// 8) is the sole caller, and a game can sweep it over its whole picture
+    /// catalog at boot, which used to decode and pin every one of those images
+    /// in the unbounded `cache` forever — pixels no caller here ever asked for
+    /// (SQ-1194). A caller that genuinely needs the DECODED pixels' dimensions
+    /// should call [`Self::image`] and measure the result directly, not this.
     pub fn info(&mut self, resnum: u32) -> Option<(u32, u32)> {
-        self.get(resnum).map(|i| i.dimensions())
+        self.dims(resnum)
     }
 
     /// The decoded image for a Pict about to be DRAWN, or `None`. Returns a
@@ -843,6 +1781,100 @@ impl PictSource {
         arc
     }
 
+    /// Is `resnum`'s decode ANSWERED BY the Current Palette — the same test
+    /// [`Self::image`] and [`Self::image_under_current_palette`] each make before
+    /// deciding whether to route through [`Self::adaptive_image`] — an adaptive
+    /// Blorb picture, or (SQ-0887) any picture at all on a one-screen-palette
+    /// machine. Shared here so the scaled-image cache below keys itself the same
+    /// way its source does.
+    fn is_palette_dependent(&self, resnum: u32) -> bool {
+        self.screen_palette || self.adaptive.contains(&resnum)
+    }
+
+    /// [`Self::image`] scaled into unit space (`session::v6_scaled_art`'s job),
+    /// cached so the resize runs once per distinct decode rather than on every
+    /// draw (SQ-1196): every v6 window refresh and every timer tick re-requests
+    /// the same picture at the same `scale`, and a Nearest resize into a fresh
+    /// ~1&nbsp;MB buffer is not free to redo each time.
+    ///
+    /// `scale == (1, 1)` is the identity — no resample, no copy, the *source*
+    /// `Arc` is the answer — which is also the common case for a Blorb-less
+    /// story (`art_scale` degenerates to (1, 1) exactly when a source has no
+    /// scaling opinion; see [`Self::art_scale`]).
+    ///
+    /// Keyed and invalidated exactly like the source cache it wraps: a
+    /// palette-dependent picture by `(resnum, palette_gen)`, evicted the moment
+    /// the generation moves on ([`Self::evict_stale_adaptive_cache`]); anything
+    /// else by `resnum` alone, cleared wherever [`Self::cache`] is
+    /// ([`Self::set_fuse_dither`]). `art_scale` itself never changes for a
+    /// source's lifetime (it is the archive's own density — see
+    /// `session::GameSession::art_scale`), so it is not part of either key: a
+    /// caller that changed it mid-session would need its own cache flush, and
+    /// none does.
+    pub fn scaled_image(&mut self, resnum: u32, scale: (u32, u32)) -> Option<Arc<DynamicImage>> {
+        self.scaled_cached(resnum, scale, |s| s.image(resnum))
+    }
+
+    /// [`Self::image_under_current_palette`] scaled into unit space and cached
+    /// the same way [`Self::scaled_image`] is — a replay op resolves the same
+    /// `(resnum, palette_gen)` pixels a live draw would, so it shares that
+    /// cache rather than resampling a second time.
+    pub fn scaled_image_under_current_palette(
+        &mut self,
+        resnum: u32,
+        scale: (u32, u32),
+    ) -> Option<Arc<DynamicImage>> {
+        self.scaled_cached(resnum, scale, |s| s.image_under_current_palette(resnum))
+    }
+
+    /// Shared cache lookup/populate for [`Self::scaled_image`] and
+    /// [`Self::scaled_image_under_current_palette`]: `decode` is whichever of
+    /// the two source methods the caller wants, so both share one cache and one
+    /// eviction story instead of duplicating it.
+    ///
+    /// **`decode` runs on a cache HIT too, and that is the point (SQ-1288).**
+    /// [`Self::image`] is not a pure function: drawing a NON-adaptive picture
+    /// establishes the Current Palette from its PLTE (§11.3, see
+    /// [`Self::set_current_palette_from`]), which is the whole mechanism by
+    /// which a later adaptive picture follows the scene. SQ-1196 returned early
+    /// on a `scaled_cache` hit and so skipped that call for any base picture the
+    /// session had already drawn once — and a game revisits its scenes. Arthur
+    /// kept the church's brown frame after walking back out to the blue
+    /// churchyard, and its F1 picture screen no longer came back the way it went
+    /// away, because the second draw of Pict 4 established nothing.
+    ///
+    /// Only the RESAMPLE is cached here, which is the cost SQ-1196 set out to
+    /// remove: `decode` itself is already cached ([`Self::cache`] /
+    /// [`Self::adaptive_cache`]), so a repeat draw pays a hash lookup and an
+    /// `Arc` clone, not a decompress.
+    fn scaled_cached(
+        &mut self,
+        resnum: u32,
+        scale: (u32, u32),
+        decode: impl FnOnce(&mut Self) -> Option<Arc<DynamicImage>>,
+    ) -> Option<Arc<DynamicImage>> {
+        let source = decode(self)?;
+        // Read `palette_gen` AFTER the decode: a base picture drawn on a
+        // one-screen-palette machine (SQ-0887) is palette-dependent by
+        // `is_palette_dependent` and yet bumps the generation on its way
+        // through, so the pixels just decoded belong to the NEW generation.
+        if self.is_palette_dependent(resnum) {
+            let key = (resnum, self.palette_gen);
+            if let Some(img) = self.adaptive_scaled_cache.get(&key) {
+                return Some(Arc::clone(img));
+            }
+            let scaled = scale_art(&source, scale);
+            self.adaptive_scaled_cache.insert(key, Arc::clone(&scaled));
+            return Some(scaled);
+        }
+        if let Some(img) = self.scaled_cache.get(&resnum) {
+            return Some(Arc::clone(img));
+        }
+        let scaled = scale_art(&source, scale);
+        self.scaled_cache.insert(resnum, Arc::clone(&scaled));
+        Some(scaled)
+    }
+
     /// Remember Pict `resnum`'s PLTE as the Current Palette (§11.3). No-op for a
     /// non-indexed picture (no PLTE); bumps `palette_gen` only on a real change.
     ///
@@ -868,6 +1900,7 @@ impl PictSource {
         if self.current_plte.as_deref() != Some(plte.as_slice()) {
             self.current_plte = Some(plte);
             self.palette_gen += 1;
+            self.evict_stale_adaptive_cache();
         }
     }
 
@@ -877,7 +1910,13 @@ impl PictSource {
     fn adaptive_image(&mut self, resnum: u32) -> Option<Arc<DynamicImage>> {
         let key = (resnum, self.palette_gen);
         if !self.adaptive_cache.contains_key(&key) {
-            let decoded = match (&self.blorb, &self.native) {
+            // SQ-1197: a native picture's INDICES are the same under every
+            // palette, so this miss costs a re-MAP off the retained index plane
+            // (a table lookup per pixel) rather than a fresh decompress — which
+            // is what a palette bump asks for, once per display-list op, when
+            // `session::replay_under_current_palette` replots every window.
+            let plane = self.blorb.is_none().then(|| self.index_plane(resnum)).flatten();
+            let decoded = match (&self.blorb, &plane) {
                 // Clone the raw PNG bytes so the immutable blorb borrow ends
                 // before we mutate the cache.
                 (Some(b), _) => b
@@ -901,11 +1940,11 @@ impl PictSource {
                 // reaches here with one — `from_native` leaves such a source with
                 // an empty adaptive set — but a restored Current Palette must not
                 // be able to reach in through the replay path either.
-                (None, Some(pics)) => {
+                (None, Some(pic)) => {
                     let pal = self
                         .hw_palette
                         .or_else(|| self.current_plte.as_deref().map(colour_table));
-                    native_image(pics, resnum, pal.as_ref(), self.blend_columns)
+                    native_image(pic, pal.as_ref(), self.blend_columns)
                 }
                 (None, None) => None,
             };
@@ -1223,11 +2262,10 @@ impl PictureOverride {
 /// when the name cannot express one (SQ-0798).
 ///
 /// **The format states the part number, and the filename carries it.** Header
-/// byte 0 is the part; Frotz's DOS port turns that number straight back into a
-/// filename — `extension[3] = '0' + number`, under the comment *"EGA pictures
-/// may be stored in two separate graphics files"* (`src/dos/bcpic.c`) — and its
-/// `open_graphics_file(int number)` takes the part as a parameter for exactly
-/// this reason. So the rule here is Infocom's own: replace the final character
+/// byte 0 is the part, read directly from the archive's own header — an
+/// interop fact about the shipped format (EGA pictures could be split across
+/// two graphics files on a part boundary), not sourced from any interpreter's
+/// code. So the rule here is Infocom's own: replace the final character
 /// of the extension with the part's digit, leaving everything else, case
 /// included, untouched. `Pic.data` has no trailing digit and therefore no
 /// continuation, which is correct — the Amiga releases ship one file.
@@ -1704,23 +2742,28 @@ pub fn absorb_continuations(
     None
 }
 
-/// Decode one picture out of a native Infocom archive into the same
-/// `DynamicImage` the Blorb path yields (SQ-0719).
+/// Colourise one already-decoded native picture into the same `DynamicImage`
+/// the Blorb path yields (SQ-0719).
 ///
 /// `Picture::rgba` already expands the palette indices and gives the
 /// transparent index alpha 0, which is exactly what `Canvas`'s alpha-honoring
-/// overlay wants. `None` covers every "no image here" case alike: an unknown
-/// id, a size-only placeholder, or a compression variant we do not decode.
+/// overlay wants. `None` is the one case left after the decode: an index plane
+/// whose length disagrees with its own `width * height`.
 ///
 /// `palette`, when given, overrides the picture's own — the Current Palette an
 /// adaptive picture is drawn through (SQ-0743).
+///
+/// This used to take the ARCHIVE and a resnum and decompress the picture itself,
+/// which made a palette change an O(decode) event. It takes the decoded index
+/// plane instead (SQ-1197), so a palette change is O(pixels): the plane comes
+/// from [`PictSource::index_plane`], which decodes each picture once, and
+/// everything below this line — the table lookup, the transparency, the dither
+/// fuse — is what actually varies with the palette.
 fn native_image(
-    pics: &blorb::infocom_pics::InfocomPics,
-    resnum: u32,
+    pic: &blorb::infocom_pics::Picture,
     palette: Option<&[blorb::infocom_pics::Rgb; 16]>,
     blend_columns: bool,
 ) -> Option<DynamicImage> {
-    let pic = pics.decode(u16::try_from(resnum).ok()?).ok()?;
     let rgba = match palette {
         Some(pal) => pic.rgba_with(pal),
         None => pic.rgba(),
@@ -1730,6 +2773,467 @@ fn native_image(
         blend_half_width_columns(&mut buf);
     }
     Some(DynamicImage::ImageRgba8(buf))
+}
+
+/// The largest supersample [`scott_c64_scale`] will ask for. Four is 1020×376,
+/// past any picture band a terminal presents at a readable font size, and the
+/// point where a room's RGBA cache entry reaches 1.5 MB (SQ-1467).
+const SCOTT_C64_MAX_SCALE: u32 = 4;
+
+/// How many device pixels per native pixel to draw the C64 Mysterious
+/// Adventures' vector artwork at, given the picture band's height in device
+/// pixels (SQ-1467).
+///
+/// **The rule: round the band's own magnification UP, and stop at
+/// [`SCOTT_C64_MAX_SCALE`].** The band reserves a fixed row count and the
+/// renderer fits the picture into it preserving aspect
+/// ([`crate::render::graphics::fit_for_protocol`]), so the magnification the
+/// picture will actually be shown at is the smaller of the two axes' ratios —
+/// and on any pane wide enough to show this artwork at all that is the
+/// vertical one, since 255/94 is a wider shape than sixteen rows of any
+/// ordinary cell against a full-width band. Rounding up rather than down
+/// leaves the renderer a small MINIFICATION, which takes the area filter and
+/// is the direction that loses nothing; rounding down would leave it
+/// magnifying with `Nearest` and put the blocks straight back.
+///
+/// The pane's width is deliberately not consulted: it is not known when the
+/// source is built, and on a narrow pane the only cost of the taller number is
+/// a slightly larger source for the same fit.
+///
+/// Backend-neutral, and it has to be: kitty, sixel and the half-block fallback
+/// all receive the same `DynamicImage` and fit it the same way. **Half-blocks
+/// gain the least** — its grid is one sample per column and two per row, so a
+/// 16-row band is 32 samples for 94 native rows whatever this returns, and all
+/// the extra resolution buys there is a better-averaged downsample. That is a
+/// reason to keep one path, not to fork one.
+fn scott_c64_scale(band_px_high: u32) -> u32 {
+    band_px_high
+        .div_ceil(scott::c64::PICTURE_HEIGHT as u32)
+        .clamp(1, SCOTT_C64_MAX_SCALE)
+}
+
+/// The largest supersample [`scott_atari_line_art_scale`] will ask for
+/// (SQ-1526) — the same clamp [`SCOTT_C64_MAX_SCALE`] applies to family B,
+/// for the same reason: past this a room's RGBA cache entry is bigger than a
+/// terminal picture band ever needs. Four is 640 x 384 on this format's
+/// smaller 160 x 96 canvas, against family B's 1020 x 376 at the same clamp.
+const SCOTT_ATARI_LINE_ART_MAX_SCALE: u32 = 4;
+
+/// How many device pixels per native pixel to draw an Atari 8-bit line-art
+/// room picture at, given the picture band's height in device pixels
+/// (SQ-1526) — [`scott_c64_scale`]'s own rule (round the band's own
+/// magnification up, stop at the format's own max), applied to this
+/// format's [`scott::saga_atari_lineart::CANVAS_HEIGHT`] rather than family
+/// B's [`scott::c64::PICTURE_HEIGHT`]. See that function's doc for why
+/// rounding up and why the pane's width is not consulted; neither argument
+/// is specific to family B.
+fn scott_atari_line_art_scale(band_px_high: u32) -> u32 {
+    band_px_high
+        .div_ceil(scott::saga_atari_lineart::CANVAS_HEIGHT as u32)
+        .clamp(1, SCOTT_ATARI_LINE_ART_MAX_SCALE)
+}
+
+/// Which resolution to draw a Commodore 64 *Mysterious Adventures* room
+/// picture at (SQ-1473): the band-fitted supersample [`scott_c64_scale`]
+/// derives, or the release's own 255×94 canvas with no supersampling at all.
+///
+/// This is a player choice (the launch-options dialog, `crate::launch_options`),
+/// never a fact about the story — unlike [`crate::picker::ScottPictures`],
+/// which says WHETHER a story has native vector art to choose a resolution for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScottPictureResolution {
+    /// [`scott_c64_scale`]'s band-fitted supersample — sharper on a terminal
+    /// whose cells render several device pixels each, which is the ordinary
+    /// case. The default.
+    #[default]
+    HiRes,
+    /// The release's own 255×94 canvas, scale 1 — what the Commodore 64 itself
+    /// drew, before any terminal magnifies it.
+    Original,
+}
+
+impl ScottPictureResolution {
+    /// The per-game sidecar's own spelling, read by [`Self::from_key`].
+    pub fn key(self) -> &'static str {
+        match self {
+            ScottPictureResolution::HiRes => "hires",
+            ScottPictureResolution::Original => "original",
+        }
+    }
+
+    /// Parse the sidecar's spelling. An unrecognised token is `None` — the same
+    /// "a corrupt sidecar inherits the default" rule every other per-game key
+    /// follows (`styles::PerGameConfig::read`).
+    pub fn from_key(s: &str) -> Option<ScottPictureResolution> {
+        match s {
+            "hires" => Some(ScottPictureResolution::HiRes),
+            "original" => Some(ScottPictureResolution::Original),
+            _ => None,
+        }
+    }
+
+    /// The launch-options dialog's row label.
+    pub fn label(self) -> &'static str {
+        match self {
+            ScottPictureResolution::HiRes => "hi-res (default)",
+            ScottPictureResolution::Original => "original",
+        }
+    }
+}
+
+/// The four picture facts a `ScottSession` needs from outside itself, bundled
+/// into one value (SQ-1485).
+///
+/// `pict_blorb`, `char_px`, `resolution` and `saga_pictures` always travel
+/// together: `startup.rs` resolves all four before the launch session boots,
+/// `reset.rs` resolves all four again before `@restart` rebuilds one, and both
+/// read them from the same places (the story path, the terminal's Picker, the
+/// per-game sidecar, the mount). Before this type they were four positional
+/// tail parameters of `ScottSession::new_with_options`, which is exactly the
+/// shape CLAUDE.md's "Refactoring policy" warns about: a hand-maintained
+/// invariant across two files that a caller supplying a subset, or the two
+/// callers drifting on HOW one fact is resolved, would not be caught by the
+/// compiler. `reset.rs` re-deriving `saga_pictures` by hand (`crate::hints
+/// ::saga_picture_files`) rather than reading it off a live mount, the way
+/// `startup.rs` can, was exactly that drift risk — [`Self::resolve`] is now
+/// the one function both call.
+#[derive(Debug)]
+pub struct ScottPictureSources {
+    /// The game's own Blorb `Pict` resources, for a `.blb` graphics container
+    /// (SQ-0402). `None` for a plain `.dat`, and for every non-Blorb release
+    /// below whichever of `saga_pictures` or nothing at all applies instead.
+    pub pict_blorb: Option<blorb::Blorb>,
+    /// The terminal's cell size in device pixels. Only the Commodore 64
+    /// *Mysterious Adventures* vector artwork reads it (SQ-1467) — the picture
+    /// band is a fixed row count, and the cell height is the other half of how
+    /// many device pixels a room picture is drawn into.
+    pub char_px: (u32, u32),
+    /// The player's HiRes/Original choice for a vector-artwork picture
+    /// source (SQ-1473): the C64/ZX family-B display lists and, since
+    /// SQ-1526, the Atari 8-bit line-art token stream. Meaningless, and
+    /// unread, for every bitmap picture source.
+    pub resolution: ScottPictureResolution,
+    /// A US S.A.G.A. release's own family-C/D/E picture files, `(name,
+    /// record)`, read off the same container the database came from (spec
+    /// §8.3/§10.6/§8.5, SQ-1475/SQ-1476/SQ-1477). Empty for every other
+    /// dialect, and for a S.A.G.A. database opened with no container to carry
+    /// them.
+    pub saga_pictures: Vec<(String, Vec<u8>)>,
+    /// A scrambled Apple II release's **LOOK close-up table**, read off the
+    /// `M2` file on its boot side (spec Appendix A item 43, SQ-1499).
+    ///
+    /// It travels with the pictures because it comes from the same place they
+    /// do — the mounted container, not the database — and because it is
+    /// useless without them: it names picture indices, and `saga_pictures` is
+    /// what those indices resolve through. `None` for every release but
+    /// *Voodoo Castle* and *The Count* on the Apple II, which are the only two
+    /// with any rows.
+    pub look_table: Option<scott::AppleLookTable>,
+    /// An Atari 8-bit US S.A.G.A. release's own companion picture SIDE, read
+    /// whole (SQ-1496) — `saga_pictures` is always empty for this platform
+    /// (there is no filesystem on the companion side to walk, §12.10), so the
+    /// pictures travel this way instead:
+    /// [`crate::graphics::PictSource::from_scott_saga_atari`] reads side A's
+    /// own (usage, index) table against this buffer. `None` for every other
+    /// release, and for an Atari release whose companion side is missing or
+    /// unpaired ([`crate::hints::saga_atari_companion_side`]).
+    pub atari_side_b: Option<Vec<u8>>,
+}
+
+impl ScottPictureSources {
+    /// No pictures at all, at [`ScottSession::FALLBACK_CHAR_PX`] and the
+    /// default resolution — what `ScottSession::new`/`new_with_trace` build
+    /// for a caller with no pictures to hand over, and the starting point for
+    /// a test fixture that only needs to set one or two of the four facts
+    /// (`with_char_px`, `with_resolution`, `with_saga_pictures`,
+    /// `with_pict_blorb`).
+    pub fn none() -> Self {
+        Self {
+            pict_blorb: None,
+            char_px: crate::scott_session::ScottSession::FALLBACK_CHAR_PX,
+            resolution: ScottPictureResolution::default(),
+            saga_pictures: Vec::new(),
+            look_table: None,
+            atari_side_b: None,
+        }
+    }
+
+    /// Set the Blorb `Pict` source (SQ-0402).
+    pub fn with_pict_blorb(mut self, pict_blorb: Option<blorb::Blorb>) -> Self {
+        self.pict_blorb = pict_blorb;
+        self
+    }
+
+    /// Set the terminal cell size a C64 vector decode is drawn at (SQ-1467).
+    pub fn with_char_px(mut self, char_px: (u32, u32)) -> Self {
+        self.char_px = char_px;
+        self
+    }
+
+    /// Set the C64 vector artwork's resolution choice (SQ-1473).
+    pub fn with_resolution(mut self, resolution: ScottPictureResolution) -> Self {
+        self.resolution = resolution;
+        self
+    }
+
+    /// Set a US S.A.G.A. release's own picture files (SQ-1475).
+    pub fn with_saga_pictures(mut self, saga_pictures: Vec<(String, Vec<u8>)>) -> Self {
+        self.saga_pictures = saga_pictures;
+        self
+    }
+
+    /// Set a scrambled Apple II release's LOOK close-up table (SQ-1499).
+    pub fn with_look_table(mut self, look_table: Option<scott::AppleLookTable>) -> Self {
+        self.look_table = look_table;
+        self
+    }
+
+    /// Set an Atari 8-bit release's companion picture side, whole (SQ-1496).
+    pub fn with_atari_side_b(mut self, atari_side_b: Option<Vec<u8>>) -> Self {
+        self.atari_side_b = atari_side_b;
+        self
+    }
+
+    /// Resolve all four facts the way `startup.rs` and `reset.rs` do (SQ-1485)
+    /// — the one function both call, so they cannot drift on any of the four.
+    ///
+    /// `pict_blorb` arrives already resolved (`resolve_pict_blorb`, `main.rs`)
+    /// rather than being resolved in here: it is binary-crate-only (it reaches
+    /// into `picker_ui`'s zip-aware tiers), and this type lives in the `app`
+    /// library crate alongside every other Scott session type. `picker` is
+    /// likewise handed in — the launch/`@restart` Picker, or `None` when there
+    /// is no terminal to ask (the fallback cell size below applies).
+    ///
+    /// `saga_pictures` is re-derived from `story_path`/`bytes` on every call,
+    /// through the same [`crate::hints::saga_picture_files`] a live mount's
+    /// `MountedStory::saga_pictures` is itself built from — so a caller
+    /// holding a fresh mount (`startup.rs`) and a caller rebuilding from
+    /// stored story bytes alone (`reset.rs`) resolve the identical set, from
+    /// one function, rather than the two hand-kept-in-step call sites this
+    /// type replaces.
+    pub fn resolve(
+        story_path: &std::path::Path,
+        bytes: &[u8],
+        game_dir: &std::path::Path,
+        pict_blorb: Option<blorb::Blorb>,
+        picker: Option<&ratatui_image::picker::Picker>,
+        resolution_override: Option<ScottPictureResolution>,
+    ) -> Self {
+        let char_px = picker
+            .map(|p| {
+                let f = p.font_size();
+                (f.width as u32, f.height as u32)
+            })
+            .unwrap_or(crate::scott_session::ScottSession::FALLBACK_CHAR_PX);
+        let resolution = resolution_override
+            .or_else(|| crate::styles::read_per_game_scott_picture_resolution(game_dir))
+            .unwrap_or_default();
+        // SQ-1476/SQ-1477: `saga_picture_files` itself gates on the container
+        // (a zip's family-E entries are found by content, not by platform), so
+        // handing it `None` for a database `detect_saga_us` cannot classify
+        // (the MS-DOS reference-text format) is exactly what `reset.rs`'s own
+        // hand-written call already did.
+        let saga_pictures = crate::hints::saga_picture_files(story_path, scott::detect_saga_us(bytes));
+        // SQ-1499: and, for the three scrambled Apple II releases, the LOOK
+        // close-up table off the same boot side the story came from. Derived
+        // here for the same reason `saga_pictures` is — so `startup.rs` and
+        // `reset.rs` cannot drift apart — and it costs a mount only when the
+        // release actually is one of the three, because
+        // `saga_apple_look_table` reads `M2` and refuses everything else.
+        let look_table = crate::hints::saga_apple_look_table(story_path);
+        // SQ-1496: and, for an Atari 8-bit release, its whole companion
+        // picture side — there is no per-file walk to do on this platform at
+        // all (`saga_pictures` above is always empty for it), so the side
+        // travels whole and `PictSource::from_scott_saga_atari` reads its
+        // (usage, index) table directly.
+        let atari_side_b = matches!(scott::detect_saga_us(bytes), Some(scott::SagaPlatform::Atari8Bit))
+            .then(|| crate::hints::saga_atari_companion_side(story_path))
+            .flatten();
+        Self { pict_blorb, char_px, resolution, saga_pictures, look_table, atari_side_b }
+    }
+}
+
+/// Which platform's *Mysterious Adventures* release a family-B display list
+/// (`scott::c64::PictureList`, §8.2) came off — the two platforms store the
+/// IDENTICAL opcode streams and canvas, and the palette a stored index
+/// resolves through is the only fact that differs (SQ-1480).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScottFamilyBPlatform {
+    /// Decoded off a PRG/D64 image (`scott::c64`, SQ-1463).
+    C64,
+    /// Decoded off a `.z80` snapshot (`scott::zx_mysterious`, SQ-1478/SQ-1480).
+    Zx,
+}
+
+impl ScottFamilyBPlatform {
+    /// The sixteen-entry table a stored pixel index resolves through —
+    /// `scott::c64::PALETTE` (already composed with §8.2's remap table A) or
+    /// `scott::zx_mysterious::PALETTE` (§8.1's optimised Sinclair table, no
+    /// remap).
+    fn palette(self) -> &'static [(u8, u8, u8); 16] {
+        match self {
+            ScottFamilyBPlatform::C64 => &scott::c64::PALETTE,
+            ScottFamilyBPlatform::Zx => &scott::zx_mysterious::PALETTE,
+        }
+    }
+
+    /// `/dump-windows`'s "source=" word for this platform (SQ-1463, SQ-1480).
+    pub fn label(self) -> &'static str {
+        match self {
+            ScottFamilyBPlatform::C64 => "C64",
+            ScottFamilyBPlatform::Zx => "ZX Spectrum",
+        }
+    }
+}
+
+/// Draw one Commodore 64 or ZX Spectrum Mysterious Adventures room picture at
+/// `scale` device pixels per native pixel
+/// (`scott::c64::PictureList::rasterise_at_with_palette`, an indexed bitmap
+/// over `platform`'s sixteen-entry palette) and hand it over in the same
+/// `DynamicImage` shape the Blorb and native-Infocom paths hand
+/// `WinNode::Graphics` — the renderer's existing backend selection (kitty,
+/// sixel, the half-block fallback) and its aspect-preserving fit into the
+/// picture band do the rest, no protocol special-casing here (SQ-1463,
+/// SQ-1467, SQ-1480).
+///
+/// A supersample multiplies both axes, so the picture's aspect is exactly the
+/// one the native canvas has and the band's fit is the same fit at the same
+/// cell rect — this adds resolution to what the renderer resamples, and no
+/// second correction of any kind.
+///
+/// Family B carries no per-pixel transparency (§8.2's fill and line ops paint
+/// every pixel the canvas starts with), so every pixel comes out fully
+/// opaque — unlike [`native_image`]'s Infocom pictures, which do carry a
+/// transparent index for adaptive overlays.
+fn scott_c64_image(list: &scott::c64::PictureList, scale: u32, platform: ScottFamilyBPlatform) -> DynamicImage {
+    let pic = list.rasterise_at_with_palette(scale, platform.palette());
+    let mut buf = RgbaImage::new(pic.width as u32, pic.height as u32);
+    for y in 0..pic.height {
+        for x in 0..pic.width {
+            let (r, g, b) = pic.rgb(x, y).unwrap_or((0, 0, 0));
+            buf.put_pixel(x as u32, y as u32, Rgba([r, g, b, 255]));
+        }
+    }
+    DynamicImage::ImageRgba8(buf)
+}
+
+/// Decode one US S.A.G.A. **family-C** record (spec §8.3) to the same
+/// `DynamicImage` shape every other picture source hands `WinNode::Graphics`
+/// (SQ-1475). `None` when the record is not a family-C picture at all
+/// (§11's named refusals — a truncated record, a placement covering no
+/// region, a platform that uses another family).
+///
+/// **No scale argument, and no supersample.** Family B is vectors and nothing
+/// in the data fixes a size, which is why [`scott_c64_image`] takes one; a
+/// family-C record IS a 280x160 bitmap, so there is nothing to draw more
+/// finely and the renderer's aspect-preserving fit into the picture band is
+/// the whole of the scaling — exactly as for a Blorb's pre-rendered art.
+///
+/// Fully opaque: §8.3 gives every pixel one of four values and value 0 is
+/// black, so there is no transparent index. That is right for a ROOM picture,
+/// which is what a picture number resolves to; §12.11's object overlays would
+/// need the composite this does not do (see the module's own note).
+fn scott_saga_image(record: &[u8], platform: scott::SagaPlatform) -> Option<DynamicImage> {
+    // SQ-1476/SQ-1489: the Apple II releases are family D — an opcode stream
+    // played over the machine's own 280x192 hi-res page, nothing family C's
+    // strip decoder could stand in for, and six colours where family C has
+    // four — so it answers its own picture type and gets its own conversion.
+    if matches!(platform, scott::SagaPlatform::AppleII) {
+        return Some(hires_to_image(&scott::decode_family_d(record, platform).ok()?));
+    }
+    Some(picture_to_image(&scott::decode_family_c(record, platform).ok()?))
+}
+
+/// Decode one MS-DOS *Questprobe* **family-E** `.PAK` file (spec §8.5) to the
+/// same `DynamicImage` every other picture source hands `WinNode::Graphics`
+/// (SQ-1477). `None` for a record that is not family E at all — §11's named
+/// refusals: too short for a header, a signature that says `.EXE`, a chunk
+/// running past the end of the file, or a header describing no pixels.
+///
+/// Fully opaque, exactly as [`scott_saga_image`] is and for the same reason:
+/// §8.5 gives every pixel one of four values and value 0 is black, so there
+/// is no transparent index. That is right for a ROOM picture, which is what a
+/// picture number resolves to; §8.6's object overlays would need a composite
+/// this does not do.
+fn scott_dos_saga_image(record: &[u8]) -> Option<DynamicImage> {
+    let pic = scott::decode_family_e(record).ok()?;
+    Some(picture_to_image(&pic))
+}
+
+/// One decoded S.A.G.A. picture — family C, D or E — as an opaque RGBA image.
+/// All three decoders answer the same
+/// [`scott::saga_pictures::Picture`], so there is one conversion and not
+/// three.
+fn picture_to_image(pic: &scott::saga_pictures::Picture) -> DynamicImage {
+    let mut buf = RgbaImage::new(pic.width() as u32, pic.height() as u32);
+    for y in 0..pic.height() {
+        for x in 0..pic.width() {
+            let (r, g, b) = pic.rgb(x, y).unwrap_or((0, 0, 0));
+            buf.put_pixel(x as u32, y as u32, Rgba([r, g, b, 255]));
+        }
+    }
+    DynamicImage::ImageRgba8(buf)
+}
+
+/// One decoded S.A.G.A. record that is about to be composited as an object
+/// overlay (§12.11, SQ-1482) — which is either family C's or family E's
+/// four-value [`scott::saga_pictures::Picture`] or family D's six-colour
+/// [`scott::apple_pictures::HiResPicture`] (SQ-1489).
+///
+/// The composite asks each record three things — how big it is, which
+/// rectangle it painted, and what colour a pixel is — and both types answer
+/// all three; this is that shared shape, so the paste loop is written once.
+enum OverlayRecord {
+    /// Family C or family E: four palette entries, four stored colour bytes.
+    Strips(scott::saga_pictures::Picture),
+    /// Family D: the Apple II high-resolution page, six colours.
+    HiRes(scott::apple_pictures::HiResPicture),
+}
+
+impl OverlayRecord {
+    /// The rectangle this record's own pixels cover, or `None` if it drew
+    /// nothing — everything outside it must not be pasted, or a postage-stamp
+    /// overlay blanks the room around it.
+    fn painted(&self) -> Option<scott::saga_pictures::Painted> {
+        match self {
+            OverlayRecord::Strips(p) => p.painted(),
+            OverlayRecord::HiRes(p) => p.painted(),
+        }
+    }
+
+    /// `(width, height)` in pixels.
+    fn dims(&self) -> (usize, usize) {
+        match self {
+            OverlayRecord::Strips(p) => (p.width(), p.height()),
+            OverlayRecord::HiRes(p) => (p.width(), p.height()),
+        }
+    }
+
+    /// The colour at `(x, y)`, or `None` off the canvas.
+    fn rgb(&self, x: usize, y: usize) -> Option<scott::saga_pictures::Rgb> {
+        match self {
+            OverlayRecord::Strips(p) => p.rgb(x, y),
+            OverlayRecord::HiRes(p) => p.rgb(x, y),
+        }
+    }
+}
+
+/// One decoded family-D picture — the Apple II hi-res page — as an opaque
+/// RGBA image (SQ-1489).
+///
+/// Separate from [`picture_to_image`] because family D answers
+/// [`scott::apple_pictures::HiResPicture`], whose pixels index a six-colour
+/// palette rather than family C's four. Fully opaque for the same reason the
+/// others are: every pixel of a hi-res page has a colour, and black is one.
+fn hires_to_image(pic: &scott::apple_pictures::HiResPicture) -> DynamicImage {
+    let mut buf = RgbaImage::new(pic.width() as u32, pic.height() as u32);
+    for y in 0..pic.height() {
+        for x in 0..pic.width() {
+            let (r, g, b) = pic.rgb(x, y).unwrap_or((0, 0, 0));
+            buf.put_pixel(x as u32, y as u32, Rgba([r, g, b, 255]));
+        }
+    }
+    DynamicImage::ImageRgba8(buf)
 }
 
 /// Fuse a 640-wide rendition's column dither, because its pixels are half as wide
@@ -1742,9 +3246,9 @@ fn native_image(
 /// the lit stone, light grey against bright red for the highlights, brown against
 /// black for the shadow — and on a 640×200 EGA screen those columns are half as
 /// wide as an MCGA pixel, so the card and the eye fused each pair into a colour
-/// the palette does not contain. Bocfel says the same of Zork Zero's EGA hint
-/// background (`z6/draw_border.cpp:745`): "no single pixel of the artwork is the
-/// colour the eye actually sees". lanthorn keeps all 640 columns — geometrically
+/// the palette does not contain — Bocfel's own EGA hint background agrees that
+/// no single pixel of the artwork is the colour the eye actually sees. lanthorn
+/// keeps all 640 columns — geometrically
 /// right, [`PictSource::art_scale`] maps them onto exactly the rectangle a
 /// 320-wide plate covers — so without this the dither arrives at full contrast
 /// and the arch reads as salmon-and-olive speckle.
@@ -1930,7 +3434,7 @@ fn png_crc(ty: &[u8], data: &[u8]) -> u32 {
 /// Test-only: build a minimal Blorb containing one `Pict` resource whose raw
 /// bytes are `data`, at resource number `resnum` — for tests that need a
 /// resolvable image without a full story file.
-#[cfg(test)]
+#[cfg(all(test, any(feature = "t-render", feature = "t-session")))]
 pub(crate) fn test_blorb_with_pict(resnum: u32, data: &[u8]) -> blorb::Blorb {
     fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();
@@ -1962,9 +3466,10 @@ pub(crate) fn test_blorb_with_pict(resnum: u32, data: &[u8]) -> blorb::Blorb {
     blorb::Blorb::parse(file).expect("valid test blorb")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
+    use image::GenericImageView;
 
     /// The property that chose the tent over a two-tap box on fixed column pairs
     /// (SQ-0797): a period-2 dither collapses to its exact mean at BOTH phases, so
@@ -2003,6 +3508,58 @@ mod tests {
             assert_eq!(*img.get_pixel(x, 0), solid, "column {x} keeps its own colour");
         }
         assert_eq!(*img.get_pixel(2, 0), hole, "a cut-out is never painted in");
+    }
+
+    /// SQ-1480: the C64 and ZX Spectrum releases of *Mysterious Adventures*
+    /// store the identical §8.2 display list, so `scott_c64_image` drawn
+    /// through [`ScottFamilyBPlatform::C64`] and [`ScottFamilyBPlatform::Zx`]
+    /// must paint the SAME pixels (same line, same flood boundary) and differ
+    /// ONLY in which RGB a stored index resolves to.
+    #[test]
+    fn c64_and_zx_platforms_draw_the_same_coverage_different_colour() {
+        // A fill (background 0 → colour 3) bounded by one line (colour 7,
+        // §8.2's derived line colour for a background-0 image) — small enough
+        // to hand-verify, large enough that the fill and the line each touch
+        // more than one pixel.
+        let list = scott::c64::PictureList {
+            background: 0,
+            line: 7,
+            ops: vec![
+                scott::c64::PictureOp::Line { from: (10, 10), to: (50, 10) },
+                scott::c64::PictureOp::Fill { seed: (5, 5), colour: 3 },
+            ],
+        };
+        let c64 = scott_c64_image(&list, 1, ScottFamilyBPlatform::C64);
+        let zx = scott_c64_image(&list, 1, ScottFamilyBPlatform::Zx);
+        assert_eq!(c64.dimensions(), zx.dimensions(), "same canvas either way");
+
+        let (c64_rgba, zx_rgba) = (c64.to_rgba8(), zx.to_rgba8());
+        let mut any_pixel_differs = false;
+        for (c64_px, zx_px) in c64_rgba.pixels().zip(zx_rgba.pixels()) {
+            // Alpha is always opaque on either platform (§8.2 has no
+            // transparent index) — coverage is identical.
+            assert_eq!(c64_px.0[3], 255);
+            assert_eq!(zx_px.0[3], 255);
+            if c64_px != zx_px {
+                any_pixel_differs = true;
+            }
+        }
+        assert!(
+            any_pixel_differs,
+            "the two platforms' tables disagree on at least one of the indices this list uses"
+        );
+        // The seed pixel is where the fill (index 3) lands — spelled out
+        // because it is the pixel `scott::zx_mysterious`'s own palette test
+        // and the ZX `decode_pictures` test both use as their tell.
+        assert_eq!(
+            c64_rgba.get_pixel(5, 5).0[..3],
+            {
+                let (r, g, b) = scott::c64_palette::PEPTO_PALETTE[4];
+                [r, g, b]
+            },
+            "C64 index 3, remapped to VIC-II purple"
+        );
+        assert_eq!(zx_rgba.get_pixel(5, 5).0[..3], [202, 0, 202], "ZX index 3");
     }
 
     #[test]
@@ -2159,6 +3716,25 @@ mod tests {
         let b = src.image(1).expect("resolves");
         assert!(Arc::ptr_eq(&a, &b), "both calls must share one cached decode");
         assert_eq!(a.dimensions(), (2, 2));
+    }
+
+    #[test]
+    fn info_answers_from_header_sniff_without_pinning_the_decode_cache() {
+        // SQ-1194: `image_info` (Glk selector 8) is answered by `info()`,
+        // which used to route through `get()` — a full decode pinned in the
+        // unbounded `cache` forever — even though only the dimensions were
+        // ever asked for. An image-heavy game sweeping `glk_image_get_info`
+        // over its whole catalog must not decode and pin every picture it
+        // merely measures.
+        let blorb = test_blorb_with_pict(5, &png_bytes());
+        let mut src = PictSource::new(Some(blorb));
+        assert_eq!(src.decode_cache_len(), 0, "nothing decoded yet");
+        assert_eq!(src.info(5), Some((2, 2)));
+        assert_eq!(src.decode_cache_len(), 0, "info() must not populate the decode cache");
+        // The decode path still works and still caches, when a caller
+        // actually wants the pixels.
+        assert!(src.image(5).is_some());
+        assert_eq!(src.decode_cache_len(), 1, "image() still decodes and caches normally");
     }
 
     // ── Adaptive palettes (Blorb spec §11.3, SQ-0485) ───────────────────────
@@ -2364,6 +3940,260 @@ mod tests {
     }
 
     #[test]
+    fn palette_change_evicts_the_stale_generations_adaptive_cache() {
+        // SQ-1193: adaptive_cache is keyed (resnum, palette_gen) and
+        // palette_gen only ever climbs, so nothing evicted an old
+        // generation's decodes. On a screen_palette machine (SQ-0887) every
+        // drawn picture routes through here, so a long session accumulated a
+        // full RGBA per (pic, scene palette) it would never be asked to
+        // decode through again. A palette bump must retain only the entries
+        // decoded under the CURRENT generation.
+        let base_green = indexed_png(2, 1, &[0, 0, 0, 0, 170, 0], None, &[&[1, 1]]);
+        let base_red = indexed_png(2, 1, &[0, 0, 0, 200, 0, 0], None, &[&[1, 1]]);
+        let adaptive = indexed_png(2, 1, &[0, 0, 0, 170, 0, 170], None, &[&[1, 1]]);
+        let blorb = blorb_apal(&[(1, &base_green), (2, &adaptive), (3, &base_red)], &[2]);
+        let mut src = PictSource::new(Some(blorb));
+
+        src.image(1).unwrap(); // establishes the green palette, generation 1
+        src.image(2).unwrap(); // decodes and caches the adaptive under it
+        let gen1 = src.palette_gen();
+        assert_eq!(src.adaptive_cache_keys(), vec![(2, gen1)], "one entry, the current generation");
+
+        src.image(3).unwrap(); // re-establishes the palette (red) → gen bumps
+        let gen2 = src.palette_gen();
+        assert!(gen2 > gen1, "a different base bumps the generation");
+        assert!(
+            src.adaptive_cache_keys().is_empty(),
+            "the old generation's entry is evicted on the bump, before anything redraws it"
+        );
+
+        src.image(2).unwrap(); // re-decodes under the new generation
+        assert_eq!(src.adaptive_cache_keys(), vec![(2, gen2)], "only the current generation survives");
+    }
+
+    #[test]
+    fn scaled_image_resamples_once_and_shares_the_arc_on_repeat_draws() {
+        // SQ-1196: `session::v6_scaled_art` used to re-run a full Nearest resize
+        // on EVERY draw and EVERY replay op, even for a picture whose scaled
+        // pixels never change. Falsify: before the cache existed, two calls at a
+        // non-unit scale each allocated their own `DynamicImage` and this
+        // `Arc::ptr_eq` would fail.
+        let base = indexed_png(2, 1, &[0, 0, 0, 0, 170, 0], None, &[&[1, 1]]);
+        let blorb = blorb_apal(&[(1, &base)], &[]);
+        let mut src = PictSource::new(Some(blorb));
+
+        let first = src.scaled_image(1, (3, 3)).unwrap();
+        assert_eq!((first.width(), first.height()), (6, 3), "resampled by the requested scale");
+        let second = src.scaled_image(1, (3, 3)).unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "second draw hits the cache: the resample ran once");
+    }
+
+    #[test]
+    fn scaled_image_at_unit_scale_is_the_source_arc_with_no_copy() {
+        // The other half of SQ-1196: `v6_scaled_art` `.clone()`d a full
+        // `DynamicImage` at (1, 1) even though the pixels are untouched.
+        // `scaled_image` must hand back the SOURCE's own `Arc` instead.
+        let base = indexed_png(2, 1, &[0, 0, 0, 0, 170, 0], None, &[&[1, 1]]);
+        let blorb = blorb_apal(&[(1, &base)], &[]);
+        let mut src = PictSource::new(Some(blorb));
+
+        let source = src.image(1).unwrap();
+        let scaled = src.scaled_image(1, (1, 1)).unwrap();
+        assert!(Arc::ptr_eq(&source, &scaled), "(1,1) is the identity: no resample, no copy");
+    }
+
+    #[test]
+    fn palette_change_invalidates_the_scaled_adaptive_cache() {
+        // The scaled cache for a palette-dependent picture must not outlive the
+        // generation it was resampled under — mirrors
+        // `palette_change_evicts_the_stale_generations_adaptive_cache` above,
+        // which is the existing invalidation point this hangs off of
+        // (`evict_stale_adaptive_cache`, called from the same palette-gen bump).
+        let base_green = indexed_png(2, 1, &[0, 0, 0, 0, 170, 0], None, &[&[1, 1]]);
+        let base_red = indexed_png(2, 1, &[0, 0, 0, 200, 0, 0], None, &[&[1, 1]]);
+        let adaptive = indexed_png(2, 1, &[0, 0, 0, 170, 0, 170], None, &[&[1, 1]]);
+        let blorb = blorb_apal(&[(1, &base_green), (2, &adaptive), (3, &base_red)], &[2]);
+        let mut src = PictSource::new(Some(blorb));
+
+        src.image(1).unwrap(); // establishes the green palette, generation 1
+        let scaled_gen1_a = src.scaled_image(2, (3, 3)).unwrap();
+        let scaled_gen1_b = src.scaled_image(2, (3, 3)).unwrap();
+        assert!(
+            Arc::ptr_eq(&scaled_gen1_a, &scaled_gen1_b),
+            "same generation, repeat draw: the resample ran once"
+        );
+
+        src.image(3).unwrap(); // re-establishes the palette (red) → gen bumps,
+                                // evicting the stale generation's scaled entry
+        let scaled_gen2 = src.scaled_image(2, (3, 3)).unwrap();
+        assert!(
+            !Arc::ptr_eq(&scaled_gen1_a, &scaled_gen2),
+            "the palette changed the source pixels: the next draw resamples again"
+        );
+        assert_eq!(top_left(&scaled_gen2), [200, 0, 0, 255], "recoloured under the new (red) palette");
+    }
+
+    #[test]
+    fn a_redrawn_base_picture_re_establishes_its_palette_through_the_scaled_cache() {
+        // SQ-1288: `scaled_image` is the LIVE DRAW path, and drawing a
+        // non-adaptive picture is what establishes the Current Palette (§11.3).
+        // SQ-1196's scaled cache returned early on a hit and so never called
+        // `image()` for a base picture the session had already drawn — but a
+        // game revisits its scenes. Arthur walked out of the brown church back
+        // into the blue churchyard and kept the church's frame, because the
+        // SECOND draw of the churchyard picture established nothing.
+        //
+        // Falsify: return early on a `scaled_cache` hit again and the last
+        // assertion reads red — the palette Pict 3 left behind.
+        let base_green = indexed_png(2, 1, &[0, 0, 0, 0, 170, 0], None, &[&[1, 1]]);
+        let base_red = indexed_png(2, 1, &[0, 0, 0, 200, 0, 0], None, &[&[1, 1]]);
+        let adaptive = indexed_png(2, 1, &[0, 0, 0, 170, 0, 170], None, &[&[1, 1]]);
+        let blorb = blorb_apal(&[(1, &base_green), (2, &adaptive), (3, &base_red)], &[2]);
+        let mut src = PictSource::new(Some(blorb));
+
+        src.scaled_image(1, (2, 2)).unwrap(); // the green scene
+        assert_eq!(top_left(&src.scaled_image(2, (2, 2)).unwrap()), [0, 170, 0, 255], "green scene");
+
+        src.scaled_image(3, (2, 2)).unwrap(); // the red scene
+        assert_eq!(top_left(&src.scaled_image(2, (2, 2)).unwrap()), [200, 0, 0, 255], "red scene");
+
+        // Back to the green scene — a REDRAW of Pict 1, already in the scaled
+        // cache. It must still establish green.
+        src.scaled_image(1, (2, 2)).unwrap();
+        assert_eq!(
+            top_left(&src.scaled_image(2, (2, 2)).unwrap()),
+            [0, 170, 0, 255],
+            "revisiting the green scene re-establishes its palette: the adaptive picture follows back"
+        );
+    }
+
+    /// A `PictSource` over one of `stories/`'s native Infocom archives, or
+    /// `None` (with a printed SKIP) when the gitignored fixture is absent —
+    /// the CI-safe pattern every real-game case here uses.
+    fn native_fixture(archive: &str) -> Option<(PictSource, blorb::infocom_pics::InfocomPics)> {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories").join(archive);
+        let Ok(raw) = std::fs::read(&path) else {
+            eprintln!("SKIP: gitignored native archive missing at {}", path.display());
+            return None;
+        };
+        let parse = |bytes: Vec<u8>| {
+            blorb::infocom_pics::InfocomPics::parse(bytes).expect("a release archive parses")
+        };
+        // Two independent parses: one for the source under test, one for the
+        // oracle below, so the oracle shares no decode state with it.
+        Some((PictSource::from_native(parse(raw.clone())), parse(raw)))
+    }
+
+    /// SQ-1197, the correctness bar: a palette change must produce the SAME
+    /// pixels a from-scratch decode under that palette produces.
+    ///
+    /// `base_a`/`base_b` are two pixel-bearing pictures carrying palettes of
+    /// their own — drawing one establishes the Current Palette (§11.3) — and
+    /// `target` is a picture with no palette of its own, which the archive's
+    /// directory marks adaptive by a zero palette offset. Ids are read off the
+    /// named release, not guessed.
+    fn palette_swap_remaps_rather_than_re_decodes(
+        archive: &str,
+        base_a: u32,
+        base_b: u32,
+        target: u32,
+    ) {
+        let Some((mut src, pics)) = native_fixture(archive) else { return };
+        assert!(src.is_adaptive(target), "{archive}: picture {target} has no palette of its own");
+        assert!(
+            !src.fuses_dither(),
+            "{archive}: this case's oracle colourises without the dither fuse"
+        );
+
+        // Generation A: the base establishes the palette, the adaptive target
+        // decodes through it — and retains its index plane.
+        src.image(base_a).expect("base picture A decodes");
+        let gen_a = src.palette_gen();
+        let under_a = src.image_under_current_palette(target).expect("adaptive picture decodes");
+        let plane_a = src.cached_index_plane(target).expect("the decode retained an index plane");
+
+        // Generation B.
+        src.image(base_b).expect("base picture B decodes");
+        assert_ne!(gen_a, src.palette_gen(), "{archive}: the two bases carry different palettes");
+        let under_b = src.image_under_current_palette(target).expect("adaptive picture re-maps");
+
+        // ZERO decodes: the plane the re-map read is the very object the first
+        // draw decoded. Falsify by removing `index_planes` and letting
+        // `adaptive_image` call `InfocomPics::decode` again — the second plane is
+        // then a fresh allocation and this fails.
+        let plane_b = src.cached_index_plane(target).expect("the plane is still retained");
+        assert!(
+            Arc::ptr_eq(&plane_a, &plane_b),
+            "{archive}: a palette swap must re-map the retained index plane, not re-decode"
+        );
+
+        // The oracle: decompress the picture afresh out of the second parse and
+        // expand it through the Current Palette by hand — the arithmetic the old
+        // `native_image` did on every palette change, written out here so it
+        // shares no cache, no `Arc` and no code path with the source above.
+        let plte = src.current_palette().expect("a base draw established the Current Palette");
+        let fresh = pics
+            .decode(u16::try_from(target).expect("a Pict number fits u16"))
+            .expect("the archive decodes the target picture")
+            .rgba_with(&colour_table(plte));
+        assert_eq!(
+            under_b.as_bytes(),
+            fresh.as_slice(),
+            "{archive}: the re-mapped pixels must be byte-identical to a fresh decode"
+        );
+
+        // Non-vacuity: the swap has to have actually recoloured something, or
+        // "identical to a fresh decode" is a statement about two identical
+        // images and proves nothing.
+        assert_ne!(
+            under_a.as_bytes(),
+            under_b.as_bytes(),
+            "{archive}: pictures {base_a} and {base_b} must recolour {target} differently"
+        );
+    }
+
+    #[test]
+    fn dos_mcga_palette_swap_remaps_the_index_plane() {
+        // Zork Zero r393/s890714, DOS `.MG1` (MCGA). Its directory marks 172
+        // pixel-bearing pictures adaptive — id for id, the numbers `Zork0.blb`
+        // lists in `APal` — the lowest of which is 9; pictures 2 and 4 carry
+        // palettes of their own and those two palettes differ.
+        palette_swap_remaps_rather_than_re_decodes("zork0.mg1", 2, 4, 9);
+    }
+
+    #[test]
+    fn amiga_palette_swap_remaps_the_index_plane() {
+        // The same release's Amiga `.pic`, whose pictures run the Huffman +
+        // run-length + per-line XOR path instead of the PC's LZW — the decode
+        // this quest is about, and a different one from the case above.
+        palette_swap_remaps_rather_than_re_decodes("zork0.pic", 2, 4, 9);
+    }
+
+    #[test]
+    fn set_fuse_dither_drops_the_retained_index_planes() {
+        // The index planes are cleared wherever `cache` is (SQ-1197). The fuse
+        // is the only such point today; Zork Zero's `.EG1` is the eligible
+        // shape for it — a 640-wide SIXTEEN-colour rendition — so
+        // `from_native` turns the fuse ON and this can turn it back off.
+        let Some((mut src, _)) = native_fixture("zork0.eg1") else { return };
+        assert!(src.fuses_dither(), "a 640-wide EGA rendition is dither-eligible");
+
+        src.image(1).expect("EGA picture 1 decodes");
+        let before = src.cached_index_plane(1).expect("the draw retained an index plane");
+
+        src.set_fuse_dither(false);
+        assert!(
+            src.cached_index_plane(1).is_none(),
+            "the fuse change dropped every decode this source held, planes included"
+        );
+
+        src.image(1).expect("EGA picture 1 decodes again");
+        let after = src.cached_index_plane(1).expect("the redraw decoded a fresh plane");
+        assert!(!Arc::ptr_eq(&before, &after), "the next draw decodes rather than serving a stale plane");
+    }
+
+    #[test]
     fn size_queries_do_not_establish_the_palette() {
         // `info`/`dims` must not count as "drawing": querying a base picture's
         // size must NOT set the Current Palette that later adaptive draws use.
@@ -2451,7 +4281,13 @@ mod tests {
             for (n, line) in lines.iter().enumerate() {
                 // `#[cfg(test)]` on a `mod` ends the production half of the
                 // file; on any other item it says nothing about what follows.
-                if line.trim_start().starts_with("#[cfg(test)]") {
+                // SQ-1242 put `app`'s in-crate `mod tests` blocks behind t-star
+                // Cargo features, gated with an `all(test, …)` predicate — both
+                // the old and new spelling are checked, or this scan would stop
+                // reading at line 1 of every file it rewrote and pass vacuously
+                // on the rest.
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[cfg(all(test,") {
                     let next = lines[n + 1..].iter().find(|l| !l.trim().is_empty());
                     if next.is_some_and(|l| l.trim_start().starts_with("mod ")
                         || l.trim_start().starts_with("pub mod ")

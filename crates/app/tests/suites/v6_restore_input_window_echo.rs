@@ -11,7 +11,7 @@
 //! asserting immediately after the restore would not have caught it. The fix
 //! moves the field onto `zvm::screen::ScreenState` (alongside `current_fg`/
 //! `current_bg`, for the same reason: an input to what the screen must show,
-//! archived with the rest of `screen.json`) so `restore_screen`'s existing
+//! archived with the rest of `screen.bin`) so `restore_screen`'s existing
 //! wholesale `machine.screen = screen` carries it for free.
 //!
 //! `stories/fmvpoker.z6` is the known reproducer: choosing "CHANGE CURRENT BET"
@@ -188,7 +188,7 @@ fn a_restore_mid_bet_still_echoes_typed_digits(honor: bool, resize: bool) {
     assert_eq!(
         ac.screen.as_ref().map(|s| s.v6_input_window),
         Some(input_window_before),
-        "screen.json must carry the input window the game was reading through (SQ-0749)"
+        "screen.bin must carry the input window the game was reading through (SQ-0749)"
     );
 
     // Restore into a completely FRESH session, as Save State / auto-resume do.
@@ -234,40 +234,22 @@ fn a_restore_mid_bet_still_echoes_typed_digits(honor: bool, resize: bool) {
     );
 }
 
-/// The palette this suite's colour assertions resolve through, **stated rather than
-/// inherited** (SQ-0958).
-///
-/// Every story these cases drive is a bare file that names no machine, so its colour
-/// numbers resolve through ZMSD §8.3.1's own table — which is what every assertion
-/// below was written against. Until now nothing here said so, and the suite believed
-/// whatever the last suite in its group binary left behind: harmless only while every
-/// one of them happened to leave `Standard` there, and not at all once a sibling boots
-/// a machine press. See [`app::v6_palette`], which is why this both names a palette
-/// and takes the shared lock. Hold the guard for the whole case.
-fn standard_palette() -> app::V6PaletteGuard {
-    app::v6_palette(zvm::screen::Palette::Standard)
-}
-
 #[test]
 fn a_restore_mid_bet_still_echoes_typed_digits_honoring_game_colours() {
-    let _g = standard_palette();
     a_restore_mid_bet_still_echoes_typed_digits(true, false);
 }
 
 #[test]
 fn a_restore_mid_bet_still_echoes_typed_digits_theme_only() {
-    let _g = standard_palette();
     a_restore_mid_bet_still_echoes_typed_digits(false, false);
 }
 
 #[test]
 fn a_restore_into_a_different_terminal_size_still_echoes_typed_digits_honoring_game_colours() {
-    let _g = standard_palette();
     a_restore_mid_bet_still_echoes_typed_digits(true, true);
 }
 
 #[test]
 fn a_restore_into_a_different_terminal_size_still_echoes_typed_digits_theme_only() {
-    let _g = standard_palette();
     a_restore_mid_bet_still_echoes_typed_digits(false, true);
 }

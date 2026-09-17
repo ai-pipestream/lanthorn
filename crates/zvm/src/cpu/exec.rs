@@ -1,14 +1,15 @@
-// Z-machine executor core — ZMSD §14, §15.
-//
-// Provides `Machine` (memory + CPU state) and `step()` (fetch-decode-execute).
-// The pc-advance contract: step() sets state.pc = instr.next_pc BEFORE executing,
-// so that call handlers find state.pc already pointing past the call instruction,
-// making it the correct return_pc. Branch/jump offsets are relative to next_pc.
-//
-// Dispatch structure: match on operand_count then opcode number.
-// Tasks 10–13 add arms to the same match without restructuring the core.
+//! Z-machine executor core — ZMSD §14, §15.
+//!
+//! Provides [`Machine`] (memory + CPU state) and [`Machine::step`]
+//! (fetch-decode-execute). The pc-advance contract: `step()` sets
+//! `state.pc = instr.next_pc` BEFORE executing, so that call handlers find
+//! `state.pc` already pointing past the call instruction, making it the
+//! correct return_pc. Branch/jump offsets are relative to `next_pc`.
+//!
+//! Dispatch structure: match on operand_count then opcode number.
 
-use crate::cpu::decode::{decode, Branch, Instr, Operand, OperandCount};
+use crate::cpu::decode::{decode_into, Branch, Instr, Operand, OperandCount, MAX_OPERANDS};
+pub use crate::cpu::boot::BootConfig;
 use crate::cpu::state::{call_routine, peek_stack, poke_stack, read_var, return_value, write_var, State};
 use crate::dictionary;
 use crate::io::{BufferOutput, Output};
@@ -17,6 +18,7 @@ use crate::objects;
 use crate::screen::{advertise_colour, advertise_sound, init_header_caps, write_default_colours, ScreenState, StreamState, V6Cell, V6Windows, GRID_CELL_CAP};
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
+use crate::text::input::ZsciiInput;
 
 /// Best-effort mnemonic for a decoded instruction; hex fallback when unknown.
 /// Covers the memory/stack opcodes most likely to fault, plus common ones.
@@ -46,16 +48,43 @@ fn opcode_name(count: OperandCount, opcode: u8) -> String {
 /// word's high byte; 255 = forever, 0/omitted = play once (applied by the host).
 /// `routine` (v5+) is the finish-routine the host calls when the sound ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SoundEvent {
+    /// Which sound to play: 1/2 select the built-in high/low bleeps; `>= 3`
+    /// selects a Blorb `Snd ` resource by number.
     pub number: u16,
+    /// What to do with it: 1=prepare 2=start 3=stop 4=finish.
     pub effect: u8,
+    /// Loudness on the Z-machine's 1..=8 scale; 255 means loudest.
     pub volume: u8,
+    /// How many times to repeat playback, from the volume word's high byte;
+    /// 255 means forever, 0/omitted means play once. The engine only records
+    /// this — applying it is the host's job.
     pub repeats: u8,
+    /// The (v5+) packed routine address the host calls when the sound
+    /// finishes playing; 0 when the story gave none.
     pub routine: u16,
 }
 
+impl SoundEvent {
+    /// Build a `SoundEvent` from its ZMSD §9.4 fields.
+    ///
+    /// - `number`: 1/2 select the built-in high/low bleeps; `>= 3` selects a
+    ///   Blorb `Snd ` resource.
+    /// - `effect`: 1=prepare 2=start 3=stop 4=finish.
+    /// - `volume`: the Z-scale 1..=8 (255 = loudest).
+    /// - `repeats`: the repeat count from the volume word's high byte; 255 =
+    ///   forever, 0 = play once (applied by the host).
+    /// - `routine`: (v5+) the finish-routine the host calls when the sound ends;
+    ///   0 when none was given.
+    pub fn new(number: u16, effect: u8, volume: u8, repeats: u8, routine: u16) -> Self {
+        Self { number, effect, volume, repeats, routine }
+    }
+}
+
 /// A v6 `draw_picture`/`erase_picture` event (ZMSD §15), recorded for the host
-/// to act on in Plan 1b. `number` is the picture number; `window` is the v6
+/// to act on — the engine never rasterizes; see [`Machine::take_paint_events`].
+/// `number` is the picture number; `window` is the v6
 /// window the call targeted (`ScreenState.v6.current` at the time); `x`/`y`
 /// are pixel coordinates (of the top-left corner) within that window. Both
 /// opcodes share the same `(picture-number, y, x)` operands, so `erase`
@@ -63,11 +92,18 @@ pub struct SoundEvent {
 /// (to know the region's dimensions), which rules out a `number: 0`
 /// "erase all" sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PictureEvent {
+    /// The picture number the story named.
     pub number: u16,
+    /// The v6 window the call targeted (`ScreenState.v6.current` at the time
+    /// of the call).
     pub window: u8,
+    /// The picture's left edge, in pixels within `window`.
     pub x: u16,
+    /// The picture's top edge, in pixels within `window`.
     pub y: u16,
+    /// `true` for `erase_picture`, `false` for `draw_picture`.
     pub erase: bool,
     /// Total chars printed to window 0 (the main scrolling window) before this
     /// event — anchors a window-0 inline picture (drop-cap, room icon) to its
@@ -113,6 +149,37 @@ pub struct PictureEvent {
     pub win_box: (u16, u16, u16, u16),
 }
 
+impl PictureEvent {
+    /// Build a `PictureEvent` from its fields. See the struct docs for what
+    /// each one means.
+    ///
+    /// - `number`: the picture number.
+    /// - `window`: the v6 window the call targeted.
+    /// - `x`/`y`: pixel coordinates (top-left corner) within that window.
+    /// - `erase`: `true` for `erase_picture`, `false` for `draw_picture`.
+    /// - `out_chars`: total chars printed to window 0 before this event.
+    /// - `margin_after`: the `left` value of a `set_margins` issued on the same
+    ///   window directly after this draw, if any.
+    /// - `at_cursor`: whether the picture landed on the window's current text
+    ///   line (see [`Self::at_cursor`] field docs above).
+    /// - `win_box`: the target window's `(x, y, w, h)` box at the moment of the
+    ///   call, in native pixels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        number: u16,
+        window: u8,
+        x: u16,
+        y: u16,
+        erase: bool,
+        out_chars: u64,
+        margin_after: Option<u16>,
+        at_cursor: bool,
+        win_box: (u16, u16, u16, u16),
+    ) -> Self {
+        Self { number, window, x, y, erase, out_chars, margin_after, at_cursor, win_box }
+    }
+}
+
 /// One filled rectangle painted by an `erase_window`, in native v6 pixels
 /// (SQ-0706). See [`Machine::pending_erase_fills`].
 ///
@@ -121,6 +188,7 @@ pub struct PictureEvent {
 /// because the window has usually been moved and resized specifically to place
 /// this rectangle and will move again before the next one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EraseFill {
     /// The window that was erased (0–7).
     pub window: u8,
@@ -148,17 +216,78 @@ pub struct EraseFill {
     pub pics_before: u32,
 }
 
+impl EraseFill {
+    /// Build an `EraseFill` from its fields. See the struct docs for what
+    /// each one means.
+    ///
+    /// - `window`: the window that was erased (0–7).
+    /// - `x`/`y`: the rect's top-left corner in native pixels, 1-based.
+    /// - `w`/`h`: the rect's width and height in native pixels.
+    /// - `bg`: the window's background at erase time — the colour the rect is
+    ///   filled with.
+    /// - `pics_before`: how many [`PictureEvent`]s were already queued when
+    ///   this fill was pushed (see [`Self::pics_before`] field docs above).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(window: u8, x: u16, y: u16, w: u16, h: u16, bg: crate::screen::ZColour, pics_before: u32) -> Self {
+        Self { window, x, y, w, h, bg, pics_before }
+    }
+}
+
+/// One paint operation a Version 6 story issued, on the single timeline the two
+/// queues really are (SQ-1396).
+///
+/// Pictures and erase-fills paint the same screen and a game interleaves them
+/// freely, so they cannot be replayed as two lists — see
+/// [`Machine::take_paint_events`], which is the only way to get them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PaintEvent {
+    /// A `draw_picture` / `erase_picture`.
+    Picture(PictureEvent),
+    /// The rectangle an `erase_window` filled.
+    Erase(EraseFill),
+}
+
 /// Result of executing one instruction.
 #[derive(Debug, PartialEq)]
+#[non_exhaustive]
 pub enum StepResult {
     /// Normal execution: continue to next instruction.
     Continue,
     /// `quit` opcode — host should stop the run loop.
     Quit,
-    /// `restart` opcode — host should reload and restart.
+    /// `restart` opcode — answer with [`Machine::restart`].
+    ///
+    /// Do NOT rebuild the machine from the original story bytes. ZMSD §6.1.3: "A
+    /// 'restart' is similar: the entire state is restored from the original story
+    /// file, and the stack is emptied; but 'Flags 2' is preserved; and the
+    /// interpreter should reset the *Rst* parts of the header." A rebuilt machine
+    /// loses the two game-writable `Flags 2` bits — transcription (bit 0) and
+    /// fixed-pitch (bit 1) — that the clause preserves, along with every
+    /// mid-session setting the host has made since boot.
     Restart,
     /// `read` / `sread` — host must supply a line of input.
-    NeedLine { text_buf: u32, parse_buf: u32 },
+    ///
+    /// `preload` is ZMSD §15 `read`'s pre-loaded input line, decoded to text:
+    /// "if byte 1 contains a positive value at the start of the input, then
+    /// read assumes that number of characters are left over from an
+    /// interrupted previous input" (v5+ only — see [`Machine::supply_line`]).
+    /// Empty for the overwhelmingly common case (nothing pre-loaded, or a
+    /// v1-4 story, where byte 1 has no such meaning). A host should show it
+    /// as already-typed, editable text at the prompt — TerpEtude option 12
+    /// and Beyond Zork's "AGAIN" both pre-load a line this way.
+    NeedLine {
+        /// Address of the text buffer the story gave `read`/`sread`; pass to
+        /// [`Machine::supply_line`] unchanged.
+        text_buf: u32,
+        /// Address of the parse buffer, or 0 in v5+ to mean "skip parsing";
+        /// pass to [`Machine::supply_line`] unchanged.
+        parse_buf: u32,
+        /// The pre-loaded input line, already decoded to text (see the
+        /// variant docs above); show it as already-typed, editable text at
+        /// the prompt.
+        preload: String,
+    },
     /// `read_char` — host must supply a single keypress.
     NeedChar,
     /// `save` — host must write interpreter state to a file.
@@ -175,15 +304,34 @@ pub enum StepResult {
 /// host calls `supply_line` / `supply_char` with the input, which uses these
 /// fields to complete the operation (write buffers, store result) before the
 /// next `step()` call.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PendingInput {
     /// Destination variable for the result (store var of the read/read_char
     /// instruction; `None` if the instruction has no store — v3 `read` has none).
     store_var: Option<u8>,
+    /// Which instruction suspended here: `true` for `read` (a LINE of text),
+    /// `false` for `read_char` (a single keystroke).
+    ///
+    /// Stated outright rather than inferred from `text_buf == 0`, which is what
+    /// this was and what SQ-1266 cost. A `read_char` leaves both buffer
+    /// addresses zero, so a host that answered a keypress prompt with
+    /// [`Self::supply_line`] wrote the typed line to absolute address 1 —
+    /// straight over the header's Flags1 and RELEASE NUMBER. Quetzal's IFhd
+    /// validates the saved release against CURRENT memory (§5.8), so from that
+    /// moment on every restore of that session's save into a freshly booted
+    /// twin failed with `SaveMismatch`, and the fork-and-probe seam
+    /// (`app::probe`) went silently dead on every Version 6 story whose opening
+    /// parks on a keypress.
+    line_read: bool,
     /// Address of the text buffer (for `supply_line`).
     text_buf: u32,
     /// Address of the parse buffer (for `supply_line`; 0 in v5+ means skip).
     parse_buf: u32,
+    /// ZMSD §15 `read`'s pre-loaded input line, decoded to text at the
+    /// moment the read suspended (v5+ only; empty otherwise) — see
+    /// [`StepResult::NeedLine`]. `supply_line` prepends this to the text the
+    /// host supplies, rather than overwriting it.
+    preload: String,
     /// Timed-input interval in tenths of a second (0 = untimed).
     interrupt_time: u16,
     /// Packed address of the interrupt routine (0 = none).
@@ -199,7 +347,12 @@ struct PendingInput {
 /// instruction's store target, so `restore_undo` can write 2 back into it.
 #[derive(Debug, Clone)]
 pub struct UndoSnapshot {
+    /// The Quetzal-encoded state at the moment `save_undo` was called.
     pub blob: Vec<u8>,
+    /// The `save_undo` instruction's own store target, so `restore_undo` can
+    /// write 2 back into it (ZMSD's undo opcodes report success/failure
+    /// through the *original* `save_undo` call's result, not the `restore_undo`
+    /// call's).
     pub store: Option<u8>,
 }
 
@@ -210,12 +363,15 @@ pub struct TimedInterrupt {
 }
 
 /// The Z-machine interpreter — ties memory and CPU state together.
-/// Fields are `pub` so Tasks 11+ can attach I/O channels.
+/// Fields are `pub` so a host can attach its own I/O channels.
 pub struct Machine {
+    /// The story image and its address space — dynamic, static, and high
+    /// memory (ZMSD §1.1).
     pub mem: Memory,
+    /// CPU registers, call stack, and variables.
     pub state: State,
-    /// Pluggable text output sink. Defaults to `BufferOutput` (Task 11).
-    pub out: Box<dyn Output>,
+    /// Pluggable text output sink. Defaults to `BufferOutput`.
+    out: Box<dyn Output>,
     /// Non-None while the machine is suspended waiting for player input.
     pending_input: Option<PendingInput>,
     /// Screen model: window layout, cursor, text style.
@@ -235,6 +391,20 @@ pub struct Machine {
     /// [`crate::screen::V6Metric`] for why the declared metric and the drawn
     /// advance are one value. [`Machine::v6_cell`] reads the declared half.
     pub v6_metric: crate::screen::V6Metric,
+    /// The (x, y) factor the picture table and [`crate::resources::Resources`]
+    /// answers were scaled by at boot — [`crate::cpu::boot::BootConfig::resolved_art_scale`]
+    /// (SQ-1437), carried here because that value is otherwise unreachable once
+    /// [`Machine::boot`] returns. `(1, 1)` for a machine built via
+    /// [`Machine::new`]/[`Machine::with_output`] rather than [`Machine::boot`],
+    /// which is also the correct answer for those (nothing has been scaled).
+    ///
+    /// A BOOT fact, not screen state: it is set once by [`crate::cpu::boot::BootConfig::apply`]
+    /// and never touched by [`Machine::restart`], so it survives a restart the
+    /// same way [`Self::v6_metric`] does (by simply not being reset), and it is
+    /// deliberately absent from [`Machine::screen_snapshot`] — a Save State
+    /// restore reconciles the SCREEN, not the archive the picture table was
+    /// scaled from, and a resource table itself is never part of the snapshot.
+    pub(crate) v6_art_scale: (u32, u32),
     /// How this machine chooses what a Version 6 window does with text that
     /// reaches its right margin (SQ-1071) — see
     /// [`crate::interpreter::V6WrapRegime`], which carries §8.8.3.1.2.2's table.
@@ -246,7 +416,7 @@ pub struct Machine {
     pub v6_wrap_regime: crate::interpreter::V6WrapRegime,
     /// May this launch present its machine's SCREEN RULES at all? (SQ-1154)
     ///
-    /// The fourth term of [`crate::screen::machine_rule`], and the only one that
+    /// The fourth term of `screen::machine_rule`, and the only one that
     /// is not read back out of the header. Every per-machine Version 6 screen
     /// rule — the Amiga's shared pens, the Amiga's and the Macintosh's screen
     /// page — asks it alongside the three header terms.
@@ -270,6 +440,36 @@ pub struct Machine {
     /// NUMBER, so the host's true RGB is snapped on the way in and painted back
     /// out as the snapped value (a `#1A1B26` ground came out pure black).
     pub machine_colours_licensed: bool,
+    /// The table a standard colour NUMBER resolves to a true colour through
+    /// (SQ-1393) — see [`crate::screen::Palette`].
+    ///
+    /// A field on the machine, not a process-wide one. It was an atomic in
+    /// `screen.rs` for two years on the premise that "there is exactly one
+    /// machine per run", which is true of one host and is not a fact about the
+    /// Z-machine: a GUI with two windows, a server with a session per player and
+    /// a harness comparing an Amiga press against an IBM one all want two at
+    /// once, and none of them could have them. Alongside [`Self::v6_metric`] and
+    /// [`Self::machine_colours_licensed`], which are the same kind of fact and
+    /// already live here.
+    ///
+    /// [`crate::screen::Palette::Standard`] — §8.3.1's own table — until a host
+    /// calls [`Machine::set_palette`], so a bare embedding resolves colours the
+    /// way the spec recommends and nothing has to be undone.
+    palette: crate::screen::Palette,
+    /// Override for header `$1F`, the interpreter version byte, or `None` for
+    /// [`init_header_caps`]'s own default.
+    ///
+    /// Latched exactly like [`Self::interpreter_number`]: set it any time, and it
+    /// takes effect at the next [`Machine::init_caps`].
+    ///
+    /// # Why it is worth overriding (SQ-0885)
+    ///
+    /// The default `b'A'` has no provenance — see [`init_header_caps`] — and the
+    /// byte is one a story can PRINT. *Shogun* release 295 renders it as a
+    /// decimal, so `'A'` (65) makes its Amiga banner read "version 6.65" where the
+    /// original read "version 6.8". Whether a story also BRANCHES on it is unknown
+    /// and is exactly what this exists to find out: set it, run the game, watch.
+    interpreter_version: Option<u8>,
     /// Output stream routing: streams 1/2/3/4 state.
     pub streams: StreamState,
     /// Snapshot of the original dynamic memory (bytes 0..static_mem_base) taken
@@ -304,21 +504,36 @@ pub struct Machine {
     /// from entropy when that key is unset (SQ-0811). Also seeded in-game by
     /// `random` with a negative argument (ZMSD §15).
     rng_state: u32,
-    /// VAR opcodes that have hit the unimplemented fallthrough (warned once each).
-    pub(crate) warned_var_opcodes: std::collections::HashSet<u8>,
+    /// The seed [`Machine::restart`] reseeds from, when the host has pinned
+    /// one — see [`Machine::set_rng_seed_pinned`] / [`BootConfig::with_rng_seed_pinned`].
+    /// `None` (the default, and what a plain [`Machine::set_rng_seed`] call
+    /// leaves it) means no seed is pinned: `restart` draws fresh entropy
+    /// instead, per ZMSD §2.4 ("when the game starts or restarts the state
+    /// becomes random").
+    pinned_rng_seed: Option<u32>,
+    /// A free-running counter mixed into [`Machine::fresh_rng_seed`] so two
+    /// restarts land on different seeds even if the wall clock has not
+    /// visibly advanced between them (a fast scripted-restart loop, or a
+    /// clock with coarse resolution).
+    rng_entropy_calls: u32,
     /// EXT opcodes that have hit the unimplemented fallthrough (warned once each).
     pub(crate) warned_ext_opcodes: std::collections::HashSet<u8>,
     /// Sound events recorded by `sound_effect` since the host last drained them.
-    pub pending_sounds: Vec<SoundEvent>,
-    /// Injected picture-dimension table for v6 `picture_data`: `(picture_number,
-    /// width_px, height_px)`. Populated by the host (Task 9) before the boot run
-    /// from the self-blorb's `Pict` resources; empty for non-v6 stories.
-    pub picture_dims: Vec<(u16, u16, u16)>,
+    pub(crate) pending_sounds: Vec<SoundEvent>,
+    /// The v6 `picture_data` answers this asks — a [`crate::resources::Resources`]
+    /// implementation, populated by the host before the boot run from the
+    /// story's own picture resources (a self-Blorb's `Pict` chunk, or
+    /// whatever archive the host resolved). Defaults to an empty answer for
+    /// non-v6 stories and hosts that never call [`Self::set_picture_dims`] /
+    /// [`Self::set_resources`]. See [`BootConfig::with_picture_dims`] /
+    /// [`BootConfig::with_resources`], which apply the Version 6 unit-space
+    /// scale this field does not.
+    resources: Box<dyn crate::resources::Resources>,
     /// Draw/erase events recorded by `draw_picture`/`erase_picture` since the
     /// host last drained them. The engine never rasterizes; the host (Plan
     /// 1b) decodes the Blorb `Pict` resource and renders it — mirrors
     /// `pending_sounds`.
-    pub pending_pictures: Vec<PictureEvent>,
+    pub(crate) pending_pictures: Vec<PictureEvent>,
     /// Filled rectangles an `erase_window` painted, since the host last drained
     /// them (SQ-0706).
     ///
@@ -348,7 +563,14 @@ pub struct Machine {
     /// moves onto the same host surface the two queues should be unified under
     /// one paint sequence; today they are independent because pictures and fills
     /// are drawn by different games for different purposes.
-    pub pending_erase_fills: Vec<EraseFill>,
+    pub(crate) pending_erase_fills: Vec<EraseFill>,
+    /// The folded Version 6 paint history (SQ-1403) — fed here, at the same
+    /// points [`Self::pending_pictures`] / [`Self::pending_erase_fills`] are
+    /// queued, so it always reflects every event this `Machine` has ever
+    /// issued regardless of whether (or how often) a host drains
+    /// [`Self::take_paint_events`]. See [`crate::paint_log`] and
+    /// [`Self::paint_log`].
+    paint_log: crate::paint_log::PaintLog,
     /// Running count of chars printed to v6 window 0 (the main scrolling
     /// window) — stamps `PictureEvent::out_chars` so window-0 inline pictures
     /// anchor to their position in the text stream. Monotonic, never reset.
@@ -363,9 +585,9 @@ pub struct Machine {
     /// stamp is where its transcript restarts, with everything before it kept as
     /// scrollback above the boundary. A turn that retires twice keeps the LAST
     /// stamp — each retirement supersedes the one before it as the live screen's
-    /// beginning. Set-only here; `GameSession::drain_turn` takes it.
-    pub v6_prose_retired: Option<u64>,
-    /// Whether the retirement [`Machine::v6_prose_retired`] stamps froze the
+    /// beginning. Set-only here; the host takes it with [`Machine::take_v6_prose_retired`].
+    pub(crate) v6_prose_retired: Option<u64>,
+    /// Whether the retirement `v6_prose_retired` stamps froze the
     /// window's WHOLE streamed screen, leaving nothing of it live (SQ-0890).
     ///
     /// [`crate::screen::ZWindow::retire_streamed`] freezes only the runs the new
@@ -381,7 +603,7 @@ pub struct Machine {
     /// the window whose prose the HOST is holding — a [`Machine::v6_win0_out_chars`]
     /// stamp, `None` when no such erase happened this turn (SQ-0755).
     ///
-    /// The same boundary [`Machine::v6_prose_retired`] carries, from the other
+    /// The same boundary `v6_prose_retired` carries, from the other
     /// cause, and deliberately NOT the same field: that one means "this prose is
     /// now PAINT and the window owns it", which is a claim about frozen runs that
     /// an erase does not make — it simply took the text off the screen. Sharing the
@@ -390,12 +612,12 @@ pub struct Machine {
     /// A v6 erase never set `erase_lower_requested` (the v1–5 lower window's flag),
     /// so before this the host was never told a v6 story had cleared its screen at
     /// all, and its transcript went on re-rendering everything the game had ever
-    /// printed into whatever the story window is now. Set-only here;
-    /// `GameSession::drain_turn` takes it.
+    /// printed into whatever the story window is now. Set-only here; the host
+    /// drains it with `std::mem::take`.
     pub v6_screen_cleared: Option<u64>,
     /// A `(window, pixel column, pixel row)` a v6 `set_cursor` just DECLARED,
     /// pending the next print to that window — see
-    /// [`Machine::v6_take_declared_indent`] (SQ-0697; the row joined it in
+    /// `v6_take_declared_indent` (SQ-0697; the row joined it in
     /// SQ-0729). Transient one-shot state between the opcode and the print it
     /// positions; nothing outside that pair reads it, and it is re-armed by the
     /// story's own `set_cursor` on any path that matters, so it carries no
@@ -403,7 +625,13 @@ pub struct Machine {
     pub v6_declared_x: Option<(u8, u16, u16)>,
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
     /// recorded since the host last drained them. The engine never prints.
-    pub diagnostics: Vec<String>,
+    pub(crate) diagnostics: Vec<String>,
+    /// How many times each EXACT diagnostic message has been pushed via
+    /// [`Machine::push_diagnostic`] — the counter behind the repeat cap,
+    /// never cleared by [`Machine::take_diagnostics`] (the cap tracks
+    /// lifetime repeats of a message, not what a host has drained). See
+    /// [`Machine::push_diagnostic`] for why this exists.
+    pub(crate) diagnostic_repeat_counts: std::collections::HashMap<String, u32>,
     /// In-memory auxiliary save table for the v5 `save/restore table` opcodes,
     /// keyed by the game-supplied name string. The host persists/repopulates it
     /// (in the `.lanthorn` archive or a per-game global file); the engine itself
@@ -427,6 +655,10 @@ pub struct Machine {
     /// 2..=9; defaults to black-on-white (2/9). Set via `set_default_colours`,
     /// re-applied at every `init_caps` (so `@restart` keeps the host's choice).
     pub default_bg_colour: u8,
+    /// The interpreter's default foreground colour, published to the game in
+    /// header byte $2D (ZMSD §8.3.3) alongside [`Self::default_bg_colour`];
+    /// see that field's docs for the standard colour range and when it is
+    /// re-applied.
     pub default_fg_colour: u8,
     /// Set when `step()` returns `Fault`; the host drains it for display.
     pub fault_trace: Option<crate::cpu::trace::StackTrace>,
@@ -438,12 +670,12 @@ pub struct Machine {
     /// (the `screen` debug section). Separate from `diagnostics`. (trace feature)
     pub trace_screen: bool,
     /// Accumulated `screen`-trace lines since the host last drained them.
-    pub screen_trace: Vec<String>,
+    pub(crate) screen_trace: Vec<String>,
     /// When true, `step()` records each instruction's start PC into `exec_pcs`
     /// (the debug inspector's execution-coverage marking).
     pub trace_exec: bool,
     /// Start PCs of instructions executed since the host last cleared them.
-    pub exec_pcs: std::collections::HashSet<u32>,
+    pub(crate) exec_pcs: std::collections::HashSet<u32>,
     /// Cumulative start PCs of every instruction ever executed while tracing was
     /// on — NEVER cleared per turn (unlike `exec_pcs`). Drives the permanent
     /// "executed" disassembly colour, and can be pre-seeded from host-persisted
@@ -454,10 +686,12 @@ pub struct Machine {
     /// the value is tracked purely so the opcode's store result (the OLD
     /// mode) is correct (ZMSD §15).
     buffer_screen_mode: u16,
-    /// True once `output_stream 2` (the transcript FILE stream) has recorded its
-    /// "not supported" diagnostic — ZMSD §7.6.5.2 asks for one warning to the
-    /// player, not one per request, and games re-select the stream every turn.
-    warned_stream2: bool,
+    /// The value of `Flags 2` bit 0 this interpreter last left in the header —
+    /// the reference [`Machine::sync_transcript_bit`] compares against to tell a
+    /// GAME's poke of the transcription bit (§7.3/§7.4: adopt it) from the
+    /// header simply still holding what we wrote (re-assert ours). Not part of
+    /// saved state: a restore re-derives it from the selection.
+    transcript_bit_seen: bool,
     /// v5/v6 mouse state (ZMSD §15/§8). Set by [`set_mouse`](Machine::set_mouse)
     /// when the host reports a click; `read_mouse` (EXT:0x16) reports these back.
     /// Coordinates are game pixels, 1-based (ZMSD §8.8.1 coordinate convention).
@@ -479,9 +713,32 @@ pub struct Machine {
     /// (e.g. a v6 picture-canvas cache) that the VM's own screen reset cannot
     /// reach. Cleared by the host when observed. Not part of saved state.
     pub just_restarted: bool,
+    /// Nonzero while [`Machine::run_routine`] is driving a nested call frame
+    /// (a timed-input interrupt or a sound finish-routine) with its own inner
+    /// `step()` loop — see [`Machine::step`]'s idempotence guard (SQ-1432),
+    /// which this lets that inner loop step past. A counter rather than a
+    /// bool because `run_routine` can itself be invoked from inside a routine
+    /// it is running (e.g. a finish-routine that triggers another sound whose
+    /// finish fires before this one returns) — see `run_routine`'s own nested
+    /// abandon path, which unwinds one level, not to zero. Not part of saved
+    /// state: it is always 0 at rest between host `step()` calls.
+    nested_call_depth: u32,
+    /// Reusable buffer for [`decode_into`](crate::cpu::decode::decode_into)'s
+    /// operand list — `step()` lends it out before decoding and reclaims it
+    /// out of the `Instr` before `execute()` drops one, so the `Vec<Operand>`
+    /// allocation is made once and reused for the rest of the run instead of
+    /// malloc'd and freed every instruction (SQ-1438). Empty at rest; never
+    /// part of saved state.
+    operand_scratch: Vec<Operand>,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
+///
+/// `Clone` so [`Machine::run_routine`] can snapshot and restore it exactly as
+/// it does [`PendingInput`] (SQ-1432) — a spec-violating timed-input/sound
+/// routine that fires a nested `@save` must not leave this set after the
+/// nested call is abandoned.
+#[derive(Clone)]
 struct PendingSave {
     /// v3: the branch descriptor; v4+: the store variable number.
     result_dest: SaveDest,
@@ -490,6 +747,7 @@ struct PendingSave {
     descriptor_pc: u32,
 }
 
+#[derive(Clone)]
 enum SaveDest {
     Branch(crate::cpu::decode::Branch),
     Store(u8),
@@ -558,8 +816,13 @@ fn boot_state_and_screen(mem: &mut Memory) -> (State, ScreenState) {
 
 impl Machine {
     /// Create a new `Machine` from story memory, using a `BufferOutput` sink.
-    /// `state.pc` is set to the header's `initial_pc` field (direct instruction
-    /// address for v3/4/5/7/8; v6 is not supported).
+    ///
+    /// `state.pc` is set to the header's `initial_pc` field for v3/4/5/7/8, a
+    /// direct instruction address. Version 6 is fully supported but boots
+    /// differently: `initial_pc` there is instead the *packed address of
+    /// `main`* (ZMSD §5.4), so the machine enters it as a call with no
+    /// args/result rather than jumping to it directly — see [`Machine::boot`],
+    /// which every v6 embedder should reach for instead of this constructor.
     pub fn new(mem: Memory) -> Machine {
         Machine::with_output(mem, Box::new(BufferOutput::new()))
     }
@@ -581,8 +844,11 @@ impl Machine {
             pending_input: None,
             screen,
             v6_metric: crate::screen::V6Metric::fixed(V6Cell::DEFAULT),
+            v6_art_scale: (1, 1),
             v6_wrap_regime: crate::interpreter::V6WrapRegime::Attributes,
             machine_colours_licensed: true,
+            palette: crate::screen::Palette::Standard,
+            interpreter_version: None,
             streams: StreamState::new(),
             original_dynamic,
             undo_stack: Vec::new(),
@@ -591,18 +857,21 @@ impl Machine {
             pending_restore_store: None,
             pending_restore: false,
             rng_state: Self::DEFAULT_RNG_SEED,
-            warned_var_opcodes: std::collections::HashSet::new(),
+            pinned_rng_seed: None,
+            rng_entropy_calls: 0,
             warned_ext_opcodes: std::collections::HashSet::new(),
             pending_sounds: Vec::new(),
-            picture_dims: Vec::new(),
+            resources: Box::new(crate::resources::EmptyResources),
             pending_pictures: Vec::new(),
             pending_erase_fills: Vec::new(),
+            paint_log: crate::paint_log::PaintLog::default(),
             v6_win0_out_chars: 0,
             v6_prose_retired: None,
             v6_prose_retired_whole: false,
             v6_screen_cleared: None,
             v6_declared_x: None,
             diagnostics: Vec::new(),
+            diagnostic_repeat_counts: std::collections::HashMap::new(),
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
             honor_game_colours: false,
@@ -618,14 +887,52 @@ impl Machine {
             exec_pcs: std::collections::HashSet::new(),
             ever_exec_pcs: std::collections::HashSet::new(),
             buffer_screen_mode: 0,
-            warned_stream2: false,
+            transcript_bit_seen: false,
             mouse_x: 0,
             mouse_y: 0,
             mouse_buttons: 0,
             mouse_window: 1,
             newline_interrupt_active: false,
             just_restarted: false,
+            nested_call_depth: 0,
+            operand_scratch: Vec::new(),
         }
+    }
+
+    /// Build a `Machine` ready for its first [`step()`](Self::step) — the whole
+    /// boot recipe in one call (SQ-1396).
+    ///
+    /// This is [`Machine::with_output`] plus every fact in `config`, applied in
+    /// the one order that is correct, plus [`Machine::init_caps`], plus the
+    /// screen size AFTER it. It does NOT run the story: the returned machine is
+    /// stopped at the initial PC, so a host drives it to its first prompt with
+    /// its own `step()` loop and can trace, instrument or abandon that run.
+    ///
+    /// # Why the order is not the host's to remember
+    ///
+    /// Three classes of setter have to be told apart — those that write the
+    /// header immediately, those latched until `init_caps`, and those that touch
+    /// no header bit but must precede the story's own initialisation — and the
+    /// screen must come after `init_caps`, which seeds a generic 80x24 over the
+    /// top of it. [`BootConfig`]'s module documentation states the whole rule and
+    /// which defect taught each clause of it. The individual setters remain
+    /// public for a MID-RUN change, which is what they are good at.
+    pub fn boot(mem: Memory, out: Box<dyn Output>, config: BootConfig) -> Machine {
+        let mut m = Machine::with_output(mem, out);
+        config.apply(&mut m);
+        m
+    }
+
+    /// The output sink this machine prints through.
+    pub fn output(&self) -> &dyn Output {
+        self.out.as_ref()
+    }
+
+    /// The output sink this machine prints through, mutably — for a host that
+    /// needs to reconfigure the sink in place (buffer mode, a test recorder's
+    /// own inspection methods) rather than replace it outright.
+    pub fn output_mut(&mut self) -> &mut dyn Output {
+        self.out.as_mut()
     }
 
     /// Set interpreter capability bits in the story header (ZMSD §11.1).
@@ -636,14 +943,33 @@ impl Machine {
     /// same address — real story files have static programs above 0x40.
     ///
     /// # Caller
-    /// Call this from the host after loading a real story file, before the first
-    /// `step()`. Not needed for test harnesses built from `sample_story` (whose
-    /// buffers may overlap header bytes).
+    /// Prefer [`Machine::boot`], which calls this in the right place. Reach for
+    /// it directly only in a test harness built from `sample_story` (whose
+    /// buffers may overlap header bytes) or when re-stamping the header
+    /// mid-session, as [`Machine::restart`] does.
+    ///
+    /// # What must precede it, and what must follow
+    ///
+    /// This is where the header capability bytes are actually stamped, so
+    /// everything LATCHED lands here: [`Self::set_interpreter_number`] (`$1E`)
+    /// and [`Self::set_interpreter_version`] (`$1F`), and the palette
+    /// ([`Self::set_palette`]) through which the default colours are resolved.
+    /// [`Self::set_default_colours`] must precede it too — it is re-applied here
+    /// over the 2/9 seed, so a pair set afterwards would survive, but a game that
+    /// reads `$2C`/`$2D` while booting (Beyond Zork picks its colour scheme
+    /// there) needs it in the header before the boot run either way.
+    ///
+    /// What must FOLLOW it is the screen size: this seeds a generic 80x24, so
+    /// [`Self::set_screen_dims`] / [`Self::set_v6_screen_px`] called earlier
+    /// would be silently overwritten.
+    ///
+    /// [`BootConfig`] carries all of that as one value and cannot be told in the
+    /// wrong order.
     pub fn init_caps(&mut self) {
-        init_header_caps(&mut self.mem, self.honor_game_colours, self.sound_available, self.interpreter_number);
+        init_header_caps(&mut self.mem, self.honor_game_colours, self.sound_available, self.interpreter_number, self.interpreter_version, self.palette);
         // Re-apply the host's chosen interpreter defaults over the 2/9 seed
         // `init_header_caps` writes, so they survive `@restart` too.
-        write_default_colours(&mut self.mem, self.default_bg_colour, self.default_fg_colour);
+        write_default_colours(&mut self.mem, self.default_bg_colour, self.default_fg_colour, self.palette);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
     }
@@ -677,15 +1003,19 @@ impl Machine {
         // pixels from it loses whatever the cell does not divide — a Macintosh
         // 640x400 comes back as 637x390 on its 7x15 cell, which is a different
         // screen from the one the launch laid the game out on. SQ-1156.
-        let screen_px = (self.mem.read_word(0x22), self.mem.read_word(0x24));
+        let screen_px = self.v6_screen_px().unwrap_or((0, 0));
 
         // Reload dynamic memory to its pristine boot image.
         for (i, &b) in self.original_dynamic.iter().enumerate() {
             self.mem.write_byte(i as u32, b);
         }
 
-        // Fresh execution + screen model, identical to a cold boot.
-        let (state, screen) = boot_state_and_screen(&mut self.mem);
+        // Fresh execution + screen model, identical to a cold boot — except the
+        // v6 change generation, which stays MONOTONE across the reboot (SQ-1191):
+        // a reader caching the screen model against the counter must never meet
+        // a rebooted screen wearing a number it has already seen on the old one.
+        let (state, mut screen) = boot_state_and_screen(&mut self.mem);
+        screen.v6_generation = self.screen.v6_generation.wrapping_add(1);
         self.state = state;
         self.screen = screen;
 
@@ -699,11 +1029,37 @@ impl Machine {
         self.pending_restore = false;
         self.pending_sounds.clear();
         self.pending_pictures.clear();
+        // …and the fills with them (SQ-1396). They are one timeline with the
+        // pictures — `EraseFill::pics_before` counts the pictures queued ahead of
+        // each — so clearing one queue and not the other left every surviving
+        // fill stamped against a picture list that no longer exists, to be
+        // replayed after the reboot's own first paints.
+        self.pending_erase_fills.clear();
+        // …and the folded history built from them (SQ-1403): a rebooted screen
+        // has painted nothing yet, so no window keeps a pre-restart recipe.
+        self.paint_log.clear_all();
         self.buffer_screen_mode = 0;
         self.v6_win0_out_chars = 0;
         // `self.screen = screen` above already reset `screen.v6_input_window` to 0
         // (a reboot is back to the classic main window, SQ-0585).
         self.newline_interrupt_active = false;
+
+        // ZMSD §2.4: "When the game starts or restarts the state becomes
+        // random." A host that PINNED a reproducible seed
+        // ([`Self::set_rng_seed_pinned`] — lanthorn's `random_seed` config,
+        // SQ-0811) keeps replaying that exact sequence across every restart,
+        // which is the one case this crate treats as more important than the
+        // letter of §2.4: a scripted/reproducible run must restart
+        // reproducibly too. Anything else — no seed pinned, including a
+        // fresh per-launch entropy draw made via the un-pinned
+        // [`Self::set_rng_seed`] — draws AGAIN here, so a restarted game is
+        // not stuck replaying the run that just ended, and a mid-game
+        // `random(-n)` predictable-mode draw (ZMSD §15) left in force at the
+        // moment of restart does not survive it either.
+        self.rng_state = match self.pinned_rng_seed {
+            Some(seed) => seed,
+            None => self.fresh_rng_seed(),
+        };
 
         // Re-stamp the interpreter capability bits over the pristine header, then
         // restore the preserved Flags 2 bits and the host screen dimensions.
@@ -818,7 +1174,7 @@ impl Machine {
     }
 
     /// Report the screen size to the story: writes the header dimension fields
-    /// (see [`write_screen_dims`]) and, for v6, reseeds windows 0 and 1 with
+    /// (see [`crate::screen::write_screen_dims`]) and, for v6, reseeds windows 0 and 1 with
     /// the new screen width in pixels (frotz restart_screen) so games that
     /// read window widths via `get_wind_prop` before sizing anything see the
     /// real screen, not the boot-time default. Window 0 also takes the new
@@ -826,7 +1182,7 @@ impl Machine {
     /// window 1 keeps its zero height until a `split_window`.
     ///
     /// For v4/v5/v7/v8 a LIVE upper window follows the new WIDTH — see
-    /// [`Machine::refit_upper_window_width`].
+    /// `refit_upper_window_width`.
     /// Declare the Version 6 character cell this session runs on (SQ-0917).
     ///
     /// Call this BEFORE [`Machine::set_screen_dims`] and before the boot run: the
@@ -851,9 +1207,34 @@ impl Machine {
         self.set_v6_text(crate::screen::V6Metric::fixed(cell));
     }
 
-    /// The declared Version 6 cell this session runs on — [`V6Metric::cell`].
+    /// The declared Version 6 cell this session runs on — `v6_metric().cell()`.
     pub fn v6_cell(&self) -> crate::screen::V6Cell {
         self.v6_metric.cell()
+    }
+
+    /// The installed [`crate::screen::V6Metric`] — cell AND pen together
+    /// (SQ-1009, SQ-1435). [`Machine::v6_cell`] is `v6_metric().cell()`; a
+    /// raster host measuring pixels on a proportional machine wants the pen
+    /// too, and this is the door to it without keeping its own copy of the
+    /// metric it passed to [`crate::cpu::boot::BootConfig::with_v6_text`].
+    pub fn v6_metric(&self) -> &crate::screen::V6Metric {
+        &self.v6_metric
+    }
+
+    /// The (x, y) factor this session's picture table (and any
+    /// [`crate::resources::Resources`] a host installed) was scaled by at boot
+    /// — [`crate::cpu::boot::BootConfig::resolved_art_scale`] read back off the
+    /// booted machine, since that value is otherwise unreachable once
+    /// [`Machine::boot`] returns (SQ-1437). `(1, 1)` for a machine built
+    /// without [`Machine::boot`], and for every version but 6.
+    ///
+    /// A boot fact, not screen state: [`Machine::restart`] leaves it alone
+    /// (it survives a restart the same way [`Self::v6_metric`] does), and it
+    /// is not part of [`Machine::screen_snapshot`] — a Save State restore
+    /// reconciles the SCREEN with the current pane, never the archive a
+    /// resource table was scaled from.
+    pub fn art_scale(&self) -> (u32, u32) {
+        self.v6_art_scale
     }
 
     /// Declare the cell AND the pen together (SQ-1009).
@@ -866,7 +1247,7 @@ impl Machine {
     pub fn set_v6_text(&mut self, metric: crate::screen::V6Metric) {
         let cell = metric.cell();
         self.v6_metric = metric;
-        if let Some(v6) = self.screen.v6.as_mut() {
+        if let Some(v6) = self.screen.v6_mut() {
             for w in v6.windows.iter_mut() {
                 w.font_size = (cell.h() << 8) | cell.w();
             }
@@ -875,9 +1256,28 @@ impl Machine {
             // Restate the header on the cell that is now current. The screen is
             // whatever `$22`/`$24` already say — this changes the CELL, not the
             // window, so the character grid is re-divided rather than re-invented.
-            let (w, h) = (self.mem.read_word(0x22), self.mem.read_word(0x24));
+            let (w, h) = self.v6_screen_px().unwrap_or((0, 0));
             crate::screen::write_screen_dims_px(&mut self.mem, w, h, cell);
         }
+    }
+
+    /// The Version 6 screen size in native PIXELS the story was told (header
+    /// `$22`/`$24`; ZMSD §8.4, §11.1) — what [`Machine::set_v6_screen_px`]
+    /// writes, read back rather than re-derived from the character grid
+    /// (SQ-1156, SQ-1436): a grid does not divide the screen exactly on every
+    /// cell, so reconstituting pixels from it loses precision (a Macintosh
+    /// 640px on a 7-wide cell comes back as 637).
+    ///
+    /// `None` below v6: at these same offsets, ZMSD §11.1 defines "a unit" as
+    /// one CHARACTER rather than one pixel for every version but 6, so the raw
+    /// header words there answer a different question than this one asks. A
+    /// caller wanting that grid already has it — header bytes `$20`/`$21`, or
+    /// the row/col arguments to [`Machine::set_screen_dims`].
+    pub fn v6_screen_px(&self) -> Option<(u16, u16)> {
+        if self.mem.version() != 6 {
+            return None;
+        }
+        Some((self.mem.read_word(0x22), self.mem.read_word(0x24)))
     }
 
     /// Report a **Version 6** screen the way Version 6 means it: in pixels, with
@@ -897,7 +1297,7 @@ impl Machine {
         }
         let cell = self.v6_cell();
         crate::screen::write_screen_dims_px(&mut self.mem, width_px, height_px, cell);
-        if let Some(v6) = self.screen.v6.as_mut() {
+        if let Some(v6) = self.screen.v6_mut() {
             // frotz `restart_screen`: windows 0 and 1 take the new screen WIDTH so a
             // story reading `get_wind_prop` before sizing anything sees the real
             // screen; window 0 also takes its height (ZMSD §8.8.3.3, "Window 0
@@ -910,11 +1310,20 @@ impl Machine {
         }
     }
 
+    /// Tell the story the screen is `rows` lines by `cols` characters, writing
+    /// header bytes $20/$21 (ZMSD §8.4) and, on v6, resizing windows 0 and 1 to
+    /// match (in native pixels, via the current [`Machine::v6_cell`]).
+    ///
+    /// This is the character-grid host API; a v6 host that already has the
+    /// screen in pixels should prefer [`Machine::set_v6_screen_px`], which
+    /// writes the exact pixel values instead of ones reconstituted from a
+    /// grid (see that method's docs for why the two can disagree). Below v6,
+    /// also re-fits an already-open upper window to the new width.
     pub fn set_screen_dims(&mut self, rows: u8, cols: u8) {
         let cell = self.v6_cell();
         crate::screen::write_screen_dims(&mut self.mem, rows, cols, cell);
         if self.mem.version() == 6 {
-            if let Some(v6) = self.screen.v6.as_mut() {
+            if let Some(v6) = self.screen.v6_mut() {
                 let width = cols.max(1) as u16 * cell.w();
                 let height = rows.max(1) as u16 * cell.h();
                 v6.windows[0].x_size = width;
@@ -1014,26 +1423,180 @@ impl Machine {
         }
     }
 
-    /// ZMSD §7.4: games (all Infocom-era ones) turn transcription on by setting
-    /// bit 0 of Flags 2 rather than issuing `output_stream 2` — the interpreter
-    /// is expected to watch the bit. We support no transcript FILE, so on
-    /// seeing the bit set, warn once (same diagnostic as `output_stream 2`) and
-    /// CLEAR it — the game then honestly reports scripting as off instead of
-    /// believing a transcript is being written. Checked at every input request
-    /// (the turn boundary), which is where a SCRIPT verb's effect first
-    /// becomes observable.
-    fn check_transcript_bit(&mut self) {
+    /// Select or deselect output stream 2, and make `Flags 2` bit 0 agree.
+    ///
+    /// ZMSD §7.4: "all four output streams can be selected or deselected using
+    /// the output_stream opcode. In addition, stream 2 can be selected or
+    /// deselected by setting or clearing bit 0 of 'Flags 2'. Whichever method is
+    /// used, the interpreter must ensure that this flag holds the current status
+    /// of stream 2. ('A Mind Forever Voyaging' requires this.)" §11.1.2 says the
+    /// same from the header's side and adds that the interpreter "must also
+    /// alter it if stream 2 is turned on or off".
+    ///
+    /// Every route in goes through here — the opcode, the header poke picked up
+    /// by [`Machine::sync_transcript_bit`], and the host's own
+    /// [`Machine::set_transcript`] — so the flag and the flag alone is the
+    /// answer to "is transcripting on".
+    fn set_stream2(&mut self, on: bool) {
         const FLAGS2: u32 = 0x10;
+        self.streams.stream2 = on;
         let flags = self.mem.read_word(FLAGS2);
-        if flags & 1 != 0 {
-            self.mem.write_word(FLAGS2, flags & !1);
-            if !self.warned_stream2 {
-                self.warned_stream2 = true;
-                self.diagnostics.push(
-                    "transcript file output isn't supported — the game's script command will have no effect (the app keeps its own scrollback)".to_string(),
-                );
+        self.mem.write_word(FLAGS2, (flags & !1) | u16::from(on));
+        self.transcript_bit_seen = on;
+    }
+
+    /// Reconcile `Flags 2` bit 0 with the stream-2 selection, in whichever
+    /// direction has moved since we last looked.
+    ///
+    /// The bit is the game's to write (ZMSD §11.1 marks it "Dyn"), and every
+    /// Infocom-era SCRIPT verb turns transcription on by setting it rather than
+    /// by issuing `output_stream 2` — §7.3 is the whole mechanism in Versions 1
+    /// and 2, and §7.4 keeps it alongside the opcode from Version 3 on. So the
+    /// interpreter has to watch it, and [`Machine::transcript_bit_seen`] records
+    /// what it last left there:
+    ///
+    /// * bit ≠ what we left → the GAME moved it. Adopt it: SCRIPT turns the
+    ///   transcript on, UNSCRIPT turns it off.
+    /// * bit = what we left → nobody moved it. Re-assert our own state, which
+    ///   costs nothing and repairs the header after anything that rewrote it.
+    ///
+    /// Checked at every input request (the turn boundary), which is where a
+    /// SCRIPT verb's effect first becomes observable — the game sets the bit and
+    /// then prompts.
+    ///
+    /// This replaces a version that unconditionally CLEARED the bit, back when
+    /// there was no transcript sink to honour it with: nine of thirteen corpus
+    /// stories driven to a SCRIPT command answered "Attempt to begin transcript
+    /// failed." because the interpreter had wiped the flag they set. The bug the
+    /// clearing guarded against — a game believing a transcript is being written
+    /// when none is — is now a HOST question, since [`crate::io::Output`]'s
+    /// stream-2 method is a no-op by default (ZMSD §7.6.5 expressly allows
+    /// declining external files, and §7.6.5.2 asks the interpreter to say so).
+    fn sync_transcript_bit(&mut self) {
+        const FLAGS2: u32 = 0x10;
+        let bit = self.mem.read_word(FLAGS2) & 1 != 0;
+        if bit != self.transcript_bit_seen {
+            self.set_stream2(bit);
+        } else {
+            let on = self.streams.stream2;
+            self.set_stream2(on);
+        }
+    }
+
+    /// Select the input stream from the HOST side: 0 = keyboard, 1 = the
+    /// recorded commands the sink supplies through
+    /// [`crate::io::Output::next_command`].
+    ///
+    /// ZMSD §10.2.2: "The game can change the current input stream itself, using
+    /// the opcode `input_stream`. It has no way of finding out which input
+    /// stream is currently in use. An interpreter is free to change the input
+    /// stream whenever it likes (e.g. at the player's request) or, indeed, to
+    /// run the entire game under input stream 1 (for testing purposes)." A host
+    /// `--replay` flag is exactly the last of those. Values other than 0 and 1
+    /// name no stream and are ignored.
+    pub fn set_input_stream(&mut self, stream: u8) {
+        if stream <= 1 {
+            self.streams.input_stream = stream;
+        }
+    }
+
+    /// Is output stream 2 — the transcript — currently selected (ZMSD §7.1.1)?
+    pub fn transcript_on(&self) -> bool {
+        self.streams.stream2
+    }
+
+    /// Turn the transcript on or off from the HOST side, exactly as if the game
+    /// had run `output_stream 2` / `output_stream -2`.
+    ///
+    /// This is what a "/transcript on" host command is for: ZMSD §7.4 gives the
+    /// game two ways to select stream 2 and the interpreter the duty of keeping
+    /// `Flags 2` bit 0 truthful, and a story with no SCRIPT verb simply never
+    /// exercises either. Writing the flag here means the game can still SEE that
+    /// transcripting is on (Infocom's own SCRIPT/UNSCRIPT verbs read the bit
+    /// back), so the two routes cannot disagree.
+    pub fn set_transcript(&mut self, on: bool) {
+        self.set_stream2(on);
+    }
+
+    /// Is output stream 4 — the command record — currently selected
+    /// (ZMSD §7.1.2)?
+    pub fn command_record_on(&self) -> bool {
+        self.streams.stream4
+    }
+
+    /// Turn the command record on or off from the HOST side, as if the game had
+    /// run `output_stream 4` / `output_stream -4`.
+    ///
+    /// Stream 4 has no header bit and nothing in the story can observe its
+    /// state (unlike stream 2, §7.4), so this is purely the interpreter's own
+    /// switch — which is how Frotz's record command works too (`ostream_record`,
+    /// set by the interpreter and by `output_stream 4` alike). It is what makes
+    /// a `--record` flag mean anything: no story ever issues `output_stream 4`
+    /// of its own accord.
+    pub fn set_command_record(&mut self, on: bool) {
+        self.streams.stream4 = on;
+    }
+
+    /// Record one finished input record on output stream 4 (ZMSD §7.1.2.3:
+    /// "the only text printed to it is that of the player's commands and
+    /// keypresses (as read by read_char). Each command is written, in one go,
+    /// when it has been finished").
+    ///
+    /// No-op when the stream is not selected. The escaping is
+    /// [`crate::io::encode_command_record`]'s, so the host writes the line
+    /// verbatim and input stream 1 can read it back (§10.2.1).
+    fn record_command(&mut self, codes: &[u8]) {
+        if !self.streams.stream4 || self.streams.input_stream == 1 {
+            return;
+        }
+        let line = crate::io::encode_command_record(codes);
+        self.out.command_record(&line);
+    }
+
+    /// Ask the host for the next recorded command when input stream 1 is
+    /// selected (ZMSD §10.2), reverting to the keyboard at end of file.
+    ///
+    /// Returns the decoded ZSCII codes of one record, or `None` to mean "suspend
+    /// for the player as usual" — either because the game never left input
+    /// stream 0, or because the command file ran out. The revert on EOF is
+    /// Frotz's `replay_close` behaviour; the standard describes the stream but
+    /// not its end.
+    fn next_recorded_input(&mut self) -> Option<Vec<u8>> {
+        if self.streams.input_stream != 1 {
+            return None;
+        }
+        match self.out.next_command() {
+            Some(line) => Some(crate::io::decode_command_record(&line)),
+            None => {
+                self.streams.input_stream = 0;
+                None
             }
         }
+    }
+
+    /// Split one recorded line record into the text the player typed and the key
+    /// that ended it (ZMSD §10.2.1, the stream-4 format read backwards).
+    ///
+    /// [`Machine::record_command`] appends the terminator only when it is not
+    /// Return, so a trailing FUNCTION KEY code is the terminator and anything
+    /// else is part of the line. §10.5.2.1 fixes which codes those can be:
+    /// "Only function key codes are permitted: these are defined as those
+    /// between 129 and 154 inclusive, together with 252, 253 and 254."
+    fn split_recorded_line(&self, codes: &[u8]) -> (String, u8) {
+        let is_terminator = |c: u8| (129..=154).contains(&c) || matches!(c, 252..=254);
+        let (body, terminator) = match codes.last().copied() {
+            Some(last) if is_terminator(last) => (&codes[..codes.len() - 1], last),
+            _ => (codes, 13),
+        };
+        let text: String = body
+            .iter()
+            .map(|&c| {
+                self.mem
+                    .unicode_char(c as u16)
+                    .unwrap_or_else(|| crate::text::decode::zscii_to_char(c as u16))
+            })
+            .collect();
+        (text, terminator)
     }
 
     /// Remember which v6 window the game is reading input through (SQ-0585), at
@@ -1085,7 +1648,7 @@ impl Machine {
 
     /// Is window `win` showing live prose that reached the HOST's transcript?
     ///
-    /// [`ZWindow::streamed`] is shadowed only for text that STREAMED — the
+    /// [`crate::screen::ZWindow::streamed`] is shadowed only for text that STREAMED — the
     /// `shadow` flag in `v6_advance_prose_cursor` is `diverted.is_none()`, the
     /// same routing decision the print path makes — so a non-empty `streamed` on
     /// a window whose prose is not diverted is exactly the host transcript's own
@@ -1119,16 +1682,77 @@ impl Machine {
     }
 
     /// Inject the v6 picture-dimension table `picture_data` answers from:
-    /// `(picture_number, width_px, height_px)` triples. The host builds this
-    /// from the self-blorb's `Pict` resources before the boot run (Task 9).
+    /// `(picture_number, width_px, height_px)` triples, wrapped into a
+    /// [`crate::resources::PictureTable`]. The host builds this from the
+    /// story's picture resources before the boot run — prefer
+    /// [`BootConfig::with_picture_dims`], which applies the scaling this
+    /// setter does not. The release number `picture_data(0, …)` reports is
+    /// this story's own header release (`$02`) — a placeholder answer until
+    /// the host has real picture-file metadata to offer through
+    /// [`Self::set_resources`] instead.
     pub fn set_picture_dims(&mut self, t: Vec<(u16, u16, u16)>) {
-        self.picture_dims = t;
+        let release = self.mem.read_word(0x02);
+        self.resources = Box::new(crate::resources::PictureTable::new(t, release));
+    }
+
+    /// Install a [`crate::resources::Resources`] implementation for `picture_data`
+    /// to ask instead of a pre-filled table — the on-demand seam
+    /// [`Self::set_picture_dims`] cannot offer. The host builds this from the
+    /// story's picture resources before the boot run — prefer
+    /// [`BootConfig::with_resources`], which applies the scaling this setter
+    /// does not.
+    pub fn set_resources(&mut self, r: Box<dyn crate::resources::Resources>) {
+        self.resources = r;
+    }
+
+    /// Number of pictures the current [`crate::resources::Resources`] reports —
+    /// `picture_data(0, …)` word 0.
+    pub fn picture_count(&self) -> u16 {
+        self.resources.picture_count()
+    }
+
+    /// The release/version number the current [`crate::resources::Resources`]
+    /// reports for the picture file — `picture_data(0, …)` word 1.
+    pub fn picture_release(&self) -> u16 {
+        self.resources.picture_release()
+    }
+
+    /// Width and height `picture_data(number, …)` would report for `number`,
+    /// in Version 6 unit-screen pixels (already scaled, if this machine was
+    /// booted through [`BootConfig`]) — `None` if `picture_data` would not
+    /// branch for it.
+    pub fn picture_dims(&self, number: u16) -> Option<(u16, u16)> {
+        self.resources.picture_dims(number)
     }
 
     /// Set the interpreter number to advertise (header 0x1E). `None` restores the
     /// auto default (Frotz's rule). Takes effect at the next `init_caps`.
     pub fn set_interpreter_number(&mut self, n: Option<u8>) {
         self.interpreter_number = n;
+    }
+
+    /// Select the table standard colour numbers resolve through on THIS machine
+    /// (SQ-1393). Takes effect immediately — the palette is read at the moment a
+    /// colour is resolved, never latched into the header.
+    pub fn set_palette(&mut self, p: crate::screen::Palette) {
+        self.palette = p;
+    }
+
+    /// The table this machine's standard colour numbers resolve through.
+    pub fn palette(&self) -> crate::screen::Palette {
+        self.palette
+    }
+
+    /// Override the interpreter version byte written into header `$1F`; `None`
+    /// restores [`init_header_caps`]'s default. Takes effect at the next
+    /// [`Self::init_caps`], exactly like [`Self::set_interpreter_number`].
+    pub fn set_interpreter_version(&mut self, v: Option<u8>) {
+        self.interpreter_version = v;
+    }
+
+    /// The interpreter version override, or `None` when no host has set one.
+    pub fn interpreter_version(&self) -> Option<u8> {
+        self.interpreter_version
     }
 
     /// The PRNG seed a bare `Machine` starts from: fixed, so a machine nobody
@@ -1141,14 +1765,51 @@ impl Machine {
     ///
     /// `0` is coerced to [`Self::DEFAULT_RNG_SEED`]: xorshift32 is an absorbing
     /// state at zero, and a machine that always returns 0 is not a random one.
+    ///
+    /// Does NOT pin the seed across `@restart` — see [`Self::set_rng_seed_pinned`]
+    /// for that. This is the right call for a one-off draw (a fresh-per-launch
+    /// entropy value, a probe's forced replay): a later `@restart` still draws
+    /// its own fresh entropy per ZMSD §2.4 rather than repeating this one.
     pub fn set_rng_seed(&mut self, seed: u32) {
         self.rng_state = if seed == 0 { Self::DEFAULT_RNG_SEED } else { seed };
+        self.pinned_rng_seed = None;
+    }
+
+    /// Seed the `random` PRNG exactly like [`Self::set_rng_seed`], but also
+    /// PIN it: every later `@restart` reseeds from this same value instead of
+    /// drawing fresh entropy, so a run booted for reproducibility (lanthorn's
+    /// `random_seed` config key, SQ-0811) replays identically across a
+    /// restart too. Un-pin by calling [`Self::set_rng_seed`] instead.
+    pub fn set_rng_seed_pinned(&mut self, seed: u32) {
+        self.set_rng_seed(seed);
+        self.pinned_rng_seed = Some(self.rng_state);
     }
 
     /// The current PRNG state — the seed the next `random` draw advances from.
     /// Diagnostic only (the startup seed report); the game never sees it.
     pub fn rng_seed(&self) -> u32 {
         self.rng_state
+    }
+
+    /// A fresh, unpredictable seed for [`Machine::restart`]'s un-pinned path
+    /// (ZMSD §2.4: "When the game starts or restarts the state becomes
+    /// random"). `zvm` takes zero external dependencies, so this draws from
+    /// `std::time` rather than a `rand` crate: nanosecond-resolution wall
+    /// clock mixed with a per-machine free-running counter (so two restarts
+    /// in the same nanosecond, or on a clock with coarse resolution, still
+    /// diverge) and the current RNG/PC state, then coerced away from zero
+    /// exactly as [`Self::set_rng_seed`] does.
+    fn fresh_rng_seed(&mut self) -> u32 {
+        self.rng_entropy_calls = self.rng_entropy_calls.wrapping_add(1);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let mixed = nanos
+            .wrapping_add(self.rng_entropy_calls.wrapping_mul(0x9E37_79B9))
+            ^ self.rng_state
+            ^ self.state.pc.wrapping_mul(0x2545_F491);
+        if mixed == 0 { Self::DEFAULT_RNG_SEED } else { mixed }
     }
 
     /// Publish the interpreter's own default colours to the game.
@@ -1168,7 +1829,18 @@ impl Machine {
         let version = self.mem.version();
         self.default_bg_colour = clamp_default_colour(bg, DEFAULT_BG_COLOUR, version);
         self.default_fg_colour = clamp_default_colour(fg, DEFAULT_FG_COLOUR, version);
-        write_default_colours(&mut self.mem, self.default_bg_colour, self.default_fg_colour);
+        write_default_colours(&mut self.mem, self.default_bg_colour, self.default_fg_colour, self.palette);
+    }
+
+    /// The interpreter's default background/foreground colours as published to
+    /// the game in header bytes `$2C`/`$2D` (ZMSD §8.3.3): `(bg, fg)`, the same
+    /// order the header stores them in and [`Machine::set_default_colours`]
+    /// takes them in (SQ-1436). [`Self::default_bg_colour`]/[`Self::default_fg_colour`]
+    /// remain `pub` fields for a caller that already has one in hand; this is
+    /// the paired read a graphical host wants instead of two field reads it
+    /// has to remember the header order for.
+    pub fn default_colours(&self) -> (u8, u8) {
+        (self.default_bg_colour, self.default_fg_colour)
     }
 
     /// Seed the cumulative "ever executed" set from host-persisted knowledge
@@ -1193,7 +1865,53 @@ impl Machine {
     /// This ensures `state.pc` already points past the call site when
     /// `call_routine` is invoked, giving the correct `return_pc`. Branch and
     /// jump offsets are computed relative to `state.pc` (= next_pc) too.
+    ///
+    /// # Idempotence while input/save/restore is pending (SQ-1432)
+    ///
+    /// A `read`/`read_char`/`save`/`restore` opcode advances `state.pc` PAST
+    /// itself before suspending (see the CRITICAL comment below), so the
+    /// naive re-poll — calling `step()` again without first resolving the
+    /// suspension — would decode and execute the INSTRUCTION AFTER the
+    /// suspended one, silently completing the read with blank/default
+    /// content (or worse, mid-way through a save/restore). `step()` guards
+    /// against that here: while a read is pending it returns the SAME
+    /// `NeedLine`/`NeedChar` again (rebuilt from the stored pending-input
+    /// state, byte-for-byte, including `preload`), and while a game `@save`/
+    /// `@restore` is pending it returns the same `SaveRequest`/
+    /// `RestoreRequest`, in every case touching neither `state.pc` nor any
+    /// buffer nor the transcript/command-record streams. The only ways
+    /// forward are [`Self::supply_line`], [`Self::supply_char`],
+    /// [`Self::abort_timed_input`] (which delegates to those two),
+    /// [`Self::complete_save`], [`Self::complete_restore_success`] and
+    /// [`Self::complete_restore_failure`] — each of which clears the pending
+    /// state before the next `step()` is allowed to proceed.
+    ///
+    /// The guard steps aside (`nested_call_depth != 0`) for
+    /// [`Self::run_routine`]'s own inner `step()` loop, which is how a timed-
+    /// input interrupt routine or a sound finish-routine actually executes
+    /// while the outer read/save/restore it was called from stays pending —
+    /// that is a real, intended nested call, not a re-poll of the same
+    /// suspension.
     pub fn step(&mut self) -> StepResult {
+        if self.nested_call_depth == 0 {
+            if let Some(p) = self.pending_input.as_ref() {
+                return if p.line_read {
+                    StepResult::NeedLine {
+                        text_buf: p.text_buf,
+                        parse_buf: p.parse_buf,
+                        preload: p.preload.clone(),
+                    }
+                } else {
+                    StepResult::NeedChar
+                };
+            }
+            if self.pending_save.is_some() {
+                return StepResult::SaveRequest;
+            }
+            if self.pending_restore {
+                return StepResult::RestoreRequest;
+            }
+        }
         let version = self.mem.version();
         let instr_start_pc = self.state.pc;
         self.cur_instr_pc = instr_start_pc;
@@ -1201,8 +1919,14 @@ impl Machine {
             self.exec_pcs.insert(instr_start_pc);
             self.ever_exec_pcs.insert(instr_start_pc);
         }
-        let instr = decode(&self.mem, self.state.pc, version);
-        let op_name = opcode_name(instr.operand_count.clone(), instr.opcode);
+        let operand_scratch = std::mem::take(&mut self.operand_scratch);
+        let instr = decode_into(&self.mem, self.state.pc, version, operand_scratch);
+        // `op_name` is a formatted/allocated String consumed only on the fault
+        // path below (approximately never) — save the two cheap, Copy-ish
+        // fields decode() gave us and format it lazily, only if a fault
+        // actually latches, instead of on every instruction (SQ-1438).
+        let opcode = instr.opcode;
+        let operand_count = instr.operand_count.clone();
 
         // CRITICAL: advance PC before executing so call/branch targets are correct.
         self.state.pc = instr.next_pc;
@@ -1217,10 +1941,12 @@ impl Machine {
         if let Some((is_write, size, addr)) = mem_fault {
             let kind = if is_write { "write".to_string() } else { format!("read{}", size as u32 * 8) };
             let msg = format!("memory fault: {kind} @{addr:#010x}");
+            let op_name = opcode_name(operand_count, opcode);
             self.fault_trace = Some(self.build_trace(msg, instr_start_pc, op_name));
             return StepResult::Fault;
         }
         if let Some(msg) = state_fault {
+            let op_name = opcode_name(operand_count, opcode);
             self.fault_trace = Some(self.build_trace(msg, instr_start_pc, op_name));
             return StepResult::Fault;
         }
@@ -1237,6 +1963,213 @@ impl Machine {
     /// Take and clear the stack trace captured at the last fault.
     pub fn take_fault_trace(&mut self) -> Option<crate::cpu::trace::StackTrace> {
         self.fault_trace.take()
+    }
+
+    /// Sound events recorded by `sound_effect` since the last drain, without
+    /// taking them.
+    pub fn pending_sounds(&self) -> &[SoundEvent] {
+        &self.pending_sounds
+    }
+
+    /// Take and clear the sound events recorded by `sound_effect` since the
+    /// host last drained them.
+    pub fn take_pending_sounds(&mut self) -> Vec<SoundEvent> {
+        std::mem::take(&mut self.pending_sounds)
+    }
+
+    /// Draw/erase events recorded by `draw_picture`/`erase_picture` since the
+    /// last drain, without taking them. Drain them with
+    /// [`Self::take_paint_events`], which is the only door and the only ordering
+    /// that replays a turn correctly.
+    pub fn pending_pictures(&self) -> &[PictureEvent] {
+        &self.pending_pictures
+    }
+
+    /// Take and clear everything the story has PAINTED since the host last
+    /// drained it — pictures and erase-fills together, in the order the game
+    /// issued them (SQ-1396).
+    ///
+    /// # Why there is no way to take them separately
+    ///
+    /// Both queues paint the same screen and a Version 6 game interleaves them
+    /// freely, so replaying one list and then the other replays the turn in the
+    /// wrong order. *scopa* is the story that proves it: it draws every playing
+    /// card out of `erase_window` fills (hundreds per card) and its boot fills
+    /// the green table, draws its Neapolitan and Sicilian card pictures, then
+    /// fills the menu buttons over the top. Run all the fills last and the
+    /// opening full-screen clear erases both cards it had already painted.
+    ///
+    /// That was a correctness constraint on the HOST, discoverable only from a
+    /// comment on [`EraseFill::pics_before`] — which is the field that records
+    /// the interleave, the count of pictures already queued when a fill was
+    /// pushed. Both queues only ever grow within a turn, so it is a total order
+    /// and this method is the merge: every fill stamped `pics_before == i` comes
+    /// out ahead of picture `i`, and anything stamped past the last picture
+    /// trails it.
+    ///
+    /// A non-v6 story pushes neither and drains empty.
+    pub fn take_paint_events(&mut self) -> Vec<PaintEvent> {
+        let pictures = std::mem::take(&mut self.pending_pictures);
+        let fills = std::mem::take(&mut self.pending_erase_fills);
+        let mut out = Vec::with_capacity(pictures.len() + fills.len());
+        let mut next_fill = 0usize;
+        for (i, ev) in pictures.iter().enumerate() {
+            while next_fill < fills.len() && fills[next_fill].pics_before as usize <= i {
+                out.push(PaintEvent::Erase(fills[next_fill]));
+                next_fill += 1;
+            }
+            out.push(PaintEvent::Picture(*ev));
+        }
+        out.extend(fills[next_fill..].iter().copied().map(PaintEvent::Erase));
+        out
+    }
+
+    /// Queue a v6 picture-draw/erase event as if the opcode that produces it
+    /// had just run. For a host (and this crate's own tests) exercising the
+    /// render-drain path without executing real V6 bytecode. Feeds
+    /// [`Self::paint_log`] too, exactly as the real opcode handlers do.
+    pub fn queue_picture_event(&mut self, ev: PictureEvent) {
+        self.pending_pictures.push(ev);
+        self.paint_log.apply(&PaintEvent::Picture(ev));
+    }
+
+    /// The folded Version 6 paint history (SQ-1403) — what to replay to
+    /// rebuild every window's picture canvas, independent of whether (or how
+    /// often) the host has drained [`Self::take_paint_events`]. Read-only: a
+    /// host never feeds this itself, only `Machine` does, at the same points
+    /// it queues the events themselves — see [`crate::paint_log`].
+    pub fn paint_log(&self) -> &crate::paint_log::PaintLog {
+        &self.paint_log
+    }
+
+    /// Replace the paint log from bytes written by
+    /// [`crate::paint_log::encode`] — the counterpart of [`Self::paint_log`]
+    /// for a host Save State restore.
+    ///
+    /// Always resets the log first, exactly as
+    /// [`Self::restore_screen_snapshot`] resets the screen: an empty `bytes`
+    /// (no log was ever archived, e.g. an older archive format) leaves the
+    /// log empty rather than untouched, and a malformed or too-new buffer
+    /// does too rather than leaving a stale pre-restore log standing. Real
+    /// decode errors (a newer format version) are still returned so a host
+    /// that wants to know can.
+    pub fn restore_paint_log(&mut self, bytes: &[u8]) -> Result<(), crate::error::ZError> {
+        self.paint_log.clear_all();
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.paint_log = crate::paint_log::decode(bytes)?;
+        Ok(())
+    }
+
+    /// Filled rectangles an `erase_window` painted since the last drain,
+    /// without taking them (SQ-0706). Drain them with
+    /// [`Self::take_paint_events`], which is the only door and the only ordering
+    /// that replays a turn correctly.
+    pub fn pending_erase_fills(&self) -> &[EraseFill] {
+        &self.pending_erase_fills
+    }
+
+    /// Host-facing diagnostic lines recorded since the last drain, without
+    /// taking them.
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
+    }
+
+    /// How many times an identical diagnostic message is recorded before this
+    /// machine stops recording it — see [`Machine::push_diagnostic`].
+    const DIAGNOSTIC_REPEAT_CAP: u32 = 64;
+
+    /// Record a host-facing diagnostic line, capping IDENTICAL repeats so a
+    /// per-instruction warning inside a runaway loop cannot grow
+    /// [`Self::diagnostics`] without bound. The 2026-09 zvm reference audit
+    /// measured a mutated story emitting the same repeated message fast
+    /// enough to reach tens of megabytes within seconds under a naive
+    /// push-every-time implementation — strictz.z5 requires an interpreter to
+    /// warn-and-continue on an object-0 access rather than fault, so a
+    /// runaway loop hitting one MUST keep running, and this is what stops
+    /// that from flooding the channel instead of turning it into a fault.
+    ///
+    /// The first [`Self::DIAGNOSTIC_REPEAT_CAP`] occurrences of a given
+    /// message are recorded verbatim; the next records one summary line
+    /// instead, and every later occurrence of that exact text is silently
+    /// dropped. A different message text has its own, independent count.
+    fn push_diagnostic(&mut self, msg: String) {
+        let count = self.diagnostic_repeat_counts.entry(msg.clone()).or_insert(0);
+        *count += 1;
+        if *count <= Self::DIAGNOSTIC_REPEAT_CAP {
+            self.diagnostics.push(msg);
+        } else if *count == Self::DIAGNOSTIC_REPEAT_CAP + 1 {
+            self.diagnostics.push(format!(
+                "(further occurrences of this diagnostic suppressed after {}): {msg}",
+                Self::DIAGNOSTIC_REPEAT_CAP
+            ));
+        }
+    }
+
+    /// Take and clear the host-facing diagnostic lines recorded since the
+    /// host last drained them.
+    pub fn take_diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.diagnostics)
+    }
+
+    /// Latch a fault for an opcode number this Z-machine version does not
+    /// define, and continue — [`Machine::step`] drains `state.fault` into
+    /// [`StepResult::Fault`] right after this returns (the same latch
+    /// `put_prop`/`insert_obj`/… use), so the caller need not do anything
+    /// beyond returning what this returns.
+    ///
+    /// ZMSD §14.2: "it is illegal for a game to contain an opcode not
+    /// specified for its version. An interpreter should normally halt with a
+    /// suitable message." Only EXT:29–255 are exempted (§14.2.1) and stay a
+    /// warn-and-continue no-op — see the EXT catch-all, the one caller of
+    /// this that does NOT reach it for every unmatched opcode. Every other
+    /// undefined-opcode class (2OP, 1OP, 0OP, VAR) faults outright: a
+    /// mutated/corrupted story hitting one used to spin forever instead of
+    /// stopping (the 2026-09 zvm reference audit's mutated curses.z5, where
+    /// dfrotz prints "Fatal error: Illegal opcode" and exits).
+    fn fault_illegal_opcode(&mut self, class: &str, opcode: u8) -> StepResult {
+        self.state.fault = Some(format!(
+            "illegal opcode: {class}:{opcode:#04X} is not defined for this Z-machine version (ZMSD §14.2)"
+        ));
+        StepResult::Continue
+    }
+
+    /// Accumulated `screen`-trace lines since the last drain, without taking
+    /// them.
+    pub fn screen_trace(&self) -> &[String] {
+        &self.screen_trace
+    }
+
+    /// Take and clear the accumulated `screen`-trace lines since the host
+    /// last drained them.
+    pub fn take_screen_trace(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.screen_trace)
+    }
+
+    /// Push one line onto the `screen`-trace buffer, as `trace_screen` would.
+    /// For a host (and this crate's own tests) that wants to exercise the
+    /// trace-drain path directly.
+    pub fn push_screen_trace(&mut self, line: String) {
+        self.screen_trace.push(line);
+    }
+
+    /// Start PCs of instructions executed since the host last cleared them.
+    pub fn exec_pcs(&self) -> &std::collections::HashSet<u32> {
+        &self.exec_pcs
+    }
+
+    /// Clear the start-PCs-executed-this-turn set (the debug inspector's
+    /// per-turn execution-coverage marking).
+    pub fn clear_exec_pcs(&mut self) {
+        self.exec_pcs.clear();
+    }
+
+    /// Take and clear the wrap+scroll-window prose-retirement stamp: a
+    /// `v6_win0_out_chars` position where prose was frozen into paint by a
+    /// window move/resize (SQ-0697), `None` when nothing was retired.
+    pub fn take_v6_prose_retired(&mut self) -> Option<u64> {
+        self.v6_prose_retired.take()
     }
 
     fn build_trace(&self, fault: String, fault_pc: u32, fault_op: String)
@@ -1272,7 +2205,12 @@ impl Machine {
     // Main dispatch
     // -----------------------------------------------------------------------
 
-    fn execute(&mut self, instr: Instr) -> StepResult {
+    fn execute(&mut self, mut instr: Instr) -> StepResult {
+        // Recover decode_into's operand buffer so it — and `ops` below — can
+        // be handed back to `self.{operand,ops}_scratch` at the end instead of
+        // dropped (freed) here every instruction (SQ-1438).
+        let operands = std::mem::take(&mut instr.operands);
+
         // v6 `pull stack -> (result)` (ZMSD §15, frotz z_pull V6 branch): with an
         // operand — of ANY encoding, resolved like every other operand — its value
         // is a *user*-stack address: pop one word off it (bump the free-slot
@@ -1284,7 +2222,7 @@ impl Machine {
             && instr.opcode == 0x09
             && self.mem.version() == 6
         {
-            let value = if let Some(op) = instr.operands.first() {
+            let value = if let Some(op) = operands.first() {
                 let addr = self.resolve(op) as u32;
                 let size = self.mem.read_word(addr).wrapping_add(1);
                 self.mem.write_word(addr, size);
@@ -1293,23 +2231,43 @@ impl Machine {
                 read_var(&mut self.state, &self.mem, 0) // pop the game stack
             };
             self.do_store(instr.store, value);
+            self.operand_scratch = operands;
             return StepResult::Continue;
         }
 
-        // Resolve all operands left-to-right (Var operands can pop the stack).
-        let ops: Vec<u16> = instr
-            .operands
-            .iter()
-            .map(|op| self.resolve(op))
-            .collect();
-
-        match instr.operand_count {
-            OperandCount::Two => self.exec_2op(instr.opcode, &ops, instr.store, instr.branch),
-            OperandCount::One => self.exec_1op(instr.opcode, &ops, instr.store, instr.branch),
-            OperandCount::Zero => self.exec_0op(instr.opcode, instr.store, instr.branch, instr.text),
-            OperandCount::Var => self.exec_var(instr.opcode, &ops, instr.store, instr.branch),
-            OperandCount::Ext => self.exec_ext(instr.opcode, &ops, instr.store, instr.branch),
+        // Resolve all operands left-to-right (Var operands can pop the stack)
+        // into a STACK array rather than a heap buffer: an instruction carries
+        // at most MAX_OPERANDS values by construction (see the constant), so
+        // the resolved list never needs to live behind a pointer, and keeping
+        // it in a local lets the compiler hold it in registers instead of
+        // reloading it through `self` (SQ-1431). This was a reused
+        // `Vec<u16>` field (SQ-1438) and a fresh `.collect()` before that.
+        //
+        // Every operand is still resolved, in order, whatever the count —
+        // `resolve` pops the game stack for Var operands, so skipping one
+        // would change semantics. Only the *storing* is bounded.
+        debug_assert!(operands.len() <= MAX_OPERANDS, "decode produced {} operands", operands.len());
+        let mut ops_buf = [0u16; MAX_OPERANDS];
+        let mut n = 0usize;
+        for op in operands.iter() {
+            let v = self.resolve(op);
+            if n < MAX_OPERANDS {
+                ops_buf[n] = v;
+                n += 1;
+            }
         }
+        let ops = &ops_buf[..n];
+
+        let result = match instr.operand_count {
+            OperandCount::Two => self.exec_2op(instr.opcode, ops, instr.store, instr.branch),
+            OperandCount::One => self.exec_1op(instr.opcode, ops, instr.store, instr.branch),
+            OperandCount::Zero => self.exec_0op(instr.opcode, instr.store, instr.branch, instr.text),
+            OperandCount::Var => self.exec_var(instr.opcode, ops, instr.store, instr.branch),
+            OperandCount::Ext => self.exec_ext(instr.opcode, ops, instr.store, instr.branch),
+        };
+
+        self.operand_scratch = operands;
+        result
     }
 
     // -----------------------------------------------------------------------
@@ -1547,7 +2505,7 @@ impl Machine {
                         a as i16 == -1,
                         b as i16 == -1,
                     );
-                } else if let Some(v6) = self.screen.v6.as_mut() {
+                } else if let Some(v6) = self.screen.v6_mut() {
                     let win = ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current);
                     // SQ-0956: a TWO-COLOUR CARD has one bit, and a §8.3.1 pair
                     // carries one bit for it — see
@@ -1556,7 +2514,7 @@ impl Machine {
                     // unchanged on every other display, so the per-window model
                     // below is one code path and not two.
                     let req = (decode_set_colour_v6(a), decode_set_colour_v6(b));
-                    let (req_fg, req_bg) = crate::screen::two_colour_card_request(req.0, req.1);
+                    let (req_fg, req_bg) = crate::screen::two_colour_card_request(self.palette, req.0, req.1);
                     if self.trace_screen {
                         let name = |c: Option<crate::screen::ZColour>, raw: u16| {
                             c.map(zscreen_colour_name).unwrap_or_else(|| raw.to_string())
@@ -1611,8 +2569,8 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // Unknown / unimplemented 2OP — no-op seam for Tasks 10+ (object/text ops)
-            _ => StepResult::Continue,
+            // Undefined 2OP opcode — ZMSD §14.2: halt, see `fault_illegal_opcode`.
+            _ => self.fault_illegal_opcode("2OP", opcode),
         }
     }
 
@@ -1739,8 +2697,8 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // Unknown / unimplemented 1OP — no-op seam (object ops in Task 10)
-            _ => StepResult::Continue,
+            // Undefined 1OP opcode — ZMSD §14.2: halt, see `fault_illegal_opcode`.
+            _ => self.fault_illegal_opcode("1OP", opcode),
         }
     }
 
@@ -1813,10 +2771,22 @@ impl Machine {
                 StepResult::Continue
             }
             // 0OP:0x0D verify — checksum the story and branch on match.
+            //
+            // ZMSD §15 `verify`: "Verification counts a (two byte, unsigned)
+            // checksum of the file from $0040 onwards ... and compares this
+            // against the value in the game header, branching if the two
+            // values agree." A stored checksum of 0 is compared LIKE ANY
+            // OTHER value, not treated as "no checksum, assume genuine" —
+            // both Frotz and Bocfel (zterp.cpp) compare strictly, and the
+            // 2026-09 zvm reference audit proved the old leniency wrong on a
+            // live story: curses.z5 with its $1C word zeroed reports
+            // "verified as intact" here and "did not verify properly" under
+            // dfrotz. A real story's checksum is astronomically unlikely to
+            // BE zero, so this only ever changes the answer for a corrupted
+            // header, which is exactly the case `verify` exists to catch.
             0x0D => {
                 let header_ck = self.mem.read_word(0x1C);
-                // If the header records no checksum (some dev builds), treat as genuine.
-                let ok = header_ck == 0 || self.story_checksum() == header_ck;
+                let ok = self.story_checksum() == header_ck;
                 self.do_branch(branch, ok);
                 StepResult::Continue
             }
@@ -1869,9 +2839,25 @@ impl Machine {
                 self.screen.show_status_requested = true;
                 StepResult::Continue
             }
-            // Unknown / unimplemented 0OP — no-op
-            _ => StepResult::Continue,
+            // Undefined 0OP opcode — ZMSD §14.2: halt, see `fault_illegal_opcode`.
+            _ => self.fault_illegal_opcode("0OP", opcode),
         }
+    }
+
+    /// Does a `len`-byte region starting at `addr` lie entirely inside this
+    /// story's memory? `writable` selects which region: the whole story
+    /// (`false`, for a read) or only dynamic memory below `static_mem_base`
+    /// (`true`, for a write) — ZMSD §1.1. `len == 0` is trivially in bounds.
+    ///
+    /// Used by `copy_table` and `print_table` (ZMSD §15) to fault a table
+    /// that cannot exist up front, rather than running a bounded-but-wasted
+    /// loop to discover the same fact one byte at a time (SQ-1395).
+    fn table_region_in_memory(&self, addr: u32, len: u32, writable: bool) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let limit = if writable { self.mem.static_mem_base() as u32 } else { self.mem.len() as u32 };
+        addr.saturating_add(len) <= limit
     }
 
     // -----------------------------------------------------------------------
@@ -1957,8 +2943,29 @@ impl Machine {
             // 0x06 print_num — print operand as signed decimal
             0x06 => {
                 let val = ops.first().copied().unwrap_or(0) as i16;
-                let s = format!("{}", val);
-                self.print_text(&s);
+                // Format into a stack buffer rather than a heap `String`: the
+                // widest i16 is "-32768", six bytes, and `print_num` runs on
+                // every score/turn/inventory count a game prints (SQ-1431).
+                let mut buf = [0u8; 6];
+                let mut n = buf.len();
+                // Negate into i32 first — `-i16::MIN` overflows i16.
+                let mut mag = (val as i32).unsigned_abs();
+                loop {
+                    n -= 1;
+                    buf[n] = b'0' + (mag % 10) as u8;
+                    mag /= 10;
+                    if mag == 0 {
+                        break;
+                    }
+                }
+                if val < 0 {
+                    n -= 1;
+                    buf[n] = b'-';
+                }
+                // Every byte written above is b'-' or b'0'..=b'9', so this
+                // cannot fail; asserting that is honest where a fallback
+                // string would silently print the wrong number.
+                self.print_text(std::str::from_utf8(&buf[n..]).expect("ASCII digits"));
                 StepResult::Continue
             }
             // 0x07 random — ZMSD §15: random number generator
@@ -2028,29 +3035,58 @@ impl Machine {
             // v3: no store var. v4+: has a store var (terminating character).
             // Operands: text_buf, parse_buf, + optional time/routine (v4+).
             0x04 => {
-                self.check_transcript_bit();
+                self.sync_transcript_bit();
                 self.note_v6_input_window();
                 let text_buf = ops.first().copied().unwrap_or(0) as u32;
                 let parse_buf = ops.get(1).copied().unwrap_or(0) as u32;
                 let interrupt_time = ops.get(2).copied().unwrap_or(0);
                 let interrupt_routine = ops.get(3).copied().unwrap_or(0);
+                // ZMSD §15 read: "if byte 1 contains a positive value at the
+                // start of the input, then read assumes that number of
+                // characters are left over from an interrupted previous
+                // input" — v5+ only (v1-4's byte 1 is the first TEXT byte,
+                // not a count). Read BEFORE anything else touches the
+                // buffer: `supply_line` prepends this to whatever the host
+                // supplies, rather than overwriting it.
+                let preload = self.read_line_preload(text_buf);
                 self.pending_input = Some(PendingInput {
-                    store_var: store, text_buf, parse_buf, interrupt_time, interrupt_routine,
-                    instr_pc: self.cur_instr_pc,
+                    store_var: store, line_read: true, text_buf, parse_buf, interrupt_time,
+                    interrupt_routine, instr_pc: self.cur_instr_pc, preload: preload.clone(),
                 });
-                StepResult::NeedLine { text_buf, parse_buf }
+                // ZMSD §10.2: with input stream 1 selected the line comes from
+                // the command file, not the player — so the read completes here
+                // instead of suspending. `next_recorded_input` reverts to stream
+                // 0 at end of file, and the `None` that says so falls through to
+                // the ordinary suspension below.
+                if let Some(codes) = self.next_recorded_input() {
+                    let (text, terminator) = self.split_recorded_line(&codes);
+                    self.supply_line(&text, terminator);
+                    return StepResult::Continue;
+                }
+                StepResult::NeedLine { text_buf, parse_buf, preload }
             }
             // 0x16 read_char — pause execution and wait for a single keypress (v4+).
             // Has a store var for the ZSCII code. Operands: device, + optional time/routine.
             0x16 => {
-                self.check_transcript_bit();
+                self.sync_transcript_bit();
                 self.note_v6_input_window();
                 let interrupt_time = ops.get(1).copied().unwrap_or(0);
                 let interrupt_routine = ops.get(2).copied().unwrap_or(0);
                 self.pending_input = Some(PendingInput {
-                    store_var: store, text_buf: 0, parse_buf: 0, interrupt_time, interrupt_routine,
-                    instr_pc: self.cur_instr_pc,
+                    store_var: store, line_read: false, text_buf: 0, parse_buf: 0, interrupt_time,
+                    interrupt_routine, instr_pc: self.cur_instr_pc, preload: String::new(),
                 });
+                // ZMSD §10.2: keypresses too are "drawn from the current input
+                // stream", so a `read_char` under stream 1 takes the next
+                // record's first code — the record a `read_char` WROTE to
+                // stream 4 holds exactly one (§7.1.2.3), and an empty record is
+                // the Return that Frotz's `record_char` writes as a bare
+                // newline.
+                if let Some(codes) = self.next_recorded_input() {
+                    let key = codes.first().copied().unwrap_or(13);
+                    self.supply_char_raw(key);
+                    return StepResult::Continue;
+                }
                 StepResult::NeedChar
             }
             // 0x18 not (VAR form, v5+) — bitwise complement
@@ -2138,7 +3174,7 @@ impl Machine {
                     let screen_h = self.mem.read_word(0x24);
                     let mut retired = false;
                     let mut whole = true;
-                    if let Some(v6) = self.screen.v6.as_mut() {
+                    if let Some(v6) = self.screen.v6_mut() {
                         // (window, new top, new height) — window 1 across the top,
                         // window 0 tiled below it, both the full screen width.
                         let tiling =
@@ -2205,17 +3241,10 @@ impl Machine {
                     // would otherwise allocate rows×cols cells (~400 MB at 80
                     // cols) before the terminal could ever show them.
                     let rows = rows.min(GRID_CELL_CAP);
-                    // SQ-1088: does THIS split STRAND the rows below it? Only a
-                    // shrink can — a boundary that moves UP past rows already
-                    // painted. A split that grows, or that opens a window over a
-                    // grid no taller than itself, strands nothing, so whatever a
-                    // game paints below it afterwards is live content and not a
-                    // quote box awaiting retirement. See
-                    // `retire_stranded_upper_rows`. Recomputed on every split, so
-                    // the answer always describes the split the grid stands on.
+                    // Where the boundary was, kept for the v4+ arm below: whether
+                    // this split STRANDS anything is a question about the move,
+                    // not about the new height (SQ-1088).
                     let prev_split = self.screen.upper_window_rows;
-                    self.screen.upper_rows_stranded_by_split =
-                        self.mem.version() > 3 && rows < prev_split && self.screen.upper.rows > rows;
                     self.screen.upper_window_rows = rows;
                     let cols = self.mem.read_byte(0x21) as u16;
                     // ZMSD §15 split_window: "In Version 3 (only) the upper
@@ -2224,6 +3253,7 @@ impl Machine {
                     // turn and repaint only the fields that changed), so grow
                     // with blanks / shrink by truncation instead of reallocating.
                     if self.mem.version() <= 3 {
+                        self.screen.upper_rows_stranded_by_split = false;
                         self.screen.upper.resize(rows, cols.max(1));
                         let bg = self.screen.current_bg;
                         self.screen.upper.clear_to(bg);
@@ -2249,16 +3279,52 @@ impl Machine {
                         // window repaints nothing — the rows keep displaying what
                         // was put there.
                         //
-                        // So the allocation only ever grows here. `upper.rows`
-                        // already exceeds `upper_window_rows` whenever a game
-                        // paints below its own split (LostPig's HELP menu), and
-                        // every host already renders the full grown height, so
-                        // the quote lands exactly where the game placed it —
-                        // including in `--screen-reader`, where a region taller
-                        // than one row is read as content rather than quietened
-                        // chrome. `erase_window` reallocates and is what clears
-                        // it, which is the same moment a real screen loses it.
-                        let painted = self.screen.upper.rows.max(rows);
+                        // …but "what was PAINTED" is the paint, not the
+                        // ALLOCATION (SQ-1355). The grid keeps whatever row count
+                        // the tallest split it has ever stood at left behind, and
+                        // a shrink that preserved that count preserved BLANK rows
+                        // — which no real interpreter can be showing, because it
+                        // has no per-window grid at all: Infocom's own EZIP moves
+                        // the boundary and repaints nothing (`OPSPLT` in
+                        // `ibmzip/ezip/loop.c` is `spltflg = temp; winlen = slpp -
+                        // spltflg;` plus a cursor nudge), so what is below the new
+                        // split is simply whatever pixels were left there. Erase
+                        // those pixels first and there is nothing to leave:
+                        // `md_clr(1)` in the same interpreter's `sysdep.c` blanks
+                        // rows 0..spltflg-1, the whole upper window at its CURRENT
+                        // height, which is exactly ZMSD §8.7.3.2's "the specified
+                        // window can be cleared to background colour".
+                        //
+                        // Bureaucracy's licence form is that sequence: `<CLEAR
+                        // ,S-WINDOW>` over a 24-row split, then `<SPLIT 1>` for
+                        // the status line (`forms.zil` FILL-FORM →
+                        // `other-misc.zil` INIT-STATUS-LINE). Keeping the
+                        // allocation handed the host a 24-row status grid holding
+                        // one row of text, so the banner and the first room
+                        // printed into a story pane with no rows left — and only
+                        // the player's next keypress, which
+                        // `retire_stranded_upper_rows` acts on, gave the screen
+                        // back. `last_painted_row` asks the grid instead: a
+                        // shrink keeps the rows that have something on them and
+                        // lets the empty ones go.
+                        //
+                        // Anything genuinely painted below the new split still
+                        // stays — that is the quote box above, and LostPig's HELP
+                        // menu, whose rows the host renders in full (including in
+                        // `--screen-reader`, where a region taller than one row is
+                        // read as content rather than quietened chrome).
+                        let painted = self.screen.upper.last_painted_row().max(rows);
+                        // SQ-1088: does THIS split STRAND rows below it? Only a
+                        // shrink can — a boundary that moves UP past rows already
+                        // painted. A split that grows, or that opens a window over
+                        // a grid with nothing under the new boundary, strands
+                        // nothing, so whatever a game paints below it afterwards
+                        // is live content and not a quote box awaiting retirement.
+                        // See `retire_stranded_upper_rows`. Recomputed on every
+                        // split, so the answer always describes the split the grid
+                        // stands on.
+                        self.screen.upper_rows_stranded_by_split =
+                            rows < prev_split && painted > rows;
                         self.screen.upper.resize_preserving(painted, cols.max(1));
                     }
                     self.screen.cursor_row = 1;
@@ -2293,7 +3359,7 @@ impl Machine {
                 if self.trace_screen { self.screen_trace.push(format!("@set_window({})", zscreen_window_name(win as u16))); }
                 let mut mirror = None;
                 let mut style = None;
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     let w = win as usize;
                     if w < v6.windows.len() {
                         v6.current = win;
@@ -2327,8 +3393,7 @@ impl Machine {
                 // erase-all meanings below.
                 let win = self.v6_window_operand(ops.first().copied().unwrap_or(0)) as i16;
                 if self.trace_screen { self.screen_trace.push(format!("@erase_window({})", zscreen_window_name(win as u16))); }
-                let screen_w = self.mem.read_word(0x22);
-                let screen_h = self.mem.read_word(0x24);
+                let (screen_w, screen_h) = self.v6_screen_px().unwrap_or((0, 0));
                 // SQ-0755: does this erase take the prose the HOST is holding off the
                 // screen? A v6 erase never set `erase_lower_requested` — that flag is
                 // the v1–5 path's — so on a v6 story the host was never told the screen
@@ -2367,7 +3432,7 @@ impl Machine {
                     _ => false,
                 };
                 let mut mirror = None;
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     // v6 erase is PAINT: background fills the window's CURRENT
                     // screen rect. Painted text runs (any window's) lose the
                     // covered glyphs — no more, no less: Shogun erases its
@@ -2533,9 +3598,12 @@ impl Machine {
                         }
                         _ => {}
                     }
+                    for f in &fills {
+                        self.paint_log.apply(&PaintEvent::Erase(*f));
+                    }
                     self.pending_erase_fills.extend(fills);
                     for (window, win_box) in clear_canvas {
-                        self.pending_pictures.push(PictureEvent {
+                        let ev = PictureEvent {
                             number: 0,
                             window,
                             win_box,
@@ -2549,7 +3617,13 @@ impl Machine {
                             // IS the cursor. The host's `number == 0` arm returns
                             // before reading this either way.
                             at_cursor: true,
-                        });
+                        };
+                        self.pending_pictures.push(ev);
+                        // The paired EraseFill above (SQ-0715) already folds this
+                        // window's paint log to a single Clear entry — this is the
+                        // idempotent twin — but it is fed from here too so the
+                        // same `win_box` reaches both queues in the same breath.
+                        self.paint_log.apply(&PaintEvent::Picture(ev));
                     }
                 } else {
                     // ZMSD §8.7.3.2.1: "In Versions 5 and later, the cursor for
@@ -2622,7 +3696,7 @@ impl Machine {
             0x0F => {
                 let row = ops.first().copied().unwrap_or(1);
                 let col = ops.get(1).copied().unwrap_or(1);
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     let win = ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current);
                     if self.trace_screen {
                         self.screen_trace.push(format!("@set_cursor(row={row}, col={col}, window={win})"));
@@ -2701,7 +3775,7 @@ impl Machine {
                 // CURRENT v6 window's prop 10 so get_wind_prop(w, 10) reads
                 // fresh.
                 let new_style = self.screen.text_style as u16;
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     let cur = v6.current as usize;
                     if let Some(w) = v6.windows.get_mut(cur) {
                         w.text_style = new_style;
@@ -2737,25 +3811,15 @@ impl Machine {
                 match stream {
                     1  => { self.streams.stream1 = true; }
                     -1 => { self.streams.stream1 = false; }
-                    2  => {
-                        self.streams.stream2 = true;
-                        // ZMSD §7.6.5: "Interpreters are allowed to not support
-                        // access to external files (such as with output_stream
-                        // 2 …)"; §7.6.5.2: such an attempt "should ideally print
-                        // a warning to the user that the functionality is not
-                        // available, and otherwise do nothing". Nothing consumes
-                        // `stream2` — there is no transcript FILE — so the flag
-                        // is the "do nothing" half and this diagnostic is the
-                        // warning. The host surfaces diagnostics as Warning
-                        // transcript lines; once per session is enough.
-                        if !self.warned_stream2 {
-                            self.warned_stream2 = true;
-                            self.diagnostics.push(
-                                "transcript file output isn't supported — the game's script command will have no effect (the app keeps its own scrollback)".to_string(),
-                            );
-                        }
-                    }
-                    -2 => { self.streams.stream2 = false; }
+                    // ZMSD §7.4: "In Versions 3 and later, all four output
+                    // streams can be selected or deselected using the
+                    // output_stream opcode. In addition, stream 2 can be
+                    // selected or deselected by setting or clearing bit 0 of
+                    // 'Flags 2'. Whichever method is used, the interpreter must
+                    // ensure that this flag holds the current status of stream
+                    // 2." `set_stream2` is the one place that writes both.
+                    2  => { self.set_stream2(true); }
+                    -2 => { self.set_stream2(false); }
                     3  => {
                         let table = ops.get(1).copied().unwrap_or(0) as u32;
                         // ZMSD §15 output_stream: "In Version 6, a width field
@@ -2793,9 +3857,12 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // VAR:0x14 input_stream — select input source: 0 = keyboard (default), 1 = command
-            // file. The engine only records the selection; sourcing input from a file is a host
-            // concern (the app drives all reads via supply_line). Other values are ignored per spec.
+            // VAR:0x14 input_stream — select input source (ZMSD §10.2): 0 = keyboard
+            // (default), 1 = a file of commands. The FILE is the host's — `read` and
+            // `read_char` ask it for the next record through
+            // `Machine::next_recorded_input` / `Output::next_command` rather than
+            // suspending — and the machine reverts to stream 0 at end of file. Other
+            // values name no stream and are ignored.
             0x14 => {
                 let stream = ops.first().copied().unwrap_or(0) as i16;
                 if stream == 0 || stream == 1 {
@@ -2896,24 +3963,49 @@ impl Machine {
             0x1D => {
                 let first = ops.first().copied().unwrap_or(0) as u32;
                 let second = ops.get(1).copied().unwrap_or(0) as u32;
+                // ZMSD §15: `size` is a signed 16-bit quantity, so its
+                // magnitude is at most 32,768 (`i16::MIN`) — this loop is
+                // inherently short, never the print_table shape below. What
+                // is unchecked is whether `first`/`second`, both raw
+                // story-controlled u16s, name a region this story's memory
+                // actually has: `first..first+size` must be readable, and
+                // whichever of `first`/`second` receives the zero-fill or
+                // copy must lie in WRITABLE (dynamic) memory (ZMSD §1.1).
+                // The per-byte read_byte/write_byte already fault safely on
+                // an out-of-bounds access; checking the whole span first
+                // avoids partial, silently-discarded work and reports the
+                // fault before doing any of it (SQ-1395).
                 let size = ops.get(2).copied().unwrap_or(0) as i16;
+                let n = size.unsigned_abs() as u32;
                 if second == 0 {
-                    for i in 0..size.unsigned_abs() as u32 {
+                    if !self.table_region_in_memory(first, n, true) {
+                        self.mem.write_byte(first.saturating_add(n).saturating_sub(1), 0);
+                        return StepResult::Continue;
+                    }
+                    for i in 0..n {
                         self.mem.write_byte(first + i, 0);
                     }
-                } else if size < 0 {
-                    // forced forward copy; overlap corruption is intentional
-                    let n = size.unsigned_abs() as u32;
-                    for i in 0..n {
-                        let b = self.mem.read_byte(first + i);
-                        self.mem.write_byte(second + i, b);
-                    }
                 } else {
-                    // positive: copy avoiding corruption — snapshot the source first
-                    let n = size as u32;
-                    let src: Vec<u8> = (0..n).map(|i| self.mem.read_byte(first + i)).collect();
-                    for (i, &b) in src.iter().enumerate() {
-                        self.mem.write_byte(second + i as u32, b);
+                    if !self.table_region_in_memory(first, n, false) {
+                        self.mem.read_byte(first.saturating_add(n).saturating_sub(1));
+                        return StepResult::Continue;
+                    }
+                    if !self.table_region_in_memory(second, n, true) {
+                        self.mem.write_byte(second.saturating_add(n).saturating_sub(1), 0);
+                        return StepResult::Continue;
+                    }
+                    if size < 0 {
+                        // forced forward copy; overlap corruption is intentional
+                        for i in 0..n {
+                            let b = self.mem.read_byte(first + i);
+                            self.mem.write_byte(second + i, b);
+                        }
+                    } else {
+                        // positive: copy avoiding corruption — snapshot the source first
+                        let src: Vec<u8> = (0..n).map(|i| self.mem.read_byte(first + i)).collect();
+                        for (i, &b) in src.iter().enumerate() {
+                            self.mem.write_byte(second + i as u32, b);
+                        }
                     }
                 }
                 StepResult::Continue
@@ -2937,6 +4029,25 @@ impl Machine {
                 let width = ops.get(1).copied().unwrap_or(0).min(GRID_CELL_CAP);
                 let height = ops.get(2).copied().unwrap_or(1).clamp(1, GRID_CELL_CAP);
                 let skip = ops.get(3).copied().unwrap_or(0) as u32;
+                // GRID_CELL_CAP bounds the WORST-CASE cost of this loop, but
+                // says nothing about whether the specific table this story
+                // named is backed by real memory: a `height`-row, `width`-
+                // wide table with `skip` bytes of gap between rows spans
+                // `height * (width + skip)` bytes starting at `addr` (the
+                // last row's trailing skip is never read, so this slightly
+                // overstates the true footprint — a safe direction to
+                // round). If that span runs past the end of this story's
+                // memory, the table cannot exist: fault immediately rather
+                // than spending up to GRID_CELL_CAP² iterations of
+                // read_byte/print_text discovering the same thing one byte
+                // at a time (SQ-1395; each individual OOB read would still
+                // safely latch on its own — this just skips the wasted work
+                // that would happen first).
+                let span = u32::from(width).saturating_add(skip).saturating_mul(u32::from(height));
+                if !self.table_region_in_memory(addr, span, false) {
+                    self.mem.read_byte(addr.saturating_add(span).saturating_sub(1));
+                    return StepResult::Continue;
+                }
                 let start_col = self.screen.cursor_col;
                 let start_row = self.screen.cursor_row;
                 for row in 0..height {
@@ -2961,7 +4072,7 @@ impl Machine {
             0x0E => {
                 let value = ops.first().copied().unwrap_or(0);
                 if self.trace_screen { self.screen_trace.push(format!("@erase_line({value})")); }
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     let cur = v6.current as usize;
                     let (top, left, width) = {
                         let w = &v6.windows[cur.min(7)];
@@ -3011,13 +4122,39 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // 0x15 sound_effect — number effect volume routine (ZMSD §9.4).
+            // 0x15 sound_effect — number effect volume routine (ZMSD §15).
             // Record a SoundEvent for every call (including #1/#2 bleeps). The host
             // drains `pending_sounds` and decides what to play / how to visualise.
+            //
+            // ZMSD §15: "In theory, @sound_effect; (with no operands at all) is
+            // illegal. However interpreters are asked to beep (as if the operand
+            // were 1) if possible" — `number` defaults to 1 (a bleep), matching
+            // Frotz's `z_sound_effect` (sound.c). The old default of 0 made a
+            // bare call fall through the `number != 0` guard below and vanish
+            // silently instead of beeping.
+            //
+            // An omitted `effect` defaults to 2 = start/play (Frotz sound.c,
+            // Bocfel sound.cpp) for a genuine sampled-sound call — the old
+            // default of 0 meant nothing to the VM, and `app/src/state.rs` used
+            // to compensate for it at the call site (`effect == 0 || effect ==
+            // 2`), a host policy patching a VM default, removed alongside this.
+            // Bleeps (number 1/2) carry no meaningful `effect` at all — §15:
+            // "in these cases the other operands must be omitted" — so they
+            // keep the pre-existing 0 rather than being handed one that means
+            // nothing to them.
+            //
+            // §15's "To clarify" paragraph: "@sound_effect 0 3/4 will stop (and
+            // unload) all sounds" — number 0 with effect 3 (stop) or 4 (finish
+            // with / unload) refers to every currently-playing sound, not to a
+            // specific one, and must be delivered like any other call; the old
+            // `if number != 0` guard treated number 0 as always "nothing to do"
+            // and dropped it.
             0x15 => {
-                let number = ops.first().copied().unwrap_or(0);
-                if number != 0 {
-                    let effect = ops.get(1).copied().unwrap_or(0) as u8;
+                let number = ops.first().copied().unwrap_or(1);
+                let is_bleep = number == 1 || number == 2;
+                let effect = ops.get(1).copied().unwrap_or(if is_bleep { 0 } else { 2 }) as u8;
+                let stop_all_sounds = number == 0 && matches!(effect, 3 | 4);
+                if number != 0 || stop_all_sounds {
                     // Volume word: low byte = volume (1..8, 255=loudest), high byte
                     // = repeat count (255 = forever, 0/omitted = play once, applied
                     // by the host). Default 8 when omitted.
@@ -3029,15 +4166,11 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // Unknown / unimplemented VAR opcode: record once, then ignore.
-            _ => {
-                if self.warned_var_opcodes.insert(opcode) {
-                    self.diagnostics.push(format!(
-                        "unimplemented VAR opcode 0x{opcode:02X} (ignored)"
-                    ));
-                }
-                StepResult::Continue
-            }
+            // Undefined VAR opcode — ZMSD §14.2: halt, see `fault_illegal_opcode`.
+            // VAR has no EXT-style exemption: numbers 0x00-0x1F are all
+            // defined, so reaching this arm means a genuinely undefined
+            // opcode byte.
+            _ => self.fault_illegal_opcode("VAR", opcode),
         }
     }
 
@@ -3171,7 +4304,7 @@ impl Machine {
                         None => self.screen.v6.as_ref().map(|v6| v6.current as u16),
                     };
                     if let Some(win) = win {
-                        if let Some(v6) = self.screen.v6.as_mut() {
+                        if let Some(v6) = self.screen.v6_mut() {
                             if let Some(w) = v6.windows.get_mut(win as usize) {
                                 w.font_number = new_font;
                             }
@@ -3217,7 +4350,7 @@ impl Machine {
             0x0D => {
                 let fg_op = ops.first().copied().unwrap_or(0);
                 let bg_op = ops.get(1).copied().unwrap_or(0);
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     let win = ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current);
                     if self.trace_screen {
                         let fg = decode_true_colour(fg_op).map(zscreen_colour_name).unwrap_or_else(|| fg_op.to_string());
@@ -3262,6 +4395,7 @@ impl Machine {
                 let win = self.v6_window_operand(ops.first().copied().unwrap_or(0));
                 let prop = ops.get(1).copied().unwrap_or(0);
                 let (def_fg, def_bg) = (self.default_fg_colour, self.default_bg_colour);
+                let palette = self.palette;
                 let val = self.screen.v6.as_ref()
                     .and_then(|v6| v6.windows.get(win as usize))
                     .map(|w| match prop {
@@ -3273,8 +4407,8 @@ impl Machine {
                         // through the §8.3.1 table; a `Default` channel resolves
                         // to the interpreter's own default, the same value
                         // published in header-extension words 5/6).
-                        16 => w.fg.true_value(def_fg),
-                        17 => w.bg.true_value(def_bg),
+                        16 => w.fg.true_value(palette, def_fg),
+                        17 => w.bg.true_value(palette, def_bg),
                         _ => w.get_prop(prop),
                     })
                     .unwrap_or(0);
@@ -3305,10 +4439,10 @@ impl Machine {
             // EXT:0x06 picture_data(picture-number, array) [branch] — ZMSD §15:
             // picture-number 0 asks for "number of pictures available" (word 0)
             // and "release number of the picture file" (word 1), branching if any
-            // pictures are available. Otherwise: if `picture-number` is in the
-            // injected table, write height (word 0) then width (word 1) in
-            // pixels and branch true; else leave the array untouched and don't
-            // branch.
+            // pictures are available. Otherwise: if `picture-number` is known to
+            // the installed [`crate::resources::Resources`], write height (word
+            // 0) then width (word 1) in pixels and branch true; else leave the
+            // array untouched and don't branch.
             0x06 => {
                 // v6-only: for a non-v6 story this stays the Phase 0 stub
                 // (no array write, no branch) so v1–5 behaviour is byte-identical.
@@ -3319,18 +4453,15 @@ impl Machine {
                 let number = ops.first().copied().unwrap_or(0);
                 let array = ops.get(1).copied().unwrap_or(0) as u32;
                 if number == 0 {
-                    let count = self.picture_dims.len() as u16;
-                    // No real picture-file metadata is available yet (Task 9 wires
-                    // the self-blorb); the story's own header release number is a
-                    // harmless placeholder until then.
-                    let release = self.mem.read_word(0x02);
+                    let count = self.resources.picture_count();
+                    let release = self.resources.picture_release();
                     self.mem.write_word(array, count);
                     self.mem.write_word(array.wrapping_add(2), release);
                     if self.trace_screen {
                         self.screen_trace.push(format!("@picture_data(0) -> count={count}, release={release}"));
                     }
                     self.do_branch(branch, count > 0);
-                } else if let Some(&(_, w, h)) = self.picture_dims.iter().find(|&&(n, _, _)| n == number) {
+                } else if let Some((w, h)) = self.resources.picture_dims(number) {
                     self.mem.write_word(array, h);
                     self.mem.write_word(array.wrapping_add(2), w);
                     if self.trace_screen {
@@ -3391,7 +4522,7 @@ impl Machine {
                 }
                 let mut retired = false;
                 let mut whole = false;
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     if (win as usize) < v6.windows.len() {
                         let w = &mut v6.windows[win as usize];
                         if (w.y_coord, w.x_coord) != (y, x) {
@@ -3429,7 +4560,7 @@ impl Machine {
                 // 2/3) are still stored verbatim; only the cell grid is bounded.
                 let mut retired = false;
                 let mut whole = false;
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     if (win as usize) < v6.windows.len() {
                         let w = &mut v6.windows[win as usize];
                         // The box is changing under prose already on screen, and
@@ -3476,7 +4607,7 @@ impl Machine {
                         "@window_style(win={win}, flags={flags:#06b}, op={operation})"
                     ));
                 }
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     if (win as usize) < v6.windows.len() {
                         let w = &mut v6.windows[win as usize];
                         w.attributes = match operation {
@@ -3499,7 +4630,7 @@ impl Machine {
                 if self.trace_screen {
                     self.screen_trace.push(format!("@put_wind_prop(win={win}, prop={prop}, val={val})"));
                 }
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     if let Some(w) = v6.windows.get_mut(win as usize) {
                         w.put_prop(prop, val);
                     }
@@ -3539,12 +4670,14 @@ impl Machine {
                         ));
                     }
                     let out_chars = self.v6_win0_out_chars;
-                    self.pending_pictures.push(PictureEvent {
+                    let ev = PictureEvent {
                         number, window, x, y, erase: false, out_chars, margin_after: None, win_box,
                         // Placed on the window's current text line — see
                         // `PictureEvent::at_cursor` (SQ-0695).
                         at_cursor: y == cy,
-                    });
+                    };
+                    self.pending_pictures.push(ev);
+                    self.paint_log.apply(&PaintEvent::Picture(ev));
                 }
                 StepResult::Continue
             }
@@ -3578,10 +4711,12 @@ impl Machine {
                         ));
                     }
                     let out_chars = self.v6_win0_out_chars;
-                    self.pending_pictures.push(PictureEvent {
+                    let ev = PictureEvent {
                         number, window, x, y, erase: true, out_chars, margin_after: None, win_box,
                         at_cursor: y == cy,
-                    });
+                    };
+                    self.pending_pictures.push(ev);
+                    self.paint_log.apply(&PaintEvent::Picture(ev));
                 }
                 StepResult::Continue
             }
@@ -3600,7 +4735,7 @@ impl Machine {
                 if self.trace_screen {
                     self.screen_trace.push(format!("@set_margins(left={left}, right={right}, win={win})"));
                 }
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     if let Some(w) = v6.windows.get_mut(win as usize) {
                         w.put_prop(6, left); // clamped — see ZWindow::put_prop
                         w.put_prop(7, right);
@@ -3627,6 +4762,12 @@ impl Machine {
                         ev.margin_after = Some(left);
                     }
                 }
+                // The paint log's own copy of that same draw needs the same
+                // retroactive attachment (SQ-1403) — it was already fed when
+                // the draw was queued, before this `set_margins` ran.
+                if let Ok(win) = u8::try_from(win) {
+                    self.paint_log.set_margin_after(win, left);
+                }
                 StepResult::Continue
             }
             // EXT:0x14 scroll_window(window, pixels) — ZMSD §15: "Scrolls the
@@ -3645,7 +4786,7 @@ impl Machine {
             // has already scrolled by exactly the text it printed — so obeying
             // the pixel scroll would double it. Warning about it would fire on
             // essentially every illustrated room description; the `@scroll_window`
-            // trace line above is the diagnostic channel. (See docs/standards.md,
+            // trace line above is the diagnostic channel. (See docs/reference/standards.md,
             // "Where we knowingly differ".)
             //
             // Grid windows 1–7 DO shift their pixel-positioned text runs and cell
@@ -3658,7 +4799,7 @@ impl Machine {
                 }
                 if win == 0 {
                     // Intentionally silent — see above.
-                } else if let Some(v6) = self.screen.v6.as_mut() {
+                } else if let Some(v6) = self.screen.v6_mut() {
                     if let Some(w) = v6.windows.get_mut(win as usize) {
                         w.scroll_pixels(pixels, cell);
                     }
@@ -3759,11 +4900,19 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // Unknown / unimplemented EXT opcode: record once, then ignore
-            // (mirrors the VAR fallthrough for observability parity).
+            // Undefined EXT opcode. ZMSD §14.2.1 exempts EXT:29-255 from the
+            // §14.2 halt rule ("extended opcodes in the range EXT:29 to
+            // EXT:255 should be simply ignored") — EXT:29 itself
+            // (buffer_screen) has its own arm above, so only 30-255 reach
+            // here through that door; below 29 (14, 15 — the two numbers
+            // this crate's own EXT:0-13,16-29 dispatch skips) is a genuinely
+            // undefined opcode and faults like every other class.
             _ => {
+                if opcode < 29 {
+                    return self.fault_illegal_opcode("EXT", opcode);
+                }
                 if self.warned_ext_opcodes.insert(opcode) {
-                    self.diagnostics.push(format!(
+                    self.push_diagnostic(format!(
                         "unimplemented EXT opcode 0x{opcode:02X} (ignored)"
                     ));
                 }
@@ -3819,7 +4968,7 @@ impl Machine {
     /// Offset 0 → return false (0) from current routine.
     /// Offset 1 → return true (1) from current routine.
     /// Else → pc += offset - 2  (offset is relative to next_pc already in state.pc).
-    pub fn do_branch(&mut self, branch: Option<Branch>, cond: bool) {
+    pub(crate) fn do_branch(&mut self, branch: Option<Branch>, cond: bool) {
         let br = match branch {
             Some(b) => b,
             None => return,
@@ -3837,14 +4986,24 @@ impl Machine {
 
     /// Sum (mod 0x10000) of the story bytes [0x40, file_length) — every byte
     /// past the header up to the declared file length (ZMSD §11.1.6). file_length =
-    /// header word 0x1A * scale (2 for v3, 4 for v4-5, 8 for v6+).
+    /// header word 0x1A * scale (2 for v1-3, 4 for v4-5, 8 for v6+).
+    ///
+    /// **When the story declares no length, the image's own is used instead.**
+    /// §11.1 marks $1A "3+" and notes "Some early Version 3 files do not
+    /// contain length and checksum data"; Versions 1 and 2 have no such field
+    /// at all. Frotz makes exactly this substitution — `init_memory` reads the
+    /// word and, "some old games lack the file size entry", seeks to the end of
+    /// the story file for `story_size`, which is then what `z_verify` sums
+    /// (`src/common/fastmem.c`). Summing to 0x40 instead would make `verify`
+    /// answer for the empty region rather than for the story.
     pub fn story_checksum(&self) -> u16 {
         let scale: u32 = match self.mem.version() {
             1..=3 => 2,
             4 | 5 => 4,
             _ => 8,
         };
-        let file_length = self.mem.read_word(0x1A) as u32 * scale;
+        let declared = self.mem.read_word(0x1A) as u32 * scale;
+        let file_length = if declared == 0 { self.mem.len() as u32 } else { declared };
         let end = file_length.min(self.mem.len() as u32);
         // Checksum the ORIGINAL story image: the dynamic region [0..static_mem_base)
         // may have been mutated by the running game, so read it from the snapshot
@@ -3961,7 +5120,7 @@ impl Machine {
     /// The clock lives in the host: it polls input for `time_tenths * 100` ms and
     /// calls `run_timed_interrupt` on each timeout.
     pub fn pending_timeout(&self) -> Option<(u16, u16)> {
-        let p = self.pending_input?;
+        let p = self.pending_input.as_ref()?;
         if p.interrupt_time != 0 && p.interrupt_routine != 0 {
             Some((p.interrupt_time, p.interrupt_routine))
         } else {
@@ -3976,8 +5135,8 @@ impl Machine {
     /// input/save/restart (unsupported per ZMSD), the interrupt is abandoned and
     /// reported as non-aborting, with engine state restored.
     pub fn run_timed_interrupt(&mut self) -> TimedInterrupt {
-        let saved = match self.pending_input {
-            Some(p) if p.interrupt_routine != 0 => p, // PendingInput: Copy
+        let saved = match self.pending_input.clone() {
+            Some(p) if p.interrupt_routine != 0 => p,
             _ => return TimedInterrupt { aborted: false },
         };
         let ret = self.run_routine(saved.interrupt_routine);
@@ -3985,13 +5144,23 @@ impl Machine {
     }
 
     /// Call `packed_routine` to completion and return its value. Safe whether or
-    /// not a read is pending: it snapshots `pending_input` and restores it if the
-    /// routine attempts nested input/save/restart (unsupported — the routine is
-    /// then abandoned and 0 is returned). On the normal path `pending_input` is
-    /// left untouched. Used by timed-input interrupts and by the sound
-    /// finish-routine callback.
+    /// not a read/save/restore is pending: it snapshots that suspended state and
+    /// restores it if the routine attempts nested input/save/restart (unsupported
+    /// — the routine is then abandoned and 0 is returned). On the normal path the
+    /// snapshot is left untouched, since nothing here clears the outer suspension
+    /// — only the host's own `supply_line`/`supply_char`/`complete_save`/
+    /// `complete_restore_*` do that. Used by timed-input interrupts and by the
+    /// sound finish-routine callback.
+    ///
+    /// While this drives its own inner `step()` loop, `nested_call_depth` is
+    /// nonzero so `step()`'s SQ-1432 idempotence guard steps aside and actually
+    /// executes the routine's instructions, rather than mistaking this legitimate
+    /// nested call for a re-poll of the outer suspension.
     pub fn run_routine(&mut self, packed_routine: u16) -> u16 {
-        let saved = self.pending_input; // Option<PendingInput>: Copy
+        let saved_input = self.pending_input.clone();
+        let saved_save = self.pending_save.clone();
+        let saved_restore = self.pending_restore;
+        let saved_restore_store = self.pending_restore_store;
         let base_frames = self.state.frames.len();
         let base_stack = self.state.eval_stack.len();
         // Push the routine, storing its return value onto the eval stack (var 0).
@@ -4000,6 +5169,7 @@ impl Machine {
             // packed 0 / bad addr: call_routine pushed 0 to the stack already.
             return self.state.eval_stack.pop().unwrap_or(0);
         }
+        self.nested_call_depth += 1;
         loop {
             match self.step() {
                 StepResult::Continue => {
@@ -4008,16 +5178,22 @@ impl Machine {
                     }
                 }
                 // Nested input/save/restart/quit inside the routine: unsupported.
-                // Unwind and restore, including pending_input (a nested read opcode
-                // may have overwritten it).
+                // Unwind and restore every suspension the outer call had, including
+                // pending_input/pending_save/pending_restore — a nested read/save/
+                // restore opcode may have overwritten any of them.
                 _ => {
                     self.state.frames.truncate(base_frames);
                     self.state.eval_stack.truncate(base_stack);
-                    self.pending_input = saved;
+                    self.pending_input = saved_input;
+                    self.pending_save = saved_save;
+                    self.pending_restore = saved_restore;
+                    self.pending_restore_store = saved_restore_store;
+                    self.nested_call_depth -= 1;
                     return 0;
                 }
             }
         }
+        self.nested_call_depth -= 1;
         let ret = self.state.eval_stack.pop().unwrap_or(0);
         // Guard: a well-behaved routine leaves the stack where we started.
         self.state.eval_stack.truncate(base_stack);
@@ -4031,13 +5207,17 @@ impl Machine {
     /// text printing resumes". Called once per '\n' streamed to the window in
     /// [`print_text`].
     ///
-    /// Semantics matched to Frotz: `if countdown != 0 { if --countdown == 0 { call }}`
-    /// — the routine fires exactly once, and because the countdown is now 0 any
-    /// new-line the routine itself emits is a no-op (Frotz's `!= 0` guard), so the
-    /// zeroed prop 9 *is* the re-entrancy guard. The routine "should not attempt to
-    /// print anything" (§8.8.3.2.2); Zork0 r393's is three instructions — set a
-    /// flag byte, `set_margins 0,0`, `rtrue` — i.e. it rolls prose back inside its
-    /// border frame. We run it synchronously via [`run_routine`], which safely
+    /// The countdown is decremented on every new-line and the routine fires the
+    /// instant it reaches zero, exactly once: any new-line the routine's OWN
+    /// output then causes must not re-fire it, and it does not, because that
+    /// decrement only ever runs while the countdown is still nonzero — once it
+    /// hits zero the field itself is what blocks the next decrement, so the
+    /// zeroed prop 9 *is* the re-entrancy guard, with nothing extra to track.
+    /// Frotz's `countdown()` reaches the same guard the same way. The routine
+    /// "should not attempt to print anything" (§8.8.3.2.2); Zork0 r393's is
+    /// three instructions — set a flag byte, `set_margins 0,0`, `rtrue` — i.e.
+    /// it rolls prose back inside its border frame. We run it synchronously
+    /// via [`run_routine`], which safely
     /// abandons (and restores state) if a spec-violating routine attempts a nested
     /// blocking read our step model cannot suspend for. `newline_interrupt_active`
     /// hard-stops recursion for a pathological routine that both prints and re-arms
@@ -4049,7 +5229,7 @@ impl Machine {
         if self.newline_interrupt_active {
             return;
         }
-        let routine = match self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(win)) {
+        let routine = match self.screen.v6_mut().and_then(|v6| v6.windows.get_mut(win)) {
             Some(w) if w.interrupt_countdown != 0 => {
                 w.interrupt_countdown -= 1;
                 if w.interrupt_countdown != 0 {
@@ -4178,7 +5358,7 @@ impl Machine {
         // The style/colours this text is going out in, for the SQ-0697 shadow
         // below — read before the window borrow.
         let (style, fg, bg) = (self.v6_run_style(), self.screen.current_fg, self.screen.current_bg);
-        let Some(v6) = self.screen.v6.as_mut() else {
+        let Some(v6) = self.screen.v6_mut() else {
             return;
         };
         let idx = (v6.current as usize).min(7);
@@ -4271,11 +5451,11 @@ impl Machine {
     /// all eight windows whenever a keystroke actually arrives (not on a
     /// timeout), in `console_read_input` and `console_read_key`; without it a
     /// long game walks the count down to the -999 floor and silently turns
-    /// "[MORE]" off for good. No-op below v6.
+    /// "\[MORE\]" off for good. No-op below v6.
     fn v6_reload_line_counts(&mut self) {
         // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
         let cell = self.v6_cell();
-        if let Some(v6) = self.screen.v6.as_mut() {
+        if let Some(v6) = self.screen.v6_mut() {
             for w in v6.windows.iter_mut() {
                 w.reload_line_count(cell);
             }
@@ -4283,12 +5463,12 @@ impl Machine {
     }
 
     /// The current v6 window's line count (property 15) as a signed number:
-    /// how many more lines it prints before "[MORE]" falls due (zero or below
+    /// how many more lines it prints before "\[MORE\]" falls due (zero or below
     /// = due; [`crate::screen::NEVER_MORE`] = never). `None` below v6.
     ///
     /// For the host's pager — the engine only maintains the count (decrement
     /// per new-line, floor at -999, reload on input); deciding when to show
-    /// "[MORE]" stays a host job.
+    /// "\[MORE\]" stays a host job.
     pub fn v6_line_count(&self) -> Option<i16> {
         self.screen
             .v6
@@ -4296,7 +5476,7 @@ impl Machine {
             .map(|v6| v6.windows[(v6.current as usize).min(7)].line_count_signed())
     }
 
-    /// ZMSD §8.8.3.2.6: "A line count of -999 means 'never print [MORE]'."
+    /// ZMSD §8.8.3.2.6: "A line count of -999 means 'never print \[MORE\]'."
     /// True only for a v6 story whose current window is parked at the
     /// sentinel — the device Zork Zero's demonstration mode uses (§8 Remarks).
     pub fn v6_suppress_more(&self) -> bool {
@@ -4309,10 +5489,10 @@ impl Machine {
     /// Delegates to `supply_char`/`supply_line`, which clear `pending_input`.
     /// No-op if no read is pending.
     pub fn abort_timed_input(&mut self, typed: &str) {
-        match self.pending_input {
-            Some(p) if p.text_buf == 0 => {
+        match &self.pending_input {
+            Some(p) if !p.line_read => {
                 // read_char: deliver ZSCII 0.
-                self.supply_char(0);
+                self.supply_char_raw(0);
             }
             Some(_) => {
                 // read (line): partial buffer, terminator 0.
@@ -4323,7 +5503,7 @@ impl Machine {
     }
 
     /// Store `val` into variable `var` if `var` is Some.
-    pub fn do_store(&mut self, var: Option<u8>, val: u16) {
+    pub(crate) fn do_store(&mut self, var: Option<u8>, val: u16) {
         if let Some(v) = var {
             write_var(&mut self.state, &mut self.mem, v, val);
         }
@@ -4367,7 +5547,7 @@ impl Machine {
     /// 32–126 are translated through the Font-3 Unicode mapping table before
     /// being stored in the upper window grid or forwarded to the output sink.
     /// With any other font the output is byte-identical to the input.
-    pub fn print_text(&mut self, s: &str) {
+    pub(crate) fn print_text(&mut self, s: &str) {
         // SQ-0917: the session's v6 cell, read before any borrow of `self.screen`.
         let cell = self.v6_cell();
         // ZMSD 7.1.2.5: when stream 3 is selected it is the ONLY output stream —
@@ -4396,7 +5576,7 @@ impl Machine {
                 None => self.screen.current_window != 1,
             };
             if copy {
-                self.streams.write_stream2(s);
+                self.out.transcript(s);
             }
         }
         let font3 = self.screen.current_font == 3;
@@ -4448,7 +5628,7 @@ impl Machine {
                 // every machine but Arthur's Amiga press this answers the cell
                 // width for every glyph and everything below is what it was.
                 let metric = &self.v6_metric;
-                if let Some(w) = self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(idx)) {
+                if let Some(w) = self.screen.v6_mut().and_then(|v6| v6.windows.get_mut(idx)) {
                     let fw = cell.w();
                     let fh = cell.h();
                     let (fg, bg) = (w.fg, w.bg);
@@ -4762,7 +5942,7 @@ impl Machine {
                     }
                     w.set_grid_cursor(r, c);
                 }
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     for r in finished {
                         v6.paint_run(idx, r, &self.v6_metric);
                     }
@@ -4844,7 +6024,7 @@ impl Machine {
                 // Taken on BOTH branches, so a declaration can never outlive the
                 // print that answered it.
                 let (col, row) = self.v6_take_declared_indent(s);
-                if let Some(v6) = self.screen.v6.as_mut() {
+                if let Some(v6) = self.screen.v6_mut() {
                     v6.windows[cur].push_prose(s, (col > 0).then_some(col), (row > 0).then_some(row));
                 }
             } else {
@@ -4943,10 +6123,36 @@ impl Machine {
         crate::screen::compute_status_line(&self.mem)
     }
 
-    /// Read global variable N (0-based). Convenience for tests and Tasks 11+.
+    /// Read global variable N (0-based). A convenience for tests and for a
+    /// host inspecting story state directly.
     pub fn global(&self, n: u8) -> u16 {
         let base = self.mem.global_vars() as u32;
         self.mem.read_word(base + n as u32 * 2)
+    }
+
+    /// Write global variable N (0-based). Convenience for tests: sets up a
+    /// known value before exercising a code path that is expected to overwrite it.
+    pub fn set_global(&mut self, n: u8, val: u16) {
+        let base = self.mem.global_vars() as u32;
+        self.mem.write_word(base + n as u32 * 2, val);
+    }
+
+    /// Decode ZMSD §15 `read`'s pre-loaded input line out of `text_buf`, at
+    /// the moment a `read` instruction suspends — see [`StepResult::NeedLine`]
+    /// and [`Self::supply_line`]. Empty below v5 (byte 1 there is the first
+    /// TEXT byte, not a count) and whenever byte 1 is 0 (the overwhelmingly
+    /// common case: nothing pre-loaded).
+    fn read_line_preload(&self, text_buf: u32) -> String {
+        if self.mem.version() < 5 {
+            return String::new();
+        }
+        let count = self.mem.read_byte(text_buf + 1);
+        if count == 0 {
+            return String::new();
+        }
+        (0..count as u32)
+            .map(|i| self.print_char_to_unicode(self.mem.read_byte(text_buf + 2 + i) as u16))
+            .collect()
     }
 
     /// Complete a suspended `read` instruction by supplying a line of input.
@@ -4977,6 +6183,25 @@ impl Machine {
             None => return, // no pending read — ignore
         };
 
+        // The machine is suspended on `read_char`, not `read`: there is no text
+        // buffer to write and the store variable wants a ZSCII key, so deliver
+        // the terminator as that key and write NOTHING to memory (SQ-1266).
+        //
+        // A host reaches here whenever it answers a keypress prompt with a line
+        // — every `submit("")` that dismisses a Version 6 title splash, and
+        // every `app::probe` shadow command typed while the story happens to be
+        // parked on a key. `read_char` leaves `text_buf` and `parse_buf` at
+        // zero, so the code below used to write the count byte to address 1 and
+        // the text from address 2: the header's Flags1 and release number. See
+        // `PendingInput::line_read` for what that then broke, and note the
+        // observable result was already this store — the memory writes were
+        // pure damage.
+        if !pending.line_read {
+            self.pending_input = Some(pending);
+            self.supply_char_raw(terminator);
+            return;
+        }
+
         // A key actually arrived, so the v6 windows get a fresh screenful
         // before "[MORE]" is due again (frotz console_read_input, which skips
         // this on ZC_TIME_OUT — our timeout path is terminator 0).
@@ -4998,13 +6223,20 @@ impl Machine {
         let byte0 = self.mem.read_byte(text_buf) as usize;
         let max_len = if version <= 4 { byte0.saturating_sub(1) } else { byte0 };
 
-        // Lower-case the input, convert each character to its ZSCII code
-        // (custom Unicode table first, ZMSD §3.8.5.4 — the buffer stores ZSCII
-        // bytes, never raw UTF-8: 'é' must land as one byte, code 170, or it
-        // can never match a dictionary key), and truncate to max_len
+        // ZMSD §15: the pre-loaded characters (if any — see `read_line_preload`)
+        // come FIRST, and `input` is what the host supplies AFTER them, not a
+        // replacement for them — `pending.preload` is empty in the
+        // overwhelmingly common case (nothing pre-loaded, or v1-4), so this
+        // is a no-op there.
+        //
+        // Lower-case the combined text, convert each character to its ZSCII
+        // code (custom Unicode table first, ZMSD §3.8.5.4 — the buffer stores
+        // ZSCII bytes, never raw UTF-8: 'é' must land as one byte, code 170,
+        // or it can never match a dictionary key), and truncate to max_len
         // CHARACTERS (byte-slicing a UTF-8 string here panicked mid-char).
-        let text: Vec<u8> = input
+        let text: Vec<u8> = pending.preload
             .chars()
+            .chain(input.chars())
             .map(|c| c.to_lowercase().next().unwrap_or(c))
             .take(max_len)
             .map(|c| self.mem.zscii_from_unicode(c))
@@ -5042,22 +6274,108 @@ impl Machine {
         if version >= 5 {
             self.do_store(pending.store_var, terminator as u16);
         }
+
+        self.record_input_line(&text, terminator);
+    }
+
+    /// The two side-streams a finished line of input feeds (ZMSD §7).
+    ///
+    /// * Stream 4 takes the whole command, "in one go, when it has been
+    ///   finished" (§7.1.2.3), terminator included when it was not Return —
+    ///   unless the line CAME from input stream 1, since re-recording a replay
+    ///   into the script being replayed is a copy of a file onto itself. (Frotz
+    ///   spells the same exception `ostream_record && !istream_replay`,
+    ///   `stream.c`.)
+    /// * Stream 2 takes the line as typed, in every version but 6: §7.1.1.1 —
+    ///   "In Versions 1 to 5, the player's input to the `read` opcode should be
+    ///   echoed to output streams 1 and 2 (if stream 2 is active), so that text
+    ///   typed in appears in any transcript. In Version 6 input should be sent
+    ///   only to stream 1 and it is the game's responsibility to write to the
+    ///   transcript." The standard names no rule for Versions 7 and 8, which
+    ///   postdate it as a screen model; Frotz reads the clause as being ABOUT
+    ///   Version 6 and passes `no_scripting = (h_version == V6)` (`input.c`
+    ///   `z_read`), so a v8 transcript shows the commands that produced it. That
+    ///   is the reading here. Echoing to stream 1 is the HOST's business — it is
+    ///   the host that drew the input line in the first place.
+    ///
+    /// `text` is the ZSCII the line was stored as, so the transcript records what
+    /// the game received (lower-cased, truncated to the buffer) rather than what
+    /// the host happened to hold.
+    fn record_input_line(&mut self, text: &[u8], terminator: u8) {
+        if self.streams.stream4 {
+            let mut codes = text.to_vec();
+            if terminator != 13 {
+                codes.push(terminator);
+            }
+            self.record_command(&codes);
+        }
+        if self.streams.stream2 && self.mem.version() != 6 {
+            let mut line: String = text
+                .iter()
+                .map(|&c| {
+                    self.mem
+                        .unicode_char(c as u16)
+                        .unwrap_or_else(|| crate::text::decode::zscii_to_char(c as u16))
+                })
+                .collect();
+            line.push('\n');
+            self.out.transcript(&line);
+        }
     }
 
     /// Complete a suspended `read_char` instruction by supplying a single keystroke.
     ///
-    /// `ch` is the ZSCII code of the key pressed (e.g. 65 = 'A').
-    /// The value is written into the instruction's store variable.
-    pub fn supply_char(&mut self, ch: u8) {
+    /// `ch` is the ZSCII code of the key pressed (e.g. 65 = 'A'), typed as
+    /// [`ZsciiInput`] so a code the standard never defines for input (ZMSD
+    /// §3.8's Table 2) cannot reach here at all — see that type for the
+    /// verified range table and [`ZsciiInput::from_char`] for the convenience
+    /// that normalises a typed `'\n'` to Return (SQ-1419). The value is
+    /// written into the instruction's store variable.
+    pub fn supply_char(&mut self, ch: ZsciiInput) {
+        self.supply_char_raw(ch.code());
+    }
+
+    /// The body of [`Self::supply_char`], taking a raw ZSCII byte rather than
+    /// a [`ZsciiInput`] — for the machine's own internal callers, which
+    /// forward a code that never passed through a host's keyboard at all: a
+    /// replayed command-stream byte, a `read`-with-terminator terminator, or
+    /// 0, this crate's own timed-read timeout sentinel (not a ZSCII input
+    /// code — see the call sites). Every one of those still needs the §3.8
+    /// validity check `ZsciiInput::new` performs, since none of them went
+    /// through the type; unlike `supply_char`'s caller, they cannot lean on
+    /// the compiler for it.
+    fn supply_char_raw(&mut self, ch: u8) {
         let pending = match self.pending_input.take() {
             Some(p) => p,
             None => return,
         };
+        // §3.8: 10 (line feed) is not a legal input code; 13 (carriage
+        // return) is the one Return/Enter is defined as. `ZsciiInput` applies
+        // this same normalisation on the `from_char('\n')` path; raw internal
+        // forwarders (see above) still want it done here.
+        let ch = if ch == 10 { 13 } else { ch };
+        // 0 is our own timed-read timeout sentinel (not a ZSCII input code at
+        // all — see the call sites), so it bypasses the input-table check.
+        if ch != 0 && ZsciiInput::new(ch).is_none() {
+            self.push_diagnostic(format!(
+                "supply_char: ZSCII {ch} is not a legal input code (ZMSD §3.8); dropped"
+            ));
+            self.pending_input = Some(pending); // read is still pending
+            return;
+        }
         // As in `supply_line`: a real keystroke reloads the v6 line counts,
         // ZSCII 0 (our timed-read timeout) does not (frotz console_read_key).
         if ch != 0 {
             self.v6_reload_line_counts();
             self.retire_stranded_upper_rows();
+            // ZMSD §7.1.2: stream 4 is "a script file of the player's whole
+            // commands and of individual keypresses as read by read_char" — one
+            // record per key. A Return is recorded as an EMPTY record, matching
+            // Frotz's `record_char`, which writes nothing for ZC_RETURN before
+            // the line break that ends every record. ZSCII 0 is our timed-read
+            // timeout, not a keypress, and is not recorded.
+            let codes: &[u8] = if ch == 13 { &[] } else { std::slice::from_ref(&ch) };
+            self.record_command(codes);
         }
         self.do_store(pending.store_var, ch as u16);
     }
@@ -5072,6 +6390,61 @@ impl Machine {
     /// then write the returned bytes to a file (or wherever), then call `complete_save`.
     pub fn save_quetzal(&self) -> Vec<u8> {
         crate::quetzal::save_quetzal(self)
+    }
+
+    /// Serialise the current SCREEN to a versioned byte buffer
+    /// ([`crate::screen_snapshot`]).
+    ///
+    /// The companion to [`Machine::save_quetzal`] for a host snapshot, and needed
+    /// because Quetzal deliberately carries no screen state: the standard assumes
+    /// the *story* repaints after an in-game `@restore`. A host "Save State" gets
+    /// no such repaint — it swaps dynamic memory under a game that never learns it
+    /// happened — so the host writes this beside the Quetzal buffer and hands it
+    /// back on the way in.
+    ///
+    /// Backend- and terminal-neutral: Version 6 geometry travels in native
+    /// pixels, and there are no cell coordinates, font metrics or host state in
+    /// it. The module docs list the handful of fields deliberately left out.
+    pub fn screen_snapshot(&self) -> Vec<u8> {
+        crate::screen_snapshot::encode(&self.screen)
+    }
+
+    /// Install a screen from a buffer written by [`Machine::screen_snapshot`].
+    ///
+    /// # Where this goes in a host restore
+    ///
+    /// After [`Machine::restore_file`] (or `restore_quetzal`), not before: the
+    /// memory restore blanks the upper window on purpose, because what is in it
+    /// belongs to the moment the host just left. This puts the right screen back
+    /// over that blank.
+    ///
+    /// **Then re-declare the screen SIZE.** A restore into a different terminal is
+    /// a resize the game never saw: the snapshot carries the grid geometry of the
+    /// session that WROTE it, which silently undoes the header dimensions the
+    /// restore just re-stamped for this host. `lanthorn` calls
+    /// `reconcile_restored_screen_size` immediately after this, which is nothing
+    /// more than [`Machine::set_screen_dims`] with the current pane's rows and
+    /// columns — routing the restored screen through the same path a live resize
+    /// takes. Version 6 is exempt there, laying out on its own fixed native pixel
+    /// screen with no terminal geometry to reconcile.
+    ///
+    /// Two facts that live in two places and only one of which is in here are the
+    /// host's to re-sync afterwards: the output sink's buffering (from
+    /// [`ScreenState::buffer_mode`](crate::screen::ScreenState::buffer_mode), ZMSD
+    /// §7.2.1) and, for Version 6, the mirrored `current_fg`/`current_bg` pair,
+    /// which the restored window table is the authority for.
+    ///
+    /// # Errors
+    ///
+    /// [`ZError::ScreenSnapshotVersion`](crate::error::ZError::ScreenSnapshotVersion)
+    /// for a buffer from a newer build (it names both version numbers) and
+    /// [`ZError::BadScreenSnapshot`](crate::error::ZError::BadScreenSnapshot) for
+    /// one that is not a snapshot, is truncated, or is unreadable. The machine is
+    /// untouched on either — a screen that cannot be read is the case Quetzal was
+    /// designed for, so the honest fallback is to let the story repaint.
+    pub fn restore_screen_snapshot(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
+        self.screen = crate::screen_snapshot::decode(data)?;
+        Ok(())
     }
 
     /// The PC of the `read`/`read_char` instruction the machine is suspended on
@@ -5108,7 +6481,7 @@ impl Machine {
     ///
     /// Hosts guard their unconditional snapshot triggers (exit auto-save, the
     /// quit dialog's "Save State & quit") on this. The Z-machine's hazard is not
-    /// Glulx's un-popped call stub, it is [`save_pc`](Self::save_pc): while an
+    /// Glulx's un-popped call stub, it is `save_pc`: while an
     /// `@save` is suspended, `save_pc` deliberately reports the result-descriptor
     /// address (Quetzal §5.8), so a HOST snapshot taken in that window records a
     /// PC pointing at a branch/store descriptor byte rather than at an
@@ -5222,6 +6595,16 @@ impl Machine {
     /// restore.
     fn post_restore_fixups(&mut self, (rows, cols): (u8, u8)) {
         self.init_caps();
+        // ZMSD §11.1.2: "the interpreter ensures that [the transcription bit's]
+        // value survives a restart or restore." The saved dynamic memory brought
+        // the SAVING session's bit 0 back with it, which says nothing about
+        // whether a transcript is open now — the transcript is the interpreter's,
+        // not the save's, exactly as §7.6.2 says of files generally ("Saved files
+        // are not associated with any particular session of a game"). Re-assert
+        // the live selection. (`restart` needs no equivalent: it already
+        // preserves Flags 2's two game-writable bits across the reload, §6.1.3.)
+        let on = self.streams.stream2;
+        self.set_stream2(on);
         if rows > 0 && cols > 0 {
             self.set_screen_dims(rows, cols);
         }
@@ -5292,10 +6675,8 @@ impl Machine {
 
 /// Translate a character code through Font 3's character-graphics table.
 ///
-/// Source: Bocfel interpreter (garglk/garglk, terps/bocfel/unicode.cpp,
-/// function `build_zscii_to_character_graphics_table`), which faithfully
-/// implements the 8×8 bitmap descriptions in Z-Machine Standards Document §16.
-/// https://inform-fiction.org/zmachine/standards/z1point1/sect16.html
+/// Implements the 8×8 bitmap descriptions in Z-Machine Standards Document §16.
+/// <https://inform-fiction.org/zmachine/standards/z1point1/sect16.html>
 ///
 /// Key BeyondZork cursor-arrow mappings (ZMSD §16):
 ///   code 92 ('\\') → U+2191 ↑  (cursor up)
@@ -5699,6 +7080,73 @@ pub(crate) mod tests {
         }
     }
 
+    /// SQ-1435: `v6_metric()` is the field `v6_cell()` already reads half of.
+    #[test]
+    fn v6_metric_reads_back_the_cell_and_pen_together() {
+        let mut m = Machine::new(Memory::new(v6_boot_story(&[0xB0])).unwrap());
+        let metric = crate::screen::V6Metric::fixed(V6Cell::new(8, 20));
+        m.set_v6_text(metric.clone());
+        assert_eq!(m.v6_metric(), &metric, "v6_metric() is the installed metric, verbatim");
+        assert_eq!(m.v6_metric().cell(), m.v6_cell(), "v6_cell() is v6_metric().cell()");
+    }
+
+    /// SQ-1436: `v6_screen_px()` reads back what `set_v6_screen_px` wrote,
+    /// without reconstituting it from the character grid (SQ-1156's precision
+    /// loss — see `v6_restart_redeclares_the_hosts_cell_and_keeps_the_screen_in_pixels`
+    /// for the case where that loss is observable).
+    #[test]
+    fn v6_screen_px_reads_back_the_declared_screen() {
+        let mut m = Machine::new(Memory::new(v6_boot_story(&[0xB0])).unwrap());
+        assert_eq!(m.v6_screen_px(), Some((0, 0)), "unset until a host declares it");
+        m.set_v6_screen_px(640, 400);
+        assert_eq!(m.v6_screen_px(), Some((640, 400)));
+    }
+
+    /// SQ-1436: below v6, header words `$22`/`$24` answer a different question
+    /// (ZMSD §11.1: "a unit" is one character there, not one pixel), so the
+    /// accessor refuses to answer rather than mislabel a character count as
+    /// pixels.
+    #[test]
+    fn v6_screen_px_is_none_below_v6() {
+        let m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        assert_eq!(m.v6_screen_px(), None);
+    }
+
+    /// SQ-1436: `default_colours()` is `(bg, fg)`, the header's own `$2C`/`$2D`
+    /// order and the order `set_default_colours` takes them in (ZMSD §8.3.3).
+    #[test]
+    fn default_colours_reads_back_bg_then_fg() {
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.set_default_colours(4, 7);
+        assert_eq!(m.default_colours(), (4, 7), "(bg, fg), the header's own order");
+    }
+
+    /// SQ-1437: a machine built without `Machine::boot` has scaled nothing, so
+    /// `art_scale()` answers the identity factor.
+    #[test]
+    fn art_scale_defaults_to_identity_off_boot() {
+        let m = Machine::new(Memory::new(v6_boot_story(&[0xB0])).unwrap());
+        assert_eq!(m.art_scale(), (1, 1));
+    }
+
+    /// SQ-1437: `Machine::boot` carries `BootConfig::resolved_art_scale` onto
+    /// the machine, and `@restart` — which never touches `v6_art_scale` —
+    /// leaves it exactly as boot set it (the same "boot fact, not screen
+    /// state" shape as `v6_metric`; SQ-1022's restart-diverges-from-launch
+    /// defect is exactly what would reopen if this were reset).
+    #[test]
+    fn art_scale_carries_the_boot_configs_resolved_scale_and_survives_restart() {
+        let cfg = crate::cpu::boot::BootConfig::new()
+            .with_v6_screen_px((320, 200))
+            .with_v6_art_scale((2, 2));
+        let mut m = Machine::boot(Memory::new(v6_boot_story(&[0xB0])).unwrap(), Box::new(crate::io::BufferOutput::new()), cfg);
+        assert_eq!(m.art_scale(), (2, 2), "the config's own scale, read back off the machine");
+
+        m.restart();
+
+        assert_eq!(m.art_scale(), (2, 2), "a boot fact, untouched by @restart");
+    }
+
     #[test]
     fn v1to5_restart_resets_to_initial_pc_and_reloads_dynmem() {
         // In v3–5, @restart resumes frameless at the header's initial PC with
@@ -5727,31 +7175,92 @@ pub(crate) mod tests {
         );
     }
 
+    /// SQ-1419 / ZMSD §2.4: a PINNED seed (lanthorn's reproducible
+    /// `random_seed` config, SQ-0811) keeps replaying the SAME sequence
+    /// across `@restart` — the one case this crate treats as more important
+    /// than the letter of §2.4's "becomes random".
+    ///
+    /// FALSIFY by dropping the `pinned_rng_seed` branch in `restart` (always
+    /// drawing fresh entropy): the two draws below then almost never match.
     #[test]
-    fn game_set_transcript_bit_warns_once_and_clears() {
+    fn restart_with_a_pinned_seed_replays_the_same_random_sequence() {
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.set_rng_seed_pinned(0xC0FF_EE00);
+        m.exec_var(0x07, &[10], Some(0x10), None); // random(10) -> G0
+        let first_draw = m.global(0);
+
+        m.restart();
+        m.exec_var(0x07, &[10], Some(0x10), None);
+        let second_draw = m.global(0);
+
+        assert_eq!(first_draw, second_draw, "a pinned seed reproduces the same draw across @restart");
+    }
+
+    /// ZMSD §2.4: with NO pinned seed, `@restart` draws fresh entropy rather
+    /// than leaving the PRNG wherever gameplay left it (the pre-fix
+    /// behaviour) or replaying a fixed default forever.
+    ///
+    /// FALSIFY by making `restart` a no-op on `rng_state`: the two restarts
+    /// below then land on the identical value gameplay already advanced to,
+    /// every time, rather than a fresh draw each time.
+    #[test]
+    fn restart_without_a_pinned_seed_draws_fresh_entropy_each_time() {
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        // No set_rng_seed(_pinned) call at all: the un-pinned default.
+        m.restart();
+        let first = m.rng_seed();
+        m.restart();
+        let second = m.rng_seed();
+        m.restart();
+        let third = m.rng_seed();
+        assert!(
+            first != second || second != third,
+            "three successive un-pinned restarts must not all land on the same seed \
+             (got {first:#x}, {second:#x}, {third:#x})",
+        );
+    }
+
+    /// A mid-game `random(-n)` predictable-mode draw (ZMSD §15) must not
+    /// survive an un-pinned `@restart` — the reboot draws its own fresh
+    /// state rather than leaving the game stuck in the predictable mode it
+    /// entered before restarting.
+    #[test]
+    fn restart_clears_a_mid_game_predictable_rng_mode() {
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.exec_var(0x07, &[(-5i16) as u16], Some(0x10), None); // random(-5): predictable seed 5
+        assert_eq!(m.rng_seed(), 5, "predictable mode set the state to |range|");
+        m.restart();
+        assert_ne!(m.rng_seed(), 5, "restart must not leave the predictable-mode seed in force");
+    }
+
+    #[test]
+    fn a_script_verb_survives_the_read_it_prompts_for() {
         // ZMSD §7.4: Infocom-era games turn transcription on by SETTING Flags 2
-        // bit 0 — not via `output_stream 2` — and the interpreter is expected to
-        // watch the bit. With no transcript file supported, the bit is cleared
-        // at the next input request (so the game honestly reports scripting
-        // off) and the unsupported-transcript warning fires ONCE per session.
-        // (SQ-0532 TTY-pass finding: typing `script` showed no warning because
-        // only the opcode path was hooked.)
+        // bit 0 — not via `output_stream 2` — and §11.1.2 makes watching it the
+        // interpreter's job: "The interpreter must also alter it if stream 2 is
+        // turned on or off, to ensure that the bit always reflects the true
+        // state of transcribing."
+        //
+        // The turn boundary is where a SCRIPT verb's effect first becomes
+        // observable: the game sets the bit, prints its confirmation, and
+        // prompts. Whatever the interpreter leaves in the bit is what the game's
+        // own SCRIPT routine reads back on the way out — and this is exactly
+        // where nine of thirteen corpus stories used to print "Attempt to begin
+        // transcript failed." (SQ-1420, falsified by restoring the old
+        // unconditional clear here).
         let mut m = Machine::new(Memory::new(sample_story(3)).unwrap());
-        let count = |m: &Machine| {
-            m.diagnostics.iter().filter(|d| d.contains("transcript file")).count()
-        };
         let f2 = m.mem.read_word(0x10);
         m.mem.write_word(0x10, f2 | 1); // the game's SCRIPT verb sets the bit
         m.exec_var(0x04, &[0x200, 0x220], None, None); // read → the turn boundary
-        assert_eq!(m.mem.read_word(0x10) & 1, 0, "unsupported transcription bit is cleared");
-        assert_eq!(count(&m), 1, "warning surfaced");
-        // The game sets it again (SCRIPT after UNSCRIPT): cleared again, but
-        // the warning stays once-per-session.
+        assert_eq!(m.mem.read_word(0x10) & 1, 1, "the game's request stands");
+        assert!(m.transcript_on(), "and stream 2 is genuinely selected");
+
+        // UNSCRIPT: the game clears the bit and the interpreter follows it down.
         let f2 = m.mem.read_word(0x10);
-        m.mem.write_word(0x10, f2 | 1);
+        m.mem.write_word(0x10, f2 & !1);
         m.exec_var(0x04, &[0x200, 0x220], None, None);
-        assert_eq!(m.mem.read_word(0x10) & 1, 0, "cleared on every sighting");
-        assert_eq!(count(&m), 1, "still only one warning");
+        assert_eq!(m.mem.read_word(0x10) & 1, 0, "cleared as the game asked");
+        assert!(!m.transcript_on());
     }
 
     #[test]
@@ -7299,6 +8808,35 @@ pub(crate) mod tests {
         assert_eq!(out.buf, "Hello\n-7");
     }
 
+    /// `print_num` formats the whole signed 16-bit range exactly as `{}` on an
+    /// `i16` does — the boundary cover for the hand-rolled digit loop that
+    /// replaced `format!` on this path (SQ-1431). `-32768` is the case that
+    /// matters: negating it in `i16` overflows, so the magnitude is taken in
+    /// `i32`.
+    #[test]
+    fn text_print_num_spans_the_signed_range() {
+        for raw in [0u16, 1, 7, 9, 10, 99, 100, 999, 1000, 9999, 10000,
+                    0x7FFE, 0x7FFF, 0x8000, 0x8001, 0xFFF9, 0xFFFF] {
+            let mut buf = sample_story(5);
+            // VAR:0x06 print_num with a Large constant (small constants are
+            // 0-255 and unsigned, so they cannot reach the negative half).
+            buf[0x10] = 0xE6;
+            buf[0x11] = 0x3F; // type: large first, rest omitted
+            buf[0x12] = (raw >> 8) as u8;
+            buf[0x13] = (raw & 0xFF) as u8;
+            buf[0x14] = 0xBA; // quit
+
+            let mut m = build_raw_machine(buf);
+            run_until_quit(&mut m);
+            let out = m.buffer_output().expect("default sink");
+            assert_eq!(
+                out.buf,
+                format!("{}", raw as i16),
+                "print_num of {raw:#06x} ({})", raw as i16,
+            );
+        }
+    }
+
     /// Test: `print_char` for ZSCII 65 ('A') prints 'A'.
     #[test]
     fn text_print_char_known_zscii() {
@@ -7489,7 +9027,7 @@ pub(crate) mod tests {
         // Step 1: step() returns NeedLine with correct addresses.
         let result = m.step();
         assert!(
-            matches!(result, StepResult::NeedLine { text_buf: tb, parse_buf: pb } if tb == text_buf as u32 && pb == parse_buf as u32),
+            matches!(result, StepResult::NeedLine { text_buf: tb, parse_buf: pb, .. } if tb == text_buf as u32 && pb == parse_buf as u32),
             "expected NeedLine{{text_buf={:#x}, parse_buf={:#x}}}, got {:?}", text_buf, parse_buf, result
         );
 
@@ -7577,7 +9115,7 @@ pub(crate) mod tests {
 
         let result = m.step();
         assert!(
-            matches!(result, StepResult::NeedLine { text_buf: tb, parse_buf: pb } if tb == text_buf as u32 && pb == parse_buf as u32),
+            matches!(result, StepResult::NeedLine { text_buf: tb, parse_buf: pb, .. } if tb == text_buf as u32 && pb == parse_buf as u32),
             "expected NeedLine, got {:?}", result
         );
 
@@ -7717,9 +9255,50 @@ pub(crate) mod tests {
             let mut m = Machine::new(mem);
             m.state.pc = 0x0010;
             assert_eq!(m.step(), StepResult::NeedChar);
-            m.supply_char(z);
+            m.supply_char(ZsciiInput::new(z).unwrap());
             assert_eq!(m.global(0), z as u16, "supply_char({z}) stored in G0");
         }
+    }
+
+    /// SQ-1266. A host that answers a `read_char` prompt with a LINE — every
+    /// `submit("")` that dismisses a Version 6 title splash — must store the
+    /// terminator as the key and write NOTHING to memory.
+    ///
+    /// `read_char` leaves both buffer addresses at zero, so `supply_line`'s
+    /// v5+ branch wrote the count byte to absolute address 1 and the text from
+    /// address 2 — Flags1 and the header's RELEASE NUMBER. Quetzal's IFhd
+    /// validates the saved release against CURRENT memory, so from the first
+    /// such keypress onward every restore of that session's save into a
+    /// separately booted twin failed with `SaveMismatch`, and `app::probe`'s
+    /// shadow went dead on every v6 story with a keypress opening (measured:
+    /// eighteen of the nineteen in `stories/`).
+    ///
+    /// Falsify by deleting the `!pending.line_read` early return in
+    /// `supply_line`: the header assertion below fails with `04 6c 6f 6f 6b`
+    /// — the length byte and `"look"` — sitting on top of the release word.
+    #[test]
+    fn a_line_supplied_to_a_read_char_stores_the_key_and_writes_no_memory() {
+        let mut buf = sample_story(5);
+        buf[0x0010] = 0xF6; // VAR read_char
+        buf[0x0011] = 0x7F; // small const, omit, omit, omit
+        buf[0x0012] = 1; // device = keyboard
+        buf[0x0013] = 0x10; // store → G0
+        buf[0x0014] = 0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+        assert_eq!(m.step(), StepResult::NeedChar);
+
+        let header: Vec<u8> = (0u32..0x40).map(|a| m.mem.read_byte(a)).collect();
+        m.supply_line("look", 13);
+
+        assert_eq!(m.global(0), 13, "the terminator reaches the read_char's store var");
+        assert_eq!(
+            (0u32..0x40).map(|a| m.mem.read_byte(a)).collect::<Vec<u8>>(),
+            header,
+            "not one header byte moved — the release number in particular"
+        );
+        assert_eq!(m.pending_read_pc(), None, "and the suspension is consumed, not left armed");
     }
 
     // -----------------------------------------------------------------------
@@ -7912,7 +9491,7 @@ pub(crate) mod tests {
         let result = m.step();
         assert_eq!(result, StepResult::NeedChar, "read_char returns NeedChar");
 
-        m.supply_char(65); // ZSCII 'A'
+        m.supply_char(ZsciiInput::new(65).unwrap()); // ZSCII 'A'
 
         assert_eq!(m.global(0), 65, "supply_char(65) stored in G0");
 
@@ -8097,6 +9676,185 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // SQ-1432: step() must be idempotent while a read/read_char is pending.
+    //
+    // `read`/`read_char` advance state.pc PAST themselves before suspending
+    // (the "CRITICAL" comment on step()), so a host that polls step() again
+    // without first calling supply_line/supply_char/abort_timed_input must
+    // NOT execute the instruction after the read — that would silently
+    // complete the read with blank/default content. These cases falsify the
+    // guard by asserting the SAME StepResult and byte-identical machine state
+    // across repeated polls.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn step_is_idempotent_while_a_line_read_is_pending() {
+        let (mut buf, ..) = build_input_story(5);
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 10;
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 8;
+        let n = emit_read(&mut buf, 0x0010, text_buf, parse_buf, 5, Some(0x10));
+        buf[0x0010 + n] = 0xBA; // quit — never reached if the guard holds
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+
+        let first = m.step();
+        assert!(matches!(first, StepResult::NeedLine { .. }), "read suspends: {first:?}");
+        let pc0 = m.state.pc;
+        let text0 = mem_range(&m, text_buf as u32, 16);
+        let parse0 = mem_range(&m, parse_buf as u32, 16);
+        let out0 = m.buffer_output().unwrap().buf.clone();
+
+        for i in 0..3 {
+            let r = m.step();
+            assert_eq!(r, first, "re-poll {i} must return the identical NeedLine");
+            assert_eq!(m.state.pc, pc0, "re-poll {i} must not move the PC");
+            assert_eq!(mem_range(&m, text_buf as u32, 16), text0, "re-poll {i} must not touch the text buffer");
+            assert_eq!(mem_range(&m, parse_buf as u32, 16), parse0, "re-poll {i} must not touch the parse buffer");
+            assert_eq!(m.buffer_output().unwrap().buf, out0, "re-poll {i} must not print anything");
+        }
+    }
+
+    #[test]
+    fn step_is_idempotent_while_a_char_read_is_pending() {
+        let mut buf = sample_story(5);
+        buf[0x0010] = 0xF6; // VAR read_char
+        buf[0x0011] = 0x7F; // type: small const, rest omit
+        buf[0x0012] = 1;    // device = 1 (keyboard)
+        buf[0x0013] = 0x10; // store -> G0
+        buf[0x0014] = 0xBA; // quit — never reached if the guard holds
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+
+        let first = m.step();
+        assert_eq!(first, StepResult::NeedChar, "read_char suspends");
+        let pc0 = m.state.pc;
+        let g0_before = m.global(0);
+        let out0 = m.buffer_output().unwrap().buf.clone();
+
+        for i in 0..3 {
+            let r = m.step();
+            assert_eq!(r, first, "re-poll {i} must return the identical NeedChar");
+            assert_eq!(m.state.pc, pc0, "re-poll {i} must not move the PC");
+            assert_eq!(m.global(0), g0_before, "re-poll {i} must not store a value");
+            assert_eq!(m.buffer_output().unwrap().buf, out0, "re-poll {i} must not print anything");
+        }
+    }
+
+    /// Read `len` bytes starting at `addr` for a byte-identical-state comparison.
+    fn mem_range(m: &Machine, addr: u32, len: u32) -> Vec<u8> {
+        (0..len).map(|i| m.mem.read_byte(addr + i)).collect()
+    }
+
+    #[test]
+    fn timed_read_repoll_does_not_fire_the_interrupt_but_run_timed_interrupt_still_does() {
+        // routine body: inc G0 (1OP:0x05 short form small const 0x10), rfalse.
+        let (buf, _) = timed_read_story(&[0x95, 0x10, 0xB1]);
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        let first = m.step();
+        assert!(matches!(first, StepResult::NeedLine { .. }));
+        let g_before = m.global(0);
+
+        for i in 0..3 {
+            let r = m.step();
+            assert_eq!(r, first, "re-poll {i} returns the identical NeedLine");
+            assert_eq!(m.global(0), g_before, "re-poll {i} must NOT fire the timed-input interrupt");
+        }
+
+        let out = m.run_timed_interrupt();
+        assert!(!out.aborted, "the un-aborting routine still runs when actually invoked");
+        assert_eq!(
+            m.global(0),
+            g_before.wrapping_add(1),
+            "run_timed_interrupt is the real, still-working way to fire it"
+        );
+    }
+
+    #[test]
+    fn supply_line_after_repolls_matches_a_machine_polled_only_once() {
+        // read (store terminator -> G0) then print_num of G0 (VAR:0x06, Variable
+        // operand referencing global 0) then quit, so the transcript after the
+        // read completes is observable and comparable byte-for-byte.
+        let build = || {
+            let (mut buf, ..) = build_input_story(5);
+            let text_buf: u16 = 0x0250;
+            buf[text_buf as usize] = 10;
+            let n = emit_read(&mut buf, 0x0010, text_buf, 0, 5, Some(0x10));
+            let mut p = 0x0010 + n;
+            buf[p] = 0xE6; p += 1;    // VAR print_num
+            buf[p] = 0xBF; p += 1;    // type: Variable, rest omit
+            buf[p] = 0x10; p += 1;    // operand: variable G0 (the stored terminator)
+            buf[p] = 0xBA;            // quit
+            buf
+        };
+
+        // Baseline: polled exactly once before supply_line.
+        let mut a = Machine::new(Memory::new(build()).unwrap());
+        a.state.pc = 0x0010;
+        assert!(matches!(a.step(), StepResult::NeedLine { .. }));
+        a.supply_line("north", 13);
+        loop {
+            match a.step() {
+                StepResult::Quit => break,
+                StepResult::Continue => {}
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+
+        // Same story, re-polled 3 extra times before supply_line.
+        let mut b = Machine::new(Memory::new(build()).unwrap());
+        b.state.pc = 0x0010;
+        assert!(matches!(b.step(), StepResult::NeedLine { .. }));
+        for _ in 0..3 {
+            assert!(matches!(b.step(), StepResult::NeedLine { .. }));
+        }
+        b.supply_line("north", 13);
+        loop {
+            match b.step() {
+                StepResult::Quit => break,
+                StepResult::Continue => {}
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+
+        assert_eq!(
+            a.buffer_output().unwrap().buf,
+            b.buffer_output().unwrap().buf,
+            "re-polling before supply_line must not change the game's next output"
+        );
+        assert_eq!(a.buffer_output().unwrap().buf, "13", "sanity: terminator 13 got printed");
+        assert_eq!(mem_range(&a, 0x0250, 16), mem_range(&b, 0x0250, 16), "text buffer matches");
+    }
+
+    #[test]
+    fn restart_while_a_read_is_pending_clears_the_suspension() {
+        let (mut buf, ..) = build_input_story(5);
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 10;
+        let n = emit_read(&mut buf, 0x0010, text_buf, 0, 5, Some(0x10));
+        buf[0x0010 + n] = 0xBA;
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }));
+        assert!(m.pending_read_pc().is_some(), "suspended at the read");
+
+        m.restart();
+
+        assert!(m.pending_read_pc().is_none(), "restart clears a pending read");
+        assert!(!m.is_saveload_pending(), "restart clears a pending save/restore too");
+        // A step() right after restart must decode fresh code at the reboot PC,
+        // not re-return a stale NeedLine — the strongest witness that the
+        // suspension is gone rather than merely unreported.
+        assert!(!matches!(m.step(), StepResult::NeedLine { .. }), "no stale suspension survives restart");
+    }
+
+    // -----------------------------------------------------------------------
     // v6 newline interrupt (window props 8/9, ZMSD §8.8.3.2.2). Frotz reference:
     // `countdown()` / `screen_new_line` in src/common/screen.c.
     //
@@ -8123,7 +9881,7 @@ pub(crate) mod tests {
             Memory::new(crate::header::tests_support::sample_story(6)).unwrap(),
         );
         {
-            let w = &mut m.screen.v6.as_mut().unwrap().windows[0];
+            let w = &mut m.screen.v6_mut().unwrap().windows[0];
             w.interrupt_countdown = 3;
             w.interrupt_routine = 0xA0; // present, but must not fire yet
         }
@@ -8149,7 +9907,7 @@ pub(crate) mod tests {
         // ZMSD §8.8.3.1's "text copied to output stream 2" — which is how a game
         // says this window's text is not the transcript's (advent.z6's `style`).
         {
-            let v6 = m.screen.v6.as_mut().unwrap();
+            let v6 = m.screen.v6_mut().unwrap();
             v6.current = 3;
             let w = &mut v6.windows[3];
             w.attributes = 0b1011; // wrap + scroll + buffered, NOT copy-to-transcript
@@ -8176,7 +9934,7 @@ pub(crate) mod tests {
         let mut m =
             Machine::new(Memory::new(crate::header::tests_support::sample_story(6)).unwrap());
         {
-            let v6 = m.screen.v6.as_mut().unwrap();
+            let v6 = m.screen.v6_mut().unwrap();
             v6.current = 3;
             let w = &mut v6.windows[3];
             w.attributes = 0b1011; // wrap + scroll + buffered, NOT copy-to-transcript
@@ -8259,7 +10017,7 @@ pub(crate) mod tests {
             Memory::new(crate::header::tests_support::sample_story(6)).unwrap(),
         );
         {
-            let v6 = m.screen.v6.as_mut().unwrap();
+            let v6 = m.screen.v6_mut().unwrap();
             v6.current = 7;
             let w = &mut v6.windows[7];
             w.attributes = 0b1111; // wrap + scroll + copy-to-transcript + buffered
@@ -8308,7 +10066,7 @@ pub(crate) mod tests {
     #[test]
     fn with_nothing_declared_the_input_window_is_still_the_transcript() {
         let mut m = diverted_prose_machine();
-        m.screen.v6.as_mut().unwrap().windows[0].attributes = 0b1011; // …and not even window 0
+        m.screen.v6_mut().unwrap().windows[0].attributes = 0b1011; // …and not even window 0
         m.screen.v6_input_window = 3;
         m.print_text("you are in a maze\n");
 
@@ -8329,7 +10087,7 @@ pub(crate) mod tests {
             Memory::new(v6_newline_story(&[0xBB, 0xBA], &[0x95, 0x10, 0xB0])).unwrap(),
         );
         {
-            let w = &mut m.screen.v6.as_mut().unwrap().windows[0];
+            let w = &mut m.screen.v6_mut().unwrap().windows[0];
             w.interrupt_countdown = 1; // fire after this one new-line
             w.interrupt_routine = 0xA0;
         }
@@ -8356,7 +10114,7 @@ pub(crate) mod tests {
             Memory::new(v6_newline_story(&[0xBB, 0xBA], &rout)).unwrap(),
         );
         {
-            let w = &mut m.screen.v6.as_mut().unwrap().windows[0];
+            let w = &mut m.screen.v6_mut().unwrap().windows[0];
             w.interrupt_countdown = 1;
             w.interrupt_routine = 0xA0;
         }
@@ -8770,26 +10528,204 @@ pub(crate) mod tests {
 
     // ── (d) stream 1 off: screen receives nothing ─────────────────────────────
 
-    #[test]
-    fn output_stream2_warns_the_player_once() {
-        // ZMSD §7.6.5.2: "An attempt by the game to use streams to access
-        // external files which is not supported by the interpreter should
-        // ideally print a warning to the user that the functionality is not
-        // available, and otherwise do nothing." The host renders diagnostics as
-        // Warning transcript lines.
-        let mut m = build_test_machine(&[]);
-        m.exec_var(0x13, &[2], None, None); // output_stream 2
-        assert_eq!(m.diagnostics.len(), 1, "one warning: {:?}", m.diagnostics);
-        assert!(
-            m.diagnostics[0].contains("transcript file"),
-            "warning names the missing feature: {:?}", m.diagnostics[0]
-        );
-        assert!(m.streams.stream2, "the selection itself is still recorded");
+    /// Everything output stream 2 has taken, read off the default sink. The
+    /// machine keeps no copy — a real host is writing it to a file as it
+    /// arrives — so the sink IS the transcript.
+    fn sink_transcript(m: &Machine) -> &str {
+        &m.buffer_output().expect("BufferOutput sink").transcript
+    }
 
-        // Games re-select the transcript every turn — warn once per session.
-        m.exec_var(0x13, &[(-2i16) as u16], None, None);
+    /// Every finished output-stream-4 record so far, in order.
+    fn sink_commands(m: &Machine) -> &[String] {
+        &m.buffer_output().expect("BufferOutput sink").commands
+    }
+
+    /// Seed input stream 1 with recorded records (the sink's replay queue).
+    fn seed_replay<S: Into<String>>(m: &mut Machine, records: impl IntoIterator<Item = S>) {
+        m.out
+            .as_any_mut()
+            .downcast_mut::<BufferOutput>()
+            .expect("BufferOutput sink")
+            .replay_records(records);
+    }
+
+    // ── SQ-1420: output streams 2 and 4, input stream 1, Flags 2 bit 0 ────────
+
+    #[test]
+    fn output_stream2_delivers_exactly_the_text_between_selection_and_deselection() {
+        // ZMSD §7.1.1: stream 2 is "the game transcript". §7.4 turns it on and
+        // off with `output_stream`; only what is printed in between belongs to it.
+        let mut m = build_test_machine(&[]);
+        m.print_text("before");
+        m.exec_var(0x13, &[2], None, None); // output_stream 2
+        m.print_text("inside");
+        m.exec_var(0x13, &[(-2i16) as u16], None, None); // output_stream -2
+        m.print_text("after");
+        assert_eq!(sink_transcript(&m), "inside");
+        assert_eq!(
+            m.buffer_output().unwrap().buf,
+            "beforeinsideafter",
+            "stream 1 sees all three — stream 2 is a COPY, not a diversion"
+        );
+    }
+
+    #[test]
+    fn stream3_suppresses_the_transcript_while_it_is_selected() {
+        // ZMSD §7.1.2.2: "Output stream 3 is unusual in that, while it is
+        // selected, no text is sent to any other output streams which are
+        // selected. (However, they remain selected.)"
+        let mut m = build_test_machine(&[]);
         m.exec_var(0x13, &[2], None, None);
-        assert_eq!(m.diagnostics.len(), 1, "no repeat warning: {:?}", m.diagnostics);
+        m.print_text("seen");
+        m.streams.push_stream3(0x0060, None);
+        m.print_text("hidden");
+        m.streams.pop_stream3(&mut m.mem, &m.v6_metric);
+        m.print_text("again");
+        assert_eq!(sink_transcript(&m), "seenagain", "stream 3 took 'hidden' alone");
+        assert!(m.streams.stream2, "and stream 2 remained selected throughout");
+    }
+
+    #[test]
+    fn selecting_stream2_sets_flags2_bit0_and_deselecting_clears_it() {
+        // ZMSD §7.4: "Whichever method is used, the interpreter must ensure that
+        // this flag holds the current status of stream 2. ('A Mind Forever
+        // Voyaging' requires this.)"
+        let mut m = build_test_machine(&[]);
+        assert_eq!(m.mem.read_word(0x10) & 1, 0, "a fresh game is not transcripting");
+        m.exec_var(0x13, &[2], None, None);
+        assert_eq!(m.mem.read_word(0x10) & 1, 1, "output_stream 2 sets the bit");
+        assert!(m.transcript_on());
+        m.exec_var(0x13, &[(-2i16) as u16], None, None);
+        assert_eq!(m.mem.read_word(0x10) & 1, 0, "output_stream -2 clears it");
+        assert!(!m.transcript_on());
+    }
+
+    #[test]
+    fn the_game_setting_flags2_bit0_turns_the_transcript_on() {
+        // ZMSD §7.4: "stream 2 can be selected or deselected by setting or
+        // clearing bit 0 of 'Flags 2'" — which is how every Infocom-era SCRIPT
+        // verb does it. §11.1.2 says the same from the header's side. The
+        // interpreter notices at the next input request (the turn boundary).
+        //
+        // FALSIFICATION (SQ-1420): the previous `check_transcript_bit` CLEARED
+        // this bit unconditionally, so the story's next test of it reported
+        // "Attempt to begin transcript failed." — measured on nine of thirteen
+        // corpus stories. Restore the clear and this case fails on the assert
+        // below, with the transcript empty.
+        let mut m = build_test_machine(&[]);
+        let f2 = m.mem.read_word(0x10);
+        m.mem.write_word(0x10, f2 | 1); // the game's SCRIPT verb
+        m.sync_transcript_bit();
+        assert!(m.transcript_on(), "the interpreter adopted the game's request");
+        assert_eq!(m.mem.read_word(0x10) & 1, 1, "and left the bit set for the game to read back");
+        m.print_text("scripted");
+        assert_eq!(sink_transcript(&m), "scripted", "the sink receives the game's prose");
+
+        // UNSCRIPT: the game clears the bit again.
+        let f2 = m.mem.read_word(0x10);
+        m.mem.write_word(0x10, f2 & !1);
+        m.sync_transcript_bit();
+        assert!(!m.transcript_on(), "the interpreter adopted the game's UNSCRIPT too");
+        m.print_text("silent");
+        assert_eq!(sink_transcript(&m), "scripted");
+    }
+
+    #[test]
+    fn a_host_transcript_survives_the_interpreters_own_bit_sync() {
+        // `set_transcript` is the host's `/transcript on` — a story with no
+        // SCRIPT verb never touches the bit, so nothing must be read as the game
+        // turning it off again at the next `read`.
+        let mut m = build_test_machine(&[]);
+        m.set_transcript(true);
+        assert_eq!(m.mem.read_word(0x10) & 1, 1, "the game can see the transcript is on");
+        m.sync_transcript_bit();
+        m.sync_transcript_bit();
+        assert!(m.transcript_on(), "an untouched bit is not a request to stop");
+    }
+
+    #[test]
+    fn stream4_records_the_command_line_and_read_char_keys() {
+        // ZMSD §7.1.2: stream 4 is "a script file of the player's whole commands
+        // and of individual keypresses as read by read_char"; §7.1.2.3: "Each
+        // command is written, in one go, when it has been finished."
+        let mut m = build_test_machine(&[]);
+        m.exec_var(0x13, &[4], None, None); // output_stream 4
+        m.pending_input = Some(PendingInput {
+            store_var: None, line_read: true, text_buf: 0x0100, parse_buf: 0,
+            preload: String::new(),
+            interrupt_time: 0, interrupt_routine: 0, instr_pc: 0,
+        });
+        m.mem.write_byte(0x0100, 40); // the game's buffer cap
+        m.supply_line("take lamp", 13);
+        assert_eq!(sink_commands(&m), ["take lamp"], "one record, no trailing Return code");
+
+        // A read_char key is its own record; §7 Remarks bracket a non-printable
+        // code by its ZSCII value.
+        m.pending_input = Some(PendingInput {
+            store_var: None, line_read: false, text_buf: 0, parse_buf: 0,
+            preload: String::new(),
+            interrupt_time: 0, interrupt_routine: 0, instr_pc: 0,
+        });
+        m.supply_char(ZsciiInput::UP); // cursor up
+        assert_eq!(sink_commands(&m), ["take lamp", "[129]"]);
+    }
+
+    #[test]
+    fn input_stream1_consumes_recorded_lines_and_reverts_at_end_of_file() {
+        // ZMSD §10.2: input stream 1 is "a file containing commands"; §10.2.1
+        // fixes its format as stream 4's. The revert at EOF is Frotz's
+        // `replay_close`.
+        let mut m = build_test_machine(&[]);
+        seed_replay(&mut m, ["north"]);
+        m.exec_var(0x14, &[1], None, None); // input_stream 1
+        assert_eq!(m.streams.input_stream, 1);
+
+        m.mem.write_byte(0x0100, 40);
+        let r = m.exec_var(0x04, &[0x0100, 0], None, None); // read
+        assert_eq!(r, StepResult::Continue, "the recorded line answered the read outright");
+        assert_eq!(m.mem.read_byte(0x0101), 5, "v5 count byte: 'north'");
+        assert_eq!(
+            (0..5).map(|i| m.mem.read_byte(0x0102 + i) as char).collect::<String>(),
+            "north"
+        );
+
+        // The file is exhausted: the next read reverts to the keyboard and
+        // suspends for the player.
+        let r = m.exec_var(0x04, &[0x0100, 0], None, None);
+        assert!(matches!(r, StepResult::NeedLine { .. }), "EOF suspends: {r:?}");
+        assert_eq!(m.streams.input_stream, 0, "and the machine is back on the keyboard");
+    }
+
+    #[test]
+    fn input_stream1_answers_read_char_with_the_next_records_key() {
+        let mut m = build_test_machine(&[]);
+        seed_replay(&mut m, ["[129]", ""]);
+        m.exec_var(0x14, &[1], None, None);
+        let r = m.exec_var(0x16, &[0], Some(0x10), None); // read_char → G0
+        assert_eq!(r, StepResult::Continue);
+        assert_eq!(m.global(0), 129, "the bracketed code is the key");
+        let r = m.exec_var(0x16, &[0], Some(0x10), None);
+        assert_eq!(r, StepResult::Continue);
+        assert_eq!(m.global(0), 13, "an empty record is the Return that wrote it");
+    }
+
+    #[test]
+    fn a_v5_input_line_is_echoed_to_the_transcript() {
+        // ZMSD §7.1.1.1: "In Versions 1 to 5, the player's input to the read
+        // opcode should be echoed to output streams 1 and 2 (if stream 2 is
+        // active), so that text typed in appears in any transcript."
+        let mut m = build_test_machine(&[]);
+        assert_eq!(m.mem.version(), 5);
+        m.exec_var(0x13, &[2], None, None);
+        m.print_text("> ");
+        m.pending_input = Some(PendingInput {
+            store_var: None, line_read: true, text_buf: 0x0100, parse_buf: 0,
+            preload: String::new(),
+            interrupt_time: 0, interrupt_routine: 0, instr_pc: 0,
+        });
+        m.mem.write_byte(0x0100, 40);
+        m.supply_line("open door", 13);
+        assert_eq!(sink_transcript(&m), "> open door\n");
     }
 
     #[test]
@@ -9397,6 +11333,59 @@ pub(crate) mod tests {
         assert!(m.diagnostics.is_empty(), "bleeps must not record diagnostics");
     }
 
+    /// SQ-1419 / ZMSD §15: "@sound_effect; (with no operands at all) is
+    /// illegal. However interpreters are asked to beep (as if the operand
+    /// were 1)". A bare call used to default `number` to 0 and vanish through
+    /// the `number != 0` guard instead of beeping.
+    ///
+    /// FALSIFY by reverting `number`'s default to 0: `pending_sounds` comes
+    /// back empty instead of holding one high bleep.
+    #[test]
+    fn bare_sound_effect_beeps_as_if_number_were_one() {
+        let mut m = build_test_machine(&[]);
+        m.exec_var(0x15, &[], None, None);
+        assert_eq!(
+            m.pending_sounds,
+            vec![SoundEvent { number: 1, effect: 0, volume: 8, repeats: 0, routine: 0 }],
+            "a bare @sound_effect beeps as bleep #1, not a dropped no-op",
+        );
+    }
+
+    /// ZMSD §15 "To clarify": "@sound_effect 0 3/4 will stop (and unload) all
+    /// sounds" — number 0 refers to every sound, not "no sound", and must be
+    /// delivered like any other call.
+    ///
+    /// FALSIFY by keeping the old `if number != 0` guard: `pending_sounds`
+    /// stays empty for both calls instead of recording a stop-all each.
+    #[test]
+    fn sound_effect_zero_stop_or_finish_delivers_stop_all() {
+        let mut m = build_test_machine(&[]);
+        m.exec_var(0x15, &[0, 3], None, None); // stop all
+        m.exec_var(0x15, &[0, 4], None, None); // stop and unload all
+        assert_eq!(
+            m.pending_sounds,
+            vec![
+                SoundEvent { number: 0, effect: 3, volume: 8, repeats: 0, routine: 0 },
+                SoundEvent { number: 0, effect: 4, volume: 8, repeats: 0, routine: 0 },
+            ],
+            "number 0 with effect stop/finish is a real stop-all event, not a no-op",
+        );
+    }
+
+    /// A sampled-sound call with `effect` omitted defaults to 2 = start/play
+    /// (Frotz sound.c, Bocfel sound.cpp), matching what
+    /// `app/src/state.rs` used to patch in at the call site.
+    #[test]
+    fn sound_effect_omitted_effect_defaults_to_play_for_a_sampled_sound() {
+        let mut m = build_test_machine(&[]);
+        m.exec_var(0x15, &[5], None, None); // number 5, no effect operand
+        assert_eq!(
+            m.pending_sounds,
+            vec![SoundEvent { number: 5, effect: 2, volume: 8, repeats: 0, routine: 0 }],
+            "an omitted effect on a real sound number defaults to start/play",
+        );
+    }
+
     #[test]
     fn sound_effect_records_sampled_sound_event_no_diagnostic() {
         let mut m = build_test_machine(&[]);
@@ -9418,27 +11407,107 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn unimplemented_var_opcode_records_diagnostic_not_stderr() {
+    fn undefined_var_opcode_faults() {
         let mut m = build_test_machine(&[]);
         // Every VAR opcode number 0x00..=0x1F now has an arm, so probe the defensive
         // fallthrough with an out-of-range number no valid VAR encoding can produce.
-        assert!(m.diagnostics.is_empty());
+        assert!(m.state.fault.is_none());
         m.exec_var(0xFF, &[], None, None);
-        assert_eq!(m.diagnostics.len(), 1, "fallthrough records one diagnostic line");
-        assert!(m.diagnostics[0].contains("0xFF"), "diagnostic names the opcode");
-        m.exec_var(0xFF, &[], None, None); // second call must not duplicate
-        assert_eq!(m.diagnostics.len(), 1, "warn-once: no duplicate diagnostic");
+        let fault = m.state.fault.as_deref().expect("undefined VAR opcode must latch a fault");
+        assert!(fault.contains("VAR") && fault.contains("0xFF"), "fault names the class + opcode: {fault:?}");
     }
 
+    /// SQ-1419 / ZMSD §14.2: stepping a real story onto an undefined 2OP
+    /// opcode halts with `StepResult::Fault` at that PC, instead of
+    /// continuing forever — the end-to-end path `exec_2op`'s own direct-call
+    /// tests bypass. 2OP numbers 29-31 (0x1D-0x1F) have no arm — see the
+    /// match above — so this is reachable from real bytes, unlike VAR (whose
+    /// every 0-31 number is defined) or 1OP (whose every 0-15 is).
+    ///
+    /// FALSIFY by reverting the 2OP fallthrough to the old no-op arm:
+    /// `m.step()` then returns `StepResult::Continue` instead of `Fault`.
     #[test]
-    fn unimplemented_var_opcode_is_warned_once() {
+    fn undefined_2op_opcode_halts_a_running_story_at_that_pc() {
+        let mut buf = sample_story(5);
+        // Long form, both operands small constants, opcode number 0x1D = 29
+        // (2OP:29 — undefined for every Z-machine version).
+        buf[0x10] = 0x1D;
+        buf[0x11] = 0x00; // operand 1
+        buf[0x12] = 0x00; // operand 2
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        assert_eq!(m.step(), StepResult::Fault, "an undefined 2OP opcode halts the machine");
+    }
+
+    /// 1OP's every representable number (0-15, 4 bits) has an arm, so this
+    /// probes the defensive fallthrough directly the same way the VAR test
+    /// above does, rather than via `step()` (unreachable from real bytes).
+    #[test]
+    fn undefined_1op_opcode_faults() {
         let mut m = build_test_machine(&[]);
-        // Out-of-range VAR opcode number: no arm, hits the defensive fallthrough.
-        assert!(m.warned_var_opcodes.is_empty());
-        m.exec_var(0xFF, &[], None, None);
-        assert!(m.warned_var_opcodes.contains(&0xFF), "fallthrough records the opcode");
-        m.exec_var(0xFF, &[], None, None); // second call must not duplicate
-        assert_eq!(m.warned_var_opcodes.len(), 1, "warned at most once per opcode");
+        m.exec_1op(0xFF, &[0], None, None);
+        let fault = m.state.fault.as_deref().expect("undefined 1OP opcode must latch a fault");
+        assert!(fault.contains("1OP") && fault.contains("0xFF"), "fault names the class + opcode: {fault:?}");
+    }
+
+    /// 0OP's every representable short-form number (0-15) is either an arm
+    /// here or, at 14, the EXTENDED-opcode prefix byte intercepted earlier in
+    /// `decode()` (`zero_op_sig`'s own comment on `0x0E` says so) — so
+    /// nothing ever reaches this fallthrough from real bytes, the same as
+    /// 1OP and VAR. Probed directly, like the 1OP/VAR tests above.
+    #[test]
+    fn undefined_0op_opcode_faults() {
+        let mut m = build_test_machine(&[]);
+        m.exec_0op(0x0E, None, None, None);
+        let fault = m.state.fault.as_deref().expect("undefined 0OP opcode must latch a fault");
+        assert!(fault.contains("0OP") && fault.contains("0x0E"), "fault names the class + opcode: {fault:?}");
+    }
+
+    /// SQ-1419: a repeating per-instruction diagnostic must not grow
+    /// `diagnostics` without bound. `get_sibling 0` (1OP:0x01) is a
+    /// perfectly legal opcode call — object 0 means "no object", ZMSD §14 —
+    /// so looping it thousands of times must record nothing at all: this is
+    /// the regression guard proving the illegal-opcode fault above did not
+    /// turn a benign degenerate operand into either a fault or a diagnostic
+    /// flood.
+    #[test]
+    fn get_sibling_of_object_zero_loops_without_growing_diagnostics() {
+        let mut m = build_test_machine(&[]);
+        for _ in 0..10_000 {
+            let r = m.exec_1op(0x01, &[0], Some(0x10), None); // get_sibling(0) -> G0
+            assert!(matches!(r, StepResult::Continue));
+        }
+        assert!(m.state.fault.is_none(), "get_sibling(0) is legal and must never fault");
+        assert!(m.diagnostics.is_empty(), "a legal no-op loop records nothing");
+        assert_eq!(m.global(0), 0, "sibling of nothing is nothing");
+    }
+
+    /// [`Machine::push_diagnostic`]'s own contract: the first
+    /// `DIAGNOSTIC_REPEAT_CAP` occurrences of an identical message are kept,
+    /// the next records one summary line, and every later occurrence of that
+    /// exact text is dropped — bounding a runaway per-instruction warning
+    /// (the audit measured 42 MB of one repeated message in 8s under a
+    /// naive push-every-time implementation) without turning it into a fault
+    /// (strictz requires warn-and-continue on an object-0 access).
+    #[test]
+    fn push_diagnostic_caps_identical_repeats() {
+        let mut m = build_test_machine(&[]);
+        for _ in 0..1_000 {
+            m.push_diagnostic("repeated warning".to_string());
+        }
+        assert_eq!(
+            m.diagnostics.len(),
+            Machine::DIAGNOSTIC_REPEAT_CAP as usize + 1,
+            "capped at the repeat limit plus one summary line",
+        );
+        assert!(
+            m.diagnostics.last().unwrap().contains("suppressed"),
+            "the final line says occurrences were suppressed: {:?}", m.diagnostics.last()
+        );
+        // A DIFFERENT message gets its own, independent budget.
+        m.push_diagnostic("a different warning".to_string());
+        assert_eq!(m.diagnostics.len(), Machine::DIAGNOSTIC_REPEAT_CAP as usize + 2);
     }
 
     #[test]
@@ -9454,9 +11523,10 @@ pub(crate) mod tests {
         // Out-of-spec values are ignored, leaving the selection unchanged.
         m.exec_var(0x14, &[7], None, None);
         assert_eq!(m.streams.input_stream, 0, "out-of-range stream ignored");
-        // The opcode is implemented, so it must not record an unimplemented diagnostic.
+        // The opcode is implemented, so it must not record an unimplemented diagnostic
+        // or fault — it is a real arm, not the undefined-opcode fallthrough.
         assert!(m.diagnostics.is_empty(), "input_stream is implemented, no warning");
-        assert!(!m.warned_var_opcodes.contains(&0x14));
+        assert!(m.state.fault.is_none(), "input_stream is implemented, not the fallthrough");
     }
 
     #[test]
@@ -9477,15 +11547,41 @@ pub(crate) mod tests {
         assert_eq!(m.diagnostics.len(), 1, "warn-once: no duplicate diagnostic");
     }
 
+    /// ZMSD §14.2.1 exempts only EXT:29-255 from the §14.2 halt rule. EXT:14
+    /// and EXT:15 are the two numbers this crate's own EXT:0-13,16-29
+    /// dispatch skips — below 29, so §14.2.1 does not cover them and they
+    /// must fault like any other undefined opcode.
+    #[test]
+    fn undefined_ext_opcode_below_29_faults() {
+        let mut m = build_test_machine(&[]);
+        assert!(m.state.fault.is_none());
+        m.exec_ext(0x0E, &[], None, None); // EXT:14 — no arm, and < 29
+        let fault = m.state.fault.as_deref().expect("EXT:14 is undefined and below the §14.2.1 exemption");
+        assert!(fault.contains("EXT") && fault.contains("0x0E"), "fault names the class + opcode: {fault:?}");
+        assert!(m.warned_ext_opcodes.is_empty(), "a fault is not the warn-and-continue path");
+    }
+
+    /// ZMSD §14.2.1: "extended opcodes in the range EXT:29 to EXT:255 should
+    /// be simply ignored". EXT:30 has no arm but must NOT fault — it
+    /// continues, warned once via the existing diagnostic budget.
+    #[test]
+    fn undefined_ext_opcode_at_or_above_29_continues() {
+        let mut m = build_test_machine(&[]);
+        let r = m.exec_ext(0x1E, &[], None, None); // EXT:30
+        assert!(matches!(r, StepResult::Continue));
+        assert!(m.state.fault.is_none(), "EXT:29-255 is exempt from §14.2's halt rule");
+        assert_eq!(m.diagnostics.len(), 1, "still observable as a warning, just not fatal");
+    }
+
     #[test]
     fn erase_line_is_recognized_noop_without_warning() {
         let mut m = build_test_machine(&[]);
         let r = m.exec_var(0x0E, &[1], None, None);
         assert!(matches!(r, StepResult::Continue));
-        // It must be an explicit arm, not the unknown-opcode fallthrough (Task 6),
-        // so it is NOT recorded as a warned opcode.
-        assert!(!m.warned_var_opcodes.contains(&0x0E),
-            "erase_line is a recognized arm, not an unimplemented fallthrough");
+        // It must be an explicit arm, not the undefined-opcode fallthrough
+        // (Task 6 / SQ-1419), so it must NOT have latched a fault.
+        assert!(m.state.fault.is_none(),
+            "erase_line is a recognized arm, not an undefined-opcode fallthrough");
     }
 
     #[test]
@@ -9603,6 +11699,13 @@ pub(crate) mod tests {
         assert_eq!(m.screen.upper.cell(1, 1).ch, 'H', "v5 re-split keeps the old contents");
         assert_eq!(m.screen.upper.rows, 3, "and still resizes");
         assert_eq!(m.screen.upper.cell(3, 1).ch, ' ', "the new row is blank");
+        // The quote itself, on a row BELOW the split the game is about to shrink
+        // back to — which is what makes this a quote box rather than a status
+        // line. A shrink over rows with nothing on them strands nothing and keeps
+        // nothing (SQ-1355).
+        m.screen.cursor_row = 3;
+        m.screen.cursor_col = 1;
+        m.print_text("QUOTE");
         // SQ-0696: a shrink no longer truncates on the spot. The Inform box
         // quote paints a tall upper window and shrinks it back BEFORE asking for
         // the keypress that is meant to display it, so what was painted has to
@@ -9611,21 +11714,59 @@ pub(crate) mod tests {
         assert_eq!(m.screen.upper_window_rows, 1, "the SPLIT shrinks immediately");
         assert_eq!(m.screen.upper.rows, 3, "…but the painted rows stay on screen");
         assert_eq!(m.screen.upper.cell(1, 1).ch, 'H', "the surviving row survives");
+        assert_eq!(m.screen.upper.cell(3, 1).ch, 'Q', "and so does the quote below the split");
 
         // They are retired when the player next acts — the box "would then
         // scroll away as part of the story window's natural scrolling, over the
         // next few command inputs".
         m.pending_input = Some(PendingInput {
             store_var: Some(0),
+            line_read: false,
             text_buf: 0,
             parse_buf: 0,
             interrupt_time: 0,
             interrupt_routine: 0,
             instr_pc: 0,
+            preload: String::new(),
         });
-        m.supply_char(b' ');
+        m.supply_char(ZsciiInput::new(b' ').unwrap());
         assert_eq!(m.screen.upper.rows, 1, "a real keypress retires the stranded rows");
         assert_eq!(m.screen.upper.cell(1, 1).ch, 'H', "the status row itself is untouched");
+    }
+
+    /// SQ-1355: a shrink over rows the game has already ERASED keeps nothing,
+    /// and needs no keypress to say so.
+    ///
+    /// Bureaucracy's licence form ends `<CLEAR ,S-WINDOW>` `<CLEAR ,S-TEXT>`
+    /// `<SPLIT 1>` (`forms.zil` FILL-FORM, then `other-misc.zil`
+    /// INIT-STATUS-LINE). The erase blanks the whole 24-row upper window —
+    /// ZMSD §8.7.3.2, "the specified window can be cleared to background colour",
+    /// and `md_clr(1)` in Infocom's own IBM interpreter scrolls rows
+    /// `0..spltflg-1` blank — so the split that follows has no pixels below it to
+    /// leave standing. Preserving the ALLOCATION handed the host a 24-row status
+    /// grid holding one row of text, and the game's banner and first room printed
+    /// into a story pane with no rows left.
+    #[test]
+    fn a_shrink_over_erased_rows_collapses_the_grid_at_once() {
+        let mut m = screen_machine(5);
+        m.mem.write_byte(0x20, 24);
+        m.exec_var(0x0A, &[24], None, None); // split_window 24 — the form's own split
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 12;
+        m.screen.cursor_col = 1;
+        m.print_text("Last name:");
+        assert_eq!(m.screen.upper.last_painted_row(), 12, "the form painted row 12");
+
+        m.exec_var(0x0D, &[1], None, None); // <CLEAR ,S-WINDOW> — erase_window 1
+        assert_eq!(m.screen.upper.last_painted_row(), 0, "the erase took the paint with it");
+
+        m.exec_var(0x0A, &[1], None, None); // <SPLIT 1> — the status line
+        assert_eq!(m.screen.upper_window_rows, 1, "the split is one row");
+        assert_eq!(m.screen.upper.rows, 1, "and so is the grid: there was nothing to strand");
+        assert!(
+            !m.screen.upper_rows_stranded_by_split,
+            "nothing was stranded, so no retirement is pending"
+        );
     }
 
     #[test]
@@ -9653,13 +11794,15 @@ pub(crate) mod tests {
 
         m.pending_input = Some(PendingInput {
             store_var: Some(0),
+            line_read: false,
             text_buf: 0,
             parse_buf: 0,
             interrupt_time: 0,
             interrupt_routine: 0,
             instr_pc: 0,
+            preload: String::new(),
         });
-        m.supply_char(130); // ZSCII cursor down (ZMSD §3.8) — one menu arrow key
+        m.supply_char(ZsciiInput::DOWN); // ZSCII cursor down (ZMSD §3.8) — one menu arrow key
         assert_eq!(m.screen.upper.rows, 13, "an arrow key must not retire live menu rows");
         assert_eq!(m.screen.upper.cell(13, 1).ch, 'B', "…and the row keeps its text");
     }
@@ -9688,13 +11831,15 @@ pub(crate) mod tests {
 
         m.pending_input = Some(PendingInput {
             store_var: Some(0),
+            line_read: false,
             text_buf: 0,
             parse_buf: 0,
             interrupt_time: 0,
             interrupt_routine: 0,
             instr_pc: 0,
+            preload: String::new(),
         });
-        m.supply_char(b' ');
+        m.supply_char(ZsciiInput::new(b' ').unwrap());
         assert_eq!(m.screen.upper.rows, 3, "so the keypress retires nothing");
         assert_eq!(m.screen.upper.cell(2, 1).ch, 'M', "the live row survives");
     }
@@ -9754,7 +11899,7 @@ pub(crate) mod tests {
 
         // A SECOND fill at a new position accumulates rather than replacing —
         // this is the whole point: a card is many fills from one moved window.
-        if let Some(v6) = m.screen.v6.as_mut() {
+        if let Some(v6) = m.screen.v6_mut() {
             v6.windows[3].x_coord = 73;
             v6.windows[3].bg = crate::screen::ZColour::True(0x001f);
         }
@@ -9762,6 +11907,85 @@ pub(crate) mod tests {
         assert_eq!(m.pending_erase_fills.len(), 2, "fills queue, they do not overwrite each other");
         assert_eq!(m.pending_erase_fills[1].x, 73, "the second fill records the window's NEW position");
         assert_eq!(m.pending_erase_fills[1].bg, crate::screen::ZColour::True(0x001f), "and its new colour");
+    }
+
+    /// SQ-1396: erase, picture, erase comes back in THAT order.
+    ///
+    /// The two queues are one timeline and draining them as two lists replays a
+    /// turn wrongly — scopa's boot fills its green table, draws its cards and
+    /// fills the menu buttons over the top, so fills-last erases both cards. The
+    /// merge is `take_paint_events`'s job precisely so no host has to know that.
+    #[test]
+    fn paint_events_drain_in_the_order_the_game_issued_them() {
+        let mut m = build_test_machine(&[]);
+        let mut windows: [crate::screen::ZWindow; 8] = Default::default();
+        windows[3] = crate::screen::ZWindow {
+            x_coord: 61, y_coord: 97, x_size: 12, y_size: 8,
+            bg: crate::screen::ZColour::True(0x7fff),
+            ..Default::default()
+        };
+        m.screen.v6 = Some(crate::screen::V6Windows { windows, current: 3 });
+
+        let pic = |number: u8| PictureEvent {
+            number: number as u16, window: 3, x: 1, y: 1, erase: false,
+            out_chars: 0, margin_after: None, at_cursor: false, win_box: (61, 97, 12, 8),
+        };
+
+        m.exec_var(0x0D, &[3], None, None); // erase_window(3) — the table
+        m.queue_picture_event(pic(1)); //                       a card
+        m.exec_var(0x0D, &[3], None, None); // erase_window(3) — a menu button
+        m.queue_picture_event(pic(2)); //                       a second card
+
+        // Each `erase_window` publishes its RECT and, right after it, the
+        // canvas-clear sentinel picture that tells a host which window's canvas
+        // the rect belongs to — so the issued order is six events, not four.
+        let drained = m.take_paint_events();
+        let shape: Vec<&str> = drained
+            .iter()
+            .map(|p| match p {
+                PaintEvent::Erase(_) => "fill",
+                PaintEvent::Picture(p) if p.erase => "clear",
+                PaintEvent::Picture(_) => "draw",
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            ["fill", "clear", "draw", "fill", "clear", "draw"],
+            "the table, the first card, the button, the second card: {drained:?}",
+        );
+        let drawn: Vec<u16> = drained
+            .iter()
+            .filter_map(|p| match p {
+                PaintEvent::Picture(p) if !p.erase => Some(p.number),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn, [1, 2], "and the cards keep their own order");
+        assert!(m.take_paint_events().is_empty(), "the drain empties both queues");
+    }
+
+    /// A fill stamped past the last picture still lands, and lands last — the
+    /// trailing arm of the merge.
+    ///
+    /// Constructed rather than driven: `erase_window` publishes its sentinel
+    /// picture immediately after its fill, so no opcode reaches this arm today.
+    /// It is the arm a host would have got wrong, so it is pinned.
+    #[test]
+    fn a_fill_stamped_past_the_last_picture_trails_it() {
+        let mut m = build_test_machine(&[]);
+        m.queue_picture_event(PictureEvent {
+            number: 9, window: 3, x: 1, y: 1, erase: false,
+            out_chars: 0, margin_after: None, at_cursor: false, win_box: (1, 1, 4, 4),
+        });
+        m.pending_erase_fills.push(EraseFill {
+            window: 3, x: 1, y: 1, w: 4, h: 4,
+            bg: crate::screen::ZColour::Default,
+            pics_before: 1,
+        });
+        assert!(
+            matches!(m.take_paint_events().as_slice(), [PaintEvent::Picture(_), PaintEvent::Erase(_)]),
+            "the fill the game issued last is applied last",
+        );
     }
 
     /// `erase_window(-1)` clears every window, so every window's box is painted —
@@ -10039,6 +12263,31 @@ pub(crate) mod tests {
         m.state.pc = 0x10;
         run_until_quit(&mut m);
         assert_eq!(m.global(0), 7, "verify branched false (ran the add)");
+    }
+
+    /// SQ-1419 / 2026-09 zvm reference audit: a header checksum of exactly 0
+    /// used to be treated as "some dev builds omit it, assume genuine" and
+    /// always branched true. ZMSD §15 draws no such exception — Frotz and
+    /// Bocfel both compare strictly — so a corrupted header that happens to
+    /// zero $1C must fail `verify` like any other mismatch.
+    ///
+    /// FALSIFY by restoring the `header_ck == 0` shortcut: this then asserts
+    /// `global(0) == 0` (branched true) instead of 7.
+    #[test]
+    fn verify_branches_false_when_header_checksum_is_zero_but_story_isnt() {
+        let mut buf = sample_story(5);
+        buf[0x1A] = 0x00; buf[0x1B] = 0x20; buf[0x40] = 0xAB;
+        buf[0x10] = 0xBD; buf[0x11] = 0xC6;
+        buf[0x12] = 0x14; buf[0x13] = 0x00; buf[0x14] = 0x07; buf[0x15] = 0x10;
+        buf[0x16] = 0xBA;
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        let ck = m.story_checksum();
+        assert_ne!(ck, 0, "checksum region non-empty so a zeroed header word is a real mismatch");
+        m.mem.write_word(0x1C, 0x0000); // header checksum corrupted to zero
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 7, "a zeroed header checksum is compared strictly, not waved through");
     }
 
     // -----------------------------------------------------------------------
@@ -11008,8 +13257,8 @@ pub(crate) mod tests {
         // ZMSD §15: zero y/x means the cursor coordinate in the current window
         // (the cursor is stored in 1-based pixels and used verbatim).
         let mut m = v6_exec_machine();
-        m.screen.v6.as_mut().unwrap().windows[0].y_cursor = 9;
-        m.screen.v6.as_mut().unwrap().windows[0].x_cursor = 17;
+        m.screen.v6_mut().unwrap().windows[0].y_cursor = 9;
+        m.screen.v6_mut().unwrap().windows[0].x_cursor = 17;
         m.exec_ext(0x05, &[7, 0, 0], None, None);
         let ev = m.pending_pictures.last().unwrap();
         assert_eq!((ev.y, ev.x), (9, 17));
@@ -11019,7 +13268,7 @@ pub(crate) mod tests {
     fn v6_set_margins_stores_and_snaps_cursor() {
         let mut m = v6_exec_machine();
         // Cursor sits at pixel 9, inside the new 20px left margin.
-        m.screen.v6.as_mut().unwrap().windows[1].x_cursor = 9;
+        m.screen.v6_mut().unwrap().windows[1].x_cursor = 9;
         m.exec_ext(0x08, &[20, 8, 1], None, None); // set_margins(left, right, window)
         let w = &m.screen.v6.as_ref().unwrap().windows[1];
         assert_eq!(w.left_margin, 20, "left margin stored (prop 6)");
@@ -11035,9 +13284,9 @@ pub(crate) mod tests {
         // new text column (x_size - right) must snap home. (matches Frotz's
         // two-sided `x_cursor <= left || x_cursor > x_size - right`.)
         let mut m = v6_exec_machine();
-        m.screen.v6.as_mut().unwrap().windows[0].x_size = 548;
+        m.screen.v6_mut().unwrap().windows[0].x_size = 548;
         // Cursor at pixel 300 — past the new text column (548 - 328 = 220).
-        m.screen.v6.as_mut().unwrap().windows[0].x_cursor = 300;
+        m.screen.v6_mut().unwrap().windows[0].x_cursor = 300;
         m.exec_ext(0x08, &[2, 328, 0], None, None); // set_margins(left=2, right=328, win=0)
         let w = &m.screen.v6.as_ref().unwrap().windows[0];
         assert_eq!(w.right_margin, 328, "right margin stored (prop 7)");
@@ -11071,7 +13320,7 @@ pub(crate) mod tests {
             let mut m = v6_exec_machine();
             m.v6_metric = crate::screen::V6Metric::proportional(cell, advances.clone(), 0);
             {
-                let w = &mut m.screen.v6.as_mut().unwrap().windows[0];
+                let w = &mut m.screen.v6_mut().unwrap().windows[0];
                 w.x_size = 200; // 25 columns of 8
                 w.right_margin = 0;
                 w.left_margin = left_margin;
@@ -11482,8 +13731,8 @@ pub(crate) mod tests {
         // its right-aligned layout math.
         let mut m = v6_exec_machine();
         v6_place_window(&mut m, 3, 41, 25, 24, 100);
-        m.screen.v6.as_mut().unwrap().windows[3].y_cursor = 7;
-        m.screen.v6.as_mut().unwrap().windows[3].x_cursor = 33;
+        m.screen.v6_mut().unwrap().windows[3].y_cursor = 7;
+        m.screen.v6_mut().unwrap().windows[3].x_cursor = 33;
         // get_wind_prop(-3, prop) must read window 3 (the current window).
         m.exec_ext(0x13, &[0xFFFD, 4], Some(0), None); // y_cursor -> sp
         m.exec_ext(0x13, &[0xFFFD, 5], Some(0), None); // x_cursor -> sp
@@ -11690,8 +13939,8 @@ pub(crate) mod tests {
         // non-v6 screen cursor fields, which v6 never updates — (0,0).
         let mut m = v6_exec_machine();
         m.exec_var(0x0B, &[3], None, None); // set_window(3)
-        m.screen.v6.as_mut().unwrap().windows[3].y_cursor = 57;
-        m.screen.v6.as_mut().unwrap().windows[3].x_cursor = 123;
+        m.screen.v6_mut().unwrap().windows[3].y_cursor = 57;
+        m.screen.v6_mut().unwrap().windows[3].x_cursor = 123;
         m.exec_var(0x10, &[0x0100], None, None); // get_cursor -> array at 0x0100
         assert_eq!(m.mem.read_word(0x0100), 57, "word 0 = y cursor in pixels");
         assert_eq!(m.mem.read_word(0x0102), 123, "word 1 = x cursor in pixels");
@@ -11807,11 +14056,11 @@ pub(crate) mod tests {
         m.exec_var(0x13, &[2], None, None); // output_stream 2 (transcript on)
         m.exec_ext(0x12, &[2, 0b0100, 1], None, None); // window_style: set attribute 2
         m.print_text("copied");
-        assert_eq!(m.streams.stream2_text(), "copied", "attr 2 + stream 2 → transcript");
+        assert_eq!(sink_transcript(&m), "copied", "attr 2 + stream 2 → transcript");
         m.exec_ext(0x12, &[2, 0b0100, 2], None, None); // clear attribute 2
         m.print_text("silent");
         assert_eq!(
-            m.streams.stream2_text(),
+            sink_transcript(&m),
             "copied",
             "with attribute 2 clear the window's text stays out of the transcript"
         );
@@ -11819,7 +14068,7 @@ pub(crate) mod tests {
         m.exec_ext(0x12, &[2, 0b0100, 1], None, None);
         m.exec_var(0x13, &[(-2i16) as u16], None, None); // output_stream -2
         m.print_text("offline");
-        assert_eq!(m.streams.stream2_text(), "copied", "unselected stream 2 takes nothing");
+        assert_eq!(sink_transcript(&m), "copied", "unselected stream 2 takes nothing");
     }
 
     // -----------------------------------------------------------------------
@@ -11861,10 +14110,10 @@ pub(crate) mod tests {
         let full = m.screen.v6.as_ref().unwrap().windows[0].more_interval(crate::screen::V6Cell::DEFAULT);
         m.exec_ext(0x19, &[0, 15, 1], None, None);
         m.exec_var(0x16, &[0], Some(0x01), None); // read_char (arms pending input)
-        m.supply_char(0); // ZSCII 0 = timed out
+        m.supply_char_raw(0); // ZSCII 0 = timed out (our sentinel, not a real ZsciiInput)
         assert_eq!(m.v6_line_count(), Some(1), "a timeout is not a keystroke");
         m.exec_var(0x16, &[0], Some(0x01), None);
-        m.supply_char(b'x');
+        m.supply_char(ZsciiInput::new(b'x').unwrap());
         assert_eq!(m.v6_line_count(), Some(full), "a real key reloads a full screen");
     }
 
@@ -12008,6 +14257,55 @@ pub(crate) mod tests {
         m.exec_ext(0x06, &[0, array], None, Some(branch));
         assert_eq!(m.mem.read_word(array as u32), 2, "word 0 = number of pictures available");
         assert_eq!(m.state.pc, pc_before + 10 - 2, "pictures available → branch taken");
+    }
+
+    #[test]
+    fn v6_picture_data_asks_a_custom_resources_impl_on_demand() {
+        // SQ-1402: a host answering on demand rather than pre-filling a table —
+        // the seam `crate::resources::Resources` exists for. This one computes
+        // an answer from `number` itself rather than looking anything up, which
+        // a pre-filled `PictureTable` cannot do.
+        struct Doubling;
+        impl crate::resources::Resources for Doubling {
+            fn picture_count(&self) -> u16 {
+                3
+            }
+            fn picture_release(&self) -> u16 {
+                77
+            }
+            fn picture_dims(&self, number: u16) -> Option<(u16, u16)> {
+                if number == 0 || number > 3 {
+                    None
+                } else {
+                    Some((number * 10, number * 20))
+                }
+            }
+        }
+
+        let mut m = v6_exec_machine();
+        m.set_resources(Box::new(Doubling));
+
+        // number 0: count + release, from the trait, not a table length.
+        let array = 0x0060u16;
+        let pc_before = m.state.pc;
+        m.exec_ext(0x06, &[0, array], None, Some(Branch { on_true: true, offset: 10, len: 1 }));
+        assert_eq!(m.mem.read_word(array as u32), 3, "word 0 = count, from the trait");
+        assert_eq!(m.mem.read_word(array as u32 + 2), 77, "word 1 = release, from the trait");
+        assert_eq!(m.state.pc, pc_before + 10 - 2, "pictures available → branch taken");
+
+        // number 2: dims computed on the fly (20, 40) — never stored anywhere.
+        let pc_before = m.state.pc;
+        m.exec_ext(0x06, &[2, array], None, Some(Branch { on_true: true, offset: 10, len: 1 }));
+        assert_eq!(m.mem.read_word(array as u32), 40, "word 0 = height = 2*20");
+        assert_eq!(m.mem.read_word(array as u32 + 2), 20, "word 1 = width = 2*10");
+        assert_eq!(m.state.pc, pc_before + 10 - 2, "picture found → branch taken");
+
+        // number 9: outside the trait's answer → not found, no branch.
+        m.mem.write_word(array as u32, 0xDEAD);
+        let pc_before = m.state.pc;
+        m.exec_ext(0x06, &[9, array], None, Some(Branch { on_true: true, offset: 10, len: 1 }));
+        assert_eq!(m.state.pc, pc_before, "picture not found → branch not taken");
+        assert_eq!(m.mem.read_word(array as u32), 0xDEAD, "array left untouched");
     }
 
     // ── Task 4: move_window / window_size / window_style bodies ─────────────
@@ -12236,7 +14534,7 @@ pub(crate) mod tests {
         // (This test replaces an assertion that pinned the opposite.)
         let mut m = v6_exec_machine();
         {
-            let v6 = m.screen.v6.as_mut().unwrap();
+            let v6 = m.screen.v6_mut().unwrap();
             v6.windows[7].y_cursor = 33;
             v6.windows[7].x_cursor = 57;
         }
@@ -12253,7 +14551,7 @@ pub(crate) mod tests {
         // prose printed to the current window must be tagged with it.
         let mut m = v6_exec_machine();
         {
-            let v6 = m.screen.v6.as_mut().unwrap();
+            let v6 = m.screen.v6_mut().unwrap();
             v6.windows[4].fg = ZColour::Standard(3);
             v6.windows[4].bg = ZColour::Standard(6);
         }
@@ -12290,7 +14588,7 @@ pub(crate) mod tests {
     fn v6_erase_window_clears_target_window_grid() {
         let mut m = v6_exec_machine();
         {
-            let v6 = m.screen.v6.as_mut().unwrap();
+            let v6 = m.screen.v6_mut().unwrap();
             v6.windows[3].grid.resize(2, 2);
             v6.windows[3].grid.put(1, 1, 'X', 0, ZColour::Default, ZColour::Default);
             v6.windows[3].y_cursor = 5;
@@ -12372,7 +14670,7 @@ pub(crate) mod tests {
         m.set_screen_dims(25, 80);
         m.exec_var(0x0A, &[160], None, None); // split_window(160px) -> window 1 has height
         {
-            let v6 = m.screen.v6.as_mut().unwrap();
+            let v6 = m.screen.v6_mut().unwrap();
             v6.current = 3;
             v6.windows[0].bg = ZColour::Standard(6);
             v6.windows[2].y_cursor = 40;
@@ -12400,7 +14698,7 @@ pub(crate) mod tests {
         m.set_screen_dims(25, 80);
         m.exec_var(0x0A, &[160], None, None); // split_window(160px)
         {
-            let v6 = m.screen.v6.as_mut().unwrap();
+            let v6 = m.screen.v6_mut().unwrap();
             v6.current = 3;
             v6.windows[2].grid.resize(1, 2);
             v6.windows[2].grid.put(1, 1, 'X', 0, ZColour::Default, ZColour::Default);
@@ -12458,7 +14756,7 @@ pub(crate) mod tests {
         // (a game computing garbage coords must not land at the right edge).
         let mut m = v6_exec_machine();
         m.exec_var(0x0B, &[1], None, None); // current = 1
-        m.screen.v6.as_mut().unwrap().windows[1].x_size = 320; // window width, px
+        m.screen.v6_mut().unwrap().windows[1].x_size = 320; // window width, px
         m.exec_var(0x0F, &[9, 17], None, None); // set_cursor(y=9px, x=17px)
         {
             let w = &m.screen.v6.as_ref().unwrap().windows[1];
@@ -12705,7 +15003,7 @@ pub(crate) mod tests {
     fn hostile_print_flood_cannot_overflow_the_cursor_advance() {
         let mut m = v6_exec_machine();
         {
-            let w = &mut m.screen.v6.as_mut().unwrap().windows[1];
+            let w = &mut m.screen.v6_mut().unwrap().windows[1];
             w.y_cursor = WINDOW_PX_CAP;
             w.x_cursor = WINDOW_PX_CAP;
         }
@@ -12744,6 +15042,94 @@ pub(crate) mod tests {
         assert!(
             dt < std::time::Duration::from_secs(2),
             "print_table(0xFFFF, 0xFFFF) must return control to the host promptly, took {dt:?}",
+        );
+    }
+
+    /// SQ-1395: a `print_table` whose span overruns this story's memory must
+    /// fault immediately — deterministically, not "either answer is fine" —
+    /// and well under the wall-clock bound that would catch a regression to
+    /// the pre-SQ-1030 29 s/4.3 GB behaviour.
+    #[test]
+    fn hostile_print_table_span_overrunning_memory_faults() {
+        let mut body = Vec::new();
+        // addr=0x40 (just past the routine header), width=height=0xFFFF
+        // (clamped to GRID_CELL_CAP=1024 each) → a 1024x1024 span from a
+        // story whose whole buffer is 0x400 (1024) bytes: nowhere close.
+        emit_var_large(&mut body, 0x1E, &[0x0040, 0xFFFF, 0xFFFF]);
+        let mut m = Machine::new(Memory::new(v6_boot_story(&body)).unwrap());
+        let t0 = std::time::Instant::now();
+        let r = m.step();
+        let dt = t0.elapsed();
+        assert_eq!(r, StepResult::Fault, "an unbacked table span must fault");
+        assert!(
+            dt < std::time::Duration::from_millis(50),
+            "the up-front span check must fault before looping, took {dt:?}",
+        );
+    }
+
+    /// SQ-1395: `copy_table` writing past the end of memory must fault rather
+    /// than silently discarding the illegal tail (or the whole operation).
+    #[test]
+    fn hostile_copy_table_past_end_of_memory_faults() {
+        let mut body = Vec::new();
+        // copy_table(first=0x0040, second=0x03F0, size=0x0100): the story is
+        // 0x400 bytes, so writing 256 bytes starting at 0x03F0 runs 240
+        // bytes past the end.
+        emit_var_large(&mut body, 0x1D, &[0x0040, 0x03F0, 0x0100]);
+        let mut m = Machine::new(Memory::new(v6_boot_story(&body)).unwrap());
+        assert_eq!(m.step(), StepResult::Fault, "an unbacked copy_table span must fault");
+    }
+
+    /// SQ-1395: `copy_table` zero-filling past `static_mem_base` (the
+    /// `second == 0` form) must fault even where every byte touched is
+    /// still inside `mem.len()` — this is a WRITE bound (dynamic memory
+    /// only, ZMSD §1.1), not merely a read bound, so a naive "does this fit
+    /// the buffer" check would wrongly let it through. Extend the story
+    /// past `static_mem_base` with real (readable) bytes so the two bounds
+    /// genuinely differ.
+    #[test]
+    fn hostile_copy_table_zero_fill_past_static_mem_base_faults() {
+        let mut body = Vec::new();
+        // copy_table(first=0x03F0, second=0, size=0x0100): static_mem_base
+        // is 0x0400 in sample_story, so this zero-fill starts inside
+        // dynamic memory but runs 240 bytes into static memory.
+        emit_var_large(&mut body, 0x1D, &[0x03F0, 0x0000, 0x0100]);
+        let mut buf = v6_boot_story(&body);
+        buf.resize(0x500, 0); // real, readable bytes past static_mem_base
+        let mut m = Machine::new(Memory::new(buf).unwrap());
+        assert_eq!(m.step(), StepResult::Fault, "a zero-fill crossing into static memory must fault");
+    }
+
+    /// SQ-1395: a routine with no base case that calls itself must fault at
+    /// `MAX_CALL_DEPTH` frames rather than growing `State::frames` without
+    /// bound to an OOM abort. Build a v5 routine at 0x40 (packed 0x0010)
+    /// whose only instruction is a `call_vs` of itself, and enter its body
+    /// directly (no outer frame needed — the first recursive call pushes
+    /// its own).
+    #[test]
+    fn hostile_self_recursion_faults_at_call_depth_cap() {
+        let mut buf = sample_story(5);
+        buf[0x40] = 0x00; // routine header: 0 locals
+        let call = assemble(&[Asm::CallVs(0x0010, vec![], DG(0))]);
+        for (i, &b) in call.iter().enumerate() {
+            buf[0x41 + i] = b;
+        }
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x41;
+
+        let mut result = StepResult::Continue;
+        for _ in 0..(crate::cpu::state::MAX_CALL_DEPTH + 10) {
+            result = m.step();
+            if result == StepResult::Fault {
+                break;
+            }
+        }
+        assert_eq!(result, StepResult::Fault, "runaway recursion must fault, not OOM");
+        assert!(
+            m.state.frames.len() <= crate::cpu::state::MAX_CALL_DEPTH,
+            "frame count must never exceed the cap, got {}",
+            m.state.frames.len(),
         );
     }
 }

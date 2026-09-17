@@ -160,9 +160,10 @@ pub struct PortalGlyphs {
 /// Every slot is a STATE, not a control: a toggle draws one of two glyphs
 /// depending on which way it would move things, so the icon says what is on
 /// before the colour does. The panel toggles are arrows pointing the way the
-/// panel would go — the map lives to the right of the story pane and the verb
-/// panel below it, so `map_hide` points right (click and the map leaves that
-/// way) and `band_show` points up (click and the band rises into view).
+/// panel would go — the map lives to the right of the story pane and the
+/// command band below it, so `map_hide` points right (click and the map
+/// leaves that way) and `band_show` points up (click and the band rises into
+/// view).
 ///
 /// Defaults come from Geometric Shapes (U+25xx) for the same reason
 /// [`PortalGlyphs`]' do: it is the block an ordinary monospace face already has
@@ -173,10 +174,22 @@ pub struct ControlGlyphs {
     pub map_show: char,
     /// Map shown — click and it leaves to the right (▶).
     pub map_hide: char,
-    /// Verb panel closed — click and it rises from the bottom (▲).
+    /// The panel cycle (SQ-1237) is closed — click and the command panel rises
+    /// from the bottom (▲).
     pub band_show: char,
-    /// Verb panel open — click and it drops back down (▼).
+    /// The panel cycle's command-panel state — click and it moves to the
+    /// inventory panel (▼).
     pub band_hide: char,
+    /// The panel cycle's inventory-panel state — click and it closes (◆).
+    ///
+    /// **No verified nerd-font codepoint exists for this yet.** Every other
+    /// glyph in this set was read from the patched font's own `post` table
+    /// (SQ-0989 is what guessing one costs: a wrong codepoint draws crisply and
+    /// confidently, and nothing on our side can tell). Rather than guess a
+    /// bag/inventory icon from memory, the `nerdfont` preset below deliberately
+    /// falls back to the same plain shape until someone reads a real one off
+    /// the font.
+    pub inventory_open: char,
     /// Lanthorn's Guiding Light is on (●; the lamp itself in a patched font).
     pub guidance_on: char,
     /// The Guiding Light is off (○).
@@ -321,6 +334,16 @@ pub struct SymbolSet {
     pub room_portal: BoxStyle,
     /// Selected room outline. Defaults to normal (selection is color-only today).
     pub room_selected: BoxStyle,
+    /// Cross-layer GHOST outline (SQ-1356): the box drawn for a room that lives on ANOTHER
+    /// layer, at the same size as a real room's so the grid stays a grid, but with a BROKEN
+    /// border — the one property of a line that says "this is a stand-in" without needing a
+    /// colour, so it still reads on a monochrome terminal and under any theme.
+    ///
+    /// Chosen by `map.ghost_box_style` rather than by `map.box_style`, because the two answer
+    /// different questions: `box_style` picks the house line-art vocabulary, this picks how the
+    /// ghost DIFFERS from it, and a player who moved to `ascii` for coverage still wants the
+    /// ghost to differ from their rooms. See [`BoxStyle::ghost_preset`].
+    pub room_ghost: BoxStyle,
     pub arrows: Arrows,
     pub path: PathGlyphs,
     pub portal: PortalGlyphs,
@@ -391,6 +414,7 @@ impl Default for SymbolSet {
             room_current: BoxStyle { tl: '┏', tr: '┓', bl: '┗', br: '┛', h: '━', v: '┃' },
             room_portal: BoxStyle { tl: '╔', tr: '╗', bl: '╚', br: '╝', h: '═', v: '║' },
             room_selected: room_normal, // color-only selection today
+            room_ghost: BoxStyle { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '╌', v: '╎' },
             arrows: Arrows {
                 north: '▲',
                 south: '▼',
@@ -434,6 +458,10 @@ impl Default for SymbolSet {
                 map_hide: '▶',
                 band_show: '▲',
                 band_hide: '▼',
+                // ◆ (U+25C6), from the same Geometric Shapes block as the rest
+                // of this preset — a third, direction-less mark for the third
+                // state, next to the arrow pair.
+                inventory_open: '◆',
                 guidance_on: '●',
                 guidance_off: '○',
                 render_hybrid: '◧',
@@ -525,12 +553,40 @@ impl BoxStyle {
             _ => return None,
         })
     }
+
+    /// All known preset names for a cross-layer ghost's outline, in display order (SQ-1356).
+    pub fn ghost_preset_names() -> &'static [&'static str] {
+        &["dashed", "dotted", "ascii"]
+    }
+
+    /// A ghost box's broken outline, or `None` for an unknown name.
+    ///
+    /// Every preset keeps SOLID corners: a box whose corners are also broken stops reading as a
+    /// box at 11x5, which is the size the drawn map has to say all this in. Only the runs break.
+    ///
+    /// - "dashed"  — `╌`/`╎` (U+254C/U+254E), the light double-dash pair (default)
+    /// - "dotted"  — `┄`/`┆` (U+2504/U+2506), the light triple-dash pair: a finer break, and the
+    ///   same glyphs `portal_path_style`'s own dotted preset draws its connectors with
+    /// - "ascii"   — `-`/`:`, for a face with no Box Drawing dashes at all; the corners come down
+    ///   to `+` with them, since a rounded corner in a `-`/`:` box would be the only non-ASCII
+    ///   glyph left and would defeat the point of asking for this preset
+    pub fn ghost_preset(name: &str) -> Option<BoxStyle> {
+        Some(match name {
+            "dashed" => BoxStyle { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '╌', v: '╎' },
+            "dotted" => BoxStyle { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '┄', v: '┆' },
+            "ascii" => BoxStyle { tl: '+', tr: '+', bl: '+', br: '+', h: '-', v: ':' },
+            _ => return None,
+        })
+    }
 }
 
 impl Arrows {
     /// All known preset names for Arrows, in display order.
     pub fn preset_names() -> &'static [&'static str] {
-        &["filled", "line", "nerdfont", "nf-bold", "nf-box", "nf-chevron", "nf-circle", "nf-outline"]
+        &[
+            "filled", "line", "nerdfont", "nf-bold", "nf-box", "nf-chevron", "nf-circle", "nf-outline",
+            "nf-thick", "nf-wind", "nf-thin",
+        ]
     }
 
     /// Return a named preset, or `None` for an unknown name.
@@ -538,12 +594,12 @@ impl Arrows {
     /// Presets:
     /// - "filled"     — filled triangle glyphs ▲▼▶◀ + diagonal arrows ↗↖↘↙ (default)
     /// - "line"       — thin Unicode arrows ↑↓→← + diagonal ↗↖↘↙
-    /// - "nerdfont"   — MDI bold-box arrows, the same set as "nf-box" (requires a
-    ///   patched font). This is what the font check installs, so it is the set
-    ///   most players see. It is boxed rather than bare because a connector
-    ///   arrowhead sits ON a line of path glyphs: a box gives the head an edge of
-    ///   its own, where a chevron reads as one more bend in the path.
-    ///   Diagonal: native MDI bold-box diagonals — one family for all eight,
+    /// - "nerdfont"   — MDI bold-outline arrows, the same set as "nf-outline"
+    ///   (requires a patched font). This is what the font check installs, so it
+    ///   is the set most players see (2026-09-03, user decision: it was the boxed
+    ///   set until then, which at a one-cell size collapses to a square with a
+    ///   dot in it; the outline head still reads as an arrow).
+    ///   Diagonal: native MDI bold-outline diagonals — one family for all eight,
     ///   which is the same rule `ControlGlyphs` states for its own pairs.
     /// - "nf-chevron" — the MDI chevrons "nerdfont" used to be
     ///   (U+F0143/F0140/F0142/F0141), kept reachable by name so a player who
@@ -556,7 +612,12 @@ impl Arrows {
     /// - "nf-circle"  — MDI arrow-{up,down,left,right}-bold-circle (F005F/F0047/F004F/F0056)
     ///   Diagonal: Unicode fallback ↖↗↙↘ (no native MDI circle diagonals)
     /// - "nf-outline" — MDI arrow-{up,down,left,right}-bold-outline (F09C7/F09BF/F09C0/F09C2)
-    ///   Diagonal: native MDI bold-outline diagonals (F09C3/F09C5/F09B7/F09B9)
+    ///   Diagonal: native MDI bold-outline diagonals (F09C3/F09C5/F09B7/F09B9).
+    ///   Note the family's own unevenness: its up/down heads are drawn smaller
+    ///   than its left/right and diagonal ones (12 vs 14 px at a 28 px cell).
+    /// - "nf-thick"   — MDI arrow-{up,down,left,right}-thick (F005E/F0046/F004E/F0055)
+    ///   Diagonal: native MDI thick diagonals (F09C4/F09C6/F09B8/F09BA). The one
+    ///   MDI family measured uniform in all eight directions.
     pub fn preset(name: &str) -> Option<Arrows> {
         Some(match name {
             "filled" => Arrows {
@@ -582,10 +643,7 @@ impl Arrows {
                 // No native MDI plain-bold diagonal arrows; use Unicode fallback
                 ne: '↗', nw: '↖', se: '↘', sw: '↙',
             },
-            // One arm, two names: "nerdfont" is what the font check writes and
-            // "nf-box" is what it IS. Spelling the glyphs once means the set the
-            // check installs and the set that name promises cannot drift apart.
-            "nerdfont" | "nf-box" => Arrows {
+            "nf-box" => Arrows {
                 // MDI arrow-up-bold-box F0738, arrow-down-bold-box F072F,
                 // arrow-left-bold-box F0732, arrow-right-bold-box F0735
                 north: '\u{F0738}', south: '\u{F072F}',
@@ -604,7 +662,10 @@ impl Arrows {
                 // No native MDI circle diagonal arrows; use Unicode fallback
                 ne: '↗', nw: '↖', se: '↘', sw: '↙',
             },
-            "nf-outline" => Arrows {
+            // One arm, two names: "nerdfont" is what the font check writes and
+            // "nf-outline" is what it IS. Spelling the glyphs once means the set the
+            // check installs and the set that name promises cannot drift apart.
+            "nerdfont" | "nf-outline" => Arrows {
                 // MDI arrow-up-bold-outline F09C7, arrow-down-bold-outline F09BF,
                 // arrow-left-bold-outline F09C0, arrow-right-bold-outline F09C2
                 north: '\u{F09C7}', south: '\u{F09BF}',
@@ -614,6 +675,36 @@ impl Arrows {
                 // arrow-bottom-left-bold-outline F09B7, arrow-bottom-right-bold-outline F09B9
                 nw: '\u{F09C3}', ne: '\u{F09C5}',
                 sw: '\u{F09B7}', se: '\u{F09B9}',
+            },
+            // MDI arrow-*-thick: the one MDI family whose eight heads measure the
+            // same (14x14 at a 28 px cell, cardinals and diagonals alike, 2026-09-03).
+            "nf-thick" => Arrows {
+                north: '\u{F005E}', south: '\u{F0046}',
+                east: '\u{F0055}', west: '\u{F004E}',
+                ne: '\u{F09C6}', nw: '\u{F09C4}',
+                se: '\u{F09BA}', sw: '\u{F09B8}',
+            },
+            // Nerd Fonts' Weather Icons `wind_*` set (E354-E35B): a circled arrow for
+            // ALL eight directions from one icon set at one weight — the only preset
+            // whose diagonals are native and match the cardinals exactly (measured:
+            // identical ink boxes at every pixel size, 2026-09-03). The names are the
+            // OPPOSITE of the arrow: `wind_north` (E35A) points DOWN — it is the wind
+            // FROM the north — so each slot takes the glyph named for its opposite.
+            "nf-wind" => Arrows {
+                north: '\u{E357}', south: '\u{E35A}', // wind_south / wind_north
+                east: '\u{E354}', west: '\u{E35B}',  // wind_west / wind_east
+                ne: '\u{E355}', nw: '\u{E356}',      // wind_south_west / wind_south_east
+                se: '\u{E358}', sw: '\u{E359}',      // wind_north_west / wind_north_east
+            },
+            // Weather Icons `direction_*` (E33F-E353, E37F, E380): bare thin arrows,
+            // all eight native. The clearest set at one-cell size, where a boxed or
+            // circled arrow collapses to a shape with a dot in it and a bare stroke
+            // still reads.
+            "nf-thin" => Arrows {
+                north: '\u{E353}', south: '\u{E340}',
+                east: '\u{E349}', west: '\u{E344}',
+                ne: '\u{E352}', nw: '\u{E37F}',
+                se: '\u{E380}', sw: '\u{E33F}',
             },
             _ => return None,
         })
@@ -691,12 +782,12 @@ impl PortalGlyphs {
     /// Presets:
     /// - "ascii"            — ASCII-compatible glyphs (default): ●/↑/↓/◉/◎/? with ┊┄ connectors
     /// - "nerdfont"         — Nerd Font single-width icon codepoints (requires patched font)
-    ///   nf-fa-circle (U+F111) for marker, nf-md-arrow_up_circle (U+F0CE1) for up,
+    ///   nf-md-note_text (U+F039E) for marker, nf-md-arrow_up_circle (U+F0CE1) for up,
     ///   nf-md-arrow_down_circle (U+F0CDB) for down, nf-fa-sign_in (U+F090) for in,
     ///   nf-fa-sign_out (U+F08B) for out, nf-fa-question_circle (U+F059) for unknown
     /// - "nerdfont-stairs"  — Nerd Font 4 distinct direction icons (requires patched font)
     ///   up=mdi-stairs-up (U+F12BD), down=mdi-stairs-down (U+F12BE),
-    ///   in=mdi-location-enter (U+F0FC4), out=mdi-exit-run (U+F0A48)
+    ///   in=mdi-location-enter (U+F0FC4), out=mdi-exit-run (U+F0A48), marker=nf-md-note_text (U+F039E)
     pub fn preset(name: &str) -> Option<PortalGlyphs> {
         Some(match name {
             // In/Out are ◉ FISHEYE (U+25C9) and ◎ BULLSEYE (U+25CE), not the ⊙ (U+2299) and
@@ -716,8 +807,12 @@ impl PortalGlyphs {
                 up: '↑', down: '↓', in_: '◉', out: '◎', unknown: '?',
             },
             "nerdfont" => PortalGlyphs {
-                // nf-fa-circle U+F111, connectors keep the same box-drawing chars
-                marker: '\u{F111}', path: '┊', path_h: '┄',
+                // nf-md-note_text U+F039E — resolved by NAME from the Nerd Fonts
+                // `glyphnames.json` (v3.5.1). A room-notes marker drawn as nf-fa-circle U+F111
+                // (until SQ-1387) was the same dot the "ascii" preset already draws with plain
+                // ● — a patched font gained a codepoint but nothing about the icon said "note".
+                // Connectors keep the same box-drawing chars.
+                marker: '\u{F039E}', path: '┊', path_h: '┄',
                 // md-arrow_up_circle U+F0CE1, md-arrow_down_circle U+F0CDB — resolved by NAME
                 // from the Nerd Fonts `glyphnames.json` (v3.5.1). They used to read F0B71 and
                 // F0B72, which that file calls md-card_bulleted_off{,_outline}: patched faces
@@ -730,8 +825,9 @@ impl PortalGlyphs {
                 unknown: '\u{F059}',
             },
             "nerdfont-stairs" => PortalGlyphs {
-                // Reuse nf-fa-circle U+F111 for marker, nf-fa-question_circle U+F059 for unknown
-                marker: '\u{F111}', path: '┊', path_h: '┄',
+                // Reuse nf-md-note_text U+F039E for marker (see the "nerdfont" arm above),
+                // nf-fa-question_circle U+F059 for unknown
+                marker: '\u{F039E}', path: '┊', path_h: '┄',
                 // Four DISTINCT direction icons (resolved from MDI webfont CSS by name):
                 // mdi-stairs-up U+F12BD
                 up: '\u{F12BD}',
@@ -770,7 +866,7 @@ impl ControlGlyphs {
     /// that_were_read_from_the_font` pins them.
     ///
     /// **Each control's two states come from ONE icon family** — `fa-` for the
-    /// map, `cod-` for the verb panel, `md-` for the Guiding Light, the render
+    /// map, `cod-` for the command band, `md-` for the Guiding Light, the render
     /// mode and the pixel lock. Codicons, Font Awesome and Material Design carry
     /// different stroke weights and cap heights, so a control whose states came
     /// from different families appeared to JUMP on toggle, independently of the
@@ -788,6 +884,10 @@ impl ControlGlyphs {
                 // off/on pair rather than two icons pressed into service.
                 band_show: '\u{0EC01}',
                 band_hide: '\u{0EBF2}',
+                // No verified codepoint for a third (inventory) icon in this
+                // family — see the field's own doc comment. Inherits the plain
+                // shape rather than guessing one (SQ-0989).
+                inventory_open: plain.inventory_open,
                 // md-post_lamp — the Guiding Light's own mark, the same glyph
                 // `font_check_dialog::ASSIST_LAMP` draws in the gutter — and
                 // md-help for the light that is out.
@@ -981,6 +1081,8 @@ impl SymbolSet {
             room_current: SymbolSet::default().room_current,
             room_portal: SymbolSet::default().room_portal,
             room_selected: BoxStyle::preset(&cfg.box_style).unwrap_or_else(|| SymbolSet::default().room_selected),
+            room_ghost: BoxStyle::ghost_preset(&cfg.ghost_box_style)
+                .unwrap_or_else(|| SymbolSet::default().room_ghost),
             arrows: Arrows::preset(&cfg.arrow_set).unwrap_or_else(|| SymbolSet::default().arrows),
             path: PathGlyphs::preset(&cfg.path_style).unwrap_or_else(|| SymbolSet::default().path),
             portal: PortalGlyphs::preset(&cfg.portal_icons).unwrap_or_else(|| SymbolSet::default().portal),
@@ -1022,6 +1124,7 @@ impl SymbolSet {
     pub fn from_preset_names(box_: &str, arrow: &str, portal: &str, path: &str) -> SymbolSet {
         let cfg = crate::config::SymbolConfig {
             box_style: box_.to_owned(),
+            ghost_box_style: crate::config::default_ghost_box_style(),
             arrow_set: arrow.to_owned(),
             portal_icons: portal.to_owned(),
             path_style: path.to_owned(),
@@ -1142,6 +1245,7 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "control.map_hide"       => s.controls.map_hide = ch,
         "control.band_show"      => s.controls.band_show = ch,
         "control.band_hide"      => s.controls.band_hide = ch,
+        "control.inventory_open" => s.controls.inventory_open = ch,
         "control.guidance_on"    => s.controls.guidance_on = ch,
         "control.guidance_off"   => s.controls.guidance_off = ch,
         "control.render_hybrid"  => s.controls.render_hybrid = ch,
@@ -1178,7 +1282,7 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-state"))]
 mod tests {
     use super::*;
 
@@ -1308,6 +1412,7 @@ mod tests {
     fn from_preset_names_matches_resolve() {
         let cfg = crate::config::SymbolConfig {
             box_style: "ascii".into(),
+            ghost_box_style: crate::config::default_ghost_box_style(),
             arrow_set: "filled".into(),
             portal_icons: "ascii".into(),
             path_style: "light".into(),
@@ -1356,8 +1461,20 @@ mod tests {
         assert_eq!(p.down, '\u{F0CDB}', "md-arrow_down_circle");
         assert_eq!(p.in_, '\u{F090}', "fa-sign_in");
         assert_eq!(p.out, '\u{F08B}', "fa-sign_out");
-        assert_eq!(p.marker, '\u{F111}', "fa-circle");
+        assert_eq!(p.marker, '\u{F039E}', "md-note_text");
         assert_eq!(p.unknown, '\u{F059}', "fa-question_circle");
+    }
+
+    /// SQ-1387: the notes marker is `nf-md-note_text` (U+F039E), not
+    /// `nf-fa-circle` (U+F111) — the old codepoint drew the same dot the
+    /// "ascii" preset already draws with plain `●`, so a patched font gained a
+    /// codepoint but nothing about the icon said "note". Resolved by NAME from
+    /// the Nerd Fonts `glyphnames.json` (v3.5.1).
+    #[test]
+    fn portal_marker_is_a_note_icon_not_a_circle() {
+        assert_eq!(PortalGlyphs::preset("ascii").unwrap().marker, '●');
+        assert_eq!(PortalGlyphs::preset("nerdfont").unwrap().marker, '\u{F039E}', "md-note_text");
+        assert_eq!(PortalGlyphs::preset("nerdfont-stairs").unwrap().marker, '\u{F039E}', "md-note_text");
     }
 
     #[test]
@@ -1550,7 +1667,7 @@ mod tests {
             ("render_hybrid", c.render_hybrid), ("render_raster", c.render_raster),
             ("render_extended", c.render_extended),
             ("lock_on", c.lock_on), ("lock_off", c.lock_off),
-            ("return_probe", c.return_probe),
+            ("return_probe", c.return_probe), ("inventory_open", c.inventory_open),
         ] {
             assert!(!is_wide_estimate(ch), "control.{slot} = {ch:?} estimates as double-width");
         }
@@ -1558,6 +1675,10 @@ mod tests {
         // it is exempt from the two-states rule above because it HAS one state:
         // its off-reading is the muted colour, not a second glyph (SQ-0785).
         assert!(c.return_probe as u32 >= 0xF_0000, "md-shoe_print is Material Design");
+        // `inventory_open` has no verified nerd-font codepoint (see its doc
+        // comment) and deliberately inherits the plain shape rather than
+        // guessing one — pinned here so a future guess has to change this line.
+        assert_eq!(c.inventory_open, ControlGlyphs::preset("plain").unwrap().inventory_open);
     }
 
     /// The PLAIN defaults must be drawable by an ordinary monospace face, so
@@ -1577,7 +1698,7 @@ mod tests {
             ("render_hybrid", c.render_hybrid), ("render_raster", c.render_raster),
             ("render_extended", c.render_extended),
             ("lock_on", c.lock_on), ("lock_off", c.lock_off),
-            ("return_probe", c.return_probe),
+            ("return_probe", c.return_probe), ("inventory_open", c.inventory_open),
         ] {
             assert!(shapes.contains(&(ch as u32)), "control.{slot} = {ch:?} is outside Geometric Shapes");
             assert!(!is_wide_estimate(ch), "control.{slot} = {ch:?} estimates as double-width");
@@ -1586,6 +1707,9 @@ mod tests {
         assert_ne!(c.band_show, c.band_hide);
         assert_ne!(c.guidance_on, c.guidance_off);
         assert_ne!(c.lock_on, c.lock_off);
+        // The panel cycle's three states (SQ-1237) are three distinct glyphs.
+        assert_ne!(c.band_show, c.inventory_open);
+        assert_ne!(c.band_hide, c.inventory_open);
         // Three render modes, three distinct glyphs.
         let modes = [c.render_hybrid, c.render_raster, c.render_extended];
         assert_eq!(modes.iter().collect::<std::collections::HashSet<_>>().len(), 3);
@@ -1687,6 +1811,7 @@ mod tests {
         let baseline = SymbolSet::resolve(&crate::config::SymbolConfig::default());
         for key in [
             "control.map_show", "control.map_hide", "control.band_show", "control.band_hide",
+            "control.inventory_open",
             "control.guidance_on", "control.guidance_off", "control.render_hybrid",
             "control.render_raster", "control.render_extended", "control.lock_on",
             "control.lock_off",
@@ -1737,7 +1862,7 @@ mod tests {
 
     #[test]
     fn nf_arrow_presets_exist_and_are_single_width() {
-        for name in ["nf-bold","nf-box","nf-circle","nf-outline"] {
+        for name in ["nf-bold","nf-box","nf-circle","nf-outline","nf-thick","nf-wind","nf-thin"] {
             assert!(Arrows::preset_names().contains(&name), "{name} missing");
             let a = Arrows::preset(name).expect("preset");
             for ch in [a.north,a.south,a.east,a.west,a.ne,a.nw,a.se,a.sw] {
@@ -1750,6 +1875,12 @@ mod tests {
         assert_eq!(b.south, '\u{F072E}');
         assert_eq!(b.east,  '\u{F0734}');
         assert_eq!(b.west,  '\u{F0731}');
+        // "nerdfont" is the outline set, spelled once (2026-09-03):
+        let nf = Arrows::preset("nerdfont").unwrap();
+        let ol = Arrows::preset("nf-outline").unwrap();
+        assert_eq!([nf.north, nf.south, nf.east, nf.west, nf.ne, nf.nw, nf.se, nf.sw],
+                   [ol.north, ol.south, ol.east, ol.west, ol.ne, ol.nw, ol.se, ol.sw]);
+        assert_eq!(nf.north, '\u{F09C7}', "md-arrow_up_bold_outline");
         // nf-box native diagonals:
         let bx = Arrows::preset("nf-box").unwrap();
         assert_eq!(bx.ne, '\u{F196A}');

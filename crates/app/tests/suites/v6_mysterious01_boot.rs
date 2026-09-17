@@ -52,36 +52,32 @@
 //!
 //! Stories are gitignored (CLAUDE.md), so every case skips cleanly without one.
 
-use std::path::PathBuf;
-
 use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::{GameSession, TranscriptElem};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
+use crate::fixture_paths::fixture_path;
+
 /// Both cards are 512x192 at y=1 and y=192, one unit pixel per art pixel.
 const CARD_H: u32 = 192;
 const CARD_W: u32 = 512;
 
-/// SQ-1015: NOT redirected to the tracked fixtures directory, unlike its
-/// sibling suites. This test's assertions depend on `Mysterious01.blb`'s
-/// actual picture bytes (the two boot title cards), and that blorb's
-/// screenshot-sourced graphics have no established licence separate from the
-/// text `Mysterious Adventures` permission (see `fixture_paths.rs`'s doc
-/// comment) — so only `mysterious01.z6` moved, and `Mysterious01.blb` stays
-/// commercial-only in `stories/`. Resolving the story from the tracked copy
-/// while its Blorb companion stays put would silently boot it with NO
-/// pictures at all (`resolve_resource_blorb` scans the story's own
-/// directory), turning this suite's card-geometry assertions into failures
-/// instead of the clean skip they are today.
-fn stories_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
-}
-
 /// mysterious01 at the boot screen, in hybrid, with game colours honored.
+///
+/// SQ-1015: this suite used to pin itself to `stories/` rather than go through
+/// `fixture_path`, because its assertions are about `Mysterious01.blb`'s actual
+/// picture bytes — the two boot title cards — and only `mysterious01.z6` had
+/// been moved. Resolving the story from a directory its Blorb companion was not
+/// in would boot it with NO pictures at all (`resolve_resource_blorb` scans the
+/// story's own directory) and turn card-geometry assertions into failures.
+///
+/// The fetch manifest carries BOTH now, out of the one upstream zip that
+/// Brian Howarth gave the IF Archive permission to serve, so the story and its
+/// pictures arrive together wherever they arrive at all.
 fn boot(honor: bool) -> Option<(GameSession, app::state::AppState)> {
-    let path = stories_dir().join("mysterious01.z6");
+    let path = fixture_path("mysterious01.z6");
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("SKIP: gitignored story missing at {}", path.display());
         return None;
@@ -121,21 +117,6 @@ fn opaque_rows(session: &GameSession) -> Vec<u32> {
         .collect()
 }
 
-/// The palette this suite's colours resolve through, **stated rather than inherited**
-/// (SQ-0958).
-///
-/// Every story these cases drive is a bare file that names no machine — or, for the
-/// disk images, a machine whose table IS §8.3.1's — so the colour numbers behind
-/// every pixel asserted below resolve through the standard table. Until now nothing
-/// here said so, and the suite believed whatever the last suite in its group binary
-/// left behind. See [`app::v6_palette`], which is why this both names a palette and
-/// takes the shared lock; hold the guard for the whole case, because the two frames
-/// a repaint case compares are only comparable if the palette did not move between
-/// them.
-fn standard_palette() -> app::V6PaletteGuard {
-    app::v6_palette(zvm::screen::Palette::Standard)
-}
-
 /// SQ-0722: both title cards are PLACED ART on window 0's canvas, and neither one
 /// is an inline transcript float.
 ///
@@ -146,7 +127,6 @@ fn standard_palette() -> app::V6PaletteGuard {
 /// (SQ-0722)".
 #[test]
 fn mysterious01_stacks_both_title_cards_on_window_zero() {
-    let _g = standard_palette();
     let Some((session, _state)) = boot(true) else { return };
 
     // The cards are drawn at 1-based y=1 and y=192, so they OVERLAP by exactly one
@@ -256,12 +236,10 @@ fn mysterious01_boot_shows_both_cards(honor: bool) {
 
 #[test]
 fn mysterious01_boot_shows_both_cards_honoring_game_colours() {
-    let _g = standard_palette();
     mysterious01_boot_shows_both_cards(true);
 }
 
 #[test]
 fn mysterious01_boot_shows_both_cards_theme_only() {
-    let _g = standard_palette();
     mysterious01_boot_shows_both_cards(false);
 }

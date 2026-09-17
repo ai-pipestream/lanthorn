@@ -62,6 +62,7 @@ fn draw(g: &MapGraph, st: &AppState) -> (Buffer, Rect) {
         &st.colors,
         &st.symbols,
         false,
+        0,
         &mut buf,
     );
     (buf, pl.room_dock)
@@ -165,9 +166,9 @@ fn flipping_the_view_redraws_the_same_room_with_the_other_body() {
 #[test]
 fn the_dock_selectors_apply_in_both_colour_modes() {
     let parsed = app::theme::toml_schema::parse(
-        "[elements]\nroom_dock = { fg = \"magenta\" }\n\
-         \"room_dock.header\" = { fg = \"blue\" }\n\
-         \"room_dock.header:pinned\" = { fg = \"green\" }\n",
+        "[elements]\nroom_panel = { fg = \"magenta\" }\n\
+         \"room_panel.header\" = { fg = \"blue\" }\n\
+         \"room_panel.header:pinned\" = { fg = \"green\" }\n",
     )
     .expect("the override parses");
 
@@ -191,15 +192,15 @@ fn the_dock_selectors_apply_in_both_colour_modes() {
 
         let (buf, r) = draw(&m.graph, &st);
         let following = fgs(&buf, r);
-        assert!(following.contains(&Some(Color::Blue)), "honor={honor}: room_dock.header applies");
-        assert!(following.contains(&Some(Color::Magenta)), "honor={honor}: room_dock applies to the body");
+        assert!(following.contains(&Some(Color::Blue)), "honor={honor}: room_panel.header applies");
+        assert!(following.contains(&Some(Color::Magenta)), "honor={honor}: room_panel applies to the body");
         assert!(!following.contains(&Some(Color::Green)), "honor={honor}: not the pinned variant");
 
         st.selected_room = Some(here);
         let (buf, r) = draw(&m.graph, &st);
         assert!(
             fgs(&buf, r).contains(&Some(Color::Green)),
-            "honor={honor}: room_dock.header:pinned applies once pinned"
+            "honor={honor}: room_panel.header:pinned applies once pinned"
         );
     }
 }
@@ -236,8 +237,8 @@ fn the_dock_docks_below_the_matrix_view_too() {
     let rm = mapper::render::render_layer(&m2.graph, 1);
     let mut buf = Buffer::empty(FRAME);
     let hits = app::render::map::render_map_layered(&rm, &m2.graph, &st, open.map, &mut buf);
-    assert!(!hits.is_empty(), "the matrix still publishes click targets in the shortened pane");
-    for (_, r) in &hits {
+    assert!(!hits.room_rects.is_empty(), "the matrix still publishes click targets in the shortened pane");
+    for (_, r) in &hits.room_rects {
         assert!(r.bottom() <= open.room_dock.y, "nothing the matrix draws reaches into the dock");
     }
 }
@@ -276,6 +277,7 @@ fn the_whole_info_body_fits_at_the_default_dock_height() {
         &st.colors,
         &st.symbols,
         false,
+        0,
         &mut buf,
     );
     let text = text_in(&buf, pl.room_dock);
@@ -352,6 +354,7 @@ fn the_info_body_lists_the_current_rooms_objects_from_a_real_engine() {
         &st.colors,
         &st.symbols,
         false,
+        0,
         &mut buf,
     );
     let text = text_in(&buf, pl.room_dock);
@@ -376,6 +379,7 @@ fn the_info_body_lists_the_current_rooms_objects_from_a_real_engine() {
         &st.colors,
         &st.symbols,
         false,
+        0,
         &mut buf,
     );
     let text = text_in(&buf, pl.room_dock);

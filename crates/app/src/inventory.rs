@@ -18,9 +18,9 @@ use zvm::objects::{get_child, get_sibling, short_name};
 /// When prev_location == current_location (no move), or either is 0, returns `None`
 /// (not enough information to lock — we re-try next move).
 pub fn detect_player_obj(
-    prev_location: Option<u16>,
+    prev_location: Option<mapper::graph::RoomId>,
     prev_objects_here: &BTreeSet<u16>,
-    current_location: u16,
+    current_location: mapper::graph::RoomId,
     objects_here: &BTreeSet<u16>,
 ) -> Option<u16> {
     let prev = prev_location?;
@@ -177,7 +177,7 @@ fn strip_article(s: &str) -> &str {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod tests {
     use super::*;
 
@@ -374,7 +374,7 @@ mod tests {
 
 /// A private shim that provides the sample_story_v3 helper used only in tests.
 /// This mirrors what zvm's own tests do internally.
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod zvm_test_support {
     pub fn sample_story_v3() -> Vec<u8> {
         // Build a minimal valid v3 story buffer matching the header layout in

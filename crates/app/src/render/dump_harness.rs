@@ -80,6 +80,7 @@ fn filled_buffer(id: u32, n: usize, bg: Option<u32>, fg: Option<u32>, primary: b
     };
     let len = lines.len();
     BufferWindow {
+        win: id,
         runs: vec![Vec::new(); len],
         para: vec![crate::state::ParaFmt::default(); len],
         images: vec![None; len],
@@ -196,12 +197,12 @@ pub fn render_to_text(dump: &str, area: Rect, lines_per_win: usize) -> (Vec<Vec<
 }
 
 /// A row's cells `[from, to)` as a `String`, for readable asserts/prints.
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 fn span(row: &[char], from: usize, to: usize) -> String {
     row.iter().skip(from).take(to.saturating_sub(from)).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
 

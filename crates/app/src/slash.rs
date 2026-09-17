@@ -46,6 +46,11 @@ pub enum SlashOutcome {
     Error(String),
     /// Print `/help` lines to the transcript as Meta entries.
     Help,
+    /// Start or stop the STORY's transcript — Z-machine output stream 2, written
+    /// to `<game_dir>/script.txt` (ZMSD §7.1.1). The same thing a game's own
+    /// SCRIPT verb does, offered because most games have no such verb; not to be
+    /// confused with `Export`, which writes out the app's own scrollback.
+    SetTranscript(bool),
     /// Save the game; optionally to a named slot.
     Save(Option<String>),
     /// Load a save; optionally a named slot.
@@ -124,8 +129,8 @@ pub enum SlashOutcome {
     /// global one. Handled in `slash_dispatch` (mutates `state.config.guidance`).
     SetGuidance(GuidanceArg),
     SetReturnProbe(ReturnProbeArg),
-    /// Light the words on screen this story's parser would accept, for a moment
-    /// (SQ-1107).
+    /// Light the nouns and named things on screen this story knows, for a moment
+    /// (SQ-1107, SQ-1207).
     ///
     /// **The one outcome in this family that is not a setting.** Everything
     /// beside it — the guidance switch, the probe, the render mode — reports a
@@ -305,6 +310,13 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "reset-game", category: Category::Game, context: Context::Global,
         usage: "reset-game [map] [data]", description: "restart the game — bare opens the options dialog; 'map' also clears the map, 'data' deletes the game's saved progress/cache so it starts fresh",
         dispatch: |a| SlashOutcome::Reset { map: a.contains(&"map"), data: a.contains(&"data") } },
+    CommandSpec { name: "set-transcript", category: Category::Game, context: Context::Global,
+        usage: "set-transcript on|off", description: "start or stop the story's own transcript, written to script.txt in the game's folder — the same switch a game's SCRIPT command throws, for the many that have none (launch with --transcript-file for a live, engine-neutral stream instead)",
+        dispatch: |a| match a.first().copied() {
+            Some("on")  => SlashOutcome::SetTranscript(true),
+            Some("off") => SlashOutcome::SetTranscript(false),
+            _ => err("set-transcript requires an argument: on | off"),
+        } },
     CommandSpec { name: "quit", category: Category::Game, context: Context::Global,
         usage: "quit", description: "exit lanthorn",
         dispatch: |_| SlashOutcome::Quit },
@@ -317,9 +329,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "open-history", category: Category::Game, context: Context::Global,
         usage: "open-history", description: "open the rewind/replay history",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenHistory) },
-    CommandSpec { name: "open-command-band", category: Category::Game, context: Context::Global,
-        usage: "open-command-band", description: "open or close the command band; persisted per-game",
+    CommandSpec { name: "toggle-command-panel", category: Category::Game, context: Context::Global,
+        usage: "toggle-command-panel", description: "open or close the command panel; remembered per story",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenCommandBand) },
+    CommandSpec { name: "cycle-panel", category: Category::Game, context: Context::Global,
+        usage: "cycle-panel", description: "cycle command panel → inventory panel → none; persisted per-game",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::CyclePanel) },
     CommandSpec { name: "toggle-timed-input", category: Category::Game, context: Context::Global,
         usage: "toggle-timed-input", description: "toggle honoring the game's timed-input timers",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleTimedInput) },
@@ -429,11 +444,11 @@ pub static COMMANDS: &[CommandSpec] = &[
         // the EMPTY remainder — bare `move-region` auto-picks the seam and the destination when
         // each has only one possibility, which only the graph can answer (SQ-0439).
         dispatch: |a| SlashOutcome::Action(crate::input::Action::MoveRegion(a.join(" "))) },
-    CommandSpec { name: "toggle-room-dock", category: Category::Map, context: Context::Map,
-        usage: "toggle-room-dock", description: "open or close the room dock under the map",
+    CommandSpec { name: "toggle-room-panel", category: Category::Map, context: Context::Map,
+        usage: "toggle-room-panel", description: "open or close the room panel under the map",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomDock) },
     CommandSpec { name: "toggle-inspector", category: Category::Map, context: Context::Map,
-        usage: "toggle-inspector", description: "show the room dock's diagnostics view (flips back to info when open)",
+        usage: "toggle-inspector", description: "show the room panel's diagnostics view (flips back to info when open)",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomDiagnostics) },
     CommandSpec { name: "load-map", category: Category::Map, context: Context::Global,
         usage: "load-map <path>", description: "load a standalone map file into the current session",
@@ -472,8 +487,8 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "toggle-focus", category: Category::View, context: Context::Global,
         usage: "toggle-focus", description: "switch focus between panes",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleFocus) },
-    CommandSpec { name: "toggle-inventory", category: Category::View, context: Context::Global,
-        usage: "toggle-inventory", description: "toggle the inventory strip",
+    CommandSpec { name: "toggle-inventory-panel", category: Category::View, context: Context::Global,
+        usage: "toggle-inventory-panel", description: "open or close the inventory panel; remembered per story",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleInventory) },
     CommandSpec { name: "toggle-status-bar", category: Category::View, context: Context::Global,
         usage: "toggle-status-bar", description: "toggle the status/score bar",
@@ -498,7 +513,7 @@ pub static COMMANDS: &[CommandSpec] = &[
             _ => err("filter-transcript: use story | meta | both"),
         } },
     CommandSpec { name: "export-transcript", category: Category::Transcript, context: Context::Global,
-        usage: "export-transcript [file]", description: "export the visible transcript; default path when omitted",
+        usage: "export-transcript [file]", description: "export the visible transcript once; default path when omitted (launch with --transcript-file for a live, appending stream instead)",
         dispatch: |a| SlashOutcome::Export(a.first().map(|s| s.to_string())) },
 
     // ── Style ─────────────────────────────────────────────────────────────
@@ -566,7 +581,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     // take. It is the first of its kind among the border controls; see
     // `SlashOutcome::RevealWords` and `crate::reveal`.
     CommandSpec { name: "reveal-words", category: Category::Style, context: Context::Global,
-        usage: "reveal-words", description: "light the words on screen this story's parser would accept, for a few seconds — under the Guiding Light's switch",
+        usage: "reveal-words", description: "light the nouns and named things on screen this story knows, for a few seconds — under the Guiding Light's switch",
         dispatch: |_| SlashOutcome::RevealWords },
     CommandSpec { name: "run-font-check", category: Category::Style, context: Context::Global,
         usage: "run-font-check", description: "ask which of two glyph rows your terminal's font draws properly, and set the map's arrow, portal and Guiding Light icons from the answer (writes style.toml)",
@@ -596,6 +611,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "export-map", category: Category::Export, context: Context::Global,
         usage: "export-map [file]", description: "dump the map structure; default path when omitted",
         dispatch: |a| SlashOutcome::Action(crate::input::Action::ExportMap(a.first().map(|s| s.to_string()))) },
+    CommandSpec { name: "export-json", category: Category::Export, context: Context::Global,
+        usage: "export-json [file]", description: "export the map as versioned lanthorn-map JSON, the same schema lanthorn-mapgen writes; default path when omitted",
+        dispatch: |a| SlashOutcome::Action(crate::input::Action::ExportJson(a.first().map(|s| s.to_string()))) },
 
     // ── Animation ─────────────────────────────────────────────────────────
     CommandSpec { name: "animate-tidy", category: Category::Animation, context: Context::Global,
@@ -665,6 +683,12 @@ pub static COMMANDS: &[CommandSpec] = &[
             Some(n) => SlashOutcome::Browser(crate::browser::BrowserAction::PageSelection(n)),
             None => err("page-selection requires an integer (e.g. page-selection -1)"),
         } },
+    CommandSpec { name: "half-page-selection", category: Category::Library, context: Context::Browser,
+        usage: "half-page-selection <n>", description: "move the browser's selection by half a page (vim Ctrl-U/Ctrl-D)",
+        dispatch: |a| match a.first().and_then(|s| s.parse::<isize>().ok()) {
+            Some(n) => SlashOutcome::Browser(crate::browser::BrowserAction::HalfPageSelection(n)),
+            None => err("half-page-selection requires an integer (e.g. half-page-selection -1)"),
+        } },
     CommandSpec { name: "select-edge", category: Category::Library, context: Context::Browser,
         usage: "select-edge first|last", description: "jump the browser's selection to the first or last story",
         dispatch: |a| {
@@ -681,6 +705,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "open-launch-options", category: Category::Library, context: Context::Browser,
         usage: "open-launch-options", description: "open the launch-options dialog for the selected story",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::OpenLaunchOptions) },
+    CommandSpec { name: "open-story-menu", category: Category::Library, context: Context::Browser,
+        usage: "open-story-menu", description: "open the per-story menu beside the selected story",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::OpenStoryMenu) },
+    CommandSpec { name: "show-browser-keys", category: Category::Library, context: Context::Browser,
+        usage: "show-browser-keys", description: "show the story browser's key reference",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ShowBrowserKeys) },
     CommandSpec { name: "toggle-info-panel", category: Category::Library, context: Context::Browser,
         usage: "toggle-info-panel", description: "open or close the browser's story info panel",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ToggleInfoPanel) },
@@ -711,6 +741,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "reverse-sort", category: Category::Library, context: Context::Browser,
         usage: "reverse-sort", description: "reverse the browser's sort direction, keeping the column",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ReverseSort) },
+    CommandSpec { name: "find-story", category: Category::Library, context: Context::Browser,
+        usage: "find-story", description: "type to filter the whole library by title, author, filename or folder",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::FindStory) },
+    CommandSpec { name: "parent-folder", category: Category::Library, context: Context::Browser,
+        usage: "parent-folder", description: "leave the current library folder for the one above it",
+        dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::ParentFolder) },
     CommandSpec { name: "quit-browser", category: Category::Library, context: Context::Browser,
         usage: "quit-browser", description: "leave the story browser",
         dispatch: |_| SlashOutcome::Browser(crate::browser::BrowserAction::QuitBrowser) },
@@ -811,7 +847,7 @@ pub fn slash_names() -> Vec<String> {
 ///
 /// The story browser's commands are omitted: this list is what you can *type*,
 /// and the browser is a pre-game loop with no command line (SQ-0796). They are
-/// documented as key bindings instead — see `docs/features/customization.md`.
+/// documented as key bindings instead — see `docs/internals/customization.md`.
 pub fn help_text(prefix: char) -> Vec<String> {
     let mut lines = vec![
         format!("Slash commands (type {prefix}<command> [args]):"),
@@ -844,7 +880,7 @@ pub fn help_for_command(prefix: char, name: &str) -> Vec<String> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-input"))]
 mod tests {
     use super::*;
 
@@ -1089,8 +1125,9 @@ mod tests {
         // `nudge-room` was removed with Manual layout mode (SQ-0600).
         // `toggle-untried-exits` was retired with the overlay it drove (SQ-0666); `view-map`
         // and `mark-maze-layer` arrived with the matrix view.
-        // SQ-0692 added `toggle-room-dock`; `toggle-inspector` kept its name and
-        // now flips the SAME dock to its diagnostics body.
+        // SQ-0692 added `toggle-room-panel` (as `toggle-room-dock`, renamed by
+        // SQ-1237); `toggle-inspector` kept its name and now flips the SAME
+        // panel to its diagnostics body.
         // SQ-0761 added `dump-cells`, the cell-buffer half of `dump-windows`.
         // SQ-0994 added `dump-terminal`, the terminal-and-traffic half of the same
         // family: what was detected about the terminal, and which of those numbers
@@ -1110,7 +1147,142 @@ mod tests {
         // SQ-1107 added `reveal-words`, the momentary word reveal — the seventh
         // border control and the first that is a TRIGGER rather than a switch:
         // nothing to read off it, nothing persisted, it just happens.
-        assert_eq!(COMMANDS.len(), 84, "registry must match the spec's Full command table");
+        // `find-story` and `parent-folder` arrived with the picker's folder
+        // navigation and its in-memory library find: two more Library commands.
+        // SQ-1228 added `half-page-selection`, the vim Ctrl-U/Ctrl-D convention
+        // for the browser's list view.
+        // SQ-1227 added `open-story-menu` and `show-browser-keys` — the browser's
+        // per-story menu and its own key reference, which between them are what
+        // let the footer shrink to one key per hint.
+        // SQ-1336 added `export-json`: the played map in the same versioned
+        // `lanthorn-map` JSON `lanthorn-mapgen` writes for a static one.
+        // SQ-1420 added `set-transcript`: the STORY's own transcript (Z-machine
+        // output stream 2, ZMSD §7.1.1), for the many games that ship no SCRIPT
+        // verb to turn it on with.
+        assert_eq!(COMMANDS.len(), 92, "registry must match the spec's Full command table");
+    }
+
+    /// SQ-1237 unified the panel vocabulary — `command band` became `command
+    /// panel`, `inventory strip`/`inventory dock` became `inventory panel`, and
+    /// `room dock` became `room panel` — and this is the guard that stops the
+    /// old spellings creeping back into anything a PLAYER can read.
+    ///
+    /// Two kinds of source, two ways of reading them: a `.rs` file's doc
+    /// comments are implementation narration nobody playing the game ever sees,
+    /// so only its STRING LITERALS are checked (the heuristic: an
+    /// odd number of literal `"` characters before the match on the same line
+    /// means it is inside one — good enough for the single-line literals every
+    /// hit here actually is, and it is why this comment spells the forbidden
+    /// phrases with backticks rather than quotes: a quote in a DOC COMMENT would
+    /// otherwise throw the very heuristic that reads past comments off by one).
+    /// A `.md` file's prose IS what a reader sees end to end, so the whole file
+    /// is checked — except `CHANGELOG.md`, which is checked only down to (not
+    /// including) the next `## ` heading after `## Unreleased`: everything below
+    /// that line is a historical record of what a released version was called
+    /// at the time, and rewriting history there would be the wording sweep
+    /// contradicting the log it is supposed to be adding a line to.
+    ///
+    /// The needles themselves are built by concatenation, not written as
+    /// contiguous literals — the exact failure `scratch_path_discipline` warns
+    /// about in its own prose: a scan
+    /// that names its own forbidden spelling verbatim finds itself.
+    #[test]
+    fn no_stale_panel_wording_survives() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let needles = [
+            format!("{}{}", "command ", "band"),
+            format!("{}{}", "inventory ", "strip"),
+            format!("{}{}", "inventory ", "dock"),
+            format!("{}{}", "room ", "dock"),
+        ];
+        let needles: Vec<&str> = needles.iter().map(String::as_str).collect();
+
+        let mut hits: Vec<String> = Vec::new();
+
+        // ── crates/app/src/**/*.rs — string literals only ──────────────────────
+        let mut stack = vec![root.join("crates/app/src")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(src) = std::fs::read_to_string(&path) else { continue };
+                for (lineno, line) in src.lines().enumerate() {
+                    let lower = line.to_lowercase();
+                    for &needle in &needles {
+                        let mut from = 0;
+                        while let Some(rel) = lower[from..].find(needle) {
+                            let idx = from + rel;
+                            let quotes_before = line[..idx].matches('"').count();
+                            if quotes_before % 2 == 1 {
+                                hits.push(format!(
+                                    "{}:{}: {:?} (string literal)",
+                                    path.strip_prefix(&root).unwrap_or(&path).display(),
+                                    lineno + 1,
+                                    needle,
+                                ));
+                            }
+                            from = idx + needle.len();
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── docs/**/*.md and README.md — whole file, prose is the product ──────
+        let mut md_files = vec![root.join("README.md")];
+        let mut stack = vec![root.join("docs/guide"), root.join("docs/internals"), root.join("docs/reference")];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|x| x.to_str()) == Some("md") {
+                    md_files.push(path);
+                }
+            }
+        }
+        for path in &md_files {
+            let Ok(text) = std::fs::read_to_string(path) else { continue };
+            let lower = text.to_lowercase();
+            for &needle in &needles {
+                if lower.contains(needle) {
+                    hits.push(format!(
+                        "{}: {:?}",
+                        path.strip_prefix(&root).unwrap_or(path).display(),
+                        needle,
+                    ));
+                }
+            }
+        }
+
+        // ── CHANGELOG.md — the `## Unreleased` section only ────────────────────
+        if let Ok(text) = std::fs::read_to_string(root.join("CHANGELOG.md")) {
+            let unreleased = text
+                .find("## Unreleased")
+                .map(|start| &text[start..])
+                .map(|rest| {
+                    let after_heading = &rest[rest.find('\n').unwrap_or(rest.len())..];
+                    let end = after_heading.find("\n## ").unwrap_or(after_heading.len());
+                    &after_heading[..end]
+                })
+                .unwrap_or("");
+            let lower = unreleased.to_lowercase();
+            for &needle in &needles {
+                if lower.contains(needle) {
+                    hits.push(format!("CHANGELOG.md (## Unreleased): {:?}", needle));
+                }
+            }
+        }
+
+        assert!(hits.is_empty(), "stale panel wording survives:\n{}", hits.join("\n"));
     }
 
     /// SQ-0796: `Category::ORDER` must list every category, or a whole group of
@@ -1160,6 +1332,21 @@ mod tests {
         assert!(find_command("print-colors").is_some());
         assert!(matches!(parse("print-colors", '/'), SlashOutcome::PrintColors { actual: false }));
         assert!(matches!(parse("print-colors color", '/'), SlashOutcome::PrintColors { actual: true }));
+    }
+
+    /// SQ-1420. `set-transcript` throws the STORY's stream-2 switch (ZMSD §7.4)
+    /// — the one a game's SCRIPT verb throws, for the many games that ship none.
+    /// It takes on|off and nothing else: a bare toggle would leave a player who
+    /// cannot remember whether it is running unable to find out, and the
+    /// registry's own convention for a switch is the explicit word
+    /// (`set-game-colours`, `set-guidance`, `set-return-probe`).
+    #[test]
+    fn set_transcript_parses_on_and_off_and_rejects_anything_else() {
+        assert!(find_command("set-transcript").is_some());
+        assert!(matches!(parse("set-transcript on", '/'), SlashOutcome::SetTranscript(true)));
+        assert!(matches!(parse("set-transcript off", '/'), SlashOutcome::SetTranscript(false)));
+        assert!(matches!(parse("set-transcript", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("set-transcript maybe", '/'), SlashOutcome::Error(_)));
     }
 
     #[test]

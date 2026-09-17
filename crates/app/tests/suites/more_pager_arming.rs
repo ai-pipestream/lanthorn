@@ -238,7 +238,7 @@ fn v6_never_print_more_vetoes_arming() {
     // Park the CURRENT window's line count (property 15) at the sentinel — what
     // `put_wind_prop win 15 -999` does from inside the story.
     {
-        let v6 = s.machine.screen.v6.as_mut().expect("a v6 story has v6 windows");
+        let v6 = s.machine.screen.v6_mut().expect("a v6 story has v6 windows");
         let cur = (v6.current as usize).min(7);
         v6.windows[cur].line_count = zvm::screen::NEVER_MORE as u16;
     }

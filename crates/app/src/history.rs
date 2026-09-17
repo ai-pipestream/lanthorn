@@ -1,6 +1,17 @@
 //! Per-turn rewind/replay history: a `TurnRecord` per played turn (Quetzal save
 //! + optional map snapshot + transcript), plus pure helpers used by the capture
 //!   loop (`main.rs`), the archive (`archive.rs`), and the replay modal.
+//!
+//! Stored as `Arc<TurnRecord>` rather than bare `TurnRecord` (SQ-1184/SQ-1185):
+//! the per-turn auto-save hands its snapshot of `state.history` to a background
+//! writer thread, and with `save: Vec<u8>` holding a full VM snapshot per turn —
+//! "megabytes per turn on big Glulx games" is what motivated the cap below —
+//! cloning the whole history Vec-of-values every turn just to cross the thread
+//! boundary would itself be an unbounded per-turn cost, the same shape of bug
+//! this exists to fix. `Vec<Arc<TurnRecord>>` makes that handoff an O(turns)
+//! copy of pointers, never of snapshot bytes.
+
+use std::sync::Arc;
 
 use mapper::mapper::Mapper;
 
@@ -19,8 +30,13 @@ pub struct TurnRecord {
 /// Append a record for a completed turn. The caller computes `map_changed`
 /// (cheap room/connection-count delta); the map snapshot is serialized and
 /// stored only when it changed.
+///
+/// Does not itself cap `history` — call [`cap_history`] after this (the
+/// per-turn capture site in `turn.rs` does) — so every other caller that
+/// simulates turns without touching the config-driven cap (tests scattered
+/// across the app crate) keeps working unchanged.
 pub fn record_turn(
-    history: &mut Vec<TurnRecord>,
+    history: &mut Vec<Arc<TurnRecord>>,
     turn: u32,
     command: &str,
     save: Vec<u8>,
@@ -29,18 +45,32 @@ pub fn record_turn(
     transcript: &str,
 ) {
     let map_snapshot = map_changed.then(|| mapper::persist::to_json(mapper));
-    history.push(TurnRecord {
+    history.push(Arc::new(TurnRecord {
         turn,
         command: command.to_string(),
         save,
         map_snapshot,
         transcript: transcript.to_string(),
-    });
+    }));
+}
+
+/// Evict the OLDEST records once `history` exceeds `cap` entries (SQ-1185), so
+/// memory stays bounded across an arbitrarily long session rather than growing
+/// without limit — `TurnRecord::save` is a full VM snapshot, "megabytes per
+/// turn on big Glulx games" is what motivated this. There is no "unbounded"
+/// escape hatch — a `cap` of 0 is clamped to 1 — because an opt-out would
+/// silently reintroduce the exact growth this exists to bound; a player who
+/// wants more rewind depth raises the number instead.
+pub fn cap_history(history: &mut Vec<Arc<TurnRecord>>, cap: usize) {
+    let cap = cap.max(1);
+    if history.len() > cap {
+        history.drain(0..history.len() - cap);
+    }
 }
 
 /// Return the latest `map_snapshot` at-or-before `turn` (the map as it stood
 /// then), or `None` if no record at-or-before `turn` carries a snapshot.
-pub fn map_at_turn(history: &[TurnRecord], turn: u32) -> Option<&str> {
+pub fn map_at_turn(history: &[Arc<TurnRecord>], turn: u32) -> Option<&str> {
     history
         .iter()
         .filter(|r| r.turn <= turn)
@@ -59,7 +89,7 @@ pub struct ResumePlan {
 
 /// Compute the resume plan for turn index `idx`. Does NOT mutate `history`
 /// (the caller truncates to `[0..=idx]` after restoring).
-pub fn resume_plan(history: &[TurnRecord], idx: usize) -> ResumePlan {
+pub fn resume_plan(history: &[Arc<TurnRecord>], idx: usize) -> ResumePlan {
     let rec = &history[idx];
     ResumePlan {
         save: rec.save.clone(),
@@ -71,7 +101,7 @@ pub fn resume_plan(history: &[TurnRecord], idx: usize) -> ResumePlan {
 /// Rebuild the on-screen transcript from records `[0..=idx]`: each record
 /// contributes an echoed `> command` (Input) followed by its turn output (Story).
 pub fn rebuild_transcript(
-    history: &[TurnRecord],
+    history: &[Arc<TurnRecord>],
     idx: usize,
 ) -> (Vec<String>, Vec<crate::state::TranscriptKind>) {
     use crate::state::TranscriptKind;
@@ -90,7 +120,7 @@ pub fn rebuild_transcript(
     (lines, kinds)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-persist"))]
 mod tests {
     use super::*;
     use mapper::direction::Direction;
@@ -174,6 +204,41 @@ mod tests {
         assert_eq!(kinds[1], TranscriptKind::Story);
     }
 
+    /// SQ-1185: once `history` exceeds `cap` entries, the OLDEST are evicted —
+    /// newest turns and the ability to resume at the boundary both survive.
+    #[test]
+    fn cap_history_evicts_oldest_beyond_cap() {
+        let mut hist = Vec::new();
+        let m1 = mapper_with(1);
+        for turn in 1..=5u32 {
+            record_turn(&mut hist, turn, &format!("t{turn}"), vec![turn as u8], &m1, false, "");
+            cap_history(&mut hist, 3);
+        }
+        assert_eq!(hist.len(), 3, "capped at 3 entries");
+        // Oldest (turns 1, 2) evicted; newest three (3, 4, 5) survive in order.
+        assert_eq!(hist.iter().map(|r| r.turn).collect::<Vec<_>>(), vec![3, 4, 5]);
+
+        // Resume still works at the new boundary (index 0 == turn 3).
+        let plan = resume_plan(&hist, 0);
+        assert_eq!(plan.turn, 3);
+        assert_eq!(plan.save, vec![3u8]);
+    }
+
+    /// A `cap` of 0 is clamped to 1 rather than read as "unbounded" — see the
+    /// doc comment on `cap_history`.
+    #[test]
+    fn cap_history_clamps_zero_cap_to_one() {
+        let mut hist = Vec::new();
+        let m1 = mapper_with(1);
+        record_turn(&mut hist, 1, "a", vec![1], &m1, false, "");
+        cap_history(&mut hist, 0);
+        record_turn(&mut hist, 2, "b", vec![2], &m1, false, "");
+        cap_history(&mut hist, 0);
+        assert_eq!(hist.len(), 1, "cap 0 clamps to 1, not unbounded");
+        assert_eq!(hist[0].turn, 2, "the newest turn survives");
+    }
+
+
     /// Integration-flavored capture test: drive a real GameSession and prove the
     /// spec invariants (non-empty save + transcript; snapshot only on map-change).
     /// Mirrors archive.rs's czech.z5 fixture pattern; skips if the fixture is absent.
@@ -183,12 +248,12 @@ mod tests {
         // minizork.z3 is an interactive fixture that requests line input (unlike
         // czech.z5, which auto-runs to Quit and has no frame to save afterwards).
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../zvm/tests/fixtures/minizork.z3");
+            .join("tests/fixtures/stories/minizork-r34-s871124.z3");
         let Ok(story) = std::fs::read(&fixture) else { return };
 
         let mut session = GameSession::new(story, true, false, None).expect("GameSession::new");
         let mut mapper = Mapper::default();
-        let mut hist: Vec<TurnRecord> = Vec::new();
+        let mut hist: Vec<Arc<TurnRecord>> = Vec::new();
 
         for (turn, cmd) in ["look", "wait"].iter().enumerate() {
             let rooms_before = mapper.graph.rooms().count();

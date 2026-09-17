@@ -1,6 +1,6 @@
 //! The pane border's clickable toggle controls (SQ-1123).
 //!
-//! Guidance, the verb panel and the two v6 render switches had no presence on
+//! Guidance, the command band and the two v6 render switches had no presence on
 //! screen at all: a player who turned guidance on saw nothing and could only
 //! conclude it was broken. These assert the four things that close the gap —
 //! the controls are THERE, they SHOW their state, the v6-only pair appears only
@@ -139,6 +139,7 @@ fn story(zversion: Option<u8>) -> AppState {
     st.story_zversion = zversion;
     st.layout = Layout::TranscriptFull;
     st.config.guidance = false;
+    st.config.return_probe = false; // on by default since SQ-1215; this fixture is the all-off row
     st.config.v6_render = app::config::V6RenderMode::Hybrid;
     st.config.v6_pixel_lock = false;
     st
@@ -174,7 +175,7 @@ fn the_controls_ride_the_border_nearest_what_they_switch() {
     let (top, bottom) = (row(&buf, 0), row(&buf, 5));
     println!("z3 top:    {top}");
     println!("z3 bottom: {bottom}");
-    assert_eq!(hits.len(), 5, "off v6: map, probe, guidance, verb panel, reveal");
+    assert_eq!(hits.len(), 5, "off v6: map, probe, guidance, command band, reveal");
 
     // Bottom: `┤○ ▲ ◈├` centred, `┤◌ ◀├` anchored right, one corner clear of each.
     assert!(bottom.contains("┤○ ▲ ◈├"), "the centred group: {bottom:?}");
@@ -605,7 +606,7 @@ fn the_reveal_is_a_trigger_and_says_so() {
     let reveal = views.iter().find(|v| v.id == BorderControl::Reveal).expect("drawn");
     let text = reveal.hint.join(" / ");
     println!("reveal hint: {text}");
-    assert!(text.contains("light the words on screen"), "it says what it does: {text:?}");
+    assert!(text.contains("light the nouns and named things on screen"), "it says what it does: {text:?}");
     assert!(text.contains("/reveal-words"), "…and how to do it from the keyboard: {text:?}");
     // Guidance is out in `story()`, and a press would then do nothing at all —
     // which the hint has to say, or the player concludes the button is broken.
@@ -628,7 +629,7 @@ fn the_reveal_is_a_trigger_and_says_so() {
 /// produced it (SQ-1142). `the_reveal_is_a_trigger_and_says_so` asserts
 /// `text.contains("/reveal-words")`, and the hint `"F4 · /reveal-words"`
 /// satisfies that perfectly — so when SQ-1142 unbound F2, F3 and F4, the reveal
-/// went on advertising a dead key and the suite stayed green; the verb panel's
+/// went on advertising a dead key and the suite stayed green; the command band's
 /// hint was the bare string `"F2"` and was not checked for a command at all. A
 /// substring check on the half that is right cannot fail on the half that is
 /// wrong.
@@ -771,7 +772,7 @@ fn the_groups_drop_whole_and_the_centred_pair_gives_way_first() {
         let map = has(&hits, BorderControl::Map);
         let pair = has(&hits, BorderControl::Guidance);
         let v6 = has(&hits, BorderControl::V6Render);
-        // Guidance, the verb panel and the reveal are one group: never one of
+        // Guidance, the command band and the reveal are one group: never one of
         // them without the others.
         assert_eq!(pair, has(&hits, BorderControl::VerbPanel), "w={w}: half the centred group");
         assert_eq!(pair, has(&hits, BorderControl::Reveal), "w={w}: half the centred group");

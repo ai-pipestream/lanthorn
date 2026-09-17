@@ -1,4 +1,5 @@
 pub mod aux_dialog;
+pub mod browser_keys;
 pub mod fetch_keep_dialog;
 pub mod font_check_dialog;
 pub mod history_prompt;
@@ -78,6 +79,46 @@ pub(crate) fn apply_text_style(base: Style, bits: u8) -> Style {
     s
 }
 
+/// Light the EGA **intensity** bit on a bold run's ink, on the one display whose
+/// interpreter did (SQ-1354).
+///
+/// On the IBM PC a text cell is one attribute byte and bold is not a face — it is
+/// bit 3 of the foreground nibble, so `HLIGHT` printed the same colour *lit*.
+/// Infocom's own v1–v5 interpreter is where that is read from; `zvm::screen`'s
+/// [`ega_intense`](zvm::screen::ega_intense) carries the lines and the table, and
+/// [`Palette::bold_lights_the_intensity_bit`](zvm::screen::Palette::bold_lights_the_intensity_bit)
+/// decides which displays apply it (only the v1–v5 DOS text screen: the Version 6
+/// interpreter ignores bold outright, and the CGA card has two states and no room
+/// for a third).
+///
+/// **Applied to the run's RESOLVED ink**, after the game/slot/element chain, and
+/// that is the point rather than an implementation convenience. The attribute
+/// byte has one foreground nibble however it was filled, so the machine lit a
+/// story's own `set_colour` and the machine's DEFAULT ink alike — and the second
+/// is the case this exists for. *Bureaucracy* is Version 4, has no `set_colour` at
+/// all, and prints its room names and its bracketed notes in `HLIGHT`: with the
+/// period look laying the PC's `#AAAAAA` ink under the prose, every one of those
+/// runs resolved to that same grey plus a terminal BOLD most terminals do not
+/// brighten, where DOS drew them white.
+///
+/// A colour that is not one this palette painted comes back untouched — the
+/// 15-bit round trip is the test, so a themed `#AAAAAA` (which is not
+/// `rgb15_to_888`'s `#ADADAD`) is left alone. So is every colour when `honor` is
+/// off, which is the player saying "keep my terminal's colours" and takes the
+/// machine's screen with it exactly as the period look does.
+pub(crate) fn ibm_bold_fg(fg: Color, bits: u8, honor: bool, scheme: &ColorScheme) -> Color {
+    if bits & 0x02 == 0 || !honor || !scheme.machine_palette.bold_lights_the_intensity_bit() {
+        return fg;
+    }
+    let Color::Rgb(r, g, b) = fg else { return fg };
+    let v15 = (u16::from(b >> 3) << 10) | (u16::from(g >> 3) << 5) | u16::from(r >> 3);
+    if rgb15_to_888(v15) != (r, g, b) {
+        return fg; // not a colour the palette resolved — a theme's, and the player's
+    }
+    let (r, g, b) = rgb15_to_888(zvm::screen::ega_intense(v15));
+    Color::Rgb(r, g, b)
+}
+
 /// How a run's INK resolves on the CELL paths: whether the game's own colours are
 /// honoured, and the theme every channel it leaves alone is read against.
 ///
@@ -112,24 +153,68 @@ pub(crate) struct TextInk<'a> {
     honor: bool,
     /// The theme every channel the game leaves alone is read against.
     colors: &'a ColorScheme,
+    /// The game's own page/ink pair (`render::screen::game_input_style`), when
+    /// `honor_game_colours` is on and the game has declared one — `None` under
+    /// `--game-colours off` or when the game names no page (SQ-1462).
+    ///
+    /// This is the "next ink fact" the struct doc above named: a Glk run left
+    /// wholly `Default` (no per-run colour, no themed `glk_styles` slot — a
+    /// buffer's own echo of the player's typed line is always exactly this,
+    /// since Glk style `Input` is an INTERPRETER convention with no colour of
+    /// its own) used to fall through `resolve_glk_channel`'s last tier straight
+    /// to the generic `text` role, which is white-on-nothing — meaning the
+    /// generic dark-terminal guess, not the game's own page. Counterfeit
+    /// Monkey honours white-on-white for its Normal style (`glulx_game_colours.rs`
+    /// confirms the pane adopts it), so every echoed command — "hint", "n", "1",
+    /// every keystroke of navigating its in-game hint menu — rendered in white
+    /// text on the same white page: invisible, not merely low-contrast. The
+    /// generic prose case never hit this because Counterfeit Monkey colours
+    /// every Normal-style RUN explicitly; nothing colours its own echo.
+    game_input: Option<Style>,
 }
 
 impl<'a> TextInk<'a> {
     /// The ink the app is drawing with, from the one place that knows both facts.
     pub(crate) fn of(state: &'a crate::state::AppState) -> TextInk<'a> {
-        TextInk { honor: state.config.honor_game_colours, colors: &state.colors }
+        TextInk { honor: state.config.honor_game_colours, colors: &state.colors, game_input: None }
+    }
+
+    /// [`Self::of`] plus the game's own page/ink pair, for a caller that has
+    /// already resolved one (`render::screen::game_input_style`) — currently
+    /// only the scrolling transcript body, which is where an uncoloured Glk
+    /// `Input`-class run (an echoed command) needs it as a floor beneath the
+    /// generic theme (SQ-1462).
+    pub(crate) fn of_with_game_input(
+        state: &'a crate::state::AppState,
+        game_input: Option<Style>,
+    ) -> TextInk<'a> {
+        TextInk { game_input, ..Self::of(state) }
     }
 
     /// Ink stated outright, for a case with no `AppState` to read it from. Every
     /// production caller has one, which is the point — [`TextInk::of`] is the only
     /// place these facts are decided.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "t-render"))]
     pub(crate) fn new(honor: bool, colors: &'a ColorScheme) -> TextInk<'a> {
-        TextInk { honor, colors }
+        TextInk { honor, colors, game_input: None }
+    }
+
+    /// [`Self::new`] plus a stated game-input pair, for the SQ-1462 tests.
+    #[cfg(all(test, feature = "t-render"))]
+    pub(crate) fn new_with_game_input(
+        honor: bool,
+        colors: &'a ColorScheme,
+        game_input: Option<Style>,
+    ) -> TextInk<'a> {
+        TextInk { honor, colors, game_input }
     }
 
     pub(crate) fn honor(self) -> bool {
         self.honor
+    }
+
+    pub(crate) fn game_input(self) -> Option<Style> {
+        self.game_input
     }
 
     pub(crate) fn colors(self) -> &'a ColorScheme {
@@ -150,7 +235,7 @@ pub(crate) fn resolve_zcolour(c: ZColour, scheme: &ColorScheme) -> Color {
         ZColour::Default => Color::Reset,
         ZColour::Standard(n @ 2..=9) => scheme.palette[(n - 2) as usize],
         ZColour::Standard(n @ 10..=12) => {
-            let (r, g, b) = grey_rgb(n);
+            let (r, g, b) = grey_rgb(scheme.machine_palette, n);
             Color::Rgb(r, g, b)
         }
         // The rest of the §8.3.1 table is not a paintable colour: 0 = "current",
@@ -167,6 +252,7 @@ pub(crate) fn resolve_zcolour(c: ZColour, scheme: &ColorScheme) -> Color {
         ZColour::True24(v) => {
             Color::Rgb(((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8)
         }
+        _ => Color::Reset,
     }
 }
 
@@ -299,6 +385,24 @@ pub fn blank_control_chars(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Unicode superscript digit (¹²³⁴⁵⁶⁷⁸⁹, U+00B9/U+00B2/U+00B3/U+2074–2079) for a count of 1–9,
+/// and `"⁹⁺"` (superscript nine plus a superscript plus, U+207A) for ten or more — the callers
+/// this exists for (a room-box badge, a matrix cell) have room for one glyph, not two digits, and
+/// "at least this many" is still an honest thing to say with one. `""` for zero.
+///
+/// Shared by [`crate::render::map`]'s alias-count marker (SQ-1257 Phase 3) and its random-exit
+/// destination-count marker, and by [`crate::render::matrix`]'s `?` cell (SQ-1261) — one glyph
+/// table for "how many of these are there", so the three surfaces can never drift into showing
+/// different digits for the same count.
+pub(crate) fn superscript_count(count: usize) -> String {
+    const SUP_DIGITS: [char; 9] = ['¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+    match count {
+        0 => String::new(),
+        1..=9 => SUP_DIGITS[count - 1].to_string(),
+        _ => "⁹⁺".to_string(),
+    }
+}
+
 /// Like `draw_str_clipped` but accepts a signed start coordinate (see `put_char`).
 pub fn put_str(buf: &mut Buffer, x: i32, y: i32, s: &str, style: Style, area: Rect) {
     if y < area.y as i32 || y >= area.bottom() as i32 {
@@ -309,7 +413,7 @@ pub fn put_str(buf: &mut Buffer, x: i32, y: i32, s: &str, style: Style, area: Re
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod text_style_tests {
     use super::*;
     use ratatui::style::{Color, Modifier, Style};

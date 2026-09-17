@@ -1,8 +1,12 @@
 //! Disassembly cache: an ordered model of the code region as display units.
 //!
-//! Task 1 scope only: the `Unit`/`DisasmCache` data model, code-region bounds,
-//! and an empty-cache skeleton constructor. Routine discovery (populating
-//! `units`/`routines`) lands in later tasks.
+//! [`DisasmCache::empty`] builds an empty cache over the code region's bounds;
+//! [`DisasmCache::build`] discovers routine entry points and tiles the code
+//! region into display units around them, populating `units`/`routines` —
+//! see that function's doc comment for the discovery algorithm.
+//! [`DisasmCache::confirm_pc`]/[`DisasmCache::confirm_routine`] extend an
+//! existing cache incrementally as execution or a caller's own probing turns
+//! up more routines.
 
 use crate::cpu::decode::{decode, Operand, OperandCount};
 use crate::cpu::disasm::{format_instr, format_instr_basic, format_instr_raw, mnemonic, Unpack};
@@ -15,6 +19,7 @@ use std::collections::{BTreeSet, HashSet};
 /// descent from a constant call target, the initial PC, or execution-confirmed)
 /// and `Soft` when it came only from the linear scan (an unverified guess).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum Provenance {
     /// Hard: RD-discovered / initial-PC / execution-confirmed code.
     Rd,
@@ -26,14 +31,36 @@ pub enum Provenance {
 
 /// A single displayable unit within the disassembled code region.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum Unit {
     /// A decoded instruction spanning `[addr, next)`.
-    Instr { addr: u32, next: u32, prov: Provenance },
+    Instr {
+        /// Address of the instruction's opcode byte.
+        addr: u32,
+        /// Address one past the instruction's last byte (the next unit's start).
+        next: u32,
+        /// This unit's static confidence tag (see [`Provenance`]).
+        prov: Provenance,
+    },
     /// A routine header spanning `[addr, first_instr)` (ZMSD §5.2: one byte of
     /// local count, then `nlocals` initial-value words in v1-4).
-    RoutineHeader { addr: u32, nlocals: u8, first_instr: u32, prov: Provenance },
+    RoutineHeader {
+        /// Address of the header's locals-count byte (the routine's entry point).
+        addr: u32,
+        /// Declared local-variable count, read from the locals-count byte.
+        nlocals: u8,
+        /// Address of the routine's first instruction, past the header.
+        first_instr: u32,
+        /// This unit's static confidence tag (see [`Provenance`]).
+        prov: Provenance,
+    },
     /// An opaque data run spanning `[addr, addr+len)` (not decoded as code).
-    Data { addr: u32, len: u32 },
+    Data {
+        /// Address of the run's first byte.
+        addr: u32,
+        /// Length of the run in bytes.
+        len: u32,
+    },
 }
 
 impl Unit {
@@ -70,9 +97,16 @@ impl Unit {
 /// Rendering detail level for a cached unit (mirrors `disasm`'s
 /// full/basic/raw views).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum CacheFmt {
+    /// Fully annotated form — role sigils, packed-address unpacking, named
+    /// variables (mirrors [`crate::cpu::disasm::format_instr`]).
     Full,
+    /// Plain mnemonic form — named variables but no role sigils or
+    /// packed-address unpacking (mirrors [`crate::cpu::disasm::format_instr_basic`]).
     Basic,
+    /// Untranslated raw form — instruction bytes and class:opcode, no
+    /// mnemonic or variable naming (mirrors [`crate::cpu::disasm::format_instr_raw`]).
     Raw,
 }
 
@@ -303,7 +337,7 @@ impl DisasmCache {
 
     /// Like [`disassemble`](Self::disassemble), but tags each display row with
     /// the [`Provenance`] of the unit it came from (SQ-0428). The row strings are
-    /// byte-identical to [`disassemble`]; `Unit::Data`'s multiple `.byte` rows
+    /// byte-identical to [`disassemble`](Self::disassemble); `Unit::Data`'s multiple `.byte` rows
     /// each carry `Provenance::Data`.
     pub fn disassemble_tiered(
         &self,
@@ -626,7 +660,8 @@ fn is_terminator(count: OperandCount, opcode: u8) -> bool {
 /// The initial "main" context has no header, so the seed is enqueued on the
 /// first-instruction worklist directly and never added to the routine set.
 ///
-/// Consumed by Task 3 (tiling/nav).
+/// Consumed by [`DisasmCache::build`] to tile the code region into display
+/// units around the discovered routines.
 pub fn discover_rd(mem: &Memory, version: u8, unpack: &Unpack, region: (u32, u32)) -> BTreeSet<u32> {
     /// Safety cap on instructions decoded per routine run (guards a malformed
     /// decode loop that never reaches a terminator or the region end).

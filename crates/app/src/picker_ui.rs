@@ -62,8 +62,15 @@ struct ResourcePreview {
     /// The decoded image, when this is a renderable Pict.
     image: Option<image::DynamicImage>,
     /// Cached protocol, keyed by the content rect `(w, h)` and zoom it was
-    /// built for, so a resize or a zoom step invalidates it.
-    proto: Option<(u16, u16, PreviewZoom, ratatui_image::protocol::Protocol)>,
+    /// built for, so a resize or a zoom step invalidates it. The trailing
+    /// `Option<u32>` is the kitty image id it was last placed under (SQ-1190),
+    /// set by `draw_resource_preview` right after `place_protocol`. Freeing it
+    /// (on rebuild, or when the modal closes) rides on `cover`'s own delete
+    /// queue — the preview has no `GraphicsRender` to share either, and reusing
+    /// `cover`'s (already flushed every frame) beats a second private one that
+    /// would need flushing too, and would lose whatever it held whenever the
+    /// whole `ResourcePreview` is dropped on close.
+    proto: Option<(u16, u16, PreviewZoom, ratatui_image::protocol::Protocol, Option<u32>)>,
     /// A status line shown instead of (or below) an image.
     status: Option<String>,
     /// Current zoom (SQ-0486): `Fit` on open; `+`/`-`/wheel step it.
@@ -146,8 +153,15 @@ const YEAR_COL_W: u16 = 6;
 /// fits where the old 6-wide column could only take `RATE ▲`.
 const RATING_COL_W: u16 = 10;
 /// Interpreter/format column ("Z5", "Z5 (blorb)", "G3.1.2"): fixed width, sits
-/// just left of the badge cluster. `Z8 (blorb)` (10) is the widest (SQ-0369).
-const INTERP_COL_W: u16 = 13;
+/// just left of the badge cluster. `Scott (Atari DOS)` (17) is the widest —
+/// the Scott base is the longest engine letters and `Atari DOS` (9) is the
+/// longest container name; the column used to be 14 and truncate that row
+/// deliberately (SQ-1475), which the user overruled (SQ-1507): the column is
+/// now sized to the true worst case rather than an accepted truncation.
+/// `interp_label_fits_the_column_for_every_base_and_container` below proves
+/// it against every engine base × every container `type_container` can
+/// answer, so a new label cannot silently overflow it again.
+const INTERP_COL_W: u16 = 17;
 const TITLE_MIN_W: u16 = 8;
 /// Title keeps this much before the author column is allowed to grow past its
 /// base width — title has priority for the shared space, so a long author name
@@ -406,42 +420,64 @@ fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) 
     }
 }
 
-/// Render the hint segments of `hints` that are reachable in `km`.
+/// The gap between two footer hints.
+const FOOTER_GAP: &str = "  ";
+
+/// The droppable footer segments in KEEP order — the last to go as the terminal
+/// narrows comes first, which is also the order they come back as it widens.
 ///
-/// A hint whose commands nobody has bound simply is not shown — the footer has
-/// no way to claim a key that does not exist, which is the drift SQ-0796 set out
-/// to end.
-fn hint_segments(km: &app::keymap::KeyMap, hints: &[app::browser::Hint]) -> Vec<String> {
+/// A hint whose command nobody has bound simply is not shown; the footer has no
+/// way to claim a key that does not exist, which is the drift SQ-0796 set out to
+/// end.
+#[cfg(all(test, feature = "t-picker"))]
+fn footer_optional(km: &app::keymap::KeyMap, gallery: bool) -> Vec<String> {
+    let mut hints: Vec<app::browser::Hint> = app::browser::footer_hints(gallery)
+        .into_iter()
+        .filter(|h| h.drop_rank.is_some())
+        .collect();
+    hints.sort_by_key(|h| std::cmp::Reverse(h.drop_rank.unwrap_or(0)));
     hints.iter().filter_map(|h| app::browser::render_hint(km, h)).collect()
 }
 
-/// The optional footer segments, most-important (least-guessable) first, in the
-/// order they are added as the terminal widens.
-fn footer_optional(km: &app::keymap::KeyMap) -> Vec<String> {
-    hint_segments(km, app::browser::HINTS_OPTIONAL)
-}
-
-/// Build the list footer for `width`.
+/// Build the footer for `width` (SQ-1227).
 ///
-/// The core hints (move / open / info / quit) are always shown; the optional
-/// ones are added left-to-right while they still fit. Every segment's KEYS come
+/// `Enter: open`, `Space: menu` and `q: quit` are always shown — the first two
+/// are how anything else is discovered and the third is the way out. The rest
+/// are added in `drop_rank` order (highest first) while they still fit, and
+/// DRAWN in the table's fixed left-to-right order however many of them survived,
+/// so the line never rearranges itself as the window is dragged. Every key comes
 /// from the live keymap, so rebinding one relabels its hint (SQ-0796).
-fn build_footer(km: &app::keymap::KeyMap, width: u16) -> String {
-    let core_left = app::browser::render_hint(km, &app::browser::HINT_MOVE).unwrap_or_default();
-    let core_right = hint_segments(km, app::browser::HINTS_CORE_RIGHT).join("   ");
-    let mut footer = format!(" {core_left}");
-    for seg in footer_optional(km) {
-        let candidate = format!("{footer}   {seg}   {core_right}");
-        if UnicodeWidthStr::width(candidate.as_str()) as u16 <= width {
-            footer.push_str("   ");
-            footer.push_str(&seg);
-        } else {
+fn build_footer(km: &app::keymap::KeyMap, width: u16, gallery: bool) -> String {
+    let hints = app::browser::footer_hints(gallery);
+    let rendered: Vec<Option<String>> =
+        hints.iter().map(|h| app::browser::render_hint(km, h)).collect();
+    let mut shown: Vec<bool> = hints.iter().map(|h| h.drop_rank.is_none()).collect();
+
+    let line = |shown: &[bool]| -> String {
+        let segs: Vec<&str> = rendered
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| shown[*i])
+            .filter_map(|(_, r)| r.as_deref())
+            .collect();
+        format!(" {}", segs.join(FOOTER_GAP))
+    };
+
+    let mut order: Vec<usize> = (0..hints.len()).filter(|&i| hints[i].drop_rank.is_some()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(hints[i].drop_rank.unwrap_or(0)));
+    for i in order {
+        if rendered[i].is_none() {
+            continue;
+        }
+        shown[i] = true;
+        if UnicodeWidthStr::width(line(&shown).as_str()) as u16 > width {
+            // One that does not fit takes everything below it with it: the drop
+            // order is an order, not a packing problem.
+            shown[i] = false;
             break;
         }
     }
-    footer.push_str("   ");
-    footer.push_str(&core_right);
-    footer
+    line(&shown)
 }
 
 /// True if the terminal is wide enough to show list + panel.
@@ -475,11 +511,309 @@ fn ensure_aux(
 ) {
     if let Some(slot) = cache.get_mut(idx) {
         if slot.is_none() {
-            if let Some(entry) = stories.get(idx) {
+            // A folder has no aux to resolve (and nothing to open).
+            if let Some(entry) = stories.get(idx).filter(|e| !e.is_folder()) {
                 *slot = Some(app::picker::resolve_aux(entry, data_base, hint_index));
             }
         }
     }
+}
+
+/// The rows the picker lists for `dir`: a library shows the folder at `dir`
+/// (its sub-folders, then its stories, `..` below the root); a multi-disk set
+/// is one release and has no folders to show.
+fn rows_for(
+    source: &app::picker::StorySource,
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    data_base: &std::path::Path,
+) -> Vec<app::picker::StoryEntry> {
+    match source {
+        app::picker::StorySource::Library(_) => app::picker::library_rows(dir, root, data_base),
+        other @ app::picker::StorySource::DiskSet { .. } => other.scan(data_base),
+    }
+}
+
+/// The first row that is a story, for the paths that must pick one without a
+/// terminal to ask on. `None` when the folder holds only folders.
+fn first_story(stories: &[app::picker::StoryEntry]) -> Option<&app::picker::StoryEntry> {
+    stories.iter().find(|e| !e.is_folder())
+}
+
+/// Resolve where the browser should open: the folder to list, its rows, and
+/// which row to select — the read half of the remember/restore round trip
+/// (SQ-1474). Extracted so it's testable without a pty: `run_story_picker`
+/// calls it once at startup and nothing else.
+///
+/// Always rescans from disk rather than trusting anything cached, because the
+/// folder may have changed while a game was running. A remembered `dir` that
+/// no longer exists (deleted, media moved) falls back to `root`, and so does
+/// one that rescans to nothing — the root is the one folder guaranteed not to
+/// be empty (`run_story_picker` would have exited already if it were). The
+/// row is found by **identity** (`StoryEntry::is`), never by index, since the
+/// rescan may reorder or add/remove rows — including a multi-story disk/zip's
+/// several entries in the same folder listing, which is what makes "return to
+/// the same disk's expanded listing" fall out of "return to the same folder"
+/// with no special-casing. When the remembered story isn't there any more,
+/// the nearest surviving row is `index_hint` (where it sat at launch) clamped
+/// into the new list's bounds, rather than resetting to the top.
+fn resolve_picker_position(
+    source: &app::picker::StorySource,
+    root: &std::path::Path,
+    data_base: &std::path::Path,
+    restore: Option<&PickerPosition>,
+) -> (std::path::PathBuf, Vec<app::picker::StoryEntry>, usize) {
+    let mut dir = restore
+        .map(|p| p.dir.clone())
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(|| root.to_path_buf());
+    let mut stories = rows_for(source, &dir, root, data_base);
+    if stories.is_empty() && dir != root {
+        dir = root.to_path_buf();
+        stories = rows_for(source, &dir, root, data_base);
+    }
+    let selected = restore
+        .and_then(|p| stories.iter().position(|e| e.is(&p.path, p.disk_entry.as_deref())))
+        .or_else(|| restore.map(|p| p.index_hint.min(stories.len().saturating_sub(1))))
+        .unwrap_or(0);
+    (dir, stories, selected)
+}
+
+/// Add to the in-memory index whatever stories in `rows` it does not hold yet
+/// (a download landed in the folder on screen after the walk passed it).
+fn merge_index(index: &mut Vec<app::picker::StoryEntry>, rows: &[app::picker::StoryEntry]) {
+    for r in rows.iter().filter(|e| !e.is_folder()) {
+        if !index.iter().any(|e| e.same_story(r)) {
+            index.push(r.clone());
+        }
+    }
+}
+
+/// Replace the list with `dir := target`'s rows and realign the two per-index
+/// caches, the same three moves the download drain makes. Going up lands the
+/// selection on the folder just left; going down lands on the first row.
+#[allow(clippy::too_many_arguments)]
+fn enter_folder(
+    source: &app::picker::StorySource,
+    dir: &mut std::path::PathBuf,
+    root: &std::path::Path,
+    target: &std::path::Path,
+    stories: &mut Vec<app::picker::StoryEntry>,
+    row_badges: &mut Vec<app::picker::RowBadges>,
+    aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
+    list: &mut app::list_scroll::ListScroll,
+    data_base: &std::path::Path,
+    hint_index: &app::hints::HintIndex,
+    viewport: usize,
+    anim: &app::config::AnimationConfig,
+) {
+    let came_from = std::mem::replace(dir, target.to_path_buf());
+    *stories = rows_for(source, dir, root, data_base);
+    *row_badges = stories
+        .iter()
+        .map(|e| app::picker::compute_row_badges(e, data_base, hint_index))
+        .collect();
+    *aux_cache = (0..stories.len()).map(|_| None).collect();
+    list.len(stories.len());
+    let idx = stories.iter().position(|e| e.is_folder() && e.path == came_from).unwrap_or(0);
+    list.select(idx, viewport, anim);
+}
+
+/// Replace the list with the index's matches for `query` and realign the
+/// caches. The selection goes back to the top: the rows under it are new.
+#[allow(clippy::too_many_arguments)]
+fn apply_find(
+    index: &[app::picker::StoryEntry],
+    root: &std::path::Path,
+    query: &str,
+    stories: &mut Vec<app::picker::StoryEntry>,
+    row_badges: &mut Vec<app::picker::RowBadges>,
+    aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
+    list: &mut app::list_scroll::ListScroll,
+    data_base: &std::path::Path,
+    hint_index: &app::hints::HintIndex,
+) {
+    *stories = app::picker::search_library(index, root, query);
+    *row_badges = stories
+        .iter()
+        .map(|e| app::picker::compute_row_badges(e, data_base, hint_index))
+        .collect();
+    *aux_cache = (0..stories.len()).map(|_| None).collect();
+    list.len(stories.len());
+    list.selected = 0;
+}
+
+/// Whether the list on screen is the gallery's recursive view: the cover grid,
+/// no find field open, and a library index to draw from (a disk set has none,
+/// and shows its rows as tiles as it always did).
+fn gallery_all_folders(view: PickerView, finding: bool, has_index: bool) -> bool {
+    matches!(view, PickerView::Gallery) && !finding && has_index
+}
+
+/// Replace the list with every story under `dir` (the gallery's view of a
+/// folder), keeping the selection on the same story where it survives.
+#[allow(clippy::too_many_arguments)]
+fn show_gallery_scope(
+    index: &[app::picker::StoryEntry],
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    stories: &mut Vec<app::picker::StoryEntry>,
+    row_badges: &mut Vec<app::picker::RowBadges>,
+    aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
+    list: &mut app::list_scroll::ListScroll,
+    data_base: &std::path::Path,
+    hint_index: &app::hints::HintIndex,
+) {
+    let keep = stories.get(list.selected).filter(|e| !e.is_folder()).map(|e| (e.path.clone(), e.meta.disk_entry.clone()));
+    *stories = app::picker::search_library_under(index, root, dir, "");
+    *row_badges = stories
+        .iter()
+        .map(|e| app::picker::compute_row_badges(e, data_base, hint_index))
+        .collect();
+    *aux_cache = (0..stories.len()).map(|_| None).collect();
+    list.len(stories.len());
+    list.selected = keep
+        .and_then(|(p, d)| stories.iter().position(|e| e.is(&p, d.as_deref())))
+        .unwrap_or(0);
+}
+
+/// What the picker's title line says, and which folder the row painter
+/// measures a match's folder label against.
+pub(crate) struct PickerHeading<'a> {
+    /// The folder being listed: the root until the user descends.
+    pub dir: &'a std::path::Path,
+    /// The library root; a find match's folder label is relative to it.
+    pub root: &'a std::path::Path,
+    /// `Some` while find-story's field is open.
+    pub find: Option<FindStatus<'a>>,
+    /// The cover gallery, showing every story under `dir` rather than the
+    /// folder's own rows (`None` in the list, and with no index to draw on).
+    pub all_folders: Option<IndexStatus>,
+}
+
+/// How far the library index has got, for a header that draws on it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IndexStatus {
+    pub indexed: usize,
+    pub done: bool,
+}
+
+/// The find field's state, as the header reports it.
+pub(crate) struct FindStatus<'a> {
+    pub query: &'a str,
+    /// Stories indexed so far, shown while the walk is still running.
+    pub indexed: usize,
+    pub done: bool,
+}
+
+impl<'a> PickerHeading<'a> {
+    /// A folder view of `dir`, which is also the root.
+    #[cfg(all(test, feature = "t-picker"))]
+    fn browse(dir: &'a std::path::Path) -> Self {
+        PickerHeading { dir, root: dir, find: None, all_folders: None }
+    }
+
+    /// The folder a row's label is relative to: the root while finding (a match
+    /// can be anywhere under it), the listed folder otherwise (so no row in a
+    /// folder view wears one).
+    fn label_base(&self) -> &std::path::Path {
+        if self.find.is_some() { self.root } else { self.dir }
+    }
+
+    /// The title line. Hotkeys used to ride here too (`[i: info · g: covers]`),
+    /// but the footer and `?` help already carry every key that was in it, so
+    /// SQ-1282 dropped the hint and gave the row's right edge to the running
+    /// version instead (see `draw_top_bar_version`).
+    fn line(&self, stories: &[app::picker::StoryEntry]) -> String {
+        match &self.find {
+            Some(f) => {
+                let n = stories.len();
+                let es = if n == 1 { "" } else { "es" };
+                let progress = if f.done { String::new() } else { format!(" · indexing, {} so far", f.indexed) };
+                format!(
+                    " lanthorn — find a story  ({n} match{es} for “{}” in {}{progress})",
+                    f.query,
+                    self.root.display()
+                )
+            }
+            None if self.all_folders.is_some() => {
+                let status = self.all_folders.expect("checked");
+                let progress = if status.done { String::new() } else { format!(" · indexing, {} so far", status.indexed) };
+                format!(
+                    " lanthorn — choose a story  ({} in {} and its folders{progress})",
+                    stories.len(),
+                    self.dir.display()
+                )
+            }
+            None => {
+                let folders = stories.iter().filter(|e| e.is_folder() && e.title != app::picker::PARENT_LABEL).count();
+                let n = stories.iter().filter(|e| !e.is_folder()).count();
+                let f = match folders {
+                    0 => String::new(),
+                    1 => ", 1 folder".to_string(),
+                    k => format!(", {k} folders"),
+                };
+                format!(" lanthorn — choose a story  ({n} found{f} in {})", self.dir.display())
+            }
+        }
+    }
+}
+
+/// Right-align the running lanthorn version on the picker's title row, the
+/// same build string `lanthorn --version` prints (`buildinfo::LONG`: the
+/// crate version plus a short git hash, `-dirty` and all, which is what makes
+/// a bug report self-identifying). Skipped entirely — never truncated or
+/// overlapped onto the title — when the row isn't wide enough for both; the
+/// title always wins the space (SQ-1282).
+fn draw_top_bar_version(buf: &mut ratatui::buffer::Buffer, area: Rect, title: &str, style: ratatui::style::Style) {
+    const GAP: u16 = 2;
+    let version = buildinfo::LONG;
+    let title_w = UnicodeWidthStr::width(title) as u16;
+    let version_w = UnicodeWidthStr::width(version) as u16;
+    if area.width < title_w + GAP + version_w {
+        return;
+    }
+    let x = area.right().saturating_sub(version_w);
+    draw_str_clipped(buf, x, area.y, version, style, area);
+}
+
+/// The info panel for a folder row: where it leads, and how. Returns the
+/// panel's scroll extent, which is nothing.
+fn draw_folder_panel(
+    entry: &app::picker::StoryEntry,
+    root: &std::path::Path,
+    area: Rect,
+    cs: &app::colors::ColorScheme,
+    buf: &mut ratatui::buffer::Buffer,
+) -> usize {
+    if area.width < 2 || area.height < 2 {
+        return 0;
+    }
+    let story_info = cs.theme.get("story_info").style;
+    let story_info_title = cs.theme.get("story_info_title").style;
+    let story_info_value = cs.theme.get("story_info_value").style;
+    let story_info_label = cs.theme.get("story_info_label").style;
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                c.set_symbol(" ").set_style(story_info);
+            }
+        }
+    }
+    let x = area.x + 1;
+    let inner = Rect::new(x, area.y, area.width.saturating_sub(2), area.height);
+    let is_parent = entry.title == app::picker::PARENT_LABEL;
+    let title = if is_parent { "Up one folder".to_string() } else { entry.title.clone() };
+    draw_str_clipped(buf, x, area.y + 1, &title, story_info_title, inner);
+    let rel = entry.path.strip_prefix(root).ok().filter(|r| !r.as_os_str().is_empty());
+    let where_ = match rel {
+        Some(r) => format!("{}/", r.display()),
+        None => "the library root".to_string(),
+    };
+    draw_str_clipped(buf, x, area.y + 3, "Leads to", story_info_label, inner);
+    draw_str_clipped(buf, x, area.y + 4, &where_, story_info_value, inner);
+    draw_str_clipped(buf, x, area.y + 6, "Enter opens it; Backspace goes up.", story_info_value, inner);
+    0
 }
 
 /// Reorder `stories` by `sort`, keeping the selection on the same story (by
@@ -527,17 +861,62 @@ fn draw_progress_line(
     draw_str_clipped(buf, area.x, y, text, style, area);
 }
 
+/// What lanthorn asks the terminal at startup, beyond the crate's defaults.
+///
+/// Opt in to kitty's `o=z` zlib transmission compression (off by default
+/// upstream, since it trades render latency for bandwidth). lanthorn takes that
+/// trade on purpose: encodes run on a worker thread rather than the render loop
+/// (`spawn_v6_encode`, `spawn_band_jobs`), so the CPU cost is off the UI's
+/// critical path; the composites are flat indexed colour that deflates
+/// enormously; and SSH — where the terminal link is the actual bottleneck — is a
+/// first-class way to run this app. SQ-1339.
+///
+/// And opt in to `t=s` shared memory, which beats both: the pixels never reach
+/// the wire at all, so there is nothing to deflate and nothing to base64.
+/// `kitty_shared_memory_object` is a single option since SQ-1382: setting it
+/// probes for the capability during the same stdio query and the crate hands
+/// over an object only where the terminal answered `OK`, which is what makes
+/// asking for it safe over ssh — a terminal there can never open the object, and
+/// the probe is what keeps that failure invisible rather than dropped frames.
+/// SQ-1374, SQ-1382.
+fn cover_query_options(
+    shm: app::config::KittySharedMemory,
+) -> ratatui_image::picker::cap_parser::QueryStdioOptions {
+    let probe_shm = shm == app::config::KittySharedMemory::Auto;
+    ratatui_image::picker::cap_parser::QueryStdioOptions {
+        kitty_compression: true,
+        kitty_shared_memory_object: probe_shm.then(std::process::id),
+        ..Default::default()
+    }
+}
+
 /// Build the ratatui-image picker for cover art per the CLI mode. `Auto`
 /// queries the terminal (falling back to half-blocks); forced modes query for
 /// font size then pin the protocol. Returns `None` only if construction fails.
-pub(crate) fn build_cover_picker(mode: app::config::ImageProtocol) -> Option<ratatui_image::picker::Picker> {
+///
+/// `shm` is the `kitty_shared_memory` config key, and it is honoured HERE rather
+/// than at the transmit (SQ-1374). `off` has to mean "do not even ask": the probe
+/// creates a real shared memory object and writes an extra escape into the
+/// startup query, so declining it at the wire would leave both of those happening
+/// for a user who said no. Declining it here means the capability never appears,
+/// and every reader downstream — `render::graphics::window_wire`,
+/// `/dump-terminal`'s capability list — sees exactly what a terminal that cannot
+/// do shared memory looks like, which is the state `off` is asking for.
+pub(crate) fn build_cover_picker(
+    mode: app::config::ImageProtocol,
+    shm: app::config::KittySharedMemory,
+) -> Option<ratatui_image::picker::Picker> {
     use app::config::ImageProtocol as M;
     use ratatui_image::picker::{Picker, ProtocolType};
+    let query_options = move || cover_query_options(shm);
     match mode {
         M::Halfblocks => Some(Picker::halfblocks()),
-        M::Auto => Some(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())),
+        M::Auto => Some(
+            Picker::from_query_stdio_with_options(query_options())
+                .unwrap_or_else(|_| Picker::halfblocks()),
+        ),
         M::Kitty | M::Sixel | M::Iterm2 => {
-            let mut p = Picker::from_query_stdio().ok()?;
+            let mut p = Picker::from_query_stdio_with_options(query_options()).ok()?;
             p.set_protocol_type(match mode {
                 M::Kitty => ProtocolType::Kitty,
                 M::Sixel => ProtocolType::Sixel,
@@ -547,6 +926,19 @@ pub(crate) fn build_cover_picker(mode: app::config::ImageProtocol) -> Option<rat
             Some(p)
         }
     }
+}
+
+/// Did a [`build_cover_picker`] build's own capability query — if it ran one
+/// at all — get any answer back? `Halfblocks` mode never queries stdio, so
+/// `capabilities()` reads empty for the same reason a query that timed out
+/// completely does; both must be read the same way by a settle-and-requery
+/// poller (`loop_tick::requery_picker_if_settled`), which skips paying a
+/// requery's stdio round trip on a terminal that will only ever answer with
+/// nothing. One spelling shared by `startup.rs` (for `state.game_picker`) and
+/// `run_story_picker` (for its own local cover-art preview picker), so the two
+/// `game_picker_query_answered`-shaped bools can't drift apart (SQ-1520).
+pub(crate) fn picker_query_answered(picker: Option<&ratatui_image::picker::Picker>) -> bool {
+    picker.is_some_and(|p| !p.capabilities().is_empty())
 }
 
 /// The terminal's cell size in pixels **right now**, from `TIOCGWINSZ`.
@@ -562,6 +954,16 @@ pub(crate) fn build_cover_picker(mode: app::config::ImageProtocol) -> Option<rat
 /// are documented as "unused" by the tty ioctl and are zero on plenty of
 /// terminals, and Windows has no equivalent at all). A caller must then KEEP the
 /// value it has: a default would be a guess replacing a measurement.
+///
+/// **Neither `state.game_picker` nor `run_story_picker`'s cover-art preview
+/// picker derive their resize-time cell from this any more** (SQ-1511 moved
+/// the former, SQ-1520 the latter) — both now go through a settled
+/// `Picker::from_query_stdio` requery (`loop_tick::requery_picker_if_settled`)
+/// after `ratatui-image`'s maintainer rejected this ioctl derivation upstream
+/// as provably wrong at some window sizes. What remains is `/dump-terminal`'s
+/// diagnostic read (`slash_dispatch.rs`), a one-off measurement rather than a
+/// refresh loop, which is exactly the shape this cheap ioctl is still right
+/// for.
 pub(crate) fn terminal_cell_size() -> Option<ratatui_image::FontSize> {
     let ws = crossterm::terminal::window_size().ok()?;
     if ws.width == 0 || ws.height == 0 || ws.columns == 0 || ws.rows == 0 {
@@ -570,50 +972,37 @@ pub(crate) fn terminal_cell_size() -> Option<ratatui_image::FontSize> {
     Some(ratatui_image::FontSize::new(ws.width / ws.columns, ws.height / ws.rows))
 }
 
-/// Re-derive `picker`'s cell size after a resize. Answers whether it MOVED, so
-/// the caller can throw away what it fitted against the old one.
-///
-/// **The absolute size does not matter; the aspect ratio does.** Geometry
-/// multiplies by `fw`/`fh` to reach a device box and divides by them again to
-/// return to cells, so a uniform scale error cancels out. What survives is
-/// `fw : fh` — and a cell is `round(advance_em · px)` by `round(line_em · px)`,
-/// two roundings at different rates, so even a face whose design ratio is
-/// exactly 2.002 (FiraCode) yields real cells from 1.750 (4x7 at 6 px) to 2.250
-/// (4x9 at 7 px). Change font size mid-session and the composite is fitted with
-/// an aspect up to ~29% wrong until the app is restarted; the art looks subtly
-/// stretched and comes right again after a relaunch, which is exactly how it was
-/// reported.
-///
-/// **The cell is the only thing that moved, so the cell is the only thing
-/// touched.** The picker is mutated in place rather than rebuilt, because a
-/// queried picker knows things this function cannot re-derive without asking the
-/// terminal again: the protocol, and behind it the whole capability list —
-/// `KittyCompression` (`o=z`, worth up to 88x on a raster composite),
-/// `RectangularOps`, the tmux flag. A font change tells you nothing about any of
-/// them.
-///
-/// This used to rebuild with the deprecated `Picker::from_fontsize` and copy the
-/// protocol across by hand, which preserved exactly the one field it named:
-/// `from_fontsize` constructs `capabilities: Vec::new()`, so a mid-session font
-/// change silently dropped compression back to raw and left it there until the
-/// app was relaunched. It fails safe, which is why nobody saw it (SQ-0992).
-/// Re-querying is not the alternative either — `Picker::from_query_stdio` writes
-/// an escape and reads the reply, which is the whole thing
-/// [`terminal_cell_size`] exists to avoid.
-pub(crate) fn refresh_cell_size(picker: &mut ratatui_image::picker::Picker) -> bool {
-    let Some(fs) = terminal_cell_size() else { return false };
-    apply_cell_size(picker, fs)
-}
-
-/// [`refresh_cell_size`] with the measurement handed in, so it can be driven
-/// without a tty.
-fn apply_cell_size(picker: &mut ratatui_image::picker::Picker, fs: ratatui_image::FontSize) -> bool {
-    let was = picker.font_size();
-    if (fs.width, fs.height) == (was.width, was.height) {
-        return false;
-    }
-    picker.set_font_size(fs);
-    true
+/// Where the browser was sitting the moment a story was launched (SQ-1474):
+/// the folder on screen, plus enough to find that same row again once the
+/// game ends and the browser is rebuilt from scratch — which it is, every
+/// time (`run_story_picker` re-scans `dir` from disk on every call, so a
+/// remembered index alone would drift the moment the folder gains, loses or
+/// reorders a row).
+#[derive(Debug, Clone)]
+pub(crate) struct PickerPosition {
+    /// The folder that was listed (not necessarily `root` — a launch from a
+    /// sub-directory, or from inside a multi-story disk/zip sitting in one,
+    /// remembers that folder rather than snapping back to the top level).
+    pub dir: std::path::PathBuf,
+    /// The launched row's identity — checked via [`app::picker::StoryEntry::is`],
+    /// never by index, since `dir` is rescanned fresh on return.
+    pub path: std::path::PathBuf,
+    pub disk_entry: Option<String>,
+    /// Where the row sat in the list at launch, for the one case identity
+    /// can't answer: the story is gone from the rescanned folder entirely
+    /// (deleted, media moved). The nearest surviving row is read off this
+    /// clamped into the new list's bounds, rather than resetting to the top.
+    pub index_hint: usize,
+    /// How many rows below the top of the LIST viewport the row sat at
+    /// launch (SQ-1479) — `ListScroll::prime`'s distance, so a return scrolls
+    /// back to the same relative position instead of snapping the row to the
+    /// top of the list.
+    pub rows_from_top: usize,
+    /// `Some(distance)` when the browser was showing the cover GALLERY at
+    /// launch instead of the list — the row's distance in grid rows below
+    /// the top of the gallery viewport, mirroring `rows_from_top` (SQ-1479).
+    /// `None` means it was the list.
+    pub gallery_rows_from_top: Option<usize>,
 }
 
 /// What the browser hands back: the story to play, and the boot-time overrides
@@ -627,18 +1016,56 @@ pub(crate) struct PickedStory {
     /// by path exactly as it always did.
     pub disk_entry: Option<String>,
     pub overrides: app::launch_options::LaunchOverrides,
+    /// Where this was launched from, so the next `run_story_picker` call can
+    /// return here (SQ-1474).
+    pub position: PickerPosition,
 }
 
 impl PickedStory {
     /// Play the story one browser row stands for, with no overrides: its path
-    /// **and** which story on the image it is.
-    fn row(entry: &app::picker::StoryEntry) -> PickedStory {
+    /// **and** which story on the image it is. `dir`/`index_hint` are the
+    /// browser's position at the moment of launch, remembered for the return
+    /// trip, along with its scroll distance from the top of whichever
+    /// viewport (list or gallery) was showing (SQ-1479).
+    fn row(
+        entry: &app::picker::StoryEntry,
+        dir: &std::path::Path,
+        index_hint: usize,
+        rows_from_top: usize,
+        gallery_rows_from_top: Option<usize>,
+    ) -> PickedStory {
         PickedStory {
             path: entry.path.clone(),
             disk_entry: entry.meta.disk_entry.clone(),
             overrides: app::launch_options::LaunchOverrides::default(),
+            position: PickerPosition {
+                dir: dir.to_path_buf(),
+                path: entry.path.clone(),
+                disk_entry: entry.meta.disk_entry.clone(),
+                index_hint,
+                rows_from_top,
+                gallery_rows_from_top,
+            },
         }
     }
+}
+
+/// Where the browser sits right now, translated into the launch-time recipe
+/// [`PickerPosition`] remembers for the return trip (SQ-1479): the list's
+/// distance from the top of its viewport, and — only when the gallery is the
+/// one on screen — that same distance in grid rows. Computed once so every
+/// launch site (`PickedStory::row`'s callers and the launch-options dialog's
+/// two confirm paths) can't drift out of step with each other.
+fn launch_scroll_recipe(
+    list: &app::list_scroll::ListScroll,
+    view: PickerView,
+    gallery_first_row: usize,
+    gallery_cols: usize,
+) -> (usize, Option<usize>) {
+    let rows_from_top = list.selected.saturating_sub(list.target_offset());
+    let gallery_rows_from_top = matches!(view, PickerView::Gallery)
+        .then(|| (list.selected / gallery_cols.max(1)).saturating_sub(gallery_first_row));
+    (rows_from_top, gallery_rows_from_top)
 }
 
 /// Open the launch-options dialog for one browser row.
@@ -664,6 +1091,21 @@ fn open_launch_options(
     let z_version = matches!(entry.meta.engine, app::picker::Engine::ZCode)
         .then(|| entry.meta.version.as_deref().and_then(|v| v.parse::<u8>().ok()))
         .flatten();
+    // SQ-1473/SQ-1480: the picture-resolution row exists only for a Scott
+    // entry with native family-B vector art — C64 or ZX Spectrum
+    // (`ScottPictures::offers_resolution_choice`) — a Blorb's or a S.A.G.A.
+    // release's pictures are pre-rendered bitmaps with no second resolution
+    // to offer, and every other engine has nothing here at all. Same
+    // precedence as the interpreter number just above: this session's own
+    // choice, else the sidecar, else the default (hi-res).
+    let scott_native_pictures = entry
+        .meta
+        .scott_pictures
+        .is_some_and(app::picker::ScottPictures::offers_resolution_choice);
+    let inherited_resolution = cfg
+        .scott_picture_resolution_override
+        .or_else(|| app::styles::read_per_game_scott_picture_resolution(&game_dir))
+        .unwrap_or_default();
     app::launch_options::LaunchOptionsState::new(
         &entry.title,
         &entry.path,
@@ -673,6 +1115,7 @@ fn open_launch_options(
         entry.meta.disk_image,
     )
     .on_disk_entry(entry.meta.disk_entry.as_deref())
+    .with_scott_resolution(scott_native_pictures, inherited_resolution)
 }
 
 /// Where one wheel notch over the picker goes.
@@ -682,7 +1125,9 @@ enum WheelTarget {
     /// options is shorter than its own dialog, so under SQ-0831's rule there
     /// is nothing there to scroll — but the notch must still stop here rather
     /// than reaching the story list underneath, which would otherwise slide
-    /// around behind an open modal (SQ-0832).
+    /// around behind an open modal (SQ-0832). The key reference and the
+    /// per-story menu are the same case (SQ-1227): both are short, neither
+    /// scrolls, and the list must not move behind either.
     Swallowed,
     /// The IFDB search modal's own results/files list.
     Search,
@@ -700,11 +1145,13 @@ enum WheelTarget {
 /// a single answer that can be pinned by a test.
 fn wheel_target(
     launch_open: bool,
+    keys_open: bool,
+    menu_open: bool,
     search_open: bool,
     preview_open: bool,
     over_info_panel: bool,
 ) -> WheelTarget {
-    if launch_open {
+    if launch_open || keys_open || menu_open {
         WheelTarget::Swallowed
     } else if search_open {
         WheelTarget::Search
@@ -717,6 +1164,22 @@ fn wheel_target(
     }
 }
 
+/// What a right-click on the story list does (SQ-1227), given the row it landed
+/// on and whether that row is a folder: `(row to select, menu to open)`.
+///
+/// A total function of ONE click, deliberately. The gesture it replaced was a
+/// double right-click with a 400ms recogniser and a tracker of its own
+/// (SQ-0789), which nothing on screen mentioned and nobody found; a single click
+/// needs no state, so there is none to get wrong. A folder is selected like any
+/// row and has no menu — none of the items apply to it.
+fn right_click_action(hit: Option<(usize, bool)>) -> (Option<usize>, Option<usize>) {
+    match hit {
+        Some((idx, false)) => (Some(idx), Some(idx)),
+        Some((idx, true)) => (Some(idx), None),
+        None => (None, None),
+    }
+}
+
 /// Run the pre-game story picker over a [`app::picker::StorySource`] — a
 /// directory passed at launch, or the multi-disk release one named volume
 /// belongs to (SQ-0844). Returns the chosen story (with any launch-time
@@ -726,10 +1189,14 @@ pub(crate) fn run_story_picker(
     mut source: app::picker::StorySource,
     cfg: &app::config::Config,
     data_base: &std::path::Path,
+    restore: Option<&PickerPosition>,
 ) -> Option<PickedStory> {
-    let dir = source.dir().to_path_buf();
-    let dir = dir.as_path();
-    let mut stories = source.scan(data_base);
+    // The library root, and the folder currently listed. They part company the
+    // moment the user descends into a sub-folder (Enter on a folder row) and
+    // meet again on Backspace; downloads land in `dir`, the folder on screen.
+    let root = source.dir().to_path_buf();
+    let (mut dir, mut stories, restored_idx) =
+        resolve_picker_position(&source, &root, data_base, restore);
     if stories.is_empty() {
         eprintln!("lanthorn: no Z-machine story files found in '{}'", dir.display());
         std::process::exit(1);
@@ -737,7 +1204,10 @@ pub(crate) fn run_story_picker(
 
     // Resolve themed colors the same way the game does, so the picker matches.
     let (base, _w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
-    let (cs, _set, _w2) = app::style::resolve(&base, &cfg.user_dir);
+    // No story is booted here, so no machine names a colour table: the picker
+    // resolves standard colour numbers through §8.3.1's own (SQ-1393).
+    let (cs, _set, _w2) =
+        app::style::resolve(&base, &cfg.user_dir, zvm::screen::Palette::Standard);
 
     // Row badges: each story's per-game dir under `data_base` + one shared hint
     // index, computed once (SQ-0284). Recomputed by `resort_list` whenever the
@@ -753,11 +1223,11 @@ pub(crate) fn run_story_picker(
     // Terminal setup mirrors the game loop. If any step fails we can't be
     // interactive — fall back to the first story rather than abort.
     if enable_raw_mode().is_err() {
-        return Some(PickedStory::row(&stories[0]));
+        return first_story(&stories).map(|e| PickedStory::row(e, &dir, 0, 0, None));
     }
     if execute!(stdout(), EnterAlternateScreen).is_err() {
         let _ = disable_raw_mode();
-        return Some(PickedStory::row(&stories[0]));
+        return first_story(&stories).map(|e| PickedStory::row(e, &dir, 0, 0, None));
     }
     // Mouse capture is opt-in (config `mouse = true`): its any-motion reporting
     // floods this loop with redraws on every mouse move. Off by default keeps the
@@ -769,13 +1239,21 @@ pub(crate) fn run_story_picker(
         Ok(t) => t,
         Err(_) => {
             restore_terminal();
-            return Some(PickedStory::row(&stories[0]));
+            return first_story(&stories).map(|e| PickedStory::row(e, &dir, 0, 0, None));
         }
     };
 
     // `mut` since SQ-0988: a resize can move the terminal's cell size, and the
-    // picker is re-derived from `TIOCGWINSZ` when it does.
-    let mut cover_picker = if cfg.images { build_cover_picker(cfg.image_protocol) } else { None };
+    // picker is re-derived via a settled stdio requery when it does (SQ-1520;
+    // was the ioctl-based `refresh_cell_size` — see `picker_ui::terminal_cell_size`'s
+    // doc for why that moved).
+    let mut cover_picker = if cfg.images { build_cover_picker(cfg.image_protocol, cfg.kitty_shared_memory) } else { None };
+    // Armed by `Event::Resize` below; consumed once its settle window elapses
+    // by the `requery_picker_if_settled` call in the event-wait loop further
+    // down. `cover_query_answered` is fixed at this build — same reasoning as
+    // `AppState::game_picker_query_answered`, see `picker_query_answered`'s doc.
+    let mut cover_picker_dirty: Option<std::time::Instant> = None;
+    let cover_query_answered = picker_query_answered(cover_picker.as_ref());
     let mut cover = app::cover::CoverState::default();
 
     // The browser's keys, resolved the same way the game's are (SQ-0796): the
@@ -786,6 +1264,15 @@ pub(crate) fn run_story_picker(
 
     let mut list = app::list_scroll::ListScroll::new();
     list.len(stories.len());
+    // Land on the restored row, at the distance from the top of the list
+    // viewport it sat at launch (SQ-1474, SQ-1479; a no-op `prime(idx, 0)`
+    // when there was nothing to restore, same as the prior default). No
+    // animation and no known viewport yet — the first frame hasn't measured
+    // one — so a too-large distance can leave the row below the fold; the
+    // list draw clamps it back into view once it knows the real size
+    // (`ListScroll::clamp_visible`, called from `draw_story_picker`).
+    // Ordinary navigation corrects the offset from there as usual.
+    list.prime(restored_idx, restore.map_or(0, |p| p.rows_from_top));
     let anim = &cfg.animation;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
     let mut header_rects: Vec<(app::picker::SortKey, Rect)> = Vec::new();
@@ -795,11 +1282,23 @@ pub(crate) fn run_story_picker(
     // Cover-gallery view state (SQ-0374): `view` selects list-vs-grid; the rest
     // is grid geometry from the last gallery draw, read by input handling
     // (2D navigation, paging) and the per-frame visible-tile cover requests.
-    let mut view = PickerView::List;
+    // A restored gallery position (SQ-1479) starts the browser back in
+    // gallery view rather than always defaulting to the list; the distance is
+    // applied once, by `draw_story_gallery`, the first time it measures a
+    // real grid (`gallery_restore_rows_from_top` below).
+    let restore_gallery_rows_from_top = restore.and_then(|p| p.gallery_rows_from_top);
+    let mut view =
+        if restore_gallery_rows_from_top.is_some() { PickerView::Gallery } else { PickerView::List };
     let mut gallery_first_row: usize = 0;
+    let mut gallery_restore_rows_from_top: Option<usize> = restore_gallery_rows_from_top;
     let mut gallery_cols: usize = 1;
     let mut gallery_vis: usize = 1;
     let mut gallery_visible: Vec<usize> = Vec::new();
+    // When the grid's scroll last moved — wheel or a nav key, mirroring
+    // `AppState::sixel_scroll_motion_at` (SQ-1198) — this loop has no `AppState`
+    // to ride, so it tracks the same debounce window locally. `None` = never
+    // scrolled this session. See `gallery_scroll_in_motion` below.
+    let mut gallery_scroll_motion_at: Option<std::time::Instant> = None;
 
     // IFDB fetch worker (SQ-0348): `f` (this story, forced) and `r` (whole
     // library, skip current-version) share one background worker. Live only
@@ -835,6 +1334,24 @@ pub(crate) fn run_story_picker(
     // library in hand, is where that question gets asked.)
     let mut url_prompt: Option<app::text_field::TextField> = None;
     let mut url_dl = app::story_url::UrlDownloader::new();
+
+    // Type-to-find over the WHOLE library (find-story). The field is `Some`
+    // while the list shows matches instead of a folder; Esc puts the folder
+    // back. What it matches against is an in-memory index of every story under
+    // `root`, built once per picker on its own thread, one folder per batch,
+    // because a scan opens every file it lists and a whole library is
+    // gigabytes: the folder view is up in one directory's time, and the index
+    // catches up behind it (the header says so until it has).
+    let mut find_field: Option<app::text_field::TextField> = None;
+    let index_rx = match &source {
+        app::picker::StorySource::Library(_) => {
+            Some(app::picker::spawn_library_index(root.clone(), data_base.to_path_buf()))
+        }
+        // A multi-disk set is one release, not a tree; there is nothing to walk.
+        app::picker::StorySource::DiskSet { .. } => None,
+    };
+    let mut index: Vec<app::picker::StoryEntry> = Vec::new();
+    let mut index_done = index_rx.is_none();
 
     // IFDB story search (SQ-0413): `/` opens a modal to search IFDB, browse
     // results, and download a chosen story file into `dir`. Network runs on its
@@ -891,6 +1408,11 @@ pub(crate) fn run_story_picker(
     use std::path::PathBuf;
     use std::time::Instant;
     let decoder = app::cover::CoverDecoder::new();
+    // Async gallery-tile ENCODE (SQ-1199), the second half of the same pipeline:
+    // once a cover is decoded, fitting it to a tile box and encoding the
+    // terminal protocol is heavier still, and used to run inside the draw. It
+    // now runs on this worker; the draw enqueues and paints the letterbox.
+    let mut tile_encoder = app::cover::TileEncoder::new();
     let mut requested: HashSet<PathBuf> = HashSet::new();
     let mut last_sel = usize::MAX;
     let mut sel_changed_at = Instant::now();
@@ -898,13 +1420,22 @@ pub(crate) fn run_story_picker(
     // Story-list clicks: first click selects, a second on the same row within
     // this window launches it (SQ-0366).
     let mut last_click: Option<(usize, Instant)> = None;
-    // The same recogniser for the RIGHT button (SQ-0789): first click selects, a
-    // second on the same row opens the launch-options dialog. Deliberately a
-    // parallel tracker rather than a new gesture engine — double-click already
-    // exists here for the left button and right-click already exists in the map
-    // (`input.rs`), so this is a composition of two precedents, not a third idiom.
-    let mut last_right_click: Option<(usize, Instant)> = None;
     const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+    // The per-story menu (SQ-1227): `Some` while it is open over the list or the
+    // gallery. Opened by `Space` or a SINGLE right-click on a row — which is
+    // what replaced SQ-0789's double-right-click shortcut to the launch-options
+    // dialog: the same dialog is one item down this menu, where it can be SEEN
+    // rather than guessed at.
+    let mut story_menu: Option<app::story_menu::StoryMenu> = None;
+    let mut menu_rects: Vec<(usize, Rect)> = Vec::new();
+    let mut menu_area = Rect::new(0, 0, 0, 0);
+    // The browser's key reference (`?`, SQ-1227) — its own dialog, since the
+    // game's hotkey panel is fed from an `AppState` this loop does not have.
+    let mut keys_dialog = false;
+    let mut keys_close_rect: Option<Rect> = None;
+    let mut keys_button_rects: Vec<(app::render::dialog::ButtonId, Rect)> = Vec::new();
+    let mut keys_area = Rect::new(0, 0, 0, 0);
 
     // Launch-options dialog (SQ-0789): `Some` while open, over the browser.
     // Opened only on an explicit gesture, so a plain launch never meets it.
@@ -922,7 +1453,7 @@ pub(crate) fn run_story_picker(
     // events within a notch.
     let mut pending_wheel: Option<isize> = None;
 
-    let chosen: Option<PickedStory> = loop {
+    let chosen: Option<PickedStory> = 'browser: loop {
         // Restore the terminal + exit if an external termination signal arrived.
         exit_if_terminated();
 
@@ -942,6 +1473,7 @@ pub(crate) fn run_story_picker(
                     );
                     gallery_first_row = fr;
                     list.select(ni, viewport, anim);
+                    gallery_scroll_motion_at = Some(Instant::now());
                 } else {
                     list.scroll_by(d, viewport, anim);
                 }
@@ -957,10 +1489,17 @@ pub(crate) fn run_story_picker(
             last_area = area;
             let buf = f.buffer_mut();
             let (list_area, panel_area) = split_picker_area(area, slide.fraction());
+            let heading = PickerHeading {
+                dir: &dir,
+                root: &root,
+                find: find_field.as_ref().map(|f| FindStatus { query: f.as_str(), indexed: index.len(), done: index_done }),
+                all_folders: gallery_all_folders(view, find_field.is_some(), index_rx.is_some())
+                    .then_some(IndexStatus { indexed: index.len(), done: index_done }),
+            };
             match view {
                 PickerView::List => {
                     let (rects, vp, hrects) = draw_story_picker(
-                        &stories, &list, &row_badges, &badge_glyphs, dir, &cs, &keymap,
+                        &stories, &mut list, &row_badges, &badge_glyphs, &heading, &cs, &keymap,
                         sort, list_area, buf,
                     );
                     row_rects = rects;
@@ -974,8 +1513,10 @@ pub(crate) fn run_story_picker(
                     // and corrupting its border where covers meet the edges (SQ-0389).
                     if preview.is_none() {
                         let (rects, cols, vis) = draw_story_gallery(
-                            &stories, list.selected, &mut gallery_first_row, dir, &cs, &keymap,
-                            cover_picker.as_ref(), &mut cover, data_base, list_area, buf,
+                            &stories, list.selected, &mut gallery_first_row,
+                            &mut gallery_restore_rows_from_top, &heading, &cs, &keymap,
+                            cover_picker.as_ref(), gallery_scroll_in_motion(gallery_scroll_motion_at),
+                            &mut cover, &mut tile_encoder, data_base, list_area, buf,
                         );
                         gallery_cols = cols.max(1);
                         gallery_vis = vis.max(1);
@@ -991,7 +1532,13 @@ pub(crate) fn run_story_picker(
             // The manual IFDB-entry prompt (SQ-0371) takes the footer row while
             // active; otherwise a fetch's status line, otherwise the hints.
             let story_header_active = cs.theme.get("story_header_active").style;
-            if let Some(field) = &manual_ifdb {
+            if let Some(field) = &find_field {
+                let prompt = format!(
+                    "Find (type to filter, ↑/↓ choose, Enter opens, Esc back to the folder): {}\u{258f}",
+                    field.as_str()
+                );
+                draw_progress_line(buf, list_area, &prompt, story_header_active);
+            } else if let Some(field) = &manual_ifdb {
                 let prompt = format!("IFDB URL or id (Enter to fetch, Esc to cancel): {}▏", field.as_str());
                 draw_progress_line(buf, list_area, &prompt, story_header_active);
             } else if let Some(field) = &url_prompt {
@@ -1003,8 +1550,36 @@ pub(crate) fn run_story_picker(
             } else if let Some(msg) = &progress_line {
                 draw_progress_line(buf, list_area, msg, story_header_active);
             }
+
+            // The per-story menu (SQ-1227), over the list and never over the
+            // footer row — the footer is what says the menu key exists, so the
+            // menu covering it would hide its own instructions. Anchored on the
+            // highlighted row when that row is on screen; centred on the pane
+            // when it is not (a fetch can resort the list under an open menu).
+            if let Some(menu) = &story_menu {
+                let pane = Rect::new(
+                    list_area.x,
+                    list_area.y,
+                    list_area.width,
+                    list_area.height.saturating_sub(1),
+                );
+                let anchor = row_rects
+                    .iter()
+                    .find(|(i, _)| *i == menu.story)
+                    .map(|(_, r)| *r)
+                    .unwrap_or_else(|| Rect::new(pane.x, pane.y, pane.width, 1));
+                let rects =
+                    app::story_menu::draw_story_menu(menu, anchor, pane, &keymap, &cs, buf);
+                menu_area = rects.area;
+                menu_rects = rects.items;
+            }
             if preview.is_none() && panel_area.width > 0 {
-                if let Some(entry) = stories.get(list.selected) {
+                if let Some(entry) = stories.get(list.selected).filter(|e| e.is_folder()) {
+                    last_panel_area = panel_area;
+                    panel_link_rects.clear();
+                    panel_resource_rects.clear();
+                    panel_max = draw_folder_panel(entry, &root, panel_area, &cs, buf);
+                } else if let Some(entry) = stories.get(list.selected) {
                     last_panel_area = panel_area;
                     panel_max = draw_info_panel(
                         &entry.title,
@@ -1039,7 +1614,7 @@ pub(crate) fn run_story_picker(
 
             // Resource-preview modal (SQ-0347): drawn last, over everything.
             if let Some(pv) = &mut preview {
-                let rects = draw_resource_preview(pv, area, cover_picker.as_ref(), &cs, buf);
+                let rects = draw_resource_preview(pv, area, cover_picker.as_ref(), &cs, buf, &mut cover);
                 preview_area = rects.area;
                 preview_close_rect = rects.close;
                 preview_button_rects = rects.buttons;
@@ -1065,6 +1640,23 @@ pub(crate) fn run_story_picker(
                     launch_row_rects = rects.rows;
                 }
             }
+
+            // The key reference (SQ-1227): topmost of all, since it is the one
+            // surface a lost user reaches for.
+            if keys_dialog {
+                if let Some(rects) =
+                    app::render::browser_keys::draw_browser_keys(&keymap, area, &cs, buf)
+                {
+                    keys_area = rects.area;
+                    keys_close_rect = rects.close;
+                    keys_button_rects = rects.buttons;
+                }
+            }
+
+            // Free any kitty uploads the cover/tile caches abandoned since the
+            // last frame (SQ-1190) — this loop has no `GraphicsRender` of its
+            // own, so `cover` keeps and flushes its own queue the same way.
+            cover.flush_kitty_deletes(area, buf);
         });
 
         // Housekeeping (runs every iteration, before the poll gate below, so a
@@ -1076,6 +1668,21 @@ pub(crate) fn run_story_picker(
             requested.remove(&path);
             cover_arrived = true;
         }
+        // Drain finished tile encodes into the tile cache (SQ-1199). A raster
+        // fitted against a cell the terminal no longer has is dropped rather
+        // than cached (`insert_tile`) — the request was in flight when the font
+        // size moved and `invalidate_cell_geometry` threw the rest away.
+        {
+            let cell = cover_picker
+                .as_ref()
+                .map_or((0, 0), |p| (p.font_size().width, p.font_size().height));
+            for (key, proto) in tile_encoder.drain() {
+                if let Some(p) = proto {
+                    cover.insert_tile(key, p, cell);
+                }
+                cover_arrived = true;
+            }
+        }
         // `.get`, not indexing (SQ-0659): `stories` can be empty — e.g. a
         // post-download rescan of a directory whose files all vanished.
         // The cover is asked for by the ROW's key, not by its path: one image can
@@ -1085,6 +1692,7 @@ pub(crate) fn run_story_picker(
             .then(|| {
                 stories
                     .get(list.selected)
+                    .filter(|e| !e.is_folder())
                     .map(|e| (e.cover_key(data_base), e.game_dir(data_base)))
             })
             .flatten()
@@ -1111,7 +1719,7 @@ pub(crate) fn run_story_picker(
         // wants them all, and the worker decodes them one at a time as it can.
         if view == PickerView::Gallery {
             for &idx in &gallery_visible {
-                if let Some(entry) = stories.get(idx) {
+                if let Some(entry) = stories.get(idx).filter(|e| !e.is_folder()) {
                     let p = entry.cover_key(data_base);
                     if !cover.has(&p) && !requested.contains(&p) {
                         decoder.request(p.clone(), entry.game_dir(data_base));
@@ -1127,6 +1735,36 @@ pub(crate) fn run_story_picker(
         // order of length one — then re-sort through the one shared helper so
         // the cursor stays on whatever story the user is actually looking at,
         // not wherever its index happened to land.
+        // The library index arrives one folder at a time; a disconnected
+        // channel is the walk finishing. While the find field is open, each
+        // arrival widens the match list in place, so a query typed two seconds
+        // after launch still ends up seeing the whole library.
+        let mut index_grew = false;
+        if !index_done {
+            if let Some(rx) = index_rx.as_ref() {
+                loop {
+                    match rx.try_recv() {
+                        Ok(batch) => {
+                            index.extend(batch.entries);
+                            index_grew = true;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            index_done = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if index_grew {
+            if let Some(field) = &find_field {
+                apply_find(&index, &root, field.as_str(), &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+            } else if gallery_all_folders(view, false, index_rx.is_some()) {
+                show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+            }
+        }
+
         let mut fetch_arrived = false;
         for p in fetcher.drain() {
             fetch_arrived = true;
@@ -1188,6 +1826,13 @@ pub(crate) fn run_story_picker(
             });
         }
         if fetch_arrived {
+            // A fetch just rewrote titles and authors in `stories`; the index
+            // holds its own copies, and find matches on those.
+            for e in stories.iter().filter(|e| !e.is_folder()) {
+                if let Some(slot) = index.iter_mut().find(|i| i.same_story(e)) {
+                    *slot = e.clone();
+                }
+            }
             list.select(
                 resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
                 viewport,
@@ -1242,7 +1887,11 @@ pub(crate) fn run_story_picker(
                             members.push(new_path.clone());
                         }
                     }
-                    stories = source.scan(data_base);
+                    stories = rows_for(&source, &dir, &root, data_base);
+                    merge_index(&mut index, &stories);
+                    if gallery_all_folders(view, find_field.is_some(), index_rx.is_some()) {
+                        show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                    }
                     app::picker::resort_preserving_selection(&mut stories, 0, sort);
                     row_badges = stories
                         .iter()
@@ -1293,7 +1942,11 @@ pub(crate) fn run_story_picker(
                         members.push(new_path.clone());
                     }
                 }
-                stories = source.scan(data_base);
+                stories = rows_for(&source, &dir, &root, data_base);
+                    merge_index(&mut index, &stories);
+                    if gallery_all_folders(view, find_field.is_some(), index_rx.is_some()) {
+                        show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                    }
                 app::picker::resort_preserving_selection(&mut stories, 0, sort);
                 row_badges = stories
                     .iter()
@@ -1316,7 +1969,7 @@ pub(crate) fn run_story_picker(
             }
             if search_modal.is_some() {
                 let action = search_modal.as_mut().unwrap().on_event(&ev);
-                dispatch_search_action(action, &search_worker, dir, &mut search_modal);
+                dispatch_search_action(action, &search_worker, &dir, &mut search_modal);
             }
         }
 
@@ -1324,7 +1977,10 @@ pub(crate) fn run_story_picker(
         // draw is at the top of the loop, and once the result is cached
         // `cover_busy` goes false — without this the loop would block on `read()`
         // and the new cover wouldn't appear until the next input event.
-        if cover_arrived || fetch_arrived || hint_arrived || search_arrived || url_arrived {
+        // `index_grew` too (SQ-none): a find's matches and the gallery's scope
+        // widen as folders are indexed, and a header that counts them must
+        // repaint without waiting for a key.
+        if cover_arrived || fetch_arrived || hint_arrived || search_arrived || url_arrived || index_grew {
             list.finalize_if_done();
             continue;
         }
@@ -1336,9 +1992,11 @@ pub(crate) fn run_story_picker(
         let sel_now = stories.get(list.selected).map(|e| &e.path);
         let panel_busy = slide.open
             && sel_now.is_some_and(|p| !requested.is_empty() || !cover.has(p));
-        // Gallery keeps ticking while any tile cover is still decoding so the
-        // grid fills in without needing a keypress.
-        let gallery_busy = matches!(view, PickerView::Gallery) && !requested.is_empty();
+        // Gallery keeps ticking while any tile cover is still decoding — or,
+        // since SQ-1199, still ENCODING on the tile worker — so the grid fills
+        // in without needing a keypress.
+        let gallery_busy = matches!(view, PickerView::Gallery)
+            && (!requested.is_empty() || tile_encoder.pending());
         let cover_busy = panel_busy || gallery_busy;
         let search_busy = search_modal.as_ref().is_some_and(|m| m.busy()) || search_worker.busy();
         // The modal's own lists ease exactly as `list` does (SQ-0598), so they
@@ -1346,7 +2004,12 @@ pub(crate) fn run_story_picker(
         // the next keypress.
         let search_scrolling =
             search_modal.as_ref().is_some_and(|m| m.has_active_animation());
-        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy() || url_dl.busy() || search_busy || search_scrolling)
+        // SQ-1213: while the gallery's scroll-settle window is open, keep
+        // ticking so the redraw that turns a suppressed sixel tile back into
+        // its real payload fires on its own, without waiting for another key —
+        // mirroring `has_active_animation()` pulling in `transcript_scroll_in_motion`
+        // for the transcript's own debounce (SQ-1198).
+        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy() || url_dl.busy() || search_busy || search_scrolling || gallery_scroll_in_motion(gallery_scroll_motion_at))
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
@@ -1363,6 +2026,21 @@ pub(crate) fn run_story_picker(
         // kill/SIGHUP restores the terminal promptly instead of hanging.
         loop {
             exit_if_terminated();
+            // SQ-1520: settle-and-requery `cover_picker`'s cell size on the same
+            // ~100ms cadence, same shape as `loop_tick::poll_picker_requery`
+            // drives `state.game_picker` in the main loop. A change here has no
+            // real crossterm event to `read()` below, so jump straight back to
+            // the outer loop's top (which draws unconditionally) instead of
+            // falling into the `read()` a `break` here would set up for.
+            if crate::loop_tick::requery_picker_if_settled(
+                &mut cover_picker,
+                cover_query_answered,
+                &mut cover_picker_dirty,
+                || build_cover_picker(cfg.image_protocol, cfg.kitty_shared_memory),
+            ) {
+                cover.invalidate_cell_geometry();
+                continue 'browser;
+            }
             match crossterm::event::poll(Duration::from_millis(100)) {
                 Ok(true) => break,  // an event is ready → read it below
                 Ok(false) => {}     // timeout → re-check the flag, keep waiting
@@ -1375,6 +2053,14 @@ pub(crate) fn run_story_picker(
         // on that fd, never re-checking the flag. The signal handler has already set
         // it by now, so catch it here before the blocking read. (SQ-0502)
         exit_if_terminated();
+
+        // This iteration's browser gesture, applied AFTER the event match so
+        // that a key and a story-menu item reach one dispatch (SQ-1227). A key
+        // is carried rather than resolved here because resolving it is the
+        // dispatch's own first act, and the guard test below requires that act
+        // to sit inside the marked region with the rest of it.
+        let mut pending_key = None;
+        let mut pending_command: Option<&'static str> = None;
 
         match read() {
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
@@ -1412,21 +2098,52 @@ pub(crate) fn run_story_picker(
                                         Some(format!("could not save launch options: {e}"));
                                 }
                             }
+                            let (rows_from_top, gallery_rows_from_top) =
+                                launch_scroll_recipe(&list, view, gallery_first_row, gallery_cols);
                             break Some(PickedStory {
                                 path: lo.story_path.clone(),
                                 disk_entry: lo.disk_entry.clone(),
                                 overrides: lo.overrides(),
+                                position: PickerPosition {
+                                    dir: dir.clone(),
+                                    path: lo.story_path.clone(),
+                                    disk_entry: lo.disk_entry.clone(),
+                                    index_hint: list.selected,
+                                    rows_from_top,
+                                    gallery_rows_from_top,
+                                },
                             });
                         }
                         app::launch_options::LaunchOptionsAction::Cancel => launch_opts = None,
                         app::launch_options::LaunchOptionsAction::None => {}
+                    }
+                // The key reference (SQ-1227) captures all keys while open: Esc,
+                // `?` again, `q` or Enter close it, everything else is swallowed
+                // rather than acting on the list behind it.
+                } else if keys_dialog {
+                    if matches!(k.code, Esc | Enter | Char('q') | Char('?')) {
+                        keys_dialog = false;
+                    }
+                // The per-story menu (SQ-1227) captures all keys while open. It
+                // owns the model — ↑/↓ wrap, Enter activates, Esc closes, and an
+                // item's own hotkey activates it directly — and hands back the
+                // command-string to run, which goes through the ONE dispatch
+                // below exactly as if the key had been pressed on the list.
+                } else if let Some(menu) = story_menu.as_mut() {
+                    match menu.on_key(k, &keymap) {
+                        app::story_menu::MenuOutcome::Activate(cmd) => {
+                            story_menu = None;
+                            pending_command = Some(cmd);
+                        }
+                        app::story_menu::MenuOutcome::Close => story_menu = None,
+                        app::story_menu::MenuOutcome::None => {}
                     }
                 // The IFDB search modal (SQ-0413) captures all keys while open;
                 // its state machine decides what each does (Esc backs out a
                 // level, Enter activates, ↑/↓/j/k navigate).
                 } else if search_modal.is_some() {
                     let action = search_modal.as_mut().unwrap().on_key(k.code, anim);
-                    dispatch_search_action(action, &search_worker, dir, &mut search_modal);
+                    dispatch_search_action(action, &search_worker, &dir, &mut search_modal);
                 // The resource-preview modal (SQ-0347) captures all keys while
                 // open: `+`/`=`/`-`/`0` step the zoom (SQ-0486, intercepted
                 // ahead of dismissal); any of Esc/Enter/q/Space dismisses it
@@ -1443,12 +2160,70 @@ pub(crate) fn run_story_picker(
                             preview.as_mut().unwrap().zoom = PreviewZoom::Fit;
                         }
                         Esc | Enter | Char('q') | Char(' ') => {
-                            preview = None;
+                            // Free the modal's upload before dropping the struct
+                            // that names it (SQ-1190) — `preview = None` alone
+                            // would only forget the id, not free it.
+                            if let Some(old) = preview.take() {
+                                cover.queue_external_delete(old.proto.and_then(|t| t.4));
+                            }
                             if let Some(a) = audio.as_mut() {
                                 a.stop_all();
                             }
                         }
                         _ => {}
+                    }
+                } else if let Some(field) = find_field.as_mut() {
+                    // Type-to-find: letters edit the query and the list is the
+                    // whole library's matches. The vertical keys still move the
+                    // selection, so a match is picked without leaving the field;
+                    // Enter opens it; Esc puts the folder view back.
+                    let mut refilter = false;
+                    match k.code {
+                        Esc => {
+                            find_field = None;
+                            panel_scroll = 0;
+                            if gallery_all_folders(view, false, index_rx.is_some()) {
+                                show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                            } else {
+                                let here = dir.clone();
+                                enter_folder(&source, &mut dir, &root, &here, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                            }
+                        }
+                        Enter => {
+                            if let Some(entry) = stories.get(list.selected) {
+                                let (rows_from_top, gallery_rows_from_top) =
+                                    launch_scroll_recipe(&list, view, gallery_first_row, gallery_cols);
+                                break Some(PickedStory::row(
+                                    entry, &dir, list.selected, rows_from_top, gallery_rows_from_top,
+                                ));
+                            }
+                        }
+                        Up | Down | PageUp | PageDown | Home | End => {
+                            panel_scroll = 0;
+                            app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
+                        }
+                        Backspace => {
+                            field.backspace();
+                            refilter = true;
+                        }
+                        Delete => {
+                            field.delete();
+                            refilter = true;
+                        }
+                        Left => field.left(),
+                        Right => field.right(),
+                        // A control chord (Ctrl+F itself, most likely) is not a
+                        // character for the query.
+                        Char(c) if !k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                            field.insert(c);
+                            refilter = true;
+                        }
+                        _ => {}
+                    }
+                    if refilter {
+                        panel_scroll = 0;
+                        let query = find_field.as_ref().map(|f| f.as_str().to_string()).unwrap_or_default();
+                        apply_find(&index, &root, &query, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
                     }
                 } else if let Some(field) = manual_ifdb.as_mut() {
                     match k.code {
@@ -1518,7 +2293,7 @@ pub(crate) fn run_story_picker(
                                 progress_line = Some("A download is already running".to_string());
                             } else {
                                 progress_line = Some(format!("Downloading {typed}…"));
-                                url_dl.start(typed, dir.to_path_buf());
+                                url_dl.start(typed, dir.clone());
                             }
                         }
                         Backspace => field.backspace(),
@@ -1550,248 +2325,10 @@ pub(crate) fn run_story_picker(
                     if !fetcher.busy() {
                         progress_line = None;
                     }
-                    // Gallery navigation moves a 2D cursor over the same shared
-                    // selection; the list moves it linearly. `gm` computes the
-                    // clamped grid target for a (dx, dy) step.
-                    let gm = |sel: usize, dx: isize, dy: isize| {
-                        app::cover_gallery::move_index(sel, gallery_cols, stories.len(), dx, dy)
-                    };
-                    let gallery = matches!(view, PickerView::Gallery);
-                    // ── BROWSER KEY DISPATCH (registry-driven, SQ-0796) ─────────
-                    // Everything below is keyed on a `BrowserAction`, and the only
-                    // thing that produces one is a `slash::COMMANDS` entry in
-                    // `Context::Browser` that some key is bound to. Nothing in
-                    // this region may look at the keystroke again — that is what
-                    // makes a new gesture impossible to add without a registry
-                    // entry, and it is pinned by
-                    // `browser_dispatch_never_reads_the_key_event` below.
-                    let action = app::browser::action_for_key(&keymap, k);
-                    match action {
-                        // Movement. In the grid this is a 2D cursor; in the list
-                        // it is the shared `list_scroll::nav_key` (SQ-0682) — the
-                        // same mechanism the IFDB search modal's lists and the
-                        // command band's columns navigate with — and a horizontal
-                        // step has no meaning there, so it does nothing at all.
-                        Some(app::browser::BrowserAction::MoveSelection { dx, dy }) => {
-                            if gallery {
-                                panel_scroll = 0;
-                                list.select(gm(list.selected, dx, dy), viewport, anim);
-                            } else if let Some(nav) = action.and_then(app::browser::list_nav_code) {
-                                panel_scroll = 0;
-                                app::list_scroll::nav_key(&mut list, nav, stories.len(), viewport, anim);
-                            }
-                        }
-                        Some(app::browser::BrowserAction::PageSelection(n)) => {
-                            panel_scroll = 0;
-                            if gallery {
-                                list.select(gm(list.selected, 0, n * gallery_vis as isize), viewport, anim);
-                            } else if let Some(nav) = action.and_then(app::browser::list_nav_code) {
-                                app::list_scroll::nav_key(&mut list, nav, stories.len(), viewport, anim);
-                            }
-                        }
-                        Some(app::browser::BrowserAction::SelectEdge(edge)) => {
-                            panel_scroll = 0;
-                            if gallery {
-                                match edge {
-                                    app::browser::Edge::First => list.select(0, viewport, anim),
-                                    app::browser::Edge::Last => {
-                                        list.select(stories.len().saturating_sub(1), viewport, anim)
-                                    }
-                                }
-                            } else if let Some(nav) = action.and_then(app::browser::list_nav_code) {
-                                app::list_scroll::nav_key(&mut list, nav, stories.len(), viewport, anim);
-                            }
-                        }
-                        // `.get`, not indexing (SQ-0659): playing an empty list
-                        // (all stories vanished externally) is a no-op, not a
-                        // panic.
-                        Some(app::browser::BrowserAction::PlayStory) => {
-                            if let Some(entry) = stories.get(list.selected) {
-                                break Some(PickedStory::row(entry));
-                            }
-                        }
-                        // Shift-Enter, `o` and the double right-click are one
-                        // command reaching one constructor (SQ-0789): the dialog
-                        // has a single seeding site, and now a single binding
-                        // target as well.
-                        Some(app::browser::BrowserAction::OpenLaunchOptions) => {
-                            if let Some(entry) = stories.get(list.selected) {
-                                launch_opts = Some(open_launch_options(entry, cfg, data_base));
-                            }
-                        }
-                        Some(app::browser::BrowserAction::QuitBrowser) => break None,
-                        // Cancels a running sweep first; only quits when nothing
-                        // is in flight.
-                        Some(app::browser::BrowserAction::CancelBrowser) => {
-                            if fetcher.busy() {
-                                fetcher.cancel();
-                            } else {
-                                break None;
-                            }
-                        }
-                        Some(app::browser::BrowserAction::ToggleInfoPanel) => {
-                            let target = !slide.open;
-                            if !target || can_open_panel(last_area.width) {
-                                let instant = !cfg.animation.enabled || cfg.animation.scroll_ms == 0;
-                                slide.toggle_to(target, instant);
-                                slide.arm(&cfg.animation);
-                                if target {
-                                    panel_scroll = 0;
-                                    ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
-                                }
-                            }
-                        }
-                        // Toggle the cover-gallery grid (SQ-0374). Selection
-                        // carries over; reset the grid scroll so the selected
-                        // cover is framed on entry (the next draw scrolls to it).
-                        Some(app::browser::BrowserAction::ToggleGallery) => {
-                            view = match view {
-                                PickerView::List => PickerView::Gallery,
-                                PickerView::Gallery => PickerView::List,
-                            };
-                            gallery_first_row = 0;
-                        }
-                        // Refetch only the selected story, ignoring its cache.
-                        // Ignored while a sweep is already running, so a second
-                        // press can't garble the in-flight progress line.
-                        Some(app::browser::BrowserAction::FetchStory) => {
-                            if let Some(entry) = stories.get(list.selected).filter(|_| !fetcher.busy()) {
-                                fetch_is_single = true;
-                                sweep_fetched = 0;
-                                sweep_skipped = 0;
-                                sweep_not_found = 0;
-                                sweep_failed = 0;
-                                progress_line = Some(format!("Fetching {}…", entry.title));
-                                fetcher.request(app::fetch_worker::FetchOrder {
-                                    stories: vec![app::fetch_worker::FetchTarget::row(entry)],
-                                    forced: true,
-                                    id_override: None,
-                                });
-                            }
-                        }
-                        // Sweep the whole library; the worker itself skips any
-                        // story already at the current FETCH_VERSION. Ignored
-                        // while a sweep is already running (see fetch-story).
-                        Some(app::browser::BrowserAction::RefreshLibrary) => {
-                            // A busy-worker check is an `if` inside the arm, never
-                            // a match guard: a guarded arm does not count towards
-                            // exhaustiveness, and it is exhaustiveness here that
-                            // makes a new `BrowserAction` a compile error rather
-                            // than a gesture that quietly does nothing.
-                            if !fetcher.busy() {
-                                let total = stories.len();
-                                let order: Vec<app::fetch_worker::FetchTarget> =
-                                    stories.iter().map(app::fetch_worker::FetchTarget::row).collect();
-                                fetch_is_single = false;
-                                sweep_fetched = 0;
-                                sweep_skipped = 0;
-                                sweep_not_found = 0;
-                                sweep_failed = 0;
-                                progress_line = Some(format!("Fetching 0/{total}"));
-                                fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false, id_override: None });
-                            }
-                        }
-                        // Point the selected story at an IFDB page by hand (for a
-                        // story whose IFID IFDB doesn't index). Opens the
-                        // manual-entry field; ignored mid-sweep (SQ-0371).
-                        Some(app::browser::BrowserAction::SetIfdbUrl) => {
-                            if !fetcher.busy() {
-                                manual_ifdb = Some(app::text_field::TextField::new(""));
-                                progress_line = None;
-                            }
-                        }
-                        // Open the IFDB search modal (SQ-0413) — search by
-                        // title/author, browse results, and download a story file
-                        // into this directory. Opens on a "Popular on IFDB" seed
-                        // list (SQ-0473), fetched non-blocking through the same
-                        // worker.
-                        // Open a story straight from a URL (SQ-1086). It lands
-                        // in `dir`, which IS the library, so the download is kept
-                        // by construction — the command line's keep-it prompt has
-                        // no counterpart here.
-                        Some(app::browser::BrowserAction::OpenUrl) => {
-                            if !url_dl.busy() {
-                                url_prompt = Some(app::text_field::TextField::new(""));
-                                progress_line = None;
-                            }
-                        }
-                        Some(app::browser::BrowserAction::SearchIfdb) => {
-                            let mut sm = app::ifdb_search_modal::SearchModal::new();
-                            // So the chooser can mark files this directory
-                            // already holds (SQ-0597) — the same `dir` every
-                            // download lands in, below.
-                            sm.set_download_dir(dir);
-                            let seed_action = sm.open();
-                            search_modal = Some(sm);
-                            dispatch_search_action(seed_action, &search_worker, dir, &mut search_modal);
-                            progress_line = None;
-                        }
-                        // Download a matching InvisiClues hint file for the
-                        // selected story (SQ-0445) when it has none locally — SLAG
-                        // (IF Archive) preferred, else the Internet Archive izm set.
-                        // Saved beside the story; ignored while one is downloading.
-                        Some(app::browser::BrowserAction::DownloadHints) => {
-                            if let Some(entry) = stories.get(list.selected).filter(|_| !hint_dl.busy()) {
-                                if entry.hint_sidecar.is_some() {
-                                    progress_line = Some(format!("{} already has a hint file", entry.title));
-                                } else {
-                                    let stem =
-                                        entry.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                                    match app::hints::hint_download_for(
-                                        &entry.meta.ifid,
-                                        stem,
-                                        &entry.title,
-                                    ) {
-                                        Some(dl) => {
-                                            let dest = entry.path.with_file_name(&dl.filename);
-                                            progress_line =
-                                                Some(format!("Downloading hints for {}…", entry.title));
-                                            hint_dl.start(
-                                                dl.url,
-                                                dest,
-                                                entry.path.clone(),
-                                                entry.meta.disk_entry.clone(),
-                                                entry.title.clone(),
-                                            );
-                                        }
-                                        None => {
-                                            progress_line =
-                                                Some(format!("No InvisiClues found for {}", entry.title));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Cycle the sort column, keeping direction; or toggle the
-                        // direction, keeping the column. Both preserve the
-                        // selection by path, never by index.
-                        Some(app::browser::BrowserAction::SortLibrary) => {
-                            sort.key = match sort.key {
-                                app::picker::SortKey::Title => app::picker::SortKey::Author,
-                                app::picker::SortKey::Author => app::picker::SortKey::Year,
-                                app::picker::SortKey::Year => app::picker::SortKey::Rating,
-                                app::picker::SortKey::Rating => app::picker::SortKey::Type,
-                                app::picker::SortKey::Type => app::picker::SortKey::Title,
-                            };
-                            list.select(
-                                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
-                                viewport,
-                                anim,
-                            );
-                        }
-                        Some(app::browser::BrowserAction::ReverseSort) => {
-                            sort.desc = !sort.desc;
-                            list.select(
-                                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
-                                viewport,
-                                anim,
-                            );
-                        }
-                        // An unbound key. The ONLY catch-all in this match, so the
-                        // compiler still requires an arm per action above.
-                        None => {}
-                    }
-                    // ── END BROWSER KEY DISPATCH ────────────────────────────────
+                    // Nothing above claimed the key, so it is the browser's:
+                    // carried to the one dispatch below, which is the only place
+                    // a key becomes an action (SQ-1227).
+                    pending_key = Some(k);
                 }
             }
             Ok(Event::Mouse(m)) => {
@@ -1802,34 +2339,60 @@ pub(crate) fn run_story_picker(
                 // use for sub-cell precision, so take the cells and drop the rest.
                 let (m, _) = app::pixel_mouse::normalise(m);
                 if let MouseEventKind::Down(MouseButton::Right) = m.kind {
-                    // SQ-0789: the mouse half of the same gesture. Mirrors the
-                    // left button exactly — first click selects the row, a second
-                    // within the double-click window acts — so the two buttons
-                    // differ only in what the second click does: launch, or ask
-                    // how to launch. Both reach `open_launch_options`, the one
-                    // seam, so keyboard and mouse cannot drift apart.
+                    // SQ-1227: a SINGLE right-click on a row opens that story's
+                    // menu — selecting the row first if it was not the
+                    // highlighted one, so the menu and the selection can never
+                    // disagree about which story is being talked about.
+                    //
+                    // This replaces SQ-0789's double-right-click shortcut to the
+                    // launch-options dialog. The intent survives — a story can
+                    // still be started some way other than the default one, and
+                    // still from the mouse — but it is now an item you can SEE
+                    // rather than a gesture nothing on screen mentioned.
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                    if launch_opts.is_none() && search_modal.is_none() && preview.is_none() {
-                        if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
-                            let idx = *idx;
-                            let now = Instant::now();
-                            let double = last_right_click
-                                .is_some_and(|(li, lt)| li == idx && now.duration_since(lt) < DOUBLE_CLICK);
-                            if double {
-                                if let Some(entry) = stories.get(idx) {
-                                    launch_opts = Some(open_launch_options(entry, cfg, data_base));
-                                }
-                                last_right_click = None;
-                            } else {
-                                panel_scroll = 0;
-                                list.select(idx, viewport, anim);
-                                last_right_click = Some((idx, now));
-                            }
+                    if launch_opts.is_none()
+                        && search_modal.is_none()
+                        && preview.is_none()
+                        && !keys_dialog
+                    {
+                        let hit = row_rects
+                            .iter()
+                            .find(|(_, r)| r.contains(pt))
+                            .map(|(i, _)| (*i, stories.get(*i).is_some_and(|e| e.is_folder())));
+                        let (select, open) = right_click_action(hit);
+                        if let Some(idx) = select.filter(|i| *i != list.selected) {
+                            panel_scroll = 0;
+                            list.select(idx, viewport, anim);
                         }
+                        story_menu = open.map(app::story_menu::StoryMenu::new);
                     }
                 } else if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                    if let Some(lo) = launch_opts.as_mut() {
+                    if keys_dialog {
+                        // The key reference (SQ-1227): ✕, Done, or a click
+                        // outside closes it; a click inside is swallowed.
+                        let on_close = keys_close_rect.is_some_and(|r| r.contains(pt));
+                        let on_button = keys_button_rects.iter().any(|(_, r)| r.contains(pt));
+                        if on_close || on_button || !keys_area.contains(pt) {
+                            keys_dialog = false;
+                        }
+                    } else if story_menu.is_some() {
+                        // The per-story menu (SQ-1227): a click on an item runs
+                        // it, anywhere else dismisses. The click never falls
+                        // through to the row underneath — a menu you dismiss by
+                        // clicking past it must not also move the selection.
+                        match menu_rects.iter().find(|(_, r)| r.contains(pt)) {
+                            Some((i, _)) => {
+                                story_menu = None;
+                                pending_command =
+                                    app::story_menu::STORY_MENU.get(*i).map(|it| it.command);
+                            }
+                            // Its own border is not "outside": a click that
+                            // lands on the frame is a miss, not a dismissal.
+                            None if menu_area.contains(pt) => {}
+                            None => story_menu = None,
+                        }
+                    } else if let Some(lo) = launch_opts.as_mut() {
                         // Topmost modal: ✕ / Cancel / outside dismiss, a row moves
                         // the cursor and acts on it (one click = point and choose),
                         // Play launches with whatever is selected.
@@ -1868,10 +2431,20 @@ pub(crate) fn run_story_picker(
                                         Some(format!("could not save launch options: {e}"));
                                 }
                             }
+                            let (rows_from_top, gallery_rows_from_top) =
+                                launch_scroll_recipe(&list, view, gallery_first_row, gallery_cols);
                             break Some(PickedStory {
                                 path: lo.story_path.clone(),
                                 disk_entry: lo.disk_entry.clone(),
                                 overrides: lo.overrides(),
+                                position: PickerPosition {
+                                    dir: dir.clone(),
+                                    path: lo.story_path.clone(),
+                                    disk_entry: lo.disk_entry.clone(),
+                                    index_hint: list.selected,
+                                    rows_from_top,
+                                    gallery_rows_from_top,
+                                },
                             });
                         } else if on_close
                             || button == Some(app::render::dialog::ButtonId::Cancel)
@@ -1895,7 +2468,10 @@ pub(crate) fn run_story_picker(
                         let on_button = preview_button_rects.iter().any(|(_, r)| r.contains(pt));
                         let outside = !preview_area.contains(pt);
                         if on_close || on_button || outside {
-                            preview = None;
+                            // See the keyboard-dismiss arm above (SQ-1190).
+                            if let Some(old) = preview.take() {
+                                cover.queue_external_delete(old.proto.and_then(|t| t.4));
+                            }
                             if let Some(a) = audio.as_mut() {
                                 a.stop_all();
                             }
@@ -1915,15 +2491,26 @@ pub(crate) fn run_story_picker(
                         // window → launch; otherwise just select it (SQ-0366).
                         let double = last_click
                             .is_some_and(|(li, lt)| li == idx && now.duration_since(lt) < DOUBLE_CLICK);
-                        if double {
-                            break Some(PickedStory::row(&stories[idx]));
+                        if double && stories[idx].is_folder() {
+                            // A double-click on a folder enters it, like Enter.
+                            let target = stories[idx].path.clone();
+                            panel_scroll = 0;
+                            enter_folder(&source, &mut dir, &root, &target, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                            last_click = None;
+                        } else if double {
+                            let (rows_from_top, gallery_rows_from_top) =
+                                launch_scroll_recipe(&list, view, gallery_first_row, gallery_cols);
+                            break Some(PickedStory::row(
+                                &stories[idx], &dir, idx, rows_from_top, gallery_rows_from_top,
+                            ));
+                        } else {
+                            panel_scroll = 0;
+                            list.select(idx, viewport, anim);
+                            if slide.open {
+                                ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
+                            }
+                            last_click = Some((idx, now));
                         }
-                        panel_scroll = 0;
-                        list.select(idx, viewport, anim);
-                        if slide.open {
-                            ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
-                        }
-                        last_click = Some((idx, now));
                     } else if let Some((key, _)) = header_rects.iter().find(|(_, r)| r.contains(pt)) {
                         // Click the active header → reverse; click another → sort
                         // by it, ascending.
@@ -1943,6 +2530,8 @@ pub(crate) fn run_story_picker(
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     match wheel_target(
                         launch_opts.is_some(),
+                        keys_dialog,
+                        story_menu.is_some(),
                         search_modal.is_some(),
                         preview.is_some(),
                         slide.open && last_panel_area.contains(pt),
@@ -1982,15 +2571,345 @@ pub(crate) fn run_story_picker(
             }
             Ok(Event::Resize(_, _)) => {
                 let _ = terminal.clear();
-                // SQ-0988: the cell may have changed shape, not just the grid.
-                // Every built cover raster was aspect-fitted against the old one.
-                if cover_picker.as_mut().is_some_and(refresh_cell_size) {
-                    cover.invalidate_cell_geometry();
-                }
+                // SQ-0988/SQ-1520: the cell may have changed shape, not just the
+                // grid — every built cover raster was aspect-fitted against the
+                // old one. Arm the settle timer rather than requerying right
+                // here; the event-wait loop above requeries once the resize
+                // burst settles (same shape as `loop_tick::poll_glulx_resize`).
+                cover_picker_dirty = Some(std::time::Instant::now());
+                // SQ-1340: a dtach reattach (the web image) hands this loop a
+                // resize from a browser tab whose fresh xterm.js never saw this
+                // loop's own mouse-capture enable a few lines up (or the
+                // launch-time bracketed paste) — re-send both via the same
+                // shared fn the launch site and the game loop use, so the
+                // picker cannot drift from either.
+                let _ = crate::startup::reassert_terminal_modes(&mut stdout(), cfg.mouse);
             }
             Ok(_) => {}
             Err(_) => break None,
         }
+
+        // ── BROWSER KEY DISPATCH (registry-driven, SQ-0796) ─────────────────
+        // Everything below is keyed on a `BrowserAction`, and the only thing
+        // that produces one is a `slash::COMMANDS` entry in `Context::Browser`
+        // — reached either by a key bound to it or by the story menu's item for
+        // it (SQ-1227), which is why this sits outside the event match: one
+        // dispatch, whichever gesture asked. Nothing in this region may look at
+        // the keystroke again — that is what makes a new gesture impossible to
+        // add without a registry entry, and it is pinned by
+        // `browser_dispatch_never_reads_the_key_event` below.
+        let action = pending_command
+            .and_then(app::browser::action_for_command)
+            .or_else(|| pending_key.and_then(|ev| app::browser::action_for_key(&keymap, ev)));
+        // Gallery navigation moves a 2D cursor over the same shared selection;
+        // the list moves it linearly. `gm` computes the clamped grid target for
+        // a (dx, dy) step.
+        let gm = |sel: usize, dx: isize, dy: isize| {
+            app::cover_gallery::move_index(sel, gallery_cols, stories.len(), dx, dy)
+        };
+        let gallery = matches!(view, PickerView::Gallery);
+        match action {
+            // Movement. In the grid this is a 2D cursor; in the list
+            // it is the shared `list_scroll::nav_key` (SQ-0682) — the
+            // same mechanism the IFDB search modal's lists and the
+            // command band's columns navigate with — and a horizontal
+            // step has no meaning there, so it does nothing at all.
+            Some(app::browser::BrowserAction::MoveSelection { dx, dy }) => {
+                if gallery {
+                    panel_scroll = 0;
+                    list.select(gm(list.selected, dx, dy), viewport, anim);
+                    gallery_scroll_motion_at = Some(Instant::now());
+                } else if let Some(nav) = action.and_then(app::browser::list_nav_code) {
+                    panel_scroll = 0;
+                    app::list_scroll::nav_key(&mut list, nav, stories.len(), viewport, anim);
+                }
+            }
+            Some(app::browser::BrowserAction::PageSelection(n)) => {
+                panel_scroll = 0;
+                if gallery {
+                    list.select(gm(list.selected, 0, n * gallery_vis as isize), viewport, anim);
+                    gallery_scroll_motion_at = Some(Instant::now());
+                } else if let Some(nav) = action.and_then(app::browser::list_nav_code) {
+                    app::list_scroll::nav_key(&mut list, nav, stories.len(), viewport, anim);
+                }
+            }
+            // List view only (SQ-1228): the cover gallery has no
+            // half-row concept, so Ctrl-U/Ctrl-D do nothing there.
+            Some(app::browser::BrowserAction::HalfPageSelection(n)) => {
+                panel_scroll = 0;
+                if !gallery {
+                    let dir = if n < 0 { -1 } else { 1 };
+                    list.half_page(dir, viewport, anim);
+                }
+            }
+            Some(app::browser::BrowserAction::SelectEdge(edge)) => {
+                panel_scroll = 0;
+                if gallery {
+                    match edge {
+                        app::browser::Edge::First => list.select(0, viewport, anim),
+                        app::browser::Edge::Last => {
+                            list.select(stories.len().saturating_sub(1), viewport, anim)
+                        }
+                    }
+                    gallery_scroll_motion_at = Some(Instant::now());
+                } else if let Some(nav) = action.and_then(app::browser::list_nav_code) {
+                    app::list_scroll::nav_key(&mut list, nav, stories.len(), viewport, anim);
+                }
+            }
+            // `.get`, not indexing (SQ-0659): playing an empty list
+            // (all stories vanished externally) is a no-op, not a
+            // panic.
+            Some(app::browser::BrowserAction::PlayStory) => match stories.get(list.selected) {
+                // A folder is entered, not played.
+                Some(entry) if entry.is_folder() => {
+                    let target = entry.path.clone();
+                    panel_scroll = 0;
+                    enter_folder(&source, &mut dir, &root, &target, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                }
+                Some(entry) => {
+                    let (rows_from_top, gallery_rows_from_top) =
+                        launch_scroll_recipe(&list, view, gallery_first_row, gallery_cols);
+                    break Some(PickedStory::row(
+                        entry, &dir, list.selected, rows_from_top, gallery_rows_from_top,
+                    ));
+                }
+                None => {}
+            },
+            // `o`, Shift-Enter and the story menu's own row are one
+            // command reaching one constructor (SQ-0789): the dialog
+            // has a single seeding site, and a single binding target
+            // as well.
+            Some(app::browser::BrowserAction::OpenLaunchOptions) => {
+                if let Some(entry) = stories.get(list.selected).filter(|e| !e.is_folder()) {
+                    launch_opts = Some(open_launch_options(entry, cfg, data_base));
+                }
+            }
+            // The per-story menu (SQ-1227). A folder has none of these
+            // actions — it is entered, not played — so the gesture is
+            // inert on one, exactly as launch options already are.
+            Some(app::browser::BrowserAction::OpenStoryMenu) => {
+                if stories.get(list.selected).is_some_and(|e| !e.is_folder()) {
+                    story_menu = Some(app::story_menu::StoryMenu::new(list.selected));
+                }
+            }
+            Some(app::browser::BrowserAction::ShowBrowserKeys) => {
+                keys_dialog = true;
+                progress_line = None;
+            }
+            // Open the find field over the in-memory index. An empty
+            // query lists the whole library, which is itself the
+            // answer to "where did that game go" in a tree.
+            Some(app::browser::BrowserAction::FindStory) => {
+                if index_rx.is_some() && find_field.is_none() {
+                    find_field = Some(app::text_field::TextField::new(""));
+                    progress_line = None;
+                    panel_scroll = 0;
+                    apply_find(&index, &root, "", &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                }
+            }
+            // Up one folder; inert at the root.
+            Some(app::browser::BrowserAction::ParentFolder) => {
+                if dir != root {
+                    if let Some(parent) = dir.parent().map(|p| p.to_path_buf()) {
+                        panel_scroll = 0;
+                        if gallery_all_folders(view, find_field.is_some(), index_rx.is_some()) {
+                            dir = parent;
+                            show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                        } else {
+                            enter_folder(&source, &mut dir, &root, &parent, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                        }
+                    }
+                }
+            }
+            Some(app::browser::BrowserAction::QuitBrowser) => break None,
+            // Cancels a running sweep first; only quits when nothing
+            // is in flight.
+            Some(app::browser::BrowserAction::CancelBrowser) => {
+                if fetcher.busy() {
+                    fetcher.cancel();
+                } else {
+                    break None;
+                }
+            }
+            Some(app::browser::BrowserAction::ToggleInfoPanel) => {
+                let target = !slide.open;
+                if !target || can_open_panel(last_area.width) {
+                    let instant = !cfg.animation.enabled || cfg.animation.scroll_ms == 0;
+                    slide.toggle_to(target, instant);
+                    slide.arm(&cfg.animation);
+                    if target {
+                        panel_scroll = 0;
+                        ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
+                    }
+                }
+            }
+            // Toggle the cover-gallery grid (SQ-0374). Selection
+            // carries over; reset the grid scroll so the selected
+            // cover is framed on entry (the next draw scrolls to it).
+            Some(app::browser::BrowserAction::ToggleGallery) => {
+                view = match view {
+                    PickerView::List => PickerView::Gallery,
+                    PickerView::Gallery => PickerView::List,
+                };
+                gallery_first_row = 0;
+                // The grid shows the folder and everything under
+                // it; the list shows the folder's own rows. Swap
+                // the list to match, unless a find is showing
+                // matches in both.
+                if find_field.is_none() && index_rx.is_some() {
+                    panel_scroll = 0;
+                    if matches!(view, PickerView::Gallery) {
+                        show_gallery_scope(&index, &root, &dir, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index);
+                    } else {
+                        let keep = stories.get(list.selected).map(|e| e.path.clone());
+                        let here = dir.clone();
+                        enter_folder(&source, &mut dir, &root, &here, &mut stories, &mut row_badges, &mut aux_cache, &mut list, data_base, &hint_index, viewport, anim);
+                        if let Some(idx) = keep.and_then(|p| stories.iter().position(|e| e.path == p)) {
+                            list.select(idx, viewport, anim);
+                        }
+                    }
+                }
+            }
+            // Refetch only the selected story, ignoring its cache.
+            // Ignored while a sweep is already running, so a second
+            // press can't garble the in-flight progress line.
+            Some(app::browser::BrowserAction::FetchStory) => {
+                if let Some(entry) = stories.get(list.selected).filter(|e| !e.is_folder() && !fetcher.busy()) {
+                    fetch_is_single = true;
+                    sweep_fetched = 0;
+                    sweep_skipped = 0;
+                    sweep_not_found = 0;
+                    sweep_failed = 0;
+                    progress_line = Some(format!("Fetching {}…", entry.title));
+                    fetcher.request(app::fetch_worker::FetchOrder {
+                        stories: vec![app::fetch_worker::FetchTarget::row(entry)],
+                        forced: true,
+                        id_override: None,
+                    });
+                }
+            }
+            // Sweep the whole library; the worker itself skips any
+            // story already at the current FETCH_VERSION. Ignored
+            // while a sweep is already running (see fetch-story).
+            Some(app::browser::BrowserAction::RefreshLibrary) => {
+                // A busy-worker check is an `if` inside the arm, never
+                // a match guard: a guarded arm does not count towards
+                // exhaustiveness, and it is exhaustiveness here that
+                // makes a new `BrowserAction` a compile error rather
+                // than a gesture that quietly does nothing.
+                if !fetcher.busy() {
+                    // Folder rows are not stories; the sweep skips them.
+                    let order: Vec<app::fetch_worker::FetchTarget> = stories
+                        .iter()
+                        .filter(|e| !e.is_folder())
+                        .map(app::fetch_worker::FetchTarget::row)
+                        .collect();
+                    let total = order.len();
+                    fetch_is_single = false;
+                    sweep_fetched = 0;
+                    sweep_skipped = 0;
+                    sweep_not_found = 0;
+                    sweep_failed = 0;
+                    progress_line = Some(format!("Fetching 0/{total}"));
+                    fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false, id_override: None });
+                }
+            }
+            // Point the selected story at an IFDB page by hand (for a
+            // story whose IFID IFDB doesn't index). Opens the
+            // manual-entry field; ignored mid-sweep (SQ-0371).
+            Some(app::browser::BrowserAction::SetIfdbUrl) => {
+                if !fetcher.busy() && stories.get(list.selected).is_some_and(|e| !e.is_folder()) {
+                    manual_ifdb = Some(app::text_field::TextField::new(""));
+                    progress_line = None;
+                }
+            }
+            // Open the IFDB search modal (SQ-0413) — search by
+            // title/author, browse results, and download a story file
+            // into this directory. Opens on a "Popular on IFDB" seed
+            // list (SQ-0473), fetched non-blocking through the same
+            // worker.
+            // Open a story straight from a URL (SQ-1086). It lands
+            // in `dir`, which IS the library, so the download is kept
+            // by construction — the command line's keep-it prompt has
+            // no counterpart here.
+            Some(app::browser::BrowserAction::OpenUrl) => {
+                if !url_dl.busy() {
+                    url_prompt = Some(app::text_field::TextField::new(""));
+                    progress_line = None;
+                }
+            }
+            Some(app::browser::BrowserAction::SearchIfdb) => {
+                let mut sm = app::ifdb_search_modal::SearchModal::new();
+                // So the chooser can mark files this directory
+                // already holds (SQ-0597) — the same `dir` every
+                // download lands in, below.
+                sm.set_download_dir(&dir);
+                let seed_action = sm.open();
+                search_modal = Some(sm);
+                dispatch_search_action(seed_action, &search_worker, &dir, &mut search_modal);
+                progress_line = None;
+            }
+            // Download a matching InvisiClues hint file for the
+            // selected story (SQ-0445) when it has none locally — SLAG
+            // (IF Archive) preferred, else the Internet Archive izm set.
+            // Saved beside the story; ignored while one is downloading.
+            Some(app::browser::BrowserAction::DownloadHints) => {
+                if let Some(entry) = stories.get(list.selected).filter(|e| !e.is_folder() && !hint_dl.busy()) {
+                    if entry.hint_sidecar.is_some() {
+                        progress_line = Some(format!("{} already has a hint file", entry.title));
+                    } else {
+                        match app::hints::hint_download_for(&entry.meta.ifid) {
+                            Some(dl) => {
+                                let dest = entry.path.with_file_name(&dl.filename);
+                                progress_line =
+                                    Some(format!("Downloading hints for {}…", entry.title));
+                                hint_dl.start(
+                                    dl.url,
+                                    dest,
+                                    entry.path.clone(),
+                                    entry.meta.disk_entry.clone(),
+                                    entry.title.clone(),
+                                );
+                            }
+                            None => {
+                                progress_line =
+                                    Some(format!("No InvisiClues found for {}", entry.title));
+                            }
+                        }
+                    }
+                }
+            }
+            // Cycle the sort column, keeping direction; or toggle the
+            // direction, keeping the column. Both preserve the
+            // selection by path, never by index.
+            Some(app::browser::BrowserAction::SortLibrary) => {
+                sort.key = match sort.key {
+                    app::picker::SortKey::Title => app::picker::SortKey::Author,
+                    app::picker::SortKey::Author => app::picker::SortKey::Year,
+                    app::picker::SortKey::Year => app::picker::SortKey::Rating,
+                    app::picker::SortKey::Rating => app::picker::SortKey::Type,
+                    app::picker::SortKey::Type => app::picker::SortKey::Title,
+                };
+                list.select(
+                    resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                    viewport,
+                    anim,
+                );
+            }
+            Some(app::browser::BrowserAction::ReverseSort) => {
+                sort.desc = !sort.desc;
+                list.select(
+                    resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                    viewport,
+                    anim,
+                );
+            }
+            // An unbound key. The ONLY catch-all in this match, so the
+            // compiler still requires an arm per action above.
+            None => {}
+        }
+        // ── END BROWSER KEY DISPATCH ────────────────────────────────
+
         panel_scroll = panel_scroll.min(panel_max);
         list.finalize_if_done();
     };
@@ -2016,10 +2935,10 @@ type HeaderHitRects = Vec<(app::picker::SortKey, Rect)>;
 #[allow(clippy::too_many_arguments)]
 fn draw_story_picker(
     stories: &[app::picker::StoryEntry],
-    list: &app::list_scroll::ListScroll,
+    list: &mut app::list_scroll::ListScroll,
     badges: &[app::picker::RowBadges],
     glyphs: &app::picker::BadgeGlyphs,
-    dir: &std::path::Path,
+    heading: &PickerHeading,
     cs: &app::colors::ColorScheme,
     km: &app::keymap::KeyMap,
     sort: app::picker::Sort,
@@ -2042,6 +2961,7 @@ fn draw_story_picker(
     let story_year = cs.theme.get("story_year").style;
     let story_rating = cs.theme.get("story_rating").style;
     let story_badge = cs.theme.get("story_badge").style;
+    let story_folder = cs.theme.get("story_folder").style;
     let scrollbar = app::render::scroll::ScrollbarLook::from_theme(&cs.theme);
 
     // Background fill.
@@ -2053,13 +2973,10 @@ fn draw_story_picker(
         }
     }
 
-    // Header.
-    let header = format!(
-        " lanthorn — choose a story  ({} found in {})   [i: info · g: covers]",
-        stories.len(),
-        dir.display()
-    );
+    // Header. Version right-aligned when there's room beside the title.
+    let header = heading.line(stories);
     draw_str_clipped(buf, area.x, area.y, &header, dialog_title, area);
+    draw_top_bar_version(buf, area, &header, dialog_title);
 
     // List region (title bar + column-header row at top, footer at bottom).
     let list_top = area.y + 2;
@@ -2074,6 +2991,11 @@ fn draw_story_picker(
     let scrollbar_visible =
         app::render::scroll::needs_scrollbar(total, rows) && area.width >= 2;
     let row_w = if scrollbar_visible { area.width.saturating_sub(1) } else { area.width };
+    // Correct a `ListScroll::prime()`d offset the first time the real viewport
+    // is known (SQ-1479): a distance recorded on a taller terminal can leave
+    // the row below the fold on a shorter one. A no-op once the offset
+    // already satisfies the invariant, so it's safe to call every frame.
+    list.clamp_visible(rows);
     let first = list.display_offset();
 
     // Badge cluster width depends only on the configured glyphs, not the
@@ -2157,10 +3079,26 @@ fn draw_story_picker(
         let marker = if sel { "▸ " } else { "  " };
         draw_str_clipped(buf, area.x, y, marker, style, row_rect);
 
+        // A folder row is its name in the folder colour and nothing else: no
+        // "(no metadata yet)", no year, no rating, `folder` for a type.
+        let is_folder = entry.is_folder();
+        let title_style = if sel || !is_folder { style } else { story_folder };
         let title_txt = truncate_to_width(&entry.title, cols.title_w as usize);
-        draw_str_clipped(buf, title_x, y, &title_txt, style, row_rect);
+        draw_str_clipped(buf, title_x, y, &title_txt, title_style, row_rect);
+        // While finding, a match can come from anywhere under the root, so its
+        // folder rides after the title, muted; in a folder view every row's
+        // folder is the one in the header and the label is `None`.
+        if let Some(rel) = app::picker::folder_label(entry, heading.label_base()).filter(|_| !is_folder) {
+            let used = UnicodeWidthStr::width(title_txt.as_str());
+            let room = (cols.title_w as usize).saturating_sub(used + 2);
+            if room >= 4 {
+                let suffix = truncate_to_width(&format!("{rel}/"), room);
+                let suffix_style = if sel { style } else { story_no_metadata };
+                draw_str_clipped(buf, title_x + used as u16 + 2, y, &suffix, suffix_style, row_rect);
+            }
+        }
 
-        if cols.author_w > 0 {
+        if cols.author_w > 0 && !is_folder {
             let (author_txt, author_style) = match entry.meta.author.as_deref() {
                 Some(a) if !a.is_empty() => {
                     (truncate_to_width(a, cols.author_w as usize), story_author)
@@ -2212,8 +3150,11 @@ fn draw_story_picker(
             // the badge's reverse-block treatment); selection wins like the
             // other text columns.
             let interp_x = bx - COL_GAP - INTERP_COL_W;
-            let interp_txt =
-                truncate_to_width(&interp_label(&entry.meta, b.blorb), INTERP_COL_W as usize);
+            let interp_txt = if entry.is_folder() {
+                "folder".to_string()
+            } else {
+                truncate_to_width(&interp_label(&entry.meta, b.blorb), INTERP_COL_W as usize)
+            };
             let interp_style = if sel { style } else { story_badge };
             draw_str_clipped(buf, interp_x, y, &interp_txt, interp_style, row_rect);
             // Flags render as regular text like the other columns; the selection
@@ -2239,11 +3180,34 @@ fn draw_story_picker(
     }
 
     // Footer hint.
-    let footer = build_footer(km, area.width);
+    let footer = build_footer(km, area.width, false);
     let fstyle = Style::new().fg(Color::DarkGray).patch(dialog);
     draw_str_clipped(buf, area.x, list_bottom, &footer, fstyle, area);
 
     (row_rects, rows, header_rects)
+}
+
+/// How long the gallery grid's scroll is considered "in motion" after the last
+/// wheel notch or nav key (SQ-1213), mirroring `AppState::SIXEL_SCROLL_SETTLE_MS`
+/// from the transcript's own debounce (SQ-1198, `crates/app/src/state.rs`): this
+/// loop has no `AppState` to ride, so it tracks the identical 150ms window
+/// locally instead — one default scroll-tween (120ms) plus a tick's margin.
+const GALLERY_SCROLL_SETTLE_MS: u64 = 150;
+
+/// True while the gallery grid's scroll is still "in motion" from a recent
+/// wheel notch or nav key (SQ-1213) — see [`GALLERY_SCROLL_SETTLE_MS`].
+fn gallery_scroll_in_motion(motion_at: Option<std::time::Instant>) -> bool {
+    motion_at.is_some_and(|t| t.elapsed().as_millis() < GALLERY_SCROLL_SETTLE_MS as u128)
+}
+
+/// True while a gallery cover tile should render as its already-painted
+/// letterbox footprint instead of building/placing a protocol (SQ-1213,
+/// mirroring `sixel_scroll_suppress` in `render/inline_image.rs` for the
+/// transcript's own debounce): sixel has no image ids, so re-placing a tile
+/// mid-scroll re-sends its whole payload every frame, where kitty re-places an
+/// existing upload by id for free. Kitty and half-blocks are untouched.
+fn gallery_sixel_scroll_suppress(picker: &ratatui_image::picker::Picker, in_motion: bool) -> bool {
+    picker.protocol_type() == ratatui_image::picker::ProtocolType::Sixel && in_motion
 }
 
 /// Draw the cover-gallery view (SQ-0374): a grid of story cover thumbnails, each
@@ -2252,18 +3216,32 @@ fn draw_story_picker(
 /// to keep `selected` on screen). Returns each visible tile's `(index, rect)`
 /// for click selection (the whole tile is the hit target), plus the resolved
 /// column and visible-row counts the caller feeds back into navigation. Covers
-/// paint only for tiles already decoded into `cover`; undecoded/coverless tiles
-/// show a plain letterbox until the async decoder fills them in.
+/// paint only for tiles already decoded into `cover` AND already encoded into a
+/// tile raster; anything else shows a plain letterbox until the async decoder
+/// and `tiles`, the async ENCODER (SQ-1199), fill it in — this draw builds no
+/// protocol of its own. `scroll_in_motion` gates the SQ-1213 sixel
+/// scroll-settle debounce (see [`gallery_sixel_scroll_suppress`]).
 #[allow(clippy::too_many_arguments)]
 fn draw_story_gallery(
     stories: &[app::picker::StoryEntry],
     selected: usize,
     first_row: &mut usize,
-    dir: &std::path::Path,
+    // `Some(distance)` once, right after a restore into gallery view
+    // (SQ-1479): consumed on the first call that measures a real grid, to
+    // land `first_row` `distance` grid rows above the selected tile's row —
+    // the gallery's answer to `ListScroll::prime`, deferred until `cols` is
+    // known because the grid reflows with the terminal's width. `None` on
+    // every ordinary frame after that (nothing to restore).
+    restore_rows_from_top: &mut Option<usize>,
+    heading: &PickerHeading,
     cs: &app::colors::ColorScheme,
     km: &app::keymap::KeyMap,
     picker: Option<&ratatui_image::picker::Picker>,
+    scroll_in_motion: bool,
     cover: &mut app::cover::CoverState,
+    // The background tile encoder (SQ-1199): a visible tile whose raster isn't
+    // built yet is REQUESTED here, never encoded on this thread.
+    tiles: &mut app::cover::TileEncoder,
     // Where per-game directories live: a tile's cover is cached under the ROW's
     // key, which for one of several stories off a disk image is that story's own
     // directory (SQ-0859).
@@ -2290,13 +3268,10 @@ fn draw_story_gallery(
         }
     }
 
-    // Header (matches the list view's, with the toggle hint flipped).
-    let header = format!(
-        " lanthorn — choose a story  ({} found in {})   [i: info · g: list]",
-        stories.len(),
-        dir.display()
-    );
+    // Header (matches the list view's).
+    let header = heading.line(stories);
     draw_str_clipped(buf, area.x, area.y, &header, dialog_title, area);
+    draw_top_bar_version(buf, area, &header, dialog_title);
 
     // Grid region: below the header, above the footer row.
     let grid_top = area.y + 2;
@@ -2309,6 +3284,13 @@ fn draw_story_gallery(
     let grid = Rect::new(area.x + 1, grid_top, area.width.saturating_sub(1), grid_bottom - grid_top);
     let cols = g::columns(grid.width);
     let vis = g::visible_rows(grid.height);
+    if let Some(distance) = restore_rows_from_top.take() {
+        // The grid's own row/column math, only now knowable (SQ-1479) —
+        // `cols` reflows with the terminal, so the distance couldn't be
+        // turned into a `first_row` any earlier than this.
+        let sel_row = selected / cols.max(1);
+        *first_row = sel_row.saturating_sub(distance);
+    }
     *first_row = g::scroll_to(selected, cols, vis, *first_row);
     let total = stories.len();
     let total_rows = total.div_ceil(cols);
@@ -2341,16 +3323,46 @@ fn draw_story_gallery(
                 }
             }
             let mut drew_cover = false;
-            if let Some(picker) = picker {
+            if let Some(picker) = picker.filter(|_| !entry.is_folder()) {
                 let key = entry.cover_key(data_base);
                 if cover.has(&key) {
                     // Centre the cover in the tile via a self-computed fitted rect
                     // (image aspect + cell size), so it centres on both axes no
                     // matter how the render protocol reports its own size.
                     let fit = cover.fitted_tile_rect(picker, &key, cover_rect);
-                    if let Some(proto) = cover.tile_protocol(picker, &key, fit) {
-                        app::render::graphics::place_protocol(proto, fit, buf);
+                    if gallery_sixel_scroll_suppress(picker, scroll_in_motion) {
+                        // SQ-1213: mid-scroll under sixel, leave the tile as the
+                        // letterbox footprint already filled above rather than
+                        // rebuilding/re-placing its whole payload this frame.
+                        // Nothing is requested either (SQ-1199): a frame that has
+                        // decided not to show a payload has no use for one, and a
+                        // fling would otherwise queue a row of encodes per notch
+                        // for rasters no suppressed frame will place.
                         drew_cover = true;
+                    } else {
+                        let tkey = app::cover::TileKey::new(&key, fit, picker);
+                        if let Some(proto) = cover.tile(&tkey) {
+                            let id = app::render::graphics::place_protocol(proto, fit, buf);
+                            cover.note_tile_placed(id);
+                            drew_cover = true;
+                        } else if let Some(img) =
+                            cover.image(&key).filter(|_| !tiles.failed(&tkey))
+                        {
+                            // SQ-1199: the resize + protocol encode goes to the
+                            // background encoder and the tile keeps the letterbox
+                            // footprint already filled above until it lands — the
+                            // draw never blocks on one. `request` dedupes, so the
+                            // 16ms tick that keeps redrawing while tiles are
+                            // pending queues each tile exactly once.
+                            //
+                            // The footprint, not the titled placeholder: this
+                            // story HAS a cover, and flashing the no-cover box for
+                            // the frame or two before its raster lands would read
+                            // as a glitch. A cover whose encode actually FAILED is
+                            // `failed()` above and does fall through to it.
+                            tiles.request(tkey, img, picker);
+                            drew_cover = true;
+                        }
                     }
                 }
             }
@@ -2437,8 +3449,9 @@ fn draw_story_gallery(
     }
 
     // Footer hint, from the same registry-driven hints the list footer uses
-    // (SQ-0796) — the gallery's is a fixed line rather than a dropping one.
-    let footer = format!(" {}", hint_segments(km, app::browser::HINTS_GALLERY).join("   "));
+    // (SQ-0796) — the same line and the same drop order (SQ-1227), with `g`
+    // naming where it goes (`list`) rather than where it is.
+    let footer = build_footer(km, area.width, true);
     let fstyle = ratatui::style::Style::new()
         .fg(ratatui::style::Color::DarkGray)
         .patch(dialog);
@@ -2622,7 +3635,8 @@ fn draw_info_panel(
                         used_w,
                         used_h,
                     );
-                    app::render::graphics::place_protocol(proto, dest, buf);
+                    let id = app::render::graphics::place_protocol(proto, dest, buf);
+                    cover.note_proto_placed(id);
                 }
                 if used_h > 0 {
                     inner = Rect::new(inner.x, inner.y + used_h, inner.width, inner.height - used_h);
@@ -2702,14 +3716,8 @@ fn draw_info_panel(
     // when a matching InvisiClues can be downloaded with `H` (SQ-0445).
     if let Some(name) = hint_sidecar.and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
         lines.push((format!("Hints: {name}"), story_info_value));
-    } else {
-        let stem = std::path::Path::new(filename)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        if app::hints::hint_download_for(&meta.ifid, stem, title).is_some() {
-            lines.push(("Hints: available to download (press H)".to_string(), story_info_value));
-        }
+    } else if app::hints::hint_download_for(&meta.ifid).is_some() {
+        lines.push(("Hints: available to download (press H)".to_string(), story_info_value));
     }
     // author · year · genre (SQ-0348): one line, present parts only — a story
     // with none of the three renders no line at all, so a no-metadata panel
@@ -2758,9 +3766,16 @@ fn draw_info_panel(
         lines.push((format!("IFDB search: {url}"), story_info_link));
     }
     // features line (present badges only).
-    let feats = feature_words(&meta.features, aux);
+    let feats = feature_words(&meta.features, aux, meta.scott_pictures);
     if !feats.is_empty() {
         lines.push((format!("Features: {}", feats.join(" ")), story_info_value));
+    }
+    // Scott Adams picture provenance (SQ-1473): what this story's own graphics
+    // are, resolved once at scan time (`picker::scott_pictures`) rather than
+    // guessed here. `None` — a non-Scott story, or a text-only `.dat` — prints
+    // no line at all, exactly like an absent `Features:` line above.
+    if let Some(sp) = meta.scott_pictures {
+        lines.push((format!("Pictures: {}", scott_pictures_label(sp)), story_info_value));
     }
 
     // Detected picture archives (SQ-0789). Read-only inventory: what art this
@@ -3173,6 +4188,9 @@ fn draw_resource_preview(
     picker: Option<&ratatui_image::picker::Picker>,
     cs: &app::colors::ColorScheme,
     buf: &mut ratatui::buffer::Buffer,
+    // Shares `cover`'s delete queue (SQ-1190) — see the doc comment on
+    // `ResourcePreview::proto`.
+    cover: &mut app::cover::CoverState,
 ) -> app::render::dialog::DialogRects {
     use app::render::dialog::{draw_dialog, ButtonId, DialogButton, DialogSpec, DialogStyle, Placement};
     // Centre a generous box: 80% of the terminal, floored so it stays usable on
@@ -3204,7 +4222,7 @@ fn draw_resource_preview(
     let mut drew_image = false;
     if let (Some(picker), Some(img)) = (picker, pv.image.as_ref()) {
         if content.width >= 1 && content.height >= 1 {
-            let fresh = matches!(&pv.proto, Some((w, h, z, _))
+            let fresh = matches!(&pv.proto, Some((w, h, z, _, _))
                 if *w == content.width && *h == content.height && *z == pv.zoom);
             if !fresh {
                 let target = ratatui::layout::Size::new(content.width, content.height);
@@ -3238,10 +4256,16 @@ fn draw_resource_preview(
                     }
                 };
                 if let Some(built) = built {
-                    pv.proto = Some((content.width, content.height, pv.zoom, built));
+                    // Freed only once the rebuild actually produced something — a
+                    // failed build (an unlikely encode error) must leave the
+                    // surviving proto, and its terminal upload, alone (SQ-1190).
+                    let old = pv.proto.take();
+                    cover.queue_external_delete(old.and_then(|t| t.4));
+                    pv.proto = Some((content.width, content.height, pv.zoom, built, None));
                 }
             }
-            if let Some((_, _, _, proto)) = &pv.proto {
+            let mut placed_id = None;
+            if let Some((_, _, _, proto, _)) = &pv.proto {
                 let sz = proto.size();
                 let uw = sz.width.min(content.width);
                 let uh = sz.height.min(content.height);
@@ -3251,8 +4275,13 @@ fn draw_resource_preview(
                     uw,
                     uh,
                 );
-                app::render::graphics::place_protocol(proto, dest, buf);
+                placed_id = Some(app::render::graphics::place_protocol(proto, dest, buf));
                 drew_image = true;
+            }
+            if let Some(id) = placed_id {
+                if let Some(entry) = pv.proto.as_mut() {
+                    entry.4 = id;
+                }
             }
         }
     }
@@ -3305,11 +4334,20 @@ fn human_size(bytes: u64) -> String {
 }
 
 /// Present-only feature badge words, folding in aux-derived signals (an
-/// associated blorb's sound/picture chunks, or a resolved hint index).
-fn feature_words(f: &app::picker::Features, aux: Option<&app::picker::StoryAux>) -> Vec<&'static str> {
+/// associated blorb's sound/picture chunks, or a resolved hint index) and a
+/// Scott entry's own graphics (`scott_pictures`, SQ-1473) — `f.graphics` is
+/// always `false` for the Scott engine (no header flag to read it off, see
+/// `picker::entry_from_loaded`'s `Features::default()` for that engine), so
+/// this is the only thing that lights the badge for a Scott story's native
+/// pictures, its S.A.G.A. artwork or its Atari companion side alike.
+fn feature_words(
+    f: &app::picker::Features,
+    aux: Option<&app::picker::StoryAux>,
+    scott_pictures: Option<app::picker::ScottPictures>,
+) -> Vec<&'static str> {
     let mut v = Vec::new();
     let mut sound = f.sound;
-    let mut graphics = f.graphics;
+    let mut graphics = f.graphics || scott_pictures.is_some();
     if let Some((_, chunks)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
         if chunks.iter().any(|c| c.usage == "Snd ") {
             sound = true;
@@ -3331,6 +4369,79 @@ fn feature_words(f: &app::picker::Features, aux: Option<&app::picker::StoryAux>)
         v.push("hints");
     }
     v
+}
+
+/// The info panel's "Pictures:" wording for a Scott entry (SQ-1473) — the
+/// panel's own voice, matching the terse phrase-fragments `feature_words`
+/// prints above it rather than a full sentence.
+fn scott_pictures_label(sp: app::picker::ScottPictures) -> String {
+    match sp {
+        app::picker::ScottPictures::NativeC64 { pictures } => {
+            format!("native C64 (vector, {pictures} rooms)")
+        }
+        app::picker::ScottPictures::NativeZx { pictures } => {
+            format!("native ZX Spectrum (vector, {pictures} rooms)")
+        }
+        app::picker::ScottPictures::Blorb => "Blorb".to_string(),
+        // SQ-1475: family C is drawn now, so the row names the release's own
+        // artwork and how much of it the container holds. SQ-1476: and the
+        // Apple II's family D is line art rather than strips, which is a
+        // difference a player can see, so the row says which.
+        app::picker::ScottPictures::SagaUsStrips { platform, pictures } => format!(
+            "S.A.G.A. ({} {}, {pictures} pictures)",
+            saga_platform_word(platform),
+            if matches!(platform, scott::SagaPlatform::AppleII) { "hi-res" } else { "strips" }
+        ),
+        // A release WITH artwork, opened from a file that is not where the
+        // artwork lives — an extracted database, an Atari side A without its
+        // companion picture side, or an Apple II boot side whose own side A
+        // is missing. Deliberately not "none": a text-only game shows no row
+        // here at all.
+        app::picker::ScottPictures::SagaUsNoPictures { scrambled: true, .. } => {
+            "S.A.G.A. (scrambled, not readable yet)".to_string()
+        }
+        app::picker::ScottPictures::SagaUsNoPictures { .. } => {
+            "S.A.G.A. (not on this file)".to_string()
+        }
+        // SQ-1477: family E. Named for the MACHINE and its display standard
+        // rather than for the format's letter, the way the two rows above are
+        // named for a machine — "CGA" is what a player who owned this release
+        // would recognise, and it is also the whole of what makes these
+        // pictures look the way they do (four fixed colours, §8.5).
+        app::picker::ScottPictures::SagaDosCga { pictures } => {
+            format!("S.A.G.A. (MS-DOS CGA, {pictures} pictures)")
+        }
+        // SQ-1496/SQ-1524/SQ-1525: the Atari's own companion side, counted
+        // off its table rather than a filesystem walk (`SagaUsStrips`'s
+        // doc) — named the same way that row names Apple II's line art vs.
+        // C64's strips, since a player sees the difference either way.
+        app::picker::ScottPictures::SagaAtari { format, pictures } => format!(
+            "S.A.G.A. (Atari {}, {pictures} pictures)",
+            match format {
+                scott::AtariPictureFormat::FamilyCBitmap => "strips",
+                scott::AtariPictureFormat::LineArt => "line art",
+                // `AtariPictureFormat` is `#[non_exhaustive]`.
+                _ => "pictures",
+            }
+        ),
+    }
+}
+
+/// The short machine word the "Pictures:" row uses for a S.A.G.A. platform.
+///
+/// `scott::SagaPlatform::label` is the long form ("Commodore 64", "Atari
+/// 8-bit") and reads as a whole clause inside a parenthetical that already
+/// carries two other facts; this is the panel's own voice, the way
+/// [`scott_pictures_label`] is.
+fn saga_platform_word(platform: scott::SagaPlatform) -> &'static str {
+    match platform {
+        scott::SagaPlatform::Commodore64 => "C64",
+        scott::SagaPlatform::Atari8Bit => "Atari",
+        scott::SagaPlatform::AppleII => "Apple II",
+        // `SagaPlatform` is `#[non_exhaustive]`: a platform added to `scott`
+        // reads as its own long label here rather than failing the build.
+        other => other.label(),
+    }
 }
 
 /// Selection + status line after an IFDB download's rescan (SQ-0659).
@@ -3355,13 +4466,43 @@ fn ifdb_download_landing(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-picker"))]
 mod tests {
     /// The shipped browser keymap, which is what the footer hints are drawn
     /// from (SQ-0796). Every draw test uses it, since none of them is about a
     /// user's rebinding.
     fn km() -> app::keymap::KeyMap {
         app::keymap::KeyMap::default()
+    }
+
+    /// SQ-1374, SQ-1382: `kitty_shared_memory = "off"` is honoured by never
+    /// ASKING.
+    ///
+    /// `kitty_shared_memory_object` is a single option since SQ-1382: setting it
+    /// probes for the capability during the stdio query and creates a real
+    /// shared memory object to do it, so a user who declined it must get
+    /// neither. `auto` sets it (and would hand an object to a terminal over ssh
+    /// that cannot open it, if the probe didn't gate that); `off` leaves it
+    /// unset, so nothing is created and nothing is asked.
+    #[test]
+    fn the_shared_memory_probe_follows_the_config_key() {
+        use app::config::KittySharedMemory as K;
+
+        let auto = super::cover_query_options(K::Auto);
+        assert_eq!(
+            auto.kitty_shared_memory_object,
+            Some(std::process::id()),
+            "auto asks, and names the object it would hand over"
+        );
+
+        let off = super::cover_query_options(K::Off);
+        assert_eq!(
+            off.kitty_shared_memory_object, None,
+            "off does not ask, so nothing is ever handed over"
+        );
+
+        // Compression is a separate answer and is asked for either way (SQ-1339).
+        assert!(auto.kitty_compression && off.kitty_compression);
     }
 
     /// A wheel notch goes to the topmost open surface, and no further. The
@@ -3375,18 +4516,23 @@ mod tests {
         use super::{wheel_target, WheelTarget};
 
         // Nothing open: the notch is the story list's.
-        assert_eq!(wheel_target(false, false, false, false), WheelTarget::StoryList);
-        assert_eq!(wheel_target(false, false, false, true), WheelTarget::InfoPanel);
+        assert_eq!(wheel_target(false, false, false, false, false, false), WheelTarget::StoryList);
+        assert_eq!(wheel_target(false, false, false, false, false, true), WheelTarget::InfoPanel);
 
         // The launch dialog is topmost — over the info panel, and over every
         // other modal it can be opened on top of.
-        assert_eq!(wheel_target(true, false, false, false), WheelTarget::Swallowed);
-        assert_eq!(wheel_target(true, false, false, true), WheelTarget::Swallowed);
-        assert_eq!(wheel_target(true, true, true, true), WheelTarget::Swallowed);
+        assert_eq!(wheel_target(true, false, false, false, false, false), WheelTarget::Swallowed);
+        assert_eq!(wheel_target(true, false, false, false, false, true), WheelTarget::Swallowed);
+        assert_eq!(wheel_target(true, false, false, true, true, true), WheelTarget::Swallowed);
+
+        // SQ-1227: the key reference and the per-story menu swallow it too —
+        // neither scrolls, and neither may let the list slide behind it.
+        assert_eq!(wheel_target(false, true, false, false, false, true), WheelTarget::Swallowed);
+        assert_eq!(wheel_target(false, false, true, false, false, true), WheelTarget::Swallowed);
 
         // The rest of the ladder is unchanged (SQ-0831/SQ-0486).
-        assert_eq!(wheel_target(false, true, false, true), WheelTarget::Search);
-        assert_eq!(wheel_target(false, false, true, true), WheelTarget::PreviewZoom);
+        assert_eq!(wheel_target(false, false, false, true, false, true), WheelTarget::Search);
+        assert_eq!(wheel_target(false, false, false, false, true, true), WheelTarget::PreviewZoom);
     }
 
 
@@ -3421,74 +4567,6 @@ mod tests {
         }
     }
 
-    // ── Cell-size refresh (SQ-0988/SQ-0992) ───────────────────────────────────
-
-    /// A cell-size refresh moves the cell and leaves the rest of the picker
-    /// alone — the protocol it was queried for, and the capability list behind
-    /// it (SQ-0992).
-    ///
-    /// The capability half of this assertion is weaker here than it looks:
-    /// `Picker`'s fields are private and there is no way to build one carrying
-    /// capabilities from outside the crate, so the list this compares is empty.
-    /// The seeded version of the same property lives where the fields are
-    /// reachable, in `ratatui-image`'s own
-    /// `picker::tests::test_set_font_size_keeps_the_rest_of_the_picker`. What
-    /// this case pins is the arithmetic, and its neighbour below pins the shape
-    /// that made capabilities survivable at all.
-    #[test]
-    fn a_cell_size_refresh_moves_the_cell_and_nothing_else() {
-        use ratatui_image::picker::ProtocolType;
-        use ratatui_image::FontSize;
-
-        let mut picker = ratatui_image::picker::Picker::halfblocks();
-        picker.set_protocol_type(ProtocolType::Kitty);
-        let capabilities_before = picker.capabilities().clone();
-        let was = picker.font_size();
-
-        // The same measurement is not a change, and the caller is told so — it
-        // throws away everything it fitted against the old cell on a `true`.
-        assert!(!super::apply_cell_size(&mut picker, FontSize::new(was.width, was.height)));
-        assert_eq!((was.width, was.height), (picker.font_size().width, picker.font_size().height));
-
-        // A different cell: the size moves, and nothing else does.
-        assert!(super::apply_cell_size(&mut picker, FontSize::new(7, 15)));
-        assert_eq!((7, 15), (picker.font_size().width, picker.font_size().height));
-        assert_eq!(ProtocolType::Kitty, picker.protocol_type());
-        assert_eq!(&capabilities_before, picker.capabilities());
-    }
-
-    /// **The anti-drift guard (SQ-0992).** The refresh must MUTATE the picker.
-    /// Rebuilding it preserves exactly the fields whoever wrote the rebuild
-    /// remembered to copy across, and the one that was forgotten —
-    /// `capabilities`, which `Picker::from_fontsize` constructs empty — costs a
-    /// kitty session its `o=z` compression the moment the user changes font
-    /// size, silently and until relaunch.
-    ///
-    /// Read off the source because that is where the property lives: with no way
-    /// to build a picker that carries capabilities from outside the crate, no
-    /// runtime assertion in this crate can tell a rebuild from a mutation.
-    #[test]
-    fn a_cell_size_refresh_never_rebuilds_the_picker() {
-        let src = include_str!("picker_ui.rs");
-        let start = src.find("pub(crate) fn refresh_cell_size(picker").expect("the refresh");
-        let tail = start + src[start..].find("fn apply_cell_size(").expect("the applier");
-        let end = tail + src[tail..].find("\n}\n").expect("the applier's closing brace");
-        let region = &src[start..end];
-
-        assert!(region.len() > 300, "the bounds must bracket both function bodies");
-        assert!(region.contains("set_font_size"), "the refresh must go through the setter");
-
-        for banned in ["from_fontsize", "Picker::from", "*picker ="] {
-            assert!(
-                !region.contains(banned),
-                "the cell-size refresh must not mention `{banned}` — building a \
-                 replacement picker drops every capability the original was \
-                 queried for, `KittyCompression` among them (SQ-0992). Mutate the \
-                 picker instead."
-            );
-        }
-    }
-
     // ── Story-picker row badges (type + present artifacts) ─────────────────────
 
     /// SQ-0659: where the cursor lands after an IFDB download's rescan.
@@ -3513,13 +4591,61 @@ mod tests {
         assert_eq!(super::ifdb_download_landing(None, None, 0, "x").0, 0);
     }
 
+    /// SQ-1478: the story-info panel's "Pictures:" row for a ZX Spectrum
+    /// *Mysterious Adventures* snapshot, and the TYPE column that goes with
+    /// it. Hand-built — the label is a function of the variant, so no
+    /// specimen is needed; `picker::tests` has the end-to-end half.
+    #[test]
+    fn a_zx_snapshot_labels_its_pictures_and_its_container() {
+        use app::picker::{Engine, Features, ScottPictures, StoryMeta};
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::NativeZx { pictures: 31 }),
+            "native ZX Spectrum (vector, 31 rooms)"
+        );
+        // The C64 half of the same eleven titles keeps its own wording, so the
+        // panel says which platform's release this is.
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::NativeC64 { pictures: 31 }),
+            "native C64 (vector, 31 rooms)"
+        );
+        let meta = StoryMeta {
+            size_bytes: 0,
+            story_bytes: 0,
+            modified: None,
+            engine: Engine::Scott,
+            format: String::new(),
+            version: None,
+            serial: None,
+            release: None,
+            ifid: String::new(),
+            features: Features::default(),
+            self_blorb: None,
+            scott_pictures: Some(ScottPictures::NativeZx { pictures: 31 }),
+            disk_image: None,
+            disk_entry: None,
+            author: None,
+            year: None,
+            genre: None,
+            language: None,
+            description: None,
+            ifdb_link: None,
+            ifdb_rating: None,
+            ifdb_rating_count: None,
+            fetch_not_found: false,
+        };
+        assert_eq!(super::interp_label(&meta, false), "Scott (z80)");
+        // And it fits the fixed-width TYPE column, which is what SQ-1458
+        // reached CI red by not checking.
+        assert!(super::interp_label(&meta, false).len() <= super::INTERP_COL_W as usize);
+    }
+
     #[test]
     fn interp_label_formats_type_version_and_blorb() {
         use app::picker::{Engine, Features, StoryMeta};
         let meta = |engine: Engine, version: Option<&str>| StoryMeta {
             size_bytes: 0, story_bytes: 0, modified: None, engine, format: String::new(),
             version: version.map(String::from), serial: None, release: None, ifid: String::new(),
-            features: Features::default(), self_blorb: None, disk_image: None, disk_entry: None,
+            features: Features::default(), self_blorb: None, scott_pictures: None, disk_image: None, disk_entry: None,
             author: None, year: None,
             genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
@@ -3549,7 +4675,7 @@ mod tests {
         let meta = |disk_image: Option<DiskImage>| StoryMeta {
             size_bytes: 0, story_bytes: 0, modified: None, engine: Engine::ZCode, format: String::new(),
             version: Some("6".into()), serial: None, release: None, ifid: String::new(),
-            features: Features::default(), self_blorb: None, disk_image, disk_entry: None,
+            features: Features::default(), self_blorb: None, scott_pictures: None, disk_image, disk_entry: None,
             author: None, year: None,
             genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
@@ -3558,7 +4684,7 @@ mod tests {
         // …and SQ-0833/SQ-0835: the PC and the Atari ST, which share a
         // filesystem and must still be named apart, because they are different
         // machines and the column is the only place a player is told which.
-        assert_eq!(super::interp_label(&meta(Some(DiskImage::Fat12Dos)), false), "Z6 (DOS)");
+        assert_eq!(super::interp_label(&meta(Some(DiskImage::Fat12Dos)), false), "Z6 (MS-DOS)");
         assert_eq!(super::interp_label(&meta(Some(DiskImage::Fat12AtariSt)), false), "Z6 (ST)");
         // Not a disk image: exactly what it rendered before.
         assert_eq!(super::interp_label(&meta(None), false), "Z6");
@@ -3570,6 +4696,120 @@ mod tests {
                 super::interp_label(&meta(Some(image)), false).len() <= super::INTERP_COL_W as usize
             );
         }
+    }
+
+    /// SQ-1475: a Scott row names its container the same way a Z-code row
+    /// does. One shelf can hold the same US S.A.G.A. game pressed for three
+    /// machines — `Adventureland` is a Commodore disk, an Atari pair and an
+    /// Apple II pair — and until this change every one of them read "Scott"
+    /// with nothing to tell them apart.
+    ///
+    /// **"Scott (Atari DOS)" is 17 columns**, which is `INTERP_COL_W`'s value —
+    /// it is the widest label the column has to hold (SQ-1507). The column
+    /// used to be 14 and truncate this one deliberately; the user overruled
+    /// that, so it is now sized to fit every label rather than to elide the
+    /// longest one.
+    #[test]
+    fn interp_label_names_a_scott_rows_container() {
+        use app::hints::DiskImage;
+        use app::picker::{Engine, Features, StoryMeta};
+        let meta = |disk_image: Option<DiskImage>| StoryMeta {
+            size_bytes: 0, story_bytes: 0, modified: None, engine: Engine::Scott, format: String::new(),
+            version: None, serial: None, release: None, ifid: String::new(),
+            features: Features::default(), self_blorb: None, scott_pictures: None, disk_image, disk_entry: None,
+            author: None, year: None,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+        };
+        assert_eq!(super::interp_label(&meta(Some(DiskImage::CommodoreD64)), false), "Scott (CBM)");
+        assert_eq!(super::interp_label(&meta(Some(DiskImage::AtariDos2)), false), "Scott (Atari DOS)");
+        // Unchanged for everything that is not on a disk.
+        assert_eq!(super::interp_label(&meta(None), false), "Scott");
+        assert_eq!(super::interp_label(&meta(None), true), "Scott (blorb)");
+    }
+
+    /// SQ-1507: `INTERP_COL_W` must hold the widest label [`interp_label`] can
+    /// ever produce, not just the handful pinned above. This crosses every
+    /// engine base the column can show — Z-code bare and Z1..Z8, Glulx bare
+    /// and a real Glulx version, Scott — against every container
+    /// [`app::picker::type_container`] can name: every [`DiskImage`] variant's
+    /// own `label()` (read off the table, not copied), plus the two
+    /// picture-sourced containers ("z80", "zip") and "blorb". A future
+    /// container or a Z-machine version wider than one digit that doesn't fit
+    /// fails here instead of panicking a row draw, the way SQ-1458's three new
+    /// disk images did.
+    #[test]
+    fn interp_label_fits_the_column_for_every_base_and_container() {
+        use app::hints::DiskImage;
+        use app::picker::{Engine, Features, ScottPictures, StoryMeta};
+        let base = |engine: Engine, version: Option<&str>| StoryMeta {
+            size_bytes: 0, story_bytes: 0, modified: None, engine, format: String::new(),
+            version: version.map(String::from), serial: None, release: None, ifid: String::new(),
+            features: Features::default(), self_blorb: None, scott_pictures: None, disk_image: None, disk_entry: None,
+            author: None, year: None,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+        };
+        let check = |meta: &StoryMeta, blorb: bool| {
+            let label = super::interp_label(meta, blorb);
+            assert!(
+                label.len() <= super::INTERP_COL_W as usize,
+                "{label:?} ({} cols) overflows INTERP_COL_W ({})",
+                label.len(),
+                super::INTERP_COL_W
+            );
+        };
+
+        // Z-code: bare and every version 1..=8, each crossed with no
+        // container, a sibling blorb, and every disk image.
+        let z_versions: [Option<&str>; 9] =
+            [None, Some("1"), Some("2"), Some("3"), Some("4"), Some("5"), Some("6"), Some("7"), Some("8")];
+        for v in z_versions {
+            let mut m = base(Engine::ZCode, v);
+            check(&m, false);
+            check(&m, true);
+            for image in DiskImage::all() {
+                m.disk_image = Some(image);
+                check(&m, false);
+                check(&m, true); // a disk image wins over blorb; still must fit
+            }
+        }
+
+        // Glulx never grows a container (`type_container` always answers
+        // `None` for it), but its own bases must still fit alone.
+        for v in [None, Some("3.1.2")] {
+            let m = base(Engine::Glulx, v);
+            check(&m, false);
+            check(&m, true);
+        }
+
+        // Scott: no container, a sibling blorb, every disk image, and the two
+        // picture-sourced containers.
+        let mut m = base(Engine::Scott, None);
+        check(&m, false);
+        check(&m, true);
+        for image in DiskImage::all() {
+            m.disk_image = Some(image);
+            check(&m, false);
+        }
+        m.disk_image = None;
+        m.scott_pictures = Some(ScottPictures::NativeZx { pictures: 1 });
+        check(&m, false); // "Scott (z80)"
+        m.scott_pictures = Some(ScottPictures::SagaDosCga { pictures: 1 });
+        check(&m, false); // "Scott (zip)"
+
+        // The widest label of all, pinned by value, plus the MS-DOS rename
+        // (SQ-1507) in both engines that can show it.
+        let mut widest = base(Engine::Scott, None);
+        widest.disk_image = Some(DiskImage::AtariDos2);
+        assert_eq!(super::interp_label(&widest, false), "Scott (Atari DOS)");
+        assert_eq!(super::interp_label(&widest, false).len(), super::INTERP_COL_W as usize);
+
+        let mut pc_z = base(Engine::ZCode, Some("6"));
+        pc_z.disk_image = Some(DiskImage::Fat12Dos);
+        assert_eq!(super::interp_label(&pc_z, false), "Z6 (MS-DOS)");
+
+        let mut pc_scott = base(Engine::Scott, None);
+        pc_scott.disk_image = Some(DiskImage::Fat12Dos);
+        assert_eq!(super::interp_label(&pc_scott, false), "Scott (MS-DOS)");
     }
 
     /// End to end on real media (skips vacuously — `stories/` is gitignored):
@@ -3648,10 +4888,11 @@ mod tests {
             meta: StoryMeta {
                 size_bytes: 1, story_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
-                features: Features::default(), self_blorb: None, disk_image: None, disk_entry: None,
+                features: Features::default(), self_blorb: None, scott_pictures: None, disk_image: None, disk_entry: None,
                 author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
             },
             hint_sidecar: None,
+            kind: app::picker::RowKind::Story,
         };
         vec![mk("Zork", Engine::ZCode), mk("Anchorhead", Engine::Glulx)]
     }
@@ -3667,12 +4908,161 @@ mod tests {
             meta: StoryMeta {
                 size_bytes: 1, story_bytes: 1, modified: None, engine: Engine::ZCode, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
-                features: Features::default(), self_blorb: None, disk_image: None, disk_entry: None,
+                features: Features::default(), self_blorb: None, scott_pictures: None, disk_image: None, disk_entry: None,
                 author: author.map(String::from), year: year.map(String::from),
                 genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
             },
             hint_sidecar: None,
+            kind: app::picker::RowKind::Story,
         }
+    }
+
+    /// A folder row is its label and `folder`, nothing else: no
+    /// "(no metadata yet)" in the author column, and it sits above the stories
+    /// whatever the sort says. The header counts folders apart from stories.
+    #[test]
+    fn folder_rows_paint_their_label_and_nothing_else() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let mut stories = make_two_test_stories();
+        stories.push(app::picker::StoryEntry::folder(std::path::PathBuf::from("/tmp/zcode"), "zcode/"));
+        stories.push(app::picker::StoryEntry::folder(std::path::PathBuf::from("/"), app::picker::PARENT_LABEL));
+        app::picker::sort_stories(&mut stories, app::picker::Sort::default());
+        let mut list = app::list_scroll::ListScroll::new();
+        let badges = vec![app::picker::RowBadges::default(); stories.len()];
+        let sym = app::style::finalize_symbols(&app::style::load_style(None, std::path::Path::new("/nonexistent")).0.symbols);
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
+        );
+        let header = row_text(&buf, 0, area);
+        assert!(header.contains("2 found, 1 folder in /tmp"), "header counts stories and folders apart: {header:?}");
+        let r2 = row_text(&buf, 2, area);
+        let r3 = row_text(&buf, 3, area);
+        assert!(r2.contains(".."), "the way up is the first row: {r2:?}");
+        assert!(r3.contains("zcode/") && r3.contains("folder"), "then the folder, typed `folder`: {r3:?}");
+        assert!(!r2.contains("no metadata") && !r3.contains("no metadata"), "a folder has no metadata to be missing");
+        assert!(row_text(&buf, 4, area).contains("Anchorhead"), "stories follow the folders");
+    }
+
+    /// SQ-1282: the top bar shows the running lanthorn version — the same
+    /// build string `lanthorn --version` prints — right-aligned, and no
+    /// longer carries the `[i: info · g: covers]` hotkey hint that used to
+    /// live there (the footer and `?` help carry those keys already).
+    #[test]
+    fn top_bar_shows_the_version_and_drops_the_hotkey_hint() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let stories = make_two_test_stories();
+        let mut list = app::list_scroll::ListScroll::new();
+        let badges = vec![app::picker::RowBadges::default(); stories.len()];
+        let sym = app::style::finalize_symbols(&app::style::load_style(None, std::path::Path::new("/nonexistent")).0.symbols);
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), app::picker::Sort::default(), area, &mut buf,
+        );
+        let header = row_text(&buf, 0, area);
+        assert!(header.contains(buildinfo::LONG), "version missing from the top bar: {header:?}");
+        assert!(
+            !header.contains("i: info") && !header.contains("g: covers"),
+            "the top bar's hotkey hint should be gone: {header:?}"
+        );
+    }
+
+    /// On a pane too narrow for the title AND the version, the title wins —
+    /// the version is dropped entirely rather than truncated or overlapping
+    /// the title text.
+    #[test]
+    fn top_bar_drops_the_version_rather_than_overflow_a_narrow_pane() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let stories = make_two_test_stories();
+        let mut list = app::list_scroll::ListScroll::new();
+        let badges = vec![app::picker::RowBadges::default(); stories.len()];
+        let sym = app::style::finalize_symbols(&app::style::load_style(None, std::path::Path::new("/nonexistent")).0.symbols);
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let cs = app::colors::ColorScheme::terminal_default();
+        let heading = super::PickerHeading::browse(std::path::Path::new("/tmp"));
+        let title_w = unicode_width::UnicodeWidthStr::width(heading.line(&stories).as_str()) as u16;
+
+        // Exactly enough room for the title; none left for the gap + version.
+        let area = Rect::new(0, 0, title_w, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(&stories, &mut list, &badges, &glyphs, &heading, &cs, &km(), app::picker::Sort::default(), area, &mut buf);
+        let header = row_text(&buf, 0, area);
+        assert!(header.contains("lanthorn"), "the title should still render at this width: {header:?}");
+        assert!(
+            !header.contains(buildinfo::LONG),
+            "the version should be dropped once there's no room beside the title: {header:?}"
+        );
+    }
+
+    /// The gallery's header says it is showing the folder and everything
+    /// under it, and how far the index has got while it is still building.
+    #[test]
+    fn the_gallery_heading_names_the_recursive_scope() {
+        let root = std::path::Path::new("/tmp/lib");
+        let stories = make_two_test_stories();
+        let sub = root.join("zcode");
+        let building = super::PickerHeading {
+            dir: &sub,
+            root,
+            find: None,
+            all_folders: Some(super::IndexStatus { indexed: 2, done: false }),
+        };
+        let line = building.line(&stories);
+        // Built from `display()`, since the separator is the platform's.
+        let expected = format!("2 in {} and its folders · indexing, 2 so far", sub.display());
+        assert!(line.contains(&expected), "{line:?}");
+        let done = super::PickerHeading { all_folders: Some(super::IndexStatus { indexed: 2, done: true }), ..building };
+        let line = done.line(&stories);
+        assert!(line.contains("and its folders)") && !line.contains("indexing"), "{line:?}");
+    }
+
+    /// While finding, a match shows the folder it came from after its title;
+    /// in a plain folder view, where every row is in the header's folder, it
+    /// shows nothing of the kind.
+    #[test]
+    fn find_matches_carry_their_folder_and_folder_views_do_not() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let mut stories = make_two_test_stories();
+        stories[0].path = std::path::PathBuf::from("/tmp/zcode/german/Zork.z5");
+        let mut list = app::list_scroll::ListScroll::new();
+        let badges = vec![app::picker::RowBadges::default(); stories.len()];
+        let sym = app::style::finalize_symbols(&app::style::load_style(None, std::path::Path::new("/nonexistent")).0.symbols);
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 120, 8);
+        let root = std::path::Path::new("/tmp");
+
+        let mut buf = Buffer::empty(area);
+        let finding = super::PickerHeading {
+            dir: root,
+            root,
+            find: Some(super::FindStatus { query: "zor", indexed: 2, done: false }),
+            all_folders: None,
+        };
+        super::draw_story_picker(&stories, &mut list, &badges, &glyphs, &finding, &cs, &km(), app::picker::Sort::default(), area, &mut buf);
+        let header = row_text(&buf, 0, area);
+        assert!(header.contains("2 matches for “zor” in /tmp") && header.contains("indexing, 2 so far"), "{header:?}");
+        let rows = (2..4).map(|y| row_text(&buf, y, area)).collect::<Vec<_>>().join("\n");
+        assert!(rows.contains("Zork  zcode/german/"), "the nested match names its folder: {rows:?}");
+        let anchorhead = rows.lines().find(|l| l.contains("Anchorhead")).unwrap_or_default();
+        assert!(!anchorhead.contains('/'), "a match at the root wears no label: {anchorhead:?}");
+
+        // A folder view lists the folder's own stories, so relative to it there
+        // is nothing to say (and a row from outside the folder says nothing
+        // either).
+        let mut buf = Buffer::empty(area);
+        let german = root.join("zcode/german");
+        super::draw_story_picker(&stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(&german), &cs, &km(), app::picker::Sort::default(), area, &mut buf);
+        let rows = (2..4).map(|y| row_text(&buf, y, area)).collect::<Vec<_>>().join("\n");
+        assert!(rows.contains("Zork") && !rows.contains('/'), "a folder view labels nothing: {rows:?}");
     }
 
     #[test]
@@ -3695,7 +5085,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let dir = std::path::Path::new("/tmp");
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, dir, &cs, &km(), app::picker::Sort::default(), area, &mut buf,
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(dir), &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
 
         let row0 = row_text(&buf, 2, area); // list starts at area.y + 2
@@ -3736,7 +5126,7 @@ mod tests {
         list.len(stories.len());
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
-        super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+        super::draw_story_picker(&stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
                           &cs, &km(), app::picker::Sort::default(), area, &mut buf);
         let row0 = row_text(&buf, 2, area);
         assert!(row0.contains('h'), "available hint shows lowercase glyph: {row0:?}");
@@ -3760,7 +5150,7 @@ mod tests {
         list.len(stories.len());
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
-        super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+        super::draw_story_picker(&stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
                           &cs, &km(), app::picker::Sort::default(), area, &mut buf);
         let row0 = row_text(&buf, 2, area);
         // The configured save glyph is used for the artifact badge. Type and
@@ -3786,12 +5176,12 @@ mod tests {
         let badges = vec![app::picker::RowBadges::default(); 2];
         let mut list = app::list_scroll::ListScroll::new();
         list.len(stories.len());
-        let area = Rect::new(0, 0, 60, 10);
+        let area = Rect::new(0, 0, 63, 10);
 
         // Default sort (Title, ascending): only TITLE carries an arrow.
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
             &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let header = row_text(&buf, 1, area); // header row is area.y + 1
@@ -3805,7 +5195,7 @@ mod tests {
         let mut buf2 = Buffer::empty(area);
         let sort2 = app::picker::Sort { key: app::picker::SortKey::Year, desc: true };
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
             &cs, &km(), sort2, area, &mut buf2,
         );
         let header2 = row_text(&buf2, 1, area);
@@ -3826,10 +5216,10 @@ mod tests {
         let badges = vec![app::picker::RowBadges::default(); 2];
         let mut list = app::list_scroll::ListScroll::new();
         list.len(stories.len());
-        let area = Rect::new(0, 0, 60, 10);
+        let area = Rect::new(0, 0, 63, 10);
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
             &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let row0 = row_text(&buf, 2, area);
@@ -3868,7 +5258,7 @@ mod tests {
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
             &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let row1 = row_text(&buf, 3, area);
@@ -3897,22 +5287,22 @@ mod tests {
         let mut list = app::list_scroll::ListScroll::new();
         list.len(1);
 
-        // (width, author shown, year shown). Right zone = INTERP_COL_W(13) +
-        // COL_GAP(2) + cluster_w(save+hint=2) = 17, reserved 18; so avail =
-        // width - 20. year needs avail >= 38 (width >= 58); author needs avail
-        // >= 30 (width >= 50). Below that: title + right-zone only.
+        // (width, author shown, year shown). Right zone = INTERP_COL_W(17) +
+        // COL_GAP(2) + cluster_w(save+hint=2) = 21, reserved 22; so avail =
+        // width - 24. year needs avail >= 38 (width >= 62); author needs avail
+        // >= 30 (width >= 54). Below that: title + right-zone only.
         for &(width, want_author, want_year) in &[
-            (70u16, true, true),
-            (58, true, true),
-            (57, true, false),
-            (50, true, false),
-            (49, false, false),
-            (30, false, false),
+            (74u16, true, true),
+            (62, true, true),
+            (61, true, false),
+            (54, true, false),
+            (53, false, false),
+            (34, false, false),
         ] {
             let area = Rect::new(0, 0, width, 10);
             let mut buf = Buffer::empty(area);
             super::draw_story_picker(
-                &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+                &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
                 &cs, &km(), app::picker::Sort::default(), area, &mut buf,
             );
             let row = row_text(&buf, 2, area);
@@ -3940,10 +5330,10 @@ mod tests {
         let badges = vec![app::picker::RowBadges::default()];
         let mut list = app::list_scroll::ListScroll::new();
         list.len(1);
-        let area = Rect::new(0, 0, 60, 10);
+        let area = Rect::new(0, 0, 63, 10);
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
             &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let row0 = row_text(&buf, 2, area);
@@ -3951,7 +5341,7 @@ mod tests {
         assert!(row0.contains('…'), "truncated author ends with an ellipsis: {row0:?}");
         assert!(row0.contains("1980"), "year column unaffected by the author overrun: {row0:?}");
         // TYPE column ("Z" here) stays put at its fixed right-zone offset.
-        let interp_x = 60u16 - 1 - 2 - super::COL_GAP - super::INTERP_COL_W;
+        let interp_x = 63u16 - 1 - 2 - super::COL_GAP - super::INTERP_COL_W;
         assert_eq!(
             buf.cell((interp_x, 2)).unwrap().symbol(), "Z",
             "TYPE column unaffected by the author overrun"
@@ -3975,7 +5365,7 @@ mod tests {
         let area = Rect::new(0, 0, 100, 10);
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
             &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let row = row_text(&buf, 2, area);
@@ -3993,13 +5383,13 @@ mod tests {
         let badges = vec![app::picker::RowBadges::default()];
         let mut list = app::list_scroll::ListScroll::new();
         list.len(1);
-        let area = Rect::new(0, 0, 60, 10);
+        let area = Rect::new(0, 0, 63, 10);
         let mut buf = Buffer::empty(area);
         let (_, _, header_rects) = super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
             &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
-        // 60 cells is too narrow for the RATING column, so four headers show.
+        // 63 cells is too narrow for the RATING column, so four headers show.
         assert_eq!(header_rects.len(), 4, "title/author/year/type at this width: {header_rects:?}");
         for (key, rect) in &header_rects {
             let expected_char = match key {
@@ -4043,7 +5433,7 @@ mod tests {
         let area = Rect::new(0, 0, 100, 10);
         let mut buf = Buffer::empty(area);
         let (_, _, header_rects) = super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
             &cs, &km(), app::picker::Sort::default(), area, &mut buf,
         );
         let rect = header_rects
@@ -4087,7 +5477,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let sort = app::picker::Sort { key: app::picker::SortKey::Rating, desc: true };
         super::draw_story_picker(
-            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"), &cs, &km(), sort, area, &mut buf,
+            &stories, &mut list, &badges, &glyphs, &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), sort, area, &mut buf,
         );
         let header = row_text(&buf, 1, area);
         assert!(header.contains("RATING ▼"), "active RATING column shows the arrow: {header:?}");
@@ -4112,42 +5502,177 @@ mod tests {
         assert!(narrow.author_w > 0, "author outlives both");
     }
 
-    #[test]
-    fn footer_hints_drop_right_to_left_keeping_f_and_r_longest() {
-        // Narrow: none of the new hints fit, but the existing core (move/open/
-        // info/quit) is always present.
-        let km = km();
-        let narrow = super::build_footer(&km, 60);
-        assert!(narrow.contains("move") && narrow.contains("open") && narrow.contains("info") && narrow.contains("quit"));
-        assert!(!narrow.contains("f: fetch") && !narrow.contains("PgUp/PgDn"), "{narrow:?}");
+    /// SQ-1227's footer, at a width that holds all of it. This is the spec.
+    const FOOTER: &str = "Enter: open  Space: menu  Tab: info  /: IFDB  \
+                          g: covers  s: sort  r: refresh  Ctrl+F: find  ?: keys  q: quit";
 
-        // Segments appear in declared order as width grows (least-guessable
-        // first): each one's minimum fitting width is >= the previous one's, and
-        // the core is always present. Robust to segment-set changes.
-        //
-        // SQ-0796: the segments are now GENERATED from the registry and the
-        // keymap rather than being a table of literal strings, so the list comes
-        // from `footer_optional` instead of a `FOOTER_OPTIONAL` constant. Same
-        // ordering property, same assertions — but a hint can no longer name a
-        // key nothing is bound to.
+    #[test]
+    fn the_wide_footer_is_the_library_level_keys_one_key_each() {
+        let km = km();
+        assert_eq!(super::build_footer(&km, 200, false).trim(), FOOTER);
+        // The gallery is the same line with `g` naming where it goes.
+        let gallery = super::build_footer(&km, 200, true);
+        assert_eq!(gallery.trim(), FOOTER.replace("g: covers", "g: list"));
+        // …and neither carries navigation, a mouse gesture, or a per-story
+        // action: those are the story menu's now.
+        for gone in ["move", "page", "ends", "2×click", "2×right-click", "fetch", "get hints"] {
+            assert!(!gallery.contains(gone), "{gone:?} is no longer a footer hint: {gallery:?}");
+        }
+    }
+
+    /// The footer drops right-to-left by `drop_rank` — find first, keys last —
+    /// and never drops open, menu or quit. (Was
+    /// `footer_hints_drop_right_to_left_keeping_f_and_r_longest`; the premise
+    /// changed with SQ-1227, the property did not.)
+    #[test]
+    fn footer_hints_drop_in_priority_order_keeping_open_menu_and_quit() {
+        let km = km();
+        // Narrow: none of the droppable hints fit, and the three that can never
+        // be dropped are all still there.
+        let narrow = super::build_footer(&km, 34, false);
+        assert_eq!(narrow.trim(), "Enter: open  Space: menu  q: quit", "{narrow:?}");
+
+        // Each optional segment's minimum fitting width is >= the previous
+        // one's, walking them in KEEP order — which is the drop order reversed.
+        // Robust to the segment set changing; what it pins is that there IS an
+        // order and the footer honours it.
         let min_width = |seg: &str| -> u16 {
-            (10u16..=280).find(|&w| super::build_footer(&km, w).contains(seg)).unwrap_or(u16::MAX)
+            (10u16..=200)
+                .find(|&w| super::build_footer(&km, w, false).contains(seg))
+                .unwrap_or(u16::MAX)
         };
-        let optional = super::footer_optional(&km);
+        let optional = super::footer_optional(&km, false);
+        assert_eq!(optional.first().map(String::as_str), Some("?: keys"), "last to go");
+        assert_eq!(optional.last().map(String::as_str), Some("Ctrl+F: find"), "first to go");
         let widths: Vec<u16> = optional.iter().map(|s| min_width(s)).collect();
         for pair in widths.windows(2) {
-            assert!(pair[0] <= pair[1], "segments appear in declared order: {widths:?}");
+            assert!(pair[0] <= pair[1], "segments appear in keep order: {widths:?}");
         }
-        // The first (least guessable) appears well before the last.
         assert!(widths[0] < *widths.last().unwrap(), "{widths:?}");
-        // At a wide-enough terminal, every optional hint shows. 280 rather than
-        // 240 since SQ-0796: Home/End joined the set, having been unadvertised
-        // while the hints were hand-written. The drop-right-to-left behaviour
-        // below that width is what the rest of this test pins, and it is
-        // unchanged.
-        let wide = super::build_footer(&km, 280);
-        for seg in &optional {
-            assert!(wide.contains(seg), "wide footer shows {seg:?}: {wide:?}");
+
+        // And at every width in between, the three anchors survive and the
+        // display order never rearranges itself.
+        for w in 20u16..=200 {
+            let f = super::build_footer(&km, w, false);
+            assert!(f.contains("Enter: open"), "w={w}: {f:?}");
+            assert!(f.contains("Space: menu"), "w={w}: {f:?}");
+            assert!(f.contains("q: quit"), "w={w}: {f:?}");
+            let shown: Vec<&str> = f.trim().split("  ").collect();
+            let mut expected: Vec<&str> = FOOTER.split("  ").filter(|s| shown.contains(s)).collect();
+            expected.dedup();
+            assert_eq!(shown, expected, "display order is fixed at w={w}");
+        }
+    }
+
+    // ── The per-story menu (SQ-1227) ────────────────────────────────────────
+
+    /// `Space` on the highlighted row opens that story's menu, and nothing else.
+    #[test]
+    fn space_opens_the_story_menu_for_the_highlighted_row() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let km = km();
+        assert_eq!(
+            app::browser::action_for_key(&km, KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Some(app::browser::BrowserAction::OpenStoryMenu)
+        );
+        // The picker opens it on whatever row is selected, and the menu carries
+        // that row so a later redraw anchors on the same story.
+        let menu = app::story_menu::StoryMenu::new(7);
+        assert_eq!(menu.story, 7);
+        assert_eq!(menu.cursor, 0, "the menu opens on `Open`");
+    }
+
+    /// A SINGLE right-click on another row selects it AND opens its menu —
+    /// there is no second-click state to get wrong, and a folder gets the
+    /// selection without a menu it has no items for.
+    #[test]
+    fn a_single_right_click_selects_the_row_and_opens_its_menu() {
+        assert_eq!(super::right_click_action(Some((4, false))), (Some(4), Some(4)));
+        assert_eq!(super::right_click_action(Some((0, true))), (Some(0), None), "a folder");
+        assert_eq!(super::right_click_action(None), (None, None), "past the rows: dismiss");
+    }
+
+    /// **SQ-0789's double right-click is gone** (SQ-1227): the launch-options
+    /// dialog is a MENU ITEM now, so the right button's handler carries no
+    /// double-click recogniser at all. Read off the source, because the property
+    /// is the absence of code — no runtime assertion can see a gesture that was
+    /// removed.
+    #[test]
+    fn the_right_button_no_longer_recognises_a_double_click() {
+        let src = include_str!("picker_ui.rs");
+        let start = src
+            .find("if let MouseEventKind::Down(MouseButton::Right) = m.kind {")
+            .expect("the right-button handler");
+        let end = start
+            + src[start..]
+                .find("} else if let MouseEventKind::Down(MouseButton::Left)")
+                .expect("the left-button handler after it");
+        let region = &src[start..end];
+        assert!(region.len() > 300, "the markers must bracket the real handler");
+        for banned in ["DOUBLE_CLICK", "last_right_click", "open_launch_options"] {
+            assert!(
+                !region.contains(banned),
+                "the right button must be a single click that opens the story menu; \
+                 `{banned}` means SQ-0789's double-click gesture came back (SQ-1227)"
+            );
+        }
+        assert!(region.contains("right_click_action"), "…through the one total function");
+    }
+
+    /// The menu's rows reach the very commands the picker's one dispatch runs —
+    /// `Enter` on the highlighted row, and an item's own hotkey from anywhere.
+    #[test]
+    fn a_menu_item_dispatches_its_registry_command() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use app::browser::BrowserAction;
+        use app::story_menu::{MenuOutcome, StoryMenu};
+        let km = km();
+        let plain = |c| KeyEvent::new(c, KeyModifiers::NONE);
+
+        // Enter on "Launch options…".
+        let mut menu = StoryMenu::new(0);
+        menu.cursor = 1;
+        let MenuOutcome::Activate(cmd) = menu.on_key(plain(KeyCode::Enter), &km) else {
+            panic!("Enter activates the highlighted item");
+        };
+        assert_eq!(cmd, "open-launch-options");
+        assert_eq!(app::browser::action_for_command(cmd), Some(BrowserAction::OpenLaunchOptions));
+
+        // `f` from the top of the menu goes straight to the fetch.
+        let mut menu = StoryMenu::new(0);
+        let MenuOutcome::Activate(cmd) = menu.on_key(plain(KeyCode::Char('f')), &km) else {
+            panic!("an item's own hotkey activates it");
+        };
+        assert_eq!(cmd, "fetch-story");
+        assert_eq!(app::browser::action_for_command(cmd), Some(BrowserAction::FetchStory));
+
+        // Esc closes without running anything.
+        let mut menu = StoryMenu::new(0);
+        assert_eq!(menu.on_key(plain(KeyCode::Esc), &km), MenuOutcome::Close);
+    }
+
+    /// The menu never spills off the pane, including on the bottom row — where
+    /// it flips above the story instead of being clipped away.
+    #[test]
+    fn the_story_menu_is_clamped_inside_the_pane() {
+        let km = km();
+        let cs = app::colors::ColorScheme::terminal_default();
+        let pane = ratatui::layout::Rect::new(0, 0, 60, 18);
+        let mut buf = ratatui::buffer::Buffer::empty(pane);
+        // A row on the last usable line of the pane.
+        let anchor = ratatui::layout::Rect::new(1, 16, 50, 1);
+        let menu = app::story_menu::StoryMenu::new(0);
+        let rects = app::story_menu::draw_story_menu(&menu, anchor, pane, &km, &cs, &mut buf);
+        assert!(rects.area.bottom() <= pane.bottom(), "{:?}", rects.area);
+        assert!(rects.area.right() <= pane.right(), "{:?}", rects.area);
+        assert!(rects.area.y < anchor.y, "flipped above the row: {:?}", rects.area);
+        for (_, r) in &rects.items {
+            assert!(pane.contains(ratatui::layout::Position { x: r.x, y: r.y }), "{r:?}");
+        }
+        // Every item is on screen and readable.
+        let text = buffer_to_string(&buf, rects.area);
+        for it in app::story_menu::STORY_MENU {
+            assert!(text.contains(it.label), "{:?} missing: {text}", it.label);
         }
     }
 
@@ -4156,13 +5681,15 @@ mod tests {
     #[test]
     fn footer_hints_follow_a_rebinding() {
         let mut cfg = app::config::KeymapConfig::default();
-        cfg.browser.insert("ctrl+g".into(), "toggle-gallery".into());
+        // `x` takes sort-library, and `s` is given away so the default binding
+        // is displaced rather than joined.
+        cfg.browser.insert("s".into(), "reverse-sort".into());
+        cfg.browser.insert("x".into(), "sort-library".into());
         let (km, warns) = app::keymap::KeyMap::resolve(&cfg);
         assert!(warns.is_empty(), "{warns:?}");
-        let wide = super::build_footer(&km, 280);
-        // Both keys are advertised — the override adds a binding, it does not
-        // remove `g` — and neither string was authored by hand.
-        assert!(wide.contains("g/Ctrl+G: covers"), "the new key is advertised: {wide:?}");
+        let wide = super::build_footer(&km, 200, false);
+        assert!(wide.contains("x: sort"), "the user's key is advertised: {wide:?}");
+        assert!(!wide.contains("s: sort"), "…and the displaced one is not: {wide:?}");
     }
 
     // ── Story-picker info panel ─────────────────────────────────────────────────
@@ -4199,7 +5726,7 @@ mod tests {
             size_bytes: 0, story_bytes: 0, modified: None, engine: app::picker::Engine::ZCode,
             format: "Z-code".into(), version: Some("3".into()), serial: None, release: None,
             ifid: "ZCODE-88-840726".into(), features: app::picker::Features::default(),
-            self_blorb: None, disk_image: None, disk_entry: None, author: None, year: None, genre: None, language: None,
+            self_blorb: None, scott_pictures: None, disk_image: None, disk_entry: None, author: None, year: None, genre: None, language: None,
             description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         let area = Rect::new(0, 0, 40, 12);
@@ -4242,6 +5769,7 @@ mod tests {
                     detail: Some("15.4 kHz · 8-bit · mono · 2.2s".into()),
                 },
             ]),
+            scott_pictures: None,
             author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         let game_dir = std::path::PathBuf::from("/tmp/lanthorn-info-panel-saves/zork1.z3");
@@ -4387,6 +5915,7 @@ mod tests {
             disk_image: None,
             disk_entry: Some("LEATHRGODDESSES".into()),
             self_blorb: None,
+            scott_pictures: None,
             author: None, year: None, genre: None, language: None, description: None,
             ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         }
@@ -4495,7 +6024,7 @@ mod tests {
             release: Some(88),
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features::default(),
-            disk_image: None, disk_entry: None, self_blorb: None,
+            disk_image: None, disk_entry: None, self_blorb: None, scott_pictures: None,
             author: None, year: None, genre: None, language: None, description: None,
             ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
@@ -4703,6 +6232,7 @@ mod tests {
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features::default(),
             self_blorb: Some(chunks),
+            scott_pictures: None,
             disk_image: None,
             disk_entry: None,
             author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
@@ -4741,9 +6271,258 @@ mod tests {
             size_bytes: 1, story_bytes: 1, modified: None, engine: app::picker::Engine::Glulx,
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
-            features: app::picker::Features::default(), self_blorb: None, disk_image: None, disk_entry: None,
+            features: app::picker::Features::default(), self_blorb: None, scott_pictures: None, disk_image: None, disk_entry: None,
             author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         }
+    }
+
+    /// A hand-built Scott entry, its `scott_pictures` the only thing that
+    /// varies between the two cases the next test needs.
+    fn scott_entry_with_pictures(
+        path: &std::path::Path,
+        scott_pictures: Option<app::picker::ScottPictures>,
+    ) -> app::picker::StoryEntry {
+        app::picker::StoryEntry {
+            path: path.to_path_buf(),
+            title: "Story".into(),
+            filename: "story.prg".into(),
+            meta: app::picker::StoryMeta {
+                size_bytes: 1, story_bytes: 1, modified: None, engine: app::picker::Engine::Scott,
+                format: "Scott Adams".into(), version: None, serial: None, release: None,
+                ifid: "IFID-SCOTT".into(), features: app::picker::Features::default(),
+                self_blorb: None, scott_pictures, disk_image: None, disk_entry: None,
+                author: None, year: None, genre: None, language: None, description: None,
+                ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+            },
+            hint_sidecar: None,
+            kind: app::picker::RowKind::Story,
+        }
+    }
+
+    /// SQ-1473: `open_launch_options` — the one seam both the keyboard
+    /// (Shift-Enter) and mouse (double right-click) gestures go through — gates
+    /// the picture-resolution row on `entry.meta.scott_pictures` exactly as the
+    /// info panel's "Pictures:" row does, so "the choice reaches the session"
+    /// starts from the same fact both features read.
+    #[test]
+    fn open_launch_options_gates_the_resolution_row_on_the_entrys_own_pictures_kind() {
+        let dir = temp_dir("open-launch-options-gate");
+        let story = dir.join("story.prg");
+        std::fs::write(&story, b"x").unwrap();
+        let cfg = app::config::Config::default();
+
+        let native = scott_entry_with_pictures(
+            &story,
+            Some(app::picker::ScottPictures::NativeC64 { pictures: 11 }),
+        );
+        let st = super::open_launch_options(&native, &cfg, &dir);
+        assert!(st.scott_native_pictures, "a native C64 entry must offer the row");
+
+        // SQ-1480: the ZX Spectrum releases decode through the SAME
+        // supersample machinery as the C64 ones, so they get the row too.
+        let native_zx = scott_entry_with_pictures(
+            &story,
+            Some(app::picker::ScottPictures::NativeZx { pictures: 11 }),
+        );
+        let st = super::open_launch_options(&native_zx, &cfg, &dir);
+        assert!(st.scott_native_pictures, "a native ZX Spectrum entry must offer the row too");
+
+        let blorb = scott_entry_with_pictures(&story, Some(app::picker::ScottPictures::Blorb));
+        let st = super::open_launch_options(&blorb, &cfg, &dir);
+        assert!(!st.scott_native_pictures, "a Blorb's pictures have no second resolution");
+
+        let text_only = scott_entry_with_pictures(&story, None);
+        let st = super::open_launch_options(&text_only, &cfg, &dir);
+        assert!(!st.scott_native_pictures, "a text-only story has no row at all");
+
+        // SQ-1475: family C is bitmaps, so there is no second resolution to
+        // draw it at and the row stays hidden for it too.
+        let saga = scott_entry_with_pictures(
+            &story,
+            Some(app::picker::ScottPictures::SagaUsStrips {
+                platform: scott::SagaPlatform::Commodore64,
+                pictures: 70,
+            }),
+        );
+        let st = super::open_launch_options(&saga, &cfg, &dir);
+        assert!(!st.scott_native_pictures, "family C is bitmaps — one resolution only");
+
+        // SQ-1524/SQ-1525/SQ-1526: the Atari's line-art format draws at a
+        // caller-chosen supersample exactly like the native vector formats
+        // above, so it must offer the row too — but its OTHER format,
+        // family-C bitmaps, is a fixed canvas like `SagaUsStrips` above and
+        // must stay hidden.
+        let atari_bitmap = scott_entry_with_pictures(
+            &story,
+            Some(app::picker::ScottPictures::SagaAtari {
+                format: scott::AtariPictureFormat::FamilyCBitmap,
+                pictures: 12,
+            }),
+        );
+        let st = super::open_launch_options(&atari_bitmap, &cfg, &dir);
+        assert!(!st.scott_native_pictures, "Atari family-C is bitmaps too — one resolution only");
+
+        let atari_line_art = scott_entry_with_pictures(
+            &story,
+            Some(app::picker::ScottPictures::SagaAtari {
+                format: scott::AtariPictureFormat::LineArt,
+                pictures: 92,
+            }),
+        );
+        let st = super::open_launch_options(&atari_line_art, &cfg, &dir);
+        assert!(st.scott_native_pictures, "Atari line art must offer the resolution row");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1475: the info panel's "Pictures:" wording for every kind a Scott
+    /// entry can be. The two S.A.G.A. rows are the ones this change added, and
+    /// the distinction between them is the point: a release whose artwork is
+    /// on THIS file, and one whose artwork is somewhere else. Neither is the
+    /// `None` a text-only game reports, which prints no row at all.
+    #[test]
+    fn scott_pictures_label_names_every_kind() {
+        use app::picker::ScottPictures;
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::NativeC64 { pictures: 11 }),
+            "native C64 (vector, 11 rooms)"
+        );
+        assert_eq!(super::scott_pictures_label(ScottPictures::Blorb), "Blorb");
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::SagaUsStrips {
+                platform: scott::SagaPlatform::Commodore64,
+                pictures: 70,
+            }),
+            "S.A.G.A. (C64 strips, 70 pictures)"
+        );
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::SagaUsStrips {
+                platform: scott::SagaPlatform::Atari8Bit,
+                pictures: 42,
+            }),
+            "S.A.G.A. (Atari strips, 42 pictures)"
+        );
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::SagaUsStrips {
+                platform: scott::SagaPlatform::AppleII,
+                pictures: 5,
+            }),
+            "S.A.G.A. (Apple II hi-res, 5 pictures)",
+            "SQ-1476: the Apple II draws line art, not strips, and says so"
+        );
+        for platform in [
+            scott::SagaPlatform::Commodore64,
+            scott::SagaPlatform::Atari8Bit,
+            scott::SagaPlatform::AppleII,
+        ] {
+            assert_eq!(
+                super::scott_pictures_label(ScottPictures::SagaUsNoPictures {
+                    platform,
+                    scrambled: false
+                }),
+                "S.A.G.A. (not on this file)",
+                "the platform does not change where the pictures aren't"
+            );
+        }
+        // …but WHY they are not readable does change the row (SQ-1476): the
+        // three scrambled Apple II releases keep their room artwork on a side
+        // this build cannot read at all, which is not the same as a file that
+        // simply is not the one with the pictures on it.
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::SagaUsNoPictures {
+                platform: scott::SagaPlatform::AppleII,
+                scrambled: true
+            }),
+            "S.A.G.A. (scrambled, not readable yet)"
+        );
+        // SQ-1477: family E. Named for the machine and its display standard,
+        // because that is what a player who owned this release would
+        // recognise — and because §8.5's palette IS the CGA one, fixed, so
+        // "CGA" is the whole of why these pictures look as they do.
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::SagaDosCga { pictures: 68 }),
+            "S.A.G.A. (MS-DOS CGA, 68 pictures)"
+        );
+        // SQ-1496/SQ-1524/SQ-1525: the Atari's own companion-side count,
+        // named for the format the way the Apple II row above names line art
+        // vs. strips — a player sees the difference either way.
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::SagaAtari {
+                format: scott::AtariPictureFormat::FamilyCBitmap,
+                pictures: 12,
+            }),
+            "S.A.G.A. (Atari strips, 12 pictures)"
+        );
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::SagaAtari {
+                format: scott::AtariPictureFormat::LineArt,
+                pictures: 92,
+            }),
+            "S.A.G.A. (Atari line art, 92 pictures)"
+        );
+    }
+
+    /// `f.graphics` is always `false` for the Scott engine (`Features::default()`,
+    /// `picker::entry_from_loaded`'s `Engine::Scott` arm — no header flag to
+    /// read it off) — so the "graphics" badge for a Scott entry has to come
+    /// from `scott_pictures` instead, exactly as the "Pictures:" row does.
+    /// Covers a native decode, a S.A.G.A. release AND the Atari companion
+    /// side (the kind this change added), and confirms a text-only story —
+    /// `scott_pictures: None` — still shows no badge.
+    #[test]
+    fn feature_words_derives_the_graphics_badge_from_scott_pictures() {
+        use app::picker::{Features, ScottPictures};
+        let f = Features::default();
+        assert!(
+            !super::feature_words(&f, None, None).contains(&"graphics"),
+            "a text-only Scott story must not show the graphics badge"
+        );
+        assert!(super::feature_words(
+            &f,
+            None,
+            Some(ScottPictures::NativeC64 { pictures: 11 })
+        )
+        .contains(&"graphics"));
+        assert!(super::feature_words(
+            &f,
+            None,
+            Some(ScottPictures::SagaUsStrips { platform: scott::SagaPlatform::Commodore64, pictures: 70 })
+        )
+        .contains(&"graphics"));
+        // SQ-1496/SQ-1524/SQ-1525: the Atari fix this test was added for —
+        // its companion-side artwork must light the same badge.
+        assert!(super::feature_words(
+            &f,
+            None,
+            Some(ScottPictures::SagaAtari { format: scott::AtariPictureFormat::LineArt, pictures: 92 })
+        )
+        .contains(&"graphics"));
+    }
+
+    /// SQ-1477: the MS-DOS *Questprobe* releases come in a zip, so the zip is
+    /// the medium the TYPE column names — the same slot a `.d64` and a `.z80`
+    /// fill — and the label has to fit the column like every other one
+    /// (SQ-1458's lesson: an overflowing TYPE label panics the row).
+    #[test]
+    fn interp_label_names_the_zip_an_ms_dos_release_arrives_in() {
+        use app::picker::{Engine, Features, ScottPictures, StoryMeta};
+        let meta = |scott_pictures: Option<ScottPictures>| StoryMeta {
+            size_bytes: 0, story_bytes: 0, modified: None, engine: Engine::Scott, format: String::new(),
+            version: None, serial: None, release: None, ifid: String::new(),
+            features: Features::default(), self_blorb: None, scott_pictures, disk_image: None, disk_entry: None,
+            author: None, year: None,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
+        };
+        let dos = meta(Some(ScottPictures::SagaDosCga { pictures: 68 }));
+        assert_eq!(super::interp_label(&dos, false), "Scott (zip)");
+        assert!(super::interp_label(&dos, false).len() <= super::INTERP_COL_W as usize);
+        // A Scott row with any OTHER kind of pictures is unchanged — the zip
+        // answer is only ever given for a row whose artwork came out of one.
+        assert_eq!(super::interp_label(&meta(None), false), "Scott");
+        assert_eq!(
+            super::interp_label(&meta(Some(ScottPictures::NativeC64 { pictures: 11 })), false),
+            "Scott"
+        );
     }
 
     /// SQ-0771: the size on the filename line measures the file on disk, which
@@ -5738,10 +7517,11 @@ mod tests {
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
+        let mut tiles = app::cover::TileEncoder::detached();
         let mut first_row = 0usize;
         // No picker → no cover art → each tile shows its title centred in the band.
         let (rects, cols, vis) = super::draw_story_gallery(
-            &stories, 1, &mut first_row, std::path::Path::new("/tmp"), &cs, &km(), None, &mut cover, std::path::Path::new("/tmp"), area, &mut buf,
+            &stories, 1, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
         );
 
         assert!(cols >= 1 && vis >= 1);
@@ -5834,6 +7614,7 @@ mod tests {
             self_blorb: Some(vec![ChunkInfo {
                 usage: "Pict".into(), number: 3, chunk_type: "PNG ".into(), len: 100, detail: None,
             }]),
+            scott_pictures: None,
             disk_image: None,
             disk_entry: None,
             author: None, year: None, genre: None, language: None, description: None,
@@ -5985,11 +7766,522 @@ mod tests {
         let area = Rect::new(0, 0, 40, 22);
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
+        let mut tiles = app::cover::TileEncoder::detached();
         let mut first_row = 0usize;
         let (rects, _cols, _vis) = super::draw_story_gallery(
-            &stories, 39, &mut first_row, std::path::Path::new("/tmp"), &cs, &km(), None, &mut cover, std::path::Path::new("/tmp"), area, &mut buf,
+            &stories, 39, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
         );
         assert!(first_row > 0, "grid scrolled down to keep the last cover visible");
         assert!(rects.iter().any(|(i, _)| *i == 39), "the selected tile is on screen");
+    }
+
+    /// SQ-1479: a restored gallery position is applied once the real grid
+    /// (cols/vis) is known — not before, since the grid reflows with the
+    /// terminal width — and never reapplied on a later draw.
+    #[test]
+    fn draw_story_gallery_applies_a_restored_distance_once_cols_are_known() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let stories: Vec<_> = (0..40).map(|i| story_with_meta(&format!("S{i}"), None, None)).collect();
+        let area = Rect::new(0, 0, 85, 40);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let mut tiles = app::cover::TileEncoder::detached();
+        let mut first_row = 0usize;
+        let mut restore = Some(2usize);
+        let (_, cols, vis) = super::draw_story_gallery(
+            &stories, 23, &mut first_row, &mut restore,
+            &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false,
+            &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+        );
+        assert_eq!(cols, 4, "sanity: the grid really is 4 columns wide at this area");
+        assert_eq!(vis, 3, "sanity: 3 rows visible");
+        // Selected 23 is grid row 5 (23 / 4); a distance of 2 lands `first_row`
+        // at row 3, so the selected tile's row is 2 rows below the top.
+        assert_eq!(first_row, 3);
+        assert!(restore.is_none(), "the distance is consumed on first use");
+
+        // A second draw, distance already consumed: an ordinary scroll to a
+        // different selection just does the normal `scroll_to` dance, not
+        // another jump to a `distance`-derived row.
+        super::draw_story_gallery(
+            &stories, 0, &mut first_row, &mut restore,
+            &super::PickerHeading::browse(std::path::Path::new("/tmp")), &cs, &km(), None, false,
+            &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+        );
+        assert_eq!(first_row, 0, "ordinary scroll_to pulled the window back up to the new selection");
+    }
+
+    // ── SQ-1213: gallery scroll-settle debounce ─────────────────────────────
+    //
+    // Same pattern as SQ-1198's `sixel_scroll_suppress` tests in
+    // `render/inline_image.rs`: a pure gate test on the suppression DECISION,
+    // plus a render OUTCOME test asserted on the buffer cells `draw_story_gallery`
+    // writes. The picker runs its own standalone event loop with no `AppState`
+    // to ride, so `gallery_scroll_in_motion`/`gallery_sixel_scroll_suppress`
+    // track the identical 150ms window locally instead.
+
+    /// `gallery_sixel_scroll_suppress` gates on BOTH the backend and the motion
+    /// window: only sixel, and only while `gallery_scroll_in_motion` reads true.
+    /// Kitty re-places an existing upload by id for free and half-blocks are
+    /// ordinary cells, so neither pays the cost this debounce exists to avoid.
+    #[test]
+    fn gallery_scroll_suppress_gates_on_protocol_and_motion() {
+        let mut sixel = app::render::graphics::kitty_picker(8, 16);
+        sixel.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+        let kitty = app::render::graphics::kitty_picker(8, 16);
+        let halfblocks = ratatui_image::picker::Picker::halfblocks();
+
+        // Never scrolled this session: never suppressed, whatever the backend.
+        assert!(!super::gallery_scroll_in_motion(None), "never scrolled = not in motion");
+        assert!(!super::gallery_sixel_scroll_suppress(&sixel, false), "no motion yet");
+        assert!(!super::gallery_sixel_scroll_suppress(&kitty, false));
+        assert!(!super::gallery_sixel_scroll_suppress(&halfblocks, false));
+
+        // Freshly scrolled: in motion, and sixel alone is suppressed.
+        let fresh = Some(std::time::Instant::now());
+        assert!(super::gallery_scroll_in_motion(fresh), "a fresh scroll is in motion");
+        assert!(super::gallery_sixel_scroll_suppress(&sixel, true), "sixel mid-scroll must suppress");
+        assert!(!super::gallery_sixel_scroll_suppress(&kitty, true), "kitty is untouched by the debounce");
+        assert!(!super::gallery_sixel_scroll_suppress(&halfblocks, true), "half-blocks is untouched");
+
+        // Past the settle window (backdating the Instant, since the test can't
+        // literally sleep for it — mirrors the SQ-1198 state.rs tests).
+        let stale = Some(std::time::Instant::now() - std::time::Duration::from_millis(200));
+        assert!(!super::gallery_scroll_in_motion(stale), "past the settle window");
+    }
+
+    /// Falsification target: while suppressed, a sixel tile with a decoded
+    /// cover renders as its letterbox footprint only — no protocol is built or
+    /// placed, so no cell carries a sixel payload — where a settled render of
+    /// the exact same tile places the real protocol. Repeated suppressed
+    /// renders (simulating a burst of scroll steps, all still inside the
+    /// window) place nothing at all; only the first settled render after the
+    /// burst places the real payload.
+    ///
+    /// SQ-1199 added the second half of the claim: a suppressed frame does not
+    /// even ASK for the raster. Encoding moved to a worker, so a fling that
+    /// requested every tile it flew past would queue a row of encodes per notch
+    /// for payloads no suppressed frame is going to place. The settled render
+    /// requests, the worker answers, and the frame after that places — which is
+    /// why this case now drives the encode to completion between the two.
+    #[test]
+    fn suppressed_gallery_render_shows_footprint_only_settled_places_once() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let story = story_with_meta("Zork", None, None);
+        let stories = vec![story.clone()];
+        let area = Rect::new(0, 0, 40, 22);
+        let mut cover = app::cover::CoverState::default();
+        // A real encoder: `drain_blocking` waits on the worker's own reply
+        // rather than on a clock, so this stays deterministic.
+        let mut tiles = app::cover::TileEncoder::new();
+        // A real decoded cover, so there is something to place.
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 4, image::Rgb([200, 0, 0])));
+        cover.insert(story.path.clone(), Some(img));
+
+        let mut picker = app::render::graphics::kitty_picker(8, 16);
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+        let cell = (picker.font_size().width, picker.font_size().height);
+
+        // A cell carrying the real sixel payload is far longer than any glyph
+        // or plain space this view otherwise paints.
+        let has_payload = |buf: &Buffer| {
+            (area.left()..area.right()).any(|x| {
+                (area.top()..area.bottom())
+                    .any(|y| buf.cell((x, y)).is_some_and(|c| c.symbol().len() > 16))
+            })
+        };
+
+        let mut first_row = 0usize;
+        // Three suppressed renders in a row (a burst of scroll steps, all still
+        // inside the debounce window): none may place the real payload, and
+        // none may queue an encode for one.
+        for _ in 0..3 {
+            let mut buf = Buffer::empty(area);
+            super::draw_story_gallery(
+                &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+                &cs, &km(), Some(&picker), true, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+            );
+            assert!(!has_payload(&buf), "mid-scroll must not carry a sixel payload");
+            assert!(!tiles.pending(), "mid-scroll must not queue an encode either");
+        }
+
+        // Settled: the render asks for the raster (and still places nothing).
+        let mut buf = Buffer::empty(area);
+        super::draw_story_gallery(
+            &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+        );
+        assert!(tiles.pending(), "the settled render queues the tile's encode");
+
+        // The worker answers; the next render places the real protocol.
+        for (key, proto) in tiles.drain_blocking() {
+            cover.insert_tile(key, proto.expect("the tile encodes"), cell);
+        }
+        let mut buf = Buffer::empty(area);
+        super::draw_story_gallery(
+            &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+        );
+        assert!(has_payload(&buf), "settled render must place the real sixel payload");
+    }
+
+    // ── SQ-1199: gallery tile protocols are encoded off the UI thread ───────
+    //
+    // The draw's job is now to ENQUEUE, not to encode. These cases drive
+    // `draw_story_gallery` against a `TileEncoder::detached()` — a worker-less
+    // encoder whose request channel the harness reads and whose replies the
+    // harness writes — so "the draw did not encode", "it deduped", and "that
+    // reply is stale" are all assertable without a thread or a clock.
+
+    /// N visible tiles with decoded-but-unencoded covers: the draw places NO
+    /// protocol and enqueues exactly N requests; an immediate redraw (the 16ms
+    /// tick fires while they are in flight) enqueues none of them again; and
+    /// once the replies are delivered the next draw places them.
+    ///
+    /// Falsification (dedupe half): drop the `in_flight` guard in
+    /// `TileEncoder::request` and the second draw queues all N a second time —
+    /// which, at a 16ms tick, is how a still-encoding grid queues the same work
+    /// dozens of times over.
+    #[test]
+    fn gallery_draw_enqueues_tile_encodes_without_building_them() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let stories: Vec<_> =
+            (0..4).map(|i| story_with_meta(&format!("S{i}"), None, None)).collect();
+        let area = Rect::new(0, 0, 80, 40);
+        let mut cover = app::cover::CoverState::default();
+        let mut tiles = app::cover::TileEncoder::detached();
+        for s in &stories {
+            let img =
+                image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 4, image::Rgb([9, 200, 9])));
+            cover.insert(s.path.clone(), Some(img));
+        }
+        let picker = app::render::graphics::kitty_picker(8, 16);
+        let cell = (picker.font_size().width, picker.font_size().height);
+        let has_payload = |buf: &Buffer| {
+            (area.left()..area.right()).any(|x| {
+                (area.top()..area.bottom())
+                    .any(|y| buf.cell((x, y)).is_some_and(|c| c.symbol().len() > 16))
+            })
+        };
+
+        let mut first_row = 0usize;
+        let mut buf = Buffer::empty(area);
+        let (rects, _, _) = super::draw_story_gallery(
+            &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+        );
+        assert_eq!(rects.len(), stories.len(), "sanity: every tile is on screen");
+        assert!(!has_payload(&buf), "the draw must not build a protocol on this thread");
+        let queued = tiles.take_requests();
+        assert_eq!(queued.len(), stories.len(), "one encode request per visible tile");
+
+        // A redraw while they are all still in flight queues nothing new.
+        let mut buf = Buffer::empty(area);
+        super::draw_story_gallery(
+            &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+        );
+        assert!(tiles.take_requests().is_empty(), "in-flight tiles are not re-requested");
+
+        // Deliver every reply, the way the picker loop's drain does.
+        for r in queued {
+            let proto = app::render::graphics::fitted_protocol(
+                &r.picker,
+                &r.img,
+                ratatui::layout::Size::new(r.key.cols, r.key.rows),
+                false,
+            );
+            tiles.deliver(r.key, proto);
+        }
+        for (key, proto) in tiles.drain() {
+            cover.insert_tile(key, proto.expect("the tile encodes"), cell);
+        }
+        assert!(!tiles.pending(), "every request was answered");
+
+        let mut buf = Buffer::empty(area);
+        super::draw_story_gallery(
+            &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+        );
+        assert!(has_payload(&buf), "delivered tiles paint on the next draw");
+    }
+
+    /// The cell changed shape between the request and the reply (SQ-0988's
+    /// font-size resize, which throws every built raster away): the reply is
+    /// fitted to a cell the terminal no longer has, so it is DISCARDED rather
+    /// than cached — and the redraw at the new cell asks for a fresh one under
+    /// a key of its own.
+    ///
+    /// Falsification: drop the `key.cell != cell` guard in
+    /// `CoverState::insert_tile` and the stale raster is kept — `insert_tile`
+    /// returns true, and it sits in the LRU under a geometry nothing will ever
+    /// look up again.
+    #[test]
+    fn a_tile_reply_for_a_stale_cell_is_discarded() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let story = story_with_meta("Zork", None, None);
+        let stories = vec![story.clone()];
+        let area = Rect::new(0, 0, 40, 22);
+        let mut cover = app::cover::CoverState::default();
+        let mut tiles = app::cover::TileEncoder::detached();
+        let img =
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 4, image::Rgb([200, 0, 0])));
+        cover.insert(story.path.clone(), Some(img));
+
+        // Requested at an 8x16 cell.
+        let picker = app::render::graphics::kitty_picker(8, 16);
+        let mut first_row = 0usize;
+        let mut buf = Buffer::empty(area);
+        super::draw_story_gallery(
+            &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), Some(&picker), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+        );
+        let queued = tiles.take_requests();
+        assert_eq!(queued.len(), 1, "one tile, one request");
+        let req = queued.into_iter().next().unwrap();
+        assert_eq!(req.key.cell, (8, 16), "the request carries the cell it was fitted for");
+        let proto = app::render::graphics::fitted_protocol(
+            &req.picker,
+            &req.img,
+            ratatui::layout::Size::new(req.key.cols, req.key.rows),
+            false,
+        )
+        .expect("the tile encodes");
+
+        // Meanwhile the font size moved: the picker (and `invalidate_cell_geometry`)
+        // is now on a 10x20 cell, and the reply above is fitted to a cell that
+        // no longer exists.
+        cover.invalidate_cell_geometry();
+        let wide = app::render::graphics::kitty_picker(10, 20);
+        let cell = (wide.font_size().width, wide.font_size().height);
+        assert_ne!(req.key.cell, cell, "sanity: the cell really did change");
+        assert!(
+            !cover.insert_tile(req.key.clone(), proto, cell),
+            "a reply fitted to the old cell must be discarded, not cached"
+        );
+        assert!(cover.tile(&req.key).is_none(), "and it is not in the cache under its own key");
+
+        // The redraw at the new cell asks again, under a key of its own.
+        tiles.drain();
+        let mut buf = Buffer::empty(area);
+        super::draw_story_gallery(
+            &stories, 0, &mut first_row, &mut None, &super::PickerHeading::browse(std::path::Path::new("/tmp")),
+            &cs, &km(), Some(&wide), false, &mut cover, &mut tiles, std::path::Path::new("/tmp"), area, &mut buf,
+        );
+        let again = tiles.take_requests();
+        assert_eq!(again.len(), 1, "the new cell's tile is requested afresh");
+        assert_eq!(again[0].key.cell, cell, "under the CURRENT cell's key");
+    }
+
+    // ── Remember/restore the browser's position on return (SQ-1474) ───────────
+    //
+    // `resolve_picker_position` is the whole of what `run_story_picker` does at
+    // startup with a remembered position — extracted so it's testable without a
+    // pty (`run_story_picker` itself needs a real terminal). Every case rescans
+    // from an on-disk fixture, exactly as the real call does, so a test that
+    // matched on the OLD list instead of the rescanned one would not compile,
+    // let alone pass.
+
+    /// A scratch directory unique per CALL (SQ-1131): these cases write real
+    /// files and remove their own tree. `minimal_v3_story` (this module's
+    /// existing fixture, above) supplies the story bytes.
+    fn restore_scratch(tag: &str) -> std::path::PathBuf {
+        app::scratch_dir(&format!("picker-restore-{tag}"))
+    }
+
+    /// Write a zip at `path` holding each `(entry name, bytes)`, STORED so what
+    /// comes back out is byte-for-byte what went in (mirrors
+    /// `tests/suites/zip_story_entries.rs`'s own helper).
+    fn write_test_zip(path: &std::path::Path, entries: &[(&str, Vec<u8>)]) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).expect("a scratch zip");
+        let mut zw = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(bytes).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    #[test]
+    fn resolve_picker_position_returns_to_the_sub_directory_and_matching_row() {
+        let root = restore_scratch("subdir");
+        let sub = root.join("disks");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("alpha.z5"), minimal_v3_story()).unwrap();
+        std::fs::write(sub.join("beta.z5"), minimal_v3_story()).unwrap();
+
+        let source = app::picker::StorySource::Library(root.clone());
+        let restore = super::PickerPosition {
+            dir: sub.clone(),
+            path: sub.join("beta.z5"),
+            disk_entry: None,
+            index_hint: 0,
+            rows_from_top: 0,
+            gallery_rows_from_top: None,
+        };
+
+        let (dir, stories, selected) =
+            super::resolve_picker_position(&source, &root, &root, Some(&restore));
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(dir, sub, "lands back on the sub-directory, not the root");
+        assert_eq!(
+            stories[selected].path,
+            sub.join("beta.z5"),
+            "the story row that was launched is the one selected again"
+        );
+
+        // FALSIFICATION: with no remembered position, the browser opens on the
+        // root with the top row selected — the behaviour restoring replaces.
+        let root2 = restore_scratch("subdir-none");
+        let sub2 = root2.join("disks");
+        std::fs::create_dir_all(&sub2).unwrap();
+        std::fs::write(sub2.join("alpha.z5"), minimal_v3_story()).unwrap();
+        let (dir2, _stories2, selected2) =
+            super::resolve_picker_position(&source, &root2, &root2, None);
+        let _ = std::fs::remove_dir_all(&root2);
+        assert_eq!(dir2, root2, "no restore: opens on the root");
+        assert_eq!(selected2, 0, "no restore: top row selected");
+    }
+
+    #[test]
+    fn resolve_picker_position_matches_the_right_row_of_a_multi_story_zip() {
+        let root = restore_scratch("diskentry");
+        let zip = root.join("pack.zip");
+        write_test_zip(&zip, &[("amber.z5", minimal_v3_story()), ("beacon.z5", minimal_v3_story())]);
+
+        let source = app::picker::StorySource::Library(root.clone());
+        let restore = super::PickerPosition {
+            dir: root.clone(),
+            path: zip.clone(),
+            disk_entry: Some("beacon.z5".to_string()),
+            index_hint: 0,
+            rows_from_top: 0,
+            gallery_rows_from_top: None,
+        };
+
+        let (dir, stories, selected) =
+            super::resolve_picker_position(&source, &root, &root, Some(&restore));
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(dir, root, "the zip's own directory, not a folder inside it");
+        assert_eq!(stories[selected].path, zip, "matched the zip's expanded row");
+        assert_eq!(
+            stories[selected].meta.disk_entry.as_deref(),
+            Some("beacon.z5"),
+            "the SECOND entry, not merely the first one the zip contains"
+        );
+    }
+
+    #[test]
+    fn resolve_picker_position_falls_back_to_the_nearest_row_when_the_story_is_gone() {
+        let root = restore_scratch("deleted");
+        // The remembered story ("gone.z5") sat at index 1 of a 3-row folder at
+        // launch time; it's not written here at all, standing in for a title
+        // deleted (or a disk image moved) while the game was running.
+        std::fs::write(root.join("alpha.z5"), minimal_v3_story()).unwrap();
+        std::fs::write(root.join("charlie.z5"), minimal_v3_story()).unwrap();
+
+        let source = app::picker::StorySource::Library(root.clone());
+        let restore = super::PickerPosition {
+            dir: root.clone(),
+            path: root.join("gone.z5"),
+            disk_entry: None,
+            index_hint: 1,
+            rows_from_top: 0,
+            gallery_rows_from_top: None,
+        };
+
+        let (_dir, stories, selected) =
+            super::resolve_picker_position(&source, &root, &root, Some(&restore));
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            stories.iter().all(|e| e.path != root.join("gone.z5")),
+            "sanity: the remembered story really is absent from the rescan"
+        );
+        // Two rows survive ("alpha", "charlie"); the remembered index (1)
+        // clamps into range and lands on the nearest surviving row rather than
+        // resetting to the top.
+        assert_eq!(selected, 1.min(stories.len().saturating_sub(1)));
+    }
+
+    #[test]
+    fn resolve_picker_position_falls_back_to_the_root_when_the_remembered_folder_is_gone() {
+        let root = restore_scratch("folder-gone");
+        std::fs::write(root.join("top.z5"), minimal_v3_story()).unwrap();
+
+        let source = app::picker::StorySource::Library(root.clone());
+        let restore = super::PickerPosition {
+            dir: root.join("never-existed"),
+            path: root.join("never-existed").join("whatever.z5"),
+            disk_entry: None,
+            index_hint: 0,
+            rows_from_top: 0,
+            gallery_rows_from_top: None,
+        };
+
+        let (dir, stories, _selected) =
+            super::resolve_picker_position(&source, &root, &root, Some(&restore));
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(dir, root, "a deleted sub-directory falls back to the root");
+        assert!(stories.iter().any(|e| e.path == root.join("top.z5")));
+    }
+
+    // ── `launch_scroll_recipe` (SQ-1479): the launch-time distance-from-top
+    // recipe shared by every launch site ────────────────────────────────────
+
+    #[test]
+    fn launch_scroll_recipe_reads_the_lists_own_distance_in_list_view() {
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(50);
+        list.prime(20, 4); // selected 20, offset 16 — 4 rows below the top
+        let (rows_from_top, gallery) =
+            super::launch_scroll_recipe(&list, super::PickerView::List, 0, 1);
+        assert_eq!(rows_from_top, 4);
+        assert_eq!(gallery, None, "list view carries no gallery distance");
+    }
+
+    #[test]
+    fn launch_scroll_recipe_reads_the_grid_row_distance_in_gallery_view() {
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(50);
+        list.prime(23, 0); // selected 23; the list's own offset is irrelevant here
+        // 4 columns: row 23 is grid row 5 (23 / 4). A grid `first_row` of 2
+        // puts the selected tile's row 3 rows below the top of the grid.
+        let (_, gallery) = super::launch_scroll_recipe(&list, super::PickerView::Gallery, 2, 4);
+        assert_eq!(gallery, Some(3));
+    }
+
+    #[test]
+    fn launch_scroll_recipe_gallery_distance_floors_at_zero_when_selected_is_the_top_row() {
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(50);
+        list.prime(1, 0); // row 0 (1 / 4), same as first_row: no distance
+        let (_, gallery) = super::launch_scroll_recipe(&list, super::PickerView::Gallery, 0, 4);
+        assert_eq!(gallery, Some(0));
+    }
+
+    #[test]
+    fn picked_story_row_carries_the_recipe_into_its_position() {
+        let stories = make_two_test_stories();
+        let dir = std::path::Path::new("/tmp");
+        let picked = super::PickedStory::row(&stories[0], dir, 4, 7, Some(2));
+        assert_eq!(picked.position.index_hint, 4);
+        assert_eq!(picked.position.rows_from_top, 7);
+        assert_eq!(picked.position.gallery_rows_from_top, Some(2));
+
+        // The plain (non-gallery) shape every ordinary list launch uses.
+        let picked = super::PickedStory::row(&stories[0], dir, 0, 0, None);
+        assert_eq!(picked.position.rows_from_top, 0);
+        assert_eq!(picked.position.gallery_rows_from_top, None);
     }
 }

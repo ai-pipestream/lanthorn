@@ -151,6 +151,7 @@ impl UserFace {
                 blorb::amiga_font::drawer_of(&self.name)
                     .is_some_and(|d| d.eq_ignore_ascii_case(drawer))
             }
+            _ => false,
         }
     }
 }
@@ -369,7 +370,7 @@ pub fn scan_for(dir: &Path, machine: crate::interpreter::InterpreterProfile) -> 
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
 

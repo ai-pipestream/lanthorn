@@ -127,10 +127,16 @@ pub struct LayerSuggestion {
 ///
 /// The word boundaries are the entire point. "Amazement" and "Amazed" contain the letters and mean
 /// nothing of the sort, and a room called "A Maze of Twisty Little Passages" means exactly it.
+///
+/// **`_` is a SEPARATOR here, not a word character** (SQ-1372). A name reaching this function is
+/// sometimes a compiler's identifier rather than prose — Inform 6 writes `(Alike_Maze_8)` into the
+/// header of an object declared with no quoted name, and a static reader that finds no printed name
+/// has nothing else to offer. Underscore is how an identifier spells the space that prose would
+/// have, so treating it as a letter made `Alike_Maze_8` fail the very test its middle word passes.
 pub fn mentions_maze(name: &str) -> bool {
     const WORD: [char; 4] = ['m', 'a', 'z', 'e'];
     let chars: Vec<char> = name.chars().collect();
-    let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+    let is_word_char = |c: char| c.is_alphanumeric();
     for i in 0..chars.len().saturating_sub(WORD.len() - 1) {
         if !(0..WORD.len()).all(|k| chars[i + k].to_ascii_lowercase() == WORD[k]) {
             continue;
@@ -225,6 +231,13 @@ pub fn on_arrival(
     to: RoomId,
     newly_seen: bool,
 ) -> Option<LayerSuggestion> {
+    // "Never for this story" (SQ-1298): the player has said the whole prompt is unwelcome on this
+    // map, so neither trigger below gets a turn. Checked before the per-seam decision — cheaper,
+    // and it is the single choke point every route into `name_trigger`/`structural_trigger`/
+    // `descent_trigger` passes through, so nothing downstream needs its own copy of this check.
+    if graph.suggestions_disabled() {
+        return None;
+    }
     let seam = SeamKey { from, dir };
     if graph.seam_decision(seam) == SeamDecision::Ignored {
         return None;
@@ -799,6 +812,20 @@ mod tests {
         assert!(!mentions_maze(""));
     }
 
+    /// SQ-1372: an underscore separates words, because a name reaching this
+    /// function is sometimes a compiler's identifier. Inform 6 writes
+    /// `(Alike_Maze_8)` into the header of an object declared with no quoted
+    /// name, and Adventure's thirty-nine maze rooms are declared exactly so —
+    /// with `_` treated as a letter, not one of them mentioned a maze.
+    #[test]
+    fn an_identifier_underscore_is_a_word_boundary() {
+        assert!(mentions_maze("(Alike_Maze_8)"));
+        assert!(mentions_maze("Different_Maze_1"));
+        assert!(mentions_maze("maze_room"));
+        assert!(!mentions_maze("Amazed_Hall"), "the letters still have to be the word");
+        assert!(!mentions_maze("Amazed Hall"));
+    }
+
     /// Walking into a room called "Maze" says everything at the doorway: no floor, no waiting for
     /// the player to come back out.
     #[test]
@@ -1053,6 +1080,39 @@ mod tests {
         assert_eq!(m2.graph.current(), Some(3), "the reload put the player back at the stairs");
         m2.observe(1, "Hall", Some(Direction::Up));
         assert_eq!(m2.take_suggestion(), None, "a restore does not un-decline a seam");
+    }
+
+    /// "Never for this story" (SQ-1298) is story-wide, not per-seam: once set, neither the
+    /// structural trigger nor the name trigger fires again, on a passage the flag was never asked
+    /// about either.
+    #[test]
+    fn suggestions_disabled_silences_both_triggers() {
+        let mut m = manor();
+        back_to_the_stairs(&mut m);
+        m.graph.set_suggestions_disabled(true);
+        m.observe(1, "Hall", Some(Direction::Up));
+        assert_eq!(m.take_suggestion(), None, "the structural trigger is silenced story-wide");
+
+        let mut m2 = Mapper::default();
+        m2.observe(1, "Troll Room", None);
+        m2.graph.set_suggestions_disabled(true);
+        m2.observe(2, "Maze", Some(Direction::W));
+        assert_eq!(m2.take_suggestion(), None, "the name trigger is silenced too, not just structural");
+    }
+
+    /// The flag survives the map file, and a restored game stays quiet — the same shape as
+    /// [`an_ignored_seam_is_still_ignored_after_a_save_and_reload`], perturbed rather than merely
+    /// asserted on the restored map alone.
+    #[test]
+    fn suggestions_disabled_is_still_disabled_after_a_save_and_reload() {
+        let mut m = manor();
+        back_to_the_stairs(&mut m);
+        m.graph.set_suggestions_disabled(true);
+
+        let mut m2 = crate::persist::from_json(&crate::persist::to_json(&m)).unwrap();
+        assert!(m2.graph.suggestions_disabled(), "the flag itself survives");
+        m2.observe(1, "Hall", Some(Direction::Up));
+        assert_eq!(m2.take_suggestion(), None, "a restore does not un-set the story-wide never");
     }
 
     /// A seam answer naming a room the map no longer has is dropped on load, exactly like a

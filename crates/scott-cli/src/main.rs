@@ -19,6 +19,7 @@
 //   --seed <n>       seed the VM's occurrence-roll PRNG for reproducible runs
 //   --max-turns <n>  stop after N commands (a safety cap for scripted input)
 //   --data-dir <p>   where saves live (default: beside the .dat)
+//   --story <n|name> which program to take off a disk image that holds several
 
 use std::env;
 use std::fs;
@@ -26,11 +27,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
-use cli_host::{HostMode, TerminalGuard};
+use cli_host::{HostMode, StoryOrigin, TerminalGuard};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
 
-use scott::{Database, Vm};
+use scott::{looks_like_scottfree_save, Database, Vm};
 
 /// The canonical Scott Adams input prompt (mirrors `ScottSession::PROMPT` in the
 /// app). ScottFree prints it from its input routine; the VM stays input-agnostic,
@@ -142,6 +143,15 @@ struct Args {
     /// `--data-dir`: where saves live. `None` puts them beside the `.dat`, which
     /// is what `cli_host::game_dir` does for the other two hosts.
     data_dir: Option<String>,
+    /// `--story <n|name>`: which program to take off a disk image that holds
+    /// several — the Commodore 64 *Mysterious Adventures* compilation disks
+    /// (SQ-1414). Mirrors `zvm-cli`'s flag of the same name and matches through
+    /// the same `cli_host::story_pick` rule, so the two front-ends cannot
+    /// disagree about what a number or a name picks out.
+    story: Option<String>,
+    /// ScottFree's four runtime option flags (SQ-1413), mirroring its own
+    /// `-y`/`-s`/`-t`/`-p` — see `scott::Options`.
+    options: scott::Options,
 }
 
 /// Every option `scott-cli` accepts; `cli_host::args` applies the rules.
@@ -153,6 +163,11 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::valued(&["--seed"]),
     cli_host::Opt::valued(&["--max-turns"]),
     cli_host::Opt::valued(&["--data-dir"]),
+    cli_host::Opt::valued(&["--story"]),
+    cli_host::Opt::flag(&["--you-are", "-y"]),
+    cli_host::Opt::flag(&["--scott-light", "-s"]),
+    cli_host::Opt::flag(&["--trs80", "-t"]),
+    cli_host::Opt::flag(&["--prehistoric-lamp", "-p"]),
 ];
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
@@ -169,13 +184,230 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             Some(v) => v.parse().map(Some).map_err(|_| format!("bad {flag} value: {v}")),
         }
     };
+    // `-t`/`--trs80` sets BOTH the flag and this crate's own `Presentation`
+    // (see `Options::trs80_style`'s doc for why they're separate knobs) —
+    // a CLI user asking for the TRS-80 flag wants the TRS-80 room-block
+    // layout too. Off, `scott-cli` keeps `Options::default`'s own
+    // `Presentation::C64` layout unchanged (SQ-1413) — the flag adds the
+    // TRS-80 choice, it does not switch the baseline to plain ScottFree.
+    let trs80 = m.has("--trs80");
+    let mut options = scott::Options::new()
+        .with_you_are(m.has("--you-are"))
+        .with_scott_light(m.has("--scott-light"))
+        .with_trs80_style(trs80)
+        .with_prehistoric_lamp(m.has("--prehistoric-lamp"));
+    if trs80 {
+        options = options.with_presentation(scott::Presentation::Trs80);
+    }
     Ok(Args {
         path: m.first_positional().ok_or("no story file given")?.to_string(),
         seed: num("--seed")?.map(|v| v as u32),
         max_turns: num("--max-turns")?,
         pager: cli_host::on_off("--pager", m.value("--pager"))?.unwrap_or(true),
         data_dir: m.value("--data-dir").map(str::to_string),
+        story: m.value("--story").map(str::to_string),
+        options,
     })
+}
+
+// ── disk images (SQ-1414) ───────────────────────────────────────────────────
+
+/// One Scott Adams program file found on a mounted disk image.
+struct DiskCandidate {
+    /// The name the volume stores it under — the CBM filename on a Commodore
+    /// disk (`BATON`, `TIME MACHINE`, …).
+    name: String,
+    /// The program file's bytes, load-address bytes included — exactly what
+    /// [`scott::c64::parse_c64_mysterious_prg`] takes.
+    bytes: Vec<u8>,
+}
+
+/// The canonical title for a Commodore 64 *Mysterious Adventures* program
+/// file, by the CBM name the disk stores it under (`BATON` → "The Golden
+/// Baton"), matched case-insensitively.
+///
+/// `scott::c64::RELEASES` is derived from the disks themselves and keyed on
+/// their own spelling, unlike `app`'s `scott_titles.tsv` — see that crate's
+/// module docs.
+fn scott_c64_title(disk_name: &str) -> Option<&'static str> {
+    scott::c64::RELEASES
+        .iter()
+        .find(|r| r.file_name.eq_ignore_ascii_case(disk_name))
+        .map(|r| r.title)
+}
+
+/// The canonical title for a US S.A.G.A. release, by the database's own
+/// content identity rather than by whatever the container happens to call it
+/// (SQ-1470) — mirrors `app::picker`'s `scott_release_title`, which has the
+/// fuller reasoning. `scott::Database::parse` is cheap enough over these
+/// small files to call again here rather than plumb the parsed `Database`
+/// through; `main` re-parses the chosen candidate's bytes anyway.
+fn saga_us_title(bytes: &[u8]) -> Option<&'static str> {
+    scott::Database::parse(bytes).ok()?.saga_us?.display_title()
+}
+
+impl DiskCandidate {
+    /// How this candidate reads in the menu: the US S.A.G.A. content-identified
+    /// title (already platform-qualified — "Voodoo Castle (Atari 8-bit)"), else
+    /// the Commodore *Mysterious Adventures* table's title beside the disk's own
+    /// name, else the bare name.
+    fn label(&self) -> String {
+        if let Some(title) = saga_us_title(&self.bytes) {
+            return title.to_string();
+        }
+        match scott_c64_title(&self.name) {
+            Some(title) => format!("{title}  ({})", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// These candidates as the shared chooser sees them — the same `Row` shape
+/// `zvm-cli` builds for its own disk menu, so `--story` matches identically in
+/// both front-ends.
+fn disk_rows(cands: &[DiskCandidate]) -> Vec<cli_host::story_pick::Row> {
+    cands
+        .iter()
+        .map(|c| cli_host::story_pick::Row {
+            name: c.name.clone(),
+            title: saga_us_title(&c.bytes)
+                .map(str::to_string)
+                .or_else(|| scott_c64_title(&c.name).map(str::to_string)),
+            label: c.label(),
+        })
+        .collect()
+}
+
+/// Mount `raw` (the disk image at `path`) and return every Scott Adams
+/// program file it holds — the Commodore 64 *Mysterious Adventures*
+/// compilation disks read through the one disk seam every front-end shares
+/// (SQ-1414).
+///
+/// Filtered by [`scott::looks_like_scott_bytes`] over
+/// [`blorb::medium::MountedDisk::contents`], which lists every file on the
+/// volume regardless of engine — a Z-machine or Glulx sibling on the same
+/// disk (there are none in the corpus, but nothing here assumes it) is simply
+/// not a Scott Adams program and does not pass the sniff.
+///
+/// **The US S.A.G.A. Atari 8-bit database is not a directory entry**
+/// (SQ-1470): the release masters its database straight over Atari DOS 2's
+/// own volume table of contents, so `contents()` lists at most
+/// `DOS.SYS`/`AUTORUN.SYS` on these sides and never the database itself —
+/// see `blorb::atr`'s module docs. The one extra candidate the format offers
+/// beyond its directory is the whole image, through the reserved
+/// `blorb::atr::IMAGE_ENTRY` door. The Apple II and Commodore 64 releases
+/// need no such door: their databases ARE ordinary catalogue files.
+fn story_candidates(path: &Path, raw: Vec<u8>) -> Result<Vec<DiskCandidate>, String> {
+    let disk = cli_host::disk_set::mount_at(path, raw)
+        .map_err(|e| format!("Error: cannot mount the disk image: {e}"))?;
+    let mut contents = disk.contents();
+    if disk.format() == blorb::medium::DiskImage::AtariDos2 {
+        if let Some(image) = disk.read_named(blorb::atr::IMAGE_ENTRY) {
+            contents.push((blorb::atr::IMAGE_ENTRY.to_string(), image));
+        }
+    }
+    let found: Vec<DiskCandidate> = contents
+        .iter()
+        .filter(|(_, bytes)| scott::looks_like_scott_bytes(bytes))
+        .map(|(name, bytes)| DiskCandidate {
+            name: saga_us_keyed_name(name, bytes),
+            bytes: bytes.clone(),
+        })
+        .collect();
+    if found.is_empty() {
+        let names: Vec<String> = contents.iter().map(|(n, _)| n.clone()).collect();
+        let named = disk.volume_name().map(|n| format!(" on {n}")).unwrap_or_default();
+        return Err(format!(
+            "Error: no Scott Adams program on this disk image{named} ({} file{}: {})",
+            names.len(),
+            if names.len() == 1 { "" } else { "s" },
+            names.join(", "),
+        ));
+    }
+    Ok(found)
+}
+
+/// A save-key-safe name for a disk-mounted Scott candidate (SQ-1470) — mirrors
+/// `app::hints`'s helper of the same name, which has the fuller reasoning.
+///
+/// **A US S.A.G.A. release's own container entry is not a distinguishing
+/// name.** `blorb::atr::IMAGE_ENTRY` is the literal `"IMAGE"` on all seven
+/// Atari sides, and the Apple II boot disks spell two DIFFERENT titles
+/// `DATABASE` — and this binary's own save key is the entry name alone
+/// (`cli_host::story_key_for`; Scott bytes carry no Z-machine header to build
+/// a `DiskBuild` from), so two different games under either literal name
+/// would share one save directory. The (version, adventure, platform) triple
+/// is this release's actual identity and is appended to the real container
+/// name — a no-op for every other Scott source, whose names are already
+/// unique and already shipped.
+fn saga_us_keyed_name(name: &str, bytes: &[u8]) -> String {
+    match scott::Database::parse(bytes).ok().and_then(|db| db.saga_us) {
+        Some(saga) => {
+            format!("{name}-{}-{}-{}", saga.version, saga.adventure, saga_us_platform_slug(saga.platform))
+        }
+        None => name.to_string(),
+    }
+}
+
+/// A short, filename-safe token per [`scott::SagaPlatform`], for
+/// [`saga_us_keyed_name`].
+fn saga_us_platform_slug(platform: scott::SagaPlatform) -> &'static str {
+    match platform {
+        scott::SagaPlatform::Atari8Bit => "atari8bit",
+        scott::SagaPlatform::AppleII => "appleii",
+        scott::SagaPlatform::Commodore64 => "c64",
+        _ => "unknown",
+    }
+}
+
+/// Pick a Scott Adams program off a mounted image — the same shape as
+/// `zvm-cli`'s `media::choose`, matched through `cli_host::story_pick` so a
+/// number or a name resolves identically in both front-ends.
+///
+/// One candidate opens without asking. `--story` decides it outright.
+/// Otherwise a terminal on stdin gets the menu and answers it; without one
+/// this refuses to block and names the flag to pass instead.
+fn choose_disk_story(
+    cands: &[DiskCandidate],
+    want: Option<&str>,
+    stdin_is_tty: bool,
+    mut announce: impl FnMut(&str),
+    mut read_line: impl FnMut() -> Option<String>,
+) -> Result<usize, String> {
+    let rows = disk_rows(cands);
+    if let Some(w) = want {
+        return cli_host::story_pick::find(&rows, w, "this disk");
+    }
+    if cands.len() == 1 {
+        return Ok(0);
+    }
+    if !stdin_is_tty {
+        return Err(format!(
+            "Error: this disk image holds {} Scott Adams programs; pass --story <n|name> to \
+             pick one:\n{}",
+            cands.len(),
+            cli_host::story_pick::menu(&rows)
+        ));
+    }
+    announce(&format!(
+        "This disk holds {} Scott Adams programs:\n{}",
+        cands.len(),
+        cli_host::story_pick::menu(&rows)
+    ));
+    loop {
+        announce(&format!("Which one? [1-{}] ", cands.len()));
+        let Some(line) = read_line() else {
+            return Err("Error: no story chosen.".to_string());
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match cli_host::story_pick::find(&rows, line, "this disk") {
+            Ok(i) => return Ok(i),
+            Err(e) => announce(&format!("{e}\n")),
+        }
+    }
 }
 
 // ── host commands ─────────────────────────────────────────────────────────────
@@ -291,9 +523,18 @@ fn do_save(
 /// way this could be worse than not having it.
 ///
 /// **A save from a different adventure is refused, not half-applied.**
-/// `Vm::restore` checks the item count against the loaded database before it
-/// writes anything, so pointing this at another game's `.sav` fails cleanly
-/// instead of scattering one adventure's item locations through another's.
+/// `Vm::restore`/`Vm::restore_scottfree` both check the loaded database
+/// before writing anything, so pointing this at another game's save fails
+/// cleanly instead of scattering one adventure's item locations through
+/// another's.
+///
+/// **Accepts either save format, detected by shape (SQ-1413):** this
+/// binary's own `Vm::snapshot` (`Vm::SNAPSHOT_MAGIC`, unambiguous — checked
+/// first) or a ScottFree 1.14 text save (`scott::looks_like_scottfree_save`)
+/// — the classic interpreter's own `.sav`, brought in from ScottFree itself
+/// or a fork that kept its format. Detection is the crate's, not
+/// reimplemented here, so the app host and this CLI can never disagree
+/// about what counts as which.
 fn do_restore(
     out: &mut impl Write,
     interactive: bool,
@@ -316,16 +557,22 @@ fn do_restore(
     let chosen = cli_host::pick_save(&typed, &saves).map_or(typed.clone(), str::to_string);
     let path = cli_host::resolve_save_input(&chosen, game_dir, cli_host::SCOTT_EXT);
     match fs::read(&path) {
-        Ok(bytes) => match vm.restore(&bytes) {
-            Ok(()) => {
-                let _ = writeln!(out, "Restored from '{}'.", path.display());
-                true
+        Ok(bytes) => {
+            let is_scottfree_save =
+                !bytes.starts_with(&Vm::SNAPSHOT_MAGIC) && looks_like_scottfree_save(&bytes);
+            let result =
+                if is_scottfree_save { vm.restore_scottfree(&bytes) } else { vm.restore(&bytes) };
+            match result {
+                Ok(()) => {
+                    let _ = writeln!(out, "Restored from '{}'.", path.display());
+                    true
+                }
+                Err(e) => {
+                    let _ = writeln!(out, "Restore failed: '{}' is not a save for this game ({e}).", path.display());
+                    false
+                }
             }
-            Err(()) => {
-                let _ = writeln!(out, "Restore failed: '{}' is not a save for this game.", path.display());
-                false
-            }
-        },
+        }
         Err(e) => {
             let _ = writeln!(out, "Restore failed: {e}");
             false
@@ -339,7 +586,10 @@ scott-cli — DOS-style Scott Adams (ScottFree) player (no map)
 Usage: scott-cli [OPTIONS] <adv.dat>
 
 Arguments:
-  <adv.dat>             Scott Adams ScottFree .dat adventure
+  <adv.dat>             Scott Adams ScottFree .dat adventure, a TI-99/4A or
+                        Commodore 64 release, or a disk image carrying one
+                        (the Commodore 64 Mysterious Adventures compilation
+                        disks hold several — see --story)
 
 Host commands (typed at any prompt, never passed to the game):
   /status               Repeat the room block (location, exits, what is here)
@@ -350,7 +600,8 @@ Host commands (typed at any prompt, never passed to the game):
                         .sav rather than .qzl.
   /restore [name]       Restore. Bare, it lists your saves and takes a number or
                         a name. A save from a different adventure is refused
-                        rather than half-applied. Alias: /load
+                        rather than half-applied. Also accepts a save from the
+                        classic ScottFree interpreter itself. Alias: /load
 
 Options:
       --screen-reader   Linear plain text (alias: --plain; also selected by
@@ -366,47 +617,147 @@ Options:
       --seed <n>        Seed the RNG for reproducible play
       --data-dir <path> Where saves live (default: a .save directory beside the
                         .dat, the same rule zvm-cli and gvm-cli follow)
+      --story <n|name>  Which program to take off a disk image that holds more
+                        than one, by its 1-based menu number or a case-
+                        insensitive (sub)name — the Commodore 64 Mysterious
+                        Adventures compilation disks (MYSTADV1.D64,
+                        MYSTADV2.D64) hold six and five apiece. A single-
+                        program disk needs no flag at all.
       --max-turns <n>   Stop after n turns (headless/testing)
+  -y, --you-are         Second-person replies (\"You are dead.\", \"You are
+                        carrying:\") instead of ScottFree's plain first-person
+                        default (\"I am dead.\", \"I'm carrying:\"). Some
+                        Brian Howarth titles (Robin of Sherwood among them)
+                        were authored assuming this flag.
+  -s, --scott-light     The original Adams lamp countdown wording: a running
+                        \"Light runs out in N turns.\" every turn under 25,
+                        instead of ScottFree's own \"Your light is growing
+                        dim.\" every 5th turn.
+  -t, --trs80           The TRS-80 room-block layout (items suffixed \". \"
+                        and the whole block framed by the TRS-80's rule)
+                        in place of this player's own default layout.
+  -p, --prehistoric-lamp
+                        The light source is destroyed the instant its fuel
+                        reaches zero, rather than merely going dark and
+                        staying an inert carried item.
   -V, --version         Print version and exit
   -h, --help            Print this help and exit
 ";
 
 fn main() {
     let argv: Vec<String> = env::args().collect();
-    if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
+    if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_BIN_NAME"), buildinfo::LONG) {
         return;
     }
     let args = match parse_args(&argv) {
         // Already the only CLI that rejected unknown flags; now it shows the
         // help alongside the message, like the other two (SQ-0614).
-        Err(e) => cli_host::usage_error(env!("CARGO_PKG_NAME"), &e, HELP),
+        Err(e) => cli_host::usage_error(env!("CARGO_BIN_NAME"), &e, HELP),
         Ok(a) => a,
     };
 
-    let bytes = fs::read(&args.path).unwrap_or_else(|e| {
+    // Settled before the disk mount below, which may need to ask the player a
+    // question — mirrors `zvm-cli`'s own `--story` wiring (SQ-1414).
+    let mode = HostMode::detect_with(cli_host::plain_requested(&argv)).install();
+
+    let story_path = Path::new(&args.path);
+    let raw = fs::read(story_path).unwrap_or_else(|e| {
         eprintln!("scott-cli: cannot read {}: {e}", args.path);
         process::exit(1);
     });
-    let src = std::str::from_utf8(&bytes).unwrap_or_else(|_| {
-        eprintln!("scott-cli: {} is not a text .dat", args.path);
-        process::exit(1);
-    });
-    if !scott::looks_like_scott(src) {
-        eprintln!("scott-cli: {} does not look like a Scott .dat", args.path);
+
+    // An original release floppy — the Commodore 64 *Mysterious Adventures*
+    // compilation disks (SQ-1414): mount it and take a program off it, through
+    // the same `blorb::medium` seam every other front-end opens a disk with.
+    // `disk_entry` is the CBM name chosen, so saves below can be keyed per
+    // program rather than per disk.
+    let (bytes, disk_entry): (Vec<u8>, Option<String>) =
+        if blorb::medium::DiskImage::detect(&raw).is_some() {
+            let cands = story_candidates(story_path, raw).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                process::exit(1);
+            });
+            let chosen = choose_disk_story(
+                &cands,
+                args.story.as_deref(),
+                mode.stdin_tty(),
+                |s| {
+                    print!("{s}");
+                    let _ = io::stdout().flush();
+                },
+                || {
+                    let mut line = String::new();
+                    match io::stdin().read_line(&mut line) {
+                        Ok(0) | Err(_) => None,
+                        Ok(_) => Some(line),
+                    }
+                },
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("{e}");
+                process::exit(1);
+            });
+            // Say which one opened whenever the story came off a disk —
+            // including the scripted `--story` path, where nothing else on
+            // screen would show it (mirrors `zvm-cli`'s own disk menu).
+            //
+            // Unconditional since SQ-1470, not just "when there was a choice
+            // to get wrong": an Atari 8-bit or Apple II S.A.G.A. side always
+            // holds exactly one Scott candidate, and it is the ONE piece of
+            // output that says which platform's release just opened — the
+            // same title exists on more than one, and nothing else on screen
+            // would say so.
+            println!("Opening {}) {}", chosen + 1, cands[chosen].label());
+            let name = cands[chosen].name.clone();
+            let mut cands = cands;
+            (cands.swap_remove(chosen).bytes, Some(name))
+        } else {
+            (raw, None)
+        };
+
+    // Bytes, not `&str`: since SQ-1414 this reads two BINARY encodings as well
+    // — the TI-99/4A tokenised releases, and the Commodore 64 *Mysterious
+    // Adventures* as `.prg` program files — and no UTF-8 conversion survives
+    // either. `looks_like_scott_bytes` answers for all three and is the same
+    // predicate `Database::parse` then applies. A disk-mounted candidate has
+    // already passed this exact sniff in `story_candidates`; repeating it here
+    // costs nothing and keeps the loose-file path unchanged.
+    if !scott::looks_like_scott_bytes(&bytes) {
+        eprintln!(
+            "scott-cli: {} does not look like a Scott .dat, a TI-99/4A release \
+             or a Commodore 64 Mysterious Adventures .prg",
+            args.path
+        );
         process::exit(1);
     }
-    let db = Database::parse(src).unwrap_or_else(|e| {
-        eprintln!("scott-cli: invalid Scott .dat: {e:?}");
+    let db = Database::parse(&bytes).unwrap_or_else(|e| {
+        eprintln!("scott-cli: invalid Scott game data: {e:?}");
         process::exit(1);
     });
 
-    let mut vm = Vm::new(db);
-    if let Some(seed) = args.seed {
-        vm.seed_rng(seed);
-    }
+    // Seed and Options both belong at construction (`Vm::new_full`'s own
+    // doc): the opening occurrence pass runs inside the constructor and can
+    // roll percentage chances or print option-gated wording, so setting
+    // either afterward would be too late for it.
+    let mut vm = Vm::new_full(
+        db,
+        false,
+        args.seed.unwrap_or(Vm::DEFAULT_RNG_SEED),
+        args.options,
+    );
     // Saves live where the other two hosts put theirs, by the same rule, so a
-    // player who has learned one has learned all three (SQ-0919).
-    let game_dir: PathBuf = cli_host::game_dir(Path::new(&args.path), args.data_dir.as_deref());
+    // player who has learned one has learned all three (SQ-0919) — keyed per
+    // ENTRY when the story came off a disk holding several (SQ-1414), so
+    // `BATON` and `TIME MACHINE` off the same `MYSTADV1.D64` do not share a
+    // save directory. Scott bytes carry no Z-machine header, so `build` is
+    // always `None` here; the entry alone decides.
+    let key = cli_host::story_key_for(StoryOrigin {
+        path: story_path,
+        entry: disk_entry.as_deref(),
+        build: None,
+    });
+    let game_dir: PathBuf =
+        cli_host::game_dir_with_key(story_path, args.data_dir.as_deref(), &key);
 
     // scott-cli emits no escape sequences at all, so `rich` never comes up here
     // — the only terminal state it touches is raw mode, and until SQ-0605 it had
@@ -417,7 +768,6 @@ fn main() {
     // That also makes plain mode nearly free here: the one thing `--plain` has
     // to change is handing line editing back to the terminal, which is exactly
     // what `raw_input` decides (SQ-0606).
-    let mode = HostMode::detect_with(cli_host::plain_requested(&argv)).install();
     let interactive = mode.raw_input();
     let _guard = TerminalGuard::raw_only();
     let mut out = io::stdout();
@@ -630,6 +980,60 @@ mod tests {
             "the player is told why: {}",
             String::from_utf8_lossy(&out)
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A hand-authored ScottFree 1.14 save (see the field order documented
+    /// on `scott::Vm::restore_scottfree`), shaped for `tiny_cave.dat`
+    /// (`NumItems=9`, 10 item slots, 4 rooms 0..=3): 16 `counter room`
+    /// pairs, a state line, then one location per item.
+    fn tiny_cave_scottfree_save() -> String {
+        let mut s = String::new();
+        for ct in 0..16 {
+            s.push_str(&format!("{} 1\n", ct + 1));
+        }
+        // BitFlags DarkFlag MyLoc CurrentCounter SavedRoom LightTime
+        s.push_str("0 0 3 7 1 42\n");
+        // idol (item 1) carried, lamp (item 9, LIGHT_SOURCE) in room 1.
+        s.push_str("0\n255\n0\n0\n0\n0\n0\n0\n0\n1\n");
+        s
+    }
+
+    /// `/restore` also accepts the classic ScottFree interpreter's own save
+    /// format (SQ-1413), detected by shape (`scott::looks_like_scottfree_save`)
+    /// rather than a reserved extension — this crate's own binary snapshot
+    /// and ScottFree's text format both carry `.sav`.
+    #[test]
+    fn restore_accepts_a_scottfree_save() {
+        let dir = scratch("scottfree-import");
+        let mut vm = tiny_cave();
+        let mut out: Vec<u8> = Vec::new();
+
+        fs::write(dir.join("classic.sav"), tiny_cave_scottfree_save()).unwrap();
+
+        assert!(do_restore(&mut out, false, &mut vm, &dir, "classic"));
+        assert_eq!(vm.current_room(), 3, "MyLoc=3 from the save file");
+        assert_eq!(vm.item_loc(1), scott::database::CARRIED, "the idol (255) normalises to CARRIED");
+        assert_eq!(vm.item_loc(9), 1, "the lamp is in room 1");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Neither this crate's own binary snapshot nor a well-formed ScottFree
+    /// save: refused with a message, not a panic, and the live game is
+    /// untouched.
+    #[test]
+    fn restore_rejects_garbage_matching_neither_format() {
+        let dir = scratch("garbage-import");
+        let mut vm = tiny_cave();
+        let before = vm.room_block();
+        let mut out: Vec<u8> = Vec::new();
+
+        fs::write(dir.join("junk.sav"), b"this is not a scott save of either format").unwrap();
+
+        assert!(!do_restore(&mut out, false, &mut vm, &dir, "junk"));
+        assert_eq!(vm.room_block(), before, "the live game is untouched");
 
         let _ = fs::remove_dir_all(&dir);
     }

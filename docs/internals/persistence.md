@@ -1,0 +1,517 @@
+# The persistence model
+
+> For players, the short version is in [the guide](../guide/saves-and-rewind.md).
+
+[← back to README](../../README.md) · see also [Saves & persistence (feature highlights)](saves.md) · for the engine-side API contract behind Glulx's fileref/VFS layer — not lanthorn's own storage layout — see [`gvm`'s fileref seam](gvm-fileref-seam.md)
+
+lanthorn persists game progress at three distinct layers. They coexist and serve
+different purposes: the game's own save, the host emulator snapshot, and an
+automatic per-story layer that needs no explicit save at all. This page explains
+what each one captures, when it triggers, and what survives.
+
+## Terminology
+
+- **Save State / Restore State** — the *host* (emulator) snapshot. Engine-neutral,
+  save-anywhere, captures the whole machine. Invoked with Ctrl+S / `/save-state`
+  and Ctrl+R / `/restore-state`. This is lanthorn's own mechanism, not something
+  the game knows about.
+- **`@save` / `@restore`** — the *game's* own in-game save, the standard path a
+  story invokes when the player types `SAVE` / `RESTORE`. On both engines the VM
+  state it captures is a portable, standard **Quetzal** payload — on the Z-machine,
+  Quetzal proper; on Glulx, standard **Glulx-Quetzal**.
+
+The two are different *mechanisms*, but in the app they are no longer different
+*files*: since SQ-0531 both write the same `.lanthorn` archive, and `meta.json`'s
+`trigger` field (`"ingame"` / `"hoststate"`) records which one asked for it. Keep
+the names straight anyway — what a restore does with the file depends entirely on
+which trigger wrote it (see Layer 1 and Layer 2 below). The `zvm-cli`/`gvm-cli`
+front-ends have no archive to write and still emit bare Quetzal files.
+
+**A third engine, Scott Adams, has no Layer 1 at all.** The Scott VM has no
+in-game Quetzal `@save`/`@restore` suspension protocol; its in-game `SAVE GAME`
+action (opcode 71) instead routes to a host **Save State** snapshot (Layer 2),
+and it keeps no Layer 3 sidecar. Wherever this page says "both engines" it means
+the Z-machine and Glulx — the two engines with an in-game `@save`/`@restore`
+(Layer 1); their in-game saves are Quetzal (`.qzl`) and Glulx (`.glksave`)
+respectively.
+
+## Layer 1 — the game's own save (`@save` / `@restore`)
+
+Player-initiated, from inside the story ("Type SAVE to save your position").
+
+**What it captures (SQ-0531).** In the app, `@save` writes a `.lanthorn` archive —
+byte for byte the container a host Save State writes, carrying the map, screen,
+transcript (inline art included), aux data and turn metadata alongside the VM
+state. What makes it a *Layer 1* save is not the wrapper but the **PC convention
+of the payload inside**, recorded as `meta.trigger = "ingame"`. The `zvm-cli` and
+`gvm-cli` front-ends have no archive layer and still write the bare payload alone.
+
+The payload is unchanged and stays interchange-grade — `game.qzl` / `game.glksave`
+inside the ZIP is byte-identical to what the bare file used to be, so unzipping it
+hands another interpreter a standard save:
+
+- **Z-machine:** a bare, standard **Quetzal** save — the same format other
+  interpreters (e.g. `dfrotz`) read and write, all versions including v3
+  branch-form `@save`/`@restore`. Implemented in `crates/zvm/src/quetzal.rs`.
+- **Glulx:** a bare, standard **Glulx-Quetzal** save (`machine.save_quetzal()`) —
+  `IFhd`/`CMem`/`Stks`/`MAll` only, no `GReg`, no `Glk ` chunk. Per the Glulx
+  spec, `@save` pushes a call stub before suspending, so PC and FramePtr are
+  recovered from the stack on restore rather than serialized as registers; the
+  save is the same shape as the Z-machine's Quetzal. Implemented in
+  `crates/gvm/src/exec.rs` (`save_quetzal`/`restore_quetzal`). Round-trip is
+  verified internally (gvm unit tests); cross-interpreter golden-file interop is
+  tracked separately under SQ-0229. Note this is a *different byte shape* from
+  Glulx's host snapshot (`save_state`), which is why the archive writer consults
+  the trigger instead of always snapshotting.
+
+**Two kinds of Glulx `@save`/`@restore`, routed by how the game made the fileref
+(SQ-0296).** The VM carries the target file's name and a `by_prompt` flag to the
+host on each save/restore request (`Machine::pending_saveload_request` →
+`SaveLoadRequest { name, by_prompt, restore }`):
+
+  - **Player SAVE/RESTORE verb** — the game opens the file with
+    `glk_fileref_create_by_prompt` (`by_prompt = true`). The host surfaces its
+    save UI: `gvm-cli` prompts `Save to file:` / `Restore from file:`; the app
+    opens its saves dialog. Lands as `<slug>.lanthorn` in the app, `<slug>.qzl`
+    from `gvm-cli`.
+  - **The game's OWN fixed-name saves** — `glk_fileref_create_by_name` /
+    `create_by_usage` (`by_prompt = false`), e.g. Counterfeit Monkey's
+    `_Counterfeit_Monkey-startup-data` init cache, its autosave, and undo slots.
+    These are serviced **silently and automatically** — no prompt, no UI. `@save`
+    writes `<game-dir>/<name>.qzl`; `@restore` reads that fixed path if present,
+    else fails cleanly so the game runs its init. Because the file persists in the
+    per-game `.save` dir, the next launch's boot `@restore` finds it and the game
+    skips its (multi-second) init — measured for CM: ~3.5s first launch vs ~0.9s
+    on relaunch. These internal `_`-prefixed files are hidden from the player
+    saves list (app) and never prompt (both hosts). These stay bare `.qzl` files:
+    they are the game's private storage, not player-facing save slots.
+
+**A third case never reaches the host at all (SQ-1427).** Not every `@save`/
+`@restore` targets a fileref — the Glulx spec hands the opcode whatever writable
+Glk stream the game opened, and a memory stream (`glk_stream_open_memory`) is a
+legal, self-contained target: its bytes already live inside VM memory, so there
+is nothing for the host to write or read. `crates/gvm/src/exec.rs`'s opcode
+handlers detect a `StreamKind::Memory` operand and build/apply the Quetzal in
+process (`write_bytes_to_memory_stream`/`read_bytes_from_memory_stream`),
+never suspending with `SaveRequest`/`RestoreRequest` — `Machine::pending_saveload_request`
+stays `None` throughout. A read-only Blorb resource stream (a game ships a
+pre-computed save as a `Data` chunk to skip an expensive init) already worked
+this way for the identical reason — its bytes are inside the VM too — which is
+what CM's boot-time restore relies on (SQ-0595); SQ-1427 is a memory stream's
+turn.
+
+**Restoring one.** The extension no longer decides: `restore_from_file`
+(`crates/app/src/engine_helpers.rs`) reads `meta.trigger` and, for `"ingame"`,
+completes the suspended `@save`/`@restore` descriptor (`Engine::restore_game_save`
+for a host load, `resume_restore` for the game's own `@restore`) and then reinstates
+the archive's map/transcript/screen around it. A bare `.qzl`/`.sav` carried in from
+another interpreter has no `meta.json` at all and takes the same descriptor path
+with nothing to reinstate — that interchange route is untouched.
+
+**A restore carries a layout width (SQ-0681).** A v4/v5 status routine lays its
+bar out ONCE, from header byte $21 as it stood at boot, and thereafter only
+re-cursors to the field columns it computed back then; declaring a narrower
+screen later makes those moves illegal (ZMSD §8.7.2.3) and the digits land on the
+room name. The app therefore floors the declared width at the width the running
+story was laid out for (`GameSession::boot_screen_cols`, SQ-0679/0680) — and a
+restore replaces the running story with one *another* session booted, at its own
+width. Every restore that brings a screen with it (`restore_screen`, so: host
+Save State resume, auto-resume at launch, and the in-game `@restore` of a
+`.lanthorn`) raises that floor to the restored upper window's grid width, which
+is the saved session's own frame of reference; the floor only ever grows, so
+restoring a narrow save into a wide session changes nothing.
+`reconcile_restored_screen_size` applies the same floor, so the restored grid
+follows a *wider* pane and holds its own width in a narrower one, where the pane
+simply clips the right of the bar. A bare `.qzl`/`.sav` carries no screen and,
+per Quetzal, no usable header dimensions either, so its layout width is
+unknowable: that path assumes the conventional 80 columns
+(`note_bare_quetzal_width`) — wrong at worst by a clipped bar, versus a garbled
+one for assuming this session's width.
+
+**Every engine, the same deal (SQ-0556).** `@save` behaves identically wherever you
+meet it: it writes a `.lanthorn`, the archive shows up in the saves manager, and it
+comes back through *both* the game's own `restore` and the host restore path.
+Glulx used to be the exception — the saves manager answered
+`Glulx has no game-save (.qzl) format` — and no longer is. Its host restore now
+takes the same road the game's own `@restore` takes: `restore_quetzal`, which
+reverts RAM/stack/heap, pops `@save`'s call stub and stores the `-1` "just
+restored" sentinel, and leaves the **live** Glk window model exactly where it
+found it (Glulx spec §1.8.5 keeps windows, streams and I/O state out of a save
+on purpose). That is why the bare `IFhd`/`CMem`/`Stks`/`MAll` shape is the right
+thing to seal: it carries no serialized window tree, so there is nothing for a
+restore to snap a *stale* set of windows back from.
+
+One wrinkle is the host's alone. A saves-manager restore arrives while the session
+is parked inside a `glk_select` belonging to the run you are leaving, and the save
+file — by that same §1.8.5 — cannot say a word about it. Left in place it wedges
+the restore twice: the VM re-reports the old suspension instead of resuming at the
+restored PC, and your next command gets swallowed answering it. So the host
+retires it (`Machine::abandon_pending_input`) and runs the save-verb tail out to
+the next prompt, discarding that tail's output the way the Z-machine path does —
+the archive's own transcript is about to be laid down over it. Verified against
+real Adventure (Glulx) in `crates/app/tests/suites/glulx_ingame_save_host_restore.rs`:
+save, play on, host-restore, and the game replays the reference run move for move
+with an inventory that has forgotten everything picked up afterwards.
+
+## Layer 2 — host Save State / Restore State (emulator snapshot)
+
+lanthorn's own save-anywhere snapshot, explicit and per-slot. Triggered by Ctrl+S
+/ `/save-state`, the named-slot saves manager, and the "Save State & quit" prompt.
+
+It captures the **entire machine plus lanthorn's session context**: VM state, the
+Glk window/stream tree and screen, the map, the transcript, turn history, and
+metadata. Crucially it **includes the entire Glk file VFS** — every file a Glulx
+game has written through Glk file streams — embedded in the `Glk ` snapshot
+(`crates/gvm/src/glk.rs`, `GLK_SNAPSHOT_VERSION = 6`; the VFS has been embedded
+since v4, SQ-0277, and restore still accepts v4 onward).
+
+Save States are bundled into a self-contained `.lanthorn` archive
+(`crates/app/src/archive.rs`). Inside the archive the engine-tagged VM save is
+`game.glksave` for Glulx and `game.qzl` otherwise (the `save_ext` fallback, so
+the Z-machine's Quetzal and the Scott VM's `Vm::snapshot` blob both land as
+`game.qzl` — the recorded engine tag, not the extension, tells them apart on
+restore). This is Scott Adams' **only** persistence layer: with no in-game
+Quetzal save and no sidecar, its in-game `SAVE GAME` and the host Ctrl+S both
+write here. Named slots, auto-save (per turn) and auto-load (resume on launch)
+all operate on this layer.
+
+**The Z-machine screen rides beside the VM save, not inside it (SQ-1401).** The
+archive's `screen.bin` entry is `zvm`'s own versioned binary snapshot of
+`ScreenState` — windows, cursor, text attributes, the upper-window grid, and for
+a Version 6 story the whole eight-window table with its colours and all three of
+each window's pixel-run layers. `Machine::screen_snapshot` writes it and
+`Machine::restore_screen_snapshot` (or, in the app, `screen_snapshot::decode` plus
+`session::restore_screen`) reads it back. Three things about that arrangement are
+deliberate:
+
+- **It is separate from `game.qzl` because that file is interchange-grade.** An
+  `@save`-triggered archive promises that unzipping `game.qzl` hands another
+  interpreter a standard Quetzal file, so nothing may be wrapped around it.
+- **It lives in `zvm` because the mirror kept going stale.** The archive used to
+  carry a serde copy of six `zvm` screen types, maintained by hand across a crate
+  boundary with nothing checking that the two still agreed — and every embedder
+  would have had to write it again. One versioned blob, with the version number
+  in it, is the whole fix.
+- **It is backend- and terminal-neutral.** v6 geometry is native pixels, and there
+  are no cell coordinates, font metrics or picker state anywhere in it, so a save
+  moves between kitty/half-blocks/sixel and between terminal sizes. What it does
+  NOT carry is anything derived: the request flags a turn drains, the v6 change
+  counter, the grid pen. A restore recomputes those, and
+  `reconcile_restored_screen_size` then re-declares the size — because a restore
+  into a different pane is a resize the game never saw.
+
+**The v6 display — pictures, palette and the painted ground — rides beside the
+screen snapshot too, in its own set of entries (SQ-0588, SQ-0814, SQ-1403).**
+`screen.bin` carries the window TABLE (geometry, cursor, text runs); it says
+nothing about what has been PAINTED into a v6 window's picture area, because
+that is pixels rather than Z-machine state. Four more archive entries cover it,
+and which is the recipe and which is the stated exception is the thing worth
+holding onto:
+
+- **`display.bin` is the recipe, and it is `zvm`'s own** (SQ-1403). Every
+  `draw_picture` / `erase_picture` / `erase_window` a Version 6 story issues is
+  folded into [`zvm::paint_log::PaintLog`](../../crates/zvm/src/paint_log.rs) —
+  ONE flat, globally-ordered stream tagged per window (native, window-relative
+  pixels, with no rasterization and no cell of any kind), so a cross-window
+  erase mirror replays at its true position relative to every other window's
+  own draws rather than before or after all of them. `Machine` feeds it itself,
+  at the exact points `pending_pictures`/`pending_erase_fills` are queued (the
+  same events `Machine::take_paint_events` later drains) — a host never calls
+  `PaintLog::apply` (it is `pub(crate)`), so it cannot forget to record one —
+  and `Machine::restart` clears it structurally in the same breath as the
+  paint queues. `zvm::paint_log::encode`/`decode` write it as a versioned
+  binary blob, exactly as `screen_snapshot` does for the window table —
+  hand-rolled, because `zvm` takes no dependencies. Each `Draw`/`ErasePicture`
+  entry also carries `at_cursor`, `margin_after` and `out_chars` — genuine
+  facts about that call (ZMSD says nothing about the host rendering question
+  they answer, an inline text float vs. a window-canvas picture, but a host
+  needs the values AS THEY STOOD AT THE CALL, not a running count it reads
+  later, which has typically moved on by the time a turn's pictures are
+  drained).
+- **`display.json` is the palette plus two small screen layers app still
+  owns**: the raw `PLTE` bytes of the Current Palette at save time (an adaptive
+  picture has no palette of its own — Blorb §11.3 — so replaying the log
+  without it recolours nothing), and [`archive::V6LayersDto`](../../crates/app/src/archive.rs)'s
+  `fills`/`anchors` — the `erase_window` fills still covering the screen and
+  where each window's canvas was painted (SQ-0715), both bounded recipes in the
+  game's own native pixels. No separate field names which windows the log
+  reproduces correctly — see the next point.
+- **`pictures/win-N.png` and `pictures/ground.png` are the stated exceptions,
+  in pixels rather than a recipe.** A window's replay is checked against its
+  LIVE canvas at save time (`GameSession::display_list`'s replay-and-compare
+  self-check, one global walk of `ops_in_order()` through the same
+  canvas-painting core live rendering uses — `GameSession::apply_canvas_paint`
+  — under `PaintMode::Replay`); one that doesn't match — an op path not yet
+  recorded, or a log that hit `zvm::paint_log::PAINT_LOG_CAP` — is carried as a
+  PNG instead and named in a diagnostic. Which windows those are is not stored
+  as a separate list: the PNGs present in the archive ARE that list, and a
+  restore simply loads whichever PNGs it finds and replays the log for every
+  other window (`GameSession::load_display_list`). The painted ground
+  (`GameSession::paint`) is pixels unconditionally: it accumulates from an
+  unbounded stream of `erase_window` fills across the whole session, so there
+  is no bounded recipe to store for it the way there is for a window's own
+  log.
+
+A restore reinstalls all four in one order: `screen.bin`, then
+`Machine::restore_paint_log` from `display.bin` (empty bytes — an older
+archive, or a non-v6 story — reset it to empty, the same as a freshly booted
+machine's), then the saved PNGs load straight as pixels, then every window NOT
+covered by a PNG is rebuilt by replaying the log's `ops_in_order()` under the
+restored palette, then the ground loads unconditionally (a host Save State
+swaps memory under a game that never learns it happened, so nothing repaints
+to clear a stale one on its own).
+
+**The player is told when a restore lands in this state**: every host-mediated
+restore site computes `app::archive::RestoreDegradation::from_format_version`
+from `meta.format_version` alone and pushes a one-line `TranscriptKind::Warning`
+transcript notice naming what will repaint as the player plays, rather than
+leaving the accepted break above silent (SQ-1410).
+
+## Layer 3 — automatic per-story persistence (no explicit save)
+
+This layer needs **no player action and no Save State**. lanthorn keeps a small
+per-story sidecar that it loads when the story opens and flushes after each turn
+(only when it changed). It is what makes a game's own external-storage files
+survive a plain quit — quit the game normally, relaunch, and the data is still
+there. For example, Kerkerkruip's persistent scores/preferences stick across
+sessions.
+
+- **Z-machine — aux data.** Games that use the v5 `@save` / `@restore`
+  auxiliary-file mechanism (save/restore of a memory table to a named external
+  file) persist to `<base>/<story-key>.save/default.aux` — in the app
+  (`crates/app/src/aux_store.rs`) and in `zvm-cli` (`ZAUX` format,
+  `crates/zvm-cli/src/auxiliary.rs`), each keyed by the story key, not IFID.
+- **Glulx — the Glk file VFS (new, SQ-0278).** See [`gvm`'s fileref seam](gvm-fileref-seam.md)
+  for what gvm itself guarantees here (the in-memory VFS, the `StepResult`s a
+  host answers, the sidecar codec) — this section is lanthorn's own instance
+  of it. Every file a Glulx game writes through Glk file streams now
+  auto-persists to
+  `<base>/<story-key>.save/default.glkvfs` — in the app
+  (`crates/app/src/vfs_store.rs`) and in `gvm-cli`
+  (`crates/gvm-cli/src/main.rs`), both keyed by the story key. The blob is
+  the files-only `GVFS` codec (`gvm::glk::encode_files` / `decode_files`): magic
+  `GVFS` + version `1` + length-prefixed name→bytes entries, big-endian, fully
+  tolerant of a corrupt or foreign file (it just resets to empty, never panics).
+  Session-scoped Glk temp files (VFS keys beginning with `__temp_`) are
+  deliberately **not** persisted.
+
+  Loaded at story-open (`main.rs`, alongside the aux load) and flushed per-turn
+  dirty-gated (`persist_vfs_after_turn`), exactly mirroring the aux store. This is
+  the automatic, no-explicit-save counterpart to Layer 2: Save State already
+  embeds the full VFS per-slot, but Layer 3 is what preserves those files when the
+  player never saves at all.
+
+Deleting the sidecar (or `--aux off` in the CLIs) resets the game's stored data.
+
+## Storage layout (SQ-0284)
+
+All three hosts — app, `zvm-cli`, `gvm-cli` — store saves and sidecars in a
+flat **per-game directory**, one directory per story, holding everything for
+that game side by side:
+
+```
+<base>/<story-key>.save/
+    default.aux        # Z-machine aux sidecar (Layer 3)
+    script.txt         # the STORY's transcript — Z-machine output stream 2
+    commands.txt       # the STORY's command record — output stream 4, and the
+                        #   file input stream 1 reads back (ZMSD §10.2.1)
+    default.glkvfs     # Glulx VFS sidecar (Layer 3)
+    default.lanthorn   # the auto/singleton Save State slot (Layer 2)
+    <slug>.lanthorn     # named saves — Save States AND in-game @save (app only);
+                        #   meta.json's `trigger` says which wrote each one
+    <slug>.qzl           # bare in-game @save files: the CLI hosts, a game's own
+                        #   fixed-name storage (`_`-prefixed), and saves carried
+                        #   in from other interpreters
+    style.toml          # per-game style override (app only, layered over global)
+    config.toml         # per-game non-style overrides (honor/borders/map panel)
+```
+
+`<story-key>` has **two rules**, because one disk image is no longer one game
+(SQ-0850):
+
+- A **loose story file** keys on its own **filename** (basename including
+  extension, sanitized to filesystem-safe characters) — *not* the IFID. The
+  same story file always maps to the same directory, and different files (even
+  the same game shipped as `.z5` vs `.zblorb`) get separate directories.
+- A story **mounted out of a disk image** keys on that story's own **release
+  and serial** instead: `<slug>-r<release>-s<serial>`, e.g.
+  `hitchhikers-guide-r59-s851108`. The slug is the canonical title from
+  `cli_host::titles`, cut at its subtitle and truncated on a word boundary; it
+  is there to be read, and the release and serial are what identify the build.
+  A build the title table does not name slugs as `story`, which is still
+  unique.
+
+The image's filename cannot answer for a compilation: `Infocom Compilation 1
+(19xx)(-).st` carries six games and `floppy2.ima` six more, and under a
+filename key all of them shared one `default.lanthorn` and overwrote each
+other in turn. Keying on the build gives three properties a filename never
+had — renaming the image keeps the saves, a game that moves between disks in a
+set keeps them, and two games on one disk cannot collide — and it is the same
+identity this project already uses to say that *a disk image is a different
+release*, not the same story on other media. So the Amiga, DOS and Atari ST
+presses of Zork I r88/840726 share one directory, while Zork Zero's r296, r366
+and r393 presses get three.
+
+One helper answers for every host — `cli_host::storage::story_key_for` /
+`story_key_at`, which `app` re-exports through `app::storage` — so the TUI and
+`zvm-cli` cannot name one game's directory two ways.
+
+The IFID is still computed and used for the story's *title* and for
+interpreter-hint association, but it no longer keys any storage path.
+
+The directory name carries a **`.save` suffix** (`<story-key>.save`, e.g.
+`Zork1.z5.save/`) so it can never collide with the story file itself — this
+matters for `zvm-cli`/`gvm-cli`, whose default `<base>` is the story's own
+directory, where a directory named exactly `Zork1.z5` would collide with the
+file `Zork1.z5` (SQ-0294).
+
+`<base>` — the directory containing all per-game directories — defaults
+differently per host, and every host accepts `--data-dir <path>` to override
+it:
+
+- **app** — `~/.lanthorn/saves` (i.e. `<user_dir>/saves`; follows
+  `--user-dir` unless `--data-dir` is also given).
+- **`zvm-cli` / `gvm-cli`** — the story file's own directory (so a story run
+  from `~/games/zork1.z5` gets `~/games/zork1.z5/...`).
+
+A save named `default` is a **reserved slug** — the app rejects an attempt to
+create a named Save State or in-game save called `default`, since that name
+is claimed by the auto/singleton slot. (The rejection re-opens the save-name
+dialog so an in-game `SAVE` can be retried rather than lost.)
+
+### Interactive `@save` / `@restore` in the CLIs
+
+When `zvm-cli` / `gvm-cli` prompt for a filename on the **player's** SAVE /
+RESTORE verb (a `glk_fileref_create_by_prompt` fileref in Glulx; always in the
+Z-machine), a **bare name** (no path separator, e.g. `@save quick`) resolves
+into the per-game directory — `<base>/<story-key>.save/quick.qzl` — matching the
+`.qzl` extension automatically. A **path-bearing value** (e.g.
+`@save /tmp/x.qzl`) is honored verbatim, bypassing the per-game directory
+entirely.
+
+A Glulx game's **own** fixed-name saves (`glk_fileref_create_by_name`, e.g. CM's
+init cache) do **not** prompt: `gvm-cli` writes/reads `<story-key>.save/<name>.qzl`
+silently (see Layer 1, SQ-0296).
+
+### Map/transcript exports (SQ-0288)
+
+The app's `/export-svg`, `/export-dot`, `/export-map`, and `/export-transcript`
+commands write into the same per-game directory, using fixed default names —
+`map.svg`, `map.dot`, `map.txt`, `transcript.txt` — overwriting on repeat
+export. Each takes an optional `[file]` argument that resolves the same way as
+`@save`/`@restore` above: a **bare name** lands in `<base>/<story-key>.save/`
+(the format's extension is appended if the name has none), a **path-bearing
+value** is honored verbatim.
+
+### No migration (alpha)
+
+There is **no migration** from the old IFID-keyed layout. Saves and sidecars
+previously written as `<save_dir>/<ifid>.lanthorn`, `<ifid>.aux`, `<ifid>.gvfs`,
+etc. are orphaned — lanthorn will not find or move them automatically. If you
+have saves from before this change, either re-create them under the new
+layout or manually move the files into the new `<base>/<story-key>.save/`
+directory (renaming to the `default.*` / `<slug>.*` names above as needed).
+
+## Where each thing lands
+
+| Layer | Engine | Host | File |
+|-------|--------|------|------|
+| 1 — game's `@save`/`@restore` | Z-machine | app | `<base>/<story-key>.save/<slug>.lanthorn` (`trigger = "ingame"`; `game.qzl` inside is bare standard Quetzal) |
+| 1 — game's `@save`/`@restore` | Z-machine | `zvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
+| 1 — player SAVE verb (`create_by_prompt`) | Glulx | app | `<base>/<story-key>.save/<slug>.lanthorn` (`trigger = "ingame"`; `game.glksave` inside is bare standard Glulx-Quetzal) |
+| 1 — player SAVE verb (`create_by_prompt`) | Glulx | `gvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
+| 1 — game's own save (`create_by_name`, SQ-0296) | Glulx | app & `gvm-cli` | `<base>/<story-key>.save/<name>.qzl` — silent, no prompt; hidden from the saves list |
+| 2 — Save State / Restore State | Z-machine | app | `<base>/<story-key>.save/default.lanthorn` or `<slug>.lanthorn` (`game.qzl` inside) |
+| 2 — Save State / Restore State | Glulx | app | `<base>/<story-key>.save/default.lanthorn` or `<slug>.lanthorn` (`game.glksave` inside; embeds full Glk VFS) |
+| 2 — Save State / Restore State | Scott Adams | app | `<base>/<story-key>.save/default.lanthorn` or `<slug>.lanthorn` (`game.qzl` inside = `Vm::snapshot` blob; Scott's only layer) |
+| 3 — auto per-story (aux) | Z-machine | app | `<base>/<story-key>.save/default.aux` |
+| 3 — auto per-story (aux) | Z-machine | `zvm-cli` | `<base>/<story-key>.save/default.aux` (`ZAUX`) |
+| 3 — auto per-story (Glk VFS) | Glulx | app | `<base>/<story-key>.save/default.glkvfs` (`GVFS`) |
+| 3 — auto per-story (Glk VFS) | Glulx | `gvm-cli` | `<base>/<story-key>.save/default.glkvfs` (`GVFS`) |
+| export — `/export-svg`\|`-dot`\|`-dump`\|`-transcript` | either | app | `<base>/<story-key>.save/map.svg`\|`map.dot`\|`map.txt`\|`transcript.txt` (bare `[file]` arg) or verbatim path |
+| stream 2 — the story's transcript | Z-machine | app | `<base>/<story-key>.save/script.txt` (appended) |
+| stream 2 — the story's transcript | Z-machine | `zvm-cli` | `--transcript <file>` (truncated); absent = declined |
+| stream 4 / input stream 1 — command record | Z-machine | app | `<base>/<story-key>.save/commands.txt` (appended; input stream 1 reads the same file) |
+| stream 4 / input stream 1 — command record | Z-machine | `zvm-cli` | `--record <file>` / `--replay <file>` (truncated); absent = declined |
+
+### The story's transcript is not lanthorn's (SQ-1420)
+
+Three different documents wear the word "transcript", and only one of them is
+the Z-machine's:
+
+| | what it holds | who writes it | file |
+|---|---|---|---|
+| **output stream 2** | exactly what the STORY printed, plus the commands typed (ZMSD §7.1.1, §7.1.1.1), as plain text | the game's SCRIPT verb, or `/set-transcript on` | `script.txt` |
+| **the archive transcript** | lanthorn's whole scrollback — styled runs, images, meta and assist lines, the map's own notes — so a restore can rebuild the pane | the app, into every Save State | `transcript.json`, inside a `.lanthorn` archive |
+| **`/export-transcript`** | a plain-text rendering of that scrollback, on demand | the player | `transcript.txt` |
+
+The stream-2 file is named for the SCRIPT verb rather than for the word
+"transcript" precisely because the third row already owns `transcript.txt` and
+truncates it on every export.
+
+It is APPENDED to, never truncated: the transcript belongs to the GAME, and a
+story scripted across three sittings is one document. `zvm-cli` truncates
+instead, because there the player names the path on the command line and means
+this run. Both files open lazily at their first byte, so a game that never
+scripts leaves nothing behind.
+
+**zvm opens neither.** `zvm::io::Output` gained `transcript`, `command_record`
+and `next_command` (all defaulted to nothing), and the engine decides only what
+belongs on each stream — §7.1.2.2's rule that stream 3 silences the others,
+§8.8.3.1 attribute 2's per-window choice in Version 6, §7.1.1.1's input echo.
+The host does the I/O, as it does for `@save`.
+
+**Flags 2 bit 0 is the interpreter's to keep truthful.** §7.4: "Whichever method
+is used, the interpreter must ensure that this flag holds the current status of
+stream 2. ('A Mind Forever Voyaging' requires this.)" Both routes in —
+`output_stream 2` and a direct poke of the bit — go through `Machine`'s
+`set_stream2`, and every `read`/`read_char` reconciles the two directions before
+suspending.
+
+`<base>` and `<story-key>` are as defined in [Storage layout](#storage-layout-sq-0284)
+above.
+
+## `create_by_prompt` naming (SQ-0279)
+
+`glk_fileref_create_by_prompt` suspends the VM for a host-chosen name rather than
+resolving to a fixed per-usage slot. Write / append / read-write modes open a
+name-entry prompt; read mode opens a picker over the story's existing Glk files.
+The named file lives in the VFS like any other Glk file, so it auto-persists
+per-story through the Layer 3 sidecar (`default.glkvfs`) and is embedded in
+Layer 2 Save States — there is no separate on-disk file. `gvm-cli` prompts for the
+name on stdin (blank cancels). This matches the layering above: a game reaching for
+`create_by_prompt` is writing an *external named file*, which by the game's own
+choice belongs in the automatic per-story (global) layer, not a save slot.
+
+**Exception — `fileusage_SavedGame`.** A `create_by_prompt` stream opened for
+saved-game usage does **not** resolve into a VFS slot at all: it's a host
+conduit (`StreamKind::Null`) that discards writes and reads EOF, with no
+`self.files` entry and nothing persisted to `default.glkvfs` or embedded in a
+Save State. The library's post-`@save` verification is satisfied without storing
+bytes: `note_stream_write` credits the stream (and records the slot's byte
+length), so `glk_fileref_does_file_exist` reports the slot exists and a reopen +
+seek-to-end reports the true save size — CM's SAVE verb otherwise printed "Save
+failed." (SQ-0292). The game's `@save`/`@restore` always reaches the opcode —
+even on a first-ever restore, with no prior save this session — and the *host*
+decides success by writing/reading the actual `.qzl` (Layer 1, above). Net: the
+VFS (Layer 3) now holds only the game's genuine external files — transcripts,
+command recordings, and data files — never saves.
+
+**Game-managed vs. player-prompted (SQ-0296).** The above concerns the
+*player's* verb (`create_by_prompt`). A game that saves to a **fixed-name**
+fileref (`create_by_name`/`create_by_usage` — CM's `_Counterfeit_Monkey-startup-data`
+init cache, its autosave, undo slots) is routed differently: the host writes/reads
+`<game-dir>/<name>.qzl` **silently, with no prompt**, keyed by the fileref name
+the VM now reports (`SaveLoadRequest.by_prompt = false`). This is what makes CM's
+boot cache auto-restore on relaunch (skipping its long init) and removes the
+spurious boot prompts. Note a Glulx game may open such a slot as a `Data`-usage
+VFS `File` stream rather than a `SavedGame` `Null` stream — CM does — so the
+name/`by_prompt` routing covers both stream kinds.
+
+## Known limitations (Glk file VFS)
+
+- **The read picker is not usage-filtered** — it lists *all* of the story's VFS
+  files, not only those matching the requested Glk usage class, because the `GVFS`
+  codec does not record a per-file usage tag.
+- **Text-mode newline translation is omitted** — Glk text-mode file streams are
+  stored verbatim, with no platform newline translation.

@@ -13,20 +13,34 @@
 
 #![allow(dead_code, unused_imports)]
 
+// Shared fixture-path resolution, declared ONCE per group binary: the suites
+// below are modules of this one crate, so a `#[path]` module in each of them is
+// the same file loaded several times over (clippy::duplicate_mod).
+#[path = "suites/fixture_paths.rs"]
+mod fixture_paths;
+
 #[path = "pty_stream/mod.rs"]
 mod pty_stream;
 
 #[path = "suites/cast_manifest.rs"]
 mod cast_manifest;
+#[path = "suites/docs_reference.rs"]
+mod docs_reference;
 #[path = "suites/gallery_manifest.rs"]
 mod gallery_manifest;
 #[path = "suites/pty_emitted_stream.rs"]
 mod pty_emitted_stream;
 #[path = "suites/pty_flank_alpha_seam.rs"]
 mod pty_flank_alpha_seam;
+#[path = "suites/pty_hangup_autosave.rs"]
+mod pty_hangup_autosave;
 #[path = "suites/pty_kitty_compression.rs"]
 mod pty_kitty_compression;
 #[path = "suites/pty_oracle.rs"]
 mod pty_oracle;
+#[path = "suites/pty_picker_return.rs"]
+mod pty_picker_return;
 #[path = "suites/pty_query_replies.rs"]
 mod pty_query_replies;
+#[path = "suites/public_surfaces_no_quest_refs.rs"]
+mod public_surfaces_no_quest_refs;

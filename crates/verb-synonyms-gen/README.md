@@ -36,7 +36,7 @@ That source is better than WordNet at exactly the job here, because it answers
 the parser's question rather than English's. `inspect` is the case that made the
 point: WordNet's groups for it are `case`, `visit` and `audit`/`scrutinize` —
 the police sense — and not one of them holds `examine`, which is what every
-player who types `inspect` means. Fourteen stories in this corpus put the two on
+player who types `inspect` means. Sixteen stories in this corpus put the two on
 one verb. It is also free (the grammar is already loaded), and it carries no
 licence obligation, being read out of behaviour rather than out of a lexicon.
 
@@ -118,6 +118,52 @@ lemmatised and reduced to those WordNet knows as verbs) reach a surviving group.
 That is the quality metric for the whole exercise — far more meaningful than the
 row count — and it is what tells you whether a change to the filters helped.
 
+### When the corpus grows
+
+Three things, in order. Re-run the **harvest** above into scratch files and diff
+them against the committed `if_verbs.tsv` / `if_groups.tsv`: the new lines are
+the verbs and verb entries the tables have never seen, and a group whose count
+has climbed past `--game-support` is one the shipped table would now believe.
+Re-run the **build** into a scratch file and diff that against
+`crates/verb-synonyms/src/synonym_groups.tsv` — the number to read is the
+coverage audit on stderr, not the row count. Then look at what the new stories
+actually get offered:
+
+```sh
+cargo run -p app --example guidance_scan          # stories/ + unit_tests/
+cargo run -p app --example guidance_scan -- --only curses.z5,vespers.z8 --json
+```
+
+The harvest diff answers "which verbs are missing"; `guidance_scan` answers
+"are the offers we already make any good" — it drives the real vocabulary offer
+and its shadow-probe vetting over every story it can read and prints each
+suggestion with its verdict. A wrong offer (`shove` → `pull · drag`) is a
+line-order or sense problem in this table; a silent story is usually a grammar
+this generator could not read at all, and the harvest's own skip report names it.
+
+**A growing corpus can REMOVE a mapping, and one guard here did.**
+The gap-fill refuses a union whose CHILD synset a story can match, and it used
+to test that per SYNSET: one of the thirty stories added between 119 and 149
+implements `derive`, so {`derive`, `gain`} stopped being unioned onto its
+hypernym {`obtain`} — and `obtain` → `gain`, which
+`canonical_mappings_survive_regeneration` pins, disappeared with it. The test is
+now per WORD, so one author's dictionary costs the union that one word rather
+than the whole row, and the invariant is unchanged: nothing left in a gap-filled
+group is a specific word a story can match. Watch for the same shape in the
+other whole-row refusals when the corpus next grows.
+
+**Diff the two scans on member SETS, and read a lost offer twice.**
+Going from 119 stories to 149 moved 2,831 rows' positions and rewrote 222 sets,
+and the whole visible effect on the 188-story scan was 346 offers becoming 345.
+Two of the three changes were traced to a single ADDED row — `rush hasten hurry
+look sharp` — and to `look sharp` in particular: a Scott Adams dictionary
+truncates at four characters, so an idiomatic multi-word member can collide with
+a real verb (`LOOK`) and be offered in its place. The offer machinery holds one
+shadow probe at a time, so an extra offer in one turn also displaces the next
+turn's. Neither is a fault in what the rebuild REMOVED, which is what a growing
+corpus makes you afraid of and which cost nothing here — so attribute a scan
+delta to a specific row before blaming a cap.
+
 ### The knobs
 
 `build` takes `--sense-cap`, `--band-cap`, `--group-cap`, `--hyponym-cap`,
@@ -131,14 +177,89 @@ entry before it is believed), on the 1,365-verb basis:
 
 | support | game groups kept | rows | table | coverage |
 |---|---|---|---|---|
-| — (WordNet only) | 0 | 2,759 | 74 KB | 88.8% |
-| 1 | 1,425 | 3,463 | 90 KB | 90.5% |
-| **2** | **546** | **3,068** | **81 KB** | **90.0%** |
-| 3 | 306 | 2,946 | 78 KB | 89.5% |
+| — (WordNet only) | 0 | 3,117 | 84 KB | 90.3% |
+| 1 | 1,653 | 4,129 | 107 KB | 92.1% |
+| **2** | **599** | **3,467** | **90 KB** | **91.1%** |
+| 3 | 337 | 3,307 | 87 KB | 90.7% |
 
 One story is one author's idiom: at support 1 the corpus contributes a
 33-member `attack` group carrying `vandalise` and `torture`, and a 21-member
 `cut`. Two is where those disappear and the survivors are IF conventions.
+
+Re-measured on the 149-story corpus with the four rules below and the
+gap-fill fix in place, which is what the shipped table is built from. The
+knob's shape is what argues for it and the shape has not moved: every extra
+story raises every row, coverage climbs about half a point per support level
+down, and support 1 still buys its 1.0 point by believing 1,054 sets exactly
+one author ever wrote.
+
+### Four more rules
+
+A 30-story guidance-scan audit found four systematic ways the table (and the
+mechanisms above) still misled a player. All four are in `build.rs`, and none
+of them is a list of words — every one reads its answer out of the harvest.
+
+1. **Order game-derived groups by support.** Two game-derived groups sharing a
+   member used to break their tie arbitrarily (alphabetically, in practice):
+   `shove` offered `pull · drag` (the `pull/drag/tug/yank/shove` group, 4
+   stories) before `push · nudge` (`push/press/stick/thrust/shove/nudge`, 3
+   stories) even though a THIRD, narrower group — `press/push/shove` — has 5.
+   That third group was also the deeper half of the bug: the subsumption step
+   (above) swallowed it into the 3-story six-member set purely for being
+   smaller, discarding the stronger evidence entirely. Both halves are fixed
+   together: subsumption between two GAME groups now requires the wider set to
+   be at least as well supported as the narrower one it would eat (`build.rs`,
+   the "Drop groups another group already contains" step), and
+   `order_by_sense`'s tie-break among a word's game-derived groups is support,
+   descending, ties kept in file order. A companion fix in `keep` matters here
+   too: two raw entries that reduce to the SAME final members after
+   filtering used to remember whichever processed first regardless of its
+   support; now the higher one wins, so `order_by_sense` reasons from the
+   corpus's true belief in a set rather than an accident of file order.
+2. **Drop WordNet senses no parser wants.** `illuminate` was pulling `clear`
+   into its "clarify" sense (`clear up / elucidate / illuminate / …`) even
+   though the corpus's OWN, heavily-corroborated sense of `clear` is
+   "push/move aside" (43 stories) and has nothing to do with clarifying. The
+   rule: a member is a "bystander" in a synset if that synset was not the
+   reason WordNet counts the word as an IF verb in the first place — its own
+   sense rank for this offset falls outside `sense_cap` — which is true of
+   `clear` here (its top sense is `push`; "clarify" is its 10th) and false of
+   `light` in the neighbouring "illuminate" group (that group IS `light`'s
+   #1 sense). A bystander is dropped only if the corpus ALSO corroborates a
+   different action for it that shares nothing with the rest of the synset —
+   so a word with no corpus opinion, or one whose corpus entries actually
+   overlap the synset, is left alone. See `Report::bystanders_dropped`.
+3. **Rank the canonical parser verb first.** `inspect` was offering
+   `watch · check · examine` — `examine` last, because member order used each
+   spelling's OVERALL if_verbs.tsv popularity, and `watch` is IF's more common
+   verb across every sense it has, most of them nothing to do with inspecting.
+   Members are now ordered first by how much of the corpus's OWN evidence for
+   THIS group backs each spelling — the sum of every if_groups.tsv
+   declaration (any support level; a single story is still real evidence of a
+   ranking, if not of a group's existence) that names the spelling alongside
+   one of the group's other members — falling back to the old overall-count
+   tiebreak only where that is zero (a WordNet-only group, where no
+   if_groups.tsv entry ever names a member like `light up`). This is also what
+   makes `find` disappear from `obtain`'s `get/find/incur/receive` group
+   without a special case: `find`'s own dominant corpus sense is "search"
+   (`find/seek`, a dozen-plus stories, sharing nothing with `get`/`obtain`), so
+   rule 2 removes it as a bystander before ordering ever sees it.
+4. **Derive `un-X`.** `unmask`, `unpin` and `unzip` reached no group at all —
+   too rare to pass `--game-support` on their own, and WordNet has no synset
+   relating an English verb to its `un`-form (that is a live morphological
+   rule, not a fact any lexicon states). A new pass, `derive_reversals`, gives
+   every `un`-prefixed spelling that reaches NOTHING through every earlier
+   pass one of two homes: the corpus's own raw declaration for the `un`-word
+   itself, at ANY support level (`unpin` reaches `unblock`/`uncover`/`unplug`
+   this way, one story, the reversal cluster a game author actually wrote);
+   or, failing that, a minimal pairing with its bare base verb (`unmask` with
+   `mask`), so the spelling is at least resolvable. The base must itself be a
+   known verb (an IF verb or a WordNet lemma) at least `MIN_REVERSAL_BASE`
+   (3) letters long — short enough to exclude only light verbs like `do`/`go`,
+   whose "reversal" means nothing, and specifically what keeps this pass from
+   ever touching `undo` (base `do`, 2 letters). A word that already reaches a
+   group through an earlier pass — `unhook`, corroborated normally — is left
+   untouched.
 
 ## The second table
 
@@ -167,11 +288,11 @@ to two different lemmas, and one map would have to drop one of them.
 ## Why `if_verbs.tsv` and `if_groups.tsv` are committed
 
 One is a sorted list of ordinary English verb spellings with a count of how many
-stories accept each — `take 118`, `xyzzy 9`; the other is a sorted list of the
+stories accept each — `take 135`, `xyzzy 42`; the other is a sorted list of the
 verb entries those stories declare, with a count of how many declare each —
-`29 awake awaken wake`. Neither carries game text, game titles or any
+`55 awake awaken wake`. Neither carries game text, game titles or any
 attribution of a word to a story: the per-story detail exists only in the
 harvest's stderr report. `stories/` is gitignored because it holds commercial
-game files; a de-duplicated vocabulary list drawn across 119 of them is not one,
+game files; a de-duplicated vocabulary list drawn across 149 of them is not one,
 and committing both is what makes step 2 — and therefore the shipped table —
 reproducible by CI and by anyone without the corpus.

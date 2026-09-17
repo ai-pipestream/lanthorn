@@ -1,5 +1,5 @@
 //! The Glk window/stream/output model — the interactive-fiction subset of Glk
-//! (Andrew Plotkin's Glk spec 0.7.5), transcribed into `GLULX_NOTES.md` §19.
+//! (Andrew Plotkin's Glk spec 0.7.6), transcribed into `GLULX_NOTES.md` §19.
 //!
 //! The model ([`Model`]) owns the window tree, the streams, the current output
 //! stream, and per-stream styles. It is pure bookkeeping: it never touches
@@ -15,13 +15,190 @@
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 
+// ── Image scaling rules (`imagerule_*`, Glk 0.7.6 §7.2) ───────────────────────
+
+/// The `imagerule_*` constants, taken verbatim from the Glk 0.7.6 `glk.h`
+/// (cheapglk `glk.h` lines 373-380, cross-checked against its `gi_dispa.c`
+/// constant table, which lists the same eight values). SQ-1424.
+///
+/// Note the two coincidences the masks make deliberate: `WidthRatio` IS
+/// `WidthMask` (`0x03`) and `AspectRatio` IS `HeightMask` (`0x0C`), because each
+/// rule is a two-bit field whose highest value is the ratio rule. A rule field
+/// of zero names no rule at all, which the spec forbids outright ("You must
+/// supply one of each when calling this function") — and garglk, a conformance
+/// witness for this same reading, agrees: its `glk_image_draw_scaled_ext`
+/// rejects such a call too.
+///
+/// There is NO `imagerule_HeightRatio`: the third HEIGHT rule is
+/// [`imagerule::ASPECT_RATIO`], which is relative to the resolved image WIDTH,
+/// not to the window.
+pub mod imagerule {
+    /// Use the image's standard width; the `width` argument is ignored.
+    pub const WIDTH_ORIG: u32 = 0x01;
+    /// Use the `width` argument as an integer pixel count.
+    pub const WIDTH_FIXED: u32 = 0x02;
+    /// `width` is a 16.16 fixed-point fraction of the WINDOW width
+    /// (`0x10000` = 100%).
+    pub const WIDTH_RATIO: u32 = 0x03;
+    /// Two-bit field holding the width rule.
+    pub const WIDTH_MASK: u32 = 0x03;
+    /// Use the image's standard height; the `height` argument is ignored.
+    pub const HEIGHT_ORIG: u32 = 0x04;
+    /// Use the `height` argument as an integer pixel count.
+    pub const HEIGHT_FIXED: u32 = 0x08;
+    /// `height` is a 16.16 fixed-point fraction multiplied by the image's own
+    /// aspect ratio, applied to the RESOLVED width (`0x10000` = keep the
+    /// original aspect).
+    pub const ASPECT_RATIO: u32 = 0x0C;
+    /// Two-bit field holding the height rule.
+    pub const HEIGHT_MASK: u32 = 0x0C;
+}
+
+/// One `glk_image_draw_scaled_ext` sizing request: the rule word plus the three
+/// arguments it interprets (Glk 0.7.6, dispatch selector `0x00EC`). SQ-1424.
+///
+/// This is the "facts that travel together" form the refactoring policy asks
+/// for: `rule` alone is meaningless, and `width`/`height`/`maxwidth` each mean
+/// something different depending on it, so a caller can never supply a
+/// plausible subset.
+///
+/// A value of this type is also what makes the TEXT BUFFER behaviour possible
+/// at all. The spec (§"Graphics in Text Buffer Windows") makes the ratio
+/// STANDING there — "In a text buffer window, imagerule_WidthRatio is
+/// dynamically computed; the image width will always be relative to the
+/// *current* window width. If the text buffer window is resized (by the user or
+/// a window arrangement call), the image will resize too" — so the host must
+/// keep the RULE beside the inline image and re-resolve it on every relayout,
+/// rather than freezing a pixel size at call time. In a GRAPHICS window the
+/// same rule is one-shot: §"Graphics in Graphics Windows" says "The
+/// imagerule_WidthRatio option does *not* dynamically resize in a graphics
+/// window. The image size is computed when glk_image_draw_scaled_ext() is
+/// called, and then the image is painted to the canvas. The maxwidth argument
+/// is ignored in graphics windows."
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageRule {
+    /// The `imagerule` word: one width rule OR'd with one height rule.
+    pub rule: u32,
+    /// The `width` argument — pixels under `WIDTH_FIXED`, a 16.16 fraction of
+    /// the window width under `WIDTH_RATIO`, ignored under `WIDTH_ORIG`.
+    pub width: u32,
+    /// The `height` argument — pixels under `HEIGHT_FIXED`, a 16.16 aspect
+    /// multiplier under `ASPECT_RATIO`, ignored under `HEIGHT_ORIG`.
+    pub height: u32,
+    /// A 16.16 fraction of the window width bounding the resolved width, or 0
+    /// for no bound. Ignored entirely in graphics windows.
+    pub maxwidth: u32,
+}
+
+impl ImageRule {
+    /// The rule `glk_image_draw(win, image, val1, val2)` is defined to be
+    /// equivalent to: `WidthOrig | HeightOrig`, `maxwidth = $10000` — Glk 0.7.6
+    /// §7.2 states it outright, "glk_image_draw() is equivalent to
+    /// imagerule_WidthOrig|imagerule_HeightOrig, maxwidth=$10000", and garglk
+    /// agrees, implementing `glk_image_draw` as literally that call.
+    pub const fn draw() -> ImageRule {
+        ImageRule { rule: imagerule::WIDTH_ORIG | imagerule::HEIGHT_ORIG, width: 0, height: 0, maxwidth: 0x10000 }
+    }
+
+    /// The rule `glk_image_draw_scaled(win, image, val1, val2, w, h)` is defined
+    /// to be equivalent to: `WidthFixed | HeightFixed` at that size,
+    /// `maxwidth = $10000`.
+    pub const fn draw_scaled(w: u32, h: u32) -> ImageRule {
+        ImageRule { rule: imagerule::WIDTH_FIXED | imagerule::HEIGHT_FIXED, width: w, height: h, maxwidth: 0x10000 }
+    }
+
+    /// Resolve to `(width, height)` in pixels for a GRAPHICS window: one-shot,
+    /// with `maxwidth` ignored per §"Graphics in Graphics Windows".
+    ///
+    /// `natural` is the image's own `(width, height)`
+    /// ([`GlkBackend::image_info`]); `window_width_px` is the graphics window's
+    /// current width in pixels, read only by `WIDTH_RATIO`.
+    pub fn resolve_in_graphics(&self, natural: (u32, u32), window_width_px: u32) -> Option<(u32, u32)> {
+        self.resolve(natural, window_width_px, false)
+    }
+
+    /// Resolve to `(width, height)` in pixels for a TEXT BUFFER window, applying
+    /// `maxwidth`. Call this AGAIN with the new width on every relayout: that
+    /// re-resolution is the whole of what makes `WIDTH_RATIO` standing rather
+    /// than one-shot, and it is why the host stores the rule instead of a size.
+    pub fn resolve_in_buffer(&self, natural: (u32, u32), window_width_px: u32) -> Option<(u32, u32)> {
+        self.resolve(natural, window_width_px, true)
+    }
+
+    /// The shared arithmetic, in the order the spec fixes: "The interpreter
+    /// always figures out the width first, then the height (again,
+    /// imagerule_AspectRatio only controls height). Then it applies maxwidth,
+    /// which may cause a proportional reduction (regardless of how height was
+    /// determined)."
+    ///
+    /// `None` for a rule word that names no width rule or no height rule (a
+    /// zero two-bit field), per the spec's "You must supply one of each" —
+    /// garglk, as a conformance witness, refuses the same call.
+    ///
+    /// Everything is computed in `u64` with round-half-up division rather than
+    /// plain truncation, which would land a pixel under the correct answer at
+    /// most ratios — the spec's own arithmetic is exact fractions ("a 16.16
+    /// fixed-point fraction"), and rounding to the nearest whole pixel is the
+    /// natural reading of resolving a fraction to a pixel count. garglk agrees
+    /// on the destination, resolving the same three expressions in `double`
+    /// and rounding with `std::round`; we differ only in method (fixed-point
+    /// integer division here, floating point there), not in the outcome
+    /// either is meant to reach.
+    fn resolve(&self, natural: (u32, u32), window_width_px: u32, apply_maxwidth: bool) -> Option<(u32, u32)> {
+        let (nat_w, nat_h) = (natural.0.max(1) as u64, natural.1.max(1) as u64);
+        // Width first.
+        let mut w: u64 = match self.rule & imagerule::WIDTH_MASK {
+            imagerule::WIDTH_ORIG => nat_w,
+            imagerule::WIDTH_FIXED => self.width as u64,
+            imagerule::WIDTH_RATIO => div_round(window_width_px as u64 * self.width as u64, 0x1_0000),
+            _ => return None, // no width rule supplied
+        };
+        // Then height, which under ASPECT_RATIO reads the width just resolved.
+        let mut h: u64 = match self.rule & imagerule::HEIGHT_MASK {
+            imagerule::HEIGHT_ORIG => nat_h,
+            imagerule::HEIGHT_FIXED => self.height as u64,
+            // height = width · (nat_h / nat_w) · (height / $10000)
+            imagerule::ASPECT_RATIO => div_round(w * nat_h * self.height as u64, nat_w * 0x1_0000),
+            _ => return None, // no height rule supplied
+        };
+        // Then maxwidth, proportionally on BOTH axes — the spec's own
+        // "regardless of how height was determined" above, applied; garglk's
+        // `win_textbuffer_draw_picture` reaches the same reduction.
+        if apply_maxwidth && self.maxwidth != 0 && w != 0 {
+            let limit = div_round(window_width_px as u64 * self.maxwidth as u64, 0x1_0000);
+            if w > limit {
+                h = div_round(h * limit, w);
+                w = limit;
+            }
+        }
+        Some((w.min(u32::MAX as u64) as u32, h.min(u32::MAX as u64) as u32))
+    }
+}
+
+/// `round(n / d)` for unsigned integers, the integer spelling of the
+/// `std::round` the reference library applies to each of these expressions.
+fn div_round(n: u64, d: u64) -> u64 {
+    if d == 0 {
+        return 0;
+    }
+    (n + d / 2) / d
+}
+
 // ── Window types (`wintype_*`, the `wintype` argument to glk_window_open) ──────
 
-/// The window kinds this subset supports. (Blank is out of scope.)
+/// The window kinds this subset supports.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum WinType {
     /// Internal layout node created by a split (`wintype_Pair` = 1).
     Pair,
+    /// A window that is always blank: no input, no output, and
+    /// `glk_window_get_size()` always reports `(0, 0)` regardless of the space
+    /// its split actually gives it (`wintype_Blank` = 2; Glk spec §3.5.1 — "A
+    /// blank window is always blank. It supports no input and no output. …
+    /// A blank window has no size; glk_window_get_size() will return (0,0)").
+    /// Used as pure layout filler (e.g. a spacer corner between other panes).
+    Blank,
     /// Scrolling main text window (`wintype_TextBuffer` = 3).
     TextBuffer,
     /// Fixed character grid / status window (`wintype_TextGrid` = 4).
@@ -35,6 +212,7 @@ impl WinType {
     pub fn from_arg(v: u32) -> Option<WinType> {
         match v {
             1 => Some(WinType::Pair),
+            2 => Some(WinType::Blank),
             3 => Some(WinType::TextBuffer),
             4 => Some(WinType::TextGrid),
             5 => Some(WinType::Graphics),
@@ -45,6 +223,7 @@ impl WinType {
     pub fn to_arg(self) -> u32 {
         match self {
             WinType::Pair => 1,
+            WinType::Blank => 2,
             WinType::TextBuffer => 3,
             WinType::TextGrid => 4,
             WinType::Graphics => 5,
@@ -81,6 +260,7 @@ pub const WINMETHOD_NOBORDER: u32 = 0x0100;
 
 /// A Glk style class (the `style_*` constants 0–10).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum GlkStyle {
     /// `style_Normal` = 0.
     Normal,
@@ -116,8 +296,14 @@ pub const NUMSTYLES: u32 = 11;
 /// display. Plain data — keeps `gvm` zero-dependency.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StyleColour {
+    /// The resolved foreground colour (`0xRRGGBB`), or `None` if the window
+    /// type set no `stylehint_TextColor` hint.
     pub fg: Option<u32>,
+    /// The resolved background colour (`0xRRGGBB`), or `None` if the window
+    /// type set no `stylehint_BackColor` hint.
     pub bg: Option<u32>,
+    /// Whether `stylehint_ReverseColor` requested swapping foreground and
+    /// background on display.
     pub reverse: bool,
 }
 
@@ -133,10 +319,18 @@ pub struct StyleColour {
 /// styles distinguishable. Plain data — keeps `gvm` zero-dependency.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StyleAttrs {
+    /// The `stylehint_Weight` hint (bold vs. normal), or `None` if unset.
     pub weight: Option<u32>,
+    /// The `stylehint_Oblique` hint (italic vs. upright), or `None` if unset.
     pub oblique: Option<u32>,
+    /// The `stylehint_Indentation` hint in ems, or `None` if unset; negative
+    /// values are a hanging indent.
     pub indent: Option<i32>,
+    /// The `stylehint_ParaIndentation` hint in ems, or `None` if unset;
+    /// negative values are a hanging indent.
     pub para_indent: Option<i32>,
+    /// The `stylehint_Justification` hint (`stylehint_just_*`), or `None` if
+    /// unset.
     pub justify: Option<u32>,
 }
 
@@ -279,8 +473,11 @@ pub mod datetime {
     /// `glk.h`: `{ glsi32 high_sec; glui32 low_sec; glsi32 microsec; }`.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
     pub struct GlkTimeVal {
+        /// The top 32 bits of the signed epoch-second count.
         pub high_sec: i32,
+        /// The bottom 32 bits of the signed epoch-second count.
         pub low_sec: u32,
+        /// The sub-second fraction, in microseconds.
         pub microsec: i32,
     }
 
@@ -290,13 +487,21 @@ pub mod datetime {
     /// `microsec` 0–999999.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
     pub struct GlkDate {
+        /// The full four-digit year.
         pub year: i32,
+        /// The month, 1-12 (1 = January).
         pub month: i32,
+        /// The day of month, 1-31.
         pub day: i32,
+        /// The day of week, 0-6 (0 = Sunday).
         pub weekday: i32,
+        /// The hour, 0-23.
         pub hour: i32,
+        /// The minute, 0-59.
         pub minute: i32,
+        /// The second, 0-59 (may be 60 at a leap second).
         pub second: i32,
+        /// The sub-second fraction, in microseconds (0-999999).
         pub microsec: i32,
     }
 
@@ -481,9 +686,15 @@ pub struct Rect {
 /// comparing rects.)
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum WinTree {
+    /// A window with no children — the leaf that actually holds text, a grid,
+    /// or a graphics surface.
     Leaf {
+        /// The window's Glk id (`winid_t` as a plain integer).
         id: u32,
+        /// Which kind of window this is (text buffer, text grid, graphics,
+        /// blank).
         wintype: WinType,
+        /// The window's resolved on-screen rectangle.
         rect: Rect,
         /// The window's Normal-style background colour from its own snapshot
         /// (packed RGB `0x00RRGGBB`), or `None` if the game set none (host uses
@@ -498,6 +709,8 @@ pub enum WinTree {
         /// empty cells match the reversed text instead of showing the base. (SQ-0403)
         reverse: bool,
     },
+    /// An internal split node joining two children — the result of a
+    /// `glk_window_open` split, never directly visible to the game.
     Pair {
         /// true for an Above/Below split (children stacked), false for Left/Right.
         vertical: bool,
@@ -508,6 +721,8 @@ pub enum WinTree {
         /// (rows if vertical, cols if not) — the host gives `first` this many
         /// cells, then the border cell (if `border`), then `second` the rest.
         split: u32,
+        /// This pair window's own resolved rectangle (the union of its two
+        /// children plus any border).
         rect: Rect,
         /// The Normal-style background colour of this split's KEY window (the new
         /// window that created the border) from its snapshot, or `None` if the
@@ -517,7 +732,9 @@ pub enum WinTree {
         /// The Normal-style foreground colour of this split's KEY window, or
         /// `None` if absent/a pair/unset.
         key_fg: Option<u32>,
+        /// The top/left (or left) child, in on-screen position order.
         first: Box<WinTree>,
+        /// The bottom/right (or right) child, in on-screen position order.
         second: Box<WinTree>,
     },
 }
@@ -536,12 +753,85 @@ impl WinTree {
 /// A display backend the VM drives for all output-side effects. The Glk state
 /// (window tree, streams, current style) lives in [`Model`]; the backend renders
 /// it. Every method has a no-op default so a backend implements only what it
-/// needs; `as_any_mut` supports downcasting in tests.
+/// needs.
+///
+/// # Why `as_any`/`as_any_mut`, and why they stay (SQ-1409)
+///
+/// The two are required with no default, which forces every implementor to
+/// write `fn as_any(&self) -> &dyn Any { self }` (and the `_mut` twin) —
+/// and writing that line requires `Self: Any`, which requires `Self:
+/// 'static`, exactly as if the trait carried a `: Any` supertrait bound
+/// (see `zvm::io`'s `Output: Any`, documented the same way under SQ-1402).
+/// So every backend must own everything it touches rather than borrow it
+/// from its host. The reason is this crate's own test suites: they build a
+/// `Box<dyn GlkBackend>`, drive a few opcodes through it, then downcast back
+/// to the concrete `TestBackend` to read what got recorded — `as_any_mut`
+/// is what makes that downcast possible. **Do not change the trait** to drop
+/// or default these; that is the one thing SQ-1409 asks to leave alone.
+///
+/// **The pattern for a host whose backend must reach state it does not
+/// own:** don't fight `'static` by borrowing — share the state behind a
+/// reference-counted cell instead ([`std::rc::Rc`]`<`[`std::cell::RefCell`]`<_>>`
+/// for a single-threaded host, [`std::sync::Arc`]`<`[`std::sync::Mutex`]`<_>>`
+/// across threads). The backend owns a clone of the handle (satisfying
+/// `'static` honestly, not by unsafely erasing a borrow), the host keeps its
+/// own clone, and both sides see the same state with no downcast anywhere:
+///
+/// ```rust
+/// use std::any::Any;
+/// use std::cell::RefCell;
+/// use std::rc::Rc;
+///
+/// use gvm::glk::{GlkBackend, GlkStyle};
+///
+/// struct SharedLog(Rc<RefCell<Vec<String>>>);
+///
+/// impl GlkBackend for SharedLog {
+///     fn put_text(&mut self, _win: u32, _style: GlkStyle, s: &str) {
+///         self.0.borrow_mut().push(s.to_string());
+///     }
+///     fn as_any(&self) -> &dyn Any {
+///         self
+///     }
+///     fn as_any_mut(&mut self) -> &mut dyn Any {
+///         self
+///     }
+/// }
+///
+/// // What a real host's step loop would call as the story prints.
+/// fn a_steps_worth_of_output(backend: &mut dyn GlkBackend) {
+///     backend.put_text(0, GlkStyle::Normal, "hello");
+/// }
+///
+/// let log = Rc::new(RefCell::new(Vec::new()));
+/// let mut backend = SharedLog(Rc::clone(&log));
+/// a_steps_worth_of_output(&mut backend);
+/// // The host reads its OWN clone after the step, no downcast required —
+/// // the whole point of sharing the cell instead of asking the backend for it.
+/// assert_eq!(log.borrow().as_slice(), ["hello".to_string()]);
+/// ```
 pub trait GlkBackend {
     /// Total display size available to the root window, in characters
     /// `(width, height)`. The model lays the window tree out within this.
     fn screen_size(&self) -> (u32, u32) {
         (80, 24)
+    }
+    /// A host layout preference (SQ-0341/SQ-1402), not a Glk mechanism the
+    /// story can query or set: `true` makes every split abut with no reserved
+    /// gutter cell, regardless of what the story asked for.
+    ///
+    /// A split's border comes from `winmethod_Border`/`winmethod_NoBorder`
+    /// (the border bit of `glk_window_open`'s `method` argument, bit 0x100 —
+    /// `GLULX_NOTES.md`'s Split methods table) — the STORY's own per-split
+    /// request, honoured or not entirely at the library's discretion (the Glk
+    /// spec leaves whether and how a border is drawn up to the library, the
+    /// same advisory latitude a stylehint gets). This is that discretion,
+    /// exercised once for the whole session instead of per split: `true`
+    /// OVERRIDES a story's `winmethod_Border` request with no gutter, the way
+    /// Gargoyle's own borderless-windows preference does; the default `false`
+    /// honours the story's request exactly as before this existed.
+    fn borderless(&self) -> bool {
+        false
     }
     /// A window was opened.
     fn window_open(&mut self, _id: u32, _wintype: WinType) {}
@@ -619,8 +909,45 @@ pub trait GlkBackend {
     /// Draw image `resnum` into a graphics window at `(x, y)`, optionally
     /// scaled to `(width, height)`. Return whether the image actually
     /// resolved and was drawn (false if `resnum` is missing/undecodable).
-    fn graphics_draw_image(&mut self, _win: u32, _resnum: u32, _x: i32, _y: i32, _scale: Option<(u32, u32)>) -> bool {
+    ///
+    /// `link` is the CURRENT STREAM's hyperlink value (`glk_set_hyperlink`) at
+    /// the moment of the draw (SQ-1503; Glk spec: "you can also set a hyperlink
+    /// for an image, by calling glk_set_hyperlink() before glk_image_draw()").
+    /// It only means anything for a draw into a TEXT BUFFER window — a graphics
+    /// window's canvas is pixels, not a stream, and has no hyperlink concept —
+    /// so a host ignores it on that path.
+    fn graphics_draw_image(&mut self, _win: u32, _resnum: u32, _x: i32, _y: i32, _scale: Option<(u32, u32)>, _link: u32) -> bool {
         false
+    }
+    /// Draw image `resnum` inline in a TEXT BUFFER window under a **standing**
+    /// [`ImageRule`] (`glk_image_draw_scaled_ext`, Glk 0.7.6; SQ-1424).
+    /// `align` is the `imagealign_*` value the buffer path takes in `val1`.
+    /// `link` is the same current-stream hyperlink value [`Self::graphics_draw_image`]
+    /// takes (SQ-1503).
+    ///
+    /// A host that lays text buffers out itself should OVERRIDE this: store
+    /// `rule` beside the image and call [`ImageRule::resolve_in_buffer`] with
+    /// the window's CURRENT width every time it lays the buffer out, so a
+    /// resize re-resolves `imagerule_WidthRatio` as the spec requires. It is a
+    /// separate seam from [`GlkBackend::graphics_draw_image`] precisely because
+    /// that one takes a resolved size, which is the thing a standing rule must
+    /// not freeze.
+    ///
+    /// The default resolves ONCE against `window_width_px` and delegates, which
+    /// is right for a host with no relayout of its own (a one-shot transcript
+    /// dump) and wrong only in that a later resize will not follow.
+    fn buffer_draw_image_ext(
+        &mut self,
+        win: u32,
+        resnum: u32,
+        align: u32,
+        rule: ImageRule,
+        window_width_px: u32,
+        link: u32,
+    ) -> bool {
+        let Some(natural) = self.image_info(resnum) else { return false };
+        let Some(size) = rule.resolve_in_buffer(natural, window_width_px) else { return false };
+        self.graphics_draw_image(win, resnum, align as i32, 0, Some(size), link)
     }
     /// Create a sound channel with rock `rock`; return its Glk ref (0 = failure).
     fn schannel_create(&mut self, _rock: u32) -> u32 { 0 }
@@ -675,6 +1002,26 @@ pub trait GlkBackend {
     fn local_utc_offset_seconds(&self, _epoch_seconds: i64) -> Option<i32> {
         None
     }
+    /// Answer `gestalt_CharOutput`/`glk_gestalt_ext` for code point `ch`
+    /// (SQ-1416 item 8; Glk spec §2.3): `(result, glyph_count)`, where
+    /// `result` is `gestalt_CharOutput_CannotPrint` (0), `_ApproxPrint` (1),
+    /// or `_ExactPrint` (2), and `glyph_count` is "the number of actual
+    /// glyphs which will be used to represent the character" (`glk_gestalt_ext`'s
+    /// output array) — meaningless when `result` is `CannotPrint`, though the
+    /// spec allows any value there too. Default (no backend knowledge of its
+    /// real font coverage): `CannotPrint` for the eight-bit control ranges
+    /// the spec names outright ("always … CannotPrint if ch is an unprintable
+    /// eight-bit character (0 to 9, 11 to 31, 127 to 159)"), `ExactPrint`
+    /// (1 glyph) for the rest of Latin-1, `ApproxPrint` (1 glyph) beyond that.
+    fn char_output_gestalt(&self, ch: u32) -> (u32, u32) {
+        if matches!(ch, 0..=9 | 11..=31 | 127..=159) {
+            (0, 0) // CannotPrint
+        } else if ch <= 0xFF {
+            (2, 1) // ExactPrint
+        } else {
+            (1, 1) // ApproxPrint
+        }
+    }
     /// Immutable downcast support (used by tests to read recorded output).
     fn as_any(&self) -> &dyn Any;
     /// Mutable downcast support.
@@ -685,8 +1032,17 @@ pub trait GlkBackend {
 
 /// One recorded `fill_rect`/`erase_rect` call: `(color, left, top, w, h)`.
 type FillRec = (u32, i32, i32, u32, u32);
-/// One recorded `draw_image` call: `(resnum, x, y, scale)`.
-type DrawRec = (u32, i32, i32, Option<(u32, u32)>);
+/// One recorded `draw_image` call: `(resnum, x, y, scale, link)`. `link` is the
+/// CURRENT STREAM's hyperlink value at the time of the draw (`glk_set_hyperlink`,
+/// SQ-1503) — meaningful only for a draw into a text-buffer window; a graphics
+/// window's canvas has no hyperlink concept, so a host ignores it there.
+type DrawRec = (u32, i32, i32, Option<(u32, u32)>, u32);
+/// One recorded `buffer_draw_image_ext` call:
+/// `(resnum, align, rule, window_width_px, link)` — the STANDING form, which
+/// records the rule rather than a resolved size precisely because the size is
+/// not settled until the host lays the buffer out (SQ-1424). `link` is the same
+/// current-stream hyperlink value `DrawRec` carries (SQ-1503).
+pub type BufferDrawExtRec = (u32, u32, ImageRule, u32, u32);
 
 /// A [`GlkBackend`] that records each window's text/grid in memory, replacing
 /// the old `BufferOutput`: tests downcast to it and read the asserted strings.
@@ -714,6 +1070,8 @@ pub struct TestBackend {
     fills: BTreeMap<u32, Vec<FillRec>>,
     /// Recorded `draw_image` calls per graphics window.
     draws: BTreeMap<u32, Vec<DrawRec>>,
+    /// Recorded `buffer_draw_image_ext` calls per text-buffer window (SQ-1424).
+    buffer_draws_ext: BTreeMap<u32, Vec<BufferDrawExtRec>>,
     /// Resnums that simulate a missing/undecodable image (draw reports false,
     /// nothing recorded).
     missing_images: BTreeSet<u32>,
@@ -743,6 +1101,15 @@ pub struct TestBackend {
     /// [`GlkBackend::local_utc_offset_seconds`] for the `_local` date/time
     /// selector tests (`None` = no tz knowledge → selectors fall back to UTC).
     local_offset: Option<i32>,
+    /// Served by [`GlkBackend::borderless`] (SQ-1402). Defaults to `false`.
+    borderless: bool,
+    /// Ordered log of `window_open`/`window_close` calls (SQ-1515): a restore
+    /// that swaps the whole Glk window model has to notify the backend of the
+    /// old ids closing and the new ones opening, and the ORDER matters (a
+    /// host that tracks "the first `TextBuffer` opened is primary" — as
+    /// `AppGlk` does — needs the new primary told about first). Entries read
+    /// `"open <id> <WinType>"` / `"close <id>"`.
+    window_log: Vec<String>,
 }
 
 impl Default for TestBackend {
@@ -765,6 +1132,7 @@ impl TestBackend {
             dims: BTreeMap::new(),
             fills: BTreeMap::new(),
             draws: BTreeMap::new(),
+            buffer_draws_ext: BTreeMap::new(),
             missing_images: BTreeSet::new(),
             image_infos: BTreeMap::new(),
             backgrounds: BTreeMap::new(),
@@ -775,6 +1143,8 @@ impl TestBackend {
             default_colours: None,
             style_colours: BTreeMap::new(),
             local_offset: None,
+            borderless: false,
+            window_log: Vec::new(),
         }
     }
     /// A backend reporting a specific display size.
@@ -821,6 +1191,12 @@ impl TestBackend {
     /// date/time selectors (e.g. `-25200` = PDT, UTC-7).
     pub fn with_local_offset(mut self, seconds: i32) -> Self {
         self.local_offset = Some(seconds);
+        self
+    }
+    /// Set the borderless-windows preference [`GlkBackend::borderless`]
+    /// reports (SQ-1402).
+    pub fn with_borderless(mut self, on: bool) -> Self {
+        self.borderless = on;
         self
     }
     /// Accumulated text for one text-buffer window (empty if none).
@@ -880,6 +1256,12 @@ impl TestBackend {
     pub fn draws(&self, win: u32) -> Vec<DrawRec> {
         self.draws.get(&win).cloned().unwrap_or_default()
     }
+    /// Recorded `buffer_draw_image_ext` calls for one text-buffer window
+    /// (empty if none) — the UNRESOLVED standing rules, as a real host stores
+    /// them (SQ-1424).
+    pub fn buffer_draws_ext(&self, win: u32) -> Vec<BufferDrawExtRec> {
+        self.buffer_draws_ext.get(&win).cloned().unwrap_or_default()
+    }
     /// The last background color set for one graphics window, if any.
     pub fn background(&self, win: u32) -> Option<u32> {
         self.backgrounds.get(&win).copied()
@@ -887,6 +1269,17 @@ impl TestBackend {
     /// The recorded schannel call log (create/play/stop/setvol/destroy), in order.
     pub fn sound_log(&self) -> &[String] {
         &self.sound_log
+    }
+    /// The recorded `window_open`/`window_close` call log, in order (SQ-1515).
+    pub fn window_log(&self) -> &[String] {
+        &self.window_log
+    }
+    /// Discard everything recorded in the `window_log` so far — lets a test
+    /// set up its own pre-existing windows (which log their own opens) and
+    /// then check only what a LATER call (e.g. `Machine::restore_state`)
+    /// logs, without those setup entries in the way (SQ-1515).
+    pub fn clear_window_log(&mut self) {
+        self.window_log.clear();
     }
 }
 
@@ -897,7 +1290,11 @@ impl GlkBackend for TestBackend {
     fn char_pixels(&self) -> (u32, u32) {
         self.char_px
     }
+    fn borderless(&self) -> bool {
+        self.borderless
+    }
     fn window_open(&mut self, id: u32, wintype: WinType) {
+        self.window_log.push(format!("open {id} {wintype:?}"));
         match wintype {
             WinType::TextBuffer => {
                 self.runs.entry(id).or_default();
@@ -907,9 +1304,11 @@ impl GlkBackend for TestBackend {
             }
             WinType::Pair => {}
             WinType::Graphics => {}
+            WinType::Blank => {}
         }
     }
     fn window_close(&mut self, id: u32) {
+        self.window_log.push(format!("close {id}"));
         self.runs.remove(&id);
         self.linked_runs.remove(&id);
         self.colour_runs.remove(&id);
@@ -967,11 +1366,30 @@ impl GlkBackend for TestBackend {
     fn graphics_set_background(&mut self, win: u32, color: u32) {
         self.backgrounds.insert(win, color);
     }
-    fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>) -> bool {
+    /// Records the STANDING rule rather than resolving it, which is what a host
+    /// that lays its own text buffers out does (SQ-1424) — and is the only way
+    /// a test can tell "resolved once at call time" from "kept for relayout".
+    fn buffer_draw_image_ext(
+        &mut self,
+        win: u32,
+        resnum: u32,
+        align: u32,
+        rule: ImageRule,
+        window_width_px: u32,
+        link: u32,
+    ) -> bool {
         if self.missing_images.contains(&resnum) {
             return false;
         }
-        self.draws.entry(win).or_default().push((resnum, x, y, scale));
+        self.buffer_draws_ext.entry(win).or_default().push((resnum, align, rule, window_width_px, link));
+        true
+    }
+
+    fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>, link: u32) -> bool {
+        if self.missing_images.contains(&resnum) {
+            return false;
+        }
+        self.draws.entry(win).or_default().push((resnum, x, y, scale, link));
         true
     }
     fn image_info(&mut self, resnum: u32) -> Option<(u32, u32)> {
@@ -1058,11 +1476,31 @@ pub enum StreamKind {
     /// is the write high-water mark (`bufeof` in cheapglk) — the largest element
     /// index ever written, capped at `len`. `seekmode_End` and the seek clamp are
     /// relative to `hiwater`, not `len`.
-    Memory { addr: u32, len: u32, pos: u32, unicode: bool, hiwater: u32 },
+    Memory {
+        /// The starting address in Glulx main memory the stream reads/writes
+        /// through.
+        addr: u32,
+        /// The length, in elements, of the `[addr, addr+len)` region backing
+        /// this stream.
+        len: u32,
+        /// The current element cursor (read/write position, and seek target).
+        pos: u32,
+        /// Whether elements are 32-bit Unicode code points (`true`) or bytes
+        /// (`false`).
+        unicode: bool,
+        /// The write high-water mark (`bufeof` in cheapglk): the largest
+        /// element index ever written, capped at `len`. `seekmode_End` and the
+        /// seek clamp are relative to this, not `len`.
+        hiwater: u32,
+    },
     /// A file stream over the in-memory VFS. `unicode` selects the on-file
     /// encoding (4-byte-BE / UTF-8 vs 1 byte per char); the mutable name/mode/pos
-    /// state lives in [`Model::file_streams`] keyed by stream id so this stays `Copy`.
-    File { unicode: bool },
+    /// state lives in `Model::file_streams` keyed by stream id so this stays `Copy`.
+    File {
+        /// Whether the on-file encoding is 4-byte-BE Unicode (`true`) or one
+        /// byte per character (`false`).
+        unicode: bool,
+    },
     /// A `SavedGame`-usage stream: a host conduit fully decoupled from the VFS.
     /// Opens successfully for every mode (Read succeeds even with no prior save,
     /// so the game always reaches `@save`/`@restore` and the host decides).
@@ -1070,9 +1508,13 @@ pub enum StreamKind {
     Null,
     /// A read-only Blorb data-resource stream (`glk_stream_open_resource[_uni]`).
     /// The resource bytes + read cursor + text/binary flag live in
-    /// [`Model::resource_streams`] keyed by stream id so this stays `Copy`;
+    /// `Model::resource_streams` keyed by stream id so this stays `Copy`;
     /// `unicode` selects 32-bit vs Latin-1 read elements.
-    Resource { unicode: bool },
+    Resource {
+        /// Whether read elements are 32-bit Unicode code points (`true`) or
+        /// Latin-1 bytes (`false`).
+        unicode: bool,
+    },
 }
 
 /// A Glk stream.
@@ -1208,6 +1650,23 @@ const filemode_Write: u32 = 1;
 #[allow(non_upper_case_globals)]
 const fileusage_TextMode: u32 = 0x100;
 
+/// Glk `fileusage_TypeMask` (garglk `glk.h`): the low bits of a fileref's
+/// `usage` naming what kind of file it is, independent of the TextMode bit.
+#[allow(non_upper_case_globals)]
+const fileusage_TypeMask: u32 = 0x0f;
+/// Glk `fileusage_Data` (garglk `glk.h`).
+#[allow(non_upper_case_globals)]
+const fileusage_Data: u32 = 0x00;
+/// Glk `fileusage_SavedGame` (garglk `glk.h`).
+#[allow(non_upper_case_globals)]
+const fileusage_SavedGame: u32 = 0x01;
+/// Glk `fileusage_Transcript` (garglk `glk.h`).
+#[allow(non_upper_case_globals)]
+const fileusage_Transcript: u32 = 0x02;
+/// Glk `fileusage_InputRecord` (garglk `glk.h`).
+#[allow(non_upper_case_globals)]
+const fileusage_InputRecord: u32 = 0x03;
+
 /// The mutable read/write state of an open file stream, kept in a side table
 /// (`Model::file_streams`) keyed by stream id so `StreamKind` stays `Copy`.
 #[derive(Clone, Debug)]
@@ -1281,12 +1740,16 @@ pub struct Model {
     /// Open Blorb data-resource streams keyed by stream id (the owned bytes +
     /// read cursor for each [`StreamKind::Resource`] stream).
     resource_streams: std::collections::BTreeMap<u32, ResourceStream>,
-    /// When true, honor every window border as ZERO width: splits reserve no
-    /// gutter cell and the tree reports `border: false`, so windows abut like a
-    /// pixel interpreter (Gargoyle). A per-game opt-in for layouts whose full-cell
-    /// gutters read as gaps or double a game's own graphics dividers (narco).
-    /// Default false → the Glk border hint is honored (bordered → 1-cell gutter,
-    /// NoBorder → none). (SQ-0341)
+    /// [`GlkBackend::borderless`], cached from the backend at the last
+    /// [`Self::relayout`] call — the model has no standing coupling to the
+    /// backend, so it is handed this fact the same way it is handed
+    /// `char_px` (SQ-1402). NOT a host-settable field on `Model` itself: the
+    /// backend is the single source of truth, and this is stale between
+    /// relayouts exactly as `char_px` is (defaults to `false`, i.e. "honour
+    /// the story's own border request", until a `relayout` reports
+    /// otherwise). When true, honor every window border as ZERO width:
+    /// splits reserve no gutter cell and the tree reports `border: false`,
+    /// so windows abut like a pixel interpreter (Gargoyle). (SQ-0341)
     borderless: bool,
 }
 
@@ -1349,29 +1812,17 @@ impl Model {
         }
     }
 
-    /// Set the per-game borderless-windows mode (SQ-0341): `true` makes every
-    /// split abut with no reserved gutter and no reported border.
-    pub fn set_borderless(&mut self, on: bool) {
-        self.borderless = on;
-    }
-
-    /// The current per-game borderless-windows mode (see
-    /// [`Self::set_borderless`]). A host/runtime setting, not game state — the
-    /// exec-side model swaps (`@restart`, `restore_state`) read it off the old
-    /// model and re-apply it to the new one. (SQ-0627)
-    pub fn borderless(&self) -> bool {
-        self.borderless
-    }
-
     /// Ids of every live window, pairs included — the teardown set `@restart`
     /// notifies the backend about before discarding the model. (SQ-0627)
     pub(crate) fn all_window_ids(&self) -> Vec<u32> {
         self.windows.iter().flatten().map(|w| w.id).collect()
     }
 
-    /// The gutter width (cells) reserved for a split's border under the current
-    /// mode: 0 when [`borderless`](Self::borderless), else 1 for a bordered split
-    /// (the Glk default) and 0 for `winmethod_NoBorder`. (SQ-0341)
+    /// The gutter width (cells) reserved for a split's border under the
+    /// backend's current [`GlkBackend::borderless`] preference (cached at the
+    /// last [`Self::relayout`], see the field doc): 0 when that preference is
+    /// set, else 1 for a bordered split (the Glk default) and 0 for
+    /// `winmethod_NoBorder`. (SQ-0341)
     fn split_border(&self, method: u32) -> u32 {
         if self.borderless || (method & WINMETHOD_BORDERMASK) == WINMETHOD_NOBORDER {
             0
@@ -1449,7 +1900,7 @@ impl Model {
         let row = match wintype {
             WinType::TextBuffer => 0,
             WinType::TextGrid => 1,
-            WinType::Pair | WinType::Graphics => return StyleColour::default(),
+            WinType::Pair | WinType::Graphics | WinType::Blank => return StyleColour::default(),
         };
         self.style_hints[row][style as usize]
     }
@@ -1484,7 +1935,7 @@ impl Model {
         let row = match wintype {
             WinType::TextBuffer => 0,
             WinType::TextGrid => 1,
-            WinType::Pair | WinType::Graphics => return StyleAttrs::default(),
+            WinType::Pair | WinType::Graphics | WinType::Blank => return StyleAttrs::default(),
         };
         self.style_attrs[row][style as usize]
     }
@@ -1727,19 +2178,36 @@ impl Model {
 
     // ── filerefs (in-memory VFS) ────────────────────────────────────────────────
 
-    /// Keep the characters Glk libraries safely allow in a base filename (ASCII
-    /// alphanumerics plus `-`, `_`, `.`); everything else becomes `_`. An empty
-    /// result falls back to `"file"` so a name is never blank.
-    pub fn sanitize_fileref_name(raw: &str) -> String {
-        let cleaned: String = raw
+    /// Simplify a fileref's raw name into a base filename that exchanges cleanly
+    /// with other Glk interpreters — the spec-recommended rule (Glk spec §3.7,
+    /// "Other File Reference Functions"; the precise algorithm is cheapglk
+    /// `cgfref.c`'s `glk_fileref_create_by_name` comment: "delete all characters
+    /// in the string \"/\\<>:|?*\" (including quotes). Truncate at the first
+    /// period. Change to \"null\" if there's nothing left. Then append an
+    /// appropriate suffix: \".glkdata\", \".glksave\", \".txt\"."): delete
+    /// `" \ / > < : | ? *`, keep only the part before the first `.`, fall back
+    /// to `"null"` if that leaves nothing, then append the usage's suffix
+    /// (`.glkdata` for `fileusage_Data`, `.glksave` for `fileusage_SavedGame`,
+    /// `.txt` for `fileusage_Transcript`/`fileusage_InputRecord`, none for any
+    /// other usage — matching `gli_suffix_for_usage`'s `default: return ""`).
+    pub fn sanitize_fileref_name(raw: &str, usage: u32) -> String {
+        let base: String = raw
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+            .take_while(|&c| c != '.')
+            .filter(|c| !matches!(c, '"' | '\\' | '/' | '>' | '<' | ':' | '|' | '?' | '*'))
             .collect();
-        if cleaned.is_empty() {
-            "file".to_string()
+        let base = if base.is_empty() { "null".to_string() } else { base };
+        let masked = usage & fileusage_TypeMask;
+        let suffix = if masked == fileusage_Data {
+            ".glkdata"
+        } else if masked == fileusage_SavedGame {
+            ".glksave"
+        } else if masked == fileusage_Transcript || masked == fileusage_InputRecord {
+            ".txt"
         } else {
-            cleaned
-        }
+            ""
+        };
+        format!("{base}{suffix}")
     }
 
     /// Allocate a fileref slot for a (already-chosen) name; returns its id.
@@ -1754,7 +2222,7 @@ impl Model {
     /// `glk_fileref_create_by_name`: sanitize `name`, allocate a fileref, return id.
     /// A game-fixed name (not `by_prompt`).
     pub fn fileref_create(&mut self, usage: u32, name: String, rock: u32) -> u32 {
-        let name = Self::sanitize_fileref_name(&name);
+        let name = Self::sanitize_fileref_name(&name, usage);
         self.alloc_fileref(usage, name, rock, false)
     }
 
@@ -1762,7 +2230,7 @@ impl Model {
     /// the name via `glk_fileref_create_by_prompt` (their SAVE/RESTORE verb), so
     /// the host should surface its save UI for this fileref's `@save`/`@restore`.
     pub fn fileref_create_prompted(&mut self, usage: u32, name: String, rock: u32) -> u32 {
-        let name = Self::sanitize_fileref_name(&name);
+        let name = Self::sanitize_fileref_name(&name, usage);
         self.alloc_fileref(usage, name, rock, true)
     }
 
@@ -1824,7 +2292,7 @@ impl Model {
 
     /// `glk_fileref_does_file_exist`: the fileref is live AND its file has been
     /// written to the VFS — or, for a host-managed `SavedGame` slot, opened for
-    /// writing this session (see [`Model::saved_game_files`]).
+    /// writing this session (see `Model::saved_game_files`).
     pub fn fileref_exists(&self, fref: u32) -> bool {
         match self.fileref(fref) {
             Some(f) => self.files.contains_key(&f.name) || self.saved_game_files.contains_key(&f.name),
@@ -1864,7 +2332,7 @@ impl Model {
         self.saved_game_files.insert(name, size);
     }
 
-    /// Whether the file VFS has been mutated since the last [`clear_vfs_dirty`].
+    /// Whether the file VFS has been mutated since the last [`Self::clear_vfs_dirty`].
     pub fn vfs_dirty(&self) -> bool {
         self.vfs_dirty
     }
@@ -1873,6 +2341,44 @@ impl Model {
     /// initial load — loading is not a game mutation).
     pub fn clear_vfs_dirty(&mut self) {
         self.vfs_dirty = false;
+    }
+
+    /// Reset the model for the story's own `@restart` opcode (0x0122),
+    /// keeping the file VFS intact (SQ-1439).
+    ///
+    /// Glulx spec §1.8.5 ("State Not Saved") lists Glk library state — "Glk
+    /// opaque objects (windows, filerefs, streams)... I/O state such as the
+    /// current output stream, contents of windows, and cursor positions" —
+    /// as untouched by a `restart`/`restore`/`restoreundo` operation, and
+    /// glulxe's own `vm_restart` (`vm.c`) confirms this in practice: it
+    /// resets memory (skipping the live `@protect` range), the stack and
+    /// the registers, and never calls into Glk at all. Any window-closing an
+    /// Inform game exhibits right after RESTART is the game's *own* compiled
+    /// library code re-issuing `glk_window_close`, not an interpreter action.
+    ///
+    /// `gvm` still tears the window/stream/fileref layer down on `@restart`
+    /// — that is SQ-0627's existing, deliberate design (a fresh `Model`
+    /// hands out the same ids the backend must be told to forget first) and
+    /// is unchanged by this method. What SQ-1439 fixes is narrower: the file
+    /// VFS (`files`, `saved_game_files`, `vfs_dirty`) models the game's
+    /// DISK, not a Glk runtime object, and a real disk survives an
+    /// interpreter restart the way it survives a process crash — so those
+    /// three fields carry forward into the fresh model instead of being
+    /// wiped by [`Model::new`].
+    ///
+    /// Open file *streams* are still closed along with every other Glk
+    /// object: their handles are dead once the stack that named them is
+    /// gone, and closing them loses no bytes because every file write
+    /// already lands in `files` at write time ([`Self::file_stream_write`]
+    /// has no separate flush step) — there is nothing left to flush.
+    pub(crate) fn reset_for_restart(&mut self) {
+        let files = std::mem::take(&mut self.files);
+        let saved_game_files = std::mem::take(&mut self.saved_game_files);
+        let vfs_dirty = self.vfs_dirty;
+        *self = Model::new();
+        self.files = files;
+        self.saved_game_files = saved_game_files;
+        self.vfs_dirty = vfs_dirty;
     }
 
     /// The `(name, usage)` a fileref points at, for opening a file stream (Task 2).
@@ -1902,13 +2408,14 @@ impl Model {
         let styles = match wt {
             WinType::TextBuffer => self.style_hints[0],
             WinType::TextGrid => self.style_hints[1],
-            WinType::Pair | WinType::Graphics => [StyleColour::default(); NUMSTYLES as usize],
+            WinType::Pair | WinType::Graphics | WinType::Blank => [StyleColour::default(); NUMSTYLES as usize],
         };
         {
             // `nid` was just allocated; see the invariant note by `win`.
-            let w = self.win_mut(nid).unwrap();
-            w.stream = sid;
-            w.styles = styles;
+            if let Some(w) = self.win_mut(nid) {
+                w.stream = sid;
+                w.styles = styles;
+            }
         }
 
         if split == 0 {
@@ -1930,9 +2437,8 @@ impl Model {
         // already proved live (`split`, and `old_parent` by the tree invariant) —
         // see the note by `win`.
         let pid = self.alloc_window(WinType::Pair, 0);
-        let old_parent = self.win(split).unwrap().parent;
-        {
-            let p = self.win_mut(pid).unwrap();
+        let old_parent = self.win(split).map(|w| w.parent).unwrap_or(0);
+        if let Some(p) = self.win_mut(pid) {
             p.parent = old_parent;
             p.child1 = split;
             p.child2 = nid;
@@ -1940,13 +2446,16 @@ impl Model {
             p.method = method;
             p.size = size;
         }
-        self.win_mut(split).unwrap().parent = pid;
-        self.win_mut(nid).unwrap().parent = pid;
+        if let Some(w) = self.win_mut(split) {
+            w.parent = pid;
+        }
+        if let Some(w) = self.win_mut(nid) {
+            w.parent = pid;
+        }
         if old_parent == 0 {
             self.root = pid;
-        } else {
+        } else if let Some(op) = self.win_mut(old_parent) {
             // Replace `split` with the new pair in its old parent's child links.
-            let op = self.win_mut(old_parent).unwrap();
             if op.child1 == split {
                 op.child1 = pid;
             } else if op.child2 == split {
@@ -1972,19 +2481,19 @@ impl Model {
             // Closing the root empties the whole display.
             self.free_window_subtree(win);
             self.root = 0;
-        } else {
+        } else if let Some(pw) = self.win(parent) {
             // The parent is a pair; promote the sibling into the pair's place.
             // `parent`, its two children and `grandparent` are all live by the
             // tree invariant — see the note by `win`.
-            let pw = self.win(parent).unwrap();
             let sibling = if pw.child1 == win { pw.child2 } else { pw.child1 };
             let grandparent = pw.parent;
             self.free_window_subtree(win);
-            self.win_mut(sibling).unwrap().parent = grandparent;
+            if let Some(sw) = self.win_mut(sibling) {
+                sw.parent = grandparent;
+            }
             if grandparent == 0 {
                 self.root = sibling;
-            } else {
-                let gp = self.win_mut(grandparent).unwrap();
+            } else if let Some(gp) = self.win_mut(grandparent) {
                 if gp.child1 == parent {
                     gp.child1 = sibling;
                 } else if gp.child2 == parent {
@@ -1993,6 +2502,11 @@ impl Model {
             }
             // Free the now-defunct pair node.
             self.windows[(parent - 1) as usize] = None;
+        } else {
+            // Invariant violated (should never happen — see the note by
+            // `win`): the parent id is not live. Free just this window's
+            // subtree rather than panicking on the relink.
+            self.free_window_subtree(win);
         }
 
         // A closed window's stream must not remain current.
@@ -2025,13 +2539,18 @@ impl Model {
     /// border-presence hint from its parent pair's split method (SQ-0286):
     /// `None` for a parentless root (no preference), `Some(false)` for a
     /// `winmethod_NoBorder` split, `Some(true)` for the default (`winmethod_Border`).
-    pub fn relayout(&mut self, width: u32, height: u32, char_px: (u32, u32)) -> Vec<(u32, WinType, Rect, Option<bool>)> {
+    ///
+    /// `char_px` and `borderless` are both the backend's, handed in fresh each
+    /// call the same way: the model has no standing coupling to
+    /// `dyn GlkBackend`, so the caller (`Machine::step`, which owns both) reads
+    /// [`GlkBackend::borderless`] and passes the answer through (SQ-1402).
+    pub fn relayout(&mut self, width: u32, height: u32, char_px: (u32, u32), borderless: bool) -> Vec<(u32, WinType, Rect, Option<bool>)> {
         self.char_px = char_px;
-        // Snap the working screen size down so every proportional split lands on
-        // whole cells (see `clean_dims`). Any leftover row/column is simply not
-        // covered by a window — a harmless margin — rather than forcing a
-        // fractional split a game's layout code may loop on.
-        let (width, height) = self.clean_dims(width, height);
+        self.borderless = borderless;
+        // The whole screen is laid out, always. Each proportional split divides
+        // its own parent in virtual pixels and floors each child to whole cells
+        // (see `layout_window`), so the at-most-one-cell remainder stays inside
+        // that split as padding instead of being taken out of the screen.
         if self.root != 0 {
             let r = Rect { left: 0, top: 0, width, height };
             self.layout_window(self.root, r);
@@ -2051,121 +2570,77 @@ impl Model {
         out
     }
 
-    /// Largest `(w, h) ≤ (width, height)` at which every **proportional** split in
-    /// the window tree divides into whole cells, so no two siblings end up off by
-    /// a rounding cell.
-    ///
-    /// Why: a terminal quantizes windows to character cells, so a 50 % split of an
-    /// odd column count rounds to unequal halves (e.g. 40 | 39). Some games — an
-    /// Inform 7 graphics/map sidebar among them — assume their proportional split
-    /// is exact and spin forever on a fractional one, where a pixel interpreter's
-    /// ≤1-pixel error is invisible. Snapping width/height independently (a
-    /// Left/Right split constrains columns, an Above/Below split constrains rows)
-    /// gives such splits the equal cells they expect. A non-halving ratio (e.g.
-    /// 37 %) has no small clean size; there we fall back to the requested size and
-    /// rely on the host's per-turn watchdog.
-    fn clean_dims(&self, width: u32, height: u32) -> (u32, u32) {
-        // Snap DOWN to the largest size at which every proportional split lands
-        // on whole cells — but only when that costs a handful of cells. A "nice"
-        // ratio (50 %, 25 %) needs at most a rounding cell; an awkward one (33 %,
-        // or narco's nested panels) has no clean size near the requested one, and
-        // taking the largest one that exists collapses the whole screen (narco:
-        // 95×57 → 3×1). Losing more than half an axis is never a rounding
-        // correction, so fall back to the requested size there and rely on the
-        // host's per-turn watchdog for a genuine looper. (SQ-0336)
-        let snap = |extent: u32, horizontal: bool| -> u32 {
-            match (1..=extent).rev().find(|&s| self.axis_splits_exact(self.root, s, horizontal)) {
-                Some(s) if s * 2 >= extent => s, // kept ≥ half: a real rounding fix
-                _ => extent,                      // collapse (or none): keep requested
-            }
-        };
-        (snap(width, true).max(1), snap(height, false).max(1))
-    }
-
-    /// Does every proportional split that divides the given axis land on whole
-    /// cells, if this subtree occupies `size` cells along that axis? `horizontal`
-    /// selects the column axis (Left/Right splits) vs the row axis (Above/Below).
-    fn axis_splits_exact(&self, id: u32, size: u32, horizontal: bool) -> bool {
-        let w = match self.win(id) {
-            Some(w) if w.wintype == WinType::Pair => w,
-            _ => return true, // leaf or missing: nothing to constrain
-        };
-        let dir = w.method & WINMETHOD_DIRMASK;
-        let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
-        if vertical != horizontal {
-            // This split divides the axis under test. A bordered split reserves
-            // one cell (the separator), so the proportional halves must divide
-            // the *content* (`size − border`), not the full extent — otherwise a
-            // bordered 50% split lands on unequal cells. Borderless mode reserves
-            // nothing, so the halves divide the full extent (SQ-0341).
-            let content = size.saturating_sub(self.split_border(w.method));
-            let proportional = (w.method & WINMETHOD_DIVISIONMASK) == WINMETHOD_PROPORTIONAL;
-            if proportional && !(content * w.size).is_multiple_of(100) {
-                return false; // (content * pct) / 100 would truncate → fractional split
-            }
-            let new = if proportional {
-                (content * w.size) / 100
-            } else {
-                let key_is_graphics = self.win(w.child2).map(|c| c.wintype) == Some(WinType::Graphics);
-                if key_is_graphics {
-                    let cell_px = if vertical { self.char_px.1 } else { self.char_px.0 }.max(1);
-                    w.size.div_ceil(cell_px)
-                } else {
-                    w.size
-                }
-            }
-            .min(content);
-            let old = content - new;
-            self.axis_splits_exact(w.child1, old, horizontal)
-                && self.axis_splits_exact(w.child2, new, horizontal)
-        } else {
-            // Splits the other axis: this axis passes full `size` to both children.
-            self.axis_splits_exact(w.child1, size, horizontal)
-                && self.axis_splits_exact(w.child2, size, horizontal)
-        }
-    }
-
     /// Lay `id` out into `rect`, recursing into a pair's children. Entered only
     /// from `relayout` at `self.root` and from itself along child links, so `id` is
     /// live by the tree invariant — see the note by `win`.
     fn layout_window(&mut self, id: u32, rect: Rect) {
-        let (wintype, method, size, child1, child2, key) = {
-            let w = self.win_mut(id).unwrap();
+        let Some((wintype, method, size, child1, child2, key)) = self.win_mut(id).map(|w| {
             w.rect = rect;
             (w.wintype, w.method, w.size, w.child1, w.child2, w.key)
+        }) else {
+            return;
         };
         match wintype {
             WinType::TextGrid => {
-                let w = self.win_mut(id).unwrap();
-                w.grid.width = rect.width;
-                w.grid.height = rect.height;
-                if w.grid.cx >= rect.width {
-                    w.grid.cx = 0;
-                }
-                if w.grid.cy >= rect.height {
-                    w.grid.cy = 0;
+                if let Some(w) = self.win_mut(id) {
+                    w.grid.width = rect.width;
+                    w.grid.height = rect.height;
+                    if w.grid.cx >= rect.width {
+                        w.grid.cx = 0;
+                    }
+                    if w.grid.cy >= rect.height {
+                        w.grid.cy = 0;
+                    }
                 }
             }
             WinType::TextBuffer => {}
             WinType::Graphics => {}
+            // A blank window still takes its share of the split (so its sibling
+            // is sized correctly), but has nothing to lay out inside that share —
+            // `window_size` reports (0,0) for it regardless (Glk spec §3.5.1).
+            WinType::Blank => {}
             WinType::Pair => {
                 let _ = key;
-                // Graphics fixed-splits size in PIXELS; convert to whole cells
-                // (rounding up so the requested pixels aren't clipped). The
-                // window's *logical* pixel size reported to the game stays exactly
-                // what it asked for — see `window_pixel_size` — so its layout math
-                // isn't thrown off by the cell rounding.
-                let key_is_graphics = self.win(child2).map(|w| w.wintype) == Some(WinType::Graphics);
-                let is_fixed = (method & WINMETHOD_DIVISIONMASK) == WINMETHOD_FIXED;
-                let eff_size = if key_is_graphics && is_fixed {
-                    let dir = method & WINMETHOD_DIRMASK;
-                    let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
-                    let cell_px = if vertical { self.char_px.1 } else { self.char_px.0 }.max(1);
-                    size.div_ceil(cell_px)
+                let dir = method & WINMETHOD_DIRMASK;
+                let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
+                let cell_px = if vertical { self.char_px.1 } else { self.char_px.0 }.max(1);
+                let total = if vertical { rect.height } else { rect.width };
+                let border = self.split_border(method).min(total);
+                let content = total - border;
+                let (old_size, new_size) = if (method & WINMETHOD_DIVISIONMASK) == WINMETHOD_PROPORTIONAL {
+                    // Divide in VIRTUAL PIXELS and floor each child to whole cells
+                    // INDEPENDENTLY — what a GUI interpreter does, where the split
+                    // lands on a pixel and each text window reports
+                    // `floor(px / char_px)` characters, keeping the sub-character
+                    // slack as a gutter inside its own edge. A terminal has no
+                    // sub-cell slack, so the slack becomes a whole cell: a 50 %
+                    // split of 79 content cells gives 316 | 316 virtual pixels →
+                    // 39 | 39 cells, one cell over, and the two halves come out
+                    // EQUAL at every parent size. Handing that cell to the other
+                    // child instead is what made them 39 | 40, which is the
+                    // rounding an Inform 7 sidebar's layout code spins on
+                    // (SQ-0201) — and hiding it by shrinking the whole screen
+                    // until every split divided exactly is what cost City of
+                    // Secrets nineteen of eighty columns (SQ-1220).
+                    //
+                    // The remainder is at most ONE cell per split (the key child
+                    // rounds down, the old child rounds down against the same
+                    // boundary), it belongs to the split rather than to either
+                    // child, and `split_rect` leaves it beside the border.
+                    let content_px = content * cell_px;
+                    let new_px = (content_px * size) / 100;
+                    ((content_px - new_px) / cell_px, new_px / cell_px)
                 } else {
-                    size
+                    // Fixed. A graphics key child sizes in PIXELS; convert to whole
+                    // cells (rounding UP so the requested pixels aren't clipped).
+                    // The pixel size reported to the game stays exactly what it
+                    // asked for — see `window_pixel_size` — so its layout math
+                    // isn't thrown off by the cell rounding.
+                    let key_is_graphics = self.win(child2).map(|w| w.wintype) == Some(WinType::Graphics);
+                    let n = if key_is_graphics { size.div_ceil(cell_px) } else { size }.min(content);
+                    (content - n, n)
                 };
-                let (r_old, r_new) = split_rect(rect, method, eff_size, self.split_border(method));
+                let (r_old, r_new) = split_rect(rect, method, old_size, new_size);
                 self.layout_window(child1, r_old);
                 self.layout_window(child2, r_new);
             }
@@ -2197,9 +2672,16 @@ impl Model {
         let p = self.win(w.parent)?;
         Some(if p.child1 == win { p.child2 } else { p.child1 })
     }
-    /// A window's `(width, height)` in characters. `None` if invalid.
+    /// A window's `(width, height)` in characters. `None` if invalid. A blank
+    /// window always reports `(0, 0)`, regardless of the space its split
+    /// actually gives it (Glk spec §3.5.1 — "A blank window has no size;
+    /// glk_window_get_size() will return (0,0)").
     pub fn window_size(&self, win: u32) -> Option<(u32, u32)> {
-        self.win(win).map(|w| (w.rect.width, w.rect.height))
+        let w = self.win(win)?;
+        if w.wintype == WinType::Blank {
+            return Some((0, 0));
+        }
+        Some((w.rect.width, w.rect.height))
     }
     /// gvm's live window tree as a [`WinTree`], reflecting the rects from the
     /// most recent [`relayout`](Self::relayout). `None` when no root is open.
@@ -2259,29 +2741,48 @@ impl Model {
         self.windows.iter().flatten().any(|w| w.wintype == WinType::Graphics)
     }
     /// A graphics window's `(width, height)` in PIXELS. Normally cells × char_px,
-    /// but when the window is the key of a **fixed-pixel** split we report the
-    /// exact pixels the game requested on the split axis rather than the
-    /// cell-rounded value. A terminal can only allocate whole cells, so the
-    /// footprint is rounded up (see `layout_window`) and the spare pixels are
-    /// letterboxed — but the game drew its content for the pixel size it asked
-    /// for, and reporting a rounded value here throws off layout code that
-    /// assumes `get_size` echoes its request (an Inform 7 map sidebar spins
-    /// forever on the mismatch). `None` if invalid or not a graphics window.
+    /// but on the axis its parent splits we report the pixel share the split
+    /// actually divided rather than the cell-rounded value — the number a GUI
+    /// interpreter, which splits in pixels and has no cells to round to, would
+    /// give back:
+    ///
+    /// * a **fixed-pixel** split: exactly the pixels the game asked for. A
+    ///   terminal can only allocate whole cells, so the footprint is rounded UP
+    ///   (see `layout_window`) and the spare pixels are letterboxed — but the
+    ///   game drew its content for the size it requested, and reporting a
+    ///   rounded value throws off layout code that assumes `get_size` echoes
+    ///   its request (an Inform 7 map sidebar spins forever on the mismatch).
+    /// * a **proportional** split: exactly its percentage of the parent's
+    ///   content, which is what `layout_window` divided before flooring the
+    ///   footprint to whole cells. The at-most-one-cell remainder is the split's
+    ///   padding, not this window's, so it must not show up in the size the
+    ///   game measures its own artwork against.
+    ///
+    /// `None` if invalid or not a graphics window.
     pub fn window_pixel_size(&self, win: u32, char_px: (u32, u32)) -> Option<(u32, u32)> {
         let w = self.win(win)?;
         if w.wintype != WinType::Graphics {
             return None;
         }
         let mut px = (w.rect.width * char_px.0, w.rect.height * char_px.1);
-        if let Some((method, size, keywin)) = self.window_parent(win).and_then(|p| self.window_arrangement(p)) {
-            let is_fixed = (method & WINMETHOD_DIVISIONMASK) == WINMETHOD_FIXED;
-            if is_fixed && keywin == win {
-                let dir = method & WINMETHOD_DIRMASK;
-                if dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW {
-                    px.1 = size.min(px.1); // fixed rows: exact requested height
-                } else {
-                    px.0 = size.min(px.0); // fixed cols: exact requested width
+        let parent = self.window_parent(win).unwrap_or(0);
+        if let Some((method, size, keywin)) = self.window_arrangement(parent) {
+            let dir = method & WINMETHOD_DIRMASK;
+            let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
+            let cell_px = if vertical { char_px.1 } else { char_px.0 }.max(1);
+            let axis = if vertical { &mut px.1 } else { &mut px.0 };
+            match method & WINMETHOD_DIVISIONMASK {
+                WINMETHOD_FIXED if keywin == win => *axis = size.min(*axis),
+                WINMETHOD_PROPORTIONAL => {
+                    // Both children of a proportional split get their own share:
+                    // the key window's is `pct`, its sibling's is the rest.
+                    let pr = self.win(parent).map(|p| p.rect).unwrap_or(w.rect);
+                    let total = if vertical { pr.height } else { pr.width };
+                    let content_px = total.saturating_sub(self.split_border(method)) * cell_px;
+                    let new_px = (content_px * size) / 100;
+                    *axis = if keywin == win { new_px } else { content_px - new_px };
                 }
+                _ => {}
             }
         }
         Some(px)
@@ -2504,7 +3005,9 @@ impl Model {
             (u32::from_be_bytes([b[0], b[1], b[2], b[3]]), 4)
         };
         // Re-lookup to end the immutable borrow; `id` was proved present above.
-        self.resource_streams.get_mut(&id).unwrap().pos += adv;
+        if let Some(rs) = self.resource_streams.get_mut(&id) {
+            rs.pos += adv;
+        }
         if let Some(st) = self.stream_mut(id) {
             st.read_count = st.read_count.saturating_add(1);
         }
@@ -2669,7 +3172,9 @@ impl Model {
                         _ => 0,
                     };
                     let np = (base + pos as i64).clamp(0, len) as usize;
-                    self.file_streams.get_mut(&id).unwrap().pos = np;
+                    if let Some(fs) = self.file_streams.get_mut(&id) {
+                        fs.pos = np;
+                    }
                 }
             }
             Some(StreamKind::Null) => {
@@ -2683,7 +3188,9 @@ impl Model {
                         _ => 0,
                     };
                     let np = (base + pos as i64).clamp(0, len) as u32;
-                    self.savegame_streams.get_mut(&id).unwrap().pos = np;
+                    if let Some(ss) = self.savegame_streams.get_mut(&id) {
+                        ss.pos = np;
+                    }
                 }
             }
             Some(StreamKind::Resource { .. }) => {
@@ -2695,7 +3202,9 @@ impl Model {
                         _ => 0,
                     };
                     let np = (base + pos as i64).clamp(0, len) as usize;
-                    self.resource_streams.get_mut(&id).unwrap().pos = np;
+                    if let Some(rs) = self.resource_streams.get_mut(&id) {
+                        rs.pos = np;
+                    }
                 }
             }
             _ => {}
@@ -2782,7 +3291,9 @@ impl Model {
             }
             nchars += 1;
         }
-        self.file_streams.get_mut(&id).unwrap().pos = pos;
+        if let Some(fs) = self.file_streams.get_mut(&id) {
+            fs.pos = pos;
+        }
         if let Some(st) = self.stream_mut(id) {
             st.write_count = st.write_count.saturating_add(nchars);
         }
@@ -2826,7 +3337,9 @@ impl Model {
         } else {
             Self::vfs_decode_utf8(data, pos)?
         };
-        self.file_streams.get_mut(&id).unwrap().pos = pos + adv;
+        if let Some(fs) = self.file_streams.get_mut(&id) {
+            fs.pos = pos + adv;
+        }
         if let Some(st) = self.stream_mut(id) {
             st.read_count = st.read_count.saturating_add(1);
         }
@@ -3077,6 +3590,25 @@ impl Model {
     /// Pop the next queued non-input event, if any.
     pub fn pop_event(&mut self) -> Option<GlkEvent> {
         self.events.pop_front()
+    }
+    /// Pop the first queued event `glk_select_poll` is allowed to return
+    /// (SQ-1416 item 4; Glk spec §4.2's `glk_select_poll` prose): Timer,
+    /// Arrange, Redraw, SoundNotify, VolumeNotify. `glk_select_poll` "does
+    /// _not_ check for or return evtype_CharInput, evtype_LineInput, or
+    /// evtype_MouseInput events" (§4.2) — Hyperlink is the same shape (a
+    /// per-window player-input request, like Mouse), so it is excluded too.
+    /// Scans front-to-back for the first eligible event and removes ONLY
+    /// that one, leaving every other queued event (including any ineligible
+    /// ones ahead of it) in its original place — "unavailable events remain
+    /// pending for glk_select() to retrieve".
+    pub fn pop_pollable_event(&mut self) -> Option<GlkEvent> {
+        let i = self.events.iter().position(|e| {
+            matches!(
+                e.etype,
+                evtype::TIMER | evtype::ARRANGE | evtype::REDRAW | evtype::SOUND_NOTIFY | evtype::VOLUME_NOTIFY
+            )
+        })?;
+        self.events.remove(i)
     }
     /// Drain all queued non-input events (test accessor).
     pub fn take_pending_events(&mut self) -> Vec<GlkEvent> {
@@ -3720,38 +4252,30 @@ fn read_style_attrs(r: &mut SnapReader) -> Result<StyleAttrs, String> {
 /// requested size and the border comes out of the sibling's share. So the
 /// content apportioned between the children is `total − 1`, and the two
 /// children sit on either side of the reserved cell.
-fn split_rect(rect: Rect, method: u32, size: u32, border: u32) -> (Rect, Rect) {
+fn split_rect(rect: Rect, method: u32, old_size: u32, new_size: u32) -> (Rect, Rect) {
     let dir = method & WINMETHOD_DIRMASK;
-    let division = method & WINMETHOD_DIVISIONMASK;
     let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
     let total = if vertical { rect.height } else { rect.width };
-    let border = border.min(total); // a degenerate 0-cell rect can't spare one
-    let content = total - border;
-    let new_size = if division == WINMETHOD_PROPORTIONAL {
-        (content * size) / 100
-    } else {
-        size
-    }
-    .min(content);
-    let old_size = content - new_size;
-
+    // Each child is anchored to its OWN outer edge, so the separator and any
+    // remainder cell a proportional split could not divide (see `layout_window`)
+    // sit together in the middle and neither end of the parent is left bare.
     match dir {
         WINMETHOD_LEFT => (
-            Rect { left: rect.left + new_size + border, width: old_size, ..rect },
+            Rect { left: rect.left + total - old_size, width: old_size, ..rect },
             Rect { left: rect.left, width: new_size, ..rect },
         ),
         WINMETHOD_RIGHT => (
             Rect { left: rect.left, width: old_size, ..rect },
-            Rect { left: rect.left + old_size + border, width: new_size, ..rect },
+            Rect { left: rect.left + total - new_size, width: new_size, ..rect },
         ),
         WINMETHOD_ABOVE => (
-            Rect { top: rect.top + new_size + border, height: old_size, ..rect },
+            Rect { top: rect.top + total - old_size, height: old_size, ..rect },
             Rect { top: rect.top, height: new_size, ..rect },
         ),
         // WINMETHOD_BELOW (and any unknown direction defaults to below).
         _ => (
             Rect { top: rect.top, height: old_size, ..rect },
-            Rect { top: rect.top + old_size + border, height: new_size, ..rect },
+            Rect { top: rect.top + total - new_size, height: new_size, ..rect },
         ),
     }
 }
@@ -3762,31 +4286,46 @@ mod layout_snap_tests {
 
     // Left|Proportional 50% sidebar (like an Inform 7 map) with the DEFAULT
     // border: the split reserves one column for the separator, so the two halves
-    // divide the *content* (width − 1). The snap must therefore land on an odd
-    // total whose content is even — here 81 (content 80 → 40|border|40) — not on
-    // an even total (80 → content 79, an unequal split).
+    // divide the *content* (width − 1). Content 80 divides evenly; content 78
+    // and 100 do too. The case that used to need help is an ODD content, where
+    // a cell split gives 39|40 — the mismatch an I7 sidebar's layout code spins
+    // on (SQ-0201). Dividing in virtual pixels and flooring each child
+    // independently gives 39|39 with one cell of padding left in the split, so
+    // the halves are equal at EVERY width and the screen is never shrunk to
+    // find one (SQ-1220).
     #[test]
-    fn relayout_snaps_odd_width_so_proportional_halves_are_equal() {
-        let mut m = Model::new();
-        let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
-        let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
-        m.relayout(81, 41, (9, 19));
-        let gw = m.window_size(gfx).unwrap().0;
-        let bw = m.window_size(buf).unwrap().0;
-        assert_eq!(gw, bw, "50% split must be equal halves (gfx={gw}, buf={bw})");
-        assert_eq!(gw + bw, 80, "content (81 − 1 border) split into equal halves");
+    fn proportional_halves_are_equal_at_every_width() {
+        for width in [79u32, 80, 81, 101] {
+            let mut m = Model::new();
+            let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
+            let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
+            let leaves = m.relayout(width, 41, (9, 19), false);
+            let gw = m.window_size(gfx).unwrap().0;
+            let bw = m.window_size(buf).unwrap().0;
+            assert_eq!(gw, bw, "50% of {width} must be equal halves (gfx={gw}, buf={bw})");
+            // Content is width − 1 (the separator); the halves cover it but for
+            // at most the one cell the split could not divide.
+            let content = width - 1;
+            assert!(
+                content - (gw + bw) <= 1,
+                "at {width}: halves {gw}+{bw} leave more than one cell of {content} unpadded"
+            );
+            // And the whole screen is laid out: the outer edge is still reached.
+            let right = leaves.iter().map(|(_, _, r, _)| r.left + r.width).max().unwrap();
+            assert_eq!(right, width, "the tree must reach the right edge at {width}");
+        }
     }
 
-    // NoBorder: with no separator cell reserved, an already-even width needs no
-    // snapping — the 50% split lands on 40|40 directly.
+    // NoBorder: with no separator cell reserved, an even width divides directly —
+    // 40|40, no padding cell at all.
     #[test]
-    fn relayout_leaves_even_width_untouched() {
+    fn a_borderless_even_split_needs_no_padding() {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let gfx = m
             .window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL | WINMETHOD_NOBORDER, 50, 5, 0)
             .unwrap();
-        m.relayout(80, 40, (9, 19));
+        m.relayout(80, 40, (9, 19), false);
         assert_eq!(m.window_size(gfx).unwrap().0, 40);
         assert_eq!(m.window_size(buf).unwrap().0, 40);
     }
@@ -3800,7 +4339,7 @@ mod layout_snap_tests {
     fn window_tree_reflects_stylehint_set_after_open() {
         let mut m = Model::new();
         let _buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), false);
         // Normal (style 0) BackColor (hint 8) for buffer windows (wintype 3),
         // set AFTER the window already opened.
         m.set_style_hint(3, 0, 8, 0x00EE_EEEE);
@@ -3816,19 +4355,18 @@ mod layout_snap_tests {
     // DEFAULT border, one row is reserved for the separator, so the equal halves
     // divide the content (height − 1): 41 → content 40 → 20|border|20.
     #[test]
-    fn relayout_snaps_odd_height_for_vertical_proportional_split() {
-        let mut m = Model::new();
-        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
-        let top = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
-        m.relayout(80, 41, (9, 19));
-        assert_eq!(m.window_size(top).unwrap().1, m.window_size(buf).unwrap().1, "equal rows");
-        assert_eq!(
-            m.window_size(top).unwrap().1 + m.window_size(buf).unwrap().1,
-            40,
-            "content (41 − 1 border) split into equal halves",
-        );
-        // Width (no horizontal proportional split) is untouched.
-        assert_eq!(m.window_size(top).unwrap().0, 80);
+    fn proportional_halves_are_equal_at_every_height() {
+        for height in [40u32, 41, 33] {
+            let mut m = Model::new();
+            let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+            let top = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
+            m.relayout(80, height, (9, 19), false);
+            let (th, bh) = (m.window_size(top).unwrap().1, m.window_size(buf).unwrap().1);
+            assert_eq!(th, bh, "50% of {height} rows must be equal halves ({th} vs {bh})");
+            assert!((height - 1) - (th + bh) <= 1, "at {height}: more than one row unpadded");
+            // Width (no horizontal split at all) is untouched.
+            assert_eq!(m.window_size(top).unwrap().0, 80);
+        }
     }
 
     // A fixed-pixel graphics sidebar (e.g. an Inform 7 map at its max size):
@@ -3841,7 +4379,7 @@ mod layout_snap_tests {
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         // Fixed Left 722px sidebar; 722/9 = 80.2 → 81-cell footprint (729px).
         let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED, 722, 5, 0).unwrap();
-        m.relayout(200, 48, (9, 19));
+        m.relayout(200, 48, (9, 19), false);
         assert_eq!(m.window_size(gfx).unwrap().0, 81, "footprint rounds up to whole cells");
         let (pw, ph) = m.window_pixel_size(gfx, (9, 19)).unwrap();
         assert_eq!(pw, 722, "reports the exact requested width, not 81×9=729");
@@ -3849,32 +4387,88 @@ mod layout_snap_tests {
         assert_eq!(ph, m.window_size(gfx).unwrap().1 * 19, "height still cells × char_px");
     }
 
-    // An awkward split percentage has no clean size near the requested one: a
-    // 33% split needs its content (width − 1 border) to be a multiple of 100, so
-    // the only "clean" width is 1 (content 0). Taking that would collapse the
-    // whole screen (narco's nested panels did exactly this: 95×57 → 3×1). The
-    // snap must instead fall back to the requested size — a fractional split is
-    // harmless here and the host's per-turn watchdog guards a genuine looper.
-    // (SQ-0336)
+    // A graphics window on the key side of a PROPORTIONAL split reports the
+    // pixel share the split divided, not its cell footprint × char_px — the
+    // number a GUI interpreter would give back, since the padding cell belongs
+    // to the split rather than to either window. Its sibling gets the rest of
+    // the same content, for the same reason.
     #[test]
-    fn relayout_falls_back_when_snapping_would_collapse_the_screen() {
+    fn proportional_graphics_split_reports_its_exact_pixel_share() {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
-        let _gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 33, 5, 0).unwrap();
-        let leaves = m.relayout(95, 57, (9, 19));
-        let right = leaves.iter().map(|(_, _, r, _)| r.left + r.width).max().unwrap();
-        let bottom = leaves.iter().map(|(_, _, r, _)| r.top + r.height).max().unwrap();
-        assert_eq!(right, 95, "awkward proportional split must not collapse the width");
-        assert_eq!(bottom, 57, "the unconstrained axis is untouched");
+        let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
+        m.relayout(80, 41, (9, 19), false);
+        // Content 79 cells = 711 px; half is 355 px (floor), leaving 356 px.
+        assert_eq!(m.window_size(gfx).unwrap().0, 355 / 9, "footprint floors to whole cells");
+        assert_eq!(m.window_pixel_size(gfx, (9, 19)).unwrap().0, 355, "reports its exact share, not 39×9");
+        // The sibling is a text window, so it is measured in cells and gets the
+        // floor of the remaining share — equal to the key child's, at 39 each.
+        assert_eq!(m.window_size(buf).unwrap().0, 356 / 9, "the sibling floors its own share");
+        assert_eq!(m.window_size(gfx).unwrap().0, m.window_size(buf).unwrap().0, "still equal halves");
     }
 
-    // A fixed split imposes no proportional constraint: an odd screen passes through.
+    // An awkward split percentage divides like any other: each child takes the
+    // floor of its own pixel share and the split keeps the remainder. There is no
+    // screen size an awkward ratio can refuse, which is what used to make it
+    // dangerous — a 33% split needed its content to be a multiple of 100, and
+    // taking the largest "clean" size that existed collapsed narco's nested
+    // panels from 95×57 to 3×1 (SQ-0336). The screen is now always laid out
+    // whole.
     #[test]
-    fn relayout_does_not_snap_a_fixed_split() {
+    fn an_awkward_ratio_lays_out_the_whole_screen() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 33, 5, 0).unwrap();
+        let leaves = m.relayout(95, 57, (9, 19), false);
+        let right = leaves.iter().map(|(_, _, r, _)| r.left + r.width).max().unwrap();
+        let bottom = leaves.iter().map(|(_, _, r, _)| r.top + r.height).max().unwrap();
+        assert_eq!(right, 95, "an awkward proportional split must not collapse the width");
+        assert_eq!(bottom, 57, "the unconstrained axis is untouched");
+        // Content 94 cells = 846 px; 33% = 279 px → 31 cells, the rest 567 px →
+        // 63 cells. 31 + 63 = 94, so this ratio happens to need no padding at all.
+        assert_eq!(m.window_size(gfx).unwrap().0, 279 / 9, "gfx = floor(33% of the content px)");
+        assert_eq!(m.window_size(buf).unwrap().0, (846 - 279) / 9, "buf = floor(the rest)");
+    }
+
+    // Every proportional split floors its own two children and keeps at most ONE
+    // cell — including deep in a nested tree, where the old whole-screen snap had
+    // to satisfy every split at once or give up. Three stacked 40% splits (whose
+    // content must be a multiple of 5 to divide exactly) at a width that satisfies
+    // none of them.
+    #[test]
+    fn every_split_in_a_nested_tree_keeps_at_most_one_cell() {
+        let mut m = Model::new();
+        let a = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let b = m.window_open(a, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 40, 3, 0).unwrap();
+        let c = m.window_open(b, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 40, 3, 0).unwrap();
+        let d = m.window_open(c, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 40, 3, 0).unwrap();
+        let leaves = m.relayout(97, 30, (9, 19), false);
+        let right = leaves.iter().map(|(_, _, r, _)| r.left + r.width).max().unwrap();
+        assert_eq!(right, 97, "the tree still reaches the right edge");
+        // Walk each pair and check its two children against its own content.
+        for pair in m.windows.iter().flatten().filter(|w| w.wintype == WinType::Pair) {
+            let content = pair.rect.width - 1; // one bordered vertical separator
+            let px = content * 9;
+            let new_px = (px * pair.size) / 100;
+            let (c1, c2) = (m.window_size(pair.child1).unwrap().0, m.window_size(pair.child2).unwrap().0);
+            assert_eq!(c2, new_px / 9, "key child = floor(its own pixel share)");
+            assert_eq!(c1, (px - new_px) / 9, "old child = floor(the remaining pixel share)");
+            assert!(content - (c1 + c2) <= 1, "a split may keep at most one cell ({c1}+{c2} of {content})");
+        }
+        // And all four leaves are non-degenerate — the collapse SQ-0336 fixed.
+        for w in [a, b, c, d] {
+            assert!(m.window_size(w).unwrap().0 >= 4, "window {w} still has real width");
+        }
+    }
+
+    // A fixed split divides exactly by construction, so it covers its parent
+    // whole — no padding cell, at any screen size.
+    #[test]
+    fn a_fixed_split_covers_the_whole_screen() {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let _grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
-        let leaves = m.relayout(81, 41, (9, 19));
+        let leaves = m.relayout(81, 41, (9, 19), false);
         let right = leaves.iter().map(|(_, _, r, _)| r.left + r.width).max().unwrap();
         let bottom = leaves.iter().map(|(_, _, r, _)| r.top + r.height).max().unwrap();
         assert_eq!(right, 81, "no proportional split → full width used");
@@ -3890,14 +4484,14 @@ mod layout_snap_tests {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
         let grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
-        let leaves = m.relayout(80, 24, (9, 19));
+        let leaves = m.relayout(80, 24, (9, 19), false);
         let grid_border = leaves.iter().find(|(id, ..)| *id == grid).map(|&(.., b)| b);
         assert_eq!(grid_border, Some(Some(true)), "default split (Border) hints a framed grid leaf");
 
         // A lone, unsplit root has no parent pair → no border preference (None).
         let mut m = Model::new();
         let root = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root, never split
-        let leaves = m.relayout(80, 24, (9, 19));
+        let leaves = m.relayout(80, 24, (9, 19), false);
         let root_border = leaves.iter().find(|(id, ..)| *id == root).map(|&(.., b)| b);
         assert_eq!(root_border, Some(None), "a parentless root expresses no border preference");
 
@@ -3907,7 +4501,7 @@ mod layout_snap_tests {
         let grid = m
             .window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED | WINMETHOD_NOBORDER, 1, 4, 0)
             .unwrap();
-        let leaves = m.relayout(80, 24, (9, 19));
+        let leaves = m.relayout(80, 24, (9, 19), false);
         let grid_border = leaves.iter().find(|(id, ..)| *id == grid).map(|&(.., b)| b);
         assert_eq!(grid_border, Some(Some(false)), "NoBorder split hints an unframed grid leaf");
     }
@@ -4087,7 +4681,7 @@ mod layout_snap_tests {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
         let grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
-        m.relayout(80, 40, (9, 19));
+        m.relayout(80, 40, (9, 19), false);
         assert!(m.mouse_windows().is_empty(), "nothing armed → empty");
         m.set_mouse_request(grid);
         let armed = m.mouse_windows();
@@ -4105,7 +4699,7 @@ mod layout_snap_tests {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
         let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED, 20, 4, 0).unwrap();
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), false);
         assert_eq!(m.window_size(grid).unwrap().0, 20, "fixed key keeps its exact 20 cols");
         assert_eq!(m.window_size(buf).unwrap().0, 59, "sibling = 80 − 20 − 1 border");
     }
@@ -4119,7 +4713,7 @@ mod layout_snap_tests {
         let grid = m
             .window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED | WINMETHOD_NOBORDER, 20, 4, 0)
             .unwrap();
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), false);
         assert_eq!(m.window_size(grid).unwrap().0, 20);
         assert_eq!(m.window_size(buf).unwrap().0, 60, "no border reserved → 80 − 20");
     }
@@ -4130,10 +4724,9 @@ mod layout_snap_tests {
     #[test]
     fn borderless_mode_makes_bordered_splits_abut() {
         let mut m = Model::new();
-        m.set_borderless(true);
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED, 20, 4, 0).unwrap(); // default border
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), true); // backend's borderless preference, on
         assert_eq!(m.window_size(grid).unwrap().0, 20, "fixed key keeps its 20 cols");
         assert_eq!(m.window_size(buf).unwrap().0, 60, "borderless → sibling gets 80 − 20 (no gutter)");
         match m.window_tree().expect("a root pair") {
@@ -4148,7 +4741,7 @@ mod layout_snap_tests {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let grid = m.window_open(buf, WINMETHOD_BELOW | WINMETHOD_FIXED, 3, 4, 0).unwrap();
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), false);
         assert_eq!(m.window_size(grid).unwrap().1, 3, "fixed key keeps its 3 rows");
         assert_eq!(m.window_size(buf).unwrap().1, 20, "sibling = 24 − 3 − 1 border");
     }
@@ -4160,7 +4753,7 @@ mod layout_snap_tests {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 4, 0).unwrap();
-        m.relayout(81, 24, (1, 1)); // content 80 is even → equal halves
+        m.relayout(81, 24, (1, 1), false); // content 80 is even → equal halves
         let gw = m.window_size(grid).unwrap().0;
         let bw = m.window_size(buf).unwrap().0;
         let total = m.window_size(m.root()).unwrap().0;
@@ -4177,7 +4770,7 @@ mod layout_snap_tests {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), false);
         match m.window_tree().unwrap() {
             WinTree::Pair { vertical, border, split, first, second, .. } => {
                 assert!(vertical, "Above → vertical split");
@@ -4203,7 +4796,7 @@ mod layout_snap_tests {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED, 20, 4, 0).unwrap();
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), false);
         match m.window_tree().unwrap() {
             WinTree::Pair { vertical, border, split, first, second, .. } => {
                 assert!(!vertical, "Left → horizontal split");
@@ -4225,7 +4818,7 @@ mod layout_snap_tests {
         let _grid = m
             .window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED | WINMETHOD_NOBORDER, 1, 4, 0)
             .unwrap();
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), false);
         match m.window_tree().unwrap() {
             WinTree::Pair { border, .. } => assert!(!border, "NoBorder → border == false"),
             _ => panic!("root should be a pair"),
@@ -4241,7 +4834,7 @@ mod layout_snap_tests {
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let _grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
         let buf2 = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 3, 0).unwrap();
-        m.relayout(81, 24, (1, 1));
+        m.relayout(81, 24, (1, 1), false);
         match m.window_tree().unwrap() {
             WinTree::Pair { vertical, first, second, .. } => {
                 assert!(vertical, "outer split is Above → vertical");
@@ -4340,7 +4933,7 @@ mod layout_snap_tests {
         let a = m.window_open(0, 0, 0, 3, 0).unwrap();
         m.set_style_hint(3, 0, 8, 0x0022_2222);
         let b = m.window_open(a, WINMETHOD_BELOW | WINMETHOD_PROPORTIONAL, 50, 3, 0).unwrap();
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), false);
         // Collect leaf bgs by id.
         fn leaf_bg(t: &WinTree, want: u32) -> Option<Option<u32>> {
             match t {
@@ -4362,7 +4955,7 @@ mod layout_snap_tests {
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // buffer: no hint → None
         m.set_style_hint(4, 0, 8, 0x0033_4455); // TextGrid Normal BackColor
         let grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap(); // key = grid
-        m.relayout(80, 24, (1, 1));
+        m.relayout(80, 24, (1, 1), false);
         match m.window_tree().unwrap() {
             WinTree::Pair { key_bg, key_fg, .. } => {
                 assert_eq!(key_bg, Some(0x0033_4455), "border colour is the key grid's bg");
@@ -4396,6 +4989,209 @@ mod layout_snap_tests {
             Some(0x0055_6677),
             "stream bg override wins over the per-window snapshot",
         );
+    }
+}
+
+/// SQ-1424 — the `glk_image_draw_scaled_ext` sizing arithmetic (Glk 0.7.6
+/// §7.2), pinned against the spec text and the reference library.
+#[cfg(test)]
+mod imagerule_tests {
+    use super::*;
+
+    /// The eight constants, verbatim from the Glk 0.7.6 `glk.h` shipped with
+    /// cheapglk (lines 373-380) and independently from its `gi_dispa.c`
+    /// constant table. Written out as literals here rather than derived from
+    /// each other, because the whole point of a constants pin is that it fails
+    /// when someone "simplifies" `WIDTH_RATIO` into something that is no longer
+    /// also `WIDTH_MASK`.
+    #[test]
+    fn imagerule_constants_are_the_spec_glk_h_values() {
+        assert_eq!(imagerule::WIDTH_ORIG, 0x01);
+        assert_eq!(imagerule::WIDTH_FIXED, 0x02);
+        assert_eq!(imagerule::WIDTH_RATIO, 0x03);
+        assert_eq!(imagerule::WIDTH_MASK, 0x03);
+        assert_eq!(imagerule::HEIGHT_ORIG, 0x04);
+        assert_eq!(imagerule::HEIGHT_FIXED, 0x08);
+        assert_eq!(imagerule::ASPECT_RATIO, 0x0C);
+        assert_eq!(imagerule::HEIGHT_MASK, 0x0C);
+        // The ratio rule saturates its own field in both cases — that is the
+        // shape of the encoding, not a coincidence to be tidied away.
+        assert_eq!(imagerule::WIDTH_RATIO, imagerule::WIDTH_MASK);
+        assert_eq!(imagerule::ASPECT_RATIO, imagerule::HEIGHT_MASK);
+    }
+
+    #[test]
+    fn width_orig_uses_the_image_and_ignores_the_width_argument() {
+        let r = ImageRule {
+            rule: imagerule::WIDTH_ORIG | imagerule::HEIGHT_ORIG,
+            width: 9999, // "The width argument is ignored."
+            height: 9999,
+            maxwidth: 0,
+        };
+        assert_eq!(r.resolve_in_graphics((120, 60), 400), Some((120, 60)));
+    }
+
+    #[test]
+    fn width_fixed_uses_the_argument_as_pixels() {
+        let r = ImageRule {
+            rule: imagerule::WIDTH_FIXED | imagerule::HEIGHT_FIXED,
+            width: 300,
+            height: 25,
+            maxwidth: 0,
+        };
+        assert_eq!(r.resolve_in_graphics((120, 60), 400), Some((300, 25)));
+    }
+
+    /// "$10000 (1.0) means that the image width will be 100% of the window
+    /// width. $8000 (0.5) means 50% of the window width."
+    #[test]
+    fn width_ratio_is_a_16_16_fraction_of_the_window_width() {
+        let half = ImageRule {
+            rule: imagerule::WIDTH_RATIO | imagerule::HEIGHT_ORIG,
+            width: 0x8000,
+            height: 0,
+            maxwidth: 0,
+        };
+        assert_eq!(half.resolve_in_buffer((120, 60), 400), Some((200, 60)), "50% of 400");
+        assert_eq!(half.resolve_in_buffer((120, 60), 640), Some((320, 60)), "…and of 640");
+        let full = ImageRule { width: 0x1_0000, ..half };
+        assert_eq!(full.resolve_in_buffer((120, 60), 400), Some((400, 60)), "100% of 400");
+    }
+
+    /// "The image height will be a fixed aspect ratio compared to the width. …
+    /// $10000 (1.0) means that the image will always retain its original aspect
+    /// ratio. $20000 (2.0) means that it will be stretched vertically by a
+    /// factor of 2." And it reads the width AFTER that width was resolved.
+    #[test]
+    fn aspect_ratio_is_relative_to_the_resolved_width_not_to_the_window() {
+        // A 2:1 image (200x100) at 50% of a 400px window → 200 wide.
+        let keep = ImageRule {
+            rule: imagerule::WIDTH_RATIO | imagerule::ASPECT_RATIO,
+            width: 0x8000,
+            height: 0x1_0000,
+            maxwidth: 0,
+        };
+        assert_eq!(keep.resolve_in_buffer((200, 100), 400), Some((200, 100)), "original aspect kept");
+        // Doubling the window doubles BOTH axes, because the height follows the
+        // resolved width — this is the standing behaviour a relayout re-runs.
+        assert_eq!(keep.resolve_in_buffer((200, 100), 800), Some((400, 200)));
+        // $20000 stretches vertically by 2.
+        let stretch = ImageRule { height: 0x2_0000, ..keep };
+        assert_eq!(stretch.resolve_in_buffer((200, 100), 400), Some((200, 200)));
+    }
+
+    /// "[[Thus if you use imagerule_WidthFixed, width=600, maxwidth=$10000,
+    /// then the image will appear with a width of 600 or the window width,
+    /// whichever is smaller. If you use imagerule_WidthOrig, maxwidth=$8000,
+    /// then the image will appear with its original width or half the window
+    /// width, whichever is smaller.]]" — the spec's own two worked examples.
+    #[test]
+    fn maxwidth_bounds_the_width_and_reduces_proportionally() {
+        let fixed600 = ImageRule {
+            rule: imagerule::WIDTH_FIXED | imagerule::HEIGHT_FIXED,
+            width: 600,
+            height: 300,
+            maxwidth: 0x1_0000,
+        };
+        // Window 400 < 600 → reduced to 400, and the height with it (300·400/600).
+        assert_eq!(fixed600.resolve_in_buffer((10, 10), 400), Some((400, 200)));
+        // Window 800 > 600 → untouched.
+        assert_eq!(fixed600.resolve_in_buffer((10, 10), 800), Some((600, 300)));
+
+        let orig_half = ImageRule {
+            rule: imagerule::WIDTH_ORIG | imagerule::HEIGHT_ORIG,
+            width: 0,
+            height: 0,
+            maxwidth: 0x8000,
+        };
+        // Natural 300 wide vs half of 400 = 200 → reduced to 200, height 150·200/300.
+        assert_eq!(orig_half.resolve_in_buffer((300, 150), 400), Some((200, 100)));
+        // Natural 300 wide vs half of 1000 = 500 → the original survives.
+        assert_eq!(orig_half.resolve_in_buffer((300, 150), 1000), Some((300, 150)));
+    }
+
+    #[test]
+    fn maxwidth_zero_is_no_bound() {
+        let r = ImageRule {
+            rule: imagerule::WIDTH_FIXED | imagerule::HEIGHT_FIXED,
+            width: 5000,
+            height: 100,
+            maxwidth: 0,
+        };
+        assert_eq!(r.resolve_in_buffer((10, 10), 400), Some((5000, 100)));
+    }
+
+    /// "The maxwidth argument is ignored in graphics windows." Same rule, same
+    /// window width, two answers — which is exactly why there are two entry
+    /// points rather than one with a flag the caller might forget.
+    #[test]
+    fn maxwidth_is_ignored_in_graphics_windows_but_not_in_buffers() {
+        let r = ImageRule {
+            rule: imagerule::WIDTH_FIXED | imagerule::HEIGHT_FIXED,
+            width: 600,
+            height: 300,
+            maxwidth: 0x1_0000,
+        };
+        assert_eq!(r.resolve_in_graphics((10, 10), 400), Some((600, 300)), "graphics: uncapped");
+        assert_eq!(r.resolve_in_buffer((10, 10), 400), Some((400, 200)), "buffer: capped to the window");
+    }
+
+    /// "You must supply one of each when calling this function." (Glk 0.7.6
+    /// §7.2); garglk, as a conformance witness, also refuses a missing rule.
+    #[test]
+    fn a_rule_word_missing_either_field_resolves_to_nothing() {
+        let no_width = ImageRule { rule: imagerule::HEIGHT_ORIG, width: 0, height: 0, maxwidth: 0 };
+        assert_eq!(no_width.resolve_in_graphics((10, 10), 400), None);
+        let no_height = ImageRule { rule: imagerule::WIDTH_ORIG, width: 0, height: 0, maxwidth: 0 };
+        assert_eq!(no_height.resolve_in_graphics((10, 10), 400), None);
+        let neither = ImageRule { rule: 0, width: 0, height: 0, maxwidth: 0 };
+        assert_eq!(neither.resolve_in_graphics((10, 10), 400), None);
+    }
+
+    /// "glk_image_draw() is equivalent to
+    /// imagerule_WidthOrig|imagerule_HeightOrig, maxwidth=$10000.
+    /// glk_image_draw_scaled() is equivalent to
+    /// imagerule_WidthFixed|imagerule_HeightFixed with the given size,
+    /// maxwidth=$10000." garglk implements both as literally that call, so
+    /// these two constructors are the spec's equivalence, pinned.
+    #[test]
+    fn the_older_two_calls_are_expressible_as_rules() {
+        assert_eq!(ImageRule::draw().rule, imagerule::WIDTH_ORIG | imagerule::HEIGHT_ORIG);
+        assert_eq!(ImageRule::draw().maxwidth, 0x1_0000);
+        assert_eq!(ImageRule::draw_scaled(60, 40).rule, imagerule::WIDTH_FIXED | imagerule::HEIGHT_FIXED);
+        assert_eq!(ImageRule::draw_scaled(60, 40).maxwidth, 0x1_0000);
+        // In a graphics window (maxwidth ignored) they are exactly the old
+        // behaviours: natural size, and the requested size.
+        assert_eq!(ImageRule::draw().resolve_in_graphics((120, 60), 400), Some((120, 60)));
+        assert_eq!(ImageRule::draw_scaled(60, 40).resolve_in_graphics((120, 60), 400), Some((60, 40)));
+    }
+
+    /// Rounding is half-up, matching garglk's `std::round` on the same
+    /// expression; truncation would answer 133 here.
+    #[test]
+    fn ratios_round_rather_than_truncate() {
+        let third = ImageRule {
+            rule: imagerule::WIDTH_RATIO | imagerule::HEIGHT_ORIG,
+            width: 0x5555, // 21845/65536 ≈ 0.33333
+            height: 0,
+            maxwidth: 0,
+        };
+        // 400 · 21845 / 65536 = 133.3… → 133; 401 · … = 133.66… → 134.
+        assert_eq!(third.resolve_in_buffer((10, 10), 400).unwrap().0, 133);
+        assert_eq!(third.resolve_in_buffer((10, 10), 401).unwrap().0, 134);
+    }
+
+    /// A zero natural dimension (a degenerate or undecodable image) must not
+    /// divide by zero in the aspect rule.
+    #[test]
+    fn a_degenerate_natural_size_does_not_panic() {
+        let r = ImageRule {
+            rule: imagerule::WIDTH_RATIO | imagerule::ASPECT_RATIO,
+            width: 0x8000,
+            height: 0x1_0000,
+            maxwidth: 0x1_0000,
+        };
+        assert!(r.resolve_in_buffer((0, 0), 400).is_some());
     }
 }
 
@@ -4594,8 +5390,9 @@ mod style_hint_tests {
         let f = m.fileref_create(0x00, "data".to_string(), 0);
         // A never-written fileref does not exist.
         assert!(!m.fileref_exists(f));
-        // Once its file has bytes it exists; delete removes it.
-        m.files.insert("data".to_string(), vec![1, 2, 3]);
+        // Once its file has bytes it exists; delete removes it. Keyed by the
+        // SANITIZED name (SQ-1416 item 6: Data usage appends ".glkdata").
+        m.files.insert("data.glkdata".to_string(), vec![1, 2, 3]);
         assert!(m.fileref_exists(f));
         m.fileref_delete(f);
         assert!(!m.fileref_exists(f));
@@ -4648,7 +5445,9 @@ mod style_hint_tests {
         // seeded that way must read as present at its recorded size to a
         // create_by_name game that only probes/restores — no in-session @save.
         let mut m = Model::new();
-        m.seed_saved_game_file("slot".to_string(), 1234);
+        // Seeded under the SANITIZED name (SQ-1416 item 6: SavedGame usage
+        // appends ".glksave") — a host reseeding from disk keys by that name.
+        m.seed_saved_game_file("slot.glksave".to_string(), 1234);
 
         // The game's create_by_name fileref on that slot now exists.
         let fref = m.fileref_create(0x01, "slot".to_string(), 0);
@@ -4711,12 +5510,29 @@ mod style_hint_tests {
         assert!(!m.vfs_dirty(), "a Read-mode open is not a mutation");
     }
 
+    /// SQ-1416 item 6: the spec-recommended simplification (cheapglk `cgfref.c`
+    /// `glk_fileref_create_by_name`'s comment) — delete the nine disallowed
+    /// characters, keep only the part before the first period, "null" if that
+    /// leaves nothing, then append the usage's suffix.
     #[test]
     fn fileref_sanitizes_names() {
-        assert_eq!(Model::sanitize_fileref_name("a/b*c.sav"), "a_b_c.sav");
-        assert_eq!(Model::sanitize_fileref_name(""), "file");
-        assert_eq!(Model::sanitize_fileref_name("///"), "___");
-        assert_eq!(Model::sanitize_fileref_name("Ok-Name_1.dat"), "Ok-Name_1.dat");
+        // Disallowed characters are DELETED (not replaced), and everything from
+        // the first period on is dropped before the usage's own suffix is added.
+        assert_eq!(Model::sanitize_fileref_name("a/b*c.sav", fileusage_Data), "abc.glkdata");
+        // Every disallowed character named by cheapglk: " \ / > < : | ? *
+        assert_eq!(
+            Model::sanitize_fileref_name("a\"b\\c/d>e<f:g|h?i*j", fileusage_SavedGame),
+            "abcdefghij.glksave"
+        );
+        // Empty, or reduced to empty by deletion, becomes "null".
+        assert_eq!(Model::sanitize_fileref_name("", fileusage_Data), "null.glkdata");
+        assert_eq!(Model::sanitize_fileref_name("///", fileusage_SavedGame), "null.glksave");
+        // Transcript and InputRecord both take ".txt".
+        assert_eq!(Model::sanitize_fileref_name("Ok-Name_1.dat", fileusage_Transcript), "Ok-Name_1.txt");
+        assert_eq!(Model::sanitize_fileref_name("Ok-Name_1.dat", fileusage_InputRecord), "Ok-Name_1.txt");
+        // An out-of-range usage type gets no suffix at all (cheapglk's `default:
+        // return ""`).
+        assert_eq!(Model::sanitize_fileref_name("plain", 0x0F), "plain");
     }
 
     #[test]
@@ -4739,23 +5555,24 @@ mod style_hint_tests {
     fn file_stream_write_truncates_existing() {
         let mut m = Model::new();
         let f = m.fileref_create(0x00, "f".to_string(), 0);
-        m.files.insert("f".to_string(), vec![b'O', b'L', b'D']);
+        // Keyed by the sanitized name (SQ-1416 item 6: Data usage -> ".glkdata").
+        m.files.insert("f.glkdata".to_string(), vec![b'O', b'L', b'D']);
         let sid = m.stream_open_file(f, FM_WRITE, false, 0);
         assert_ne!(sid, 0);
-        assert_eq!(m.files["f"], Vec::<u8>::new(), "Write truncates on open");
+        assert_eq!(m.files["f.glkdata"], Vec::<u8>::new(), "Write truncates on open");
         m.file_stream_write(sid, "Hi");
-        assert_eq!(m.files["f"], b"Hi");
+        assert_eq!(m.files["f.glkdata"], b"Hi");
     }
 
     #[test]
     fn file_stream_write_append_preserves_and_seeks_end() {
         let mut m = Model::new();
         let f = m.fileref_create(0x00, "f".to_string(), 0);
-        m.files.insert("f".to_string(), b"AB".to_vec());
+        m.files.insert("f.glkdata".to_string(), b"AB".to_vec());
         let sid = m.stream_open_file(f, FM_WRITEAPPEND, false, 0);
         assert_eq!(m.stream_position(sid), Some(2), "append seeks to end");
         m.file_stream_write(sid, "CD");
-        assert_eq!(m.files["f"], b"ABCD");
+        assert_eq!(m.files["f.glkdata"], b"ABCD");
     }
 
     #[test]
@@ -4768,7 +5585,7 @@ mod style_hint_tests {
         m.note_stream_write(sid, 42);
 
         assert_eq!(m.stream_close(sid), Some((0, 42)), "write_count credited, no reads");
-        assert_eq!(m.files["f"], Vec::<u8>::new(), "no bytes were actually stored");
+        assert_eq!(m.files["f.glkdata"], Vec::<u8>::new(), "no bytes were actually stored");
     }
 
     #[test]
@@ -4811,7 +5628,8 @@ mod style_hint_tests {
         let f = m.fileref_create(0x00, "notes".to_string(), 0);
         let sid = m.stream_open_file(f, FM_WRITE, false, 0);
         assert_ne!(sid, 0);
-        assert!(m.files.contains_key("notes"), "a Data Write still creates a VFS entry");
+        // Keyed by the sanitized name (SQ-1416 item 6: ".glkdata" for Data usage).
+        assert!(m.files.contains_key("notes.glkdata"), "a Data Write still creates a VFS entry");
 
         let f2 = m.fileref_create(0x00, "missing".to_string(), 0);
         assert_eq!(m.stream_open_file(f2, FM_READ, false, 0), 0, "Data Read still fails if absent");
@@ -4830,7 +5648,7 @@ mod style_hint_tests {
     fn file_stream_seek_modes_clamp() {
         let mut m = Model::new();
         let f = m.fileref_create(0x00, "f".to_string(), 0);
-        m.files.insert("f".to_string(), b"ABCDE".to_vec()); // len 5
+        m.files.insert("f.glkdata".to_string(), b"ABCDE".to_vec()); // len 5
         let sid = m.stream_open_file(f, FM_READWRITE, false, 0);
         m.stream_set_position(sid, 2, 0); // Start + 2
         assert_eq!(m.stream_position(sid), Some(2));
@@ -4850,7 +5668,7 @@ mod style_hint_tests {
         let f = m.fileref_create(0x00, "u".to_string(), 0); // binary usage (no TextMode)
         let sid = m.stream_open_file(f, FM_WRITE, true, 0);
         m.file_stream_write(sid, "\u{1F600}"); // one astral code point
-        assert_eq!(m.files["u"], vec![0x00, 0x01, 0xF6, 0x00], "4-byte big-endian");
+        assert_eq!(m.files["u.glkdata"], vec![0x00, 0x01, 0xF6, 0x00], "4-byte big-endian");
         m.stream_close(sid);
         let sid2 = m.stream_open_file(f, FM_READ, true, 0);
         assert_eq!(m.file_stream_read_char(sid2), Some(0x1F600));
@@ -4864,7 +5682,7 @@ mod style_hint_tests {
         let sid = m.stream_open_file(f, FM_WRITE, false, 0);
         m.file_stream_write(sid, "Hi");
         assert_eq!(m.stream_close(sid), Some((0, 2)), "read_count 0, write_count 2");
-        assert_eq!(m.files["f"], b"Hi", "bytes persist after close");
+        assert_eq!(m.files["f.glkdata"], b"Hi", "bytes persist after close");
         assert_eq!(m.stream_position(sid), None, "stream slot is freed");
         assert!(m.file_streams.is_empty(), "cursor side-table entry dropped");
     }
@@ -4895,8 +5713,8 @@ mod style_hint_tests {
         assert_eq!(m.stream_position(sid), Some(1));
 
         let mut restored = Model::deserialize(&m.serialize()).expect("round-trip");
-        // File bytes are intact in the restored VFS.
-        assert_eq!(restored.files["save"], b"HELLO");
+        // File bytes are intact in the restored VFS (sanitized key, SQ-1416 item 6).
+        assert_eq!(restored.files["save.glkdata"], b"HELLO");
         // The fileref still exists and iteration yields it (id + rock preserved).
         assert!(restored.fileref_exists(f));
         assert_eq!(restored.fileref_iterate(0), (f, 0x42));
@@ -4926,8 +5744,8 @@ mod style_hint_tests {
             restored.stream_kind_style(mem).map(|(k, _, _)| k),
             Some(StreamKind::Memory { addr: 0x1000, len: 64, .. }),
         ));
-        // The file stream + its bytes survived.
-        assert_eq!(restored.files["d"], b"Z");
+        // The file stream + its bytes survived (sanitized key, SQ-1416 item 6).
+        assert_eq!(restored.files["d.glkdata"], b"Z");
         assert_eq!(restored.stream_position(fsid), Some(1));
     }
 
@@ -5227,5 +6045,90 @@ mod style_hint_tests {
         assert_eq!(m.style_measure(win, 3, 0), None, "cleared Indentation is unknown");
         assert_eq!(m.style_measure(win, 3, 2), None, "cleared Justification is unknown");
         assert!(!m.style_distinguish(win, 0, 3), "cleared layout hints no longer distinguish");
+    }
+}
+
+/// SQ-1395: the eighteen non-test `unwrap`/`expect` call sites this file used
+/// to carry (all on the window-tree and stream-cursor invariants documented
+/// by the block comment above `Model::win`) are now `if let`/`let else` —
+/// never reachable by a hostile Glulx file (see that comment), but no longer
+/// a panic surface if a future bug ever violated the invariant either. These
+/// exercise every converted branch through the PUBLIC API, so a regression
+/// that reintroduced a bad unwrap would show up as a panic here rather than
+/// only in code review.
+#[cfg(test)]
+mod fault_hardening_tests {
+    use super::*;
+
+    /// Window-tree category (`window_open`/`window_close`/`layout_window`,
+    /// exec.rs:1909-2064 before conversion). Builds a three-level tree —
+    /// `root(A, pair(B, C))` — then closes B (sibling C, grandparent = root,
+    /// exercising the `grandparent != 0` relink) and then C (sibling A,
+    /// grandparent = 0, exercising `self.root = sibling`), and finally A
+    /// (closing the root itself). Every step also drives `relayout`
+    /// (`layout_window`) over the live tree. No step should panic, and the
+    /// tree must end empty.
+    #[test]
+    fn window_close_relinks_through_every_converted_branch() {
+        let mut m = Model::new();
+        let a = m.window_open(0, 0, 0, 3, 0).unwrap(); // root: TextBuffer A
+        let b = m.window_open(a, WINMETHOD_RIGHT | WINMETHOD_PROPORTIONAL, 50, 3, 0).unwrap(); // split -> pair(A, B)
+        let c = m.window_open(b, WINMETHOD_BELOW | WINMETHOD_PROPORTIONAL, 50, 3, 0).unwrap(); // split B -> pair(B, C)
+        m.relayout(80, 24, (9, 19), false);
+        assert!(m.window_tree().is_some(), "three live windows, a real tree");
+
+        // Close B: parent is the inner pair, grandparent is the root pair
+        // (nonzero) — exercises `win_mut(grandparent)`.
+        m.window_close(b);
+        m.relayout(80, 24, (9, 19), false);
+        assert!(m.win(c).is_some(), "C survives its sibling's close");
+        assert!(m.win(a).is_some(), "A (outside the closed split) is untouched");
+
+        // Close C: parent is now the root pair, grandparent is 0 — exercises
+        // the `self.root = sibling` branch instead.
+        m.window_close(c);
+        m.relayout(80, 24, (9, 19), false);
+        assert_eq!(m.root(), a, "A is promoted straight to root");
+
+        // Close A: parent == 0, the "closing the root" branch.
+        m.window_close(a);
+        assert_eq!(m.root(), 0, "the display is empty");
+        assert!(m.window_tree().is_none());
+    }
+
+    /// Stream-cursor category (`resource_stream_read_char`,
+    /// `stream_set_position`'s three non-memory arms, `file_stream_write`,
+    /// `file_stream_read_char`; exec.rs:2485-2807 before conversion). Drives
+    /// every seek mode and every read/write cursor-advance path through the
+    /// public API for both a resource stream and a file stream.
+    #[test]
+    fn stream_cursor_advances_survive_every_seek_mode() {
+        let mut m = Model::new();
+
+        // Resource stream: read, then seek by all three modes.
+        let rsrc = m.stream_open_resource(b"hello world".to_vec(), false, true, 0);
+        assert_eq!(m.resource_stream_read_char(rsrc), Some(b'h' as u32));
+        assert_eq!(m.resource_stream_read_char(rsrc), Some(b'e' as u32));
+        m.stream_set_position(rsrc, 0, 0); // absolute: back to start
+        assert_eq!(m.resource_stream_read_char(rsrc), Some(b'h' as u32));
+        m.stream_set_position(rsrc, 2, 1); // relative: +2 from pos 1
+        assert_eq!(m.resource_stream_read_char(rsrc), Some(b'l' as u32));
+        m.stream_set_position(rsrc, 0, 2); // from end
+        assert_eq!(m.resource_stream_read_char(rsrc), None, "seeked to EOF");
+
+        // File stream: write, then read back after seeking, exercising the
+        // write cursor (`file_stream_write`) and the read cursor
+        // (`file_stream_read_char`) together with all three seek modes.
+        let fref = m.fileref_create(0x00, "cursor-test".to_string(), 0);
+        let wsid = m.stream_open_file(fref, 0x01, false, 0); // Write
+        m.file_stream_write(wsid, "abcdef");
+        let rsid = m.stream_open_file(fref, 0x02, false, 0); // Read
+        assert_eq!(m.file_stream_read_char(rsid), Some(b'a' as u32));
+        m.stream_set_position(rsid, 0, 0); // absolute
+        assert_eq!(m.file_stream_read_char(rsid), Some(b'a' as u32));
+        m.stream_set_position(rsid, 2, 1); // relative: +2 from pos 1
+        assert_eq!(m.file_stream_read_char(rsid), Some(b'd' as u32));
+        m.stream_set_position(rsid, -1, 2); // from end
+        assert_eq!(m.file_stream_read_char(rsid), Some(b'f' as u32));
     }
 }

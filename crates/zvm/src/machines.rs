@@ -1,6 +1,7 @@
-//! `--machines`: print the §11.1.3 machine table zvm holds, and stop.
+//! [`table`]: render the §11.1.3 machine table zvm holds as one printable
+//! string, for a host's own `--machines`-style diagnostic.
 //!
-//! [`crate::interpreter::MACHINES`] is what every front-end presents a story as
+//! [`crate::interpreter::MACHINES`] is what every host presents a story as
 //! (SQ-0872), and until now the only way to read it was to open the source. A
 //! machine is a *bundle* — the byte in `$1E`, the page and ink in `$2C`/`$2D`,
 //! the palette those colour numbers resolve through, three §8.3 screen rules and
@@ -8,14 +9,14 @@
 //! that quest was filed for. Printing all of it side by side is what makes that
 //! checkable without a debugger and without a game.
 //!
-//! # One table, two binaries
+//! # One table, many hosts
 //!
-//! This lives in `zvm` rather than in a front-end because both front-ends ask
-//! the same question: `zvm-cli --machines` and `lanthorn --machines` print this
-//! string and nothing else (SQ-0960). A reporter kept in one CLI is a reporter
-//! the other has to copy, and the copy is what goes stale — the same argument
-//! `MACHINES` itself is here for. Nothing below needs a dependency `zvm` may not
-//! take: it is `format!` over the table.
+//! This lives in `zvm` rather than in a front-end because every embedder can
+//! ask the same question: `zvm-cli --machines` and lanthorn's own `--machines`
+//! both print this string and nothing else (SQ-0960). A reporter kept in one
+//! host is a reporter every other host has to copy, and the copy is what goes
+//! stale — the same argument `MACHINES` itself is here for. Nothing below needs
+//! a dependency `zvm` may not take: it is `format!` over the table.
 //!
 //! # Generated, never transcribed
 //!
@@ -449,16 +450,14 @@ const ABSENT: &str = "  1   what declining a number already falls through to; wh
   11  no fixture and no sourced constant; anything here would be guesswork.
 ";
 
-// **No test here takes a palette lock, and none needs one.** The module used to
-// keep a `PALETTE` mutex because [`swatch`] borrowed `zvm::screen::set_palette`
-// per row and handed it straight back — safe in a binary that prints and exits,
-// a race in a test harness where one process runs many cases on many threads
-// (SQ-0904, and CI runs `cargo test`). `swatch` now asks
-// `screen::true_colour_in` by value and touches no global at all, so there is no
-// window for another case to read the table's palette instead of its own. If
-// anything below ever calls `set_palette` again, the lock has to come back with
-// it — and it would have to be a lock every OTHER case in this crate takes too,
-// which is the argument for not calling it.
+// **No test here takes a palette lock, and there is no longer one to take.** The
+// module used to keep a `PALETTE` mutex because [`swatch`] borrowed a process-wide
+// palette per row and handed it straight back — safe in a binary that prints and
+// exits, a race in a test harness where one process runs many cases on many threads
+// (SQ-0904, and CI runs `cargo test`). `swatch` asks `screen::true_colour_in` by
+// value and touches no shared state at all, and since SQ-1393 the palette is a
+// `Machine` field, so there is nothing left in the crate that could reintroduce
+// the window.
 
 #[cfg(test)]
 mod tests {

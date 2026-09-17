@@ -1,6 +1,6 @@
 # The lanthorn gallery (SQ-0942) — the RECIPE for the project page's stills.
 #
-# `cargo run -p app --example gallery` regenerates every frame below from the
+# `cargo run -p lanthorn --example gallery` regenerates every frame below from the
 # real binary, into `target/gallery/`. The pictures are output and are not
 # committed; this file is, because it is the thing that gets them back.
 #
@@ -589,7 +589,7 @@ expect_art_cells = 900
 # (76 of Uni-VGA's 94 printable glyphs ink out to column 6, so a 7-wide cell
 # drops the one column holding the letters apart, which is why the fallback is
 # X11 misc-fixed 7x14) is stated in full in `native_font.rs`'s module header and
-# in `docs/features/v6-graphics.md`, the second with the 1649-touching-pairs
+# in `docs/internals/v6-graphics.md`, the second with the 1649-touching-pairs
 # measurement the caption never had.
 #
 # WHICH FACE THIS ACTUALLY DRAWS, MEASURED RATHER THAN ASSUMED. `Shogun.toast`
@@ -792,21 +792,21 @@ expect_art_cells = 2400
 id = "frontispieces"
 from = "stories"
 members = [
-  "And_Then_You_Come_to_a_House.gblorb.blorb",
-  "Brain_Guzzlers_from_Beyond!.gblorb.blorb",
+  "And_Then_You_Come_to_a_House.gblorb",
+  "Brain_Guzzlers_from_Beyond!.gblorb",
   "Coloratura.gblorb.blorb",
   "CounterfeitMonkey-11.gblorb",
   "cragne.gblorb",
   "Dr Ludwig and the Devil.gblorb",
   "Dual.zblorb.blorb",
   "Eat_Me.gblorb",
-  "FooFoo.gblorb.blorb",
+  "FooFoo.gblorb",
   "Game of Worlds Tournament.gblorb",
   "Kerkerkruip.gblorb",
   "LostPig.zblorb.blorb",
   "MidnightSwordfight.gblorb",
   "Never Gives Up Her Dead.gblorb",
-  "Sub_Rosa.gblorb.blorb",
+  "Sub_Rosa.gblorb",
   "Superluminal_Vagrant_Twin.gblorb.blorb",
   "TAKE.gblorb",
   "THE BAT.gblorb.blorb",
@@ -815,7 +815,7 @@ members = [
   "The_Song_of_the_Mockingbird.gblorb.blorb",
   "The_Wizard_Sniffer.gblorb.blorb",
   "Violet.zblorb.blorb",
-  "Zozzled.gblorb.blorb",
+  "Zozzled.gblorb",
   "the-impossible-bottle.zblorb.blorb",
 ]
 
@@ -1030,6 +1030,24 @@ caption = """
 A Scott Adams adventure with the PNG artwork its Blorb carries, mapped as you go. \
 The third engine draws through the same pane, the same map and the same theme as \
 the other two — the only thing that changes is what is behind them."""
+keys = "wait:2500,cr,wait:1500,text:look,cr,wait:2500"
+size = "150x44"
+show_map = true
+expect = ["Golden Baton"]
+expect_art_cells = 200
+
+[[shots]]
+id = "scott-c64-native-graphics"
+title = "Golden Baton"
+press = "Commodore 64 Mysterious Adventures compilation disk (.D64), \"BATON\""
+media = "stories/scott-dialects/c64/MYSTADV1.D64"
+args = ["--story", "BATON"]
+caption = """
+The same game as the Blorb row above, drawn from a different release: this is the \
+C64 compilation disk's own family-B display list, decoded off the mounted image \
+and rasterised straight into the picture band — no PNG, no Blorb, nothing bundled \
+beside the story. The band geometry is the one the Blorb row draws through too; \
+only the artwork's source differs."""
 keys = "wait:2500,cr,wait:1500,text:look,cr,wait:2500"
 size = "150x44"
 show_map = true

@@ -14,6 +14,9 @@
 #[path = "suites/fixture_paths.rs"]
 mod fixture_paths;
 
+#[path = "suites/sq1462_hint_echo_contrast.rs"]
+mod sq1462_hint_echo_contrast;
+
 #[path = "suites/adf_disk_image.rs"]
 mod adf_disk_image;
 #[path = "suites/apple_disk_set_release.rs"]
@@ -40,16 +43,38 @@ mod glulx_boot_room_id;
 mod glulx_game_colours;
 #[path = "suites/glulx_garglk_style_sentinel.rs"]
 mod glulx_garglk_style_sentinel;
+#[path = "suites/sq1530_garglk_ini_zip.rs"]
+mod sq1530_garglk_ini_zip;
 #[path = "suites/glulx_ingame_save_host_restore.rs"]
 mod glulx_ingame_save_host_restore;
+#[path = "suites/glulx_inventory.rs"]
+mod glulx_inventory;
 #[path = "suites/atari_st_profile.rs"]
 mod atari_st_profile;
+#[path = "suites/c64_mysterious_disks.rs"]
+mod c64_mysterious_disks;
+#[path = "suites/saga_us_disks.rs"]
+mod saga_us_disks;
+#[path = "suites/sq1488_c64_crunched.rs"]
+mod sq1488_c64_crunched;
 #[path = "suites/apple_iigs_profile.rs"]
 mod apple_iigs_profile;
 #[path = "suites/apple_release_artwork.rs"]
 mod apple_release_artwork;
 #[path = "suites/glulx_maze_identity.rs"]
 mod glulx_maze_identity;
+#[path = "suites/glulx_mouse_hyperlink_drawn_rect.rs"]
+mod glulx_mouse_hyperlink_drawn_rect;
+#[path = "suites/glulx_imagerule_relayout.rs"]
+mod glulx_imagerule_relayout;
+#[path = "suites/sq1503_anchorhead_thumbnail_link.rs"]
+mod sq1503_anchorhead_thumbnail_link;
+#[path = "suites/sq1514_kerkerkruip_panel_links.rs"]
+mod sq1514_kerkerkruip_panel_links;
+#[path = "suites/glk_grid_ground_reversed.rs"]
+mod glk_grid_ground_reversed;
+#[path = "suites/glk_proportional_split_fills_pane.rs"]
+mod glk_proportional_split_fills_pane;
 #[path = "suites/glulx_pending_io_host_restore.rs"]
 mod glulx_pending_io_host_restore;
 #[path = "suites/glulx_resume_location.rs"]
@@ -62,6 +87,8 @@ mod headless;
 mod interpreter_profile;
 #[path = "suites/launch_options.rs"]
 mod launch_options;
+#[path = "suites/library_quit_resolution.rs"]
+mod library_quit_resolution;
 #[path = "suites/picture_override.rs"]
 mod picture_override;
 #[path = "suites/period_look_media.rs"]
@@ -80,15 +107,41 @@ mod restart_reboots_in_place;
 mod save_key_media;
 #[path = "suites/scott_mapper.rs"]
 mod scott_mapper;
+#[path = "suites/scott_c64_native_pictures.rs"]
+mod scott_c64_native_pictures;
+#[path = "suites/scott_zx_native_pictures.rs"]
+mod scott_zx_native_pictures;
+
+#[path = "suites/scott_saga_pictures.rs"]
+mod scott_saga_pictures;
+
+#[path = "suites/scott_saga_dos_pictures.rs"]
+mod scott_saga_dos_pictures;
+
+#[path = "suites/scott_saga_atari_pictures.rs"]
+mod scott_saga_atari_pictures;
+
+#[path = "suites/scott_saga_atari_lineart_pictures.rs"]
+mod scott_saga_atari_lineart_pictures;
+
+#[path = "suites/scott_c64_picture_colours.rs"]
+mod scott_c64_picture_colours;
+#[path = "suites/scott_saga_atari_colours.rs"]
+mod scott_saga_atari_colours;
+
+#[path = "suites/scott_c64_baton_colours.rs"]
+mod scott_c64_baton_colours;
+#[path = "suites/scott_zip_open.rs"]
+mod scott_zip_open;
 #[path = "suites/shogun_dict_words.rs"]
 mod shogun_dict_words;
 #[path = "suites/wizard_sniffer.rs"]
 mod wizard_sniffer;
 
-#[path = "suites/palette_lock_discipline.rs"]
-mod palette_lock_discipline;
 #[path = "suites/scratch_path_discipline.rs"]
 mod scratch_path_discipline;
+#[path = "suites/test_feature_gating.rs"]
+mod test_feature_gating;
 #[path = "suites/terminal_restore_order.rs"]
 mod terminal_restore_order;
 #[path = "suites/release_enumeration.rs"]
@@ -113,4 +166,11 @@ mod system_face_cascade;
 mod native_disk_sound;
 #[path = "suites/dialog_story_degradation.rs"]
 mod dialog_story_degradation;
+#[path = "suites/lost_treasures_iso_dedupe.rs"]
+mod lost_treasures_iso_dedupe;
+
+#[path = "suites/sq1515_kerkerkruip_restore_arrange.rs"]
+mod sq1515_kerkerkruip_restore_arrange;
+#[path = "suites/sq1529_kerkerkruip_grid_fg_ground.rs"]
+mod sq1529_kerkerkruip_grid_fg_ground;
 

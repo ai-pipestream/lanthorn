@@ -1,8 +1,20 @@
 [package]
-name = "app"
+# Package renamed for crates.io (SQ-1250): "app" -> "lanthorn". Every
+# `-p app` invocation across CI/docs became `-p lanthorn` (cargo's `-p`
+# matches package name, not the `[lib] name` below, which is unchanged so
+# every `use app::…` in the integration tests keeps working).
+name = "lanthorn"
+description = "A terminal interactive-fiction interpreter (Z-machine, Glulx, Scott Adams) with live automapping"
 version.workspace = true
 edition = "2021"
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+keywords = ["interactive-fiction", "z-machine", "glulx", "terminal", "tui"]
+categories = ["games", "command-line-utilities"]
+include = ["src/**", "assets/**", "Cargo.toml"]
 
 [lib]
 name = "app"
@@ -15,29 +27,94 @@ doctest = false
 name = "lanthorn"
 path = "src/main.rs"
 
+# SQ-1306: the static map generator — draws a story's whole map from the story
+# file with nothing played. Named explicitly rather than left to `src/bin/`
+# auto-discovery so `include` above (which lists `src/**`) and the release
+# workflow's per-binary copy loop both have something to point at. Ships with
+# the release archives and with `cargo install lanthorn`, which installs every
+# `[[bin]]` in the package.
+[[bin]]
+name = "lanthorn-mapgen"
+path = "src/bin/lanthorn_mapgen.rs"
+
+# `cargo binstall lanthorn` (SQ-1250) fetches a prebuilt release archive
+# instead of compiling. `release.yml` names archives
+# "lanthorn-{version}-{name}.{tar.gz|zip}" where {name} is NOT a Rust target
+# triple — "linux-x86_64" / "macos-universal2" / "windows-x86_64" — with one
+# macOS archive already universal across both Apple triples, so there is no
+# single templated `pkg-url` that covers all three; each shipped triple is an
+# explicit override instead, and a triple release.yml does not build (e.g.
+# aarch64-unknown-linux-gnu) has none, so binstall falls back to a source
+# build for it rather than guessing a URL. Every archive holds the bin at its
+# top level (`dist/<name>/lanthorn`, alongside README.md and LICENSE), no
+# nested dir.
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/lanthorn-{ version }-linux-x86_64.tar.gz"
+bin-dir = "lanthorn-{ version }-linux-x86_64/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/lanthorn-{ version }-macos-universal2.tar.gz"
+bin-dir = "lanthorn-{ version }-macos-universal2/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/lanthorn-{ version }-macos-universal2.tar.gz"
+bin-dir = "lanthorn-{ version }-macos-universal2/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/lanthorn-{ version }-windows-x86_64.zip"
+pkg-fmt = "zip"
+bin-dir = "lanthorn-{ version }-windows-x86_64/{ bin }{ binary-ext }"
+
+# SQ-1242: `app`'s ~3,271 in-crate `#[test]`s (all under `#[cfg(test)] mod tests`
+# blocks, one per source file) are gated behind these marker features instead of
+# bare `cfg(test)`, so `cargo check -p app --lib --tests` with no features on
+# compiles none of them — 33s for `--lib` alone vs 5m19s for `--tests` unguarded
+# was the whole reason. Each `t-*` feature names a slice of the module tree; a
+# developer can guess the group from the file. Plain markers, no deps. `t-all`
+# must list every `t-*` feature — `t_all_lists_every_group` in
+# `crates/app/tests/suites/test_feature_gating.rs` fails the build if a group is
+# missing from it or if any `#[cfg(test)] mod` in `src/` is left ungated on one
+# of these features. Run one group: `cargo nextest run -p app --lib --features
+# t-input input`. Run everything (CI does): `--features t-all` or
+# `--all-features`.
+[features]
+t-input = []    # input.rs, keymap, slash(_dispatch), browser, complete, pixel/pane mouse
+t-render = []   # render/*, plus the model layer it draws (graphics, layout, fonts, list_scroll, pager, clipboard, cell_dump)
+t-picker = []   # picker*, ifdb*, ifiction, ifid, fetch_worker, cover*, story_info/menu/pick/url, launch_options*, metadata_import
+t-session = []  # session/glulx_session/scott_session, engine*, probe*, turn, glk_backend, glulx_debug/roomlock, interpreter, inventory, machine_boot, reload, reset, startup
+t-guidance = [] # vocab, reveal (word reveal), assist, hints, hint_download
+t-persist = []  # archive*, history, storage, config*, styles, aux/vfs/persist stores, garglk_ini, ingame_io, pcset_store
+t-theme = []    # theme/*, colors, style, term_colors, period
+t-state = []    # state.rs, overlays, debug_panel, mapper glue (map_dump, roomid, export*, tidy, symbols)
+t-misc = []     # everything with no closer home: anim, assets, docs_reference, lifecycle, loop_tick, main, native_sound, notify, query_sweep, stderr_redirect, terminal_dump, trace, watch, corpus, lib.rs's own palette-guard self-test
+t-all = ["t-input", "t-render", "t-picker", "t-session", "t-guidance", "t-persist", "t-theme", "t-state", "t-misc"]
+
 [dependencies]
-buildinfo = { path = "../buildinfo" }
+buildinfo = { package = "lanthorn-buildinfo", path = "../buildinfo", version = "0.7.0" }
 # SQ-0850: the per-game save-directory key and the canonical-title table the
 # readable half of it comes from. Shared with `zvm-cli` so the TUI and the CLI
 # cannot name one game's save directory two different ways.
-cli-host = { path = "../cli-host" }
-zvm = { path = "../zvm" }
-gvm = { path = "../gvm" }
-scott = { path = "../scott" }
+cli-host = { package = "lanthorn-cli-host", path = "../cli-host", version = "0.7.0" }
+zvm = { package = "lanthorn-zvm", path = "../zvm", version = "0.7.0" }
+gvm = { package = "lanthorn-gvm", path = "../gvm", version = "0.7.0" }
+scott = { package = "lanthorn-scott", path = "../scott", version = "0.7.0" }
 # SQ-1041: the shape of what a story's parser accepts, produced by both grammar
 # readers, so the vocabulary offer is one piece of code for every engine.
-grammar-model = { path = "../grammar-model" }
+grammar-model = { package = "lanthorn-grammar-model", path = "../grammar-model", version = "0.7.0" }
 # SQ-1119: the one thing a story file cannot answer — that `illuminate` means
 # `light`. A shipped table, parsed lazily behind a `OnceLock` on the first
 # rejected word, so a session that never has one never reads it.
-verb-synonyms = { path = "../verb-synonyms" }
-mapper = { path = "../mapper" }
-blorb = { path = "../blorb" }
-audio = { path = "../audio" }
+verb-synonyms = { package = "lanthorn-verb-synonyms", path = "../verb-synonyms", version = "0.7.0" }
+mapper = { package = "lanthorn-mapper", path = "../mapper", version = "0.7.0" }
+blorb = { package = "lanthorn-blorb", path = "../blorb", version = "0.7.0" }
+audio = { package = "lanthorn-audio", path = "../audio", version = "0.7.0" }
 ratatui = { version = "0.30", features = ["crossterm_0_29"] }
 crossterm = "0.29"
 ratatui-image = { version = "11.0.6", default-features = false }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# gif: IFDB and the IFComp archive serve some covers as GIF; without the
+# decoder those fetches were dropped as "does not decode" (13 of 29 in one
+# curated import, two of them IFDB's own).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 zip = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -70,9 +147,14 @@ flate2 = "1"
 # Ghostty's terminal core ported to Rust — a real emulator's resolution of the
 # same bytes, so "an image covers these cells" versus "a background colour was
 # painted into these cells" has an independent witness. TESTS ONLY: the shipped
-# binary must never gain it (`cargo tree -p app -e normal | grep -c qwertty`
+# binary must never gain it (`cargo tree -p lanthorn -e normal | grep -c qwertty`
 # must print 0).
 [dev-dependencies]
+# SQ-1394: turns on zvm's `fixtures` feature (gated off by default so its
+# `CARGO_MANIFEST_DIR`-baking module never reaches a normal downstream build)
+# for this crate's own test builds, which is the only place `session.rs`'s
+# tests reach `zvm::fixtures::load`.
+zvm = { package = "lanthorn-zvm", path = "../zvm", version = "0.7.0", features = ["fixtures"] }
 # SQ-0942: a real typeface for the gallery tool (`--example gallery`), whose
 # output is meant to be LOOKED at. It is NOT used by the geometry oracle, which
 # keeps its deliberately-synthetic bitmap face — see

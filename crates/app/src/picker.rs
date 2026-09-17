@@ -40,6 +40,138 @@ pub struct Features {
     pub hints: bool,          // folded in from StoryAux when the aux resolves
 }
 
+/// What a Scott Adams entry's own graphics are — derived once at scan time from
+/// the loaded bytes ([`scott_pictures`], SQ-1473), never guessed at render time.
+/// Drives the info panel's "Pictures:" row and, through
+/// [`ScottPictures::offers_resolution_choice`], gates the launch-options
+/// dialog's picture-resolution choice — only a native family-B vector decode
+/// can be drawn at more than one resolution (SQ-1480); a Blorb's or a
+/// S.A.G.A. release's pictures are already pre-rendered bitmaps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScottPictures {
+    /// Commodore 64 *Mysterious Adventures* Family B vector artwork, decoded
+    /// straight off the PRG/D64 image (SQ-1463) — `pictures` is the room count
+    /// [`scott::c64::decode_family_b_pictures`] returns (one drawing per room).
+    NativeC64 { pictures: usize },
+    /// ZX Spectrum *Mysterious Adventures* Family B vector artwork, decoded
+    /// straight off the `.z80` snapshot (`scott::zx_mysterious`, SQ-1478) —
+    /// the SAME display lists as [`ScottPictures::NativeC64`], since the
+    /// eleven titles carry one picture set between the two platforms and only
+    /// the palette differs. `pictures` is the room count
+    /// `scott::zx_mysterious::decode_picture_lists` returns.
+    NativeZx { pictures: usize },
+    /// Pre-rendered room pictures in the story's own Blorb `Pict` resources.
+    Blorb,
+    /// A US S.A.G.A. release whose own release disks carry their artwork as
+    /// named picture files — `pictures` of them.
+    ///
+    /// Two formats wear this one variant, because to a player they are the
+    /// same fact (this release's own pictures, and this many of them) and
+    /// `platform` already says which: **family C**, the four-colour strip
+    /// bitmaps of spec §8.3, on the Commodore 64 (SQ-1475), and **family D**,
+    /// the Apple II hi-res line drawings `scott::apple_pictures` measures, on
+    /// the Apple II (SQ-1476).
+    SagaUsStrips {
+        /// Which format and, on family C, whose colour table reads a record's
+        /// four colour bytes.
+        platform: scott::SagaPlatform,
+        /// How many picture files the release holds (`R…` room pictures and
+        /// `B…` object overlays together — §8.6's three usages). On the Apple
+        /// II these are counted off the **companion side**, which is where
+        /// that platform keeps them (§10.6).
+        pictures: usize,
+    },
+    /// A US S.A.G.A. database with **no picture files beside it**: opened from
+    /// a bare extracted database rather than a release disk, or from an Atari
+    /// side A whose companion picture side is not paired (§8.3 puts the
+    /// Atari's pictures on the second disk of the pair, at hard-coded byte
+    /// offsets rather than in a catalogue).
+    ///
+    /// Not the same thing as a text-only game, which reports `None` — this
+    /// release HAS artwork, and this file is not where it lives.
+    SagaUsNoPictures {
+        /// Which release this database is, for the same reason
+        /// [`Self::SagaUsStrips`] carries it: the answer to "where would the
+        /// pictures be?" is per-platform.
+        platform: scott::SagaPlatform,
+        /// Is this one of the three Apple II releases §7.4's string test calls
+        /// **scrambled** (SQ-1476)? Those keep their room artwork on a side A
+        /// that is not a DOS 3.3 disk at all, so the answer to "where would
+        /// the pictures be?" is not a file name.
+        ///
+        /// **SQ-1490 made it readable**, so a scrambled release with its side
+        /// A beside it reports [`Self::SagaUsStrips`] like any other and never
+        /// reaches this arm. What is left for the flag is the case that
+        /// remains genuinely different: a scrambled boot side whose companion
+        /// is missing has no *catalogue* to be missing from either, so the
+        /// panel can say which kind of nothing it found.
+        ///
+        /// Always `false` off the Apple II.
+        scrambled: bool,
+    },
+    /// An MS-DOS *Questprobe* release whose zip carries **family-E** CGA
+    /// bitmaps beside the database (spec §8.5, SQ-1477) — `pictures` of them,
+    /// decodable by `scott::decode_family_e`.
+    ///
+    /// No platform field, unlike [`Self::SagaUsStrips`]: family E's palette is
+    /// fixed by the format (§8.5, CGA palette 1 at high intensity) rather than
+    /// stored per record, so there is no second machine's colour table for a
+    /// reader to choose between.
+    SagaDosCga {
+        /// How many `.PAK` picture files the archive holds (`R…` room
+        /// pictures and `B…` object overlays together — §8.6's three usages).
+        pictures: usize,
+    },
+    /// An Atari 8-bit US S.A.G.A. release whose artwork lives on a paired
+    /// companion side rather than in named files, so [`Self::SagaUsStrips`]'s
+    /// filesystem walk finds nothing for it (§12.10) — counted instead
+    /// straight off that side's own table
+    /// (`scott::saga_atari::read_picture_table`/`read_line_art_table`), the
+    /// SAME production readers a real launch draws through
+    /// (`crate::graphics::PictSource::from_scott_saga_atari`/`_lineart`,
+    /// SQ-1496/SQ-1524/SQ-1525).
+    SagaAtari {
+        /// Which drawing format the companion side carries — *Voodoo
+        /// Castle*, *The Count* and *Claymorgue Castle* carry family-C
+        /// bitmaps; the other four carry a line-art token stream. Decides,
+        /// through [`Self::offers_resolution_choice`], whether the
+        /// launch-options panel offers a resolution toggle: line-art draws
+        /// at a caller-chosen supersample the way family B does; the bitmap
+        /// format is a fixed 280x160 canvas like [`Self::SagaUsStrips`] and
+        /// has no second resolution to offer.
+        format: scott::AtariPictureFormat,
+        /// How many table entries the companion side holds — room pictures
+        /// and object overlays together, the same fact `pictures` counts for
+        /// [`Self::SagaUsStrips`].
+        pictures: usize,
+    },
+}
+
+impl ScottPictures {
+    /// Is this the native C64 decode?
+    pub fn is_native_c64(self) -> bool {
+        matches!(self, ScottPictures::NativeC64 { .. })
+    }
+
+    /// Is this a native family-B vector decode — C64 or ZX Spectrum alike —
+    /// the only kinds `PictSource::from_scott_family_b`
+    /// (`crate::graphics::PictSource::from_scott_family_b`) can draw at more
+    /// than one resolution, so the only kinds the launch-options dialog
+    /// offers a resolution choice for (SQ-1473, SQ-1480)? A Blorb's or a
+    /// S.A.G.A. release's pictures are pre-rendered bitmaps with no second
+    /// resolution to offer. SQ-1524/SQ-1525: the Atari's line-art format
+    /// draws at a caller-chosen supersample the same way, so it gets the row
+    /// too — but the Atari's OTHER format, family-C bitmaps, is a fixed
+    /// canvas like [`Self::SagaUsStrips`] and stays excluded.
+    pub fn offers_resolution_choice(self) -> bool {
+        matches!(self, ScottPictures::NativeC64 { .. } | ScottPictures::NativeZx { .. })
+            || matches!(
+                self,
+                ScottPictures::SagaAtari { format: scott::AtariPictureFormat::LineArt, .. }
+            )
+    }
+}
+
 /// Eager per-story metadata, derived from bytes `scan_stories` already reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoryMeta {
@@ -61,6 +193,9 @@ pub struct StoryMeta {
     pub ifid: String,
     pub features: Features,
     pub self_blorb: Option<Vec<ChunkInfo>>, // Some when the story file itself is a blorb
+    /// What a Scott Adams entry's own graphics are ([`scott_pictures`], SQ-1473).
+    /// `None` for a non-Scott engine and for a text-only Scott `.dat`.
+    pub scott_pictures: Option<ScottPictures>,
     /// The story was mounted out of a release floppy rather than read as a plain
     /// file, and which kind, so the TYPE column names that container: `Z6 (ADF)`
     /// for an Amiga disk, `Z6 (HFS)` for a Macintosh one (SQ-0737, SQ-0837).
@@ -99,6 +234,36 @@ pub struct StoryMeta {
 }
 
 impl StoryMeta {
+    /// The metadata a row that is not a story carries: every field at its
+    /// "unknown" value. Only [`StoryEntry::folder`] builds one.
+    fn placeholder() -> StoryMeta {
+        StoryMeta {
+            size_bytes: 0,
+            story_bytes: 0,
+            modified: None,
+            engine: Engine::ZCode,
+            format: String::new(),
+            version: None,
+            serial: None,
+            release: None,
+            ifid: String::new(),
+            features: Features::default(),
+            self_blorb: None,
+            scott_pictures: None,
+            disk_image: None,
+            disk_entry: None,
+            author: None,
+            year: None,
+            genre: None,
+            language: None,
+            description: None,
+            ifdb_link: None,
+            ifdb_rating: None,
+            ifdb_rating_count: None,
+            fetch_not_found: false,
+        }
+    }
+
     /// The build that names this story's save directory when it was mounted out
     /// of a disk image, and `None` for a loose story file — the scan already
     /// read the header, so a row can be keyed without touching the disk again
@@ -116,6 +281,25 @@ impl StoryMeta {
     }
 }
 
+/// What a picker row stands for: a story, or a place stories live.
+///
+/// A library is a tree the moment someone sorts two thousand files into
+/// folders, and the picker used to see one level of it. A folder is a row in
+/// the same list rather than a second list, so every mechanism the list has
+/// (selection, scrolling, mouse hit-testing, the sort that keeps caches
+/// index-aligned) applies to it unchanged; what changes is what `Enter` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowKind {
+    #[default]
+    Story,
+    /// A sub-folder of the library, or the `..` that leads back out of one.
+    /// `path` is the directory itself; `Enter` descends into it.
+    Folder,
+}
+
+/// The label a folder row wears when it leads to the parent directory.
+pub const PARENT_LABEL: &str = "..";
+
 /// One selectable story in the picker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoryEntry {
@@ -129,9 +313,31 @@ pub struct StoryEntry {
     /// it during the scan (SQ-0443). The sidecar entry is hidden from the list;
     /// its presence lights the hint badge and names the file in the info panel.
     pub hint_sidecar: Option<std::path::PathBuf>,
+    /// Story or folder. Every reader that opens, fetches, badges or launches a
+    /// row asks this first; a folder has none of those.
+    pub kind: RowKind,
 }
 
 impl StoryEntry {
+    /// True for a folder row (a sub-directory or `..`), which is navigated
+    /// rather than played.
+    pub fn is_folder(&self) -> bool {
+        self.kind == RowKind::Folder
+    }
+
+    /// A folder row: `path` is the directory, `label` what the list prints
+    /// (`name/`, or [`PARENT_LABEL`]).
+    pub fn folder(path: PathBuf, label: &str) -> StoryEntry {
+        StoryEntry {
+            path,
+            title: label.to_string(),
+            filename: label.to_string(),
+            meta: StoryMeta::placeholder(),
+            hint_sidecar: None,
+            kind: RowKind::Folder,
+        }
+    }
+
     /// **What identifies a row.** The container's path, plus which story on it
     /// when the container is a disk image holding several (SQ-0859).
     ///
@@ -195,6 +401,28 @@ impl StoryEntry {
 /// `blorb::medium`'s format table, and [`has_story_ext`] takes the union.
 const STORY_EXTS: &[&str] = &[
     "z3", "z4", "z5", "z6", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb", "blb",
+    // The TI-99/4A tokenised Scott Adams releases (SQ-1414). `.fiad` is the
+    // TI world's "file in a directory" wrapper — a 128-byte file-descriptor
+    // header in front of the raw memory image — and is the extension every
+    // one of the twelve original titles is distributed under.
+    "fiad",
+    // The Commodore 64 *Mysterious Adventures* (SQ-1414). A `.prg` is a
+    // Commodore program file — two load-address bytes and then a raw 6502
+    // memory image — and is how the eleven titles come off their compilation
+    // disks. The extension is not exclusively Scott's, but neither is `.dat`:
+    // `entry_from_loaded` still requires the bytes to build a database before
+    // a row appears, so a `.prg` of anything else costs one open and is
+    // listed nowhere.
+    "prg",
+    // The ZX Spectrum *Mysterious Adventures* (SQ-1478). A `.z80` is a 48K
+    // Spectrum snapshot — an RLE-compressed dump of the whole memory image the
+    // game's tables live in — and is how all twenty titles in the IF Archive's
+    // Spectrum collection come. As with `.prg`, the extension is not
+    // exclusively Scott's and does not have to be: `entry_from_loaded` still
+    // requires the bytes to build a database before a row appears, so a
+    // snapshot of anything else (including the nine non-Mysterious games in
+    // that same collection) costs one open and is listed nowhere.
+    "z80",
     // A ZIP is opened by `hints::read_story_file` exactly as a disk image is —
     // the container is unwrapped and the story inside comes out — so the scan
     // that lists disk images had no principled reason to skip archives, and
@@ -806,6 +1034,184 @@ pub fn scott_tuid(stem: &str) -> Option<&'static str> {
     scott_entry(stem).and_then(|e| e.tuid)
 }
 
+/// The canonical title for a Commodore 64 *Mysterious Adventures* program
+/// file, identified by its own bytes rather than by any name — the disk's
+/// CBM spelling (`BATON`), a filename someone gave the extracted `.prg`
+/// (`BATON.prg`), or nothing at all.
+///
+/// `scott::c64::identify` matches the eleven by content checksum
+/// (`scott::c64::RELEASES`), which is the one fact both routes to this
+/// dialect share: `entry_from_loaded` used to key this off the disk's own
+/// `disk_entry` name, so a program file opened DIRECTLY — with no disk
+/// entry to ask — fell through to `scott_titles.tsv`'s IF-Archive-filename
+/// keys (`golden_baton`, never `BATON`) and showed the bare stem instead of
+/// "The Golden Baton" (SQ-1469). Reading the checksum out of the bytes
+/// themselves answers identically down both routes, because
+/// `hints::extract_story` never touches a Scott story's bytes — the same
+/// `.prg` bytes reach here whether they were read straight off disk or
+/// pulled out of a `.d64`'s directory.
+///
+/// **Extended for the US S.A.G.A. releases (SQ-1470)**, the same way and for
+/// the same reason: `scott::SagaUs::display_title` identifies a release from
+/// the database's own (version, adventure, platform) identity, which reads
+/// the same whether the bytes came straight off an `.atr`/`.dsk`/`.d64` or
+/// were opened directly.
+fn scott_release_title(bytes: &[u8]) -> Option<&'static str> {
+    if let Some((image, load_address)) = scott::c64::prg_image(bytes) {
+        if let Some(r) = scott::c64::identify(image, load_address) {
+            return Some(r.title);
+        }
+    }
+    // The ZX Spectrum half of those same eleven titles (SQ-1478). Identified
+    // by the header counts its own loader reads out of the decompressed
+    // snapshot — `scott::zx_mysterious` needs no catalogue to LOAD one, and
+    // this is the one thing it keeps a table for: putting "The Golden Baton"
+    // on the row where the filename says `m1goldba`.
+    if let Some(r) = scott::zx_mysterious::identify_z80(bytes) {
+        return Some(r.title);
+    }
+    let db = scott::Database::parse(bytes).ok()?;
+    // SQ-1477: the MS-DOS *Questprobe* release, identified by the eleven
+    // reference-format header counts §10.7 prints in full. It needs a table
+    // for the same reason the two above do and a stronger one: the plain text
+    // format carries no version, no adventure number the parser reads and
+    // nothing else that names the game, so without this the row is titled
+    // after whatever the archive happens to be called.
+    if let Some(release) = scott::saga_dos::identify(&db) {
+        return Some(release.title());
+    }
+    db.saga_us?.display_title()
+}
+
+/// What a Scott Adams entry's own graphics are (SQ-1473), read straight off
+/// `bytes` — the same loaded bytes `entry_from_loaded` already has, never a
+/// second read of the file. `self_blorb` is the resource index of the SAME
+/// story when it is a `.blb` container (`entry_from_loaded` has already parsed
+/// it for other fields); `None` for a plain `.dat`/`.prg`.
+///
+/// Three sources, checked in the order a running session would resolve them
+/// (`ScottSession::new_with_options`'s own precedence, SQ-1463): a Blorb's
+/// `Pict` resources win when the story carries one, because a graphics
+/// container beside a `.dat` is a different, Blorb-carried release of the same
+/// series; failing that, the Commodore 64 *Mysterious Adventures* native vector
+/// decode (`scott::c64`, SQ-1463); failing that, a US S.A.G.A. release, whose
+/// artwork is family-C strip bitmaps in separate files on the release disk
+/// (spec §8.3/§12.10, SQ-1475). `None` for every other Scott story — a plain
+/// text-only `.dat`.
+///
+/// `path` is the CONTAINER, needed only for that last case: a S.A.G.A.
+/// database says nothing at all about its own pictures (§12.10 opens
+/// "**Nothing**"), so how many there are can only be answered by walking the
+/// file the story came out of. That walk runs only once the bytes have already
+/// been identified as a S.A.G.A. database, so no other row in a directory pays
+/// for it.
+fn scott_pictures(
+    bytes: &[u8],
+    self_blorb: Option<&[ChunkInfo]>,
+    path: &Path,
+) -> Option<ScottPictures> {
+    if self_blorb.is_some_and(|chunks| chunks.iter().any(|c| c.usage == "Pict")) {
+        return Some(ScottPictures::Blorb);
+    }
+    if let Some((image, load_address)) = scott::c64::prg_image(bytes) {
+        if scott::c64::looks_like_c64_mysterious(image, load_address) {
+            let pictures = scott::c64::decode_family_b_pictures(image, load_address)
+                .map(|p| p.len())
+                .unwrap_or(0);
+            return Some(ScottPictures::NativeC64 { pictures });
+        }
+    }
+    if let Ok(lists) = scott::zx_mysterious::decode_picture_lists_z80(bytes) {
+        return Some(ScottPictures::NativeZx { pictures: lists.len() });
+    }
+    if let Some(platform) = scott::detect_saga_us(bytes) {
+        // SQ-1496/SQ-1524/SQ-1525: the Atari has no filesystem on its
+        // companion side for `saga_picture_files`' by-name walk to find
+        // anything on (§12.10) — its pictures are counted off that side's
+        // own table instead, through `scott_pictures_atari`.
+        if matches!(platform, scott::SagaPlatform::Atari8Bit) {
+            return Some(scott_pictures_atari(bytes, path).unwrap_or(
+                // Not the same thing as a text-only game (`None`) — this
+                // release HAS artwork; there is a database to read, a
+                // companion side is missing/unpaired, or the release
+                // identity/table cannot be read off what is here. Atari
+                // never reaches the Apple-only `scrambled` case.
+                ScottPictures::SagaUsNoPictures { platform, scrambled: false },
+            ));
+        }
+        let pictures = crate::hints::saga_picture_files(path, Some(platform)).len();
+        return Some(if pictures == 0 {
+            // SQ-1476: only worth asking when there is nothing to draw, and
+            // only on the platform the question means anything on.
+            let scrambled = matches!(platform, scott::SagaPlatform::AppleII)
+                && crate::hints::saga_apple_scrambled(path);
+            ScottPictures::SagaUsNoPictures { platform, scrambled }
+        } else {
+            ScottPictures::SagaUsStrips { platform, pictures }
+        });
+    }
+    // SQ-1477: family E, the MS-DOS *Questprobe* releases. Their database is
+    // the plain reference text format (§10.7) and says nothing about itself,
+    // so the CONTAINER is the only witness — and the walk is only worth doing
+    // for a zip, which is the one container these ship in. Nothing else in
+    // this function touches the filesystem for a plain `.dat`, and this does
+    // not either.
+    if crate::hints::is_zip(path) {
+        let pictures = crate::hints::saga_picture_files(path, None).len();
+        if pictures > 0 {
+            return Some(ScottPictures::SagaDosCga { pictures });
+        }
+    }
+    None
+}
+
+/// How many pictures an Atari 8-bit S.A.G.A. release's own companion side
+/// holds (SQ-1496/SQ-1524/SQ-1525), read the same way a real launch reads
+/// them — off the (usage, index) table on side A (family-C bitmap titles) or
+/// the token-stream table on side B itself (line-art titles), through the
+/// SAME production readers `crate::graphics::PictSource::from_scott_saga_atari`
+/// / `from_scott_saga_atari_lineart` use to build the session that actually
+/// draws them — never a second, invented mechanism.
+///
+/// `bytes` is side A, already in hand; `path` is side A's own path, needed
+/// only to find its companion (`crate::hints::saga_atari_companion_side`,
+/// the same pairing `crate::graphics::ScottPictureSources::resolve` uses at
+/// boot).
+///
+/// `None` when any step refuses: the release identity can't be read off
+/// `bytes` (`scott::Database::parse`'s `saga_us` is `None`), the companion
+/// side is missing or ambiguously paired, or the table's own marker does not
+/// match this release (a differently-mastered disk) — the caller falls back
+/// to [`ScottPictures::SagaUsNoPictures`] for all of these, the same
+/// honest-empty shape [`scott_pictures`] answers every other unreadable
+/// picture source with.
+fn scott_pictures_atari(bytes: &[u8], path: &Path) -> Option<ScottPictures> {
+    let release = scott::Database::parse(bytes).ok()?.saga_us?;
+    let format = release.atari_picture_format()?;
+    let side_b = crate::hints::saga_atari_companion_side(path)?;
+    let side_b_spliced = scott::saga_atari::splice_vtoc(&side_b);
+    let pictures = match format {
+        scott::AtariPictureFormat::FamilyCBitmap => scott::saga_atari::read_picture_table(
+            bytes,
+            &side_b_spliced,
+            release.picture_scheme(),
+            release.adventure,
+        )?
+        .entries()
+        .len(),
+        scott::AtariPictureFormat::LineArt => {
+            scott::saga_atari::read_line_art_table(&side_b_spliced, release.adventure)?
+                .entries()
+                .len()
+        }
+        // `AtariPictureFormat` is `#[non_exhaustive]`: a format this crate
+        // does not know how to count yet is refused rather than guessed at,
+        // the same rule every table entry in it is individually held to.
+        _ => return None,
+    };
+    Some(ScottPictures::SagaAtari { format, pictures })
+}
+
 /// The bundled author for a Scott-format game (filename stem, case-insensitive),
 /// present only for the homebrew games that have no IFDB record to fetch it from.
 pub fn scott_author(stem: &str) -> Option<&'static str> {
@@ -826,13 +1232,17 @@ pub fn scott_story_title(path: &Path) -> Option<String> {
     scott_title(stem).map(str::to_string)
 }
 
-/// The bundled-table title for a story: the Scott filename table
-/// (`scott_titles.tsv`, keyed by the stem) when the story is a Scott database,
-/// else the IFID-keyed known-title table. Neither table needs the file — this is
-/// the offline tier, below any real metadata.
-pub fn bundled_title(stem: &str, ifid: &str, is_scott: bool) -> Option<&'static str> {
+/// The bundled-table title for a story: the C64 *Mysterious Adventures*
+/// release `bytes` themselves identify by content checksum
+/// ([`scott_release_title`], SQ-1469) — the one answer that is the same
+/// whether the story was opened directly or pulled off a `.d64` — then the
+/// Scott filename table (`scott_titles.tsv`, keyed by the stem) when the
+/// story is any other Scott database, else the IFID-keyed known-title table.
+/// Neither table needs the file — this is the offline tier, below any real
+/// metadata.
+pub fn bundled_title(stem: &str, ifid: &str, is_scott: bool, bytes: &[u8]) -> Option<&'static str> {
     is_scott
-        .then(|| scott_title(stem))
+        .then(|| scott_release_title(bytes).or_else(|| scott_title(stem)))
         .flatten()
         .or_else(|| crate::session::known_title(ifid))
 }
@@ -865,9 +1275,20 @@ fn container_ifmd(path: &Path) -> Option<crate::ifiction::IFiction> {
 /// for it instead of guessing from the boot banner (SQ-0766). The precedence is
 /// literally [`resolved_title`], shared with [`resolve`], so the list and the
 /// pane cannot name the same game differently.
-pub fn metadata_title(path: &Path, data_base: &Path, ifid: &str, is_scott: bool) -> Option<String> {
+///
+/// `bytes` are the story's own executable bytes (as `hints::extract_story`
+/// returns them) — needed so [`bundled_title`] can identify a C64 *Mysterious
+/// Adventures* release by content checksum (SQ-1469) the same way the picker
+/// row does.
+pub fn metadata_title(
+    path: &Path,
+    data_base: &Path,
+    ifid: &str,
+    is_scott: bool,
+    bytes: &[u8],
+) -> Option<String> {
     let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key_at(path));
-    metadata_title_in(path, &game_dir, ifid, is_scott)
+    metadata_title_in(path, &game_dir, ifid, is_scott, bytes)
 }
 
 /// [`metadata_title`] for a caller that already knows which per-game directory
@@ -883,11 +1304,12 @@ pub fn metadata_title_in(
     game_dir: &Path,
     ifid: &str,
     is_scott: bool,
+    bytes: &[u8],
 ) -> Option<String> {
     let ifmd = container_ifmd(path);
     let fetched = crate::story_info::load(game_dir, ifid).and_then(|i| i.fetched);
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-    resolved_title(ifmd.as_ref(), fetched.as_ref(), bundled_title(stem, ifid, is_scott))
+    resolved_title(ifmd.as_ref(), fetched.as_ref(), bundled_title(stem, ifid, is_scott, bytes))
 }
 
 /// The title tiers of SPEC "Precedence", stopping short of the filename stem:
@@ -990,6 +1412,175 @@ pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
     out
 }
 
+/// The sub-folders of `dir` as rows: dot-directories skipped, sorted by name
+/// case-insensitively. Symlinks are followed (a library on a NAS is often one),
+/// which is why [`library_dirs`] keeps a visited set.
+///
+/// Also skips a `.save` directory — `storage::game_dir` names a story's own
+/// per-game save data `<story-filename>.save` right beside the story it
+/// belongs to (e.g. `Kerkerkruip.gblorb.save/`), so it is a sibling in the
+/// same directory this scans, not a folder of stories.
+pub fn scan_folders(dir: &Path) -> Vec<StoryEntry> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<(String, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?.to_string();
+            if name.starts_with('.') || name.ends_with(".save") {
+                return None;
+            }
+            Some((name, path))
+        })
+        .collect();
+    dirs.sort_by(|(a, _), (b, _)| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
+    dirs.into_iter().map(|(name, path)| StoryEntry::folder(path, &format!("{name}/"))).collect()
+}
+
+/// Everything the picker lists for `dir` inside a library rooted at `root`:
+/// `..` when `dir` is below the root, then its sub-folders, then its stories,
+/// in the default sort (which keeps the folders on top; see [`sort_stories`]).
+///
+/// One directory at a time, on purpose. The scan opens every candidate file it
+/// lists, and a whole library is gigabytes; walking it is the indexer's job
+/// ([`spawn_library_index`]), off the thread that draws.
+pub fn library_rows(dir: &Path, root: &Path, data_base: &Path) -> Vec<StoryEntry> {
+    let mut out: Vec<StoryEntry> = Vec::new();
+    if dir != root {
+        if let Some(parent) = dir.parent() {
+            out.push(StoryEntry::folder(parent.to_path_buf(), PARENT_LABEL));
+        }
+    }
+    out.extend(scan_folders(dir));
+    out.extend(scan_stories(dir, data_base));
+    sort_stories(&mut out, Sort::default());
+    out
+}
+
+/// Every directory under `root`, root first, breadth-first, dot-directories
+/// skipped and each real directory visited once however many symlinks lead to
+/// it.
+pub fn library_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut queue: std::collections::VecDeque<PathBuf> = std::collections::VecDeque::new();
+    queue.push_back(root.to_path_buf());
+    while let Some(dir) = queue.pop_front() {
+        let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !seen.insert(real) {
+            continue;
+        }
+        for sub in scan_folders(&dir) {
+            queue.push_back(sub.path);
+        }
+        out.push(dir);
+    }
+    out
+}
+
+/// One folder's worth of the library index, as the indexing thread delivers it.
+pub struct IndexBatch {
+    pub dir: PathBuf,
+    pub entries: Vec<StoryEntry>,
+}
+
+/// Scan every folder under `root` and hand each one's stories to `deliver` as
+/// it finishes. Per-folder rather than one flat scan, so the rules that only
+/// make sense within a directory (multi-disk grouping, hint-sidecar
+/// association) keep applying within one.
+pub fn index_library(root: &Path, data_base: &Path, mut deliver: impl FnMut(IndexBatch)) {
+    for dir in library_dirs(root) {
+        let entries = scan_stories(&dir, data_base);
+        deliver(IndexBatch { dir, entries });
+    }
+}
+
+/// [`index_library`] on its own thread. The receiver yields one batch per
+/// folder and disconnects when the walk is done, so a reader can tell "still
+/// indexing" from "indexed" without a flag.
+pub fn spawn_library_index(root: PathBuf, data_base: PathBuf) -> std::sync::mpsc::Receiver<IndexBatch> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        index_library(&root, &data_base, |batch| {
+            // A dropped receiver means the picker has gone; nothing to do but
+            // stop walking, which the next iteration's send failure also does.
+            let _ = tx.send(batch);
+        });
+    });
+    rx
+}
+
+/// The fetch targets a headless `--fetch` works through: one per story in
+/// `source`, and for a library that means the stories in all of its folders,
+/// in the order [`index_library`] visits them.
+pub fn fetch_targets(source: &StorySource, data_base: &Path) -> Vec<crate::fetch_worker::FetchTarget> {
+    let mut out: Vec<crate::fetch_worker::FetchTarget> = Vec::new();
+    match source {
+        StorySource::Library(root) => index_library(root, data_base, |batch| {
+            out.extend(batch.entries.iter().map(crate::fetch_worker::FetchTarget::row));
+        }),
+        other @ StorySource::DiskSet { .. } => {
+            out.extend(other.scan(data_base).iter().map(crate::fetch_worker::FetchTarget::row));
+        }
+    }
+    out
+}
+
+/// Where `entry` lives relative to `dir`: `None` when it sits directly in
+/// `dir` (or outside it altogether), `Some("sub/deeper")` otherwise, always
+/// with forward slashes since it is a label, not a path.
+pub fn folder_label(entry: &StoryEntry, dir: &Path) -> Option<String> {
+    let rel = entry.path.parent()?.strip_prefix(dir).ok()?;
+    if rel.as_os_str().is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    Some(parts.join("/"))
+}
+
+/// The stories in `index` matching `query`: every whitespace-separated term
+/// must occur, case-insensitively, in the title, the author, the filename or
+/// the folder (relative to `root`). An empty query matches everything. Folder
+/// rows never match; the result is stories only, in the default sort.
+pub fn search_library(index: &[StoryEntry], root: &Path, query: &str) -> Vec<StoryEntry> {
+    search_library_under(index, root, root, query)
+}
+
+/// [`search_library`] restricted to the stories under `scope` (a folder at or
+/// below `root`): what the cover gallery shows for a folder, since a grid of
+/// covers is worth more the more of the library it covers, and a folder that
+/// holds only folders would otherwise show an empty one.
+pub fn search_library_under(index: &[StoryEntry], root: &Path, scope: &Path, query: &str) -> Vec<StoryEntry> {
+    let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
+    let mut out: Vec<StoryEntry> = index
+        .iter()
+        .filter(|e| !e.is_folder())
+        .filter(|e| e.path.starts_with(scope))
+        .filter(|e| {
+            if terms.is_empty() {
+                return true;
+            }
+            let hay = format!(
+                "{}\n{}\n{}\n{}",
+                e.title,
+                e.meta.author.as_deref().unwrap_or(""),
+                e.filename,
+                folder_label(e, root).unwrap_or_default()
+            )
+            .to_lowercase();
+            terms.iter().all(|t| hay.contains(t.as_str()))
+        })
+        .cloned()
+        .collect();
+    sort_stories(&mut out, Sort::default());
+    out
+}
+
 /// **One disc, not two layouts** (SQ-0878): drop a row whose build is already
 /// offered by an earlier story on the *same volume*, for the *same machine*.
 ///
@@ -1082,10 +1673,25 @@ fn dedupe_within_a_volume(out: &mut Vec<StoryEntry>) {
 ///   sits on `floppy5.ima` and on both of the DOS 360K/720K presses; those are
 ///   three separate sets and stay three rows, because they are three pieces of
 ///   media the player deliberately keeps. Nothing outside a set is ever folded.
-/// - **Keyed on the IFID**, which for Z-code is release, serial and checksum —
-///   the identity of a *build*. Zork Zero's r296, r366 and r393 are three
-///   different builds and therefore three rows however they are reached, which
-///   is the same rule SQ-0850 keys their saves on.
+/// - **Keyed on the IFID *and* the machine**, which for Z-code is release,
+///   serial and checksum plus which machine's pressing it is. Zork Zero's
+///   r296, r366 and r393 are three different builds and therefore three rows
+///   however they are reached, which is the same rule SQ-0850 keys their
+///   saves on — and the machine half is [`dedupe_within_a_volume`]'s own rule,
+///   repeated here rather than dropped.
+///
+///   **The machine cannot be left out** (SQ-1517): a "set" here is a shelf of
+///   *volumes*, and a volume can itself be a hybrid disc carrying more than
+///   one machine's pressings — exactly what [`dedupe_within_a_volume`] exists
+///   to tell apart. `LostTreasures1.iso` and `LostTreasures2.iso` satisfy the
+///   set-naming rule (`disk_set::group`) purely on their filenames, and on
+///   disc 1 alone `MAC/BEYOND ZORK` and `PC/DATA/BEYONDZO.DAT` are the same
+///   byte-identical build (`ZCODE-57-871221-C5AD`) on two different machines.
+///   An IFID-only key here re-folds that pair down to one row — silently
+///   discarding a whole machine's pressing — even though it never crossed a
+///   volume boundary at all, which is exactly the collapse
+///   `dedupe_within_a_volume`'s machine key was written to prevent. The same
+///   thing happens to `MAC/CUTTHROATS` / `PC/CUTTHROA/CUTTHROA.DAT`.
 /// - **The lowest disk number wins.** `disk_set::group` returns its members in
 ///   disk order and the scan walks a sorted file list, so which copy survives is
 ///   fixed and reproducible rather than whatever `read_dir` happened to yield.
@@ -1114,10 +1720,12 @@ fn dedupe_within_sets(out: &mut Vec<StoryEntry>, sets: &[Vec<PathBuf>]) {
         })
         .collect();
     order.sort();
-    let mut seen: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
+    type SeenKey = (usize, Option<crate::hints::DiskImage>, String);
+    let mut seen: std::collections::HashSet<SeenKey> = std::collections::HashSet::new();
     let mut drop: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (set_idx, _disk, _pos, i) in order {
-        if !seen.insert((set_idx, out[i].meta.ifid.clone())) {
+        let key: SeenKey = (set_idx, out[i].meta.disk_image, out[i].meta.ifid.clone());
+        if !seen.insert(key) {
             drop.insert(i);
         }
     }
@@ -1379,6 +1987,13 @@ pub fn resolve_entries(path: &Path, data_base: &Path) -> Vec<StoryEntry> {
             dedupe_within_a_volume(&mut rows);
             return rows;
         }
+        // Exactly one story: the plain path, no selector — `resolve_entry`
+        // reaches it through `load_mounted_story_from(path, None)`, which
+        // since SQ-1470 falls back to this same single Scott candidate when
+        // the format's own Z-code/Glulx/Blorb tiebreak (`MountedDisk::story`)
+        // finds nothing — see `hints::read_story_file`'s own doc. Nothing
+        // about an ordinary single-story floppy changes: `disk_entry` stays
+        // `None`, exactly as it always did.
         return resolve_entry(path, data_base).into_iter().collect();
     }
     // A zip is a container too (SQ-1098). Its entries carry no `DiskImage`, so
@@ -1414,15 +2029,19 @@ fn entry_from_loaded(
     data_base: &Path,
 ) -> Option<StoryEntry> {
     // Only list stories lanthorn can actually launch: Z-code via the
-    // Z-machine loader (accepts v3/4/5/7/8, rejects v6/v1/v2), Glulx via the
-    // Glulx loader, Scott Adams via the Scott database parser.
+    // Z-machine loader (accepts v1-v8 since SQ-1422), Glulx via the Glulx
+    // loader, Scott Adams via the Scott database parser.
     let bytes = loaded.bytes().to_vec();
     let launchable = match &loaded {
         crate::hints::LoadedStory::ZCode(b) => zvm::memory::Memory::new(b.clone()).is_ok(),
         crate::hints::LoadedStory::Glulx(b) => gvm::Memory::new(b.clone()).is_ok(),
-        crate::hints::LoadedStory::Scott(b) => {
-            std::str::from_utf8(b).ok().map(|s| scott::Database::parse(s).is_ok()).unwrap_or(false)
-        }
+        // Over the BYTES, not through `from_utf8`. Two of the three encodings
+        // `scott::Database::parse` reads are binary memory images — the
+        // TI-99/4A tokenised releases and the Commodore 64 *Mysterious
+        // Adventures* program files (SQ-1414) — and no UTF-8 conversion
+        // survives either, so the older spelling listed `BATON.prg` as
+        // unlaunchable while `lanthorn BATON.prg` opened it perfectly well.
+        crate::hints::LoadedStory::Scott(b) => scott::Database::parse(b).is_ok(),
     };
     if !launchable {
         return None;
@@ -1491,16 +2110,27 @@ fn entry_from_loaded(
     // `INFOCOM6` would every one of them fall back to *Lost Treasures of Infocom
     // (Disk 6 of 7)*. `LEATHRGODDESSES` is the row that needs it — its header
     // reads release 0 serial `Blown!`, which no title table answers to, so the
-    // last resort is all it has. (A disk story is never Scott — every mountable
-    // format here is Infocom Z-code — so the Scott lookups below are unaffected
-    // by the substitution.)
+    // last resort is all it has.
+    //
+    // **A disk story is not always Infocom Z-code any more** (SQ-1414): the
+    // Commodore 64 *Mysterious Adventures* compilation disks carry Scott Adams
+    // program files, named `BATON`, `TIME MACHINE`, and so on — the disk's own
+    // spelling, not a filename `scott_titles.tsv` was ever keyed on. `bundled_title`
+    // identifies those by content checksum before falling back to the ordinary
+    // Scott lookup below — which also fixes the same game opened DIRECTLY as a
+    // bare `.prg` (`BATON.prg`), with no disk entry to name it at all (SQ-1469).
     let stem = disk_entry.unwrap_or_else(|| {
         path.file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(&filename)
     });
     let is_scott = matches!(loaded, crate::hints::LoadedStory::Scott(_));
-    let tsv_title = bundled_title(stem, &ifid, is_scott);
+    // SQ-1473: what this Scott entry's own graphics are, for the info panel's
+    // "Pictures:" row and the launch-options dialog's resolution choice. Read
+    // once here, from the bytes already in hand — never re-derived per frame.
+    let scott_pictures_kind =
+        is_scott.then(|| scott_pictures(&bytes, self_blorb.as_deref(), path)).flatten();
+    let tsv_title = bundled_title(stem, &ifid, is_scott, &bytes);
     let tsv_author = is_scott.then(|| scott_author(stem)).flatten();
     let tsv_description = is_scott.then(|| scott_description(stem)).flatten();
     let resolved = resolve(
@@ -1555,6 +2185,7 @@ fn entry_from_loaded(
         ifid,
         features,
         self_blorb,
+        scott_pictures: scott_pictures_kind,
         disk_image,
         disk_entry: disk_entry.map(str::to_string),
         author: resolved.author,
@@ -1567,7 +2198,7 @@ fn entry_from_loaded(
         ifdb_rating_count: resolved.ifdb_rating_count,
         fetch_not_found: resolved.fetch_not_found,
     };
-    Some(StoryEntry { path: path.to_path_buf(), title, filename, meta, hint_sidecar: None })
+    Some(StoryEntry { path: path.to_path_buf(), title, filename, meta, hint_sidecar: None, kind: RowKind::Story })
 }
 
 /// Column a story list can be sorted by.
@@ -1628,7 +2259,14 @@ fn bibliographic_key(title: &str) -> String {
 ///   (that is the mount's own answer, not the filename's), else "blorb".
 /// - **Glulx** shows no container ever, blorbed or not — Glulx games are
 ///   effectively always blorbed, so the suffix would say nothing (SQ-0369).
-/// - **Scott** shows "blorb" for the graphic `.blb` versions only.
+/// - **Scott** follows the same rule Z-code does (SQ-1475): the disk image it
+///   was mounted out of when there is one — "Scott (CBM)" for the Commodore
+///   Questprobe and *Mysterious Adventures* disks, "Scott (Atari DOS)" for a
+///   US S.A.G.A. `.atr`, "Scott (DOS 3.3)" for an Apple II side — else
+///   "z80" for a ZX Spectrum snapshot (SQ-1478), else "blorb" for the graphic
+///   `.blb` versions. It ignored the medium until the S.A.G.A. releases
+///   arrived and one shelf could hold the same game pressed for three
+///   machines, all of them reading "Scott" and none of them saying which.
 ///
 /// `blorb` is `RowBadges::blorb` — see [`row_is_blorb`], which costs a
 /// directory read.
@@ -1639,7 +2277,23 @@ pub fn type_container(meta: &StoryMeta, blorb: bool) -> Option<&'static str> {
             None => blorb.then_some("blorb"),
         },
         Engine::Glulx => None,
-        Engine::Scott => blorb.then_some("blorb"),
+        // A Scott row names its medium too (SQ-1475): the disk image it was
+        // mounted out of when there is one — the mount decides, never the
+        // extension — and failing that a ZX Spectrum snapshot, whose bytes
+        // came out of a 48K memory dump rather than a `.dat` (SQ-1478) and
+        // which is read off the pictures for the same reason. A `.z80` is not
+        // a mountable image, so the two answers cannot collide.
+        Engine::Scott => match (meta.disk_image, meta.scott_pictures) {
+            (Some(image), _) => Some(image.label()),
+            (None, Some(ScottPictures::NativeZx { .. })) => Some("z80"),
+            // SQ-1477: the MS-DOS *Questprobe* releases are zips of loose DOS
+            // files, so the ZIP is the medium the way a `.z80` is the ZX
+            // release's and a `.d64` is the Commodore's — and it is only ever
+            // said for a row whose pictures came out of one, which is why
+            // this cannot collide with the two answers above.
+            (None, Some(ScottPictures::SagaDosCga { .. })) => Some("zip"),
+            (None, _) => blorb.then_some("blorb"),
+        },
     }
 }
 
@@ -1737,7 +2391,7 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
     /// Within one engine and version, a row with NO parenthetical sorts first
     /// (nothing before something — its label is a prefix of every other label
     /// in the group), then containers alphabetically and
-    /// **case-insensitively**: "blorb" is a format name and "ADF"/"HFS"/"DOS"
+    /// **case-insensitively**: "blorb" is a format name and "ADF"/"HFS"/"MS-DOS"
     /// are acronyms, so a raw byte compare would file every acronym ahead of
     /// "blorb" by that accident of casing rather than by anything a reader
     /// means. See [`type_container`] for what a row shows, which is the same
@@ -1780,9 +2434,29 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
 
     // Sorting a permutation rather than the rows, so the comparator can reach
     // each row's pre-measured key by its ORIGINAL index.
+    /// Which shelf a row sits on: `..` above the folders, folders above the
+    /// stories, under every sort key and in both directions. A folder has no
+    /// author, year or rating, and letting it sink to the bottom as a blank
+    /// would hide the way up under two thousand stories.
+    fn shelf(e: &StoryEntry) -> u8 {
+        match e.kind {
+            RowKind::Folder if e.title == PARENT_LABEL => 0,
+            RowKind::Folder => 1,
+            RowKind::Story => 2,
+        }
+    }
+
     let mut order: Vec<usize> = (0..stories.len()).collect();
     order.sort_by(|&i, &j| {
         let (a, b) = (&stories[i], &stories[j]);
+        let (sa, sb) = (shelf(a), shelf(b));
+        if sa != sb {
+            return sa.cmp(&sb);
+        }
+        if sa < 2 {
+            // Folders sort by name alone, whatever column the stories are on.
+            return a.title.to_lowercase().cmp(&b.title.to_lowercase()).then_with(|| a.title.cmp(&b.title));
+        }
         let ord = match sort.key {
             SortKey::Title => {
                 let (a_blank, a_val) = title_key(a);
@@ -1868,14 +2542,16 @@ pub fn compute_row_badges(
     data_base: &Path,
     hint_index: &hints::HintIndex,
 ) -> RowBadges {
+    if entry.is_folder() {
+        return RowBadges::default();
+    }
     let ifid = &entry.meta.ifid;
     let game_dir = entry.game_dir(data_base);
     let hint = if hint_index.get(ifid).is_some() || entry.hint_sidecar.is_some() {
         HintBadge::Present
     } else {
         // No local hint — light the lowercase glyph if one is downloadable.
-        let stem = entry.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if hints::hint_download_for(&entry.meta.ifid, stem, &entry.title).is_some() {
+        if hints::hint_download_for(&entry.meta.ifid).is_some() {
             HintBadge::Available
         } else {
             HintBadge::None
@@ -1923,7 +2599,7 @@ impl<'a> BadgeGlyphs<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-picker"))]
 mod tests {
     use super::*;
 
@@ -2044,16 +2720,23 @@ mod tests {
         let mut v6 = minimal_v3_story();
         v6[0x00] = 6;
         std::fs::write(dir.join("graphic.z6"), &v6).unwrap();
-        // v1/v2 remain unsupported (parse_header rejects them) → skipped.
+        // v1 is supported too, since SQ-1422 widened `parse_header`'s version
+        // check to `1..=8` — a v1 story is now listed exactly like a v3 one.
         let mut v1 = minimal_v3_story();
         v1[0x00] = 1;
         std::fs::write(dir.join("old.z5"), &v1).unwrap();
+        // A byte outside `1..=8` is what `parse_header` actually rejects →
+        // skipped.
+        let mut bogus = minimal_v3_story();
+        bogus[0x00] = 9;
+        std::fs::write(dir.join("bogus.z5"), &bogus).unwrap();
 
         let stories = scan_stories(&dir, &dir);
         let names: Vec<String> = stories.iter().map(|s| s.filename.clone()).collect();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(names.iter().any(|n| n == "graphic.z6"), "v6 .z6 story is listed (supported): {names:?}");
-        assert!(!names.iter().any(|n| n == "old.z5"), "v1 remains unsupported → skipped: {names:?}");
+        assert!(names.iter().any(|n| n == "old.z5"), "v1 is listed (supported since SQ-1422): {names:?}");
+        assert!(!names.iter().any(|n| n == "bogus.z5"), "version byte 9 is unsupported → skipped: {names:?}");
     }
 
     #[test]
@@ -2085,6 +2768,7 @@ mod tests {
                 ifid: String::new(),
                 features: Features::default(),
                 self_blorb: None,
+                scott_pictures: None,
                 disk_image: None,
                 disk_entry: None,
                 author: author.map(|s| s.to_string()),
@@ -2095,6 +2779,7 @@ mod tests {
                 ifdb_rating_count: None, fetch_not_found: false,
             },
             hint_sidecar: None,
+            kind: RowKind::Story,
         }
     }
 
@@ -2275,6 +2960,52 @@ mod tests {
         meta.engine = Engine::Scott;
         assert_eq!(type_container(&meta, false), None);
         assert_eq!(type_container(&meta, true), Some("blorb"));
+    }
+
+    /// SQ-1477: the story-list half of picture family E, on the real archive
+    /// — the release its database identifies as, the pictures its zip carries,
+    /// and the container the TYPE column names.
+    #[test]
+    fn ms_dos_questprobe_rows_name_the_release_its_pictures_and_its_zip() {
+        // The MS-DOS *Hulk*'s database is the plain reference TEXT format
+        // (§10.7) — no version, no adventure number the parser reads, nothing
+        // that names the game — so without `scott::saga_dos::identify` this row
+        // is titled after whatever the archive happens to be called, which
+        // here is `The-Hulk_DOS_EN`.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/scott-dialects/msdos/The-Hulk_DOS_EN.zip");
+        if !path.exists() {
+            eprintln!("SKIP: no {} (gitignored commercial fixture)", path.display());
+            return;
+        }
+        let mounted = crate::hints::load_mounted_story_full(&path, None)
+            .expect("the zip holds one Scott database");
+        let crate::hints::LoadedStory::Scott(bytes) = mounted.story else {
+            panic!("the MS-DOS Hulk's story is a Scott database");
+        };
+        assert_eq!(
+            scott_release_title(&bytes),
+            Some("The Hulk (MS-DOS)"),
+            "identified from its own header counts, not from the archive's name"
+        );
+        // …and told apart from the SAME game's Commodore 64 release, which is
+        // a §12 binary database and titles itself.
+        assert_ne!(scott_release_title(&bytes), Some("The Hulk (Commodore 64)"));
+
+        let pictures = scott_pictures(&bytes, None, &path);
+        assert_eq!(
+            pictures,
+            Some(ScottPictures::SagaDosCga { pictures: 68 }),
+            "counted from the zip's own `.PAK` entries"
+        );
+
+        // The TYPE column names the zip, the way it names a `.d64` or a `.z80`.
+        let mut meta = story("s", "s.dat", None, None).meta;
+        meta.engine = Engine::Scott;
+        meta.disk_image = None;
+        meta.scott_pictures = pictures;
+        assert_eq!(type_container(&meta, false), Some("zip"));
+        assert_eq!(type_container(&meta, true), Some("zip"), "and it beats a blorb sibling");
     }
 
     #[test]
@@ -2929,12 +3660,13 @@ mod tests {
                 size_bytes: 1, story_bytes: 1, modified: None, engine: Engine::ZCode,
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
-                features: Features::default(), self_blorb, disk_image: None, disk_entry: None,
+                features: Features::default(), self_blorb, scott_pictures: None, disk_image: None, disk_entry: None,
                 author: None, year: None, genre: None, language: None, description: None,
                 ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None,
                 fetch_not_found: false,
             },
             hint_sidecar: None,
+            kind: RowKind::Story,
         }
     }
 
@@ -3043,13 +3775,34 @@ mod tests {
         let base = dir.join("data");
         let hi = hints::load_hint_index(&dir); // empty index
 
-        // "deadline" matches the SLAG catalog → Available (no local file).
-        let e_dl = entry_with("IFID-DL", dir.join("deadline.z3"), None);
+        // Deadline r18/s820311, an identity the SLAG catalog covers → Available
+        // (no local file).
+        let e_dl = entry_with("ZCODE-18-820311-0000", dir.join("deadline.z3"), None);
         assert_eq!(compute_row_badges(&e_dl, &base, &hi).hint, HintBadge::Available);
 
-        // A game no catalog covers stays None.
+        // An unresolved identity stays None.
         let e_none = entry_with("IFID-N", dir.join("colossal.z5"), None);
         assert_eq!(compute_row_badges(&e_none, &base, &hi).hint, HintBadge::None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-1505 regression: the badge that offers a hint download must not light
+    /// for a title or filename stem that merely *contains* a catalog word.
+    /// "The Sorcerer of Claymorgue Castle" is a Scott Adams game (a non-Infocom
+    /// IFID, so `known_titles.tsv` cannot resolve it) whose title contains
+    /// "sorcerer" — a catalog key for Infocom's unrelated *Sorcerer* — and whose
+    /// stem `adv13` is the Scott Adams catalog number. Neither may light the
+    /// download-available badge.
+    #[test]
+    fn compute_row_badges_does_not_offer_a_download_for_an_unrelated_title_match() {
+        let dir = temp_dir("badge-sorcerer");
+        let base = dir.join("data");
+        let hi = hints::load_hint_index(&dir); // empty index
+
+        let mut e = entry_with("SCOTT-1234567890ABCDEF", dir.join("adv13.saga"), None);
+        e.title = "The Sorcerer of Claymorgue Castle".into();
+        assert_eq!(compute_row_badges(&e, &base, &hi).hint, HintBadge::None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3330,6 +4083,531 @@ mod tests {
         }
     }
 
+    /// [`scott_release_title`] identifies a C64 *Mysterious Adventures* release
+    /// purely from its own bytes' checksum (SQ-1469) — no real specimen needed,
+    /// because `scott::c64::identify` checks only the checksum, not the driver
+    /// shape a genuine PRG carries. Builds a load address plus a filler image
+    /// whose bytes wrap-sum to a catalogued release's checksum.
+    #[test]
+    fn scott_release_title_identifies_a_c64_release_by_checksum_alone() {
+        let load_address: u16 = 0x4000;
+        let baton = scott::c64::RELEASES
+            .iter()
+            .find(|r| r.file_name == "BATON")
+            .expect("BATON is catalogued");
+
+        // Pad with 0xFF bytes, reducing the outstanding sum by 255 each time,
+        // then a final byte closes the gap exactly — works for any u16 target.
+        let mut image = Vec::new();
+        let mut remaining =
+            baton.checksum.wrapping_sub(scott::c64::image_checksum(&[], load_address));
+        while remaining > 255 {
+            image.push(0xFFu8);
+            remaining = remaining.wrapping_sub(0xFF);
+        }
+        image.push(remaining as u8);
+        assert_eq!(
+            scott::c64::image_checksum(&image, load_address),
+            baton.checksum,
+            "constructed image must actually sum to BATON's checksum"
+        );
+
+        let mut file = load_address.to_le_bytes().to_vec();
+        file.extend_from_slice(&image);
+        assert_eq!(scott_release_title(&file), Some("The Golden Baton"));
+
+        // A file whose checksum matches none of the eleven answers None, so the
+        // caller falls through to the filename-stem table.
+        let mut junk = load_address.to_le_bytes().to_vec();
+        junk.extend_from_slice(b"not a mysterious adventure");
+        assert_eq!(scott_release_title(&junk), None);
+    }
+
+    /// An unrecognised Scott database — not one of the eleven C64 *Mysterious
+    /// Adventures* releases, and not in `scott_titles.tsv` either — falls back
+    /// to the filename stem, exactly as it did before SQ-1469.
+    #[test]
+    fn an_unrecognised_scott_database_falls_back_to_the_filename_stem() {
+        let dir = temp_dir("scott-unknown");
+        let path = dir.join("unknownscott.dat");
+        // A genuinely minimal but COMPLETE ScottFree text-format database (one
+        // of everything: header, action, verb/noun pair, room, message, item) —
+        // `entry_from_loaded`'s launchability gate is a full `Database::parse`,
+        // not just the header sniff.
+        let db = concat!(
+            "0 0 0 0 0 0 0 0 3 0 0 0\n", // unknown items actions words rooms carry player treasures wordlen light messages treasureroom
+            "0 0 0 0 0 0 0 0\n",         // one action record (verb/noun word, 5 conditions, 2 commands)
+            "\"NORTH\" \"NORTH\"\n",     // one verb/noun pair
+            "0 0 0 0 0 0 \"A room.\"\n", // one room: six exits, description
+            "\"A message.\"\n",          // one message
+            "\"An item.\" 0\n",          // one item: description, start location
+        );
+        std::fs::write(&path, db).unwrap();
+        assert!(scott::Database::parse(db).is_ok(), "premise: the database itself must parse");
+        let entry = resolve_entry(&path, &dir).expect("a minimal Scott database is launchable");
+        assert_eq!(entry.meta.engine, Engine::Scott);
+        assert_eq!(entry.title, "unknownscott", "unknown Scott story must fall back to the stem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// the same C64 *Mysterious Adventures* bytes must resolve to the same
+    /// title whether opened as a bare `.prg` (no disk entry to name it) or
+    /// pulled off `MYSTADV1.D64`'s directory as the `BATON` row (SQ-1469).
+    /// Before the fix, the direct route showed the bare stem `BATON` while the
+    /// disk route showed "The Golden Baton".
+    #[test]
+    fn a_c64_mysterious_program_file_titles_the_same_directly_and_via_the_disk() {
+        let stories = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let direct = stories.join("scott-dialects/c64/prg/MYSTADV1.D64/BATON.prg");
+        if !direct.is_file() {
+            eprintln!("SKIP: {} absent (gitignored commercial fixture)", direct.display());
+            return;
+        }
+        let base = temp_dir("c64-direct-vs-disk");
+        let direct_entry = resolve_entry(&direct, &base).expect("BATON.prg opens directly");
+        assert_eq!(direct_entry.title, "The Golden Baton", "direct route must not show the stem");
+
+        let disk = stories.join("scott-dialects/c64/MYSTADV1.D64");
+        if disk.is_file() {
+            let rows = resolve_entries(&disk, &base);
+            let baton_row = rows
+                .iter()
+                .find(|r| r.meta.disk_entry.as_deref() == Some("BATON"))
+                .expect("MYSTADV1.D64 offers a BATON row");
+            assert_eq!(baton_row.title, direct_entry.title, "direct and disk routes must agree");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+
+    /// [`type_container`]'s ZX branch, hand-built — a `.z80` row names its
+    /// container the way a Z-code row names its floppy, and the fact it reads
+    /// is the pictures rather than the filename (SQ-1478).
+    #[test]
+    fn a_zx_snapshot_row_names_its_container_hand_built() {
+        let meta = |pictures: Option<ScottPictures>| StoryMeta {
+            size_bytes: 0,
+            story_bytes: 0,
+            modified: None,
+            engine: Engine::Scott,
+            format: String::new(),
+            version: None,
+            serial: None,
+            release: None,
+            ifid: String::new(),
+            features: Features::default(),
+            self_blorb: None,
+            scott_pictures: pictures,
+            disk_image: None,
+            disk_entry: None,
+            author: None,
+            year: None,
+            genre: None,
+            language: None,
+            description: None,
+            ifdb_link: None,
+            ifdb_rating: None,
+            ifdb_rating_count: None,
+            fetch_not_found: false,
+        };
+        assert_eq!(
+            type_container(&meta(Some(ScottPictures::NativeZx { pictures: 31 })), false),
+            Some("z80"),
+            "a ZX snapshot's TYPE column names the container it was dumped from"
+        );
+        // Every other Scott row is unchanged: the C64 native decode is a
+        // program file, and a text `.dat` beside a Blorb still says "blorb".
+        assert_eq!(
+            type_container(&meta(Some(ScottPictures::NativeC64 { pictures: 31 })), false),
+            None
+        );
+        assert_eq!(type_container(&meta(None), true), Some("blorb"));
+        assert_eq!(type_container(&meta(None), false), None);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// a ZX Spectrum *Mysterious Adventures* snapshot must resolve to its
+    /// release TITLE rather than to the archive's filename stem, and must
+    /// carry the native-ZX pictures row with a genuine room count read off the
+    /// release's own artwork (SQ-1478). Before this the row read `m1goldba`
+    /// and reported no pictures at all.
+    ///
+    /// Like the C64 case above, this one cannot be hand-built: it needs a real
+    /// snapshot's driver shape, since the loader finds the header by scanning
+    /// for the one window whose counts make the driver's pointer block come
+    /// out exactly right.
+    #[test]
+    fn a_zx_mysterious_snapshot_titles_itself_and_reports_its_pictures() {
+        let stories = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let baton = stories.join("scott-dialects/spectrum/m1goldba.z80");
+        if !baton.is_file() {
+            eprintln!("SKIP: {} absent (gitignored commercial fixture)", baton.display());
+            return;
+        }
+        let base = temp_dir("zx-mysterious-row");
+        let entry = resolve_entry(&baton, &base).expect("m1goldba.z80 opens as a story");
+        assert_eq!(entry.meta.engine, Engine::Scott);
+        assert_eq!(entry.title, "The Golden Baton", "the row must not show the bare stem");
+        assert_eq!(
+            entry.meta.scott_pictures,
+            Some(ScottPictures::NativeZx { pictures: 31 }),
+            "one Family B image per room, room 0 excepted"
+        );
+        assert_eq!(type_container(&entry.meta, false), Some("z80"));
+        // And the nine non-Mysterious snapshots in the same collection are not
+        // stories at all, so they never reach a row.
+        let control = stories.join("scott-dialects/spectrum/gremlins.z80");
+        if control.is_file() {
+            assert!(
+                resolve_entry(&control, &base).is_none(),
+                "a family-A ZX release is refused, not listed"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `.z80` is in [`STORY_EXTS`], or a directory scan never opens one and
+    /// the two cases above could only ever be reached by an explicit path
+    /// (SQ-1478).
+    #[test]
+    fn the_scan_opens_zx_snapshots_at_all() {
+        assert!(STORY_EXTS.contains(&"z80"), "the picker's scan must consider a .z80");
+        let dir = temp_dir("zx-ext-scan");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("something.z80");
+        std::fs::write(&path, [0u8; 64]).unwrap();
+        assert!(has_story_ext(&path), "and `has_story_ext` must agree with the table");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// [`scott_pictures`]'s Blorb branch, hand-built — no specimen needed,
+    /// because a `Pict` usage chunk is the whole test regardless of what game
+    /// it belongs to (SQ-1473).
+    #[test]
+    fn scott_pictures_reports_blorb_from_a_pict_chunk_hand_built() {
+        let chunks = vec![
+            ChunkInfo { usage: "Exec".into(), number: 0, chunk_type: "TEXT".into(), len: 4, detail: None },
+            ChunkInfo { usage: "Pict".into(), number: 3, chunk_type: "PNG ".into(), len: 100, detail: None },
+        ];
+        assert_eq!(
+            scott_pictures(b"anything", Some(&chunks), Path::new("nowhere.blb")),
+            Some(ScottPictures::Blorb)
+        );
+    }
+
+    /// [`scott_pictures`] answers `None` for a plain text-only Scott database —
+    /// hand-built, the same minimal ScottFree text format
+    /// `an_unrecognised_scott_database_falls_back_to_the_filename_stem` parses,
+    /// which is neither a Blorb, a C64 native image, nor a SAGA-US database
+    /// (SQ-1473).
+    #[test]
+    fn scott_pictures_reports_none_for_a_text_only_database_hand_built() {
+        let db = concat!(
+            "0 0 0 0 0 0 0 0 3 0 0 0\n",
+            "0 0 0 0 0 0 0 0\n",
+            "\"NORTH\" \"NORTH\"\n",
+            "0 0 0 0 0 0 \"A room.\"\n",
+            "\"A message.\"\n",
+            "\"An item.\" 0\n",
+        );
+        assert!(scott::Database::parse(db.as_bytes()).is_ok(), "premise: the database parses");
+        assert_eq!(scott_pictures(db.as_bytes(), None, Path::new("nowhere.dat")), None);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// `BATON.prg`'s entry carries the native-decode row, with a genuine room
+    /// count read off the release's own artwork, while `adv01.dat` (a plain
+    /// text-only ScottFree database) carries none at all (SQ-1473). The C64
+    /// native decode cannot be hand-built like the two cases above — it needs
+    /// `scott::c64::looks_like_c64_mysterious`'s real driver shape, not merely
+    /// a matching checksum.
+    #[test]
+    fn baton_prg_carries_the_native_pictures_row_and_adv01_carries_none() {
+        let stories = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let baton = stories.join("scott-dialects/c64/prg/MYSTADV1.D64/BATON.prg");
+        if !baton.is_file() {
+            eprintln!("SKIP: {} absent (gitignored commercial fixture)", baton.display());
+            return;
+        }
+        let base = temp_dir("scott-pictures-row");
+        let baton_entry = resolve_entry(&baton, &base).expect("BATON.prg opens directly");
+        match baton_entry.meta.scott_pictures {
+            Some(ScottPictures::NativeC64 { pictures }) => {
+                assert!(pictures > 0, "BATON must report at least one room picture");
+            }
+            other => panic!("BATON.prg must report NativeC64, got {other:?}"),
+        }
+
+        let adv01 = stories.join("adv01.dat");
+        if adv01.is_file() {
+            let adv01_entry = resolve_entry(&adv01, &base).expect("adv01.dat opens directly");
+            assert_eq!(
+                adv01_entry.meta.scott_pictures, None,
+                "a plain text-only .dat carries no Pictures row"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// the *Hulk*'s own Questprobe disk reports its family-C picture set and
+    /// its container, and an Atari US S.A.G.A. side A reports neither
+    /// (SQ-1475).
+    ///
+    /// The counts are the disk's own (§10.7): seventy `R01nnn`/`B01nnnR`/
+    /// `B01nnnI` files. Pinned rather than floored — a directory walk that
+    /// started dropping the eighth entry of every sector would still report
+    /// "some", which is what a floor would accept.
+    #[test]
+    fn the_hulk_d64_row_reports_its_family_c_pictures_and_an_atari_side_a_does_not() {
+        let stories = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let hulk = stories.join("scott-dialects/c64/QUESTPR1.D64");
+        if !hulk.is_file() {
+            eprintln!("SKIP: {} absent (gitignored commercial fixture)", hulk.display());
+            return;
+        }
+        let base = temp_dir("saga-pictures-row");
+        let row = resolve_entry(&hulk, &base).expect("QUESTPR1.D64 opens");
+        assert_eq!(
+            row.meta.scott_pictures,
+            Some(ScottPictures::SagaUsStrips {
+                platform: scott::SagaPlatform::Commodore64,
+                pictures: 70,
+            }),
+            "the Hulk's disk carries seventy family-C picture files"
+        );
+        // …and the TYPE column names the medium, the way a Z-code disk row
+        // does — one shelf can hold the same S.A.G.A. game pressed for three
+        // machines.
+        assert_eq!(row.meta.engine, Engine::Scott);
+        assert_eq!(type_container(&row.meta, false), Some("CBM"), "the Commodore container");
+
+        let atari = stories.join("scott-dialects/atari/SAGA #1 - Adventureland [side A].atr");
+        if atari.is_file() {
+            let row = resolve_entry(&atari, &base).expect("the Atari side A opens");
+            // The pictures are on the companion side — paired and counted
+            // off its own table now (SQ-1496/SQ-1524/SQ-1525/SQ-1526);
+            // `every_atari_saga_title_reports_its_companion_sides_real_picture_count`
+            // below cross-checks the exact count against the production
+            // reader for every title.
+            match row.meta.scott_pictures {
+                Some(ScottPictures::SagaAtari { format: scott::AtariPictureFormat::LineArt, pictures }) => {
+                    assert!(pictures > 0, "Adventureland's companion side must report real pictures");
+                }
+                other => panic!("Adventureland's side A must report a line-art SagaAtari row, got {other:?}"),
+            }
+            assert_eq!(type_container(&row.meta, false), Some("Atari DOS"));
+        }
+
+        // An extracted database is a S.A.G.A. release with no container at
+        // all — the same "not on this file", and NOT the `None` a text-only
+        // game reports.
+        let extracted = stories.join("scott-dialects/c64/db/hulk.bin");
+        if extracted.is_file() {
+            let row = resolve_entry(&extracted, &base).expect("hulk.bin opens");
+            assert_eq!(
+                row.meta.scott_pictures,
+                Some(ScottPictures::SagaUsNoPictures {
+                    platform: scott::SagaPlatform::Commodore64,
+                    scrambled: false,
+                })
+            );
+            assert_eq!(type_container(&row.meta, false), None, "no container, no parenthetical");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// every readable Atari 8-bit S.A.G.A. title's side A now reports its own
+    /// companion side's REAL picture count, cross-checked against
+    /// [`crate::graphics::PictSource::scott_saga_count`] — the SAME fact a
+    /// real launch reads through the SAME production table readers
+    /// (`scott::saga_atari::read_picture_table`/`read_line_art_table`), so
+    /// the picker cannot drift from what the game actually draws
+    /// (SQ-1496/SQ-1524/SQ-1525/SQ-1526).
+    ///
+    /// **Mission Impossible is excluded**, not skipped by accident: its side
+    /// A is a pre-existing damaged specimen `parse_saga_us` refuses outright
+    /// (§12.13's ~50 corrupt bytes, "the two item-location tables disagree")
+    /// — `saga_us_disks::mission_impossible_atari_side_a_yields_no_rows_and_no_panic`
+    /// already pins that it never reaches the picker as a row at all, and
+    /// `scott_saga_atari_lineart_pictures::mission_impossibles_line_art_table_still_reads_off_side_b`
+    /// covers its picture wiring straight off side B. Nothing this fix
+    /// touches changes either fact, so this test only checks that opening its
+    /// side A still yields no row (the same non-panic this fix must not
+    /// regress) rather than a picture count that was never reachable.
+    ///
+    /// Before this fix every OTHER title reported
+    /// [`ScottPictures::SagaUsNoPictures`] — `scott_pictures` reached these
+    /// releases only through `detect_saga_us` + `saga_picture_files`'s
+    /// by-name walk, which finds nothing on this platform (§12.10: no
+    /// filesystem on the companion side at all). Falsified by temporarily
+    /// reverting `scott_pictures`'s Atari branch to the old
+    /// `saga_picture_files`-only path and confirming every title in this loop
+    /// fails back to `SagaUsNoPictures` with a zero-length picture walk.
+    #[test]
+    fn every_atari_saga_title_reports_its_companion_sides_real_picture_count() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories/scott-dialects/atari");
+        if !dir.is_dir() {
+            eprintln!("SKIP: {} absent (gitignored commercial fixture)", dir.display());
+            return;
+        }
+        let mission_impossible = dir.join("SAGA #3 - Mission Impossible [side A].atr");
+        if mission_impossible.is_file() {
+            let base = temp_dir("atari-mission-impossible-row");
+            assert!(
+                resolve_entry(&mission_impossible, &base).is_none(),
+                "Mission Impossible's damaged side A must still yield no row at all"
+            );
+            let _ = std::fs::remove_dir_all(&base);
+        }
+        const TITLES: [(&str, &str); 6] = [
+            ("SAGA #1 - Adventureland [side A].atr", "SAGA #1 - Adventureland [side B].atr"),
+            ("SAGA #2 - Pirate Adventure [side A].atr", "SAGA #2 - Pirate Adventure [side B].atr"),
+            ("SAGA #4 - Voodoo Castle [side A].atr", "SAGA #4 - Voodoo Castle [side B].atr"),
+            ("SAGA #5 - The Count [side A].atr", "SAGA #5 - The Count [side B].atr"),
+            ("SAGA #6 - Strange Odyssey [side A].atr", "SAGA #6 - Strange Odyssey [side B].atr"),
+            (
+                "SAGA No. 13 - The Sorcerer of Claymorgue Castle _ side A.atr",
+                "SAGA No. 13 - The Sorcerer of Claymorgue Castle _ side B.atr",
+            ),
+        ];
+        let base = temp_dir("atari-saga-pictures-row");
+        let mut checked = 0;
+        for (side_a_name, side_b_name) in TITLES {
+            let side_a_path = dir.join(side_a_name);
+            let side_b_path = dir.join(side_b_name);
+            if !side_a_path.is_file() || !side_b_path.is_file() {
+                eprintln!("SKIP: {side_a_name} or its companion side absent");
+                continue;
+            }
+            let bytes_a = std::fs::read(&side_a_path).expect("side A reads");
+            let bytes_b = std::fs::read(&side_b_path).expect("side B reads");
+            let release = scott::Database::parse(&bytes_a)
+                .ok()
+                .and_then(|db| db.saga_us)
+                .unwrap_or_else(|| panic!("{side_a_name}: must identify as a S.A.G.A. release"));
+            let format = release
+                .atari_picture_format()
+                .unwrap_or_else(|| panic!("{side_a_name}: must be an Atari release"));
+            let want_pictures = match format {
+                scott::AtariPictureFormat::FamilyCBitmap => {
+                    crate::graphics::PictSource::from_scott_saga_atari(&bytes_a, &bytes_b, release)
+                        .unwrap_or_else(|| panic!("{side_a_name}: family-C table should read"))
+                        .scott_saga_count()
+                        .unwrap_or_else(|| panic!("{side_a_name}: a family-C source must count"))
+                }
+                scott::AtariPictureFormat::LineArt => crate::graphics::PictSource::from_scott_saga_atari_lineart(
+                    &bytes_b,
+                    release,
+                    128,
+                    crate::graphics::ScottPictureResolution::Original,
+                )
+                .unwrap_or_else(|| panic!("{side_a_name}: line-art table should read"))
+                .scott_saga_count()
+                .unwrap_or_else(|| panic!("{side_a_name}: a line-art source must count")),
+                other => panic!("{side_a_name}: unhandled Atari picture format {other:?}"),
+            };
+            assert!(want_pictures > 0, "{side_a_name}: a real release reports a nonzero count");
+
+            let row = resolve_entry(&side_a_path, &base).expect("side A opens");
+            assert_eq!(
+                row.meta.scott_pictures,
+                Some(ScottPictures::SagaAtari { format, pictures: want_pictures }),
+                "{side_a_name}: the picker's count must match the production reader's own count"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no Atari specimen was found to check — the skip above swallowed everything");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// an Apple II release's **boot** side reports the picture set that lives
+    /// on its COMPANION side, and a scrambled release reports why it has none
+    /// (SQ-1476).
+    ///
+    /// The row is the whole of what a player sees before launching, and both
+    /// halves of it are load-bearing here: the count comes off a disk the
+    /// browser never mounted for the story, and the scrambled three would
+    /// otherwise read as "somebody deleted the pictures".
+    #[test]
+    fn an_apple_ii_boot_side_reports_the_companion_sides_pictures() {
+        let stories = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories");
+        let apple = stories.join(
+            "scott-dialects/apple/Scott Adams Graphic Adventure 1 - Adventureland v2.1-416 \
+             (4am crack) side B - boot.dsk",
+        );
+        if !apple.is_file() {
+            eprintln!("SKIP: {} absent (gitignored commercial fixture)", apple.display());
+            return;
+        }
+        let base = temp_dir("apple-pictures-row");
+        let row = resolve_entry(&apple, &base).expect("the boot side opens");
+        assert_eq!(
+            row.meta.scott_pictures,
+            Some(ScottPictures::SagaUsStrips {
+                platform: scott::SagaPlatform::AppleII,
+                pictures: 93,
+            }),
+            "the 48 room and 45 object pictures on side A (§10.6)"
+        );
+        assert_eq!(row.meta.engine, Engine::Scott);
+        assert_eq!(
+            type_container(&row.meta, false),
+            Some("DOS 3.3"),
+            "the TYPE column names the Apple II medium"
+        );
+        // And the story list's own title comes from the release, not the
+        // 4am crack's file name.
+        assert_eq!(
+            row.title, "Adventureland (Apple II)",
+            "§12.12's per-release title, platform folded in"
+        );
+
+        // …and one of the three scrambled releases, whose room artwork is on
+        // a side A with no filesystem on it and is found by header rather than
+        // by catalogue (§7.4's string test, §10.6, SQ-1490). The row reads
+        // exactly like any other Apple II release's, which is the point.
+        let count = stories.join(
+            "scott-dialects/apple/Scott Adams Graphic Adventure 5 - The Count v2.1-115 \
+             (4am crack) side B - boot.dsk",
+        );
+        if count.is_file() {
+            let row = resolve_entry(&count, &base).expect("The Count's boot side opens");
+            assert_eq!(
+                row.meta.scott_pictures,
+                Some(ScottPictures::SagaUsStrips {
+                    platform: scott::SagaPlatform::AppleII,
+                    pictures: 26,
+                }),
+                "the 26 records on The Count's side A"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// a TI-99/4A `.fiad` opened directly still resolves through the bundled
+    /// filename-stem table (`scott_titles.tsv`'s `adv01` row) — `ti994a` itself
+    /// carries no adventure number to identify a release by (SQ-1469's other
+    /// dialect; unlike the C64 releases, this route was never broken).
+    #[test]
+    fn a_ti99_fiad_titles_via_the_bundled_stem_table() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/scott-dialects/ti99/adv01.fiad");
+        if !path.is_file() {
+            eprintln!("SKIP: {} absent (gitignored commercial fixture)", path.display());
+            return;
+        }
+        let base = temp_dir("ti99-direct");
+        let entry = resolve_entry(&path, &base).expect("adv01.fiad opens directly");
+        assert_eq!(entry.meta.engine, Engine::Scott);
+        assert_eq!(entry.title, "Adventureland");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn scott_titles_file_parses_without_dupes() {
         let table = scott_titles();
@@ -3339,6 +4617,173 @@ mod tests {
             .count();
         assert_eq!(lines, table.len(), "no duplicate filename stems in scott_titles.tsv");
     }
+
+    // ── Folders and the in-memory find ────────────────────────────────────────
+
+    /// Builds `root/{a,b}/…` with one story in each level plus a dot-directory
+    /// and a non-story file, so every scan below has something to skip.
+    fn nested_library(tag: &str) -> PathBuf {
+        let root = temp_dir(tag);
+        std::fs::create_dir_all(root.join("zcode/german")).unwrap();
+        std::fs::create_dir_all(root.join("Glulx")).unwrap();
+        std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        // A story's own per-game save data (`storage::game_dir`), sitting beside
+        // it in the library the way it does on disk — not a folder of stories.
+        std::fs::create_dir_all(root.join("top.z5.save")).unwrap();
+        std::fs::write(root.join("top.z5"), minimal_v3_story()).unwrap();
+        std::fs::write(root.join("zcode/curses.z5"), minimal_v3_story()).unwrap();
+        std::fs::write(root.join("zcode/german/burg.z5"), minimal_v3_story()).unwrap();
+        std::fs::write(root.join("Glulx/notes.txt"), b"not a story").unwrap();
+        std::fs::write(root.join(".hidden/secret.z5"), minimal_v3_story()).unwrap();
+        root
+    }
+
+    #[test]
+    fn folders_list_before_stories_and_dot_directories_are_skipped() {
+        let root = nested_library("folders");
+        let rows = library_rows(&root, &root, &root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let labels: Vec<&str> = rows.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["Glulx/", "zcode/", "top"],
+            "folders first, by name, case-insensitively; no `..` at the root; no dot-dir, no `.save` dir"
+        );
+        assert!(rows[0].is_folder() && rows[1].is_folder() && !rows[2].is_folder());
+        assert_eq!(rows[1].path, root.join("zcode"), "a folder row's path is the directory itself");
+    }
+
+    #[test]
+    fn library_rows_offer_the_parent_only_below_the_root() {
+        let root = nested_library("parent");
+        let rows = library_rows(&root.join("zcode"), &root, &root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let labels: Vec<&str> = rows.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(labels, vec![PARENT_LABEL, "german/", "curses"]);
+        assert_eq!(rows[0].path, root, "`..` leads to the directory above");
+    }
+
+    /// Whatever column the stories are sorted on, and in either direction, the
+    /// way out stays at the top: `..`, then folders by name, then the stories.
+    #[test]
+    fn sort_stories_keeps_folders_on_top_under_every_key_and_direction() {
+        let mut rows = vec![
+            story("Zork", "zork.z5", Some("Infocom"), Some("1980")),
+            StoryEntry::folder(PathBuf::from("/lib/b"), "b/"),
+            story("Advent", "advent.z5", None, None),
+            StoryEntry::folder(PathBuf::from("/lib"), PARENT_LABEL),
+            StoryEntry::folder(PathBuf::from("/lib/A"), "A/"),
+        ];
+        for key in [SortKey::Title, SortKey::Author, SortKey::Year, SortKey::Rating, SortKey::Type] {
+            for desc in [false, true] {
+                sort_stories(&mut rows, Sort { key, desc });
+                let labels: Vec<&str> = rows.iter().take(3).map(|e| e.title.as_str()).collect();
+                assert_eq!(labels, vec![PARENT_LABEL, "A/", "b/"], "{key:?} desc={desc}");
+                assert!(rows[3..].iter().all(|e| !e.is_folder()));
+            }
+        }
+    }
+
+    #[test]
+    fn index_library_reaches_every_nested_folder_once_and_skips_dot_directories() {
+        let root = nested_library("index");
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut all: Vec<StoryEntry> = Vec::new();
+        index_library(&root, &root, |b| {
+            dirs.push(b.dir.clone());
+            all.extend(b.entries);
+        });
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(dirs[0], root, "the root comes first");
+        assert_eq!(dirs.len(), 4, "root, Glulx, zcode, zcode/german: {dirs:?}");
+        let mut names: Vec<&str> = all.iter().map(|e| e.filename.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["burg.z5", "curses.z5", "top.z5"], "every story once, none from `.hidden`");
+        assert!(all.iter().all(|e| !e.is_folder()), "the index carries stories, not folder rows");
+    }
+
+    #[test]
+    fn search_library_matches_title_author_filename_and_folder_case_insensitively() {
+        let root = PathBuf::from("/lib");
+        let mut curses = story("Curses", "curses.z5", Some("Graham Nelson"), Some("1993"));
+        curses.path = root.join("zcode/curses.z5");
+        let mut burg = story("Die Burg", "burg.z5", None, None);
+        burg.path = root.join("zcode/german/burg.z5");
+        let mut top = story("Top", "top.z5", Some("Nobody"), None);
+        top.path = root.join("top.z5");
+        let index = vec![StoryEntry::folder(root.join("zcode"), "zcode/"), curses, burg, top];
+
+        let titles = |q: &str| -> Vec<String> { search_library(&index, &root, q).iter().map(|e| e.title.clone()).collect() };
+        assert_eq!(titles(""), vec!["Curses", "Die Burg", "Top"], "empty query lists every story, sorted by title, never a folder");
+        assert_eq!(titles("CURSES"), vec!["Curses"], "title, case-insensitively");
+        assert_eq!(titles("nelson"), vec!["Curses"], "author");
+        assert_eq!(titles("burg.z5"), vec!["Die Burg"], "filename");
+        assert_eq!(titles("german"), vec!["Die Burg"], "folder, relative to the root");
+        assert_eq!(titles("zcode"), vec!["Curses", "Die Burg"], "a parent folder matches everything under it");
+        assert_eq!(titles("zcode nel"), vec!["Curses"], "several terms all have to hit");
+        assert!(titles("nothing-here").is_empty());
+    }
+
+    #[test]
+    fn fetch_targets_reach_the_stories_in_all_folders_and_no_folder_rows() {
+        let root = nested_library("fetch-targets");
+        let targets = fetch_targets(&StorySource::Library(root.clone()), &root);
+        let _ = std::fs::remove_dir_all(&root);
+        let mut names: Vec<String> = targets
+            .iter()
+            .map(|t| t.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["burg.z5", "curses.z5", "top.z5"]);
+        assert!(targets.iter().all(|t| !t.ifid.is_empty()), "a target carries the IFID the fetch is keyed on");
+    }
+
+    #[test]
+    fn search_library_under_keeps_to_the_scope_and_its_folders() {
+        let root = PathBuf::from("/lib");
+        let mut a = story("Alpha", "a.z5", None, None);
+        a.path = root.join("zcode/a.z5");
+        let mut b = story("Beta", "b.z5", None, None);
+        b.path = root.join("zcode/german/b.z5");
+        let mut c = story("Gamma", "c.z5", None, None);
+        c.path = root.join("glulx/c.z5");
+        let index = vec![a, b, c];
+        let names = |scope: &Path| -> Vec<String> {
+            search_library_under(&index, &root, scope, "").iter().map(|e| e.title.clone()).collect()
+        };
+        assert_eq!(names(&root), vec!["Alpha", "Beta", "Gamma"], "the root is the whole library");
+        assert_eq!(names(&root.join("zcode")), vec!["Alpha", "Beta"], "a folder and the folders under it");
+        assert_eq!(names(&root.join("zcode/german")), vec!["Beta"]);
+        assert!(names(&root.join("nothing")).is_empty());
+        assert_eq!(
+            search_library_under(&index, &root, &root.join("zcode"), "beta").len(),
+            1,
+            "the query still applies within the scope"
+        );
+    }
+
+    #[test]
+    fn folder_label_names_the_folder_below_the_root_and_nothing_at_it() {
+        let root = PathBuf::from("/lib");
+        let mut e = story("x", "x.z5", None, None);
+        e.path = root.join("x.z5");
+        assert_eq!(folder_label(&e, &root), None);
+        e.path = root.join("zcode/german/x.z5");
+        assert_eq!(folder_label(&e, &root).as_deref(), Some("zcode/german"));
+        assert_eq!(folder_label(&e, &root.join("zcode")).as_deref(), Some("german"));
+        e.path = PathBuf::from("/elsewhere/x.z5");
+        assert_eq!(folder_label(&e, &root), None, "outside the tree is not a folder of it");
+    }
+
+    #[test]
+    fn a_folder_row_carries_no_badges() {
+        let dir = temp_dir("folder-badges");
+        let row = StoryEntry::folder(dir.clone(), "dir/");
+        let badges = compute_row_badges(&row, &dir, &hints::load_hint_index(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(badges, RowBadges::default());
+    }
 }
-
-

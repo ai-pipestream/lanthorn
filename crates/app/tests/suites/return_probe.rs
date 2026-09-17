@@ -162,6 +162,7 @@ impl Play {
             &*self.session,
             cmd,
             room_before,
+            &mut app::engine::TurnSave::default(),
         );
         app::return_probe::settle_return_search(&mut self.state, &mut self.mapper)
     }
@@ -221,11 +222,23 @@ fn zork1_learns_the_way_back_which_is_not_the_way_it_came() {
         "the room east of here was walked into and deliberately forgotten"
     );
 
-    // Every attempt is on the probe's record and none of them on the player's,
-    // so the map still offers south and east as exits nobody has explored.
-    for d in [Direction::S, Direction::E, Direction::W] {
-        assert!(p.mapper.graph.is_probed(north, d), "{d:?} was attempted");
+    // Every ANSWERED attempt is on the probe's record and none of them on the player's, so the
+    // map still offers south and east as exits nobody has explored.
+    //
+    // South is refused ("The windows are all boarded") and west reaches West of House: both are
+    // answers, and both are spent for good. East is neither — it came out in Behind House, which
+    // this map does not hold, so it says only "the player has not been there YET" and is NOT
+    // spent (SQ-1292). `probed` is consulted forever after by `probe_candidates`, which never
+    // offers a direction it holds; marking east here would mean that on a later visit — with
+    // Behind House by then on the map — North of House could never learn its way back east, and
+    // the search would settle for the diagonal instead.
+    for d in [Direction::S, Direction::W] {
+        assert!(p.mapper.graph.is_probed(north, d), "{d:?} was attempted and answered");
     }
+    assert!(
+        !p.mapper.graph.is_probed(north, Direction::E),
+        "east was attempted but the map could not read the answer, so it stays askable"
+    );
     let room = p.mapper.graph.room(north).unwrap();
     assert!(room.tried.is_empty(), "the PLAYER has typed nothing here: {:?}", room.tried);
     assert!(p.mapper.graph.untried(north).contains(&Direction::S), "south is still on offer");
@@ -315,6 +328,7 @@ fn an_aborted_search_keeps_what_it_answered_and_the_next_one_resumes() {
         &*p.session,
         "north",
         Some(west),
+        &mut app::engine::TurnSave::default(),
     );
     assert!(app::return_probe::pump_return_search(&mut p.state), "one attempt went out");
     let answer = p.state.probe.settle().expect("the shadow answered it");
@@ -330,7 +344,7 @@ fn an_aborted_search_keeps_what_it_answered_and_the_next_one_resumes() {
     let r = p.session.submit("east");
     let room_before = p.mapper.graph.current();
     app::session::apply_turn(&mut p.mapper, "east", &r, &mut p.death);
-    app::return_probe::arm_return_search(&mut p.state, &p.mapper, &*p.session, "east", room_before);
+    app::return_probe::arm_return_search(&mut p.state, &p.mapper, &*p.session, "east", room_before, &mut app::engine::TurnSave::default());
     assert_ne!(p.mapper.graph.current(), Some(north), "the move really left the room");
 
     // Come back, and the search picks up where it stopped.
@@ -338,7 +352,7 @@ fn an_aborted_search_keeps_what_it_answered_and_the_next_one_resumes() {
     let room_before = p.mapper.graph.current();
     app::session::apply_turn(&mut p.mapper, "north", &r, &mut p.death);
     assert_eq!(p.mapper.graph.current(), Some(north), "back at North of House");
-    app::return_probe::arm_return_search(&mut p.state, &p.mapper, &*p.session, "north", room_before);
+    app::return_probe::arm_return_search(&mut p.state, &p.mapper, &*p.session, "north", room_before, &mut app::engine::TurnSave::default());
     if let Some(s) = &p.state.return_search {
         assert!(
             !mapper::direction::PROBE_DIRS.is_empty() && s.remaining() < 12,
@@ -369,6 +383,7 @@ fn a_busy_shadow_makes_the_search_wait_rather_than_give_up() {
         &*p.session,
         "north",
         Some(west),
+        &mut app::engine::TurnSave::default(),
     );
 
     // Somebody else's question is out with the worker.
@@ -444,7 +459,7 @@ fn a_search_that_finds_nothing_leaves_the_map_as_it_was() {
         m.graph.mark_probed(2, d);
     }
     let conns = m.graph.connections().to_vec();
-    app::return_probe::arm_return_search(&mut p.state, &m, &*p.session, "north", Some(1));
+    app::return_probe::arm_return_search(&mut p.state, &m, &*p.session, "north", Some(1), &mut app::engine::TurnSave::default());
     assert!(
         p.state.return_search.is_none(),
         "every candidate already walked leaves nothing to ask, and nothing is recorded"

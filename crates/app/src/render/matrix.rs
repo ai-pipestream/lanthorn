@@ -23,11 +23,17 @@ use ratatui::style::Style;
 use crate::render::draw_str_clipped;
 use crate::state::AppState;
 
-/// Width of the pinned label column, including the one-cell `▸`/`⇲` marker gutter.
+/// The MINIMUM label-column reservation, including the one-cell `▸`/`⇲` marker gutter — the floor
+/// the direction-column ladder is sized against (SQ-1247).
 ///
-/// Ten columns of name is enough for `"Maze 11"` and for most short room names; anything longer is
-/// abbreviated and footnoted rather than allowed to push the table sideways, because the table's
-/// value is that all twelve directions stay on screen together.
+/// How many of the twelve columns fit, and at what cell width, is decided as if the label column
+/// were exactly this wide (see [`density`]), so a label column that later grows past it (see
+/// [`MatrixLayout::label_w`]) can never steal width from the direction table — "never shrink the
+/// direction columns" is enforced by never letting them see the grown number at all. The actual
+/// drawn label width is `MatrixLayout::label_w`, which grows to whatever the shown direction
+/// columns leave behind, capped at the longest room name, and can be wider OR narrower than this
+/// constant depending on what the data actually needs. Ten columns of name is enough for
+/// `"Maze 11"` and for most short room names; this is only ever the floor.
 pub const LABEL_W: u16 = 11;
 
 /// Minimum width of a direction column: two for the widest header (`NE`) plus a separating space.
@@ -86,6 +92,7 @@ fn cell_width(m: &Matrix, with_return: bool) -> u16 {
 /// | `⇱out` | leaves the layer; the destination is footnoted |
 /// | `×`    | tried, and there is no path that way           |
 /// | `·`    | untried — the exploration frontier             |
+/// | `?`    | tried; the story sends a different room each time (SQ-1257) |
 pub fn cell_text(m: &Matrix, cell: &MatrixCell, with_return: bool) -> String {
     let tag = |id: RoomId| m.labels.tag_of(id).to_string();
     match cell {
@@ -107,6 +114,11 @@ pub fn cell_text(m: &Matrix, cell: &MatrixCell, with_return: bool) -> String {
         }
         MatrixCell::Probed => "×".to_string(),
         MatrixCell::Untried => "·".to_string(),
+        // A bare `?` when nothing is recorded yet; a superscript count of recorded destinations
+        // once there are some (SQ-1261) — `?²` for two rooms this direction has actually landed
+        // in, agreeing with the room card's "destination varies: A, B" and the same glyph table
+        // the map box's stub uses.
+        MatrixCell::Random { destinations } => format!("?{}", super::superscript_count(*destinations)),
     }
 }
 
@@ -150,6 +162,14 @@ pub struct MatrixLayout {
     pub matrix: Matrix,
     pub density: Density,
     pub cell_w: u16,
+    /// How many of the twelve direction columns are actually drawn — all of them, unless
+    /// [`Density::Scroll`] has to drop some off the left. Computed against [`LABEL_W`], the
+    /// minimum reservation, so it never shrinks because [`Self::label_w`] later grew (SQ-1247).
+    pub shown_cols: usize,
+    /// The label column's ACTUAL drawn width this frame (SQ-1247): whatever `shown_cols` columns
+    /// of direction table leave behind, capped at the longest room name (plus its one-cell marker
+    /// gutter) so it never claims width no name needs. Can be wider OR narrower than [`LABEL_W`].
+    pub label_w: u16,
     pub footnotes: Vec<Footnote>,
     /// Per-row label text and the footnote marker it carries (empty when it needs none).
     pub labels: Vec<(String, String)>,
@@ -162,10 +182,25 @@ pub fn layout(graph: &MapGraph, layer: LayerId, width: u16) -> MatrixLayout {
     let m = matrix::build(graph, layer);
     let (density, cell_w) = density(&m, width);
 
+    // How many direction columns are shown, exactly as before (SQ-0666): the floor-based ladder
+    // against `LABEL_W`, never the grown `label_w` below — that is what keeps a wide label column
+    // from ever costing the direction table a column (SQ-1247).
+    let shown_cols = ((width.saturating_sub(LABEL_W)) / cell_w).min(12) as usize;
+
+    // SQ-1247: the label column grows to whatever the shown direction columns leave behind,
+    // capped at the longest room name plus its one-cell marker gutter — so it never claims width
+    // no name actually needs. When every name's length is within that cap, `label_cell` below
+    // finds nothing left to truncate, and the whole per-row footnote-and-superscript machinery
+    // stays silent for every row.
+    let longest_name = m.rows.iter().map(|r| r.label.chars().count() as u16).max().unwrap_or(0);
+    let cap = longest_name.saturating_add(1); // one column for the ▸/⇲ marker
+    let avail = width.saturating_sub(cell_w * shown_cols as u16);
+    let label_w = avail.min(cap).max(1);
+
     let mut footnotes: Vec<Footnote> = Vec::new();
     let mut labels = Vec::with_capacity(m.rows.len());
     for row in &m.rows {
-        let (text, long) = label_cell(&row.label, LABEL_W as usize - 1);
+        let (text, long) = label_cell(&row.label, label_w.saturating_sub(1) as usize);
         let mark = match long {
             Some(full) => {
                 let mk = marker(footnotes.len());
@@ -182,8 +217,10 @@ pub fn layout(graph: &MapGraph, layer: LayerId, width: u16) -> MatrixLayout {
     for row in &m.rows {
         for (i, cell) in row.cells.iter().enumerate() {
             let MatrixCell::LeavesLayer { dest } = cell else { continue };
-            let name =
-                graph.room(*dest).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{dest}"));
+            let name = graph
+                .room(*dest)
+                .map(|r| r.label().to_string())
+                .unwrap_or_else(|| crate::roomid::room_label_no(graph, *dest));
             let text = format!(
                 "⇱out: {} from {} → {}",
                 short_label(MATRIX_DIRS[i]).to_uppercase(),
@@ -203,15 +240,17 @@ pub fn layout(graph: &MapGraph, layer: LayerId, width: u16) -> MatrixLayout {
     let mut entry_rooms: BTreeSet<RoomId> = BTreeSet::new();
     for (origin, dir, dest) in matrix::inbound_border_edges(graph, layer) {
         entry_rooms.insert(dest);
-        let origin_name =
-            graph.room(origin).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{origin}"));
+        let origin_name = graph
+            .room(origin)
+            .map(|r| r.label().to_string())
+            .unwrap_or_else(|| crate::roomid::room_label_no(graph, origin));
         let dest_label = m.labels.row_of(dest).to_string();
         let text =
             format!("⇲ in:  {origin_name} —{}→ {dest_label}", short_label(dir).to_uppercase());
         footnotes.push(Footnote { marker: String::new(), text });
     }
 
-    MatrixLayout { matrix: m, density, cell_w, footnotes, labels, entry_rooms }
+    MatrixLayout { matrix: m, density, cell_w, shown_cols, label_w, footnotes, labels, entry_rooms }
 }
 
 /// Rows of chrome the table spends before and after its data: header, rule, rule.
@@ -251,14 +290,16 @@ pub fn render_matrix(
     let entrance_style = state.colors.theme.get("map.matrix.cell:entrance").style;
     let path_style = state.colors.theme.get("map.matrix.cell:path").style;
     let frontier_style = state.colors.theme.get("map.matrix.cell:frontier").style;
+    let random_style = state.colors.theme.get("map.matrix.cell:random").style;
     let footnote_style = state.colors.theme.get("map.matrix.footnote").style;
     let trail_style = state.colors.theme.get("map.trail").style;
 
-    // The columns actually shown. Horizontal scroll drops whole columns off the LEFT while the
-    // label column stays put — a half-column would be unreadable and a floating label column
-    // would lose the reader entirely.
-    let per_row = ((area.width - LABEL_W) / ml.cell_w) as usize;
-    let shown = per_row.min(12);
+    // The columns actually shown — `ml.shown_cols`, resolved in `layout()` against the MINIMUM
+    // label reservation so the grown `ml.label_w` below can never cost the direction table a
+    // column (SQ-1247). Horizontal scroll drops whole columns off the LEFT while the label column
+    // stays put — a half-column would be unreadable and a floating label column would lose the
+    // reader entirely.
+    let shown = ml.shown_cols;
     let first_col = if ml.density == Density::Scroll {
         (state.matrix_scroll.0 as usize).min(12usize.saturating_sub(shown))
     } else {
@@ -266,10 +307,11 @@ pub fn render_matrix(
     };
 
     // ── Header + rule ────────────────────────────────────────────────────────
-    let table_w = LABEL_W + ml.cell_w * shown as u16;
+    let table_w = ml.label_w + ml.cell_w * shown as u16;
     for (slot, i) in (first_col..first_col + shown).enumerate() {
         let text = short_label(MATRIX_DIRS[i]).to_uppercase();
-        let x = area.x + LABEL_W + ml.cell_w * slot as u16 + ml.cell_w - text.chars().count() as u16;
+        let x =
+            area.x + ml.label_w + ml.cell_w * slot as u16 + ml.cell_w - text.chars().count() as u16;
         draw_str_clipped(buf, x, area.y, &text, header_style, area);
     }
     let rule: String = "─".repeat(table_w.min(area.width) as usize);
@@ -333,13 +375,13 @@ pub fn render_matrix(
             let rest = format!("{text}{mark}");
             draw_str_clipped(buf, area.x + 1, y, &rest, row_style, area);
         }
-        hits.push((row.room, Rect::new(area.x, y, LABEL_W.min(area.width), 1)));
+        hits.push((row.room, Rect::new(area.x, y, ml.label_w.min(area.width), 1)));
 
         for (col_slot, i) in (first_col..first_col + shown).enumerate() {
             let cell = row.cells[i];
             let text = cell_text(m, &cell, ml.density == Density::Full);
             let w = text.chars().count() as u16;
-            let x = area.x + LABEL_W + ml.cell_w * col_slot as u16 + ml.cell_w - w;
+            let x = area.x + ml.label_w + ml.cell_w * col_slot as u16 + ml.cell_w - w;
             // An entrance to the selected room is bolded wherever it appears — style, not a
             // glyph, so the cell keeps saying exactly one thing. A step of the route wins over
             // that: the LAST step is necessarily an entrance too, and the answer the player just
@@ -350,6 +392,8 @@ pub fn render_matrix(
                 entrance_style
             } else if cell.is_frontier() {
                 frontier_style
+            } else if matches!(cell, MatrixCell::Random { .. }) {
+                random_style
             } else {
                 row_style
             };
@@ -382,6 +426,50 @@ pub fn render_matrix(
         y += 1;
     }
     hits
+}
+
+/// Draw the hover tooltip for whichever matrix room the pointer is on, if any (SQ-1246).
+///
+/// `state.matrix_hover` is what `main.rs`'s `matrix_update_hover` last resolved from a `Moved`
+/// event — a row label or a destination cell, paired with the exact rect the pointer was found
+/// under. Either way it names a room: a row label is truncated on screen whenever the name did
+/// not fit the label column, and a destination cell never carries a name at all, only a two- or
+/// three-letter tag. The full name is read from the same [`MatrixLabels`](matrix::MatrixLabels)
+/// the table itself printed from, so a tooltip and the table's own footnote (when a name was too
+/// long to fit) can never disagree.
+///
+/// Reuses the shared floating-box renderer the border controls already draw their hints with
+/// (`tooltip::draw_tip`) rather than a second tooltip mechanism, so styling (`tooltip.*`) and
+/// placement (beside/below the anchor, clamped to `area`) are identical to theirs.
+///
+/// Returns `None` — and paints nothing — while a modal overlay owns the pointer, or when nothing
+/// is hovered, or when the hovered room has no name to show.
+pub fn draw_hover_tip(
+    graph: &MapGraph,
+    layer: LayerId,
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+) -> Option<Rect> {
+    if state.any_modal_overlay_open() {
+        return None;
+    }
+    let (room, rect) = state.matrix_hover?;
+    let m = matrix::build(graph, layer);
+    let name = m.labels.row_of(room);
+    if name.is_empty() {
+        return None;
+    }
+    let anchor_col = rect.x + rect.width / 2;
+    super::tooltip::draw_tip(
+        buf,
+        area,
+        anchor_col,
+        rect.y,
+        &[name.to_string()],
+        &state.colors.theme,
+        &state.symbols,
+    )
 }
 
 /// Move the selection `delta` rows through the matrix, scrolling to keep it visible.
@@ -426,7 +514,7 @@ pub fn scroll_to_show(graph: &MapGraph, layer: LayerId, room: RoomId, area: Rect
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
     use mapper::direction::Direction;
@@ -436,7 +524,7 @@ mod tests {
     fn tiny() -> MapGraph {
         let mut g = MapGraph::new();
         for (id, n) in [(1u16, "Maze"), (2, "Maze"), (3, "Dead End, near Vending Machine")] {
-            g.upsert_room(id, n.into());
+            g.upsert_room(id.into(), n.into());
         }
         g.add_edge(1, Direction::N, 2);
         g.add_edge(2, Direction::W, 1);
@@ -458,6 +546,30 @@ mod tests {
         assert_eq!(t(3, Direction::E, true), "×", "tried, no path");
         assert_eq!(t(3, Direction::W, true), "·", "untried");
         assert_eq!(t(1, Direction::S, true), "·");
+    }
+
+    /// SQ-1261: a `?` cell is bare with no recorded destinations, and carries a superscript
+    /// count once some are recorded — the same glyph table the map box's stub and the alias
+    /// marker use.
+    #[test]
+    fn random_cell_carries_a_superscript_destination_count() {
+        let mut g = tiny();
+        g.mark_random_exit(1, Direction::E);
+        let m = matrix::build(&g, MAIN_LAYER);
+        assert_eq!(
+            cell_text(&m, &matrix::classify(&g, 1, Direction::E), true),
+            "?",
+            "no destinations recorded yet"
+        );
+
+        g.note_random_destination(1, Direction::E, 2);
+        g.note_random_destination(1, Direction::E, 3);
+        let m = matrix::build(&g, MAIN_LAYER);
+        assert_eq!(
+            cell_text(&m, &matrix::classify(&g, 1, Direction::E), true),
+            "?²",
+            "two distinct destinations recorded"
+        );
     }
 
     /// A long name is cut at its comma, marked, and spelled out below the table — never left as
@@ -487,6 +599,107 @@ mod tests {
             density(&m, LABEL_W + compact * 12 - 1).0,
             Density::Scroll,
             "scrolling is the last resort, not the first"
+        );
+    }
+
+    /// SQ-1247: with no slack left after the direction columns — the exact width at which
+    /// [`density_degrades_before_it_scrolls`] above finds `Density::Compact`, one row short of
+    /// `Full` — the label column has nothing to grow into and must stay at today's fixed
+    /// [`LABEL_W`], byte for byte: same text, same footnote-marker presence, for every row.
+    #[test]
+    fn a_narrow_pane_keeps_todays_fixed_label_width_byte_for_byte() {
+        let g = tiny();
+        let m = matrix::build(&g, MAIN_LAYER);
+        let compact = cell_width(&m, false);
+        let width = LABEL_W + compact * 12; // Density::Compact, no width left over for the label
+        let ml = layout(&g, MAIN_LAYER, width);
+        assert_eq!(ml.label_w, LABEL_W, "no slack: the column must stay at today's fixed width");
+
+        for row in &m.rows {
+            let (want_text, want_long) = label_cell(&row.label, LABEL_W as usize - 1);
+            let idx = ml.matrix.index_of(row.room).expect("every row indexes itself");
+            let (text, mark) = &ml.labels[idx];
+            assert_eq!(*text, want_text, "room {}: today's label text must be unchanged", row.room);
+            assert_eq!(
+                !mark.is_empty(),
+                want_long.is_some(),
+                "room {}: today's footnote-marker presence must be unchanged",
+                row.room
+            );
+        }
+    }
+
+    /// SQ-1247's headline: given room to spare, the label column grows past `LABEL_W` — but only
+    /// as far as the longest name actually needs, never further. A name that would have been
+    /// truncated under yesterday's fixed 11 now fits in full, and with every name fitting, nothing
+    /// gets a superscript and no truncation footnote is added.
+    ///
+    /// Falsified by reverting `layout`'s `label_w` to the constant `LABEL_W`: with that revert,
+    /// "Medium Length Room" (18 chars, fits comfortably once the column is allowed to grow) is cut
+    /// down to 10 and footnoted instead — the very shrinkage this feature removes.
+    #[test]
+    fn a_wide_pane_with_short_names_grows_the_column_and_drops_the_footnotes() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "AAA".into());
+        g.upsert_room(2, "Medium Length Room".into()); // 18 chars: > old LABEL_W-1 (10), fits new
+        g.set_current(1);
+
+        let width = 80;
+        let ml = layout(&g, MAIN_LAYER, width);
+        // Capped at the longest name (18) plus its one-column marker gutter — not ballooned out
+        // to whatever the direction columns left behind (which is far more than 19 at width 80).
+        assert_eq!(ml.label_w, 19, "the column grows only as far as the longest name needs");
+
+        for (text, mark) in &ml.labels {
+            assert!(mark.is_empty(), "no room needs a footnote marker here: {text:?} got {mark:?}");
+        }
+        assert!(ml.footnotes.is_empty(), "every name fits: no footnote list at all: {:?}", ml.footnotes);
+
+        let area = Rect { x: 0, y: 0, width, height: 24 };
+        let text = render_lines(&g, MAIN_LAYER, area).join("\n");
+        assert!(text.contains("Medium Length Room"), "the full name is on screen: {text:?}");
+        for d in SUPERSCRIPTS {
+            assert!(!text.contains(d), "no superscript marker anywhere on screen: {text:?}");
+        }
+    }
+
+    /// The mixed case: one name too long for even the grown column, alongside names short enough
+    /// to fit it — only the long one gets a superscript and a footnote entry, exactly as today's
+    /// per-row truncation already does, just against a wider column.
+    #[test]
+    fn only_the_name_that_still_does_not_fit_is_footnoted() {
+        let mut g = MapGraph::new();
+        let long_name = "This Name Is Deliberately Long For The Direction Table Test";
+        g.upsert_room(1, "AAA".into());
+        g.upsert_room(2, "Medium Length Room".into()); // 18 chars
+        g.upsert_room(3, long_name.into()); // far longer than the other two
+        g.set_current(1);
+
+        let width = 60;
+        let ml = layout(&g, MAIN_LAYER, width);
+        assert!(ml.label_w > LABEL_W, "there was room to grow: got {}", ml.label_w);
+        assert!(
+            (ml.label_w as usize) < long_name.chars().count(),
+            "the column must NOT have grown enough to swallow the long name whole: {}",
+            ml.label_w
+        );
+
+        let idx = |id| ml.matrix.index_of(id).expect("every room has a row");
+        let (aaa_text, aaa_mark) = &ml.labels[idx(1)];
+        let (medium_text, medium_mark) = &ml.labels[idx(2)];
+        let (long_text, long_mark) = &ml.labels[idx(3)];
+        assert_eq!(aaa_text, "AAA", "short name: untouched");
+        assert!(aaa_mark.is_empty());
+        assert_eq!(medium_text, "Medium Length Room", "medium name: fits the grown column whole");
+        assert!(medium_mark.is_empty(), "…so it needs no footnote marker");
+        assert_ne!(long_text, long_name, "the long name is still cut down");
+        assert!(!long_mark.is_empty(), "…and still carries a footnote marker");
+
+        assert_eq!(
+            ml.footnotes.iter().filter(|f| !f.marker.is_empty()).count(),
+            1,
+            "exactly one row-truncation footnote — the long name's, and no other: {:?}",
+            ml.footnotes
         );
     }
 
@@ -581,5 +794,147 @@ mod tests {
         assert_eq!(step_selection(&g, MAIN_LAYER, Some(1), -1), Some(1), "nor the first");
         assert_eq!(step_selection(&g, MAIN_LAYER, Some(3), -2), Some(1));
         assert_eq!(step_selection(&MapGraph::new(), MAIN_LAYER, None, 1), None, "an empty layer");
+    }
+
+    /// SQ-1246: every drawn row label publishes a hit-rect (a tooltip needs an anchor to hover
+    /// on), and every non-empty destination cell does too. A cell with nothing to name — untried
+    /// or probed, the two "empty" glyphs (`·` and `×`) — must not.
+    #[test]
+    fn every_row_label_and_non_empty_cell_publishes_a_hit_rect() {
+        let g = tiny();
+        let m = matrix::build(&g, MAIN_LAYER);
+        let st = AppState::default();
+        let area = Rect { x: 0, y: 0, width: 100, height: 24 };
+        let mut buf = Buffer::empty(area);
+        let hits = render_matrix(&g, MAIN_LAYER, &st, area, &mut buf);
+
+        // One row-label rect per row, at the pane's left edge (cell rects start past `LABEL_W`).
+        let label_hits: Vec<_> = hits.iter().filter(|(_, r)| r.x == area.x).collect();
+        assert_eq!(label_hits.len(), m.rows.len(), "every row label gets a rect: {hits:?}");
+        for row in &m.rows {
+            assert!(
+                label_hits.iter().any(|(room, _)| *room == row.room),
+                "room {} has no row-label rect: {hits:?}",
+                row.room
+            );
+        }
+
+        // Every cell whose classification actually names a room IN this layer gets a rect;
+        // untried/probed cells (no destination at all) contribute none.
+        let expected_cell_hits = m
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .filter(|cell| cell.dest().is_some_and(|d| m.index_of(d).is_some()))
+            .count();
+        assert_eq!(hits.len() - label_hits.len(), expected_cell_hits, "hits: {hits:?}");
+    }
+
+    /// Hovering the truncated row label shows the FULL name — falsified by reverting
+    /// `draw_hover_tip` to always return `None`, which turns this into "the room's name never
+    /// appears anywhere on screen but the footnote", the originally requested behaviour.
+    #[test]
+    fn hovering_a_truncated_row_label_shows_the_full_room_name() {
+        let g = tiny();
+        let st_default = AppState::default();
+        let area = Rect { x: 0, y: 0, width: 100, height: 24 };
+        let mut buf = Buffer::empty(area);
+        let hits = render_matrix(&g, MAIN_LAYER, &st_default, area, &mut buf);
+
+        // Room 3's name ("Dead End, near Vending Machine") does not fit `LABEL_W` and is
+        // truncated on screen — exactly the case a tooltip exists for.
+        let (_, label_rect) =
+            *hits.iter().find(|(room, r)| *room == 3 && r.x == area.x).expect("room 3's row label");
+
+        let mut st = AppState::default();
+        st.matrix_hover = Some((3, label_rect));
+        let mut buf2 = Buffer::empty(area);
+        render_matrix(&g, MAIN_LAYER, &st, area, &mut buf2);
+        let painted =
+            draw_hover_tip(&g, MAIN_LAYER, &st, area, &mut buf2).expect("a tip was painted");
+        assert!(
+            buf_contains(&buf2, painted, "Dead End, near Vending Machine"),
+            "the full name must appear in the tip box"
+        );
+    }
+
+    /// Hovering a destination cell shows the DESTINATION's full name, not the row it sits in's.
+    #[test]
+    fn hovering_a_destination_cell_shows_the_destinations_full_name() {
+        let g = tiny();
+        let area = Rect { x: 0, y: 0, width: 100, height: 24 };
+        let st_default = AppState::default();
+        let mut probe = Buffer::empty(area);
+        let hits = render_matrix(&g, MAIN_LAYER, &st_default, area, &mut probe);
+
+        // A cell rect sits past the label column and names room 3 as its destination — the
+        // `→3⇠n`/`⇄DE`-shaped cell on room 2's row.
+        let (room, cell_rect) = *hits
+            .iter()
+            .find(|(room, r)| *room == 3 && r.x > area.x)
+            .expect("a destination cell pointing at room 3");
+        assert_eq!(room, 3);
+
+        let mut st = AppState::default();
+        st.matrix_hover = Some((room, cell_rect));
+        let mut buf = Buffer::empty(area);
+        render_matrix(&g, MAIN_LAYER, &st, area, &mut buf);
+        let painted = draw_hover_tip(&g, MAIN_LAYER, &st, area, &mut buf).expect("a tip was painted");
+        assert!(
+            buf_contains(&buf, painted, "Dead End, near Vending Machine"),
+            "the destination's full name must appear in the tip box"
+        );
+    }
+
+    /// No hovered room, or one that names nothing in this layer's table, paints nothing.
+    #[test]
+    fn no_hover_or_an_unresolvable_room_paints_no_tooltip() {
+        let g = tiny();
+        let area = Rect { x: 0, y: 0, width: 100, height: 24 };
+        let mut st = AppState::default();
+        let mut buf = Buffer::empty(area);
+        render_matrix(&g, MAIN_LAYER, &st, area, &mut buf);
+        assert_eq!(draw_hover_tip(&g, MAIN_LAYER, &st, area, &mut buf), None, "nothing hovered");
+
+        st.matrix_hover = Some((999, Rect::new(0, 2, LABEL_W, 1)));
+        assert_eq!(
+            draw_hover_tip(&g, MAIN_LAYER, &st, area, &mut buf),
+            None,
+            "a room with no name in this layer's table gets no tip"
+        );
+    }
+
+    /// A modal dialog owns the pointer — same rule the border-control hint follows — so no tip
+    /// draws underneath it even with a perfectly valid hover still recorded.
+    #[test]
+    fn a_modal_overlay_suppresses_the_tooltip() {
+        let g = tiny();
+        let area = Rect { x: 0, y: 0, width: 100, height: 24 };
+        let st_default = AppState::default();
+        let mut probe = Buffer::empty(area);
+        let hits = render_matrix(&g, MAIN_LAYER, &st_default, area, &mut probe);
+        let (room, rect) = *hits.iter().find(|(room, r)| *room == 3 && r.x == area.x).unwrap();
+
+        let mut st = AppState::default();
+        st.matrix_hover = Some((room, rect));
+        st.overlays.hotkey_dialog = true;
+        let mut buf = Buffer::empty(area);
+        assert_eq!(
+            draw_hover_tip(&g, MAIN_LAYER, &st, area, &mut buf),
+            None,
+            "a modal overlay must suppress the tip"
+        );
+    }
+
+    /// Cell contents as plain strings within `rect`, concatenated — enough to search for text a
+    /// tooltip box painted.
+    fn buf_contains(buf: &Buffer, rect: Rect, needle: &str) -> bool {
+        let mut joined = String::new();
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                joined.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+            }
+        }
+        joined.contains(needle)
     }
 }

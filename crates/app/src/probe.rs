@@ -44,6 +44,24 @@
 //! `@save`. So "what would happen if I typed this?" is answerable by typing it
 //! somewhere the answer costs nothing.
 //!
+//! # And what it cannot be asked: a story that is not waiting for a line (SQ-1349)
+//!
+//! Every question this seam puts is a typed command, so the shadow can only
+//! answer while the story is waiting for one. [`ShadowProbe::snapshot_from`]
+//! therefore refuses whenever the live session's [`Engine::pending_input`] is
+//! anything but `Line` — a title splash, a `[MORE]`, a yes/no, a Glk timer
+//! event — alongside the unarmed and mid-save refusals it already made, and
+//! before paying for the snapshot (SQ-1177). A caller sees the same synchronous
+//! `None` from [`ShadowProbe::ask`] it already handles as "no probe was
+//! possible", rather than a worker round trip that comes back empty.
+//!
+//! This is not an edge case waiting to happen: `journey-r83-s890706.z6` is
+//! driven entirely from menus and never presents a line prompt at all, so there
+//! is no moment in that story at which the seam has a question to ask. Before
+//! this refusal the shadow typed `look` into Journey's menu, the `l` turned an
+//! intro page, and the page's text came back looking like a reply — an answer
+//! about the story's key handling dressed as an answer about the command.
+//!
 //! # How this story says no, discovered rather than assumed
 //!
 //! The interesting question is almost never *did the parser understand this* —
@@ -62,9 +80,10 @@
 //!   all (a word this story's dictionary does not hold). Every sentence of the
 //!   reply is a refusal.
 //! * [`ProbeRun::refusal_from_pair`] — the same command twice with two different
-//!   nouns in it. Believed **only when the two replies are the same sentence**
-//!   once their own nouns are struck out, which is what tells a generic refusal
-//!   from two coincidentally similar successes.
+//!   nouns in it. Believed **only as far as the two replies agree**, sentence by
+//!   sentence, once their own nouns are struck out — which is what tells a
+//!   generic refusal from two coincidentally similar successes, while still
+//!   learning something when a daemon fires on one of the two and not the other.
 //!
 //! Both additionally require the control to have left the world unchanged
 //! ([`WorldPrint`]): a control that moved an object *did* something, so whatever
@@ -83,6 +102,39 @@
 //! So a caller runs its controls **in the same `run` as its questions**, from
 //! the same snapshot, and reads the signature off that run. Nothing is cached
 //! between turns.
+//!
+//! # What one question actually costs, and in which build (SQ-1249)
+//!
+//! The seam was reported at 4–10 s per vetted turn on heavy Inform 7 games.
+//! [`ProbePhases`] exists because that had to be split before it could be
+//! believed, and splitting it produced two answers rather than one.
+//!
+//! **The phase that dominates is `submit`** — the story running the commands we
+//! asked about — at ~80% of the bill on every Glulx story measured. `boot` is
+//! paid once a session and is a rounding error after it (SQ-1124 already moved
+//! the shadow to one boot plus a restore per question, so there is no re-boot
+//! and no replay of the turn history to remove); `restore` is ~10%; reading the
+//! world after each command is ~5%. Nothing is left to optimise there that is
+//! not "ask the story fewer questions", which is a change to what vetting MEANS.
+//!
+//! **And the 4–10 s was a DEBUG build.** `cargo run -p app --example
+//! guidance_scan` prints the breakdown per story; the same scan, same fixtures,
+//! same machine, one release flag apart (2026-09-02):
+//!
+//! | story | debug | release | worst single turn, release |
+//! |---|---|---|---|
+//! | weight-of-soul-public.gblorb | 11.64 s | **0.95 s** | 0.30 s |
+//! | Sub_Rosa.gblorb | 11.89 s | **1.15 s** | 0.32 s |
+//! | Alias 'The Magpie'.gblorb | 7.42 s | **0.56 s** | 0.09 s |
+//! | Junior Arithmancer.gblorb | 3.92 s | **0.33 s** | 0.10 s |
+//! | curses.z5 | 0.22 s | **0.06 s** | 0.01 s |
+//!
+//! Those are WORKER seconds across a whole scan, not a stall: the player's own
+//! thread pays only the host snapshot in [`ShadowProbe::ask`], measured at 0.05 s
+//! across the whole of weight-of-soul's scan. So the answer to "is this
+//! affordable" is a build question, and a number taken under `cargo test` or
+//! `cargo run` without `--release` is off by an order of magnitude. Quote the
+//! release figure, and say which build any new one came from.
 //!
 //! # What it still cannot tell you
 //!
@@ -170,41 +222,96 @@ pub struct ShadowRecipe {
 /// A fingerprint of as much of the game world as an engine will show us:
 /// where the player is, what is in the room, and what they are carrying.
 ///
-/// Deliberately a hash and not a description — nothing reads it except to ask
-/// whether it is the same as another one. `None` for an engine with no
-/// introspection, which is an honest "cannot tell", not "nothing changed".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WorldPrint(Option<u64>);
+/// Deliberately hashes and not descriptions — nothing reads them except to ask
+/// whether they are the same as another print's. Every field is `None` for an
+/// engine with no introspection, which is an honest "cannot tell", not "nothing
+/// changed".
+///
+/// # Three facts, not one hash, because only two of them survive a save
+/// (SQ-1248)
+///
+/// This was one `Option<u64>` over all of it, and that is not comparable
+/// between two engines. [`Engine::current_location`] on a v4+ Z-machine story is
+/// read off the **status line** — screen state, which no save carries and which
+/// `GameSession::restore_state` deliberately blanks (SQ-0785, so a half-repainted
+/// bar cannot name a plausible wrong room). A shadow therefore starts every
+/// question with no status line at all, and whether it gets one back depends
+/// entirely on whether the story repaints the whole bar during the probe turn:
+///
+/// | story | the shadow's bar after one probe turn | `current_location` |
+/// |---|---|---|
+/// | `vespers.z8` | repainted in full, `" Your Bedroom … Vespers "` | `Some` |
+/// | `curses.z5` | only the fields that CHANGED, so the room row stays blank | **`None`** |
+/// | `suvehnux.z5` | never split or drawn again after `Initialise` | **`None`** |
+///
+/// Folded into one hash, a location the live engine can read and the shadow
+/// cannot made **every** step differ from the baseline. [`ProbeRun::inert`] then
+/// called every control "did something", no refusal signature could be learned,
+/// and every offer on those two stories came out unvetted though the probe ran
+/// — while [`ProbeRun::did_something`] said yes to every candidate for the same
+/// reason, which is the same defect pointing the other way.
+///
+/// So each fact is stored and compared on its own, and a fact only one side can
+/// answer is not evidence of a change. That is [`Self::differs_from`]'s existing
+/// rule ("two unreadable prints are not the same; they are not an answer")
+/// applied per fact instead of to the bundle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorldPrint {
+    /// The player and what they are carrying — the object tree alone, so it is
+    /// exactly what a restored save brings back and is always comparable.
+    carried: Option<u64>,
+    /// Where the player is, when the engine can say. Screen-derived above v3;
+    /// see the type docs.
+    here: Option<mapper::graph::RoomId>,
+    /// What is in that room besides the player. `None` whenever `here` is,
+    /// because then the question was never asked.
+    room: Option<u64>,
+}
 
 impl WorldPrint {
     /// Read the world as `engine` currently has it.
     pub fn of(engine: &dyn Engine) -> WorldPrint {
-        let Some(intro) = engine.introspect() else { return WorldPrint(None) };
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        let here = engine.current_location().map(|l| l.number);
-        here.hash(&mut h);
+        let Some(intro) = engine.introspect() else { return WorldPrint::default() };
         let player = intro.player_object();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
         player.hash(&mut h);
-        if let Some(room) = here {
-            let mut v = intro.room_objects_excluding(room, player);
-            v.sort();
-            v.hash(&mut h);
-        }
         if let Some(p) = player {
             let mut v = intro.contents(p);
             v.sort();
             v.hash(&mut h);
         }
-        WorldPrint(Some(h.finish()))
+        let here = engine.current_location().map(|l| l.number);
+        let room = here.map(|room| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            let mut v = intro.room_objects_excluding(room, player);
+            v.sort();
+            v.hash(&mut h);
+            h.finish()
+        });
+        WorldPrint { carried: Some(h.finish()), here, room }
     }
 
-    /// True when both prints are readable and they differ — a changed world.
-    /// Two unreadable prints are not "the same"; they are not an answer.
+    /// True when some fact **both** prints can answer differs — a changed world.
+    /// A fact only one of them holds is not an answer either way; see the type
+    /// docs for the story that made that distinction load-bearing.
     pub fn differs_from(self, other: WorldPrint) -> bool {
-        match (self.0, other.0) {
-            (Some(a), Some(b)) => a != b,
-            _ => false,
+        fn changed<T: PartialEq>(a: Option<T>, b: Option<T>) -> bool {
+            matches!((a, b), (Some(a), Some(b)) if a != b)
         }
+        changed(self.carried, other.carried)
+            || changed(self.here, other.here)
+            || changed(self.room, other.room)
+    }
+
+    /// A print with each fact stated outright, so a case can build the
+    /// live-and-shadow pair SQ-1248 is about without two engines.
+    #[cfg(all(test, any(feature = "t-session", feature = "t-guidance")))]
+    pub(crate) fn from_parts(
+        carried: Option<u64>,
+        here: Option<mapper::graph::RoomId>,
+        room: Option<u64>,
+    ) -> WorldPrint {
+        WorldPrint { carried, here, room }
     }
 }
 
@@ -216,7 +323,7 @@ pub struct ProbeStep {
     /// Everything the story printed in reply, and nothing else.
     pub reply: String,
     /// The room the shadow ended the command in, when the engine can say.
-    pub location: Option<u16>,
+    pub location: Option<mapper::graph::RoomId>,
     /// The world after the command.
     pub world: WorldPrint,
     /// The story ended.
@@ -225,6 +332,33 @@ pub struct ProbeStep {
     /// `@save`/`@restore`, or a Glk file prompt. It was refused and the step is
     /// worthless, but nothing escaped.
     pub escaped: bool,
+    /// The command KILLED the shadow player (SQ-1506).
+    ///
+    /// [`crate::session::turn_reports_death`], the same detector the live turn path reads to
+    /// decide a room change was a relocation rather than a walked passage (SQ-0259/SQ-0671) —
+    /// the `*** … ***` banner every Infocom and Inform game prints, or a death word beside an
+    /// offer to bring the player back. Stated here, once, so that no consumer has to rediscover
+    /// it: a shadow that died was RELOCATED by the game's own resurrection, and wherever it woke
+    /// up is not where the direction it typed leads.
+    pub died: bool,
+}
+
+impl ProbeStep {
+    /// The room this step is evidence ABOUT — `None` when it is evidence about nothing.
+    ///
+    /// [`ProbeStep::location`] alone is where the shadow ENDED UP, which is a different
+    /// question. A step that ended the story, reached for a file, or got the shadow killed still
+    /// reports a room — the room the VM unwound in, the room the resurrection dropped it in —
+    /// and reading that as "where this direction leads" is how Zork I's Cellar grew a `north`
+    /// passage to the Forest (SQ-1506: the troll kills the shadow in the Troll Room and Zork I
+    /// wakes it up in Forest, a room the map already holds, so the false edge minted cleanly).
+    /// Both consumers of a probe run ask this rather than reading `location` themselves.
+    pub fn landing(&self) -> Option<mapper::graph::RoomId> {
+        if self.quit || self.escaped || self.died {
+            return None;
+        }
+        self.location
+    }
 }
 
 /// One `run`: the world the questions were asked from, and what each answered.
@@ -258,7 +392,15 @@ impl Refusals {
     /// falls silent on a whole engine. A refusal is what the story says FIRST;
     /// what follows it is a prompt, a daemon, or the lamp getting dimmer.
     pub fn says_no(&self, reply: &str, command: &str) -> bool {
+        // Two readings, either sufficient (SQ-1252): the reply as the story
+        // actually sent it, and with a leading disambiguation echo stripped —
+        // see [`strip_disambiguation_echo`]. Trying the raw reading FIRST
+        // costs nothing (it is a no-op whenever there is no echo to strip) and
+        // keeps every match a story's own un-echoed wording already earned.
         signature(reply, command).first().is_some_and(|s| self.sigs.contains(s))
+            || signature(strip_disambiguation_echo(reply), command)
+                .first()
+                .is_some_and(|s| self.sigs.contains(s))
     }
 
     /// Fold another reading of the same run in.
@@ -290,13 +432,25 @@ impl ProbeRun {
         let Some(step) = self.steps.get(i).filter(|s| self.inert(s)) else {
             return Refusals::default();
         };
-        Refusals { sigs: signature(&step.reply, &step.command).into_iter().collect() }
+        let mut sigs: BTreeSet<String> = signature(&step.reply, &step.command).into_iter().collect();
+        sigs.extend(signature(strip_disambiguation_echo(&step.reply), &step.command));
+        Refusals { sigs }
     }
 
     /// Steps `a` and `b` are the same command carrying two different nouns.
-    /// Their reply is a refusal **only if it is the same sentence** once each
-    /// one's own noun is struck out — otherwise the two are describing two
+    /// Their reply is a refusal **only if it opens with the same sentence** once
+    /// each one's own noun is struck out — otherwise the two are describing two
     /// different things that happened, and neither is a refusal.
+    ///
+    /// **Only the sentences the two replies agree on, in order, are learned**
+    /// (SQ-1248, the same rule [`WorldPrint::differs_from`] follows). A turn
+    /// carries more than its refusal: a daemon fires on one control and not the
+    /// other, and demanding that the WHOLE reply match then teaches nothing at
+    /// all — `suvehnux.z5` answered two of its direction controls identically
+    /// but appended `Something brushes past your foot.` to one of them, the pair
+    /// taught nothing, and `fasten north` read as a success. The common prefix
+    /// keeps every sentence both replies vouched for and drops the first
+    /// divergence and everything after it, which is where a daemon lives.
     pub fn refusal_from_pair(&self, a: usize, b: usize) -> Refusals {
         let (Some(x), Some(y)) = (self.steps.get(a), self.steps.get(b)) else {
             return Refusals::default();
@@ -304,11 +458,29 @@ impl ProbeRun {
         if !self.inert(x) || !self.inert(y) {
             return Refusals::default();
         }
-        let sx = signature(&x.reply, &x.command);
-        if sx.is_empty() || sx != signature(&y.reply, &y.command) {
-            return Refusals::default();
-        }
-        Refusals { sigs: sx.into_iter().collect() }
+        // Two readings of each reply, either sufficient (SQ-1252): raw, and
+        // with a leading disambiguation echo stripped (see
+        // [`strip_disambiguation_echo`]) — a story that prints one only on the
+        // side that had something to disambiguate (`(the outside door)`) makes
+        // the raw first sentence disagree though the refusal underneath it
+        // agrees. Both readings are learned rather than the stripped one
+        // replacing the raw one, because a story that agrees on the RAW
+        // reading already (`suvehnux.z5`'s `(the east wall)` / `(the south
+        // wall)` echoes, struck to the same words by their own directions)
+        // must keep teaching that: the echo is not always noise; sometimes an
+        // un-echoed wording is the only shape two controls actually share.
+        let agreed = |sa: Vec<String>, sb: Vec<String>| -> Vec<String> {
+            sa.into_iter().zip(sb).take_while(|(a, b)| a == b).map(|(a, _)| a).collect()
+        };
+        let mut sigs: BTreeSet<String> =
+            agreed(signature(&x.reply, &x.command), signature(&y.reply, &y.command))
+                .into_iter()
+                .collect();
+        sigs.extend(agreed(
+            signature(strip_disambiguation_echo(&x.reply), &x.command),
+            signature(strip_disambiguation_echo(&y.reply), &y.command),
+        ));
+        Refusals { sigs }
     }
 
     /// Did the step at `i` do anything, as far as this run can tell?
@@ -339,11 +511,44 @@ impl ProbeRun {
     }
 }
 
+/// Strip a leading parenthesised disambiguation echo: one or more lines at the
+/// very start of the reply, each entirely of the form `(…)`.
+///
+/// Inform's parser prints a line like this — `(the outside door)`, `(first
+/// taking the lamp)`, `(putting the sword on the floor)` — whenever it silently
+/// resolved which object a command meant, and it is never part of the story's
+/// answer. Left in, it becomes the reply's first sentence, so `fix south`
+/// (which the parser must disambiguate) and `fix north` (which it need not)
+/// print the same refusal after two different opening lines, the control pair
+/// disagrees from its first sentence, and [`ProbeRun::refusal_from_pair`]
+/// learns nothing at all (SQ-1252).
+///
+/// Only LEADING lines are stripped — a parenthesised clause anywhere else in
+/// the reply is prose (a room description, an aside) and stays untouched.
+fn strip_disambiguation_echo(reply: &str) -> &str {
+    let mut rest = reply;
+    loop {
+        let line_len = rest.find('\n').map_or(rest.len(), |i| i + 1);
+        let line = rest[..line_len].trim();
+        if line.len() >= 2 && line.starts_with('(') && line.ends_with(')') {
+            rest = &rest[line_len..];
+        } else {
+            break;
+        }
+    }
+    rest
+}
+
 /// One reply, reduced to the sentences that carry its *shape*: lowercased,
 /// punctuation and digits dropped, and every word of the command that produced
 /// it struck out — which is what makes `You can't see any lamp here!` and `You
 /// can't see any sword here!` the same sentence, and what removes the quoted
 /// word from `[I don't know the word "lanturn".]`.
+///
+/// Does **not** strip a leading disambiguation echo itself — every caller that
+/// needs that reading calls [`strip_disambiguation_echo`] first and tries both
+/// (SQ-1252; see [`ProbeRun::refusal_from_pair`] for why both readings are
+/// learned rather than one replacing the other).
 fn signature(reply: &str, command: &str) -> Vec<String> {
     let typed: BTreeSet<String> = command
         .split(|c: char| !c.is_alphanumeric())
@@ -365,14 +570,64 @@ fn signature(reply: &str, command: &str) -> Vec<String> {
     out
 }
 
+/// Where a probe's wall time actually went (SQ-1249).
+///
+/// A phase breakdown rather than one total, because the three phases have three
+/// different fixes: a slow BOOT is the story's own startup and is paid once a
+/// session, a slow RESTORE is the host snapshot being re-applied once per
+/// command, and slow SUBMIT time is the story running the turns we asked for.
+/// Guessing which one dominates is exactly the mistake this exists to stop —
+/// the answer differed by an order of magnitude between engines.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProbePhases {
+    /// Building the shadow engine: the story's own startup. Paid once per
+    /// session (or again after a shadow the probe had to throw away), and zero
+    /// on every other question — which is the fact a caller usually wants.
+    pub boot: Duration,
+    /// [`Engine::restore_state`], once before each command and once more to
+    /// leave the shadow on the snapshot.
+    pub restore: Duration,
+    /// [`Engine::submit`]: the story running the command we asked about.
+    pub submit: Duration,
+    /// [`WorldPrint::of`]: reading the object tree after each command.
+    pub world: Duration,
+}
+
+impl ProbePhases {
+    /// Fold another breakdown in, phase by phase.
+    pub fn add(&mut self, other: ProbePhases) {
+        self.boot += other.boot;
+        self.restore += other.restore;
+        self.submit += other.submit;
+        self.world += other.world;
+    }
+}
+
 // ── The seam ────────────────────────────────────────────────────────────────
 
 /// One question, on its way to the worker.
 struct Job {
     token: u64,
-    save: crate::engine::EngineSave,
+    /// Shared, not cloned: a return search sends one direction at a time from
+    /// ONE snapshot, and a per-job copy of the whole save blob was the
+    /// player's thread paying twelve times for one moment (SQ-1177). The
+    /// worker only ever reads it.
+    save: std::sync::Arc<crate::engine::EngineSave>,
     baseline: WorldPrint,
     commands: Vec<String>,
+    /// Per-command RNG reseed (SQ-1257 Phase 2), aligned by index with
+    /// `commands` — `None` at every index for every ordinary probe (a return
+    /// search, a vocabulary offer), which leaves the shadow's RNG running
+    /// wherever the last restore/boot left it, exactly as it always has.
+    /// `Some(seed)` forces [`Engine::reseed_random`] right after that
+    /// command's restore and before it runs, so a command asked twice under
+    /// two different seeds can be told apart from asking a deterministic
+    /// story the same question twice.
+    reseeds: Vec<Option<u32>>,
+    /// The live session's [`Engine::room_identity_state`] at snapshot time
+    /// (SQ-1267), applied to the shadow right after every restore in this
+    /// job — see [`serve`]. `None` for an engine with no such state.
+    room_identity: Option<Vec<u8>>,
 }
 
 /// One answer, on its way back.
@@ -394,6 +649,8 @@ pub struct Answer {
     probes: u32,
     /// Wall time the worker spent on it, the boot included.
     spent: Duration,
+    /// Where that time went. See [`ProbePhases`].
+    pub phases: ProbePhases,
 }
 
 /// One moment in the live game, ready to be asked questions about.
@@ -405,8 +662,32 @@ pub struct Answer {
 /// thread; everything after them is the worker's.
 #[derive(Clone, Debug)]
 pub struct ProbeSnapshot {
-    save: crate::engine::EngineSave,
+    save: std::sync::Arc<crate::engine::EngineSave>,
     baseline: WorldPrint,
+    /// The live session's current [`Engine::room_identity_state`] (SQ-1267),
+    /// carried into the shadow rather than left for it to learn (or mislearn)
+    /// on its own. `None` for an engine with no such state (the Z-machine).
+    room_identity: Option<Vec<u8>>,
+}
+
+impl ProbeSnapshot {
+    /// Build a snapshot from a save already on hand, with no world-print
+    /// baseline (SQ-1257 Phase 2): the random-exit search only ever compares
+    /// room identity, never [`WorldPrint`], and the save it asks from is the
+    /// one kept from the END of the PREVIOUS turn — the live engine at that
+    /// moment is not the engine `arm_random_exit_search` is called with (this
+    /// turn's, already moved), so there is no live engine here to read a
+    /// baseline off in the first place.
+    ///
+    /// `live` IS available at the call site even though the save is not of
+    /// this exact moment (SQ-1267): [`Engine::room_identity_state`] describes
+    /// how the engine currently keys rooms, which — unlike a world print — is
+    /// not a fact about any one turn, so reading it off the CURRENT live
+    /// engine is exactly what a shadow restored to an earlier moment of the
+    /// same session should be made to match.
+    pub fn from_save(live: &dyn Engine, save: std::sync::Arc<crate::engine::EngineSave>) -> ProbeSnapshot {
+        ProbeSnapshot { save, baseline: WorldPrint::default(), room_identity: live.room_identity_state() }
+    }
 }
 
 /// The worker thread's end of the seam.
@@ -466,6 +747,8 @@ pub struct ShadowProbe {
     /// Total time spent inside the worker, boot included. Wall time on the
     /// WORKER, which is no longer time the player waited.
     pub spent: Duration,
+    /// The same total, split by phase (SQ-1249).
+    pub phases: ProbePhases,
 }
 
 impl std::fmt::Debug for ShadowProbe {
@@ -531,6 +814,16 @@ impl ShadowProbe {
     /// because both are questions about the LIVE engine and it may not cross a
     /// thread. Everything after them is the worker's.
     pub fn ask(&mut self, live: &dyn Engine, commands: &[String]) -> Option<u64> {
+        // Refuse BEFORE snapshotting (SQ-1177). The checks are free and the
+        // snapshot is the expensive half — `save_state` is ~102 ms on
+        // Counterfeit Monkey in a debug build — and the busy case is exactly
+        // the slow-game turn where paying it for a guaranteed `None` hurts
+        // most. `ask_from` repeats the checks because it is public and has
+        // callers of its own.
+        if !self.is_armed() || self.is_busy() || commands.is_empty() || commands.len() > MAX_PROBES
+        {
+            return None;
+        }
         self.ask_from(&self.snapshot(live)?, commands)
     }
 
@@ -551,17 +844,80 @@ impl ShadowProbe {
     ///
     /// `None` for a suspended VM: snapshotting one would capture it
     /// mid-file-operation, and the shadow would resume into an I/O request
-    /// nobody can answer.
+    /// nobody can answer. `None` too when the story is not waiting for a LINE
+    /// (SQ-1349) — see [`snapshot_from`](Self::snapshot_from).
     pub fn snapshot(&self, live: &dyn Engine) -> Option<ProbeSnapshot> {
-        if !self.is_armed() || live.is_saveload_pending() {
+        self.snapshot_from(live, || std::sync::Arc::new(live.save_state()))
+    }
+
+    /// [`snapshot`](Self::snapshot), from a host save something else already
+    /// paid for — the turn path takes ONE `save_state` per turn and shares it
+    /// between history, the auto-save and this seam (SQ-1178's `TurnSave`).
+    ///
+    /// `save` is a closure rather than a value so the guards still come first:
+    /// an unarmed seam or a suspended VM must refuse before anything pays for
+    /// a snapshot, exactly as [`ask`](Self::ask) refuses before taking one
+    /// (SQ-1177). A caller holding an already-materialised Arc loses nothing —
+    /// its closure is a clone.
+    pub fn snapshot_from(
+        &self,
+        live: &dyn Engine,
+        save: impl FnOnce() -> std::sync::Arc<crate::engine::EngineSave>,
+    ) -> Option<ProbeSnapshot> {
+        // And `None` for a story that is not waiting for a LINE (SQ-1349). A
+        // probe's question is a typed command; a game parked on `read_char` —
+        // a title splash, a `[MORE]`, a yes/no, or Journey's menus, which are
+        // the whole of that game's interface — cannot be asked one, so there is
+        // no answer to wait for and nothing worth a snapshot. The suspension
+        // travels in the save, so the shadow would land on the same keypress
+        // prompt the live session is on, and whatever it did with the command
+        // there would be an accident of the story's key handling rather than a
+        // reply. `InputKind::Event` (a Glulx timer/mouse `glk_select` with no
+        // typed request) is refused for the same reason.
+        if !self.is_armed()
+            || live.is_saveload_pending()
+            || live.pending_input() != crate::session::InputKind::Line
+        {
             return None;
         }
-        Some(ProbeSnapshot { save: live.save_state(), baseline: WorldPrint::of(live) })
+        Some(ProbeSnapshot { save: save(), baseline: WorldPrint::of(live), room_identity: live.room_identity_state() })
     }
 
     /// [`ask`](Self::ask), from a snapshot already taken. See
     /// [`snapshot`](Self::snapshot).
     pub fn ask_from(&mut self, from: &ProbeSnapshot, commands: &[String]) -> Option<u64> {
+        let reseeds = vec![None; commands.len()];
+        self.send_job(from, commands.to_vec(), reseeds)
+    }
+
+    /// [`ask_from`], but walking ONE command repeatedly, once per seed in
+    /// `seeds` — each attempt independently restored to `from` and reseeded
+    /// before it runs (SQ-1257 Phase 2). `ProbeStep::location` in the
+    /// resulting run, index-for-index with `seeds`, is where that seed's walk
+    /// landed.
+    ///
+    /// Same refusal shape as [`ask_from`](Self::ask_from) — `None` when
+    /// unarmed, busy, or the seed list is empty or longer than
+    /// [`MAX_PROBES`].
+    pub fn ask_from_reseeded(
+        &mut self,
+        from: &ProbeSnapshot,
+        command: &str,
+        seeds: &[u32],
+    ) -> Option<u64> {
+        let commands = vec![command.to_string(); seeds.len()];
+        let reseeds = seeds.iter().map(|&s| Some(s)).collect();
+        self.send_job(from, commands, reseeds)
+    }
+
+    /// Common tail of [`ask_from`](Self::ask_from) and
+    /// [`ask_from_reseeded`](Self::ask_from_reseeded).
+    fn send_job(
+        &mut self,
+        from: &ProbeSnapshot,
+        commands: Vec<String>,
+        reseeds: Vec<Option<u32>>,
+    ) -> Option<u64> {
         if !self.is_armed() || self.is_busy() || commands.is_empty() || commands.len() > MAX_PROBES
         {
             return None;
@@ -569,9 +925,11 @@ impl ShadowProbe {
         let token = self.next_token.wrapping_add(1);
         let job = Job {
             token,
-            save: from.save.clone(),
+            save: std::sync::Arc::clone(&from.save),
             baseline: from.baseline,
-            commands: commands.to_vec(),
+            commands,
+            reseeds,
+            room_identity: from.room_identity.clone(),
         };
         self.worker.as_ref()?.jobs.send(job).ok()?;
         self.next_token = token;
@@ -601,6 +959,7 @@ impl ShadowProbe {
     fn settled(&mut self, answer: &Answer) {
         self.probes += answer.probes;
         self.spent += answer.spent;
+        self.phases.add(answer.phases);
         if answer.broken {
             self.broken = true;
         }
@@ -630,13 +989,15 @@ fn shadow_worker(recipe: ShadowRecipe, jobs: mpsc::Receiver<Job>, answers: mpsc:
     while let Ok(job) = jobs.recv() {
         let started = Instant::now();
         let mut probes = 0u32;
-        let answer = match serve(&recipe, &mut shadow, &job, &mut probes) {
+        let mut phases = ProbePhases::default();
+        let answer = match serve(&recipe, &mut shadow, &job, &mut probes, &mut phases) {
             Ok(run) => Answer {
                 token: job.token,
                 run,
                 broken: false,
                 probes,
                 spent: started.elapsed(),
+                phases,
             },
             Err(()) => {
                 shadow = None;
@@ -646,6 +1007,7 @@ fn shadow_worker(recipe: ShadowRecipe, jobs: mpsc::Receiver<Job>, answers: mpsc:
                     broken: true,
                     probes,
                     spent: started.elapsed(),
+                    phases,
                 }
             }
         };
@@ -665,21 +1027,48 @@ fn serve(
     shadow: &mut Option<Box<dyn Engine>>,
     job: &Job,
     probes: &mut u32,
+    phases: &mut ProbePhases,
 ) -> Result<Option<ProbeRun>, ()> {
     if shadow.is_none() {
-        *shadow = Some(boot_shadow(recipe).map_err(|_| ())?);
+        let t = Instant::now();
+        let booted = boot_shadow(recipe).map_err(|_| ())?;
+        phases.boot += t.elapsed();
+        *shadow = Some(booted);
     }
     let engine = shadow.as_mut().ok_or(())?;
 
     let mut steps = Vec::with_capacity(job.commands.len());
-    for command in &job.commands {
-        if engine.restore_state(&job.save).is_err() {
+    for (i, command) in job.commands.iter().enumerate() {
+        let t = Instant::now();
+        let restored = engine.restore_state(&job.save);
+        phases.restore += t.elapsed();
+        if restored.is_err() {
             // A shadow that will not take the live state is no shadow.
             return Err(());
         }
+        // SQ-1267: re-sync the shadow's room identity to the LIVE session's
+        // right after every restore, not only at boot — the shadow is reused
+        // across many jobs and a restore never touches this host-side state
+        // (see `Engine::room_identity_state`'s doc comment), so without this a
+        // long-lived shadow answers every question after its own boot from
+        // whatever it happened to learn (or not) on its own exploratory
+        // commands, which can diverge from the live session in either
+        // direction.
+        if let Some(state) = &job.room_identity {
+            engine.apply_room_identity_state(state);
+        }
+        // SQ-1257 Phase 2: force this attempt's own draw, AFTER the restore (a
+        // restore touches only memory, never the RNG — see `zvm::quetzal`) and
+        // BEFORE the command runs, so two attempts from the same snapshot with
+        // two different seeds are actually asking two different questions.
+        if let Some(seed) = job.reseeds.get(i).copied().flatten() {
+            engine.reseed_random(seed);
+        }
         let _ = engine.take_transcript();
         let _ = engine.take_transcript_elems();
+        let t = Instant::now();
         let result = engine.submit(command);
+        phases.submit += t.elapsed();
         *probes += 1;
         // ISOLATION. Nothing typed in here may reach a file. A game that
         // suspends for its own `@save`/`@restore`, or asks Glk for a
@@ -689,13 +1078,17 @@ fn serve(
         if escaped {
             unwind_io(engine.as_mut(), result.pending_io);
         }
+        let t = Instant::now();
+        let world = WorldPrint::of(&**engine);
+        phases.world += t.elapsed();
         steps.push(ProbeStep {
             command: command.clone(),
             reply: result.transcript.clone(),
             location: result.location.as_ref().map(|l| l.number),
-            world: WorldPrint::of(&**engine),
+            world,
             quit: result.quit,
             escaped,
+            died: crate::session::turn_reports_death(&result.transcript),
         });
     }
 
@@ -711,7 +1104,9 @@ fn serve(
         // Otherwise leave the shadow on the snapshot rather than on the last
         // probe's aftermath, so a shadow that is never asked again is
         // holding a state the live game actually reached.
+        let t = Instant::now();
         let _ = engine.restore_state(&job.save);
+        phases.restore += t.elapsed();
         let _ = engine.take_transcript();
     }
 
@@ -801,7 +1196,17 @@ fn boot_shadow(recipe: &ShadowRecipe) -> Result<Box<dyn Engine>, String> {
     }
 }
 
-#[cfg(test)]
+/// Test-only constructor for an [`Answer`] carrying a given `run` (SQ-1257 Phase 2) — lets a
+/// sibling module's tests (`random_exit_probe`) exercise `deliver` against a hand-built shadow
+/// answer, the same way this module's own tests hand-build a [`ProbeRun`], without a real worker
+/// thread or a real engine to boot one from. Every other field a genuine worker answer carries
+/// (`broken`/`probes`/`spent`/`phases`) is bookkeeping `deliver` never reads.
+#[cfg(all(test, feature = "t-session"))]
+pub(crate) fn test_answer(token: u64, run: Option<ProbeRun>) -> Answer {
+    Answer { token, run, broken: false, probes: 0, spent: Duration::ZERO, phases: ProbePhases::default() }
+}
+
+#[cfg(all(test, feature = "t-session"))]
 mod tests {
     use super::*;
 
@@ -824,6 +1229,92 @@ mod tests {
             signature("[I don't know the word \"lanturn\".]", "take lanturn"),
             vec!["i don t know the word"]
         );
+    }
+
+    /// **SQ-1252.** Inform prints a parenthesised echo whenever it silently
+    /// resolved which object a command meant — `(the outside door)`, two lines
+    /// of them for `(first taking the lamp)` followed by another clause — and
+    /// none of it is the story's answer. Only LEADING lines qualify: a
+    /// parenthesised clause in the middle of a reply is prose and stays.
+    #[test]
+    fn a_leading_disambiguation_echo_is_stripped_and_nothing_else_is() {
+        assert_eq!(
+            strip_disambiguation_echo("(the outside door)\nThere is no obvious way to do that."),
+            "There is no obvious way to do that."
+        );
+        assert_eq!(
+            strip_disambiguation_echo(
+                "(first taking the lamp)\n(putting the sword on the floor)\nDone."
+            ),
+            "Done.",
+            "two echo lines, both stripped"
+        );
+        assert_eq!(
+            strip_disambiguation_echo("You can't do that (it's too heavy) right now."),
+            "You can't do that (it's too heavy) right now.",
+            "a parenthesised clause in the MIDDLE of a reply is prose, not an echo"
+        );
+        assert_eq!(
+            strip_disambiguation_echo("(the outside door)"),
+            "",
+            "a reply that is only an echo strips down to nothing"
+        );
+        assert!(
+            signature(strip_disambiguation_echo("(the outside door)"), "fix south").is_empty(),
+            "an echo-only reply strips down to nothing, so its STRIPPED reading carries no sentence to learn"
+        );
+    }
+
+    /// An echo-only step must read as "no signature", never as a signature that
+    /// matches everything — [`Refusals::says_no`] on an empty set is always
+    /// false, which is the behaviour [`Refusals::is_empty`] documents callers
+    /// must check for rather than treating silence as success.
+    #[test]
+    fn an_echo_only_signature_is_empty_not_a_match_all() {
+        let r = Refusals {
+            sigs: signature(strip_disambiguation_echo("(the outside door)"), "fix south")
+                .into_iter()
+                .collect(),
+        };
+        assert!(r.is_empty());
+        assert!(!r.says_no("Anything at all.", "fix south"));
+    }
+
+    /// The bug as it actually bit, on `vespers.z8`'s Entrance Hall: `fix south`
+    /// needs the parser to pick between two doors and prints `(the outside
+    /// door)` before its refusal; `fix north` needs no disambiguation and
+    /// prints the refusal straight away. Demanding the two replies agree from
+    /// their very first sentence — with the echo still in it — made the pair
+    /// disagree immediately and taught nothing, so the offer that pair was
+    /// meant to vet survived unvetted.
+    ///
+    /// Falsify by reverting [`strip_disambiguation_echo`] to a no-op: this test
+    /// fails because the first sentences ("(the outside door)" vs "there is no
+    /// obvious way to do that") no longer agree.
+    #[test]
+    fn a_disambiguation_echo_does_not_defeat_the_direction_control_pair() {
+        let step = |command: &str, reply: &str| ProbeStep {
+            command: command.to_string(),
+            reply: reply.to_string(),
+            location: None,
+            world: WorldPrint::from_parts(Some(7), None, None),
+            quit: false,
+            escaped: false,
+            died: false,
+        };
+        let run = ProbeRun {
+            baseline: WorldPrint::from_parts(Some(7), None, None),
+            steps: vec![
+                step("fix north", "There is no obvious way to do that."),
+                step(
+                    "fix south",
+                    "(the outside door)\nThere is no obvious way to do that.",
+                ),
+            ],
+        };
+        let agreed = run.refusal_from_pair(0, 1);
+        assert!(!agreed.is_empty(), "the pair agreed once the echo is out of the way");
+        assert!(agreed.says_no("There is no obvious way to do that.", "fasten north"));
     }
 
     #[test]
@@ -866,11 +1357,417 @@ mod tests {
 
     #[test]
     fn an_unreadable_world_is_not_an_unchanged_one() {
-        let blind = WorldPrint(None);
+        let blind = WorldPrint::default();
+        let one = WorldPrint::from_parts(Some(1), None, None);
         assert!(!blind.differs_from(blind));
-        assert!(!blind.differs_from(WorldPrint(Some(1))));
-        assert!(WorldPrint(Some(1)).differs_from(WorldPrint(Some(2))));
-        assert!(!WorldPrint(Some(1)).differs_from(WorldPrint(Some(1))));
+        assert!(!blind.differs_from(one));
+        assert!(one.differs_from(WorldPrint::from_parts(Some(2), None, None)));
+        assert!(!one.differs_from(one));
+    }
+
+    /// **SQ-1248.** A shadow restored from a save has no status line, so on a
+    /// story that does not repaint the whole bar every turn its
+    /// `current_location` is `None` while the LIVE engine's is `Some` — and the
+    /// room contents hang off that same answer. Neither is evidence that
+    /// anything moved, and folded into one hash both of them said it had.
+    ///
+    /// Falsify by folding the three fields back into one hash: every assertion
+    /// below flips.
+    #[test]
+    fn a_fact_only_one_side_can_answer_is_not_a_changed_world() {
+        let live = WorldPrint::from_parts(Some(7), Some(35), Some(99));
+        let shadow = WorldPrint::from_parts(Some(7), None, None);
+        assert!(
+            !shadow.differs_from(live),
+            "the shadow could not read a status line; that is not a move"
+        );
+        assert!(!live.differs_from(shadow), "and the comparison is symmetric");
+        // What the two CAN both answer still decides.
+        assert!(
+            WorldPrint::from_parts(Some(8), None, None).differs_from(live),
+            "the inventory changed, and both sides can see it"
+        );
+        assert!(
+            WorldPrint::from_parts(Some(7), Some(36), None).differs_from(live),
+            "both sides named a room and they are different rooms"
+        );
+        assert!(
+            WorldPrint::from_parts(Some(7), Some(35), Some(100)).differs_from(live),
+            "same room, different contents"
+        );
+    }
+
+    /// **SQ-1248's second half.** A turn carries more than its refusal. Suvehnux
+    /// answers two direction controls identically and then appends `Something
+    /// brushes past your foot.` to whichever one the daemon fires on; demanding
+    /// the WHOLE reply match made that pair teach nothing, and the candidate
+    /// read as a success. The sentences the two agree on are still evidence.
+    ///
+    /// Falsify by restoring the whole-reply equality: the first assertion fails.
+    #[test]
+    fn a_daemon_on_one_control_still_leaves_the_pair_something_to_teach() {
+        let step = |command: &str, reply: &str| ProbeStep {
+            command: command.to_string(),
+            reply: reply.to_string(),
+            location: None,
+            world: WorldPrint::from_parts(Some(7), None, None),
+            quit: false,
+            escaped: false,
+            died: false,
+        };
+        let run = ProbeRun {
+            baseline: WorldPrint::from_parts(Some(7), None, None),
+            steps: vec![
+                step(
+                    "fasten east",
+                    "There is no obvious way to do that.\n\nSomething brushes past your foot.",
+                ),
+                step("fasten south", "There is no obvious way to do that."),
+                step("fasten hither", "The wind takes it clean out of your hands."),
+            ],
+        };
+        let agreed = run.refusal_from_pair(0, 1);
+        assert!(
+            agreed.says_no("There is no obvious way to do that.", "fasten north"),
+            "the sentence BOTH controls printed taught nothing: {:?}",
+            agreed.sentences().collect::<Vec<_>>()
+        );
+        assert!(
+            !agreed.says_no("Something brushes past your foot.", "fasten north"),
+            "the daemon line was learned as a refusal, though only one control showed it"
+        );
+        assert!(
+            run.refusal_from_pair(0, 2).is_empty(),
+            "two replies that disagree from their first sentence still teach nothing"
+        );
+    }
+
+    /// The same defect where it actually bit: a control whose reply is this
+    /// story's refusal teaches nothing at all if the print calls it a move.
+    #[test]
+    fn a_control_the_shadow_cannot_place_still_teaches_its_refusal() {
+        let step = |command: &str, reply: &str| ProbeStep {
+            command: command.to_string(),
+            reply: reply.to_string(),
+            location: None,
+            // The shadow's own print: it knows the tree, not the screen.
+            world: WorldPrint::from_parts(Some(7), None, None),
+            quit: false,
+            escaped: false,
+            died: false,
+        };
+        let run = ProbeRun {
+            // The LIVE engine's, taken with a status line on screen.
+            baseline: WorldPrint::from_parts(Some(7), Some(35), Some(99)),
+            steps: vec![
+                step("zqxwvj", "That's not a verb I recognise."),
+                step("examine ace", "You can't see any such thing."),
+                step("examine adamant", "You can't see any such thing."),
+                step("examine hinged", "You see nothing special about the hinged trapdoor."),
+            ],
+        };
+        let mut refusals = run.refusal_from(0);
+        assert!(!refusals.is_empty(), "the unknown-word control taught nothing");
+        refusals.merge(run.refusal_from_pair(1, 2));
+        assert!(
+            refusals.says_no("You can't see any such thing.", "examine lamp"),
+            "the absent-noun pair taught nothing"
+        );
+        assert!(run.did_something(3, &refusals), "a real description read as a refusal");
+        assert!(!run.did_something(1, &refusals), "a refusal read as something happening");
+    }
+
+    /// A stand-in whose only job is to count what a refusal costs. Everything
+    /// a refused `ask` has no business touching is `unreachable!`.
+    struct CountingEngine {
+        saves: std::cell::Cell<u32>,
+        /// What the story is waiting for. `Line` is the ordinary case; the
+        /// SQ-1349 case sets `Char`.
+        pending: crate::session::InputKind,
+    }
+
+    impl CountingEngine {
+        fn at_a_line_prompt() -> Self {
+            Self { saves: std::cell::Cell::new(0), pending: crate::session::InputKind::Line }
+        }
+    }
+
+    impl Engine for CountingEngine {
+        fn submit(&mut self, _command: &str) -> crate::session::TurnResult {
+            unreachable!("a refused ask types nothing")
+        }
+        fn submit_key(&mut self, _key: crate::engine::KeyInput) -> Option<crate::session::TurnResult> {
+            unreachable!("a refused ask types nothing")
+        }
+        fn take_transcript(&mut self) -> String {
+            String::new()
+        }
+        fn drain_screen_clear(&mut self) -> bool {
+            false
+        }
+        fn pending_input(&self) -> crate::session::InputKind {
+            self.pending
+        }
+        fn resume_save(&mut self, _wrote_ok: bool) -> crate::session::TurnResult {
+            unreachable!("not exercised by this test")
+        }
+        fn resume_restore(&mut self, _data: Option<&[u8]>) -> crate::session::TurnResult {
+            unreachable!("not exercised by this test")
+        }
+        fn has_quit(&self) -> bool {
+            false
+        }
+        fn screen(&self) -> crate::engine::ScreenModel {
+            unreachable!("not exercised by this test")
+        }
+        fn save_state(&self) -> crate::engine::EngineSave {
+            self.saves.set(self.saves.get() + 1);
+            crate::engine::EngineSave::new("mock", 1, Vec::new())
+        }
+        fn restore_state(
+            &mut self,
+            _save: &crate::engine::EngineSave,
+        ) -> Result<(), crate::engine::EngineError> {
+            unreachable!("not exercised by this test")
+        }
+        fn restore_game_save(&mut self, _bytes: &[u8]) -> Result<(), crate::engine::EngineError> {
+            unreachable!("not exercised by this test")
+        }
+        fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> {
+            unreachable!("not exercised by this test")
+        }
+        fn set_aux_data(&mut self, _data: std::collections::BTreeMap<String, Vec<u8>>) {
+            unreachable!("not exercised by this test")
+        }
+        fn aux_dirty(&self) -> bool {
+            false
+        }
+        fn clear_aux_dirty(&mut self) {}
+        fn current_location(&self) -> Option<crate::engine::LocationInfo> {
+            None
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// SQ-1177: a busy probe must say no BEFORE paying for the snapshot. The
+    /// busy turn is exactly the slow-game turn — the previous question is
+    /// still running because the story answers slowly — so charging the
+    /// player's thread a full `save_state` for a guaranteed `None` was the
+    /// worst possible moment for it.
+    #[test]
+    fn a_busy_probe_refuses_before_paying_for_a_snapshot() {
+        let mut p = ShadowProbe::default();
+        p.arm(ShadowRecipe::default());
+        assert!(p.is_armed(), "armed, so busyness is the only refusal in play");
+        p.inflight = Some(1); // a question is out with the worker
+        assert!(p.is_busy());
+        let live = CountingEngine::at_a_line_prompt();
+        assert_eq!(p.ask(&live, &["north".to_string()]), None, "busy refuses");
+        assert_eq!(live.saves.get(), 0, "and the refusal must cost no save_state");
+    }
+
+    /// SQ-1349: a story that is not waiting for a LINE cannot be asked one, so
+    /// the seam refuses — and refuses where the other guards do, before the
+    /// snapshot is paid for.
+    ///
+    /// `journey-r83-s890706.z6` is the specimen: menu-driven from the splash
+    /// on, `pending_input` never anything but `Char`. Without this the shadow
+    /// typed `look` at its menu, the routing (SQ-1270) delivered `l`, an intro
+    /// page turned, and the page came back as though it were a reply to the
+    /// command. Falsify by deleting the `pending_input` clause in
+    /// `snapshot_from`: the snapshot is taken and `ask` answers `Some`.
+    #[test]
+    fn a_story_waiting_on_a_keypress_is_asked_nothing_and_costs_no_snapshot() {
+        let mut p = ShadowProbe::default();
+        p.arm(ShadowRecipe::default());
+        assert!(
+            p.is_armed() && !p.is_busy(),
+            "armed and idle, so the prompt kind is the only refusal in play"
+        );
+
+        let mut live = CountingEngine::at_a_line_prompt();
+        live.pending = crate::session::InputKind::Char;
+        assert_eq!(p.ask(&live, &["north".to_string()]), None, "a keypress prompt refuses");
+        assert_eq!(live.saves.get(), 0, "and the refusal must cost no save_state");
+
+        // A Glulx timer/mouse event is no more answerable than a keypress.
+        live.pending = crate::session::InputKind::Event;
+        assert_eq!(p.ask(&live, &["north".to_string()]), None, "a bare Glk event refuses too");
+        assert_eq!(live.saves.get(), 0);
+
+        // Non-vacuity: the same probe, same engine, at a line prompt, gets past the guard and
+        // pays for its snapshot. (`snapshot` rather than `ask`, so no job goes to a worker
+        // holding a default recipe with no story in it.)
+        live.pending = crate::session::InputKind::Line;
+        assert!(p.snapshot(&live).is_some(), "a line prompt is snapshotted");
+        assert_eq!(live.saves.get(), 1, "and that one paid for exactly one save_state");
+    }
+
+    /// The guards hold on the shared-save seam too: an unarmed probe refuses
+    /// before materialising the snapshot it was offered (SQ-1178).
+    #[test]
+    fn snapshot_from_refuses_before_materialising_the_save() {
+        let p = ShadowProbe::default();
+        let live = CountingEngine::at_a_line_prompt();
+        let took = std::cell::Cell::new(false);
+        let snap = p.snapshot_from(&live, || {
+            took.set(true);
+            std::sync::Arc::new(live.save_state())
+        });
+        assert!(snap.is_none(), "unarmed refuses");
+        assert!(!took.get(), "and never asked for the save it would not use");
+    }
+
+    /// A shadow that only ever answers a question by RESTORING the live
+    /// snapshot over itself — never by re-booting the story, never by replaying
+    /// the turns that reached this moment.
+    ///
+    /// Counts what a question actually costs it, because SQ-1249 went looking
+    /// for a boot or a replay hiding inside the per-turn bill and had to be able
+    /// to prove there was neither. `save_state` is `unreachable!`: the shadow is
+    /// never asked for its own state, only handed the live game's.
+    #[derive(Default)]
+    struct ShadowStub {
+        restores: u32,
+        typed: Vec<String>,
+    }
+
+    impl Engine for ShadowStub {
+        fn submit(&mut self, command: &str) -> crate::session::TurnResult {
+            self.typed.push(command.to_string());
+            crate::session::TurnResult::default()
+        }
+        fn submit_key(&mut self, _key: crate::engine::KeyInput) -> Option<crate::session::TurnResult> {
+            unreachable!("a probe types commands, not keys")
+        }
+        fn take_transcript(&mut self) -> String {
+            String::new()
+        }
+        fn drain_screen_clear(&mut self) -> bool {
+            false
+        }
+        fn pending_input(&self) -> crate::session::InputKind {
+            crate::session::InputKind::Line
+        }
+        fn resume_save(&mut self, _wrote_ok: bool) -> crate::session::TurnResult {
+            unreachable!("nothing here suspends")
+        }
+        fn resume_restore(&mut self, _data: Option<&[u8]>) -> crate::session::TurnResult {
+            unreachable!("nothing here suspends")
+        }
+        fn has_quit(&self) -> bool {
+            false
+        }
+        fn screen(&self) -> crate::engine::ScreenModel {
+            unreachable!("a shadow is never drawn")
+        }
+        fn save_state(&self) -> crate::engine::EngineSave {
+            unreachable!("the shadow's own state is never wanted")
+        }
+        fn restore_state(
+            &mut self,
+            _save: &crate::engine::EngineSave,
+        ) -> Result<(), crate::engine::EngineError> {
+            self.restores += 1;
+            Ok(())
+        }
+        fn restore_game_save(&mut self, _bytes: &[u8]) -> Result<(), crate::engine::EngineError> {
+            unreachable!("not exercised by this test")
+        }
+        fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> {
+            unreachable!("not exercised by this test")
+        }
+        fn set_aux_data(&mut self, _data: std::collections::BTreeMap<String, Vec<u8>>) {
+            unreachable!("not exercised by this test")
+        }
+        fn aux_dirty(&self) -> bool {
+            false
+        }
+        fn clear_aux_dirty(&mut self) {}
+        fn current_location(&self) -> Option<crate::engine::LocationInfo> {
+            None
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    fn stub_job(token: u64, commands: &[&str]) -> Job {
+        let commands: Vec<String> = commands.iter().map(|c| c.to_string()).collect();
+        Job {
+            token,
+            save: std::sync::Arc::new(crate::engine::EngineSave::new("mock", 1, Vec::new())),
+            baseline: WorldPrint::default(),
+            reseeds: vec![None; commands.len()],
+            room_identity: None,
+            commands,
+        }
+    }
+
+    /// SQ-1249: the per-turn bill is the story running the commands we asked
+    /// about, and nothing else. A question costs NO boot — the shadow is built
+    /// once and every question after that restores the live host snapshot over
+    /// it — and NO replay: the only things typed into the shadow are the
+    /// commands the caller named.
+    ///
+    /// The falsification is built in. `ShadowRecipe::default()` carries no story
+    /// bytes, so the boot path cannot succeed: the third arm below forces the
+    /// shadow away and shows that a seam which re-booted per question would fail
+    /// outright here rather than quietly charging for it.
+    #[test]
+    fn a_question_restores_the_live_snapshot_and_neither_boots_nor_replays() {
+        let recipe = ShadowRecipe::default();
+        let mut shadow: Option<Box<dyn Engine>> = Some(Box::new(ShadowStub::default()));
+        let mut phases = ProbePhases::default();
+        let mut probes = 0u32;
+
+        let first = serve(&recipe, &mut shadow, &stub_job(1, &["light lamp", "light zzqx"]), &mut probes, &mut phases)
+            .expect("an already-built shadow answers")
+            .expect("two commands is two steps");
+        assert_eq!(first.steps.len(), 2);
+        assert!(phases.boot.is_zero(), "an existing shadow is not re-booted");
+
+        // A second question a turn later, on the same worker and the same shadow.
+        let second = serve(&recipe, &mut shadow, &stub_job(2, &["open door"]), &mut probes, &mut phases)
+            .expect("and answers again")
+            .expect("one command is one step");
+        assert_eq!(second.steps.len(), 1);
+        assert_eq!(probes, 3, "three commands typed across the two questions");
+        assert!(phases.boot.is_zero(), "and still no boot on the second question");
+
+        let stub = shadow
+            .as_ref()
+            .expect("the shadow survives an answered question")
+            .as_any()
+            .downcast_ref::<ShadowStub>()
+            .expect("the same stub throughout");
+        assert_eq!(
+            stub.typed,
+            vec!["light lamp", "light zzqx", "open door"],
+            "only the commands asked about — no turn history is replayed into the shadow"
+        );
+        assert_eq!(
+            stub.restores, 5,
+            "one restore per command, plus one per question to leave the shadow on the snapshot"
+        );
+
+        // Falsification: force the pre-SQ-1124 shape, where a question with no
+        // standing shadow has to boot one. With no story bytes that is a hard
+        // failure, which is exactly how we know the arms above never took it.
+        let mut none: Option<Box<dyn Engine>> = None;
+        assert!(
+            serve(&recipe, &mut none, &stub_job(3, &["look"]), &mut 0, &mut ProbePhases::default())
+                .is_err(),
+            "a question that has to boot goes down the boot path"
+        );
     }
 
     #[test]

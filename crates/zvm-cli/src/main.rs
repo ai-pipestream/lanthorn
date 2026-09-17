@@ -35,7 +35,15 @@ mod media;
 
 /// The CLI's owned audio state: backend + resolved Blorb + live sound tracking.
 struct CliSound {
-    backend: audio::AudioBackend,
+    /// The real output device — `None` until the first sound actually plays.
+    /// `AudioBackend::new` opens a real device (CoreAudio/etc.), which the SQ-1014
+    /// audit measured at ~240ms on a story that plays no sound at all: every
+    /// launch was paying it up front just because `--sound` wasn't off. Opened
+    /// lazily via `backend()` below instead, on the same thread that plays —
+    /// exactly as before, just later (SQ-1423; see the audio crate's SQ-1162
+    /// notes on why that thread matters).
+    backend: Option<audio::AudioBackend>,
+    volume: u8,
     blorb: Option<blorb::Blorb>,
     /// Sounds the story's own MEDIUM carries, by effect number, already wrapped as
     /// AIFF (SQ-0907). The two Infocom games that use sound ship it on the release
@@ -44,6 +52,13 @@ struct CliSound {
     disk: HashMap<u16, Vec<u8>>,
     ids: HashMap<u16, audio::SoundId>,
     routines: HashMap<audio::SoundId, u16>,
+}
+
+impl CliSound {
+    /// The audio backend, opening the real device on first call.
+    fn backend(&mut self) -> &mut audio::AudioBackend {
+        self.backend.get_or_insert_with(|| audio::AudioBackend::new(self.volume))
+    }
 }
 
 fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
@@ -60,15 +75,34 @@ fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
 fn play_cli_sounds(cs: &mut CliSound, events: &[zvm::cpu::exec::SoundEvent]) {
     for ev in events {
         match ev.number {
-            0 => {}
-            1 | 2 => {
-                if ev.effect == 0 || ev.effect == 2 {
-                    let freq = if ev.number == 1 { 800.0 } else { 400.0 };
-                    cs.backend.play_tone(freq, 150, ev.volume);
+            // ZMSD §15 "To clarify": "@sound_effect 0 3/4 will stop (and
+            // unload) all sounds" — number 0 refers to every currently
+            // playing sound; zvm now delivers this rather than dropping it
+            // (SQ-1419), so stop every sound this CLI started. Stop-all must
+            // NOT open a device (SQ-1423): if `cs.backend` is still `None`,
+            // nothing was ever started, so `cs.ids` is empty and there is
+            // nothing to stop.
+            0 => {
+                if matches!(ev.effect, 3 | 4) {
+                    if let Some(backend) = cs.backend.as_mut() {
+                        for (_, id) in cs.ids.drain() {
+                            backend.stop(id);
+                        }
+                    }
                 }
             }
+            // Bleeps (§15: "the other operands must be omitted") always
+            // sound when called — `effect` is meaningless for them, so this
+            // no longer gates on it (that gate used to compensate for zvm
+            // always emitting `effect == 0` on an omitted operand; zvm now
+            // defaults a real sound's omitted effect to 2 = play, so the
+            // compensation is gone with it).
+            1 | 2 => {
+                let freq = if ev.number == 1 { 800.0 } else { 400.0 };
+                cs.backend().play_tone(freq, 150, ev.volume);
+            }
             n => match ev.effect {
-                3 => { if let Some(id) = cs.ids.remove(&n) { cs.backend.stop(id); } }
+                3 => { if let Some(id) = cs.ids.remove(&n) { cs.backend().stop(id); } }
                 1 => {}
                 _ => {
                     // THE MEDIUM ANSWERS FIRST (SQ-0914): a release disk is the
@@ -88,7 +122,7 @@ fn play_cli_sounds(cs: &mut CliSound, events: &[zvm::cpu::exec::SoundEvent]) {
                             )
                         });
                     if let Some((bytes, fmt)) = picked {
-                        if let Some(id) = cs.backend.play_sample(&bytes, fmt, ev.volume, ev.repeats) {
+                        if let Some(id) = cs.backend().play_sample(&bytes, fmt, ev.volume, ev.repeats) {
                             cs.ids.insert(n, id);
                             if ev.routine != 0 { cs.routines.insert(id, ev.routine); }
                         }
@@ -102,7 +136,10 @@ fn play_cli_sounds(cs: &mut CliSound, events: &[zvm::cpu::exec::SoundEvent]) {
 /// Poll finished sampled sounds; run their finish-routines and reprint the frame.
 fn poll_sound_finish(sound: Option<&mut CliSound>, machine: &mut Machine, view: &mut screen::ScreenView, is_tty: bool) {
     let Some(cs) = sound else { return };
-    let done = cs.backend.finished();
+    // No device opened yet means nothing has ever played, so nothing can have
+    // finished — don't force the lazy open just to poll an empty backend.
+    let Some(backend) = cs.backend.as_mut() else { return };
+    let done = backend.finished();
     let mut ran = false;
     for id in done {
         // Always forget the number->id mapping for a finished sound, even one
@@ -117,8 +154,8 @@ fn poll_sound_finish(sound: Option<&mut CliSound>, machine: &mut Machine, view: 
     }
     // A finish routine may itself start sounds (into machine.pending_sounds);
     // play them now rather than deferring to the next main-loop step().
-    if !machine.pending_sounds.is_empty() {
-        let events: Vec<zvm::cpu::exec::SoundEvent> = std::mem::take(&mut machine.pending_sounds);
+    if !machine.pending_sounds().is_empty() {
+        let events: Vec<zvm::cpu::exec::SoundEvent> = machine.take_pending_sounds();
         play_cli_sounds(cs, &events);
     }
     if ran && is_tty {
@@ -180,10 +217,11 @@ fn format_output(
     cols: u16,
     current_col: u16,
     is_tty: bool,
+    palette: zvm::screen::Palette,
 ) -> (String, u16) {
     let (wrapped, new_col) = wrap_line(text, cols, current_col);
     let out = match attrs {
-        Some(a) => crate::screen::style_wrap(&wrapped, a, is_tty),
+        Some(a) => crate::screen::style_wrap(&wrapped, a, is_tty, palette),
         None => wrapped,
     };
     (out, new_col)
@@ -207,6 +245,11 @@ struct StdoutOutput {
     /// even if a non-conformant game sets colour after the header bit is cleared.
     /// Style bits (reverse/bold/italic) are always preserved.
     honor_game_colours: bool,
+    /// The table a standard colour NUMBER resolves through — the machine's
+    /// ([`Machine::palette`]), mirrored here because a sink is owned BY the
+    /// machine and cannot ask it back (SQ-1393). Set from the same
+    /// `zvm::interpreter` row that decides `$1E`, so the two cannot disagree.
+    palette: zvm::screen::Palette,
     /// Line-position tracking, and — in plain mode — holding the prompt back so
     /// the status block can be written before it. Shared with gvm-cli, which had
     /// grown its own half of the same answer (`cli_host::LineHold`, SQ-0611).
@@ -222,6 +265,69 @@ struct StdoutOutput {
     /// line, but the hold never sees it, so the next announcement would insert a
     /// second newline and read as a blank line between every keypress.
     sink_mid_line: bool,
+    /// The transcript, command-record and command-replay files (ZMSD §7.1.1,
+    /// §7.1.2, §10.2). All three are off unless the player named a file.
+    streams: StreamFiles,
+}
+
+/// The external files output streams 2 and 4 and input stream 1 read and write.
+///
+/// ZMSD §7.6.5 makes these optional for an interpreter and §7.6.5.2 asks it to
+/// say so when it declines; `zvm-cli` declines by default and supports each one
+/// the moment a `--transcript` / `--record` / `--replay` path names it. The
+/// engine holds none of this — `zvm` never opens a file — so the paths, the
+/// handles and the truncate-vs-append decision all live here.
+///
+/// **Both written files are TRUNCATED at open, not appended to.** A named path
+/// is this run's transcript or script; a session that inherited the last one's
+/// tail would be unreadable, and replaying a file that a `--record` in the same
+/// run is extending would never terminate. (lanthorn's own per-game files
+/// append — there the file is the GAME's, accumulating across sessions, and the
+/// player never names it. Different question, different answer.)
+#[derive(Default)]
+struct StreamFiles {
+    /// Output stream 2's file, opened when the player named one.
+    transcript: Option<std::fs::File>,
+    /// Output stream 4's file.
+    record: Option<std::fs::File>,
+    /// Input stream 1's records, read whole at startup — a command file is a
+    /// few kilobytes of typed lines, and holding it means a `--record` writing
+    /// the same path cannot feed itself.
+    replay: std::collections::VecDeque<String>,
+}
+
+impl StreamFiles {
+    /// Open `path` for a stream that WRITES, truncating it. The error is the
+    /// player's to see: they asked for this file by name.
+    fn create(path: &str, what: &str) -> Option<std::fs::File> {
+        match std::fs::File::create(path) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("cannot open {what} file '{path}': {e}");
+                None
+            }
+        }
+    }
+
+    /// Load a command file into the replay queue (ZMSD §10.2.1: its format is
+    /// output stream 4's). A trailing `\r` is trimmed so a file recorded on
+    /// Windows replays on Unix.
+    fn load_replay(&mut self, path: &str) {
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                self.replay = text
+                    .split('\n')
+                    .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+                    .collect();
+                // A trailing newline yields one empty record that was never
+                // typed; a genuine blank line between two records was.
+                if self.replay.back().is_some_and(String::is_empty) {
+                    self.replay.pop_back();
+                }
+            }
+            Err(e) => eprintln!("cannot read command file '{path}': {e}"),
+        }
+    }
 }
 
 impl StdoutOutput {
@@ -232,6 +338,7 @@ impl StdoutOutput {
         cols: u16,
         honor_game_colours: bool,
         hold_partial: bool,
+        palette: zvm::screen::Palette,
     ) -> Self {
         StdoutOutput {
             is_tty,
@@ -240,8 +347,10 @@ impl StdoutOutput {
             current_col: 0,
             buffer_mode: false,
             honor_game_colours,
+            palette,
             hold: cli_host::LineHold::new(hold_partial),
             sink_mid_line: false,
+            streams: StreamFiles::default(),
         }
     }
 
@@ -293,7 +402,7 @@ impl StdoutOutput {
         // When buffer_mode is off, pass u16::MAX as cols: saturating_add in
         // wrap_line will never trigger the wrap condition.
         let cols = if self.buffer_mode { self.cols } else { u16::MAX };
-        let (bytes, new_col) = format_output(s, attrs, cols, self.current_col, self.is_tty);
+        let (bytes, new_col) = format_output(s, attrs, cols, self.current_col, self.is_tty, self.palette);
         for ch in bytes.chars() {
             self.emit_char(ch);
             if ch == '\n' && self.pager.line() {
@@ -313,7 +422,7 @@ impl Output for StdoutOutput {
 
     fn print_styled(&mut self, s: &str, style: u8) {
         use zvm::io::TextAttrs;
-        self.print_attr(s, TextAttrs { style, ..Default::default() });
+        self.print_attr(s, TextAttrs::new(style, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default));
     }
 
     fn print_attr(&mut self, s: &str, attrs: zvm::io::TextAttrs) {
@@ -323,17 +432,44 @@ impl Output for StdoutOutput {
         let effective = if self.honor_game_colours {
             attrs
         } else {
-            zvm::io::TextAttrs {
-                fg: zvm::screen::ZColour::Default,
-                bg: zvm::screen::ZColour::Default,
-                ..attrs
-            }
+            zvm::io::TextAttrs::new(attrs.style, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default)
         };
         self.write_formatted(s, Some(effective));
     }
 
     fn set_buffer_mode(&mut self, on: bool) {
         self.buffer_mode = on;
+    }
+
+    /// Output stream 2 — write the game's transcript straight through
+    /// (ZMSD §7.1.1). Unwrapped, as Frotz writes it: §7.2 permits wrapping but
+    /// the file is more useful as the game composed it, and `--transcript` is
+    /// for reading back and diffing.
+    ///
+    /// Flushed per run rather than at exit, because a transcript is most often
+    /// wanted from a session that ended by crashing or being killed.
+    fn transcript(&mut self, text: &str) {
+        if let Some(f) = self.streams.transcript.as_mut() {
+            let _ = f.write_all(text.as_bytes());
+            let _ = f.flush();
+        }
+    }
+
+    /// Output stream 4 — one finished record per line (ZMSD §7.1.2.3). The
+    /// engine has already escaped it (`zvm::io::encode_command_record`); the
+    /// newline is the record separator input stream 1 splits on.
+    fn command_record(&mut self, line: &str) {
+        if let Some(f) = self.streams.record.as_mut() {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.write_all(b"\n");
+            let _ = f.flush();
+        }
+    }
+
+    /// Input stream 1 — the next record of `--replay`'s file (ZMSD §10.2).
+    /// `None` when it is exhausted, which returns the machine to the keyboard.
+    fn next_command(&mut self) -> Option<String> {
+        self.streams.replay.pop_front()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -345,12 +481,48 @@ impl Output for StdoutOutput {
     }
 }
 
+/// Open whatever `--transcript` / `--record` / `--replay` named, and hand the
+/// handles to the sink the machine already owns (ZMSD §7.1.1, §7.1.2, §10.2).
+///
+/// `--replay` also selects input stream 1 outright, which §10.2.2 provides for:
+/// "An interpreter is free to change the input stream whenever it likes (e.g. at
+/// the player's request) or, indeed, to run the entire game under input stream 1
+/// (for testing purposes)." Waiting for the story to ask would make the flag
+/// useless — almost no story ever issues `input_stream 1`.
+///
+/// `--transcript` deliberately does NOT select output stream 2. The transcript
+/// is the GAME's to start, with its own SCRIPT verb, and §7.4 makes `Flags 2`
+/// bit 0 the record of whether it did; naming a file only means there is
+/// somewhere for it to go. (lanthorn's `/transcript on` is the other half of
+/// that, for a story with no SCRIPT verb.)
+fn attach_stream_files(machine: &mut Machine, args: &Args) {
+    let mut files = StreamFiles::default();
+    if let Some(p) = args.transcript.as_deref() {
+        files.transcript = StreamFiles::create(p, "transcript");
+    }
+    if let Some(p) = args.record.as_deref() {
+        files.record = StreamFiles::create(p, "command record");
+        // Stream 4 is the interpreter's to select — no story issues
+        // `output_stream 4` on its own, and nothing in the story can observe
+        // the state either way (contrast stream 2's Flags 2 bit, §7.4). Frotz's
+        // record command sets `ostream_record` the same way.
+        machine.set_command_record(true);
+    }
+    if let Some(p) = args.replay.as_deref() {
+        files.load_replay(p);
+        machine.set_input_stream(1);
+    }
+    if let Some(sink) = machine.output_mut().as_any_mut().downcast_mut::<StdoutOutput>() {
+        sink.streams = files;
+    }
+}
+
 /// Let go of the prompt the sink is holding back (plain mode — SQ-0611).
 ///
 /// Pair it with every status emission (status first, then this) and call it
 /// before anything else writes to stdout, blocks, or exits.
 fn release_prompt(machine: &mut Machine) {
-    if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+    if let Some(o) = machine.output_mut().as_any_mut().downcast_mut::<StdoutOutput>() {
         o.release_partial();
     }
 }
@@ -368,6 +540,7 @@ fn current_score(machine: &Machine) -> Option<i32> {
         return match machine.status_line().right {
             zvm::screen::StatusRight::ScoreTurns { score, .. } => Some(score as i32),
             zvm::screen::StatusRight::Time { .. } => None,
+            _ => None,
         };
     }
     cli_host::score_in_status(&screen::ScreenView::status_now(machine))
@@ -380,7 +553,7 @@ fn announce_score(machine: &mut Machine, watch: &mut cli_host::ScoreWatch, on: b
     }
     if let Some(line) = watch.update(current_score(machine)) {
         println!("{line}");
-        if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+        if let Some(o) = machine.output_mut().as_any_mut().downcast_mut::<StdoutOutput>() {
             o.note_sink("\n");
         }
     }
@@ -393,7 +566,7 @@ fn announce_score(machine: &mut Machine, watch: &mut cli_host::ScoreWatch, on: b
 /// line, print the answer, then put the prompt back so the player can see it is
 /// still their turn.
 fn print_host_answer(machine: &mut Machine, text: &str) {
-    let (at_line_start, prompt) = match machine.out.as_any().downcast_ref::<StdoutOutput>() {
+    let (at_line_start, prompt) = match machine.output().as_any().downcast_ref::<StdoutOutput>() {
         Some(o) => (o.sink_at_line_start(), o.hold.last_prompt().to_string()),
         None => (true, String::new()),
     };
@@ -402,7 +575,7 @@ fn print_host_answer(machine: &mut Machine, text: &str) {
     }
     println!("{text}");
     print!("{prompt}");
-    if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+    if let Some(o) = machine.output_mut().as_any_mut().downcast_mut::<StdoutOutput>() {
         o.note_sink(&format!("\n{prompt}"));
     }
     let _ = io::stdout().flush();
@@ -526,15 +699,23 @@ fn build_machine(
                 .to_string(),
         );
     }
-    let mut machine = Machine::with_output(mem, Box::new(StdoutOutput::new(
-        stdout_is_tty,
-        paging,
-        page_height,
-        term_cols,
-        honor_game_colours,
-        hold_prompt,
-    )));
-    machine.set_interpreter_number(interpreter_number);
+    // The machine's own table, resolved BEFORE the sink is built: a sink is owned
+    // by the machine and cannot ask it back, so both are told once from here.
+    let machine_row = interpreter_number.and_then(zvm::interpreter::machine);
+    let palette = machine_row.map_or(zvm::screen::Palette::Standard, |m| m.palette);
+    // One value and one call (SQ-1396). The ordering — which setter writes the
+    // header at once, which is latched to `init_caps`, and why the screen size has
+    // to come after it — is `BootConfig`'s, not this front-end's; this file used to
+    // reproduce part of it by hand and `app` reproduced the rest.
+    let mut config = zvm::cpu::exec::BootConfig::new()
+        .with_palette(palette)
+        .with_interpreter_number(interpreter_number)
+        // Report the real terminal size to the game. `init_caps` seeds a generous
+        // 80×24 default; without this the game centres and wraps against 80
+        // columns regardless of the actual pane width (e.g. a title page stays
+        // centred for 80 in a 50-column terminal). Kept in sync on resize by
+        // `Machine::set_screen_dims`, which is the mid-run door.
+        .with_screen_grid(term_rows.min(255) as u8, term_cols.min(255) as u8);
     // …and the REST of that machine (SQ-0872). Setting `$1E` alone told the story
     // which machine it was on and left it to work out what that machine looked
     // like from zvm's own §8.3.2 seed, which is nobody's machine — so off a
@@ -542,8 +723,8 @@ fn build_machine(
     // `zvm::interpreter` is the table both front-ends read, so the CLI and the
     // TUI now present the same machine off the same bytes.
     //
-    // The palette is process-wide and set unconditionally: it governs how a
-    // colour NUMBER resolves to an actual colour, so it must agree with the
+    // The palette is the MACHINE's (SQ-1393) and set unconditionally: it governs
+    // how a colour NUMBER resolves to an actual colour, so it must agree with the
     // number in `$1E` whether or not the game's colours are being honoured.
     // The `$2C`/`$2D` pair is gated on `honor_game_colours`, exactly as the TUI
     // gates it (`startup`'s `host_default_colours`): with colours declined the
@@ -556,25 +737,22 @@ fn build_machine(
     // PC's page, and now that the IBM PC states one (blue under white) that would
     // paint every story anyone opened that way. `--colour machine` is the opt-in
     // for a player who named the machine and meant it.
-    if let Some(m) = interpreter_number.and_then(zvm::interpreter::machine) {
-        zvm::screen::set_palette(m.palette);
+    if let Some(m) = machine_row {
         if honor_game_colours && machine_colours {
             if let Some((bg, fg)) = m.default_colours {
-                machine.set_default_colours(bg, fg);
+                config = config.with_default_colours(bg, fg);
             }
         }
     }
-    machine.init_caps();
-    // Report the real terminal size to the game. init_caps seeds a generous
-    // 80×24 default; without this override the game centres and wraps against
-    // 80 columns regardless of the actual pane width (e.g. a title page stays
-    // centred for 80 in a 50-column terminal). Kept in sync on resize.
-    //
-    // `Machine::set_screen_dims`, not the bare `write_screen_dims` it wraps: the
-    // header bytes are only half the report, and the other half (refitting a
-    // live upper window to the new width) is what the app has always used.
-    machine.set_screen_dims(term_rows.min(255) as u8, term_cols.min(255) as u8);
-    Ok(machine)
+    Ok(Machine::boot(mem, Box::new(StdoutOutput::new(
+        stdout_is_tty,
+        paging,
+        page_height,
+        term_cols,
+        honor_game_colours,
+        hold_prompt,
+        palette,
+    )), config))
 }
 
 // ── argument parsing ──────────────────────────────────────────────────────────
@@ -594,6 +772,20 @@ struct Args {
     /// binaries is the defect SQ-1078 existed to remove, and a `--no-sound` here
     /// beside a `--sound on|off` there would put it straight back.
     aux: bool,
+    /// `--transcript <file>` / `--record <file>` / `--replay <file>`: the
+    /// external files of ZMSD §7.1.1 (output stream 2), §7.1.2 (output stream 4)
+    /// and §10.2 (input stream 1). `None` — the default — declines that stream,
+    /// which §7.6.5 expressly permits.
+    ///
+    /// The names are spelled out rather than borrowed: Frotz drives all three
+    /// from inside the game (its SCRIPT verb and the dumb interface's own escape
+    /// commands) and has no command-line option for any of them, so there is no
+    /// existing letter to be compatible with. The FILES are compatible — a
+    /// `--record` script and a Frotz one are the same format (see
+    /// `zvm::io::encode_command_record`).
+    transcript: Option<String>,
+    record: Option<String>,
+    replay: Option<String>,
     pager: bool,
     timed_input: bool,
     sound: bool,
@@ -620,6 +812,9 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--story-only", "--lower-only"]),
     cli_host::Opt::flag(&["--show-status"]),
     cli_host::Opt::valued(&["--aux"]),
+    cli_host::Opt::valued(&["--transcript"]),
+    cli_host::Opt::valued(&["--record"]),
+    cli_host::Opt::valued(&["--replay"]),
     cli_host::Opt::valued(&["--pager"]),
     cli_host::Opt::valued(&["--timed-input"]),
     cli_host::Opt::valued(&["--sound"]),
@@ -678,6 +873,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         story_only: m.has("--story-only"),
         show_status: m.has("--show-status"),
         aux: cli_host::on_off("--aux", m.value("--aux"))?.unwrap_or(true),
+        transcript: m.value("--transcript").map(str::to_string),
+        record: m.value("--record").map(str::to_string),
+        replay: m.value("--replay").map(str::to_string),
         pager: cli_host::on_off("--pager", m.value("--pager"))?.unwrap_or(true),
         timed_input: cli_host::on_off("--timed-input", m.value("--timed-input"))?.unwrap_or(true),
         sound: cli_host::on_off("--sound", m.value("--sound"))?.unwrap_or(true),
@@ -722,7 +920,9 @@ fn detect_term_size() -> (u16, u16) {
 fn decode_keycode(code: KeyCode) -> u8 {
     match code {
         KeyCode::Char(c) if (c as u32) < 128 => c as u8,
-        KeyCode::Enter => b'\n',
+        // ZMSD §3.8: Return is ZSCII 13, not 10 — LF is not a legal
+        // `read_char` input code at all (SQ-1423).
+        KeyCode::Enter => 13,
         KeyCode::Backspace | KeyCode::Delete => 8, // DEL/BS
         KeyCode::Esc => 0x1B,
         KeyCode::Up => 129,
@@ -733,7 +933,11 @@ fn decode_keycode(code: KeyCode) -> u8 {
         // (ZSCII 145–154) are unreachable: terminals report them as ordinary
         // Char events, indistinguishable from the number row.
         KeyCode::F(n) if (1..=12).contains(&n) => 132 + n,
-        _ => b'\n', // unknown → newline
+        // Unknown → treated as Enter (ZSCII 13). Used to spell this `b'\n'`
+        // (10) and lean on `supply_char`'s own LF→13 normalisation; that
+        // normalisation moved into `ZsciiInput::from_char` (SQ-1426), so this
+        // now names the code the game actually receives directly.
+        _ => 13,
     }
 }
 
@@ -825,7 +1029,7 @@ fn print_frame(machine: &mut Machine, plain: bool, text: &str) {
     if text.is_empty() {
         return;
     }
-    let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() else {
+    let Some(o) = machine.output_mut().as_any_mut().downcast_mut::<StdoutOutput>() else {
         print!("{text}");
         return;
     };
@@ -874,7 +1078,9 @@ fn read_cooked_char(machine: &mut Machine, view: &mut screen::ScreenView) -> u8 
             }
             cli_host::Typed::Passthrough => {}
         }
-        return line.bytes().next().unwrap_or(b'\n');
+        // ZMSD §3.8: Return is ZSCII 13, not the raw LF/CRLF terminator a
+        // cooked read hands back for a bare Enter (SQ-1423).
+        return cli_host::read_char_from_line(&line);
     }
 }
 
@@ -1028,6 +1234,15 @@ fn read_line_stdin() -> String {
 /// `abort_timed_input`, buffer preserved in `line`); otherwise the routine's
 /// output is redrawn via `view` and the line-edit resumes. `timeout = None`
 /// keeps today's exact blocking read.
+///
+/// `preload` is ZMSD §15 `read`'s pre-loaded input line (v5+ —
+/// `StepResult::NeedLine`'s own field; empty in the overwhelmingly common
+/// case). Printed before the read starts so the player sees it as
+/// already-typed text at the prompt — TerpEtude option 12 relies on this.
+/// Neither branch below seeds the EDIT buffer with it: `Machine::supply_line`
+/// prepends the pre-load itself (SQ-1419), so whatever the player types from
+/// here — nothing at all, in TerpEtude's demonstration, or more text after
+/// it — is exactly what this function must return, unprefixed.
 fn read_line_raw(
     is_tty: bool,
     echo: zvm::io::TextAttrs,
@@ -1035,8 +1250,15 @@ fn read_line_raw(
     view: &mut screen::ScreenView,
     timeout: Option<(u16, u16)>,
     sound: &mut Option<CliSound>,
+    preload: &str,
 ) -> (String, u8, Option<(u16, u16)>, bool) {
     if !is_tty {
+        // Cooked / `--screen-reader`: no inline cursor to place text before,
+        // so announce it as its own line rather than leaving it silent.
+        if !preload.is_empty() {
+            println!("{preload}");
+            let _ = io::stdout().flush();
+        }
         return (read_line_stdin(), 13, None, false);
     }
     let _ = terminal::enable_raw_mode();
@@ -1044,9 +1266,13 @@ fn read_line_raw(
     let mut terminator: u8 = 13; // Enter unless a function-key terminator ends the line
     let mut last_resize: Option<(u16, u16)> = None;
     let mut aborted = false;
-    let sgr = crate::screen::sgr_open(echo);
+    let sgr = crate::screen::sgr_open(echo, machine.palette());
     if !sgr.is_empty() {
         print!("{sgr}");
+        let _ = io::stdout().flush();
+    }
+    if !preload.is_empty() {
+        print!("{preload}");
         let _ = io::stdout().flush();
     }
     loop {
@@ -1145,7 +1371,7 @@ fn read_line_raw(
         // make the erase paint the foreground colour instead.
         print!(
             "{}",
-            commit_line_bytes(&screen::bg_sgr(machine.screen.current_bg, machine.honor_game_colours))
+            commit_line_bytes(&screen::bg_sgr(machine.screen.current_bg, machine.honor_game_colours, machine.palette()))
         );
     }
     let _ = io::stdout().flush();
@@ -1210,7 +1436,7 @@ fn apply_resize(
     *page_height = cli_host::Pager::height_for(new_rows);
     view.set_term_rows(new_rows);
     view.set_term_cols(new_cols);
-    if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+    if let Some(o) = machine.output_mut().as_any_mut().downcast_mut::<StdoutOutput>() {
         o.cols = new_cols;
         o.pager.set_page_height(*page_height);
     }
@@ -1299,6 +1525,17 @@ Options:
                         what it found and stops rather than blocking.
       --aux <on|off>    Read and write v5 auxiliary (VFS) sidecar files. Default
                         on.
+      --transcript <file>
+                        Write the game's transcript to <file>. This is the file
+                        a story's own SCRIPT command writes to; without the flag
+                        there is nowhere to write and SCRIPT reports a failure,
+                        which the Standard allows. Truncated at open.
+      --record <file>   Write every command you type, and every key a game reads
+                        singly, to <file> — one record per line, in the same
+                        format Frotz records. Truncated at open.
+      --replay <file>   Take commands from <file> instead of the keyboard, in
+                        the format --record writes. Play resumes at the keyboard
+                        the moment the file runs out.
       --pager <on|off>  [MORE] paging on long output. Default on, and off
                         wherever it could not work anyway: --screen-reader, or a
                         piped stdout.
@@ -1422,7 +1659,7 @@ fn comma_run(items: impl Iterator<Item = String>) -> Vec<String> {
 
 fn main() {
     let argv: Vec<String> = env::args().collect();
-    if cli_host::handled_common_flags(&argv, &help(), env!("CARGO_PKG_NAME"), buildinfo::LONG) {
+    if cli_host::handled_common_flags(&argv, &help(), env!("CARGO_BIN_NAME"), buildinfo::LONG) {
         return;
     }
     // Answered beside `--help`, and for the same reason: it describes the
@@ -1434,10 +1671,10 @@ fn main() {
     }
     let args = match parse_args(&argv) {
         Ok(a) => a,
-        Err(e) => cli_host::usage_error(env!("CARGO_PKG_NAME"), &e, &help()),
+        Err(e) => cli_host::usage_error(env!("CARGO_BIN_NAME"), &e, &help()),
     };
     let Some(story_arg) = args.story.clone() else {
-        cli_host::usage_error(env!("CARGO_PKG_NAME"), "no story file given", &help());
+        cli_host::usage_error(env!("CARGO_BIN_NAME"), "no story file given", &help());
     };
     let story_path = std::path::PathBuf::from(&story_arg);
 
@@ -1499,9 +1736,6 @@ fn main() {
         }
     };
 
-    // Keep the original bytes for Restart.
-    let original_bytes = story_bytes.clone();
-
     // Where this game's saves and sidecars go (SQ-0850). A plain story file is
     // keyed by its filename as it always was; a story taken off a disk image is
     // keyed by its OWN release and serial, because `--story` can pick any of the
@@ -1541,7 +1775,12 @@ fn main() {
     // Plain mode also drops the pager: a [MORE] prompt is a blocking modal that
     // hides the rest of the output behind a keypress, which is exactly the shape
     // a screen reader cannot cope with (SQ-0606).
-    let paging = both_tty && args.pager && !mode.plain();
+    // …and so does a replay, for the same reason the Standard gives: ZMSD
+    // §10.2.4, "When the current stream is stream 1, the interpreter should not
+    // hold up long passages of text (by printing '[MORE]' and waiting for a
+    // keypress, for instance)." A `--replay` run has nobody at the keyboard to
+    // answer one, so a [MORE] would stall the script it was asked to play.
+    let paging = both_tty && args.pager && !mode.plain() && args.replay.is_none();
     let mut page_height = cli_host::Pager::height_for(term_rows);
     // Timed reads (read/read_char time+routine) are honored unless disabled.
     let timed = args.timed_input;
@@ -1613,6 +1852,7 @@ fn main() {
     machine.set_honor_game_colours(honor);
     machine.set_sound_available(sound_enabled);
     aux_preload(&mut machine, &aux_file, args.aux);
+    attach_stream_files(&mut machine, &args);
 
     // SQ-0873: `--period-look` — dress the terminal as this story's own machine
     // did. Every clause of the gate below is load-bearing:
@@ -1661,6 +1901,7 @@ fn main() {
                 // It is also what a terminal draws when nobody states a shape, so
                 // saying nothing IS saying it (SQ-0947).
                 CursorShape::ReverseSpace => "",
+                _ => "",
             }
         );
         let _ = io::stdout().flush();
@@ -1702,7 +1943,8 @@ fn main() {
             None => HashMap::new(),
         };
         Some(CliSound {
-            backend: audio::AudioBackend::new(volume),
+            backend: None, // opened lazily by `CliSound::backend()` on first use (SQ-1423)
+            volume,
             blorb,
             disk,
             ids: HashMap::new(),
@@ -1738,6 +1980,7 @@ fn main() {
     let mut score_watch = cli_host::ScoreWatch::new();
     let announce_scores = mode.plain() && !args.story_only;
     print!("{}", view.start());
+    print!("{}", view.prime(&machine));
     let _ = io::stdout().flush();
 
     // Page background: reflects the game's current bg onto the terminal's own
@@ -1748,13 +1991,13 @@ fn main() {
 
     loop {
         let step = machine.step();
-        for d in machine.diagnostics.drain(..) {
+        for d in machine.take_diagnostics() {
             eprintln!("zvm: warning: {d}");
         }
         // Bleeps + sampled sounds: drain the turn's sound events. Ring the bell for
         // #1/#2 (TTY only), and play audio when enabled.
-        if !machine.pending_sounds.is_empty() {
-            let events: Vec<zvm::cpu::exec::SoundEvent> = std::mem::take(&mut machine.pending_sounds);
+        if !machine.pending_sounds().is_empty() {
+            let events: Vec<zvm::cpu::exec::SoundEvent> = machine.take_pending_sounds();
             let beeps = events.iter().filter(|e| e.number == 1 || e.number == 2).count();
             if beeps > 0 {
                 // The device fact, not `rich`: a bell is not an escape sequence
@@ -1779,9 +2022,9 @@ fn main() {
         // Lost Pig's HELP, which issues erase_window -1) doesn't leave stale
         // story text bleeding through beneath the upper window.
         if machine.screen.erase_lower_requested {
-            print!("{}", view.erase(machine.screen.current_bg, machine.honor_game_colours));
+            print!("{}", view.erase(machine.screen.current_bg, machine.honor_game_colours, machine.palette()));
             let _ = io::stdout().flush();
-            if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+            if let Some(o) = machine.output_mut().as_any_mut().downcast_mut::<StdoutOutput>() {
                 o.pager.reset();
                 o.current_col = 0;
             }
@@ -1811,31 +2054,19 @@ fn main() {
             }
 
             StepResult::Restart => {
-                machine = match build_machine(
-                    original_bytes.clone(),
-                    stdout_is_tty,
-                    paging,
-                    page_height,
-                    term_rows,
-                    term_cols,
-                    honor,
-                    interpreter,
-                    machine_colours,
-                    mode.plain(),
-                ) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("{e}");
-                        // As above: past the guard, so restore explicitly.
-                        cli_host::restore_and_exit(&crate::screen::leave_region(), 1);
-                    }
-                };
-                machine.set_honor_game_colours(honor);
-                machine.set_sound_available(sound_enabled);
+                // ZMSD §6.1.3: "the entire state is restored from the original
+                // story file, and the stack is emptied; but 'Flags 2' is
+                // preserved; and the interpreter should reset the Rst parts of
+                // the header." This used to throw the machine away and rebuild it
+                // from the original bytes, which is a COLD BOOT — it loses the two
+                // game-writable Flags 2 bits (transcription, fixed-pitch) the
+                // clause preserves. `Machine::restart` is the clause (SQ-1396),
+                // and it is what `app` has always answered with.
+                machine.restart();
                 aux_preload(&mut machine, &aux_file, args.aux);
             }
 
-            StepResult::NeedLine { .. } => {
+            StepResult::NeedLine { preload, .. } => {
                 // Poll for terminal resize before line input (crossterm returns
                 // current size; on piped stdout this is a no-op via is_tty guard).
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
@@ -1848,7 +2079,7 @@ fn main() {
                 release_prompt(&mut machine);
                 let _ = io::stdout().flush();
                 let cur_bg = if stdout_is_tty && machine.honor_game_colours {
-                    screen::zcolour_rgb(machine.screen.current_bg)
+                    screen::zcolour_rgb(machine.screen.current_bg, machine.palette())
                 } else {
                     None
                 };
@@ -1860,11 +2091,11 @@ fn main() {
                 // Echo input in the game's current style/colour (Default unless a
                 // game set colour and honoring is on — matching the output sink).
                 let echo = if honor {
-                    zvm::io::TextAttrs {
-                        style: machine.screen.text_style,
-                        fg: machine.screen.current_fg,
-                        bg: machine.screen.current_bg,
-                    }
+                    zvm::io::TextAttrs::new(
+                        machine.screen.text_style,
+                        machine.screen.current_fg,
+                        machine.screen.current_bg,
+                    )
                 } else {
                     zvm::io::TextAttrs::default()
                 };
@@ -1874,7 +2105,7 @@ fn main() {
                 // that expired is NOT re-read here: the interrupt has already
                 // run and the game is owed its answer.
                 let (line, terminator, resize, aborted) = loop {
-                    let r = read_line_raw(stdin_is_tty, echo, &mut machine, &mut view, timeout, &mut sound);
+                    let r = read_line_raw(stdin_is_tty, echo, &mut machine, &mut view, timeout, &mut sound, &preload);
                     if r.3 {
                         break r;
                     }
@@ -1927,7 +2158,7 @@ fn main() {
                 } else {
                     machine.supply_line(line.trim_end(), terminator);
                 }
-                if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+                if let Some(o) = machine.output_mut().as_any_mut().downcast_mut::<StdoutOutput>() {
                     o.pager.reset();
                     o.current_col = 0; // cursor is at line start after user input + Enter
                 }
@@ -1945,7 +2176,7 @@ fn main() {
                 release_prompt(&mut machine);
                 let _ = io::stdout().flush();
                 let cur_bg = if stdout_is_tty && machine.honor_game_colours {
-                    screen::zcolour_rgb(machine.screen.current_bg)
+                    screen::zcolour_rgb(machine.screen.current_bg, machine.palette())
                 } else {
                     None
                 };
@@ -1975,10 +2206,13 @@ fn main() {
                 }
                 if aborted {
                     machine.abort_timed_input("");
-                } else {
-                    machine.supply_char(ch);
+                } else if let Some(zscii) = zvm::text::input::ZsciiInput::new(ch) {
+                    machine.supply_char(zscii);
                 }
-                if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+                // else: `ch` is not a legal ZSCII input code (ZMSD §3.8);
+                // dropped, matching `supply_char`'s own former behaviour for
+                // an illegal code.
+                if let Some(o) = machine.output_mut().as_any_mut().downcast_mut::<StdoutOutput>() {
                     o.pager.reset();
                     o.current_col = 0;
                 }
@@ -2007,6 +2241,8 @@ fn main() {
                     cli_host::pick_save(&filename, &saves).map_or(filename.clone(), str::to_string);
                 handle_restore_request(&mut machine, &game_dir, filename.trim());
             }
+
+            _ => {}
         }
     }
 }
@@ -2129,13 +2365,146 @@ mod v6_tests {
         assert_eq!(frame[start..end].chars().count(), 60, "resized: {frame:?}");
     }
 
+    /// Cursor tracker for `ScreenView`'s own, small escape vocabulary — absolute
+    /// CUP (`\x1b[r;cH`), single-level DECSC/DECRC save/restore (`\x1b7`/`\x1b8`),
+    /// and literal text with `\r\n` line breaks. Not a general terminal emulator:
+    /// scoped exactly to what this module emits, which is enough to answer "which
+    /// row did this text land on" for SQ-1516. Other CSI sequences (SGR, EL, the
+    /// DECSTBM scroll-margin set) do not move the cursor here, matching a real
+    /// terminal, and are skipped.
+    fn row_of(stream: &str, needle: &str) -> u16 {
+        let bytes = stream.as_bytes();
+        let needle = needle.as_bytes();
+        let mut row: u16 = 1;
+        let mut col: u16 = 1;
+        let mut saved: Option<(u16, u16)> = None;
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i..].starts_with(needle) {
+                return row;
+            }
+            if bytes[i] == 0x1b {
+                match bytes.get(i + 1) {
+                    Some(b'7') => {
+                        saved = Some((row, col));
+                        i += 2;
+                        continue;
+                    }
+                    Some(b'8') => {
+                        if let Some((r, c)) = saved {
+                            row = r;
+                            col = c;
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    Some(b'[') => {
+                        let start = i + 2;
+                        let mut j = start;
+                        while j < bytes.len() && !bytes[j].is_ascii_alphabetic() {
+                            j += 1;
+                        }
+                        let params = std::str::from_utf8(&bytes[start..j]).unwrap_or("");
+                        if bytes.get(j) == Some(&b'H') || bytes.get(j) == Some(&b'f') {
+                            let mut parts = params.splitn(2, ';');
+                            row = parts.next().unwrap_or("1").parse().unwrap_or(1).max(1);
+                            col = parts.next().unwrap_or("1").parse().unwrap_or(1).max(1);
+                        }
+                        i = j + 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            match bytes[i] {
+                b'\r' => col = 1,
+                b'\n' => row += 1,
+                _ => col += 1,
+            }
+            i += 1;
+        }
+        panic!("{needle:?} not found in stream: {stream:?}", needle = String::from_utf8_lossy(needle));
+    }
+
+    /// SQ-1516 (user report): the first line a v3 story prints was dropped or
+    /// overwritten. A v1-v3 status line is always shown (`top_rows` returns 1
+    /// unconditionally for version < 4 — see `screen::ScreenView`'s private
+    /// `top_rows`), but the pinned region used to be established lazily: only
+    /// reactively, on the game's first `show_status` opcode or its first read.
+    /// By then the cursor was still wherever `start()` left it — row 1 — so
+    /// painting the status band there clobbered whatever the game had already
+    /// streamed to that row. The Lurking Horror's own init routine calls
+    /// `show_status` (0OP 0x0C) before printing anything, which is the exact
+    /// ordering this reproduces on: the very FIRST thing landing at row 1 is
+    /// the status paint, and the story's first line prints right on top of it.
+    ///
+    /// `ScreenView::prime` (called once, right after `start`, before the
+    /// machine's first step) is the fix: it reserves the band and pushes the
+    /// cursor below it before anything else can land there.
+    #[test]
+    fn v3_first_story_line_is_not_swallowed_by_the_status_row() {
+        let mut machine = build(story_of_version(3)).expect("v3 builds");
+        let mut view = screen::ScreenView::new(true, false, false, 24, 80);
+
+        let mut stream = String::new();
+        stream.push_str(&view.start());
+        stream.push_str(&view.prime(&machine));
+
+        // The game's first action: an explicit show_status, as The Lurking
+        // Horror's init routine does before printing anything.
+        machine.screen.show_status_requested = true;
+        let status_frame = view.frame(&machine);
+        assert!(
+            !status_frame.contains(";80r") && !status_frame.contains(";24r"),
+            "the region must already be established by `prime` — this frame \
+             must not re-enter it: {status_frame:?}"
+        );
+        stream.push_str(&status_frame);
+
+        // The interpreter's own print path is separate from `view.frame` (see
+        // `StdoutOutput::print`) — it writes straight to the stream wherever
+        // the cursor currently sits. Simulate the story's first printed line
+        // the same way.
+        stream.push_str("You've waited until the last minute again.\r\n");
+
+        assert_eq!(
+            row_of(&stream, "You've waited"),
+            2,
+            "the story's first line must land below the pinned status row, \
+             not on top of it: {stream:?}"
+        );
+    }
+
+    /// Companion to the case above: a v5 story has no upper window at boot
+    /// (`top_rows` reads `machine.screen.upper.rows`, which is 0 until the game
+    /// splits), so `prime` has nothing to reserve and the story's first line
+    /// must still land at row 1, exactly as before SQ-1516.
+    #[test]
+    fn v5_first_story_line_is_unaffected_by_priming() {
+        let machine = build(story_of_version(5)).expect("v5 builds");
+        let mut view = screen::ScreenView::new(true, false, false, 24, 80);
+
+        let mut stream = String::new();
+        stream.push_str(&view.start());
+        let prime = view.prime(&machine);
+        assert!(prime.is_empty(), "no upper window at boot — nothing to prime: {prime:?}");
+        stream.push_str(&prime);
+        stream.push_str("Some v5 intro text.\r\n");
+
+        assert_eq!(
+            row_of(&stream, "Some v5 intro"),
+            1,
+            "v5 was never affected by this bug — text starts at row 1 as before: {stream:?}"
+        );
+    }
+
     /// SQ-0611. The sink writes to the real stdout, so what is testable here is
     /// the holding decision itself: with holding on, an unterminated prompt must
     /// still be pending after the write, leaving the stream at a line start for
     /// the status block to occupy — and gone once released.
     #[test]
     fn plain_mode_holds_the_prompt_so_the_status_can_precede_it() {
-        let mut o = StdoutOutput::new(false, false, 24, 80, true, true);
+        let mut o = StdoutOutput::new(false, false, 24, 80, true, true, zvm::screen::Palette::Standard);
         o.write_counted("You are in a room.\n");
         assert!(!o.hold.is_holding(), "a complete line goes straight out");
         o.write_counted("\n>");
@@ -2149,7 +2518,7 @@ mod v6_tests {
     fn without_plain_mode_nothing_is_ever_held() {
         // The pinned-region path must keep writing straight through: its status
         // never enters the text flow, so there is nothing to make room for.
-        let mut o = StdoutOutput::new(true, false, 24, 80, true, false);
+        let mut o = StdoutOutput::new(true, false, 24, 80, true, false, zvm::screen::Palette::Standard);
         o.write_counted("\n>");
         assert!(!o.hold.is_holding(), "the TTY path holds nothing");
     }
@@ -2406,8 +2775,11 @@ mod stdin_eof_tests {
 
     #[test]
     fn blank_line_is_not_confused_with_eof() {
+        // Not `None` (EOF) — and not the raw LF byte either: ZMSD §3.8 makes
+        // Return ZSCII 13, and 10 is not a legal `read_char` input code
+        // (SQ-1423; full mapping coverage lives in `cli_host::input`).
         let mut input: &[u8] = b"\n";
-        assert_eq!(read_byte_or_eof(&mut input), Some(b'\n'));
+        assert_eq!(read_byte_or_eof(&mut input), Some(13));
     }
 
     #[test]
@@ -2424,8 +2796,9 @@ mod stdout_tests {
     #[test]
     fn print_styled_wraps_only_on_tty() {
         use zvm::io::TextAttrs;
-        assert_eq!(crate::screen::style_wrap("hi", TextAttrs { style: 2, ..Default::default() }, true), "\x1b[1mhi\x1b[0m");
-        assert_eq!(crate::screen::style_wrap("hi", TextAttrs { style: 2, ..Default::default() }, false), "hi");
+        use zvm::screen::ZColour;
+        assert_eq!(crate::screen::style_wrap("hi", TextAttrs::new(2, ZColour::Default, ZColour::Default), true, zvm::screen::Palette::Standard), "\x1b[1mhi\x1b[0m");
+        assert_eq!(crate::screen::style_wrap("hi", TextAttrs::new(2, ZColour::Default, ZColour::Default), false, zvm::screen::Palette::Standard), "hi");
     }
 
     /// CLI gate: when honor_game_colours is OFF, print_attr strips fg/bg before
@@ -2437,17 +2810,17 @@ mod stdout_tests {
         use zvm::screen::ZColour;
         // Attrs with fg=red (Standard(3)→SGR 31), bg=blue (Standard(6)→SGR 44),
         // and reverse+bold style bits.
-        let attrs = TextAttrs { style: 0x03, fg: ZColour::Standard(3), bg: ZColour::Standard(6) };
+        let attrs = TextAttrs::new(0x03, ZColour::Standard(3), ZColour::Standard(6));
 
         // With honour ON: colour SGR present.
-        let with_honour = crate::screen::style_wrap("hi", attrs, true);
+        let with_honour = crate::screen::style_wrap("hi", attrs, true, zvm::screen::Palette::Standard);
         assert!(with_honour.contains("31"), "fg red SGR present with honour: {with_honour:?}");
         assert!(with_honour.contains("44"), "bg blue SGR present with honour: {with_honour:?}");
 
         // With honour OFF: strip fg/bg, pass Default channels to style_wrap.
         // This mirrors what StdoutOutput::print_attr does when honor_game_colours=false.
-        let stripped = TextAttrs { fg: ZColour::Default, bg: ZColour::Default, ..attrs };
-        let without_honour = crate::screen::style_wrap("hi", stripped, true);
+        let stripped = TextAttrs::new(attrs.style, ZColour::Default, ZColour::Default);
+        let without_honour = crate::screen::style_wrap("hi", stripped, true, zvm::screen::Palette::Standard);
         assert!(!without_honour.contains("31"), "fg colour absent when honour=false: {without_honour:?}");
         assert!(!without_honour.contains("44"), "bg colour absent when honour=false: {without_honour:?}");
         // Reverse (7) and bold (1) must still be present.
@@ -2491,7 +2864,9 @@ mod keycode_tests {
 
     #[test]
     fn decode_keycode_special_keys() {
-        assert_eq!(decode_keycode(KeyCode::Enter), b'\n');
+        // ZMSD §3.8: Return is ZSCII 13; 10 (LF) is not a legal read_char
+        // input code (SQ-1423).
+        assert_eq!(decode_keycode(KeyCode::Enter), 13);
         assert_eq!(decode_keycode(KeyCode::Backspace), 8);
         assert_eq!(decode_keycode(KeyCode::Esc), 0x1B);
         assert_eq!(decode_keycode(KeyCode::Up), 129);
@@ -2593,13 +2968,13 @@ mod centring_tests {
     use std::path::PathBuf;
     use zvm::io::TextAttrs;
 
-    const BOLD: TextAttrs = TextAttrs { style: 2, fg: zvm::screen::ZColour::Default, bg: zvm::screen::ZColour::Default };
+    const BOLD: TextAttrs = TextAttrs::new(2, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default);
 
     // ── the root cause, at the unit ─────────────────────────────────────────
 
     #[test]
     fn a_styled_space_costs_one_column_not_nine() {
-        let (out, col) = format_output(" ", Some(BOLD), 80, 0, true);
+        let (out, col) = format_output(" ", Some(BOLD), 80, 0, true, zvm::screen::Palette::Standard);
         assert_eq!(out, "\x1b[1m \x1b[0m", "the bytes are unchanged — only the accounting was wrong");
         assert_eq!(col, 1, "an SGR escape occupies no column (ZMSD §8.8.3.1.2.2)");
     }
@@ -2613,7 +2988,7 @@ mod centring_tests {
         let mut col = 0u16;
         let mut out = String::new();
         for _ in 0..29 {
-            let (bytes, new_col) = format_output(" ", Some(BOLD), 80, col, true);
+            let (bytes, new_col) = format_output(" ", Some(BOLD), 80, col, true, zvm::screen::Palette::Standard);
             out.push_str(&bytes);
             col = new_col;
         }
@@ -2639,7 +3014,7 @@ mod centring_tests {
             self.writes.push((s.to_string(), None, self.buffer_mode));
         }
         fn print_styled(&mut self, s: &str, style: u8) {
-            self.print_attr(s, TextAttrs { style, ..Default::default() });
+            self.print_attr(s, TextAttrs::new(style, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default));
         }
         fn print_attr(&mut self, s: &str, attrs: TextAttrs) {
             self.writes.push((s.to_string(), Some(attrs), self.buffer_mode));
@@ -2673,7 +3048,7 @@ mod centring_tests {
                 break;
             }
         }
-        let rec = m.out.as_any().downcast_ref::<Recorder>().expect("recorder");
+        let rec = m.output().as_any().downcast_ref::<Recorder>().expect("recorder");
         assert!(!rec.writes.is_empty(), "the title splash must have printed something");
         Some(rec.writes.clone())
     }
@@ -2684,7 +3059,7 @@ mod centring_tests {
         let mut col = 0u16;
         for (text, attrs, buffered) in writes {
             let width = if *buffered { cols } else { u16::MAX };
-            let (bytes, new_col) = format_output(text, *attrs, width, col, true);
+            let (bytes, new_col) = format_output(text, *attrs, width, col, true, zvm::screen::Palette::Standard);
             out.push_str(&bytes);
             col = new_col;
         }
@@ -2773,7 +3148,7 @@ mod centring_tests {
                 .expect("a v5 story builds");
             assert_eq!(m.mem.read_byte(0x21) as u16, cols, "$21 = screen width in characters (§8.4)");
             assert_eq!(m.mem.read_word(0x22), cols, "$22 = screen width in units (§8.4.3)");
-            let sink = m.out.as_any().downcast_ref::<StdoutOutput>().expect("the stdout sink");
+            let sink = m.output().as_any().downcast_ref::<StdoutOutput>().expect("the stdout sink");
             assert_eq!(sink.cols, cols, "the sink wraps at exactly what the story was told");
         }
     }
@@ -2799,7 +3174,7 @@ mod centring_tests {
             apply_resize(r, c, &mut rows, &mut cols, &mut page, &mut m, &mut view);
             assert_eq!(m.mem.read_byte(0x21) as u16, c, "the story is told the new width");
             assert_eq!(m.mem.read_byte(0x20) as u16, r, "…and the new height");
-            let sink = m.out.as_any().downcast_ref::<StdoutOutput>().expect("the stdout sink");
+            let sink = m.output().as_any().downcast_ref::<StdoutOutput>().expect("the stdout sink");
             assert_eq!(sink.cols, c, "the sink follows it");
             assert_eq!(m.screen.upper.cols, c, "and so does the grid the game is drawing into");
         }
@@ -2809,6 +3184,7 @@ mod centring_tests {
 #[cfg(test)]
 mod sound_idmap_tests {
     use std::collections::HashMap;
+    use super::{CliSound, play_cli_sounds};
 
     // Mirrors the `cs.ids.retain(|_, v| *v != id)` line in `poll_sound_finish`:
     // a finished sound's number->id mapping must be cleared even when it has no
@@ -2827,6 +3203,47 @@ mod sound_idmap_tests {
 
         assert!(!ids.contains_key(&3), "finished id must be cleared even without a routine");
         assert_eq!(ids.get(&4), Some(&99), "unrelated entries must be untouched");
+    }
+
+    // SQ-1423: the real output device must open lazily, on the first sound
+    // that actually plays, rather than at launch — the SQ-1014 audit measured
+    // ~240ms opening a device a silent story never uses.
+    #[test]
+    fn backend_opens_lazily_on_first_sound_event() {
+        audio::disable_output_for_tests(); // SQ-1162: never a real device in tests
+        let mut cs = CliSound {
+            backend: None,
+            volume: 50,
+            blorb: None,
+            disk: HashMap::new(),
+            ids: HashMap::new(),
+            routines: HashMap::new(),
+        };
+        assert!(cs.backend.is_none(), "constructing CliSound must not open a device");
+        // A #1 bleep (effect 2 = start) is the simplest event that actually plays.
+        let ev = zvm::cpu::exec::SoundEvent::new(1, 2, 8, 0, 0);
+        play_cli_sounds(&mut cs, &[ev]);
+        assert!(cs.backend.is_some(), "playing a bleep must construct the backend on first use");
+    }
+
+    // A batch that carries only a no-op (a #0 filler, or an ineffective #3
+    // stop with no id ever recorded) must not pay to open the device either —
+    // "on first use" means first *actual* play, not first call.
+    #[test]
+    fn backend_stays_closed_for_events_that_play_nothing() {
+        audio::disable_output_for_tests();
+        let mut cs = CliSound {
+            backend: None,
+            volume: 50,
+            blorb: None,
+            disk: HashMap::new(),
+            ids: HashMap::new(),
+            routines: HashMap::new(),
+        };
+        let filler = zvm::cpu::exec::SoundEvent::new(0, 0, 0, 0, 0);
+        let ineffective_stop = zvm::cpu::exec::SoundEvent::new(3, 3, 8, 0, 0);
+        play_cli_sounds(&mut cs, &[filler, ineffective_stop]);
+        assert!(cs.backend.is_none(), "no device should open when nothing actually plays");
     }
 }
 
@@ -2878,25 +3295,25 @@ mod restore_request_tests {
     fn restore_request_completes_the_save_descriptor_forward() {
         let mem = Memory::new(save_v4_into_g0_story()).unwrap();
         let mut m = Machine::new(mem);
-        m.state.pc = 0x40;
+        m.state.set_pc(0x40);
 
         let r = m.step();
         assert_eq!(r, StepResult::SaveRequest, "save opcode suspends with SaveRequest");
-        assert_eq!(m.state.pc, 0x42, "PC is post-instruction after @save suspends");
+        assert_eq!(m.state.pc(), 0x42, "PC is post-instruction after @save suspends");
 
         let blob = m.save_quetzal();
         m.complete_save(true);
         assert_eq!(m.global(0), 1, "save success stored 1 into G0");
 
         // Clobber state the way later play would, so the restore must actually reset it.
-        m.do_store(Some(0x10), 0x99);
-        m.state.pc = 0x00AB;
+        m.set_global(0, 0x99);
+        m.state.set_pc(0x00AB);
 
         // This is the exact call zvm-cli's RestoreRequest arm makes.
         m.complete_restore_success(&blob).expect("in-game restore must succeed");
 
         assert_eq!(m.global(0), 2, "descriptor advanced: the original @save 'returns' 2");
-        assert_eq!(m.state.pc, 0x42, "execution resumes PAST the @save, not at its descriptor");
+        assert_eq!(m.state.pc(), 0x42, "execution resumes PAST the @save, not at its descriptor");
 
         // A properly-resumed machine must not immediately re-suspend.
         let r2 = m.step();
@@ -2931,7 +3348,7 @@ mod restore_request_tests {
         let dir = scratch_dir("save-cancel");
         let mem = Memory::new(save_then_restore_story()).unwrap();
         let mut m = Machine::new(mem);
-        m.state.pc = 0x40;
+        m.state.set_pc(0x40);
         assert_eq!(m.step(), StepResult::SaveRequest);
 
         handle_save_request(&mut m, &dir, "");
@@ -2951,7 +3368,7 @@ mod restore_request_tests {
         let dir = scratch_dir("restore-cancel");
         let mem = Memory::new(save_then_restore_story()).unwrap();
         let mut m = Machine::new(mem);
-        m.state.pc = 0x40;
+        m.state.set_pc(0x40);
 
         // Make a genuine save for this story and plant it where the empty
         // filename used to resolve.

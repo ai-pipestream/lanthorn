@@ -314,23 +314,29 @@ fn izm_url(stem: &str) -> String {
 }
 
 /// Find a downloadable InvisiClues hint file for a story, matched by the game
-/// key its **identity** resolves to — falling back to the filename stem and the
-/// displayed title only when the identity names no game we know.
+/// key its **identity** resolves to. Downloadable InvisiClues exist only for
+/// Infocom releases, and `identity_hint_key`/`identity_ident` (backed by the
+/// Infocom build registry `known_titles.tsv`) are the only source of "this IFID
+/// is an Infocom build" — so an IFID that registry doesn't recognise offers no
+/// download, full stop. There is deliberately no fallback to a filename stem or
+/// a displayed title: either can belong to a container (a disk image named for
+/// its box) or to an unrelated non-Infocom game whose title or stem happens to
+/// contain a catalog word (e.g. Scott Adams' "The Sorcerer of Claymorgue
+/// Castle" contains "sorcerer", which is a catalog key for Infocom's
+/// *Sorcerer*) — neither says the story is the Infocom game the key names.
 ///
 /// The medium is not the story (SQ-0767): a disk image is named for its box
 /// (`Zork I - The Great Underground Empire.adf`), so its filename never
 /// contains `zork1` and neither does the title derived from it. `ifid` carries
 /// the mounted story's release and serial, which name the build regardless of
-/// what the file on disk is called, so it is consulted first.
+/// what the file on disk is called.
 ///
 /// SLAG (live IF Archive) is preferred; the izm set (Internet Archive) is the
 /// fallback for games SLAG doesn't cover. Returns `None` when no catalog entry
 /// matches. A key must be ≥3 chars to match (guards against spurious hits).
-pub fn hint_download_for(ifid: &str, game_stem: &str, game_title: &str) -> Option<HintDownload> {
+pub fn hint_download_for(ifid: &str) -> Option<HintDownload> {
     let identity_key = identity_hint_key(ifid);
     let canonical = identity_ident(ifid);
-    let stem = normalize_ident(game_stem);
-    let title = normalize_ident(game_title);
     let matches = |key: &str| {
         let k = normalize_ident(key);
         if k.len() < 3 {
@@ -340,10 +346,9 @@ pub fn hint_download_for(ifid: &str, game_stem: &str, game_title: &str) -> Optio
             // The identity names its catalog key outright — authoritative, and
             // exclusive: no other key can be right for this build.
             Some(ik) => normalize_ident(ik) == k,
-            // Else the identity-resolved canonical title, then — last resort —
-            // the filename stem and the displayed title, which for a story
-            // mounted out of a container are the CONTAINER's, not the game's.
-            None => canonical.contains(&k) || stem.contains(&k) || title.contains(&k),
+            // Else the identity-resolved canonical title (still identity, never
+            // a filename or a displayed title).
+            None => canonical.contains(&k),
         }
     };
     if let Some((s, _)) = SLAG_HINTS.iter().find(|(_, k)| matches(k)) {
@@ -728,7 +733,7 @@ pub fn mounted_stories(
     blorb::medium::DiskImage::detect(&raw)?;
     let disk = mount_disk(path, raw).ok()?;
     let format = disk.format();
-    let stories: Vec<_> = disk
+    let mut stories: Vec<_> = disk
         .stories()
         .into_iter()
         .map(|s| {
@@ -736,7 +741,229 @@ pub fn mounted_stories(
             (s, image)
         })
         .collect();
+    // Scott Adams programs — the Commodore 64 *Mysterious Adventures*
+    // compilation disks (SQ-1414) — that `MountedDisk::stories` does not cover:
+    // that door stays Z-code/Glulx/Blorb-only by design (`blorb::medium`'s own
+    // module doc), so classifying a Scott program off a disk's directory is
+    // this crate's business, exactly as it already is for a zip's entries.
+    for story in scott_disk_stories(&disk) {
+        let image = disk.image_for(&story.name);
+        stories.push((story, image));
+    }
     (!stories.is_empty()).then_some((format, stories))
+}
+
+/// Names a Commodore/CBM DOS directory lists that are never a game, even when
+/// their bytes might otherwise pass [`scott::looks_like_scott_bytes`] — the
+/// boot loader every *Mysterious Adventures* disk carries, and the DOS wedge
+/// name a caller could plausibly meet on some other Commodore release.
+const NON_GAME_DISK_NAMES: [&str; 2] = ["BOOT", "DOS.SYS"];
+
+/// The Scott Adams program files on `disk` that [`blorb::medium::MountedDisk::stories`]
+/// does not list — that door answers only for Z-code, Glulx and Blorb by
+/// design, so a Scott database off a disk's directory is found by scanning
+/// [`blorb::medium::MountedDisk::contents`] instead (SQ-1414).
+///
+/// A name `stories()` already offered is skipped, so a hybrid disc's Z-code
+/// rows are never duplicated here; the same holds for the obvious non-games
+/// ([`NON_GAME_DISK_NAMES`]). What is left is sniffed with
+/// [`scott::looks_like_scott_bytes`] and then actually run through
+/// [`extract_story`], because the sniff is cheap and permissive — the real
+/// gate is whether this crate's own loader agrees the bytes are a Scott
+/// database, the same standard every other engine on a disk is held to.
+///
+/// **The US S.A.G.A. Atari 8-bit database is not a directory entry at all**
+/// (SQ-1470): Atari DOS 2's own catalogue on these sides lists at most
+/// `DOS.SYS`/`AUTORUN.SYS`, because the release masters its database straight
+/// over the volume table of contents (`blorb::atr`'s module docs), and the
+/// database is addressed by file offset within the whole image rather than
+/// by a filename. So the scan over `contents()` is extended with the one
+/// extra candidate an Atari side offers beyond its directory: the whole
+/// image, through the reserved `blorb::atr::IMAGE_ENTRY` door that format
+/// exists for. The Apple II and Commodore 64 releases need no such door —
+/// their databases ARE ordinary catalogue files (`A4.DAT`, `DATABASE`,
+/// `SHULK.DB`) that `contents()` already lists.
+fn scott_disk_stories(disk: &blorb::medium::MountedDisk) -> Vec<blorb::medium::DiskStory> {
+    let already: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
+    let mut candidates: Vec<(String, Vec<u8>)> = disk.contents();
+    if disk.format() == blorb::medium::DiskImage::AtariDos2 {
+        if let Some(image) = disk.read_named(blorb::atr::IMAGE_ENTRY) {
+            candidates.push((blorb::atr::IMAGE_ENTRY.to_string(), image));
+        }
+    }
+    let candidates: Vec<(String, Vec<u8>)> = candidates
+        .into_iter()
+        .filter(|(name, _)| !already.iter().any(|n| n.eq_ignore_ascii_case(name)))
+        .filter(|(name, _)| !NON_GAME_DISK_NAMES.iter().any(|n| name.eq_ignore_ascii_case(n)))
+        .collect();
+
+    let cheap: Vec<(String, Vec<u8>)> =
+        candidates.iter().filter(|(_, bytes)| resolves_to_scott(bytes)).cloned().collect();
+
+    // SQ-1488: only reach for depacking — real 6502 emulation, up to 50
+    // million instructions PER candidate — when the cheap byte sniff above
+    // found NOTHING on the whole disk. A disk that already has a working
+    // entry (every existing *Mysterious Adventures* and US S.A.G.A. disk in
+    // the corpus) never pays for it: `mounted_stories` is on the path a
+    // directory scan takes for every Commodore disk shown, and emulating
+    // every remaining candidate on disks that were already solved made
+    // `saga_us_disks::questpr1_yields_the_hulk_row` alone run for minutes
+    // instead of under a second (measured while wiring this in). The one
+    // real specimen this narrows away entirely — a disk that carries BOTH a
+    // working, uncrunched game AND a second, crunched one — has not been
+    // seen; every crunched disk in `stories/scott-dialects/c64/` holds
+    // exactly the one program the quest's own title describes.
+    let depacked: Vec<(String, Vec<u8>)> =
+        if cheap.is_empty() && disk.format() == blorb::medium::DiskImage::CommodoreD64 {
+            candidates
+                .into_iter()
+                .filter_map(|(name, bytes)| {
+                    let depacked = blorb::depack::depack_c64_prg(&bytes).ok()?;
+                    let prg = depacked_prg_bytes(&depacked);
+                    resolves_to_scott(&prg).then_some((name, prg))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+    cheap
+        .into_iter()
+        .chain(depacked)
+        .map(|(name, bytes)| {
+            let name = saga_us_keyed_name(&name, &bytes);
+            blorb::medium::DiskStory { name, bytes }
+        })
+        .collect()
+}
+
+/// Whether `bytes` are a Scott Adams database this crate's own loader agrees
+/// is usable — the real gate, not just the cheap sniff.
+///
+/// `looks_like_scott_bytes` is cheap and permissive on its own, so it is
+/// paired with `extract_story` (which re-runs it for a raw, non-blorb
+/// candidate) and then `Database::parse`, the loader's own final word: a
+/// database that LOOKS plausible but does not actually decode — the Atari
+/// Mission Impossible side A, whose room-description block is damaged and
+/// whose pointer tables consequently disagree (SQ-1470) — passes the sniff
+/// unchanged and only `Database::parse` catches it.
+fn resolves_to_scott(bytes: &[u8]) -> bool {
+    scott::looks_like_scott_bytes(bytes)
+        && matches!(extract_story(bytes.to_vec()), Ok(LoadedStory::Scott(_)))
+        && scott::Database::parse(bytes).is_ok()
+}
+
+/// Re-attaches the load-address header a Commodore `PRG` carries so a
+/// depacked memory image reads the same shape every Scott Adams sniff in
+/// this crate already expects — `scott::c64::prg_image`'s own doc: "bytes 0-1
+/// are the address, little-endian, and byte 2 is the byte at that address".
+/// [`blorb::depack::depack_c64_prg`] hands back the bare image alone (it
+/// depacks a memory range, not a container entry), so this is the one place
+/// that puts the two bytes back before the result crosses back into
+/// `scott::looks_like_scott_bytes`'s door.
+fn depacked_prg_bytes(depacked: &blorb::depack::DepackedProgram) -> Vec<u8> {
+    let mut prg = Vec::with_capacity(depacked.data.len() + 2);
+    prg.extend_from_slice(&depacked.start_addr.to_le_bytes());
+    prg.extend_from_slice(&depacked.data);
+    prg
+}
+
+/// Why [`crunched_program_name`] could not turn a disk's crunched program
+/// into a playable game — carried so the refusal in [`read_story_file`] can
+/// say which of the two actually happened, rather than blurring "the
+/// emulator gave up" and "it decompressed fine but into a C64 driver this
+/// crate has no reader for" into one sentence.
+enum CrunchedProgram {
+    /// `blorb::depack::depack_c64_prg` itself did not produce a decompressed
+    /// image (timed out, or the result did not look like a real program).
+    NotUnpacked(String),
+    /// It decompressed, but the memory image is not a Scott Adams dialect
+    /// this crate's loader recognises — a different C64 driver from the
+    /// *Mysterious Adventures* one `scott::c64` reads, or a bare S.A.G.A.
+    /// database at some offset other than the one [`scott::saga_us`] checks.
+    Unrecognised(String),
+}
+
+impl CrunchedProgram {
+    fn name(&self) -> &str {
+        match self {
+            Self::NotUnpacked(name) | Self::Unrecognised(name) => name,
+        }
+    }
+}
+
+/// The Commodore disk's one crunched program, when [`scott_disk_stories`]
+/// could not turn it into a playable game — SQ-1488's honest refusal in
+/// place of the generic "no story file" message below.
+///
+/// Only asked when `scott_disk_stories` found nothing at all: a candidate
+/// that already resolved is never reported as failed, and this only runs on
+/// a Commodore disk (`blorb::depack::depack_c64_prg` reads a CBM `PRG`'s own
+/// load-address header, which is specifically what a D64 directory keeps).
+/// A candidate that never looked like a `$0801` BASIC-stub program at all —
+/// [`blorb::depack::DepackError::NoEntryPoint`] — is not reported: that is
+/// not evidence of a crunched program, just an ordinary file that is neither
+/// Scott Adams nor packed.
+fn crunched_program_name(disk: &blorb::medium::MountedDisk) -> Option<CrunchedProgram> {
+    if disk.format() != blorb::medium::DiskImage::CommodoreD64 {
+        return None;
+    }
+    let already: Vec<String> = disk.stories().into_iter().map(|s| s.name).collect();
+    disk.contents()
+        .into_iter()
+        .filter(|(name, _)| !already.iter().any(|n| n.eq_ignore_ascii_case(name)))
+        .filter(|(name, _)| !NON_GAME_DISK_NAMES.iter().any(|n| name.eq_ignore_ascii_case(n)))
+        .filter(|(_, bytes)| !resolves_to_scott(bytes))
+        .find_map(|(name, bytes)| match blorb::depack::depack_c64_prg(&bytes) {
+            Err(blorb::depack::DepackError::NoEntryPoint) => None,
+            Err(_) => Some(CrunchedProgram::NotUnpacked(name)),
+            Ok(depacked) if !resolves_to_scott(&depacked_prg_bytes(&depacked)) => {
+                Some(CrunchedProgram::Unrecognised(name))
+            }
+            Ok(_) => None, // resolves — `scott_disk_stories` would have found it too
+        })
+}
+
+/// A save-key-safe name for a Scott candidate found on a disk (SQ-1470).
+///
+/// **A US S.A.G.A. release's own container entry is not a distinguishing
+/// name.** `blorb::atr::IMAGE_ENTRY` is the literal `"IMAGE"` on all seven
+/// Atari sides, and the Apple II boot disks spell two DIFFERENT titles
+/// `DATABASE` (*The Count* and *The Sorcerer of Claymorgue Castle*, both
+/// living in the same `stories/scott-dialects/apple/` directory) — and
+/// `cli_host::storage::story_key_for` keys a disk-sourced Scott entry on its
+/// NAME alone, because Scott bytes carry no Z-machine header to build a
+/// `DiskBuild` from. Two different games under either literal name would
+/// share one save directory.
+///
+/// The (version, adventure, platform) triple `scott::SagaUs` carries is this
+/// release's actual identity (§12.2/§12.3 of the dialect spec) — content-
+/// derived and stable regardless of which physical disk holds it, the same
+/// property `DiskBuild`'s release+serial gives a Z-code disk story. It is
+/// appended to the real container name rather than replacing it, so the
+/// story-info pane's `"{filename}:{entry}"` line still names what is
+/// actually on the disk.
+///
+/// A no-op for every OTHER Scott source (the Commodore 64 *Mysterious
+/// Adventures* programs, TI-99/4A releases, and plain `.dat` files): none of
+/// those carries a `saga_us` identity, so this leaves their already-unique,
+/// already-shipped names untouched.
+fn saga_us_keyed_name(name: &str, bytes: &[u8]) -> String {
+    match scott::Database::parse(bytes).ok().and_then(|db| db.saga_us) {
+        Some(saga) => format!("{name}-{}-{}-{}", saga.version, saga.adventure, saga_us_platform_slug(saga.platform)),
+        None => name.to_string(),
+    }
+}
+
+/// A short, filename-safe token per [`scott::SagaPlatform`], for
+/// [`saga_us_keyed_name`].
+fn saga_us_platform_slug(platform: scott::SagaPlatform) -> &'static str {
+    match platform {
+        scott::SagaPlatform::Atari8Bit => "atari8bit",
+        scott::SagaPlatform::AppleII => "appleii",
+        scott::SagaPlatform::Commodore64 => "c64",
+        _ => "unknown",
+    }
 }
 
 /// Open the disk image `path`, whose bytes are `raw`, with the other volumes of
@@ -799,10 +1026,18 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
         // if it has gone — an image edited between the scan and the launch must
         // say so rather than open a different game.
         if let Some(want) = want {
+            // A named story is either one `disk.stories()` already answers for
+            // (Z-code/Glulx/Blorb), or a Scott Adams program file `stories()`
+            // never lists — a Commodore *Mysterious Adventures* row (SQ-1414).
             let found = disk
                 .stories()
                 .into_iter()
-                .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want));
+                .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want))
+                .or_else(|| {
+                    scott_disk_stories(&disk)
+                        .into_iter()
+                        .find(|s| s.name == want || s.name.eq_ignore_ascii_case(want))
+                });
             return match found {
                 // `image_for`, not `format`: on a hybrid disc the story's own
                 // half of the platter decides, so a DOS build sitting on a
@@ -819,23 +1054,58 @@ fn read_story_file(path: &Path, want: Option<&str>) -> io::Result<(Vec<u8>, Opti
                 )),
             };
         }
-        return match disk.story() {
-            Some(story) => {
-                let image = disk.image_for(&story.name);
-                Ok((story.bytes, Some(image)))
+        if let Some(story) = disk.story() {
+            let image = disk.image_for(&story.name);
+            return Ok((story.bytes, Some(image)));
+        }
+        // `MountedDisk::story`'s tiebreak is Z-code/Glulx/Blorb-only by
+        // design (`scott_disk_stories`'s own doc), so it answers `None` for
+        // a disk whose one story is a Scott Adams database — every Atari
+        // 8-bit or Apple II US S.A.G.A. side (SQ-1470). A bare `lanthorn
+        // <disk.atr>` launch names no entry (`startup.rs`: "the format's own
+        // tiebreak"), and has to reach that one candidate the same way
+        // `scott-cli` does without `--story`. Ambiguous (zero, or more than
+        // one) falls through to the refusal below, exactly as before.
+        let mut scott = scott_disk_stories(&disk);
+        if scott.len() == 1 {
+            let story = scott.remove(0);
+            let image = disk.image_for(&story.name);
+            return Ok((story.bytes, Some(image)));
+        }
+        // SQ-1488: an honest, specific refusal for a disk whose one program
+        // is crunched and could not be turned into a playable game — rather
+        // than the generic "no story file" message below, which used to be
+        // the only thing a disk like the Hulk collection's could ever say
+        // (every file scanned, none of them a Scott table in the clear).
+        if scott.is_empty() {
+            if let Some(crunched) = crunched_program_name(&disk) {
+                let name = crunched.name();
+                let reason = match crunched {
+                    CrunchedProgram::NotUnpacked(_) => "lanthorn could not unpack it",
+                    CrunchedProgram::Unrecognised(_) => {
+                        "lanthorn unpacked it, but it is not a Scott Adams game lanthorn recognises"
+                    }
+                };
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "the disk image {} holds a crunched program ('{name}') — {reason}",
+                        path.display(),
+                    ),
+                ));
             }
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "no story file on the disk image {} ({} files{}; is this the boot disk?)",
-                    path.display(),
-                    disk.file_count(),
-                    // Only some formats keep a volume name; the message says so
-                    // when there is one and reads naturally when there is not.
-                    disk.volume_name().map(|n| format!(" on {n}")).unwrap_or_default(),
-                ),
-            )),
-        };
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "no story file on the disk image {} ({} files{}; is this the boot disk?)",
+                path.display(),
+                disk.file_count(),
+                // Only some formats keep a volume name; the message says so
+                // when there is one and reads naturally when there is not.
+                disk.volume_name().map(|n| format!(" on {n}")).unwrap_or_default(),
+            ),
+        ));
     }
     if raw.starts_with(ZIP_MAGIC) {
         // A ZIP is somebody's DOWNLOAD, not a lanthorn container (the `.lanthorn`
@@ -1223,8 +1493,353 @@ pub fn load_mounted_story_from(
     path: &Path,
     disk_entry: Option<&str>,
 ) -> io::Result<(LoadedStory, Option<DiskImage>)> {
+    let loaded = load_mounted_story_full(path, disk_entry)?;
+    Ok((loaded.story, loaded.disk_image))
+}
+
+/// A story taken off a container, with everything else that container
+/// supplied for it.
+///
+/// [`load_mounted_story_from`] is this minus the pictures, and stays the door
+/// for every caller that only wants the game.
+pub struct MountedStory {
+    /// The story image itself, classified.
+    pub story: LoadedStory,
+    /// Which release disk image it was mounted out of, if it was one rather
+    /// than a plain file (SQ-0737, SQ-0837).
+    pub disk_image: Option<DiskImage>,
+    /// The release's own **picture files** on the same container,
+    /// `(name, record)` in the container's own order — family C off a disk
+    /// image (spec §8.3, SQ-1475) or family E out of a zip (§8.5, SQ-1477).
+    ///
+    /// A US S.A.G.A. release keeps its artwork in separate files beside the
+    /// database — §12.10, "pictures live in separate files on the disk, one
+    /// per picture, identified by filename" — so they have to be read while
+    /// the mount is still open and handed to the session, which is what this
+    /// field is. Empty for every other story, and for a S.A.G.A. database
+    /// opened from a bare extracted `db/*.bin` (there is no container to hold
+    /// them) or from an Atari side A (§8.3 puts the Atari's pictures on the
+    /// companion side at hard-coded offsets, and the disk-set seam does not
+    /// pair the two sides).
+    pub saga_pictures: Vec<(String, Vec<u8>)>,
+}
+
+/// [`load_mounted_story_from`], plus the container's own family-C picture
+/// files when the story turns out to be a US S.A.G.A. release (SQ-1475).
+///
+/// The second walk of the image is deliberate and deliberately narrow: it runs
+/// only when the story bytes ARE a S.A.G.A. database and they came off a
+/// container, so no Z-machine or Glulx launch pays for it, and the cost when
+/// it does run is one re-read of a 175 KB floppy. The alternative — widening
+/// [`read_story_file`]'s answer, which has five return points across three
+/// container kinds — would have every caller carry a field almost none of them
+/// can use.
+pub fn load_mounted_story_full(
+    path: &Path,
+    disk_entry: Option<&str>,
+) -> io::Result<MountedStory> {
     let (bytes, disk_image) = read_story_file(path, disk_entry)?;
-    Ok((extract_story(bytes)?, disk_image))
+    // SQ-1476: which naming rule finds a disk release's artwork is its
+    // PLATFORM, so the detector's answer travels with the path.
+    let saga_pictures = match (disk_image, scott::detect_saga_us(&bytes)) {
+        (Some(_), Some(platform)) => saga_picture_files(path, Some(platform)),
+        // SQ-1477: family E. The MS-DOS *Questprobe* releases are zips of
+        // loose DOS files — the database beside its `.PAK` pictures — and the
+        // database is the plain reference TEXT format (spec §10.7), so
+        // `detect_saga_us` cannot be the gate here the way it is above. The
+        // gate is instead the cheapest pair of facts that cannot be true of
+        // anything else: the container is a zip, and what came out of it is a
+        // Scott database. `saga_picture_files` then classifies the entries by
+        // CONTENT, so a zip of Z-code and a `README` collects nothing.
+        (None, _) if is_zip(path) && scott::looks_like_scott_bytes(&bytes) => {
+            saga_picture_files(path, None)
+        }
+        _ => Vec::new(),
+    };
+    Ok(MountedStory { story: extract_story(bytes)?, disk_image, saga_pictures })
+}
+
+/// Every US S.A.G.A. picture file this release keeps, `(name, record)` —
+/// **including the ones on its companion disk side** (SQ-1475, SQ-1476,
+/// SQ-1477).
+///
+/// Three naming rules, because the three families name their artwork
+/// differently: spec §8.3's `R01nnn` on the Commodore 64
+/// (`scott::is_picture_file_name`), the Apple II's `R<aa><nn>` /
+/// `B<aa><nnn>` (`scott::is_apple_picture_file_name`, and
+/// `scott::apple_pictures` for why that rule is measured rather than quoted),
+/// and §8.5's `.PAK` entries out of an MS-DOS zip (`scott::saga_dos`).
+/// `platform` decides between the first two, which is why it is a parameter:
+/// walking an Apple II disk with the Commodore 64 predicate finds nothing at
+/// all, silently, and reads as "this release has no pictures". `None` is the
+/// MS-DOS case, whose database is the reference text format and carries no
+/// platform to detect.
+///
+/// **The Apple II keeps its artwork on the other side of the release**
+/// (§10.6): the boot side holds the database and side A holds the pictures, so
+/// a walk of the mounted image alone finds none. When the mounted side holds
+/// no picture files this therefore tries [`saga_companion_side`] before
+/// answering empty — and it is that way round, rather than "always read side
+/// A", because *Pirate Adventure* ships its database on **both** sides and a
+/// player who opened side A directly has the pictures already in hand.
+///
+/// Empty for anything that is not a mountable disk image, and for one that
+/// holds no such names — which is the honest answer for an Atari `.atr`, whose
+/// pictures are on the companion side and are reached by byte offset rather
+/// than through any catalogue (§12.10), and for the three Apple II releases
+/// whose side A is not a DOS 3.3 disk at all.
+///
+/// `pub` because `@restart` needs it (`crate::reset`): a restart rebuilds the
+/// session from the story bytes it kept, and those bytes are not the
+/// container — so the pictures are re-read off the same path the launch
+/// mounted, rather than carried in app state for the life of the session.
+pub fn saga_picture_files(
+    path: &Path,
+    platform: Option<scott::SagaPlatform>,
+) -> Vec<(String, Vec<u8>)> {
+    // SQ-1477: a zip is the MS-DOS releases' container, and family E's
+    // pictures are ordinary entries in it beside the database — so the walk
+    // is the same walk, over a different kind of volume. Classified by
+    // CONTENT and not by name: `looks_like_family_e` reads the signature
+    // bytes, which is what keeps `START.EXE`, `HULK.BAT` and `ADVENT.DAT`
+    // out of a set that a name rule alone would be free to guess at.
+    if is_zip(path) {
+        let mut out = Vec::new();
+        let _ = for_each_zip_entry(path, |name, bytes| {
+            let base = name.rsplit('/').next().unwrap_or(name);
+            if scott::saga_dos::is_picture_file_name(base)
+                && scott::saga_dos::looks_like_family_e(&bytes)
+            {
+                out.push((base.to_string(), bytes));
+            }
+            false
+        });
+        return out;
+    }
+    let Some(platform) = platform else {
+        return Vec::new();
+    };
+    let here = picture_files_on(path, platform);
+    if !here.is_empty() || !matches!(platform, scott::SagaPlatform::AppleII) {
+        return here;
+    }
+    let Some(side) = saga_companion_side(path) else {
+        return Vec::new();
+    };
+    let named = picture_files_on(&side, platform);
+    if !named.is_empty() {
+        return named;
+    }
+    // SQ-1490: the three scrambled releases. Their companion side has no
+    // filesystem on it at all, so no catalogue walk can find anything and the
+    // records are located by their own header instead.
+    apple_scrambled_picture_files(path, &side)
+}
+
+/// The room artwork of one **scrambled** Apple II release, `(name, record)`
+/// (SQ-1490).
+///
+/// *Voodoo Castle*, *The Count* and *Claymorgue Castle* keep theirs on a side A
+/// that is not a DOS 3.3 disk — spec §7.4's `M2` string test is what says a
+/// release is one of the three, and [`saga_apple_scrambled`] asks it. The
+/// records are found by [`scott::scan_scrambled_pictures`], which reads the
+/// side as flat sectors ([`blorb::medium::apple_raw_sectors`]) and takes each
+/// §8.4 header it finds; [`scott::scrambled_picture_index`] turns each
+/// record's ordinal into the §8.6 index it carries, and the name is the
+/// ordinary Apple II room-picture one, so everything downstream — the
+/// room-to-picture lookup, the info panel's count, the picker's label — needs
+/// no change at all.
+///
+/// **The ordinal is the index only up to the last room** (SQ-1499). Past it
+/// come the release's LOOK close-ups, numbered 80 upward, and then §8.6's
+/// reserved 99 for the Adventure International title card — and how many
+/// close-ups there are is in the boot side's own `M2`
+/// ([`saga_apple_look_table`]), not in the database and not on the picture
+/// side. A record past the title card is dropped: only *Claymorgue Castle*
+/// has one, and nothing on either of its sides says what it is.
+///
+/// `boot` is the side the story came off and is where both the adventure
+/// number and the close-up count are read from — the name carries the first
+/// (*Voodoo Castle*'s room 3 is `R0403` and *The Count*'s is `R0503`) and the
+/// numbering needs the second. That is one extra parse of a database already
+/// in memory once, which is the same trade this whole walk makes.
+///
+/// Empty when the release is not one of the three, when the side is not a
+/// 5.25-inch sector dump, or when the scan finds no records — each of which is
+/// a release with no reachable artwork, and says so by having none.
+fn apple_scrambled_picture_files(boot: &Path, side: &Path) -> Vec<(String, Vec<u8>)> {
+    let Some(look) = saga_apple_look_table(boot) else {
+        return Vec::new();
+    };
+    let Ok(raw) = std::fs::read(side) else {
+        return Vec::new();
+    };
+    let Some(image) = blorb::medium::apple_raw_sectors(&raw) else {
+        return Vec::new();
+    };
+    let ranges = scott::scan_scrambled_pictures(image);
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+    let Ok((bytes, _)) = read_story_file(boot, None) else {
+        return Vec::new();
+    };
+    let Ok(db) = scott::parse_saga_us(&bytes, scott::SagaPlatform::AppleII) else {
+        return Vec::new();
+    };
+    let Some(release) = db.saga_us else {
+        return Vec::new();
+    };
+    let (rooms, close_ups) = (db.rooms.len(), look.rows().len());
+    ranges
+        .into_iter()
+        .enumerate()
+        .filter_map(|(ordinal, range)| {
+            let index = scott::scrambled_picture_index(ordinal, rooms, close_ups)?;
+            let name = scott::room_picture_file_name(&release, index)?;
+            Some((name, image[range].to_vec()))
+        })
+        .collect()
+}
+
+/// One disk image's picture files, by `platform`'s naming rule.
+fn picture_files_on(path: &Path, platform: scott::SagaPlatform) -> Vec<(String, Vec<u8>)> {
+    let Ok(raw) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    if blorb::medium::DiskImage::detect(&raw).is_none() {
+        return Vec::new();
+    }
+    let Ok(disk) = mount_disk(path, raw) else {
+        return Vec::new();
+    };
+    let names: fn(&str) -> bool = match platform {
+        scott::SagaPlatform::AppleII => scott::is_apple_picture_file_name,
+        _ => scott::is_picture_file_name,
+    };
+    disk.contents().into_iter().filter(|(name, _)| names(name)).collect()
+}
+
+/// Is the Apple II release mounted at `path` one of the **scrambled** three
+/// (spec §7.4's string test)?
+///
+/// §7.4: the boot side carries a file named `M2`, and "only when the 31 bytes
+/// at 0x172C read exactly `COPYRIGHT 1983 NORMAN L. SAILER`" is the release
+/// the scrambled sub-variant. §10.6 measures it on all seven: *Voodoo
+/// Castle*, *The Count* and *Claymorgue Castle* fire, and on the other four
+/// `M2` is 3,584 bytes so the offset is past its end and the test simply
+/// fails.
+///
+/// The question a player's info panel actually wants answered, because the
+/// three that fire are exactly the three whose side A is not a DOS 3.3 disk
+/// and whose room artwork is therefore not reachable at all — so a release
+/// with no pictures can say **why** instead of just "not on this file".
+///
+/// A cheap, self-validating check, and deliberately the one §7.4 recommends:
+/// it reads a string rather than trusting a fixed offset. The string test
+/// itself lives in [`scott::apple_look_table`], which needs it anyway and is
+/// the only place it is spelled (SQ-1499).
+pub fn saga_apple_scrambled(path: &Path) -> bool {
+    saga_apple_look_table(path).is_some()
+}
+
+/// The `M2` file of the Apple II release mounted at `path`, or `None`.
+///
+/// One door for the two questions the boot side's own interpreter answers —
+/// whether this is one of §7.4's scrambled three, and which close-ups it draws
+/// — so that neither has to know how a `.dsk` is opened.
+fn saga_apple_m2(path: &Path) -> Option<Vec<u8>> {
+    let raw = std::fs::read(path).ok()?;
+    blorb::medium::DiskImage::detect(&raw)?;
+    let disk = mount_disk(path, raw).ok()?;
+    disk.read_named("M2")
+}
+
+/// The [`scott::AppleLookTable`] of the release mounted at `path` (SQ-1499),
+/// or `None` for anything that is not one of §7.4's scrambled three.
+///
+/// The table says how many records past the last room are close-ups, which is
+/// what [`scott::scrambled_picture_index`] needs to know where the title card
+/// falls. `pub` because the info panel's "why has this release no pictures"
+/// answer goes through [`saga_apple_scrambled`], which is this.
+pub fn saga_apple_look_table(path: &Path) -> Option<scott::AppleLookTable> {
+    scott::apple_look_table(&saga_apple_m2(path)?)
+}
+
+/// The **other side** of a two-sided release, by file name.
+///
+/// A host rule, and said to be one: the specification pairs nothing. §10.6
+/// describes the Apple II releases as two `.dsk` files sitting side by side
+/// with `side A` and `side B` in their names, and that is the whole of what
+/// there is to go on — the two sides share no volume name, no serial, and no
+/// digit run, so `cli_host::disk_set` (which groups volumes differing at one
+/// run of decimal digits) does not group them and should not: a *side* is not
+/// a *volume*.
+///
+/// The rule: take everything before the last case-insensitive `side ` in the
+/// file name, and answer a sibling in the same directory that starts with that
+/// prefix, carries a different letter after its own `side `, and ends in the
+/// same extension. The prefix stops at `side ` rather than swapping the letter
+/// in place because the two spellings differ after it — `… side B - boot.dsk`
+/// pairs with `… side A.dsk`, and a letter swap would look for a file called
+/// `… side A - boot.dsk` that does not exist.
+///
+/// `None` when the name carries no side marker, when no sibling matches, or
+/// when more than one does — an ambiguous pairing is not a pairing.
+pub fn saga_companion_side(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let lower = name.to_ascii_lowercase();
+    let at = lower.rfind("side ")? + "side ".len();
+    let side = *lower.as_bytes().get(at)?;
+    if !side.is_ascii_alphabetic() {
+        return None;
+    }
+    let prefix = &name[..at];
+    let ext = path.extension()?.to_ascii_lowercase();
+    let dir = path.parent()?;
+    let mut found = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let candidate = entry.path();
+        if candidate == path || candidate.extension().map(|e| e.to_ascii_lowercase()) != Some(ext.clone()) {
+            continue;
+        }
+        let other = entry.file_name();
+        let other = other.to_str()?;
+        if other.len() <= at || !other[..at].eq_ignore_ascii_case(prefix) {
+            continue;
+        }
+        if other.as_bytes()[at].to_ascii_lowercase() == side {
+            continue;
+        }
+        if found.is_some() {
+            // Two candidates: which one is the companion is a guess, and this
+            // function does not guess.
+            return None;
+        }
+        found = Some(candidate);
+    }
+    found
+}
+
+/// The whole companion **picture side** of an Atari 8-bit US S.A.G.A.
+/// release mounted at `path` (side A), read raw (SQ-1496).
+///
+/// [`saga_companion_side`] does the actual pairing — the same `side A`/`side
+/// B` rule every other two-sided release here uses, Apple II included — this
+/// just reads the sibling it finds whole rather than walking it for named
+/// files, because the Atari companion side has no filesystem at all (§12.10):
+/// the (usage, index) association is a table on side A
+/// (`scott::saga_atari::read_picture_table`) and the records themselves are
+/// found on side B by header (`scott::saga_atari::scan_picture_side`), not by
+/// name, so there is nothing here for [`saga_picture_files`]'s by-name walk
+/// to find.
+///
+/// `None` when the pairing fails — no sibling, an ambiguous one, or one that
+/// will not read — the same honest-empty shape every other picture lookup
+/// here answers with.
+pub fn saga_atari_companion_side(path: &Path) -> Option<Vec<u8>> {
+    let side = saga_companion_side(path)?;
+    std::fs::read(&side).ok()
 }
 
 /// Load story bytes from `path`, restricted to **Z-code** images.
@@ -1258,8 +1873,9 @@ pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
 /// It used to be: three formats were tested and everything else was handed to
 /// the Z-machine, which is what this doc meant by "the historical pass-through…
 /// never errors for a non-Blorb input". The only gate downstream was
-/// `zvm::header::parse_header`'s `3..=8` on byte 0 — six of 256 values, so
-/// roughly **2.3% of arbitrary containers pass it**, and one of them was an
+/// `zvm::header::parse_header`'s version check on byte 0 — `3..=8` at the time,
+/// six of 256 values, so roughly **2.3% of arbitrary containers pass it** (the
+/// range is `1..=8` since SQ-1422, which makes it 3.1%) — and one was an
 /// 838 KB Apple II disk image whose DiskCopy 4.2 name-length byte is `0x06`.
 /// lanthorn opened the whole image as a Version 6 story, paired it with a
 /// sidecar Blorb belonging to a different file, printed
@@ -1285,10 +1901,13 @@ pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
         if bytes.starts_with(b"Glul") {
             return Ok(LoadedStory::Glulx(bytes));
         }
-        if let Ok(s) = std::str::from_utf8(&bytes) {
-            if scott::looks_like_scott(s) {
-                return Ok(LoadedStory::Scott(bytes));
-            }
+        // Bytes, not `&str`: `looks_like_scott_bytes` answers for the text
+        // `.dat` AND for the TI-99/4A tokenised releases (SQ-1414), which
+        // are a binary memory image no UTF-8 conversion survives — before
+        // that, a `.fiad` was rejected here as "not a story file of any
+        // kind lanthorn opens".
+        if scott::looks_like_scott_bytes(&bytes) {
+            return Ok(LoadedStory::Scott(bytes));
         }
         if !blorb::adf::looks_like_zcode(&bytes) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, unrunnable(&bytes)));
@@ -1305,7 +1924,7 @@ pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
             // raw-`.dat` path above uses — a hostile blorb must not reach
             // scott's loader with arbitrary bytes just by claiming an SAAI
             // exec chunk.
-            if !std::str::from_utf8(data).is_ok_and(scott::looks_like_scott) {
+            if !scott::looks_like_scott_bytes(data) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Blorb SAAI executable does not look like a Scott Adams database",
@@ -1419,7 +2038,7 @@ pub fn read_zip_entry(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-guidance"))]
 mod tests {
     use super::*;
 
@@ -1507,48 +2126,60 @@ mod tests {
         assert!(!is_invisiclues_name("mechanizm.z5"));
     }
 
-    /// An empty IFID means "identity says nothing", so every case here exercises
-    /// the filename/title fallback — the common path for the many stories that
-    /// are only ever bare files, which must keep working (SQ-0767).
+    /// Downloadable InvisiClues are matched by **identity** only (SQ-1505): an
+    /// IFID that resolves through `known_titles.tsv` to an Infocom build. Real
+    /// IFID release/serial prefixes from that table stand in for "identity
+    /// resolves" here — an empty IFID resolves to nothing and always yields
+    /// `None`, exercised separately below.
     #[test]
     fn hint_download_prefers_slag_then_izm() {
-        // A SLAG-covered game: prefer the live IF Archive file.
-        let d = hint_download_for("", "deadline", "Deadline").expect("deadline has a hint");
+        // A SLAG-covered game: prefer the live IF Archive file. Deadline r18/s820311.
+        let d = hint_download_for("ZCODE-18-820311-0000").expect("deadline has a hint");
         assert_eq!(d.filename, "deadlineinv.z5");
         assert!(d.url.contains("ifarchive.org/if-archive/solutions/slag/deadlineinv.z5"), "{}", d.url);
 
         // A game only the izm set covers: fall back to the Internet Archive.
-        let w = hint_download_for("", "witness", "The Witness").expect("witness has an izm hint");
+        // The Witness r13/s830524.
+        let w = hint_download_for("ZCODE-13-830524-0000").expect("witness has an izm hint");
         assert_eq!(w.filename, "witnizm.z5");
         assert!(w.url.contains("web.archive.org"), "{}", w.url);
         assert!(w.url.ends_with("witnizm.z5"), "{}", w.url);
 
-        // Match on title when the stem is opaque.
-        assert!(hint_download_for("", "hhgg", "The Hitchhiker's Guide to the Galaxy").is_some());
+        // Hitchhiker's Guide r47/s840914 — canonical title carries the key.
+        assert!(hint_download_for("ZCODE-47-840914-0000").is_some());
 
-        // A game with no hint anywhere.
-        assert!(hint_download_for("", "adventure", "Colossal Cave").is_none());
+        // An unresolved identity: no download anywhere.
+        assert!(hint_download_for("").is_none());
     }
 
     /// Beyond Zork keys on "beyond", never bare "zork", so it must not collide
     /// with zork1/2/3 (and vice-versa).
     #[test]
     fn hint_download_zork_variants_dont_collide() {
-        assert_eq!(hint_download_for("", "zork1", "Zork I").unwrap().filename, "zork1inv.z5");
-        assert_eq!(hint_download_for("", "beyondzork", "Beyond Zork").unwrap().filename, "bzorkizm.z5");
-        // Canonical multi-word/underscored names still match via normalisation.
-        assert_eq!(hint_download_for("", "beyond_zork", "").unwrap().filename, "bzorkizm.z5");
-        assert_eq!(hint_download_for("", "", "Beyond Zork").unwrap().filename, "bzorkizm.z5");
-        assert_eq!(hint_download_for("", "zork0", "Zork Zero").unwrap().filename, "zork0izm.z5");
+        assert_eq!(hint_download_for("ZCODE-88-840726-A129").unwrap().filename, "zork1inv.z5");
+        assert_eq!(hint_download_for("ZCODE-57-871221-C5AD").unwrap().filename, "bzorkizm.z5");
+        assert_eq!(hint_download_for("ZCODE-366-890323-C5CD").unwrap().filename, "zork0izm.z5");
     }
 
     /// Regression: a stray common word in a title must not match a compound-word
     /// game key. "Brain Guzzlers from Beyond" contains "beyond" but is not
-    /// Beyond Zork, so it gets no hint (badge stays dark).
+    /// Beyond Zork, so it gets no hint (badge stays dark). `hint_download_for`
+    /// no longer reads a title at all, so this is the same guard on
+    /// `hint_matches_story` — the local-sidecar matcher, unaffected by SQ-1505.
     #[test]
     fn hint_download_rejects_stray_word_match() {
-        assert!(hint_download_for("", "Brain_Guzzlers_from_Beyond!.gblorb", "Brain Guzzlers from Beyond!").is_none());
         assert!(!hint_matches_story("bzorkizm.z5", "Brain Guzzlers from Beyond!"));
+    }
+
+    /// SQ-1505: an unknown IFID (any non-Infocom game — a Scott Adams title
+    /// here) offers no download even when its title or filename stem contains
+    /// a catalog word. "The Sorcerer of Claymorgue Castle" contains "sorcerer",
+    /// a catalog key for Infocom's *Sorcerer*, and its stem "adv13" is
+    /// unrelated too — neither may light a download for an Infocom game this
+    /// story is not.
+    #[test]
+    fn hint_download_ignores_stem_and_title_for_an_unknown_identity() {
+        assert!(hint_download_for("SCOTT-0000000000000000").is_none());
     }
 
     // ── SQ-0767: identity, not filename ─────────────────────────────────────
@@ -1574,7 +2205,7 @@ mod tests {
                 !normalize_ident(stem).contains("zork1") && !normalize_ident(&title).contains("ztuu"),
                 "the premise: no catalog key is in the container's name ({stem})"
             );
-            let dl = hint_download_for(ifid, stem, &title)
+            let dl = hint_download_for(ifid)
                 .unwrap_or_else(|| panic!("{stem}: identity {ifid} must find its InvisiClues"));
             assert_eq!(dl.filename, want, "{stem}");
         }
@@ -1584,8 +2215,8 @@ mod tests {
     /// must not let Zork I's or Beyond Zork's clues match it.
     #[test]
     fn an_identified_story_matches_only_its_own_key() {
-        let dl = hint_download_for("ZCODE-48-840904-D899", "zork1", "Beyond Zork").unwrap();
-        assert_eq!(dl.filename, "zork2inv.z5", "identity beats a misleading stem AND title");
+        let dl = hint_download_for("ZCODE-48-840904-D899").unwrap();
+        assert_eq!(dl.filename, "zork2inv.z5", "identity, and only identity, decides the match");
     }
 
     /// A local sidecar sitting beside a disk image is associated by identity —
@@ -2134,7 +2765,7 @@ mod tests {
 
         // …and every version the Z-machine runs still loads when the header is
         // real, so the gate is on the header and not on the version byte.
-        for version in 3..=8u8 {
+        for version in 1..=8u8 {
             assert!(
                 matches!(extract_story(sample_zcode(version)), Ok(LoadedStory::ZCode(_))),
                 "a real v{version} header must still load"
@@ -2185,6 +2816,52 @@ mod tests {
             LoadedStory::Scott(_) => {}
             o => panic!("{o:?}"),
         }
+    }
+
+    /// The smallest byte string `scott::looks_like_ti994a` accepts, built
+    /// from `docs/internals/scott-dialects-spec.md` §3.1: the ten-byte
+    /// detection signature at file offset `0x589` (which makes the baseline
+    /// 0), and a 34-byte header at `0x8A0` whose eleven big-endian table
+    /// pointers all resolve inside the file. Enough to prove the ENGINE
+    /// SNIFF reaches the TI-99/4A path — the tokenised tables themselves are
+    /// `scott`'s to test, and it does, in `ti994a.rs` and
+    /// `tests/ti994a_specimens.rs`.
+    fn minimal_ti994a_image() -> Vec<u8> {
+        let mut bytes = vec![0u8; 0x1000];
+        bytes[0x589..0x589 + 10]
+            .copy_from_slice(&[0x30, 0x30, 0x30, 0x30, 0x00, 0x30, 0x30, 0x00, 0x28, 0x28]);
+        // Every pointer -> stored address 0x0D00, which with a baseline of 0
+        // resolves to file offset 0x0D00 - 0x0380 = 0x980, inside the file.
+        for i in 0..11 {
+            bytes[0x8A0 + 12 + i * 2] = 0x0D;
+            bytes[0x8A0 + 12 + i * 2 + 1] = 0x00;
+        }
+        bytes
+    }
+
+    /// **A TI-99/4A tokenised release is a Scott Adams story** (SQ-1414).
+    ///
+    /// It is a binary memory image, so the sniff this used to spell as
+    /// `from_utf8(bytes).is_ok_and(looks_like_scott)` could never answer for
+    /// one: every `.fiad` was refused here as "not a story file of any kind
+    /// lanthorn opens", before the loader that reads it was ever reached.
+    #[test]
+    fn detects_a_ti994a_tokenised_release() {
+        match extract_story(minimal_ti994a_image()).unwrap() {
+            LoadedStory::Scott(_) => {}
+            o => panic!("{o:?}"),
+        }
+    }
+
+    /// And the sniff is still a sniff: a file carrying the signature but no
+    /// usable header is not claimed by any engine.
+    #[test]
+    fn a_bare_ti994a_signature_without_a_header_is_not_claimed() {
+        let mut bytes = vec![0u8; 0x600];
+        bytes[0x589..0x589 + 10]
+            .copy_from_slice(&[0x30, 0x30, 0x30, 0x30, 0x00, 0x30, 0x30, 0x00, 0x28, 0x28]);
+        let err = extract_story(bytes).expect_err("the header is off the end of the file");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     /// **Z-code is claimed, not defaulted to** (SQ-0889).

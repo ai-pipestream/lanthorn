@@ -6,14 +6,14 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.3.0`) versions every crate and every
+version in `Cargo.toml` (currently `0.7.0`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
 **A section here becomes the GitHub release body**, so keep it to what a reader
 downloading a build wants: what each feature is, briefly. The reasoning, the
 measurements and the history belong in the commit that made the change and in
-the quest that tracked it. And use no RELATIVE links — `[x](docs/features/…)`
+the quest that tracked it. And use no RELATIVE links — `[x](docs/internals/…)`
 resolves against the release page rather than the repository and 404s there.
 Absolute URLs or no link.
 
@@ -21,15 +21,1378 @@ Absolute URLs or no link.
 
 ## Unreleased
 
-*This section is drained when a version is cut. README prose for the same work
-is staged in [`docs/readme-next.md`](docs/readme-next.md), because the README
-describes the RELEASED build and must not describe this one until it ships.*
+*This section is drained when a version is cut. README.md describes the
+RELEASED build; prose for a feature that is in `main` but not yet released
+goes into the README in place, at its normal destination, marked with the
+visible tag `*Next release:*`. `release.yml` refuses to cut a release
+while any such tag, or this Unreleased section, still exists.*
+
+### Fixed
+
+- **A Glulx game's side panel (Kerkerkruip and similar) no longer shows
+  washed-out, hard-to-read text in blank areas.** A panel with its own
+  background colour now uses its own text colour too, instead of falling
+  back to the theme's default — most visible right after restoring a Save
+  State, but reachable any time a panel has blank space nobody has
+  (re)printed since it was last redrawn.
+
+---
+
+## v0.7.0 — 2026-09-17
+
+### Highlights
+
+**Atari 8-bit S.A.G.A. games now show their artwork.** *Adventureland*,
+*Pirate Adventure*, *Mission Impossible*, *Voodoo Castle*, *The Count*, and
+*The Sorcerer of Claymorgue Castle* draw their room and object pictures at
+higher resolution than the machine's native pixels, with colours checked
+against captures of the real hardware running under emulation. Some older
+cracked Commodore 64 disk images now open instead of reporting no story, and
+every US Adventure International release opens on its own title card.
+
+### Added
+
+- **US Adventure International releases (Questprobe featuring The Hulk and its
+  siblings) now open on their real title card** instead of jumping straight to
+  room one, matching the original disks.
+- **Atari 8-bit Voodoo Castle, The Count, and The Sorcerer of Claymorgue
+  Castle now show their room and object artwork instead of none.**
+- **Atari 8-bit Adventureland, Pirate Adventure, Mission Impossible, and
+  Strange Odyssey now show their real room and object artwork.**
+- **That same Atari 8-bit line-art artwork now renders at higher resolution
+  instead of the machine's native pixels.**
+- **Some crunched Commodore 64 disk images (older cracked releases) now open
+  correctly instead of reporting no story**; the ones that still can't be
+  unpacked say so clearly instead of failing silently.
+
+### Fixed
+
+- **Atari 8-bit S.A.G.A. artwork now uses more accurate colours, verified
+  against captures of the real machine** — Claymorgue Castle's castle is
+  gold-brown rather than olive, Adventureland's globe a dark red rather than
+  pink, and text and line colours are no longer over-saturated.
+- **The story list's info panel now shows Atari 8-bit S.A.G.A. games' artwork
+  instead of reporting none**, and the launch-options dialog now offers the
+  resolution choice for the titles that support it.
+- **Restoring a Save State in a Glulx game with side panels (Kerkerkruip and
+  similar) no longer leaves the panels blank.** The game now repaints them the
+  same way it would after you resize the terminal.
+- **The story list no longer shows a game's own save-data folder as if it
+  were a folder of stories.**
+- **A release pressed for two machines from the same build (several
+  late-1980s Infocom titles on the Lost Treasures compilations) no longer
+  loses one machine's copy when zvm-cli/gvm-cli/scott-cli reach it from a
+  sibling disk image.**
+
+---
+
+## v0.6.1 — 2026-09-11
+
+### Changed
+
+- **`lanthorn-scott` is no longer experimental.** A fuzz sweep over the
+  picture readers (S.A.G.A. on Commodore 64, Atari, Apple II and MS-DOS), the
+  ZX Spectrum snapshot reader and the story loader found nothing to fix, and
+  the crate's public API is tidier for it — types a host
+  builds by hand stay open, everything else is read through accessors so a
+  future field can be added without breaking anyone embedding the crate.
+
+### Fixed
+
+- **Clicking an illustration thumbnail now opens the full-size picture**, in
+  Anchorhead and any other Glulx game that draws a small image beside its
+  text as a link to a bigger one. Typing the game's own view command always
+  worked; the click didn't.
+- **The story panel lays out at the right width again after `/reset-game`**
+  in a Glulx game — it used to stay at a narrower fallback width until you
+  actually resized the terminal.
+- **InvisiClues downloads are only offered for Infocom's own games.** A
+  non-Infocom title whose name happened to share a word with an Infocom
+  catalog entry — Scott Adams' *The Sorcerer of Claymorgue Castle* against
+  Infocom's *Sorcerer*, for one — was incorrectly offered a hint download
+  that didn't exist for it.
+- **The story list's TYPE column no longer truncates.** The widest label now
+  fits in full instead of being cut off with an ellipsis, and the IBM PC
+  DOS medium is now labelled "MS-DOS" rather than the more generic "DOS".
+- **The automapper no longer draws a phantom exit where a story killed you
+  and revived you elsewhere.** Dying while the automapper was quietly
+  scouting a direction — reproducible in Zork I's cellar and maze — used to
+  record the room you woke up in as if it were an ordinary destination,
+  mislabelling the map and occasionally erasing a real passage in the
+  process.
+- **`lanthorn-mapgen --layer-min 0` now actually turns layers off.** It used
+  to still split mazes onto their own layer at that setting; now it produces
+  the same flat map as `--no-auto-layers`.
+
+---
+
+## v0.6.0 — 2026-09-10
+
+### Highlights
+
+**The three VM engines are now embeddable Rust crates.** `lanthorn-zvm` and `lanthorn-gvm` are ready for embedding; `lanthorn-scott` is experimental. The Z-machine, Glulx, and Scott Adams interpreters can be used as libraries in any Rust application through git or path dependencies. Scott Adams support gains the full family of disk-based releases — TI-99/4A, Commodore 64, Atari 8-bit (text for now), Apple II, and ZX Spectrum editions, with artwork on most. The story picker now tells you which games have pictures and what kind.
+
+### Added
+
+- **The three VM engines are embeddable Rust crates** — `lanthorn-zvm`
+  (v1–v8 Z-machine, ready for embedding), `lanthorn-gvm` (Glulx, ready for
+  embedding), and `lanthorn-scott` (Scott Adams, experimental). Each exposes a
+  headless session interface and can be integrated into any Rust application
+  through git or path dependencies, without the lanthorn TUI.
+
+- **Scott Adams TI-99/4A releases now load.** The twelve original Adventure
+  International games — *Adventureland* through *The Golden Voyage* — were sold
+  for the TI-99/4A as compiled bytecode snapshots. Hand lanthorn a TI-99/4A
+  release and it opens and plays like any other Scott game, with the map,
+  vocabulary help, the TI's own wording, its running lamp countdown, and the
+  running inventory that lives under every room description.
+
+- **The American S.A.G.A. disk games now load.** The Adventure International
+  disk editions sold in the United States — *Adventureland*, *Pirate Adventure*,
+  *Mission Impossible*, *Voodoo Castle*, *The Count*, *Strange Odyssey* and
+  *The Sorcerer of Claymorgue Castle* on the Atari 8-bit and the Apple II, and
+  Questprobe's *The Hulk* on the Commodore 64 — keep their game data in a
+  binary form all their own. lanthorn reads all of it, checked against the
+  published text conversion of each game.
+
+- **The Commodore 64 *Mysterious Adventures* now load.** Brian Howarth's
+  eleven-game series was sold for the Commodore 64 on two compilation disks as
+  memory snapshots. Hand lanthorn one of the individual program files or point
+  it at a compilation disk and pick a game — `MYSTADV1.D64` and `MYSTADV2.D64`
+  mount, list, and play all eleven games (six and five apiece), each with its
+  own saves.
+
+- **The ZX Spectrum *Mysterious Adventures* now load, straight from a
+  snapshot.** All eleven of Brian Howarth's titles can be opened from a `.z80`
+  file — a compressed dump of the machine's whole memory with both the game
+  and interpreter inside. lanthorn finds the game inside, names the release in
+  the story list, and plays it.
+
+- **Scott Adams pictures are now drawn from their original releases.** The
+  Commodore 64 *Mysterious Adventures* show their line-drawn artwork, the Commodore 64
+  and MS-DOS *Questprobe: The Hulk* draw full-colour pictures or CGA artwork, the
+  Apple II S.A.G.A. games draw their hi-res stroke-and-fill pictures, and the ZX
+  Spectrum *Mysterious Adventures* draw line artwork — all appearing above the room
+  panel through the same kitty/sixel/half-block drawing lanthorn uses everywhere else.
+  The Atari 8-bit S.A.G.A. games load and play but show no pictures yet. Pictures
+  scale smoothly (up to four times the original resolution) so diagonals step in fine
+  increments. Objects in the room now appear in the picture, and `INVENTORY` draws
+  what you're carrying. Special full-screen pictures like *Voodoo Castle*'s and *The
+  Count*'s item drawings appear when you `LOOK` at them.
+
+- **The story picker now tells you which Scott games have pictures, and what
+  kind.** A game's info panel names its artwork — Mysterious Adventures line
+  drawings, a Blorb's pre-rendered pictures, or a S.A.G.A. release's own picture
+  files, counted — so you know what you're getting before you press Play. The
+  story list's TYPE column names a Scott game's disk, so the same game pressed
+  for different machines is distinguishable.
+
+- **A game's own `SCRIPT` command now works.** Typing `SCRIPT` (or `TRANSCRIPT`)
+  starts a transcript and writes it to `script.txt` in the game's folder.
+  `UNSCRIPT` stops it, and starting it again later adds to the same file.
+
+- **`/set-transcript on` and `off`** for games that offer no `SCRIPT` command
+  of their own — the same switch, thrown from lanthorn's side, with a line
+  telling you which file it is writing to. Separate from `/export-transcript`,
+  which writes the scrollback you are looking at.
+
+- **Command recording and replay.** A game can record every command you type
+  to `commands.txt` beside the transcript, and play a recorded file back instead
+  of the keyboard — the format other interpreters use, so a script recorded in
+  Frotz replays in lanthorn and the other way round. `zvm-cli` exposes all three
+  directly: `--transcript <file>`, `--record <file>` and `--replay <file>`.
+
+- **Live-stream the transcript to a file with `--transcript-file <path>`** for
+  a screen reader or a second terminal running `tail -f`. Every line is appended
+  in plain text the moment it lands, across every engine — Z-machine, Glulx and
+  Scott Adams alike. Different from `/set-transcript`, which is the Z-machine's
+  own `SCRIPT` stream.
+
+- **The Hulk's opening cutscene now shows every scene.** Drawing several
+  pictures in a row — the opening sequence, or any other moment — now shows each
+  scene in turn, waiting for you to press RETURN before the next one shows.
+
+- **Scott Adams games now match the classic ScottFree interpreter more
+  closely.** Typing a single letter — `n`, `e`, `s`, `w`, `u`, `d`, or `i` —
+  now works as the full direction or `INVENTORY` command. A game ends with
+  "Well done." once every treasure is stored. Walking into the dark with no way
+  to go kills you. The lamp warns "Your light is growing dim." as it runs low,
+  showing its "run out" warning twice before going dark. Quoted text prints with
+  real quotation marks.
+
+- **A save file from the classic ScottFree interpreter can now be restored**
+  in a Scott Adams game, alongside lanthorn's own saves.
+
+- **Glulx games can draw pictures that follow the window width.** A story can
+  now ask for an illustration sized as a share of the text column — half the
+  width, a quarter, its own proportions kept — and it stays that share when you
+  resize the terminal.
+
+- **The classic ScottFree options are available per game**, in the story's own
+  settings sidecar: second-person replies, the original lamp-countdown wording,
+  and the light source being destroyed for good the instant it runs out.
+  `scott-cli` gets matching `-y`/`-s`/`-t`/`-p` flags.
+
+### Fixed
+
+- **The Commodore 64 pictures now use the colours a real Commodore 64 shows.** 
+  The palettes were corrected against captures of the real game running on real
+  machines. All sixteen VIC-II colours are authentic now. The MS-DOS *Questprobe*
+  pictures are corrected too — their cyan and magenta are now the softer tones
+  an IBM PC actually displays. The Commodore 64 *Mysterious Adventures* line
+  drawings were checked against real hardware and redrawn to match the display.
+
+- **"I'm in a dusty study" now follows the wording you asked for.** Scott
+  Adams games spoken in the second person used to switch to first person for
+  the room layout and inventory. Both lines now follow the game's own voice.
+
+- **In the disk editions of Adventureland and Pirate Adventure, a few
+  commands did the wrong thing.** Commands that ran right after a picture-drawing
+  one occasionally misread the input — that's fixed now.
+
+- **Quitting a game back to the story list now returns you to where you were.**
+  It used to always land you at the top of the library. Now it puts the cursor
+  back on the exact game you were playing, in the folder it came from, with the
+  list scrolled back to the same spot.
+
+- **Your typed answers are no longer invisible in Glulx games that use a light
+  background, such as Counterfeit Monkey.** Your input now reads against the
+  game's own page instead of vanishing in white-on-white.
+
+- **Glulx text that a game filters through its own routine no longer gets cut
+  off.** lanthorn now runs as deep as the game asks, and saves in the middle of
+  such passages work properly too.
+
+- **A Glulx game's in-game RESTART no longer forgets files the game had
+  written.** Those files now survive, matching every other Glulx interpreter.
+
+- **Some games no longer swallow your first keystroke at the opening prompt.**
+  Blank rows are no longer counted as text you might miss.
+
+- **Restoring a Save State that was taken during a full-screen picture in a
+  graphical game no longer pages through the whole story.** The transcript is
+  treated as already read and the game continues from the picture.
+
+- **A Save State now keeps the colours of a game's status line cell by cell.**
+  Games that colour their status line no longer lose those colours.
+
+- **Glulx (Version 3.1.3) saves and autosaves written by other interpreters
+  now restore.** Counterfeit Monkey's built-in fast start now works on the
+  very first run.
+
+- **`restart` no longer forgets a game's protected memory or its undo history.**
+  A restarted game keeps whatever it had asked to protect.
+
+- **Glulx floating-point and double-precision math now matches the reference
+  interpreter exactly**, including handling of negative zero, infinities, and
+  not-a-number. `pow`/`dpow` special cases now hold on every platform.
+
+- **Glulx games' data files now use the standard names**, so a file a Glulx
+  story writes can be shared with other interpreters.
+
+- **A command a game reopens for you to finish now shows up already typed.**
+  Beyond Zork, Zork Zero and Shogun all reopen the command prompt with your
+  last command sitting there, editable — that text used to vanish.
+
+- **A broken or corrupted story now stops with a clear message instead of
+  hanging forever.** A handful of badly damaged story files could make the
+  Z-machine loop endlessly.
+
+- **`sound_effect`'s "stop all sounds" call now actually stops everything.**
+  A story that plays a sound with no volume/effect specified gets sensible
+  defaults instead of silence.
+
+- **The in-game `verify` command is stricter about corrupted story files** —
+  it no longer waves through a story whose stored checksum has been zeroed out.
+
+- **Restarting a game now reshuffles its random events** unless you've pinned
+  a specific random seed for reproducible play.
+
+- **lanthorn and the `zvm-cli` player now start instantly on a game with no
+  sound**, instead of pausing to open an audio device the game will never use.
+  `zvm-cli` now reads Enter correctly in a game that asks for a single keypress.
+
+- **A Glulx game that saves to its own in-memory buffer now works.** A few
+  games route `SAVE`/`RESTORE` through a Glk memory stream — those used to hang
+  waiting on a save prompt that would never arrive.
+
+### Changed
+
+- **save compatibility:** The save-archive format has changed twice in this
+  release (versions 9 and 10). Archives written by earlier releases still load:
+  your position, map, transcript and history come back in full. What can be
+  missing is the screen: a graphical game's windows come back empty until the
+  game next repaints, and a text game's status line is blank until the next
+  turn redraws it. Saving again writes the new format. If you want an old
+  graphical save restored exactly, the previous release can load it and save it
+  again. lanthorn now tells you when this happens: restoring an old save prints
+  a note in the transcript.
+
+- **Z-machine games run noticeably faster.** Playing 20,000 turns of Mini-Zork
+  now takes 0.6 s, down from 2.2 s — about 3.7x — by eliminating two small
+  memory allocations the interpreter was making for every single instruction.
+
+---
+
+## v0.5.3 — 2026-09-07
+
+### Highlights
+
+- **Room notes now show up everywhere you'd look for them** — a numbered
+  badge with a hover tooltip on the exported map, a footnote list under
+  every layer's panel, a hover tooltip on the terminal map's own marker, and
+  (with a Nerd Font) a note icon in place of the plain dot.
+- **A room whose passages all point at one free cell now gets that cell.**
+  Lost Pig's gnome room, and eleven of Anchorhead's passages with it, used
+  to be shunted rows away with every connection drawn as a red distortion;
+  now they land where they belong.
+- **Connectors no longer bend right against their own arrowhead** — gutters
+  clear the box at both ends now, so the line straightens out before it
+  arrives.
+- **A maze's dead ends stay on the maze's own layer**, even when the only
+  way in is up or down.
+- **A passage is drawn red only when the finished map really bends it**, not
+  from a stale snapshot taken partway through tidying.
+
+### Added
+
+- Right-clicking a room now offers **Edit Notes** in its context menu,
+  alongside Rename Room, Move Region and Rename Layer — no more hunting
+  through the leader dialog just to jot down a note.
+- **A room's notes now show up on the exported map** — a noted room's box
+  carries a numbered badge (hover it for the note text) and every layer's own
+  panel lists its noted rooms' full text underneath the map.
+- **Hovering a room's `●` notes marker in the terminal map now pops the note
+  itself**, the same floating tooltip an alias marker or exit stub already
+  shows — no need to open the room card just to reread a note.
+- **With a Nerd Font, a room with notes now shows a little note icon on the
+  map instead of a dot.**
+
+### Changed
+
+- **A room's notes mark now sits in the bottom-right corner of its box**, on
+  both the terminal map and the exported map — it used to share the top-right
+  corner with the Up-portal icon.
+
+### Fixed
+
+- **A cross-layer room's box on the exported map no longer lets its layer
+  name run past the edge** — a short room name on a long-named layer now
+  widens the box to fit both lines.
+- **A room whose passages all point at one free cell now gets that cell.** The
+  map's tidying could decide a room in the middle of a straight run of rooms
+  was blocking that very run, and shunt it somewhere else entirely — in Lost
+  Pig, the gnome room ended up three rows away, wedged between two rooms it has
+  no passage to, with all four of its own passages drawn as red distortions.
+  Anchorhead's map loses eleven distorted passages to the same fix.
+- **Connectors no longer turn a corner right against their own arrowhead.** A
+  line coming down the gutter beside a room used to bend in the very cell
+  touching the arrow, so it read as though it were kinking inside the arrowhead;
+  gutters now leave the same clearance at both ends and the line straightens out
+  before it arrives.
+- **`lanthorn-mapgen`'s exported SVG legend no longer claims a player is
+  standing in the highlighted room.** It says "starting room" instead — a
+  generated map has nobody in it, and its highlight is only the room the
+  story begins in.
+- **A maze's dead ends stay on the maze's own layer even when the only way
+  into them is up or down.** Three of Adventure's "all alike" maze's dead
+  ends were reachable only by going down from a maze room, so they used to
+  get left behind on the main map instead of joining the maze around them.
+- **A passage is drawn red only when the finished map really bends it.** A
+  room the tidy pass moved back into line no longer keeps a stale red line —
+  the red-dashed marking is now taken from where every room actually ends up,
+  after tidying finishes, rather than from a snapshot partway through.
+
+---
+
+## v0.5.2 — 2026-09-07
+
+### Highlights
+
+- **Version 6 artwork now hands over through shared memory on a local
+  kitty-protocol terminal** — a 640x400 picture drops from about 1.3 MB on
+  the wire to under 200 bytes; nothing changes over SSH, since lanthorn asks
+  the terminal first.
+- **Dragging to select and copy story text now works in the illustrated
+  games too** — Zork Zero, Shogun and Arthur took every press in the pane as
+  a click meant for the game, so a drag there selected nothing; it now works
+  exactly as it does everywhere else.
+- **Generated maps draw fewer turns and seat harder-to-place rooms
+  correctly.** A two-way passage's rooms now line up at any distance instead
+  of only side by side, and a room reached only by stairs, a ladder or an
+  In/Out passage — Zork I's Attic and Studio among them — lands right beside
+  the room it hangs off instead of being parked across the map.
+- **A full `/dev/shm` can no longer crash lanthorn mid-picture**; it falls
+  back to a compressed transfer instead.
+
+### Added
+
+- **On a local kitty-protocol terminal, Version 6 artwork is now handed over
+  through shared memory instead of being base64-encoded into the stream** — a
+  640x400 picture goes from about 1.3 MB on the wire to under 200 bytes.
+  lanthorn asks the terminal whether it can do this before it tries, so over
+  SSH nothing changes and the pictures still arrive as they always did. Turn it
+  off with `kitty_shared_memory = "off"` in `config.toml`; `/dump-terminal`
+  names the route in force.
+
+### Fixed
+
+- **Dragging to select and copy story text now works in the illustrated games
+  too** — Zork Zero, Shogun and Arthur took every press in the pane as a click
+  meant for the game, so a drag there selected nothing and copied nothing.
+  A click still reaches the game (the banner compass and the hint menus are
+  unchanged); it is now the release that delivers it, so a drag is free to
+  select text exactly as it does in every other story.
+- **A diagonal passage between neighbouring rooms now draws as a real
+  diagonal line in the exported SVG**, instead of a right-angled hairpin out
+  of the box corner and down the gutter — so two diagonals crossing between
+  four rooms read as a clean X rather than a tangle of shared stubs.
+- **Generated maps now keep a two-way passage's rooms lined up at any distance
+  instead of forcing them side by side**, so a room that lies west of two
+  different places stays west of both. Straight passages that happen to be long
+  are drawn as plain straight lines rather than as bent red ones, and
+  `lanthorn-mapgen` now tidies a map exactly the way the live automap does — so
+  the map you generate and the map you play with agree about where the rooms
+  are. Zork I's generated map draws eight fewer turns and Anchorhead's twelve
+  fewer, with no passage anywhere taking more than four.
+- **A room reached only by stairs, a ladder or an In/Out passage — and a room
+  shown from another layer — now seats itself right beside the room it hangs
+  off, pushing its neighbours aside to make room, instead of being parked
+  across the map.** A passage the layout had drawn on its own diagonal was
+  being treated as fixed, the same as a walked pair, so it could block the
+  move outright. Zork I's Attic and its Studio ghost paid for it, landing
+  several cells from the Kitchen with their lines looping around everything
+  in between; both now sit right on the Kitchen's doorstep.
+- A full `/dev/shm` can no longer crash lanthorn mid-picture; it falls back to
+  compressed transfer.
+- In the extended v6 view, new text no longer freezes the picture on a
+  terminal using shared-memory art transfer.
+
+---
+
+## v0.5.1 — 2026-09-06
+
+### Highlights
+
+- **The map's other layers are rooms now.** A passage that leaves the layer
+  shows the room it leads to as a dashed box the layout seats like any other,
+  on both the terminal map and the SVG, pushing the building's walls out to
+  make space and taking neighbours along; two-way passages get two-headed
+  arrows, one-way ones say `to` / `from`.
+- **The exported SVG reads the way the terminal map does.** Every arrowhead,
+  stair badge and compass tag sits where the travel arrives; stairs and
+  ladders end in a real arrowhead with the letter behind it; a passage folded
+  onto another's line, or a second exit to the same room, keeps its marker;
+  each layer sits in its own panel and the legend no longer clips.
+- **Adventure and Zork I on the map.** Adventure's mazes are called "Maze"
+  and peel onto their own layers (static and live), its random forests are
+  marked on the first walk and stay marked through a lucky streak, and Zork
+  I's four Forests no longer read as "back here". `lanthorn-mapgen` opens
+  where the game does: the starting room's layer is Main and it is the
+  highlighted room.
+- **Bureaucracy on the IBM PC looks like DOSBox.** The licence form hands
+  back a readable screen with no extra Enter (and no blood-pressure
+  penalty), and bold text — room names, the bracketed asides — comes out
+  bright white the way the DOS interpreter drew it.
+
+### Added
+
+- **`/dump-terminal` now reports how long image encodes take.** Resize,
+  deflate and base64 each get their own min, mean and max since launch, so a
+  slow frame can be pinned on the stage that's actually slow.
+
+### Changed
+
+- **Once the map knows a room is reached at random, every other way in is
+  marked the first time you walk it.** Adventure's two forests are the case:
+  the hill's south, the valley's east and its west all wander between the same
+  pair, and each one used to be drawn as a confident arrow until a second walk
+  came out somewhere else and took it back. The first walk is enough now, and
+  the new `?` arrives already naming both forests. The `?` is also harder to
+  lose: getting the same forest a few times running no longer turns the mark
+  back into an arrow, since a direction that varies agrees with itself by luck
+  often enough to be worth waiting out.
+
+- **A room reached by a ladder or a staircase now pushes the building's wall
+  out to make room for itself.** Where the cell it wants is already occupied and
+  the map cannot simply open a blank row for it — because doing so would tear
+  two rooms you walked between apart — the room standing in the way is asked to
+  step aside instead, one cell further on, taking anything behind it along. So
+  Zork I's house grows a row and both cellar stairs sit under it, rather than
+  one of them being parked past the neighbour with its line looping around.
+
+- **And a room asked to step aside now takes its own neighbours with it.** The
+  rooms that hang off it on the side it is moving towards travel along, so a
+  clearing that lies south of a house stays south of it after the house shuffles
+  down, instead of ending up level with it.
+
+- **A generated map now opens where the game does.** `lanthorn-mapgen` boots the
+  story for a moment before reading it, purely to find out which room you start
+  in — so the main layer of the map is the part of the world the game begins in,
+  and that room is highlighted the way the room you are standing in is while you
+  play. On Zork I that means the white house, the forest and everything above
+  ground are the main map, instead of being filed away on a layer named after a
+  ledge in a coal mine while the cellar took the front page. `--no-boot` skips
+  the boot if you want the file read and nothing else run.
+
+- **A passage that leaves the layer now leads to a room, not a label.** The
+  room across the boundary is drawn beside its neighbour as a *ghost* — a box
+  the size of a real room, in the cell the passage points at, with a broken
+  border and quiet text — and the passage to it is drawn like any other, with
+  the same arrowheads, stair glyphs and direction tags. A crossing you can walk
+  both ways gets the ordinary two-headed arrow and the plain room name; one you
+  can only walk one way reads `to Cellar` on the side you leave from and `from
+  Maze` on the side you arrive at. Select a ghost and the room card names the
+  layer it really lives on. Both the drawn map and the exported SVG show the
+  same thing; the box's border style is `map.ghost_box_style` (dashed, dotted
+  or ascii) and its colour `map.room_ghost`. A room whose only way in is a
+  staircase now sits on its neighbour's doorstep too, rather than wherever the
+  layout could fit it.
+- **The exported SVG map frames each layer in its own panel, and the legend no
+  longer clips.** A multi-layer map now draws every layer inside a bordered
+  panel of its own, all the same width, instead of headings floating loose
+  over a shared background — and the legend's widest line no longer runs past
+  the edge of its own box.
+- The SVG map's one-way arrows now point at the room they lead to, not the
+  room they leave — the same "arrow points into the room it enters" rule a
+  two-way passage's pair of arrows already followed.
+- A cross-layer passage's exported SVG badge now sits next to its arrowhead,
+  by the ghost box it leads to, instead of back at the room it leaves.
+- The SVG map's stairs, ladders and in/out passages now end in an arrowhead
+  too, with the letter riding just behind it on the line — before, a portal's
+  only mark was the letter, so there was no way to tell "leads down" from
+  "arrived by going down".
+- **The exported SVG map's marks now sit where the travel arrives, across
+  the board.** One-way arrows point at the room they lead to, and every
+  stair badge and compass tag sits at the end its own passage arrives at,
+  rather than the end it leaves.
+- **Stairs, ladders and in/out passages on the exported SVG map lay out the
+  extra room their badge needs.** The letter now always has space to ride
+  behind a real arrowhead instead of crowding against it.
+
+### Fixed
+
+- **Rooms are called what the game calls them, so Adventure's mazes are mazes
+  again.** Some games give a whole class of rooms one name — every room of
+  Adventure's maze prints `Maze` — and lanthorn was reading the compiler's
+  internal label instead, putting rooms named `(Alike_Maze_8)` and
+  `(Dead_End_7)` on the map. Both mazes now peel onto maze layers of their own,
+  each named after the room it is entered from (`Maze (off At West End of Hall
+  of Mists)`) so you can tell one from the other, and the dead ends go with
+  them. Playing the Z-machine Adventure, the map used to stop dead at the
+  maze's doorway and stay there however far you wandered; it now follows you
+  room by room.
+
+- **Two rooms you walked between in both directions are drawn side by side, and
+  a passage the map cannot honour now admits it.** Zork I's Clearing and the
+  Forest below it came out one cell too far apart, with an empty square between
+  them and a straight line drawn through it, because two one-way exits into that
+  same Forest were allowed to overrule a passage you had walked both ways. A
+  passage walked from both ends now wins, and any passage whose two rooms are
+  not where its compass word says is drawn as a bent line rather than passing
+  itself off as straight.
+
+- **A room in a maze no longer refuses to step aside.** Asking the room in the
+  way to move takes its own neighbours along with it, but in a maze — where the
+  passages point every which way — that could gather half the layer and the map
+  gave up on the move altogether. Zork I's grating was the casualty: the
+  clearing above it was drawn off to one side with its line looping four times
+  round to reach the box next door. The move now goes ahead with just the room
+  in the way when the whole party will not fit, so the clearing sits directly
+  above the grating and the passage is one straight line.
+
+- **A stair or ladder's letter on the exported SVG map now always rides the
+  straight run into its own arrowhead.** Where the passage had to jog round a
+  neighbouring room first — a room on another layer seated beside its anchor
+  rather than directly above or below it, say — the line used to turn its
+  final corner too close to the edge, leaving the letter crowded against the
+  turn instead of sitting cleanly behind the arrow. The map now gives that
+  last stretch the room it needs.
+
+- **A stair or ladder that shares its line with another passage on the
+  exported SVG map keeps its own letter.** Where two passages between the same
+  pair of rooms draw as one line, the second one's own letter used to vanish
+  entirely instead of riding the shared line. It now gets a badge of its own
+  where its own travel arrives, exactly as a passage with a line of its own
+  would.
+
+- **A room's own second exit to a destination it already has a line to keeps
+  its own mark too.** When several of a room's directions all lead to the same
+  other room — Zork I's Canyon View has both a stairway down and a plain walk
+  east to Rocky Ledge — only one is drawn as a line, and the rest used to
+  vanish rather than get a badge of their own. They now stamp beside the
+  shared line, on both the terminal map and an exported SVG.
+
+- **Bureaucracy's licence form hands you back a screen you can read.** Filling in
+  the last field used to leave the story pane blank until you pressed Enter
+  again — and in that game an empty command is answered with "[What?]" and a
+  jump in your blood pressure. The banner and the Front Room description are now
+  on screen the moment the form ends, exactly as they are in DOS. Any game that
+  wipes a tall status window and then shrinks it gets its screen back the same
+  way.
+
+- **Finishing a story no longer resumes it a turn early.** With auto-save on,
+  quitting or winning a game from inside it used to leave the same auto-resume
+  point a mid-game exit does, so reopening the story dropped you back one turn
+  before the ending instead of at the start. Leaving lanthorn any other
+  way — `/quit`, Ctrl+Q, "Save State & quit", closing a browser tab — still
+  picks up right where you left off, and your map is never touched either way.
+
+- **Bold text on the IBM PC now comes out bright, the way DOS drew it.** Playing
+  with the PC's own colours, a game's room names and its bracketed asides were
+  the same light grey as the prose around them and hard to pick out. On the real
+  machine bold was not a heavier face at all — it lit the display's intensity
+  bit, so those runs were white against grey. They are again.
+
+- **On a machine's own colours, room names are drawn the way the machine drew
+  them.** Playing with a game's own palette (Amiga, IBM PC, and the rest), the
+  room heading used to always get a theme accent colour, even when the machine
+  itself printed it in plain or bold text like everything else on the line. Now
+  it takes whatever ink the machine gave it, matching the original.
+
+- **…and the bracketed asides come out bright with them.** *Bureaucracy*'s
+  "[Your blood pressure just went up.]" stayed grey even so: lanthorn dims a
+  whole line in brackets on the assumption it came from the interpreter rather
+  than the game, and that guess had already been withdrawn for a game wearing
+  its own machine's screen — but only for Version 6. It now stands down for
+  every machine screen, so a v1-v5 game's bracketed notes are the game's prose
+  in the machine's pens, bold and bright where the game asked for bold.
+
+- **Walking between two rooms that share a name is a passage again, not a
+  question mark.** Zork I's four rooms called "Forest" had every path between
+  them redrawn as `?`, each one claiming the destination varied between the
+  forest you actually reach and "back here" — the map mistook a crossing for a
+  step that led nowhere, because both ends print the same heading.
+
+- **A conversation is no longer a room on the map.** In *Never Gives Up Her
+  Dead*, asking for your `TOPICS` put "Things to say to Gareth" on the map as a
+  place — and the map stayed inside it for the rest of the call, so the next
+  door you walked through led out of the conversation instead of out of the
+  room. A game that names the room on its status line is now believed over a
+  bold heading that says otherwise.
+
+- **A browser tab reconnecting to a detached game in the Docker image no
+  longer comes back half-working.** Mouse clicks, map dragging and touch
+  scrolling now all work again at once, instead of only after opening the
+  story list first.
+
+- **The overlaps and stray bends the new ghost rooms had introduced in dense
+  layers are gone.** A layer already tight for space could end up with a
+  ghost box sitting on top of a real room, or a passage bent for no reason to
+  dodge one; both are cleared up now.
+
+---
+
+## v0.5.0 — 2026-09-05
+
+### Highlights
+
+- **Play in a browser without fear of the connection.** Close the tab, lose the
+  Wi-Fi, let the tablet sleep: coming back to the same address puts you in the
+  same room mid-sentence, sound and all, for up to six hours. On a touchscreen
+  the map pans with a finger, the pane splitters drag, a tap takes the word
+  completion, and the grab zones are sized for fingers.
+- **The map's passages finally behave.** Lines never run on top of each other,
+  a passage arrives at its room in a straight line, nothing takes a turn it
+  was not forced to, and a diagonal is drawn as a slope only where the rooms
+  really sit corner to corner. One router draws the terminal map and the SVG.
+- **The exported SVG is a map you can read.** Every passage in its own lane
+  with arrows that say which way it goes, doors and gated exits marked, every
+  exit to another layer named at both ends, and a legend. `/export-svg` now
+  writes every layer, and the new `/export-json` writes the map you walked in
+  the same format `lanthorn-mapgen` uses.
+- **`lanthorn-mapgen` grows up.** Mazes and portal-only regions split onto
+  their own layers, dead ends stay with their maze, and a passage the story
+  computes in code is drawn when the way back gives it away. Two field reports
+  fixed along the way: Counterfeit Monkey's yacht no longer erases its own
+  passages as you sail it, and Anchorhead no longer puts you through a door it
+  refused.
+
+### Added
+
+- **Playing in a browser now survives a dropped connection.** Close the tab,
+  walk out of Wi-Fi range, let a tablet fall asleep — come back to the same
+  address and you are in the same room, mid-sentence, with your transcript and
+  your map where you left them. Your browser quietly remembers which game is
+  yours, so there is nothing to click and nothing to restore. That holds for
+  six hours of being away; after that the game is put down, with its progress
+  saved, and the next visit picks it straight back up. The sound comes back
+  with it: close the tab in the middle of a storm and the game keeps playing
+  it, and when you return you hear where the game is now. Set
+  `LANTHORN_WEB_DETACH=off` for a server that would rather every visit started
+  fresh.
+
+- **The pane edges you drag are wider in a browser on a tablet.** The splitter
+  between the story and the map, and the top edges of the inventory and room
+  panels, are four cells deep there instead of the two a mouse pointer wants —
+  a fingertip could not reliably land on the narrower target. Set
+  `LANTHORN_WEB_GRAB_ZONE` to pick another width, or change `grab_zone_cells`
+  in the settings screen, which wins over it from then on.
+
+- **The exported SVG map now shows the passages between the rooms.** Every
+  connection is drawn as its own rounded, right-angled line running in the
+  channel between the rooms — never through a room box, never on top of
+  another passage — arriving at its own spot on the room's edge, with an
+  arrowhead saying which way it goes: one arrow for a one-way passage, one at
+  each end for a way you can walk both directions. A passage drawn a different
+  way round than the word you type (a northeast that had to be walked round a
+  corner) carries a small `NE` beside the arrow, so the map never quietly
+  renames an exit. Room boxes grow to fit their names instead of cropping
+  them, doors are marked with a bar across the line, a secret exit the story
+  gates is dotted, up/down/in/out passages get a lettered badge on the side of
+  the room they leave by, and a legend in the corner says what every mark
+  means. The whole drawing is styled by a stylesheet in the file, so the
+  colours can be changed without re-exporting. Nothing in it needs a special
+  font.
+- **Every passage that leaves the layer being drawn now says where it goes, at
+  both ends, never drops the name, and its own arrow shows which way you
+  travel.** A badge that crosses to another map layer is joined by a short
+  line to a small box naming the room and the layer it leads to, with an
+  arrowhead pointing into that box; the layer on the other side draws the
+  matching box back, its own arrow pointing into IT — and a one-way passage —
+  nothing to draw it back FROM — gets an arrival box on the far side instead,
+  naming where it came from, with the arrow pointing into the room you arrive
+  in rather than into the box. Where the old single caption used to get
+  dropped in a crowded corner (Zork I's Kitchen, a step down into the Studio,
+  on its busy house layer), the box now just moves farther out along the
+  passage until it finds room — and that connecting line now counts as part
+  of the box's own footprint, so it never gets routed straight through
+  another room to reach one (the same Kitchen exit used to run its line
+  through South of House, reading as South of House's own exit); where the
+  straight path is blocked it now turns once and reaches the box from the
+  side instead.
+- **A two-way passage between two touching rooms no longer reads as a bowtie
+  (`◄►`).** At the narrowest gutter the SVG draws, the two arrowheads used to
+  meet — or nearly meet — back to back with no line visible between them
+  (Zork I's Cyclops Room and Strange Passage was the reported case). The
+  export now gives that gutter a little extra room, in pixels only, so there
+  is always a real dash of line showing between the two heads.
+- **A passage the story computes in code is drawn when the way back gives it
+  away.** A ZIL FEXIT or an Inform routine `door_dir` names no destination of
+  its own, so it used to leave the map with nothing at all in that direction —
+  Zork I's Living Room trap door showed only `Cellar U → Living Room`, never
+  the way down. Now, when some other room's plain, door or secret exit
+  declares the way BACK, the passage is drawn too, one-way and dotted like a
+  secret exit. A passage with no such declared reverse anywhere — a joke exit
+  gated on a flag the game never sets, say — still stays off the map rather
+  than have a destination guessed for it.
+- **`lanthorn-mapgen` now splits a story's mazes and portal-only regions onto
+  their own map layers**, the way accepting every one of the interpreter's own
+  "give these rooms their own layer?" prompts would. A generated map's `.svg`,
+  `.dot`, `.map.txt` and `.map.json` all show the split; `--layer-min` sets how
+  big a region has to be first, and `--no-auto-layers` turns it off for one
+  flat map as before.
+- **`lanthorn-mapgen` gives a single room reached only through a passage —
+  climbing up into an attic, say — the same map layer as the place it opens
+  onto**, instead of stranding it on its own by default.
+- **The draggable pane boundaries can be made easier to grab.** A new
+  `grab_zone_cells` setting widens the story/map splitter and the inventory
+  and room panel edges beyond their default one-cell reach, for anyone playing
+  on a touchscreen where a finger cannot land on so narrow a target.
+- **The map now pans by dragging it with the mouse.** Press and drag anywhere
+  on the map — a room box or open space, it makes no difference — and the
+  view follows your pointer exactly, like scrolling a map on a phone. Letting
+  go without moving still does what a click always did: selects (or
+  deselects) a room.
+- **A click in the story pane accepts a showing word completion.** When the
+  dim ghost text after your cursor is offering a word, clicking anywhere in
+  the story pane takes it, the same as pressing `Tab` or `→`.
+- **`/export-svg` now draws every map layer, not just the one you're standing
+  on.** A maze or a side wing on its own layer used to be left out of the
+  file entirely; the export now stacks every layer top to bottom, each under
+  its own heading, with the same cross-layer arrows and legend
+  `lanthorn-mapgen` draws for a story's whole map. The room you're currently
+  in is still highlighted.
+- **A new `/export-json [file]` writes the map you've actually walked** in the
+  same versioned JSON format `lanthorn-mapgen` uses for a story's whole map —
+  handy for feeding your own tools, or comparing what you've found against
+  the complete map.
+
+### Changed
+
+- **Passages no longer run on top of each other.** On the map and in the
+  exported SVG, two connections that happened to want the same channel were
+  drawn along the same line, and the one underneath vanished — in Zork I the
+  conditional passage from the Living Room to the Strange Passage disappeared
+  under the West of House diagonal for the length of the house. Each passage now
+  gets a channel of its own and the gap between the rooms widens to hold them.
+  Passages that merely **cross** are untouched: they still cross, with the
+  break in the horizontal line that says the two do not meet there.
+- **A two-way passage in the exported SVG now reads as one line, not a bowtie.**
+  Between two rooms sitting side by side there is barely any room between the
+  boxes, and the two arrowheads met nose to nose in the middle of it. Each head
+  now sits at its own room, pointing in — the same double-headed line the legend
+  has always drawn for a way you can walk both directions.
+- **Passages arrive at a room in a straight line.** A one-way passage used to be
+  drawn as if it were heading for the middle of the room's side and then step
+  aside at the very last moment — a small kink right against the box, on Zork
+  I's river crossing to the White Cliffs Beach and the clearing east into the
+  forest. Every passage now aims at the spot its arrowhead will actually land on
+  and runs straight in. And a one-way may now use the middle of a side when the
+  room itself makes nothing of that direction: it still steps aside for the
+  room's own exits, its `?` marks and its two-way passages, but it no longer
+  moves out of the way of nothing at all.
+- **Diagonal passages are drawn as slopes only where they really are diagonal.**
+  With the map's diagonal corner glyphs turned on, a northeast passage used to set
+  off from the room's corner as a slanted line and then turn square partway across,
+  wherever the far room was not the next one along the diagonal. Those half-slopes
+  are gone: a passage is drawn as one unbroken slope only between two rooms that
+  sit corner to corner — around Zork I's house, *North of House* and *South of
+  House* to *Behind House* — and every other diagonal still leaves by the room's
+  corner, so you can see it is a diagonal, but travels in straight lines. The
+  crowded corner of the map around West of House, Stone Barrow and the Living Room
+  is noticeably clearer for it.
+- **Labels in the exported SVG stay out of each other's way.** A direction tag
+  and the name beside a passage that leads off the layer now go wherever there
+  is room — beside the badge, above it, below it — instead of always to one
+  side; where there is no room at all the name gives way and the lettered badge
+  carries the passage on its own. In Zork I this had written `Maze` straight
+  across `Cyclops Room`'s own name, and drawn every up-and-down passage's letter
+  twice, one on top of the other.
+
+### Fixed
+
+- **Passages on the map stop wandering.** A line between two rooms with nothing
+  in the way now goes straight there — one corner if it has to turn, none at
+  all if the two ends line up — instead of stepping sideways into the gutter,
+  running along, and stepping back. In Zork I, *West of House → Forest* used to
+  set off west and then loop up and around the Attic to come back at the forest
+  from the far side; it is two turns now instead of five. The whole Zork I map
+  lost about a fifth of its corners. A line still detours to get around a room
+  box, or to keep clear of another passage — a passage vanishing under its
+  neighbour is worse than a bend — but it no longer detours for nothing. This
+  is one router, so the terminal map and the exported SVG both straighten out.
+
+- **A game served to a browser no longer loses progress when the connection
+  drops.** Every turn was played, and none of it was written down: the served
+  container never turned on saving after each turn, so a closed tab or a
+  sleeping tablet ended the game with nothing to come back to. It now saves as
+  each turn completes, and again on the way out, so even a hard kill costs at
+  most the turn in progress. There is a switch for it anywhere lanthorn runs,
+  too — `--auto-save on` for one session, or the settings screen to keep it.
+
+- **A door the game refuses no longer puts you on the other side of it.** In
+  *Anchorhead* (the 2018 illustrated edition), trying the estate agent's locked
+  door drew you straight into the office you had just been told you could not
+  enter — a room on the map you had never seen, with a passage into it you had
+  never walked. The same mistake had a second half: *Twisting Lane*, where
+  every direction sends you wandering off to a random street, looked to the map
+  like a room you never left, so your next move drew a passage out of the lane
+  instead. That is where the lane's fistful of impossible exits came from. Both
+  came from the map watching the wrong scrap of the game's memory; it now
+  checks that scrap against the room the story itself names, drops it the
+  moment the two disagree, and finds the right one within a move or two.
+  Wandering out of the lane is now what it always was — an exit whose
+  destination varies, marked `?` and listing the streets it has actually put
+  you on.
+
+- **A ship's map no longer erases itself as you sail it.** Walking Slango's
+  yacht in *Counterfeit Monkey* with the ship's own words — `fs`, `ap`, `aft`,
+  `port` — drew each passage and then quietly rubbed it out, until the boat was
+  a scatter of disconnected rooms joined by nothing. The map draws those words
+  on the compass, because it has to draw them somewhere, but the *game* files
+  them under directions of its own and refuses "southwest" outright. The check
+  that quietly re-walks a passage to see whether it varies was asking in the
+  compass word, getting refused, and reading "I did not move" as "the story
+  sent me somewhere else" — proof enough to delete the arrow it had just drawn.
+  It now asks in the word you typed, and a refusal is never mistaken for an
+  arrival. Only the companionways survived before, where `up` and `down` happen
+  to be the ship's words too.
+
+- **A room ring around a building no longer breaks the building's own doors.**
+  Generating a full map used to lay every room out in one giant pass, so a
+  loop of rooms around an outdoor area (a house with a path circling it) could
+  shove the house's own front and back doors out of alignment even though
+  nothing was actually wrong with them. Each part of the map is now worked out
+  on its own, so a ring outside a building can stretch a little to make room
+  without ever breaking a door inside it.
+- **Rooms you can walk between in one step are now drawn next to each other.**
+  If you have walked a passage in both directions then the two rooms it joins are
+  neighbours, and the map now treats that as the one thing it must never break.
+  Rooms that used to drift two or three squares apart with blank map in between —
+  Zork I's Studio floating clear of the Gallery — are pulled together, and no room
+  is left standing in the gap with someone else's passage drawn straight through
+  it. A crossroads keeps the spot that suits all its doors, too, instead of being
+  shoved aside to tidy up a row it happens to sit in.
+
+  Where a map genuinely cannot hold every passage flat, the one that bends is now
+  the one the story **gates** — and the more gated of two goes first. A plain
+  passage says two rooms are neighbours. A door is a real way through that merely
+  needs opening, so it holds. A secret passage the game only opens under its own
+  conditions is what stretches, which is a fair drawing of a secret passage. A
+  passage merely blocked by a monster is not gated at all: the troll stands in a
+  doorway that is still a plain east-west corridor, and it stays straight.
+
+  That is what finally lets Zork I's white house come out right. West of House
+  keeps the north, south and barrow paths in their correct corners, and the
+  kitchen and living room now sit *inside* the ring of paths around the house,
+  where they belong, instead of the house being pulled apart to make room for the
+  passage behind the cyclops. On the live map and in `lanthorn-mapgen`'s alike.
+- **`lanthorn-mapgen`'s maze split now catches the dead ends hanging off a
+  maze, not just the rooms literally named "Maze"** — a "Dead End" or a
+  "Grating Room" one step from the maze now lands on the maze's own layer
+  instead of being stranded off in a corner of the main map. And a pseudo-room
+  some stories compile in with no name and no way anywhere (an object that
+  declares nothing but an exit back to itself) no longer shows up on the
+  generated map at all.
+- **A diagonal passage crossing another line no longer garbles either one.**
+  With the diagonal map style on, Zork I's slope from West of House down to
+  the Stone Barrow used to sprout a stray dash where it crossed the secret
+  passage running under the house. It now leaves the same clean one-cell gap
+  any other crossing on the map does, and the passage underneath keeps its own
+  line unbroken — the two read as a crossing, not a tangle.
+
+---
+
+## v0.4.4 — 2026-09-04
+
+### Highlights
+
+- **Inform 7 games hand lanthorn their map, and it takes it.** A modern Glulx
+  story compiled with Inform 7 carries its whole world inside the story file —
+  every room, what every room is called, and where every exit leads — and
+  lanthorn now reads it before you type a word. The room you wake up in is on
+  the map at the first prompt, under the name the author gave it. The map no
+  longer spends the opening ten commands working out how the game tracks you: it
+  settles on your first move, so no room gets drawn twice because the game
+  spelled its name two ways. And a game's own exits are checked the way Infocom's
+  always have been, which is what catches a passage whose far end shuffles rather
+  than drawing it as a fixed corridor. Counterfeit Monkey, The Wizard Sniffer and
+  Skuga Lake are among the 23 of 31 Inform 7 games in the test collection this
+  covers; the rest — older Inform 7 builds, and games that build their maps as
+  you play, like Kerkerkruip — are untouched and map exactly as they did.
+
+### Added
+
+- **`lanthorn-mapgen` draws a game's whole map without playing it.** A new
+  companion tool in every release archive: hand it a story file and it reads the
+  map the game was *built* with — every room, every exit, every door — and hands
+  you back four files. An annotated text dump with the map drawn into it, an SVG
+  you can open in anything, a Graphviz `.dot` for graph tools, and a documented
+  JSON file for writing your own. It reads Inform 7's map table, the Inform 6
+  library's exits, Infocom's own ZIL exits and Scott Adams databases, so it
+  covers everything lanthorn plays. Passages that only open once you've earned
+  them — Zork I's rainbow, the barrow at the end — are drawn and marked rather
+  than quietly dropped, and so are doors. Its limits are stated plainly: a
+  passage a game conjures up while you play was never in the file to find, and
+  a handful of games keep their map somewhere nothing can read without running
+  them, for which it says so and stops rather than guessing. Run
+  `lanthorn-mapgen --help` for the whole of it.
+- **The map now understands a ship's quarter directions.** Sailing games like
+  Counterfeit Monkey's yacht ask for fore, aft, port and starboard, and the
+  diagonals fore-port, fore-starboard, aft-port, aft-starboard — and every
+  abbreviation such games accept (`f`, `a`, `p`, `sb`, `fp`, `as`, …). The map
+  now reads them and maps them onto the compass diagonals so a ship's deck lays
+  out correctly. Return-path probing types the ship's own word back — after
+  fore-starboard it asks for aft-port, not southwest.
+
+### Changed
+
+- **A room lanthorn can't identify by a game object now shows a small number,
+  not a long code.** A Glulx room, or a Z-machine room known only by its name,
+  used to show an 8-character code like `#8000ABCD` on the map and everywhere
+  else a room number appears. It now shows a small ordinal instead — `#1` for
+  the first such room you find, `#2` the next, and so on — the same kind of
+  number the map already gives you elsewhere. The room panel and `/export-map`
+  still show the old code alongside the new number, for matching a bug report
+  back to the exact room.
+- **The "give these rooms their own layer?" prompt now offers three ways to
+  decline.** Before, you could only say "Never" and it would silence that one
+  passage, but the next passage would ask again. Now you get Not now, Not this
+  passage, and Never for this story — and the story-wide choice is remembered
+  with the map.
+
+### Fixed
+
+- **`GO TO <room>` (and `WALK TO`, `RETURN TO`, `REVISIT`) no longer draws
+  false passages.** These commands, which some games offer as shortcuts to jump
+  across several rooms at once, used to create a phantom passage between the
+  room you left and the one you arrived in, as if the map didn't know you'd
+  skipped the middle. Now the map just moves you there, the same way it handles
+  a cutscene or a flashback.
+- **Games that keep the room name in their status bar now map.** *The Wizard
+  Sniffer* never prints a room title in the story text — the name lives only in
+  its own status bar, beside the exits — and lanthorn found no rooms in it at
+  all, start to finish. It now reads the bar, the way it always has on the
+  Z-machine side, for any game that names its rooms nowhere else. *Brain
+  Guzzlers from Beyond!* and *Zozzled* map from the first move for the same
+  reason.
+- **The map knows where you are before you take a step.** Counterfeit Monkey
+  never announces the Back Alley you wake up in — it tells you to type LOOK —
+  so the map used to start blank and only found the room once you had walked
+  out of it and back. Now lanthorn asks the story, quietly, and the opening
+  room is there from the first prompt.
+- **A car ride, a cutscene or a flashback no longer breaks the map.** Once
+  lanthorn has learned where a Glulx game keeps its "you are here" pointer, it
+  believes the game rather than the screen. Driving out of Deep Street — which
+  the game narrates without reprinting the room — used to leave you marked in
+  the street you had left and quietly spawn a second copy of it, and Counterfeit
+  Monkey's REMEMBER used to move you to a yacht galley you were only thinking
+  about. Both now land exactly where you really are.
+- **Rooms whose description opens with a character's name keep their names.**
+  With Counterfeit Monkey's HIGHLIGHT reading aid on, Brown's Lab, Waterstone's
+  Office and their neighbours were being labelled with the room you had just
+  left, and the mistake spread — one session ended up with a whole cluster of
+  duplicate "Samuel Johnson" rooms. Fixed.
+- **Two differently named rooms could occasionally be merged into one on the
+  map.** Rooms lanthorn can't identify by a game object (a Glulx room, or a
+  Z-machine room known only by name) were being squeezed into too small a
+  numbering space, and two unrelated rooms could land on the same number and
+  get drawn as a single room. That numbering space is now far larger, so this
+  can no longer happen in practice.
+- **The room you were standing in when the map worked out a Glulx game's
+  layout could appear twice.** A few moves into a Glulx story, lanthorn works
+  out how the game tracks where you are and re-labels everything it has drawn
+  so far. The room you were actually in kept its old label, so the very next
+  time you did something that didn't move you — a WAIT, picking something up, a
+  door that wouldn't open — it was drawn a second time, joined to its own
+  double by a connection that isn't there. Anchorhead showed this within five
+  moves of the opening street.
+- **Updating a Glulx story file no longer freezes its map.** Lanthorn
+  remembers how a Glulx game tracks your location so it doesn't have to work
+  it out again on your next session — but if the story file was replaced with
+  a new build under the same name, that memory could point at the wrong thing,
+  and the map would stop moving no matter where you went. It now checks that
+  the memory still matches the story it was learned from, and even if a wrong
+  guess somehow slips through, it notices within a few turns and corrects
+  itself on its own.
+
+---
+
+## v0.4.3 — 2026-09-04
+
+### Highlights
+
+- **The map is a lot smarter about finding the way back.** An attempt that
+  wandered somewhere you hadn't been yet used to count as tried and never got
+  asked again — now it gets another chance once you've actually walked it.
+  And when a staircase and a compass direction both claim the same room, the
+  compass wins, the way it should: Zork I's Chasm sits where the East-West
+  Passage's own "southwest" puts it, not straight below where "down" would
+  draw it.
+- **Same-named rooms are told apart on the big Glulx games too**, not just
+  the small ones — Counterfeit Monkey, Anchorhead, Cragne Manor and the rest
+  now settle onto the game's own "you are here" pointer instead of collapsing
+  every room that shares a name into one.
+- **Layout stopped letting a staircase or a random room shove the rest of the
+  map around.** A passage walked both ways now outranks one walked only
+  once, so a lone step into Adventure's forest can no longer flip the valley
+  upside down; and a room a game scatters you into at random — the forest
+  itself — is now placed last, out of the way, instead of shoving real
+  geometry aside.
+- **Shogun's ship listens in its own language.** The map's silent scouting
+  for the way back used to ask in compass words first, even on a ship that
+  only understands fore, aft, port and starboard — now it asks in the word
+  you used and gets the right answer immediately.
+- **The story list's title bar shows the running lanthorn version**, right
+  where the hotkey hints used to crowd it.
+- **Arthur's ornamental frame follows the scene again** when you walk back
+  into a room you've already visited, instead of keeping the colours of
+  whatever room you saw first.
+
+### Changed
+
+- **The story list's title bar now shows the running lanthorn version**,
+  right-aligned — the same build string `lanthorn --version` prints, short git
+  hash and all — and no longer clutters that line with hotkey hints; the
+  footer along the bottom and `?` already carry every one of those keys.
+
+### Fixed
+
+- **The map finds a way back it once gave up on.** When lanthorn quietly checks
+  how you'd get back out of a room, an attempt that wandered into somewhere you
+  hadn't been yet used to count as tried — so it was never asked again, even
+  after you'd found the place. Rooms you passed through early in a game ended up
+  with every direction crossed off, and their way back only ever appeared once
+  you walked it yourself. It fell hardest on plain compass exits, which those
+  first searches spend first, so a staircase's way back turned up every time and
+  north/south/east/west's didn't; on Zork I's Behind House it even pushed the
+  search onto `southwest`, drawing a diagonal where `south` was the truth. An
+  attempt lanthorn couldn't read the answer to now leaves no mark, and gets asked
+  again on a later visit — by which time it usually can.
+- **The map no longer lets a staircase overrule a compass direction.** A room
+  reached both by going down and by a passage the game named — Zork I's Chasm,
+  which the East-West Passage reaches by a stairway at its north end and which
+  answers with `southwest` — was drawn straight below the room instead, with the
+  `southwest` leg greyed out as impossible. Up and down are only a drawing habit
+  ("up is north"); a compass word is the game telling you where the room is, so
+  it now wins. The Chasm sits north-east of the passage where you found it, the
+  stairway glyph is on the passage's north-east side, and nothing is greyed out.
+- **Arthur: the ornamental frame follows the scene again when you walk back into
+  a room you have already been in.** Arthur's border art takes its colours from
+  whatever picture the game last painted, so it turns brown inside the church and
+  blue out in the churchyard. Since a recent speed-up it only changed the first
+  time you saw a place: walk out of the church and the churchyard came back
+  wearing the church's browns, and the F1 picture screen no longer came back the
+  way it went away. Revisiting a scene now recolours the frame exactly as arriving
+  for the first time does.
+- **Glulx: the map tells same-named rooms apart on the big games too.** lanthorn
+  works out where a Glulx game keeps its "you are here" pointer by watching
+  which part of its memory changes when you walk, and on all but the smallest
+  games it had been throwing the right answer away — so Counterfeit Monkey,
+  Anchorhead, Cragne Manor and most of the rest identified a room by nothing but
+  the name at the top of the screen. Every room sharing a name was one room on
+  the map, and a maze collapsed into a single node. Walk a few rooms now and the
+  map settles onto the game's own pointer, exactly as it always did on
+  Adventure.
+- **A passage you have walked both ways now outranks one you have walked once,
+  so the map stops flipping rooms upside down.** In Adventure's opening the
+  valley was drawn NORTH of the end of the road, with the streambed south of the
+  road — the road wedged between the valley and its own stream, and both legs of
+  the road/valley passage struck through as impossible. The culprit was the
+  forest: it is a random place, it happens to sit beside the valley, and the
+  single northward step into it was laid down first, so it got to decide which
+  way was up and dragged the valley with it. The map now settles its geometry
+  from the passages it has the best evidence for — the ones walked from both
+  ends — before it listens to a lone one-way crossing. The same map also comes
+  out the same way whichever direction you happened to explore first.
+- **A room the game scatters you into no longer elbows the rest of the map
+  aside.** Adventure's forest is a random place: go in and the game may put you
+  in either of two clearings, so the map ends up recording that the valley is
+  west of the forest *and* east of it — which cannot both be true. The map used
+  to lay rooms out as if it were, and the forest took the row directly below the
+  end of the road, leaving the valley stranded a second row down with an empty
+  gap above it. A room whose own directions disagree like that is now placed
+  last, in whatever space is left beside the rooms it connects to, and never
+  pushes a room you have actually walked between out of position. Adventure's
+  valley sits directly south of the road again, the streambed directly below it.
+- **Shogun: two rooms with the same name are two rooms again.** Shogun has two
+  `Bridge`s, two `Main Deck`s and four `Ledge`s, and the map used to hand every
+  one of them to whichever came first in the game's own object list — so the
+  Erasmus's bridge was quietly filed as a bridge in Osaka castle from the
+  opening turn. The visible damage was on the way back up from below decks: the
+  map knew the deck's stairs led somewhere else and refused to draw the
+  passage. It now reads the game's own "you are here" pointer to tell the twins
+  apart, and the ship's decks join up.
+- **…and the graphical Infocom games no longer sprout phantom exits from the
+  map's own quiet scouting either.** Between your turns the map plays a silent
+  copy of the game to find the way back through a passage you have walked one
+  way. Zork Zero, Shogun, Arthur and their kin print the room name into their
+  status band and only repaint it when you actually change rooms — so the copy,
+  handed a direction the game refuses, printed nothing, and the band still named
+  the room it had walked into on the question before. Below decks on the Erasmus
+  ended up with an arrow to the bridge in all eight compass directions, and the
+  deck itself was written off as leading somewhere different each time you went
+  forward. The copy now starts every question with its status band cleared, so a
+  refused direction teaches the map nothing at all.
+- **Glulx games no longer sprout phantom exits from the map's own quiet
+  scouting.** Between your turns the map plays a silent copy of the game to
+  work out the way back through a passage you have walked only one way. When
+  that copy tried a direction the game simply refuses — "you cannot go up from
+  here" — it could still report itself standing wherever it had last walked,
+  and the map drew an arrow to that room. Commercial Anchorhead's "Outside the
+  Real Estate Office" ended up with seven of them, every one pointing at the
+  same office. A refused direction now teaches the map nothing, which is what
+  it always should have.
+- **`/export-map` writes `<unvisited>` for a random exit's destination you have
+  not reached yet**, instead of leaving the name blank as though it had lost
+  one. Those rooms are real — the map found them scouting — and the export is
+  now plain that you have never stood in them.
+
+- **Picking something up no longer invents a room named after it.** In games
+  that print the names of objects in bold — Counterfeit Monkey does it whenever
+  you turn `HIGHLIGHT` on — a `GET ALL` could hand the map a "room" called
+  whatever you had just picked up, hanging off the real one on a mystery
+  passage, and then trail false connections behind you as you walked away. The
+  map now asks a room heading to own its whole line, so a bolded thing at the
+  start of a sentence stays a thing.
+- **The map's silent scouting for the way back now speaks a ship's own
+  language.** On games that use nautical directions — Shogun's fore, aft,
+  port and starboard — the scouting used to ask the compass equivalent first
+  ("south" for aft), which the ship doesn't recognise, and only found the
+  real return after wandering through several refused directions and landing
+  on whichever one happened to work first. Climb below decks on the Erasmus
+  and the return used to show as "up" — a real passage, just the wrong one —
+  instead of "aft". The scouting now asks in the same word you used, and gets
+  the right answer immediately. It also no longer reveals a whole staircase
+  or hatch you have never explored just because it stumbled onto one while
+  looking for the way back through an ordinary compass passage.
+
+---
+
+## v0.4.2 — 2026-09-03
+
+### Highlights
+
+- **The map now knows when a game is sending you somewhere at random, and
+  marks it `?` instead of drawing a confident — and sometimes wrong — arrow.**
+  Lost Pig's gnome tunnels and Colossal Cave Adventure's two forest clearings
+  are the clearest examples: walk the same direction twice and land somewhere
+  different both times. The map catches it whether the story is Inform,
+  Glulx, or one of Infocom's own games, from the earliest titles through Zork
+  Zero, Shogun and Arthur. A passage that changes for good, rather than
+  randomly, is simply redrawn with its new arrow instead of being marked
+  uncertain. Hover the small number beside a `?` to see exactly which rooms
+  it has actually led to.
+- **A room that keeps renaming itself now stays one room on the map**, not a
+  flicker of relabels. Lost Pig's gnome tunnels are drawn under whatever name
+  the story currently uses, with a small superscript count noting how many
+  other names they've answered to — hover it, or check the room panel's
+  "Also seen as" list, to see them all.
+- **Right-click a room on the map for a quick menu** — rename it, move it to
+  another region, or rename its layer, right where you clicked. The room panel now
+  scrolls when its contents run long (a full exit card, a pile of aliases)
+  instead of cutting them off, and grew a close box to dismiss it.
+- **A story you opened from the list now brings you back to the list when it
+  ends**, however it ends — winning, losing, or quitting — instead of
+  dropping you out to the terminal.
+- **The Docker browser page scrolls by touch drag, not just a mouse wheel**,
+  and opens with the right letter spacing on the very first visit instead of
+  needing a refresh to fix itself.
+- **New arrowhead styles for the map.** Outline arrows are now the default —
+  the old boxed set turns into a small square with a dot in it at ordinary
+  font sizes. `nf-thick`, `nf-wind` and `nf-thin` are three more to choose
+  from, alongside the original boxed set (`arrow_set = "nf-box"`).
+
+### Docker
+
+- **The browser page now scrolls with a finger, not just a mouse wheel.** A
+  drag on the transcript or map on an iPad or phone now scrolls it, the same
+  as spinning a mouse wheel already did — set `LANTHORN_WEB_TOUCH=off` to turn
+  it back off.
+- **The browser page no longer opens with stretched-out letter spacing on its
+  first visit.** A refresh used to fix it; now the very first load looks
+  right too.
+
+### Fixed
+
+- **Games whose hero has a name of their own now show the right things.**
+  Lost Pig's inventory panel now shows what Grunk actually carries (a torch
+  and his pants), instead of reading an unused stand-in that was never really
+  playing the game; its automap now tracks the room itself rather than a
+  same-named compass direction. Lurking Horror's and The Witness's inventory
+  panels now track "the hacker" and "the detective" the same way, instead of
+  staying empty all game.
+- **Map connectors no longer take long detours** hugging a neighbouring
+  room's box when a straight line was free — Zork I's Canyon View included.
+  Which of two equally short routes wins no longer depends on the order the
+  rooms were explored in.
+- **Map probes on graphical Infocom games work again.** Zork Zero, Shogun,
+  Arthur and the rest of that catalogue used to refuse the background check
+  the map's `?` marks depend on; now they get it too.
+- **Arrowheads on the left side of a room no longer sometimes draw larger
+  than the others in Ghostty.** A west-pointing arrowhead followed by a short
+  name used to spill into the next cell and look oversized next to every
+  other arrow on the map; it now stays the same size as the rest.
+- **Room markers on a selected, current room now show the right colours.**
+  The alias-count superscript and a `?` random-exit mark used to draw as a
+  dark block with a light digit on that one room, instead of matching the
+  room's own highlighted look.
+- **The tooltip's little pointer no longer leaves a dark cell on a
+  highlighted room.** Hovering something on the selected current room's box
+  used to punch a dark, hollowed-out triangle into its light background; the
+  pointer now matches the room's ground correctly.
+- **`gvm-cli --version` names itself `gvm-cli` again**, not the crates.io
+  package name it briefly picked up in 0.4.1.
+
+---
+
+## v0.4.1 — 2026-09-02
+
+### Highlights
+
+- **Older Glulx games are much faster.** Inform 6 games and Inform 7 games
+  from before 2010 never asked for the acceleration newer ones get; lanthorn
+  now recognises their core routines and runs them natively. *King of Shreds
+  and Patches*: starting the game, `inventory` and `look` took 3.1 seconds in
+  0.4.0 and take 0.34 seconds now; the `inventory` turn alone went from 1.5
+  seconds to 0.14. `--accel off` turns it off.
+- **Glulx games show their inventory.** The inventory panel and the command
+  panel's carried column read the story's own object tree, so games that
+  answer `i` in their own words (City of Secrets) no longer leave them empty.
+- **A menu for the story under the cursor in the picker** — `Space` or a
+  right-click — and a shorter hint bar that lists only the library keys.
+- **The browser page (Docker) ships its own Nerd Font**, so icons and the
+  map's diagonals draw correctly on any machine.
+
+### Added
+
+- **Story menu in the picker.** `Space`, or a single right-click on a row or
+  cover, opens a menu beside the story: open it, launch options, fetch its
+  metadata, get its hints, point it at an IFDB page — each with its key shown.
+  (A double right-click no longer opens launch options; the menu item does.)
+- **`?` in the picker** shows every key the story browser knows.
+- **Inventory panel items are clickable**, composing the item onto the prompt
+  exactly as a click in the command panel does.
+- **The story pane's border control cycles** command panel → inventory panel →
+  none, remembered per story.
+- **The font check asks about the map's diagonal corners separately**, since
+  many fonts that carry the icons lack those four glyphs; each answer stands
+  on its own, and skipping the second question changes nothing.
+- **Matrix map view:** hovering a room shows its full name, and the name
+  column now uses the room the pane has, footnoting only names that still
+  don't fit.
+- **Ctrl-U / Ctrl-D** scroll half a page in the story list and, when the
+  prompt is empty, in the story itself.
+
+### Docker
+
+- The browser page embeds IosevkaTerm Nerd Font Mono; `LANTHORN_WEB_FONT` and
+  `LANTHORN_WEB_FONT_SIZE` override the family and size.
+- The image no longer carries an `unknown/unknown` platform row on GitHub.
+
+### Changed
+
+- **Panels are called panels everywhere**: commands `toggle-command-panel`,
+  `toggle-inventory-panel`, `toggle-room-panel`, `cycle-panel`; config section
+  `[command_panel]`; style selectors `command_panel.*`, `inventory_panel`,
+  `room_panel.*`. The old names are gone.
+- **The picker's hint bar** shows one key per action and only the library-level
+  ones: `Enter: open  Space: menu  Tab: info  /: IFDB  g: covers  s: sort
+  r: refresh  Ctrl+F: find  ?: keys  q: quit`. Every other key still works.
+
+### Fixed
+
+- City of Secrets' dictionary, and any Inform 6 Glulx game whose first
+  dictionary word is empty, is read again — the Guiding Light and the command
+  panel were dark on those games.
+- Downloading a story from IFDB whose title isn't searchable (City of Secrets
+  under "CoS") now keeps its metadata, and a forced refetch can no longer wipe
+  it.
+- Clicking a command-panel noun after a trailing space, or a verb while a
+  partial word is typed, no longer doubles the word (`examine examine rope`).
+- A dialog opened over the command panel takes all keys and mouse input.
+- The Guiding Light no longer offers `fasten` for `hasten north`, no longer
+  credits a phrase like `look sharp` to a game that only knows `look`, and
+  vets its suggestions on Curses, suvehnux and other games that don't repaint
+  their status line.
+- Kerkerkruip's grey status strip (panels off) is filled edge to edge.
+- A `parent = "…"` re-root in `style.toml` moves a row's colours even where
+  the built-in default pinned them.
+- A long notification wraps instead of losing its tail.
+- The pixel lock is a real switch in the extended v6 render mode.
+- Save State reuses the unchanged history turns of the previous archive
+  instead of recompressing them; a palette change in a v6 game re-maps the
+  pictures already decoded instead of decoding them again; the cover gallery
+  scrolls without re-encoding every visible tile.
+
+## v0.4.0 — 2026-09-01
+
+### Highlights
+
+- **Breaking: the command-line flags changed.** Every `--no-x` flag in all four
+  front-ends is now `--x on|off` — `--no-sound` is `--sound off`. The old
+  spellings are rejected; see the table below.
+- **Lanthorn's Guiding Light** — when the parser rejects a word, lanthorn offers
+  the story's own (`try instead — lantern`), having first tried each suggestion
+  in a silent throwaway copy of your game. Its lines carry a `●` in the margin:
+  lanthorn's voice, never the story's.
+- **The word reveal** (the `◈` border control) lights every noun on screen that
+  the story actually knows, so you can tell the implemented `lamp` from the
+  scenery `field`.
+- **Toggle controls on the story pane's border** — click to open the command
+  band or map, switch the Guiding Light, or change a v6 story's render mode.
+- **The story picker follows your folders**, with `Ctrl+F` to filter the whole
+  library as you type.
+- **Play in a browser, pictures and sound included** — the Docker image now shows
+  in-game graphics and plays the game's audio in the page.
+- **A third v6 render mode, `extended`**, which fills a tall terminal with more
+  story instead of a letterbox.
 
 ### Breaking — the command-line flags
 
-Every `--no-x` flag is replaced by a positive one that takes a value, across
-**all four front-ends** (`lanthorn`, `zvm-cli`, `gvm-cli`, `scott-cli`). There
-are no aliases for the old spellings; they are rejected.
+Across `lanthorn`, `zvm-cli`, `gvm-cli` and `scott-cli`. No aliases; the old
+spellings are rejected.
 
 | was | is |
 |---|---|
@@ -41,301 +1404,131 @@ are no aliases for the old spellings; they are rejected.
 | `--no-timed-input` | `--timed-input on\|off` |
 | `--no-more` / `--no-page` | `--pager on\|off` |
 | `--system-colours` | `--colour machine` |
-| `--no-status` | removed (use `--story-only`, which it was already an alias for) |
+| `--no-status` | removed (use `--story-only`) |
 
-The point is not the spelling. A negative-only flag is **one-way**: `--no-sound`
-could force sound off for a run, but nothing could force it *on*, so a config
-carrying `enable_sound = false` could only be overridden by editing the file.
-`--game-colours on` could not be asked for at all.
-
-- **New: `--colour terminal|theme|machine`** pins which of the three sources the
-  story's default page and ink resolve from — a precedence the code already had
-  and nothing could choose between. It is a different axis from
-  `--game-colours on|off`, which decides whether the interpreter honours what the
-  *story* asks for; both are kept.
-- `--help` now wraps to one width — 80 columns — in every front-end. Some entries
-  wrapped themselves at ~83 columns while a generated list ran to 117 and was
-  wrapped by the terminal, so one help screen showed two authorities.
+New: `--colour terminal|theme|machine` chooses where a story's default page and
+ink colours come from.
 
 ### Lanthorn's Guiding Light
 
-- **lanthorn can now help you play**, and says so once: a single line above its
-  first offer of the session — *"Lanthorn's Guiding Light: ● is mine, not the
-  story's."* It arrives when there is a mark on screen to explain rather than as
-  a banner at launch, which is why it describes that mark instead of promising
-  one. It does not say where the switch is, because the ●/○ control in the pane
-  border is right there. After that the
-  help comes unannounced, carried by the glyph alone and never in the story's own
-  voice.
-- **The mark is the whole of the attribution on screen.** No prefix rides the
-  text, so a forty-column pane spends one column on saying whose a line is. Both
-  tones — the ordinary light, and the caution before a move that cannot be
-  undone — are drawn in your terminal's **yellow**, the caution bold, which reads
-  on a light page as well as a dark one. `transcript_assist`,
-  `transcript_assist_caution` and the glyph itself (`"gutter.assist"`) are all
-  yours in `style.toml`; point it at a patched font's own lamp (U+F1A60) if you
-  have one installed.
-- **An exported transcript carries the words instead.** A file has no margin and
-  no colour, so `export-transcript` writes `Lanthorn: ` onto the front of every
-  line that is ours — the surface where the distinction has to survive a
-  copy-paste.
-- **When the parser rejects a word, lanthorn offers the story's own.** Mistype
-  the lantern and the light says `try instead — lantern`; type `smel` and it
-  answers `smell · sniff`, because that is how *this* story groups the word. It
-  never rewrites what you typed and never sends anything on your behalf — a wrong
-  guess costs a keystroke rather than a turn.
-  - It works out that a word was rejected from the **story's own dictionary**,
-    not from the game's wording, so it fires the same on a story that words the
-    refusal its own way ("Why, I don't even know what that verb means!") as it
-    does on Infocom's `I don't know the word "…".`
-  - Three sources, all of them the story's: a word one keystroke away, a word you
-    typed a different ending on (`opening` → `open`), and the story's own
-    synonyms for a verb once it is identified.
-  - It only ever names words this story's parser will accept — including spelling
-    out the truncated keys an older dictionary stores, so a Version 3 game says
-    `leaflet` rather than the `leafle` on disk.
-  - And it stays quiet far more often than it speaks: one wrong word in the
-    command and no more, a single-keystroke miss and nothing weaker, once per
-    word per session, and nothing at all when it has nothing good.
-- **And the suggestion is tried before you see it.** lanthorn forks your game
-  into a silent throwaway copy, types each candidate into it from exactly where
-  you are standing, keeps only the ones that did something, and throws every copy
-  away. `illuminate lamp` at Zork's front door now says nothing at all — `light
-  lamp` would not have worked there either — and the same command in the living
-  room says `try instead — light`. That is why the line recommends rather than
-  lists: the words changed with the evidence behind them.
-  - How the game says *no* is **learned from the game**, not from a table of
-    English phrases: the copy is handed deliberate nonsense alongside the real
-    question and the reply is compared with what came back. It is read in the
-    room the question was asked in, because scope is where you are standing.
-  - Nothing the copy does escapes it. Sound and graphics are off, its file store
-    is empty, and a story reaching for `@save` inside one is told the write
-    failed. Your own session is never stepped, saved or restored.
-  - It is evidence, not a promise: a game that draws on randomness can answer the
-    copy and your game differently, and a refusal the controls never provoke gets
-    through. `guidance_probe = false` (or the settings row) turns it off, and the
-    offer falls back to naming what the dictionary holds — which is also what
-    happens on a story too slow to ask inside the probe's budget.
-- **One switch for the whole set**: `--guidance on|off` for a launch,
-  `/set-guidance` (bare toggles) — or the light's own `●`/`○` control in the
-  story pane's bottom border — remembered **for that story**, and a `guidance`
-  row on the settings screen that sets the global default new games inherit.
-  `/set-guidance auto` hands a story back to that default. `guidance_probe` sits
-  beside it, for the speculative half alone.
-- **A first-run font check sets every icon at once.** lanthorn cannot read your
-  terminal's font — it writes characters, and the font belongs to the terminal —
-  so on a first launch it shows two rows of glyphs and asks which one your
-  terminal draws properly. Answer row 1 and the map takes the Nerd Font arrows,
-  the four-way stairs-and-doors portal icons and the Guiding Light's own lamp;
-  answer row 2 (or press Esc) and the plain glyphs stand. The answer is written
-  to `style.toml` as preset **names**, one line each, so it stays yours to edit
-  and a later improvement to a preset still reaches you. `/run-font-check` asks
-  again — which is what you want after changing fonts — as does
-  `--font-check on`; `--font-check off` never asks, and there is a `font_check`
-  row on the settings screen.
-- **The word reveal** — **F4**, the `◈` on the story pane's bottom border, or
-  `/reveal-words` — lights every word already on screen that this story knows,
-  for a few seconds, over its own prose and without moving a line of it. It goes
-  out on your next keystroke, your next turn, or on its own. It answers the
-  oldest frustration in the genre: a room description names a dozen nouns and two
-  of them are implemented. *Mini-Zork* opens on a `field` the story has never
-  heard of, and that word stays dark.
-  - The claim is the dictionary's and the reveal says so every time — *words this
-    story knows — not necessarily things that are here*. A description that
-    mentions something in the next room lights it, which is the point rather than
-    a leak: every word it touches is one the story has already printed on your
-    screen.
-  - Verbs never light. The verb panel already answers "what can I do".
+- Mistype a word and the light offers what the story would accept — a near
+  spelling, a different ending (`opening` → `open`), or the story's own synonyms
+  — and only words this story's parser will take. It never changes what you
+  typed or sends anything for you.
+- Each suggestion is tried first in a silent copy of your game from where you are
+  standing, so `illuminate lamp` at Zork's front door says nothing, and in the
+  living room says `try instead — light`. `guidance_probe = false` turns the
+  trying-out off.
+- `--guidance on|off`, `/set-guidance`, or the `●`/`○` control on the pane
+  border — remembered per story. A `guidance` row on the settings screen sets
+  the default.
+- **The word reveal** — the `◈` border control, or `/reveal-words` — lights
+  every noun and adjective already on screen that this story knows, for a few
+  seconds. Works for Z-machine and Glulx stories.
+- **A first-run font check** shows two rows of glyphs and asks which your
+  terminal draws properly; the answer sets the map arrows, portal icons and the
+  light's lamp glyph at once. `/run-font-check` asks again after a font change.
+- **The map finds its own way back**: after a one-way move, a silent copy probes
+  for the return passage and the map records it only if the copy comes out where
+  you left. `/set-return-probe` and a border control switch it.
 
 ### Toggle controls in the pane border
 
-- **Clickable icons on the story pane's own frame**, each showing what state it
-  is in. A control sits where the thing it governs is: the command band opens
-  below the pane, so its toggle rides the bottom border; the map lives to the
-  right, so its toggle takes that border's right-hand end; the Guiding Light
-  joins the band; and the two v6 switches — render mode and pixel lock — govern
-  how the pane itself is drawn, so they keep its top border, and appear only on
-  a graphical v6 story.
-
-  ```text
-  ┌─ ZORK I ──────────────────────┤ ◧ □ ├─┐
-  │                                       │
-  └──────────────┤ ▲ ○ ├─────────┤ ◀ ├────┘
-  ```
-
-- **The state is carried twice — by the glyph and by the colour.** The panel
-  toggles are arrows pointing the way the panel would move (`▶` = click and the
-  map leaves that way); the Guiding Light is filled when lit and hollow when
-  out; the render mode draws one glyph per mode and the lock one per state. On
-  top of that every control that is on is lit yellow, so a player who cannot
-  tell the two colours apart still has the shape. Hovering floats a hint into
-  the pane saying what a click does and which command does the same. Themeable
-  through `panel.control` (off), `panel.control:lit` (on) and
-  `panel.control:hover`.
-- **`control_icons = "nerdfont"`** gives all eleven states a named icon — a map
-  with a "you are here" dot when the map is shown, an off/on panel pair for the
-  band, a lamp for the light, a monitor per render mode, a padlock for the lock.
-  Every codepoint was read from the font's own `post` table rather than inferred
-  from a name, and each control's two states come from one icon family, so a
-  toggle changes shape without also changing stroke weight.
-- **A click is the command**, so what you switch here is remembered **for that
-  story** — in its own `config.toml` sidecar, never your global config. The
-  settings screen still sets the global default new games inherit; a command's
-  `auto` argument hands one story back to it.
-- **`/set-v6-render` and `/set-guidance` were session-only and now persist
-  per-game.** For the render mode this is a deliberate reversal rather than a
-  correction: raster began as a *fallback* — the mode you escaped to when hybrid
-  could not cope — and an escape hatch rightly did not outlive its session. It is
-  a destination now, with `extended` beside it, and a player may genuinely prefer
-  raster for one game and hybrid for another. Guidance follows by a different
-  route: wanting help is a standing preference about the story in front of you,
-  not a temporary toggle.
+- Clickable icons on the story pane's frame: command band and Guiding Light on
+  the bottom border, the map on the right, and — on a graphical v6 story —
+  render mode and pixel lock on the top. Lit controls are yellow; hovering shows
+  what a click does and the equivalent command.
+- `control_icons = "nerdfont"` swaps the plain glyphs for Nerd Font icons.
+  Themeable via `panel.control`, `panel.control:lit`, `panel.control:hover`.
+- What you switch here is remembered **for that story**; the settings screen sets
+  the default new games inherit. `/set-v6-render` and `/set-guidance` now
+  persist per game instead of lasting one session.
 
 ### The command band
 
-- **Under what is here, what the story has said.** The WHAT column now carries a
-  second block, dimmed: every word the story has printed this session that names
-  a thing. *Arthur* says of the torque that "imbedded in one of the knobs is a
-  sliver of crystal" — the crystal is a real object with a real use, and until
-  now no column had a row for it, because the object tree stops at the torque's
-  lid. Newest first, since the word you want is usually the one just printed, and
-  it accumulates: a noun named forty turns ago is still one click away. `WITH…`
-  gets the same block, being the other noun slot.
-  - **It looks like the weaker claim it is.** Dimmed through a
-    `band.item:seen` selector of your own, because the story knowing a word is
-    not a promise that the thing is within reach.
-  - **The header only says what is true of the whole column** — `WHAT — here`
-    when every row is the object tree's, `WHAT — seen` when every row is a
-    printed word, and a plain `WHAT` when it is both.
-  - **Nothing new goes into a save.** The block is read back off the transcript,
-    so restoring to before the crystal was mentioned takes `crystal` away again.
-  - The engine that knows the most used to offer the least: this block existed
-    only for Glulx and Scott Adams, which have no object tree, so *Zork I* and
-    *Arthur* got scope and nothing else.
-- **The strong language stays out of the VERB column, and the list is yours.**
-  The column is the running story's own grammar now, and Infocom's dictionaries
-  are saltier than their prose — *Zork I*'s verb table really does hold `fuck`,
-  `shit`, `rape` and `molest` — so opening the band put the lot in front of
-  whoever pressed the key. `hide_adult_words` (default on) keeps the words in
-  `adult_words` out of any panel that enumerates a story's vocabulary unprompted.
-  - **The list ships written out and uncommented in your `config.toml`**, because
-    a filter nobody can inspect is censorship and one written in your own config
-    file is a default. Shorten it, extend it, or set it to `[]`.
-  - It is the strong end only — four words out of Zork I's two hundred and
-    fifty-odd. `damn` and `barf` are Infocom being Infocom and stay; so do
-    `hell`, `crap`, `screw`, `suck` and `piss`. `rape` and `molest` are not
-    swearing at all and are on the list anyway.
-  - **Two ways off, and neither destroys anything.** `hide_adult_words = false`
-    restores the full column and keeps the words, so turning it back on needs no
-    retyping; `adult_words = []` does the same from the other end. There is a
-    settings-screen row for the switch.
-  - **Display only.** Every word taken out is still a word the story knows:
-    typing it parses exactly as it always did, and Lanthorn's Guiding Light still
-    offers it when you reach for something close to it.
+- The WHAT and WITH columns now also list, dimmed, every thing the story has
+  mentioned this session — newest first — not only what the object tree says is
+  here. Style it with `band.item:seen`.
+- Infocom's verb tables include some strong language; `hide_adult_words`
+  (default on) keeps the words in `adult_words` out of the VERB column. The list
+  is written into your `config.toml` so you can shorten, extend or empty it. The
+  words still parse when typed.
+- `up`/`down`/`in`/`out` are drawn as glyphs in a cluster beside the compass
+  rose, using the same icons as the map.
+
+### Story picker and library
+
+- A library sorted into sub-folders is browsed folder by folder: `Enter` opens,
+  `Backspace` goes up. The cover grid (`g`) shows everything below the current
+  folder. `Ctrl+F` filters the whole library by title, author, filename or folder.
+- A URL works anywhere a path does; lanthorn downloads it, runs it, and offers to
+  keep it. A downloaded zip of release disk images is unpacked into your library.
+- `lanthorn <library> --fetch missing|all` fetches IFDB metadata and cover art
+  for a whole library headlessly; `--import-metadata rows.tsv` applies your own
+  identifications and cover URLs for stories IFDB can't place.
+- GIF cover art is accepted. The download cap is 32 MiB.
 
 ### Original media
 
-- **`.g64` GCR bitstream disks.** A `.g64` holds the raw bitstream a 1541's head
-  reads rather than decoded sectors; lanthorn decodes it and plays it. Verified
-  byte-identical against an independent dump of the same release.
-- A **zip is opened like a volume**: entries are classified by content, not by
-  name, so a zip carries anything lanthorn runs — v3–v8 including graphical v6,
-  Glulx, Scott Adams, Blorb containers — and a Blorb or hints file packed beside
-  the story is found. It previously named three extensions and discarded the
-  resource handle, so the one format whose point is that it ships artwork was the
-  one a zip could not carry.
-- A `.d64` and a `.g64` now report the same type in the story list. They are one
-  floppy dumped two ways, and showing them as two kinds of thing was a
-  distinction a player could not act on.
+- `.g64` disk images play. A zip is opened like a volume and can carry any
+  format lanthorn runs, including a Blorb beside the story.
 
-### Library
+### Docker image
 
-- **A URL works wherever a path does.** lanthorn fetches it and hands the file to
-  the ordinary loader, so every format works without a second code path, then
-  offers to keep it in your library.
-- **A downloaded zip of release disk images** is recognised and offered: keep it
-  and the whole release is unpacked into your library and launched; decline and
-  it says why rather than failing obscurely. Only disk images are extracted —
-  never a readme, cover or anything else in the archive.
-- The download cap is 32 MiB, not 16. Modern Glulx games carry their artwork and
-  sound inside the blorb and run well past the "few MiB" a story file used to be;
-  the old ceiling refused real games silently.
+- The browser mode shows cover art and v6 graphics as pictures (sixel) and plays
+  the game's sound. Publish port 7682 alongside 7681; `LANTHORN_WEB_IMAGES=halfblocks`
+  and `LANTHORN_WEB_AUDIO=off` turn each off.
 
 ### Configuration
 
-- **Your `config.toml` gains the settings that arrived after it did.** The file
-  documents itself, but it was only ever *written* once — so a config seeded a
-  release ago never learned about anything invented since, and a setting you
-  cannot see in your own file is a setting you cannot discover. Lanthorn now
-  appends what is missing, commented, at the end of the section it belongs to.
-  - **Nothing you wrote is touched.** Your values, your comments and your spacing
-    come through byte for byte, sections are not reordered, and a key the file
-    already mentions — commented or not — is never offered twice. A commented
-    line changes nothing until you edit it, and a second launch adds nothing.
-  - **`adult_words` arrives uncommented**, like the fresh seed writes it. That
-    list is a default rather than a filter nobody can inspect only because it is
-    written out where you can read and edit it, and that was true of new installs
-    only.
-  - **Three files are left exactly as they are**: one you emptied on purpose
-    (an empty config is a valid one, and there is nothing there to complete), one
-    that does not parse (lanthorn already says so at startup and refuses to write
-    over it), and one carrying a line that reads `# lanthorn: no-top-up`.
+- An existing `config.toml` gains the settings added since it was written,
+  appended commented in the section they belong to. Nothing you wrote is touched.
+  `# lanthorn: no-top-up` in the file opts out.
+- `history_turns` (default 500) bounds the opt-in turn history.
+- `v6_arrow_keys` now defaults to false: arrows scroll and pan the map in a v6
+  game as everywhere else; the game's own arrow bindings are opt-in.
 
 ### Version 6 rendering
 
-- **A third v6 render mode, `extended`.** `raster` draws the whole pane as one
-  pixel image and spends every spare pixel on magnification, which on a tall
-  terminal means a fractional scale and a thick letterbox. `extended` draws the
-  same picture but pins the magnification to a whole number and grows the frame
-  DOWNWARD instead: the game's own screen keeps its layout at the top, the side
-  border tiles on down out of its own artwork, and the height that opens up
-  carries more of the story — in the release's own bitmap typeface, at 1:1 or 2x
-  where it is sharpest. Zork Zero shows 50 rows of prose where `raster` showed
-  19 at the same 100x50 terminal, and pages at `[MORE]` correspondingly less
-  often. `v6_render = "extended"`, `--v6-render extended`, or
-  `/set-v6-render extended` (bare `/set-v6-render` now cycles all three). The
-  game is never told a taller screen, so no title lays itself out differently;
-  one whose own chrome sits below its story window — Journey's command menu —
-  keeps today's letterbox.
-- A **modal over a v6 game centres in the pane**. Dropping to text-only for a
-  dialog is what frees the space, but the dialog was still being centred in the
-  rect the pixel frame had left — so it landed low and right, and at some sizes
-  its buttons ran off the pane entirely.
-- **A fractionally-scaled raster frame is no longer resampled by the terminal.**
-  The composite is padded to the whole cells it is placed over, so it blits 1:1
-  instead of being stretched into a box up to a cell taller than itself.
-
-### Fixed
-
-- Arthur's CGA flank no longer reprints a fragment of the top banner's ornament
-  partway down the side rule when the pane is taller than the artwork.
-- A menu a game prints *below* its own split — Anchorhead's help, LostPig's —
-  stays on screen. It was being retired as though it were an Inform quote box,
-  losing the bottom entries and the `BACKSPACE to return` line on every keypress.
-- `v6_arrow_keys` defaults to **false**: arrows keep driving lanthorn's
-  scrollback and map panning in a v6 game, as they do everywhere else. A game's
-  own arrow bindings are now opt-in. v6 menus and "press any key" screens are
-  unaffected either way.
-- The banner and opening room description no longer vanish one command into
-  play. A game that clears the screen during its own startup — the v5 Solid Gold
-  re-releases with built-in hints do, *Zork I* r52 and *The Hitchhiker's Guide*
-  r31 among them — had that clear held over and applied at the end of the
-  player's FIRST turn, wiping everything they had read so far. The boot now
-  drains the clear it issued, and ignores it as `zvm-cli` always has: the screen
-  the game erased is the one before its own banner, and nothing had been drawn
-  on it yet.
-
-## v0.3.0 — 2026-08-26
+- `extended` render mode: `v6_render = "extended"`, `--v6-render extended`, or
+  `/set-v6-render extended` (bare `/set-v6-render` cycles all three). Zork Zero
+  shows 50 rows of prose on a 100x50 terminal where `raster` showed 19.
+- Dialogs over a v6 game centre in the pane.
+- A fractionally scaled raster frame is no longer stretched by the terminal.
 
 ### Performance
 
-- Kitty uploads keep one image id across redraws, so a changed picture costs the
-  picture and not the whole frame — up to two orders of magnitude fewer bytes.
-- Uploads go out deflated where the terminal has said it can inflate them.
-- The transcript wrap is incremental instead of rebuilt every frame: a
-  twenty-thousand-turn session draws, and answers a keystroke, at the cost of its
-  first (a keystroke was 25 ms).
-- A live font-size change re-measures the cell in place; no restart.
+Everything that runs per turn and per frame got cheaper: guidance and the return
+probe share one snapshot per turn, the word reveal and command band no longer
+re-scan the story every frame, hybrid v6 frames are cached between changes and
+encoded off the main thread, auto-save writes in the background, and evicted
+kitty images are deleted from the terminal instead of leaking.
+
+### Fixed
+
+- The banner and opening room description no longer vanish after the first
+  command in games that clear the screen during startup (the Solid Gold
+  re-releases, *Zork I* r52, *Hitchhiker's* r31).
+- A menu printed below a game's own split — Anchorhead's help, LostPig's — stays
+  on screen.
+- A Glk text-grid window with no border now has a visible ground (City of
+  Secrets' `help` menu); themeable via `glk.grid.background`.
+- Arthur's CGA side rule no longer repeats a fragment of the top banner.
+- `--help` wraps at 80 columns in every front-end.
+
+### Documentation
+
+`docs/` now has three tiers: a player
+[**guide**](https://github.com/sharkusk/lanthorn/blob/main/docs/guide/), the
+[**internals**](https://github.com/sharkusk/lanthorn/blob/main/docs/internals/),
+and a generated
+[**reference**](https://github.com/sharkusk/lanthorn/blob/main/docs/reference/)
+of every command, key, setting and style selector.
+[`docs/README.md`](https://github.com/sharkusk/lanthorn/blob/main/docs/README.md)
+maps all three.
+
+
+## v0.3.0 — 2026-08-26
 
 ### Version 6 typefaces
 
@@ -1653,7 +2846,7 @@ it; the sections above are the summary.
   previously ignored them — a mistyped `--no-statu` did nothing and exited 0 —
   and `zvm-cli` took an unknown single-dash argument such as `-x` for the story
   path. A missing option value and a second positional argument are errors too.
-- **A full-workspace code review closed forty-odd defects** (SQ-0619–SQ-0661), the
+- **A full-workspace code review closed forty-odd defects**, the
   themes being:
   - *Hostile files can no longer crash or hang the host.* Illegal Z-machine
     instructions latch a fault instead of panicking; crafted stories, saves,
@@ -1887,7 +3080,7 @@ the game itself does, and `config.toml` learned to explain itself.
 - **Glulx rooms are identified the way the game identifies them** — by its own location
   global rather than by the room's printed name, so two rooms sharing a name stay
   distinct and a renamed room stays itself.
-- **One save format, whoever asked for it (SQ-0531).** A story's own `SAVE` now
+- **One save format, whoever asked for it.** A story's own `SAVE` now
   writes the same self-contained `.lanthorn` archive Ctrl+S writes — map, screen,
   transcript and inline art included — instead of a bare VM-state-only file. So an
   in-game `restore` finally brings your scrollback back with it, even into a
@@ -1903,7 +3096,7 @@ the game itself does, and `config.toml` learned to explain itself.
 
 ### Fixed
 
-- **A Glulx game's own `SAVE` now loads from the saves manager (SQ-0556).**
+- **A Glulx game's own `SAVE` now loads from the saves manager.**
   `SAVE` behaves the same on every engine again: on Z-machine, Glulx and Scott
   Adams alike it writes a `.lanthorn`, the archive appears in the manager, and it
   restores through both the game's own `RESTORE` and the host's. Picking a Glulx
@@ -2144,6 +3337,6 @@ exists.
 - **Glulx cross-interpreter save interop isn't golden-tested.** The Glulx in-game
   save round-trips internally and follows the Glulx-Quetzal spec, but reading our
   Glulx saves in another interpreter (and vice versa) isn't yet pinned by a
-  golden test the way the Z-machine `.qzl` interop is (tracked in SQ-0229).
+  golden test the way the Z-machine `.qzl` interop is.
 - **v6 menu opcodes are stubs** — `print_form` / `make_menu` are recognized but
-  not implemented (tracked in SQ-0457).
+  not implemented.

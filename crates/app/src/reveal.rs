@@ -1,5 +1,5 @@
-//! The momentary reveal: light the words on screen the parser really knows
-//! (SQ-1107).
+//! The momentary reveal: light the nouns and named things on screen the story
+//! really knows (SQ-1107, SQ-1207).
 //!
 //! ```text
 //! You are in a dimly lit room. Cobwebs hang from the beams, and a
@@ -23,25 +23,69 @@
 //! truncation all apply exactly as the game applies them. There is no word
 //! splitter in this file, and the last one in the codebase was deleted for cause.
 //!
-//! **Which words light is the story's answer too**, and the question put to it
-//! is *"do you know this word?"* — the DICTIONARY's answer, with no scope walk
-//! anywhere in it (SQ-1135). It used to ask the object tree what was actually
-//! here wherever an engine had one, and fall back to the dictionary where it did
-//! not. That inverted the point: the engine that could say the most lit the
-//! least, and a description naming a sword in the next room lit nothing at all.
-//! Every word here is a word the story has ALREADY PRINTED on the player's own
-//! screen, so lighting it reveals nothing that has not been told, and there is
-//! no spoiler for a narrower test to defend against. [`CAVEAT`] states the claim
-//! rather than leaving the player to infer a stronger one.
+//! **Which words light is the story's OBJECTS' answer**, and the question put
+//! to them is *"is this one of your parse names?"* — nouns and adjectives, with
+//! no scope walk anywhere in it (SQ-1135) and no verb, article or preposition
+//! anywhere in the answer (SQ-1207). It used to ask the object tree what was
+//! actually HERE wherever an engine had one, and fall back to the dictionary
+//! where it did not — that inverted the point, because the engine that could say
+//! the most lit the least, and a description naming a sword in the next room lit
+//! nothing at all (SQ-1135). It then asked every object GLOBALLY (no scope walk,
+//! same as today) but still measured "do you know this word?" by the
+//! dictionary's own flag byte, and that is not the same question: on an
+//! Inform-family story the "noun" bit means "usable in noun position", not
+//! "names a thing", so it lit `a`, `an` and `the` right alongside a real noun
+//! (SQ-1207). `ObjectWords::refers_to` / `grammar_model::ObjectWordSet` is the
+//! fix — built from every object's own parse names, nouns and adjectives folded
+//! together because the parser does not distinguish them either — and it is what
+//! every engine with a readable object table answers with today: every retail
+//! Z-machine title measured so far, Infocom and Inform-on-Z-code alike (see
+//! `zvm::objects::ParseNames::detect`), `word_reveal.rs`'s Zork I specimen
+//! among them — and, since SQ-1210, every Inform-compiled Glulx image too
+//! (`gvm::objects::ParseNames`, reached through [`Engine::object_word_set`]),
+//! which is what put out the `the`/`an` lights this module's fallback lit on
+//! `Dr Ludwig and the Devil`. SQ-1216 found `ObjectWordSet` itself still lit
+//! `of`/`on`/`in` there — Inform 7 compiles a multi-word name word by word
+//! ("back of the tavern" → `back`, `of`, `the`, `tavern`), and unlike an
+//! article a lone `of` genuinely reaches a `name` array, so the SQ-1210 fix
+//! did not catch it. Glulx's own dictionary flag cannot: `PREP_DFLAG` marks
+//! every literal word in every grammar line, ordinary nouns (`top`, `bed`,
+//! `guard`) included, not prepositions specifically — measured directly in
+//! `Inform6/src/verbs.c`. `grammar_model::GLUE` is a short, curated, English
+//! word list instead — see its doc for the evidence and the trade.
 //!
-//! # Nouns, not verbs
+//! **The dictionary is still asked, but only where the objects cannot be** —
+//! Scott today, which has no object table at all, and any Glulx image whose
+//! object list fails `gvm`'s validation and honestly answers `None`. Falling
+//! back to the dictionary's flag byte there is a decision and not an
+//! oversight: an imperfect reveal beats a dark one, and [`arm`]'s `None` arm
+//! says why in code. Every word here, either tier, is a word the story has
+//! ALREADY PRINTED on the player's own screen, so lighting it reveals nothing
+//! that has not been told, and there is no spoiler for a narrower test to
+//! defend against. [`CAVEAT`] states the claim rather than leaving the player to
+//! infer a stronger one.
 //!
-//! A verb never lights. The verb panel already answers "what can I do"; this
-//! answers "what does this game know about", and they are different questions
-//! that would blur into a ransom note if merged — "You are in an open field west
-//! of a white house" lights `open` and `west` on an unfiltered dictionary test,
-//! and the prose then says nothing at all. Widening this to verbs is a decision,
-//! not a tidy-up.
+//! # Nouns, not verbs — and not articles either
+//!
+//! A verb never lights, on any engine: the command band already answers "what can
+//! I do"; this answers "what does this game know about", and they are different
+//! questions that would blur into a ransom note if merged. Where the objects can
+//! answer, an article or preposition never lights either, because it is never
+//! one of their parse names — "You are in an open field west of a white house"
+//! lights `white` (an adjective of Zork I's house) and never `open` or `west`.
+//! That guarantee only weakens on the dictionary fallback below, and only on an
+//! Inform-family title: its dictionary marks a word "usable in noun position",
+//! not "is a noun", so `a`, `an` and `the` can still slip through there.
+//!
+//! The preposition half of that guarantee is curated English
+//! (`grammar_model::GLUE`, SQ-1216), not read from the story the way the
+//! article half is: no Inform dictionary bit separates a preposition from an
+//! ordinary noun that happens to appear literally in some grammar line
+//! elsewhere in the game. On a non-English story `GLUE`'s words are just
+//! English spellings with nothing to match, so this guarantee narrows to
+//! "never an article" there — and, in the other direction, a story with an
+//! object genuinely and *only* named one of `GLUE`'s eleven words (English's
+//! own "inn") loses that one light rather than gaining eleven wrong ones.
 //!
 //! # The viewport
 //!
@@ -130,6 +174,9 @@ pub const REVEAL_HOLD: Duration = Duration::from_millis(4_000);
 /// description naming a sword in the next room lit nothing at all. Lighting a
 /// word the story has ALREADY PRINTED reveals nothing that has not been told, so
 /// there was never a spoiler for the stronger test to defend against.
+/// Stated in the control's description rather than on every press since
+/// SQ-1214 — a lit reveal itself says nothing, so this is the one wording of
+/// the claim, kept here so the description and the docs cannot drift apart.
 pub const CAVEAT: &str = "words this story knows — not necessarily things that are here";
 
 /// A reveal that is currently lit.
@@ -240,28 +287,60 @@ pub fn arm(state: &mut AppState, engine: &dyn Engine) -> Armed {
     // (SQ-1150): it is the second tier's input, so a story whose objects answer
     // must not be turned away for want of one, and the `NoVocabulary` below then
     // means exactly what it says — neither tier could be asked.
-    let words = match engine.introspect().and_then(|i| i.all_object_words()) {
-        Some(objs) => tokens
+    // `object_word_set`, not `all_object_words` + a `refers_to` walk: this asks
+    // only "does ANY object answer", for every token on screen, and the walk
+    // re-truncated the story's whole vocabulary per token (SQ-1176). Same
+    // answers — the set is `any(refers_to)` by construction, minus the articles
+    // Inform 7 folds into multi-word names, which the story's own parser never
+    // lets stand as a typed word (`grammar_model::ARTICLES`, SQ-1210), and minus
+    // the curated glue words (`grammar_model::GLUE`, SQ-1216) — `of`, `in`,
+    // `on` and their kin, which the parser DOES accept alone but which are not
+    // nouns, and which Inform's own dictionary flag byte cannot tell apart from
+    // an ordinary noun used as a fixed grammar-line disambiguator (see `GLUE`'s
+    // doc for the measurement that ruled the flag out) — and `None` still means
+    // the question could not be asked, never a story with no names.
+    let words = match engine.object_word_set() {
+        Some(set) => tokens
             .iter()
-            .filter(|t| objs.iter().any(|o| o.refers_to(t)))
+            .filter(|t| set.contains(t))
             .cloned()
             .collect::<BTreeSet<String>>(),
         None => {
+            // Reached only by an engine this crate cannot ask about its own
+            // objects at all — Scott today, plus any Glulx image whose object
+            // list fails `gvm::objects::ParseNames`' validation (`GameSession`
+            // answers `Some` for every Z-machine title with a readable object
+            // table, and the Glulx adapter for every Inform-compiled image,
+            // which between them is essentially the whole corpus — SQ-1210).
+            // Going dark here — lighting nothing, ever, on the remainder — was
+            // the other option, and was rejected: an imperfect reveal a Scott
+            // player can still lean on beats a silently absent one (SQ-1207
+            // decision, stated here since there is nowhere else for a reader of
+            // THIS branch to find it).
+            //
             // The dictionary, filtered to the words that NAME things — nouns and
             // adjectives, minus the buzzword bit ($04), which is `the`, `a`,
-            // `please` and their kin.
+            // `please` and their kin ON AN INFOCOM TITLE.
             //
             // A word carrying both the noun and the VERB bit — `light` in most of
             // Infocom's catalogue — does light, because the claim being made
             // about it here is the noun one.
             //
-            // **And it inherits whatever the dictionary thinks a word is.**
-            // Mini-Zork files `west` with the DESC bit, exactly as it files
-            // `white` and `boarded`, so no part-of-speech filter can tell the
-            // compass from a colour; `north` and `south` carry neither bit and do
-            // not light at all. There is no rescuing that from here — the flags
-            // are the story's answer — so [`CAVEAT`] says what the reveal is
-            // rather than pretending otherwise.
+            // **And it inherits whatever the dictionary thinks a word is, which
+            // is a WEAKER claim on an Inform title than an Infocom one.** Neither
+            // Inform back-end has a buzzword bit or a distinct adjective bit at
+            // all (see `WordRoles`), and Inform's "noun" bit really means "usable
+            // in noun position" rather than "names a thing" — measured on a real
+            // Glulx game (`Dr Ludwig and the Devil.gblorb`) back when this arm
+            // was Glulx's only tier, `a`, `an` and `the` all decoded with the
+            // noun bit set and lit right alongside a real noun. That was the
+            // whole of SQ-1210, and the fix was the one this comment used to
+            // call for: `Engine::object_word_set` now answers on Glulx from the
+            // story's own objects, so an Inform-family image lands here only
+            // when its object list fails validation. There is still no rescuing
+            // the flag bits from inside this arm without consulting English,
+            // which this file does not do (see the module doc) — so [`CAVEAT`]
+            // says what the reveal is rather than pretending otherwise.
             let Some(v) = state.vocab.get(engine) else {
                 state.reveal = None;
                 return Armed::NoVocabulary;
@@ -506,7 +585,7 @@ pub fn raster_reveal(state: &AppState, fallback: image::Rgba<u8>) -> Option<Rast
     Some(RasterReveal { words: &reveal.words, ink, rule })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-guidance"))]
 mod tests {
     use super::*;
 

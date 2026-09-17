@@ -11,10 +11,12 @@
 //! assumed reciprocal: `A -> B [label="N"]` and `B -> A [label="W"]` are two
 //! independent edges, exactly as observed.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use mapper::direction::Direction;
 use mapper::graph::MapGraph;
+use mapper::layer::LayerId;
 
 /// Short label string for a connection direction, matching the TUI conventions.
 fn dir_label(d: Direction) -> &'static str {
@@ -52,9 +54,26 @@ fn dot_escape(s: &str) -> String {
 
 /// Render a `MapGraph` to a Graphviz DOT document string.
 ///
-/// The node id is `r<object-number>`, so same-named rooms stay distinct. The
-/// current room is filled gold; rooms with notes carry their notes as a tooltip
-/// and a `●` marker in the label.
+/// A room's DOT node identifier: `r` plus [`crate::roomid::display_room_id`]'s
+/// digits, minus the `#` — a bare DOT identifier cannot contain one — so a real
+/// object number reads as `r57` and a synthetic id as `r8000ABCD` rather than a
+/// 10-digit decimal, the same real/synthetic distinction every other room-id
+/// display uses (SQ-1297).
+///
+/// Deliberately NOT [`crate::roomid::room_label_no`]'s per-map ordinal (SQ-1300): the ordinal is
+/// discovery order for THIS playthrough, so two exports of the same story explored in a different
+/// order would number the same physical room differently, where a DOT file's whole point is to be
+/// compared — against another export, against notes, against a previous run. The raw id (a real
+/// object number, or a hash of the room's name/Glulx address) has no such dependency on how the
+/// player got there. The exported graph's node LABELS still show the room's name either way.
+fn node_id(id: mapper::graph::RoomId) -> String {
+    format!("r{}", crate::roomid::display_room_id(id).trim_start_matches('#'))
+}
+
+/// The node id is `r<object-number>` (or `r<hex>` for a synthetic id — see
+/// [`node_id`]), so same-named rooms stay distinct. The current room is filled
+/// gold; rooms with notes carry their notes as a tooltip and a `●` marker in
+/// the label.
 pub fn render_dot(graph: &MapGraph) -> String {
     let mut out = String::new();
 
@@ -68,35 +87,53 @@ pub fn render_dot(graph: &MapGraph) -> String {
     out.push_str("  node [shape=box, style=\"rounded\", fontname=\"monospace\"];\n");
     out.push_str("  edge [fontname=\"monospace\", fontsize=10];\n");
 
-    // Nodes, in ascending id order for deterministic output.
+    // Nodes, in ascending id order for deterministic output, grouped into one
+    // Graphviz cluster per map layer (SQ-1308) — a single-layer graph groups
+    // everything under one (unlabelled, undrawn) cluster, so this reproduces
+    // the un-clustered output byte for byte until a second layer exists.
     let mut rooms: Vec<&mapper::graph::Room> = graph.rooms().collect();
     rooms.sort_by_key(|r| r.id);
+    let mut by_layer: BTreeMap<LayerId, Vec<&mapper::graph::Room>> = BTreeMap::new();
+    for room in &rooms {
+        by_layer.entry(room.layer).or_default().push(room);
+    }
+    let multi_layer = by_layer.len() > 1;
 
     let current = graph.current();
 
-    for room in &rooms {
-        let has_notes = !room.notes.is_empty();
-        let mut label = dot_escape(room.label());
-        if has_notes {
-            label.push_str(" ●");
+    for (layer, layer_rooms) in &by_layer {
+        if multi_layer {
+            out.push_str(&format!("  subgraph cluster_{layer} {{\n"));
+            out.push_str(&format!("    label=\"{}\";\n", dot_escape(graph.layer_name(*layer))));
         }
+        let indent = if multi_layer { "    " } else { "  " };
+        for room in layer_rooms {
+            let has_notes = !room.notes.is_empty();
+            let mut label = dot_escape(room.label());
+            if has_notes {
+                label.push_str(" ●");
+            }
 
-        let mut attrs = format!("label=\"{}\"", label);
-        if Some(room.id) == current {
-            attrs.push_str(", style=\"rounded,filled\", fillcolor=\"gold\"");
+            let mut attrs = format!("label=\"{}\"", label);
+            if Some(room.id) == current {
+                attrs.push_str(", style=\"rounded,filled\", fillcolor=\"gold\"");
+            }
+            if has_notes {
+                attrs.push_str(&format!(", tooltip=\"{}\"", dot_escape(&room.notes)));
+            }
+            out.push_str(&format!("{indent}{} [{}];\n", node_id(room.id), attrs));
         }
-        if has_notes {
-            attrs.push_str(&format!(", tooltip=\"{}\"", dot_escape(&room.notes)));
+        if multi_layer {
+            out.push_str("  }\n");
         }
-        out.push_str(&format!("  r{} [{}];\n", room.id, attrs));
     }
 
     // Edges, in connection order.
     for conn in graph.connections() {
         out.push_str(&format!(
-            "  r{} -> r{} [label=\"{}\"];\n",
-            conn.origin,
-            conn.dest,
+            "  {} -> {} [label=\"{}\"];\n",
+            node_id(conn.origin),
+            node_id(conn.dest),
             dir_label(conn.dir)
         ));
     }
@@ -112,7 +149,7 @@ pub fn export_dot(path: &Path, graph: &MapGraph) -> std::io::Result<()> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-state"))]
 mod tests {
     use super::*;
     use mapper::direction::Direction;

@@ -21,6 +21,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# `.cargo/config.toml` builds into `target.noindex` (a Spotlight exclusion that
+# only matters on a developer's Mac); the environment variable wins over it, so
+# every `target/...` path below keeps working.
+env:
+  CARGO_TARGET_DIR: target
+
 jobs:
   build:
     name: build (${{ matrix.name }})
@@ -43,6 +49,17 @@ jobs:
             archive: zip
     steps:
       - uses: actions/checkout@v4
+
+      # Only on a real tag push: between releases README.md carries these tags by
+      # design, and a workflow_dispatch dry run exists to exercise the BUILDS.
+      - name: No unreleased-feature tags may ship in a release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          if grep -n -i 'next release' README.md; then
+            echo '::error::README.md still carries "Next release" tags; drain them before tagging'; exit 1; fi
+          if grep -n '^## Unreleased' CHANGELOG.md; then
+            echo '::error::CHANGELOG.md still has an Unreleased section; name the version before tagging'; exit 1; fi
 
       # Linux audio (ALSA) is a build- and run-time dependency of the default
       # feature set. Release binaries link libasound and require libasound2 at
@@ -73,11 +90,71 @@ jobs:
         with:
           key: ${{ matrix.name }}
 
+      # SQ-1501: lanthorn-zvm, lanthorn-gvm and lanthorn-scott are meant to be
+      # embeddable by other Rust projects, not just buildable inside this
+      # workspace. `cargo package -p <crate>` (verification on, the default)
+      # builds each crate's packaged tarball in complete isolation — no
+      # workspace, no path-dependency resolution — the way an actual
+      # downstream `cargo add` would see it, so a crate whose `include` list
+      # is missing a file, or that leans on a path only valid inside this
+      # workspace, fails HERE instead of at someone else's `cargo build`.
+      # Packaging is target-independent, so this runs once rather than once
+      # per matrix leg.
+      #
+      # Known gap, not something this check can fix: all three depend on this
+      # workspace's own `lanthorn-grammar-model` (a path+version dependency,
+      # SQ-1103/SQ-1118) and gvm's example additionally on `lanthorn-blorb`
+      # (dev-dependency) — neither has ever been published to crates.io
+      # (publishing is deliberately deferred, SQ-1250). `cargo package` must
+      # resolve every dependency's version requirement against the registry
+      # to build the tarball's own Cargo.lock, regardless of --no-verify, so
+      # today every one of the three fails identically with "no matching
+      # package named `lanthorn-grammar-model` found" — a statement about
+      # workspace publish order, not about these crates' own `include` lists
+      # or standalone buildability. Treat exactly that failure as a warning
+      # and move on; treat anything else (a missing file, a workspace-only
+      # path, a real compile error) as fatal. The moment lanthorn-grammar-model
+      # (and, for gvm's example, lanthorn-blorb) are published this starts
+      # verifying for real with no further change needed here.
+      - name: Standalone package check (engine crates)
+        if: matrix.name == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -uo pipefail
+          fail=0
+          for crate in lanthorn-zvm lanthorn-gvm lanthorn-scott; do
+            echo "::group::cargo package -p $crate"
+            # `shell: bash` runs with -e implied, so a failing capture must
+            # not abort the script before the warn-or-fail logic below runs.
+            status=0
+            out=$(cargo package -p "$crate" 2>&1) || status=$?
+            echo "$out"
+            echo "::endgroup::"
+            if [ "$status" -ne 0 ]; then
+              if echo "$out" | grep -qF 'no matching package named' \
+                 && echo "$out" | grep -qF 'lanthorn-grammar-model'; then
+                echo "::warning::cargo package -p $crate failed only because lanthorn-grammar-model is not yet on crates.io (publishing is deliberately deferred, SQ-1250) — not a defect in $crate itself. Revisit once it is published."
+              else
+                echo "::error::cargo package -p $crate failed for a reason other than the known unpublished lanthorn-grammar-model dependency"
+                fail=1
+              fi
+            fi
+          done
+          exit "$fail"
+
       - name: Build binaries
         shell: bash
         env:
-          # The four shipped binaries: the mapping TUI + the three no-map CLIs.
-          BINS: "-p app -p zvm-cli -p gvm-cli -p scott-cli"
+          # The five shipped binaries: the mapping TUI, the three no-map CLIs,
+          # and the static map generator (SQ-1306).
+          # Package names (SQ-1250): "app" -> "lanthorn" and every CLI ->
+          # "lanthorn-<name>-cli" (the binaries keep their bare names, see below).
+          #
+          # `lanthorn-mapgen` needs no entry here: it is a second `[[bin]]` of
+          # the `lanthorn` PACKAGE, and `-p` selects a package with all of its
+          # binary targets. It does need naming in both loops below, which copy
+          # binaries one at a time by name.
+          BINS: "-p lanthorn -p lanthorn-zvm-cli -p lanthorn-gvm-cli -p lanthorn-scott-cli"
         run: |
           set -euo pipefail
           if [ "${{ matrix.name }}" = "macos-universal2" ]; then
@@ -85,7 +162,7 @@ jobs:
             cargo build --release --locked $BINS --target aarch64-apple-darwin
             cargo build --release --locked $BINS --target x86_64-apple-darwin
             mkdir -p target/universal/release
-            for bin in lanthorn zvm-cli gvm-cli scott-cli; do
+            for bin in lanthorn lanthorn-mapgen zvm-cli gvm-cli scott-cli; do
               lipo -create -output "target/universal/release/$bin" \
                 "target/aarch64-apple-darwin/release/$bin" \
                 "target/x86_64-apple-darwin/release/$bin"
@@ -119,7 +196,7 @@ jobs:
             *)                RELDIR="target/${{ matrix.target }}/release"; EXT="" ;;
           esac
 
-          for bin in lanthorn zvm-cli gvm-cli scott-cli; do
+          for bin in lanthorn lanthorn-mapgen zvm-cli gvm-cli scott-cli; do
             cp "${RELDIR}/${bin}${EXT}" "dist/${NAME}/"
           done
           cp README.md LICENSE "dist/${NAME}/"
@@ -198,21 +275,14 @@ jobs:
             printf '(or one of the no-map CLI players `zvm-cli` / `gvm-cli` / `scott-cli`).\n\n'
             # The pre-release caveat belongs only on a pre-release. The tag decides
             # it here exactly as it decides the `prerelease:` flag below — a name
-            # with a hyphen (v0.2.0-rc.1) is a pre-release, a bare vX.Y.Z is not.
-            # A full release had been announcing itself as a beta in its own body.
+            # with a hyphen (v0.2.0-rc.1) is a pre-release, a bare vX.Y.Z is not
+            # and carries no format note at all: the save-format policy is a
+            # developer document, not release-body content.
             case "$GITHUB_REF_NAME" in
               *-*)
-                printf '> **Pre-release** — on-disk save formats are version-pinned and any\n'
-                printf '> change is a deliberate, release-noted bump (see\n'
-                printf '> `docs/release/save-format-policy.md`); across 0.x versions the\n'
-                printf '> frozen-tier formats may still break, never silently. The\n'
-                printf '> `config.toml` / `style.toml` schemas remain tolerant.\n\n'
-                ;;
-              *)
-                printf '> On-disk save formats are version-pinned and any change is a\n'
-                printf '> deliberate, release-noted bump (see\n'
-                printf '> `docs/release/save-format-policy.md`). The `config.toml` /\n'
-                printf '> `style.toml` schemas remain tolerant and may gain fields.\n\n'
+                printf '> **Pre-release** — across 0.x versions the on-disk save formats\n'
+                printf '> may still break, never silently (see\n'
+                printf '> `docs/release/save-format-policy.md`).\n\n'
                 ;;
             esac
             if [ -s changelog-section.md ]; then
@@ -254,3 +324,66 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body_path: release-notes.md
+
+  publish:
+    name: Publish to crates.io
+    needs: build
+    # Full releases only — a hyphenated tag (v0.2.0-rc.1) is a pre-release and
+    # crates.io has no such concept; publishing a pre-release version there
+    # would need bumping Cargo.toml to a real pre-release identifier, which
+    # this workflow does not do.
+    #
+    # Publishing to crates.io is opt-in and currently OFF by decision
+    # (2026-09-10): the repository variable `PUBLISH_TO_CRATES_IO` must be set
+    # to the literal string "true" before this job runs at all — today it
+    # isn't, so the tag conditions above are not the only thing standing
+    # between a release tag and a publish. The CARGO_REGISTRY_TOKEN check
+    # inside the job (see "cargo publish --workspace" below) is a second,
+    # independent guard: even with the variable flipped on, a missing token
+    # still skips rather than fails.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && vars.PUBLISH_TO_CRATES_IO == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Same as the build job: give the runner its own core count rather than
+      # the developer-Mac-sized cap in .cargo/config.toml.
+      - name: Un-cap build jobs for the runner
+        run: |
+          n=$(nproc 2>/dev/null || true)
+          case "$n" in ''|*[!0-9]*) : ;; *) echo "CARGO_BUILD_JOBS=$n" >> "$GITHUB_ENV" ;; esac
+
+      # SQ-1250: cargo's own dependency-order publish (stable since well
+      # before the 1.98 this repo pins). A missing token SKIPS rather than
+      # fails — the very first publish is done by hand (see
+      # docs/internals/releasing.md §6) because crates.io has no token to put
+      # in this secret until an owner creates one, and every release before
+      # that point should still succeed at building and shipping binaries.
+      #
+      # --no-verify, not a verify build: `lanthorn` (the app crate) currently
+      # depends on this workspace's own [patch.crates-io] fork of
+      # ratatui-image (see the root Cargo.toml's SQ-0972 comment) for
+      # `Capability::KittyCompression` and `Picker::new_protocol_with_id`,
+      # neither of which exists in the vanilla 11.0.6 on crates.io — a patch
+      # is workspace-local and never travels with a published crate, so an
+      # isolated verify build of `lanthorn` fails even though the workspace
+      # itself builds cleanly. **`lanthorn` will publish a crate that fails
+      # to build for every consumer until that patch is upstreamed and
+      # removed** (the Cargo.toml comment already says "remove this once a
+      # release carrying all of them exists") — do not tag a real release
+      # while it is still in place without accepting that. Every other
+      # workspace crate (the engines, buildinfo, cli-host, the three CLIs)
+      # has no such blocker and verifies cleanly on its own.
+      - name: cargo publish --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN is not set; skipping the crates.io publish for ${GITHUB_REF_NAME}. See docs/internals/releasing.md for the first, by-hand publish."
+            exit 0
+          fi
+          cargo publish --workspace --no-verify

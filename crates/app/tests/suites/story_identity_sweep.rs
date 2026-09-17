@@ -46,14 +46,28 @@ fn corpus_dirs() -> Vec<PathBuf> {
     ["stories", "masterpieces", "treasures"].iter().map(|d| root.join(d)).collect()
 }
 
+/// Every regular file under `dir`, recursing into subdirectories — `treasures/`
+/// now nests its discs one level down (`Amiga/`, `Mac/`, `ISOs/`), and a future
+/// reorg might nest further still.
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+}
+
 /// Every regular file in the three corpora, sorted, with the huge disc images
 /// included — a 650 MB `.bin` is exactly the sort of container that used to
 /// reach the Z-machine.
 fn corpus_files() -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in corpus_dirs() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        out.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_file()));
+        files_under(&dir, &mut out);
     }
     out.sort();
     out
@@ -184,6 +198,7 @@ fn every_container_the_gate_turned_away_was_already_unrunnable() {
             || blorb::Blorb::is_blorb(&raw)
             || raw.starts_with(b"Glul")
             || std::str::from_utf8(&raw).is_ok_and(scott::looks_like_scott)
+            || scott::looks_like_scott_bytes(&raw)
             || blorb::adf::looks_like_zcode(&raw)
         {
             continue;

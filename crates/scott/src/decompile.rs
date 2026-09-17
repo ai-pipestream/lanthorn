@@ -1,10 +1,11 @@
 //! Static decompiler for the Scott Adams action table: turns raw
 //! `Action`/`Condition`/command data into a structured, human-readable form
-//! and a plain-line rendering suitable for a line-oriented debug panel.
+//! and a plain-line rendering suitable for a line-oriented debug inspector
+//! (lanthorn's debug panel, for instance).
 //!
 //! This is cold code — nothing here is called during loading or `Vm`
-//! construction/turns; it exists purely for a later app-side debug inspector
-//! to call on demand.
+//! construction/turns; it exists purely for a host's debug inspector to call
+//! on demand.
 //!
 //! Mnemonics mirror `vm.rs`'s own dispatch: `CONDITION_MNEMONICS` and
 //! `COMMAND_MNEMONICS` below are asserted (by the coverage tests at the
@@ -12,7 +13,8 @@
 //! and `vm::FIXED_COMMAND_OPCODES`, so the executor and the decompiler can't
 //! silently drift apart.
 
-use crate::{Action, Condition, Database, CARRIED, DARK_FLAG, LAMP_EMPTY_FLAG};
+use crate::{Action, Condition, Database};
+use crate::database::CARRIED;
 
 /// Mnemonic for each condition code 0..=19 (must match `vm::CONDITION_CODES`
 /// key-for-key; see `condition_mnemonic_table_matches_vm_condition_codes`).
@@ -117,8 +119,8 @@ fn resolve_room(db: &Database, idx: usize) -> String {
 
 fn resolve_flag(idx: usize) -> String {
     match idx {
-        DARK_FLAG => "dark".to_string(),
-        LAMP_EMPTY_FLAG => "lamp_empty".to_string(),
+        crate::database::DARK_FLAG => "dark".to_string(),
+        crate::database::LAMP_EMPTY_FLAG => "lamp_empty".to_string(),
         other => other.to_string(),
     }
 }
@@ -151,8 +153,13 @@ fn resolve_noun_word(db: &Database, n: u16) -> String {
 /// One decompiled condition: mnemonic plus a human-resolved operand.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecompiledCondition {
+    /// The raw condition opcode (0..=19; see `vm::CONDITION_CODES`).
     pub code: u8,
+    /// The raw operand as the database stores it, before resolution to a
+    /// name — an item/room/flag index or a counter threshold, depending on
+    /// `code`.
     pub value: u16,
+    /// The mnemonic for `code`, from `CONDITION_MNEMONICS`.
     pub mnemonic: &'static str,
     /// Resolved operand text (item name / room description / flag name /
     /// counter threshold), or `None` when the code carries no meaningful
@@ -163,18 +170,34 @@ pub struct DecompiledCondition {
 /// One decompiled command: mnemonic plus resolved operand(s).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecompiledCommand {
+    /// The raw command opcode, as `vm::run_commands` dispatches it (0 =
+    /// no-op slot, 1..=51 and 102.. print a message, 52..=89 are the fixed
+    /// commands in `vm::FIXED_COMMAND_OPCODES`, 91..=101 are unimplemented
+    /// no-ops). Opcode 90 is implemented only for US S.A.G.A. databases
+    /// (`Database::saga_us.is_some()`, spec §12.8/§12.11, SQ-1472) and is a
+    /// no-op everywhere else.
     pub code: u16,
+    /// The mnemonic for `code`, from `COMMAND_MNEMONICS` (`"UNKNOWN"` for an
+    /// opcode this decompiler doesn't have a name for).
     pub mnemonic: &'static str,
+    /// Resolved operand text for the command's argument, or `None` when the
+    /// opcode takes none.
     pub operand: Option<String>,
 }
 
 /// A fully decompiled action row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecompiledAction {
+    /// This row's position in `Database::actions` — the action's identity
+    /// for anything that refers to it by index (e.g. `Vm::fired_actions`).
     pub index: usize,
+    /// The raw verb code this action's row is filed under; 0 marks an
+    /// occurrence/continuation row rather than a player-typed verb.
     pub verb: u16,
     /// Resolved trigger word, or "AUTO" for an occurrence/continuation (verb 0).
     pub verb_word: String,
+    /// The raw noun code paired with `verb`; 0 marks a wildcard (any noun,
+    /// or none, depending on `verb`).
     pub noun: u16,
     /// Resolved noun word; for verb 0 this is instead "N% chance" (an
     /// occurrence) or "(continuation)" (a verb-0/noun-0 chain target).
@@ -256,11 +279,26 @@ fn decompile_commands(db: &Database, cmds: &[u16; 4], params: &[u16]) -> Vec<Dec
                     Some(format!("{}, {}", resolve_item(db, a), resolve_item(db, b))),
                 )
             }
-            79 | 81 | 82 | 83 | 87 | 89 => {
+            79 | 81 | 82 | 83 | 87 => {
                 (command_mnemonic(n), Some(p.next().unwrap_or(0).to_string()))
             }
+            // Opcode 89's operand count is dialect-dependent (spec
+            // §12.8/§12.11, SQ-1472): the reference format keeps it as the
+            // "draw picture N" command with one operand, but US S.A.G.A.
+            // databases (`Database::saga_us.is_some()`) take none — see
+            // `vm::run_commands`' matching arm for the full account.
+            89 if db.saga_us.is_none() => {
+                (command_mnemonic(n), Some(p.next().unwrap_or(0).to_string()))
+            }
+            89 => (command_mnemonic(n), None),
+            // Opcode 90 exists only in US S.A.G.A. databases, where it takes
+            // one operand (draw the room-usage picture it names); everywhere
+            // else it falls into the `_` arm below, unused.
+            90 if db.saga_us.is_some() => {
+                ("DRAW_PICTURE_SAGA", Some(p.next().unwrap_or(0).to_string()))
+            }
             56 | 57 | 61 | 63..=71 | 73 | 76..=78 | 80 | 84..=86 | 88 => (command_mnemonic(n), None),
-            _ => ("UNUSED", Some(n.to_string())), // 90..=101: encoded but not implemented by vm.rs
+            _ => ("UNUSED", Some(n.to_string())), // 90 outside S.A.G.A., 91..=101 always: encoded but not implemented by vm.rs
         };
         out.push(DecompiledCommand {
             code: n,
@@ -307,9 +345,9 @@ pub fn decompile_all(db: &Database) -> Vec<DecompiledAction> {
 }
 
 impl DecompiledAction {
-    /// Plain-line rendering for a line-oriented debug panel: a `#idx VERB
-    /// NOUN` header, then an `IF ...` line per condition, then a `THEN ...`
-    /// line per command.
+    /// Plain-line rendering for a line-oriented debug inspector (lanthorn's
+    /// debug panel, for instance): a `#idx VERB NOUN` header, then an `IF ...`
+    /// line per condition, then a `THEN ...` line per command.
     pub fn lines(&self) -> Vec<String> {
         let mut out = vec![format!("#{} {} {}", self.index, self.verb_word, self.noun_word)];
         for c in &self.conditions {
@@ -411,6 +449,7 @@ pub fn list_vocab(db: &Database) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::DARK_FLAG;
     use crate::vm::{CONDITION_CODES, FIXED_COMMAND_OPCODES};
     use crate::{Item, Room};
     use std::collections::BTreeSet;
@@ -497,6 +536,9 @@ mod tests {
                 Item { text: "a brass lamp".into(), treasure: false, auto_noun: Some("LAM".into()), start_loc: 1 },
             ],
             adventure_number: 0,
+            mysterious: false,
+            saga_us: None,
+            ti99: None,
         }
     }
 

@@ -99,6 +99,18 @@ pub struct Pager {
     /// BEFORE this turn's output, awaiting the next render to decide whether to
     /// engage. `None` when not armed.
     pub pending_before_rows: Option<u16>,
+    /// Set by [`AppState::reset_transcript_sidecars`](crate::state::AppState::
+    /// reset_transcript_sidecars) whenever `transcript` is replaced wholesale
+    /// (load / restore / reset / history jump — SQ-1411). `last_transcript_
+    /// total_rows` is now a baseline for a transcript that no longer exists;
+    /// left alone, the first arm after a resume measures the WHOLE restored
+    /// backlog as "new" and pages the reader through scrollback they already
+    /// read. `apply_frame` clears it by calibrating rather than measuring on
+    /// the first frame that actually has a transcript surface. Named so
+    /// `derive(Default)` gives `false` — valid — under every
+    /// `AppState::default()` in the test suite; do not rename to a
+    /// `baseline_valid` that would default the wrong way.
+    pub baseline_stale: bool,
 }
 
 impl Pager {
@@ -162,6 +174,40 @@ impl Pager {
 /// already.
 pub fn baseline_before(last_frame_rows: u16, continued_row: bool) -> u16 {
     last_frame_rows.saturating_sub(u16::from(continued_row))
+}
+
+/// The baseline the OPENING-BANNER arm (`startup.rs`) starts from: the first row
+/// of the boot output that carries anything to read (SQ-1434).
+///
+/// The banner arm is the one arm with no previous frame to measure against, so it
+/// used to start at row 0 — which counts the blank rows a story opens with as
+/// output the reader must not miss. They are not: the pager exists to guarantee
+/// the first row of PROSE is on screen, and a blank row is not prose.
+///
+/// It is not a rounding error. Every Inform 7 Glulx story opens by printing two
+/// or three newlines before its prologue (measured: `chlorophyll.gblorb` and
+/// `Alias 'The Magpie'.gblorb` three each, `advent.blb` six), and on a pane where
+/// the prose fits exactly those blanks are the WHOLE overflow. The pager then
+/// engaged, parked the view with those blank rows across the top of the screen,
+/// pushed three rows of real text below the fold, and — with a `Line` read
+/// pending — ate the first character of the player's first command to dismiss
+/// itself. That is strictly worse than not paging at all, and it is the reported
+/// symptom: "the `>` prompt appears, the first keystroke is swallowed, and there
+/// is plainly screen left".
+///
+/// A blank line wraps to exactly one row, so counting leading blank LINES counts
+/// leading blank ROWS — except for a line carrying an inline image, which is
+/// blank as text and several rows tall as a picture, so those stop the count.
+pub fn opening_baseline(state: &crate::state::AppState) -> u16 {
+    state
+        .transcript
+        .iter()
+        .enumerate()
+        .take_while(|(i, line)| {
+            line.trim().is_empty() && state.transcript_images.get(*i).is_none_or(Option::is_none)
+        })
+        .count()
+        .min(u16::MAX as usize) as u16
 }
 
 /// What drove the turn whose output the pager is about to measure.
@@ -251,6 +297,19 @@ pub fn activation_target(
 /// made the next keypress measure the ENTIRE backlog as "new output", re-parking
 /// the view at the top with a [more] to drain. A pending arm simply survives
 /// until the next frame that really lays the transcript out.
+///
+/// `state.pager.baseline_stale` (SQ-1411) is the same idea one level up: a
+/// resume can replace the WHOLE transcript while sitting on a picture-only
+/// frame (Zork Zero's "Q to resume story" splash), so the surfaceless skip
+/// above leaves `last_transcript_total_rows` at its pre-resume value with no
+/// picture frame ever getting a chance to refresh it. The first frame that
+/// *does* have a surface is then the resumed transcript in full, and a bare
+/// baseline mismatch would measure it as "everything since the last real
+/// frame" and page the reader through scrollback they already read. So that
+/// first surfaced frame CALIBRATES instead of measuring: drop any pending
+/// arm, leave the view at the bottom, and cache the new total as the
+/// baseline — the same "already read" reasoning `startup.rs` applies to the
+/// opening-banner arm for a resumed transcript.
 pub fn apply_frame(
     state: &mut crate::state::AppState,
     max_scroll: u16,
@@ -260,6 +319,14 @@ pub fn apply_frame(
     transcript_surface: bool,
 ) {
     if !transcript_surface {
+        return;
+    }
+    if state.pager.baseline_stale {
+        state.pager.pending_before_rows = None;
+        state.pager.active = false;
+        state.transcript_scroll = 0;
+        state.last_transcript_total_rows = total_rows;
+        state.pager.baseline_stale = false;
         return;
     }
     state.transcript_scroll = state.transcript_scroll.min(max_scroll);
@@ -282,7 +349,7 @@ pub fn apply_frame(
     state.last_transcript_total_rows = total_rows;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
 
@@ -486,7 +553,7 @@ mod tests {
 
         // While the pager is showing, NOTHING re-arms or re-parks it — the player
         // is mid-catch-up and a fresh baseline would jump the view.
-        let mut p = Pager { active: true, pending_before_rows: None };
+        let mut p = Pager { active: true, pending_before_rows: None, ..Pager::default() };
         p.arm_after_turn(50, InputKind::Char, false, Driver::Timeout);
         assert!(p.pending_before_rows.is_none());
         p.arm_after_turn(50, InputKind::Line, false, Driver::PlayerInput);

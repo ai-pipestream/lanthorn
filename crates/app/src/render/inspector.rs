@@ -36,6 +36,10 @@ pub struct EdgeInfo {
 #[derive(Debug, Clone)]
 pub struct RoomDiagnostics {
     pub id: RoomId,
+    /// The "both" spelling of `id` (SQ-1300): `#136` alone for a Z-machine room, or
+    /// `#12 (8000ABCD)` — the ordinal shown everywhere else on the map plus the raw id — for a
+    /// synthetic one. See [`crate::roomid::room_label_full`].
+    pub id_label: String,
     pub name: String,
     pub layer_id: mapper::layer::LayerId,
     pub layer_name: String,
@@ -59,6 +63,7 @@ pub fn room_diagnostics(graph: &MapGraph, id: RoomId) -> Option<RoomDiagnostics>
     let layer_name = graph.layer_name(layer_id).to_owned();
     let pos = room.pos;
     let name = room.label().to_owned();
+    let id_label = crate::roomid::room_label_full(graph, id);
 
     let edges: Vec<EdgeInfo> = graph
         .connections()
@@ -68,7 +73,7 @@ pub fn room_diagnostics(graph: &MapGraph, id: RoomId) -> Option<RoomDiagnostics>
             let neighbour_name = graph
                 .room(c.dest)
                 .map(|r| r.label().to_owned())
-                .unwrap_or_else(|| format!("#{}", c.dest));
+                .unwrap_or_else(|| crate::roomid::room_label_no(graph, c.dest));
             EdgeInfo {
                 dir: c.dir,
                 neighbour_id: c.dest,
@@ -82,21 +87,85 @@ pub fn room_diagnostics(graph: &MapGraph, id: RoomId) -> Option<RoomDiagnostics>
     let distorted_count = edges.iter().filter(|e| e.distorted).count();
 
     let loc_method = room.loc_method.clone();
-    Some(RoomDiagnostics { id, name, layer_id, layer_name, pos, edges, edge_count, distorted_count, loc_method })
+    Some(RoomDiagnostics {
+        id,
+        id_label,
+        name,
+        layer_id,
+        layer_name,
+        pos,
+        edges,
+        edge_count,
+        distorted_count,
+        loc_method,
+    })
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
+
+/// Build the Diagnostics body's full content as logical rows, top to bottom — independent of how
+/// many of them a scrolled dock can actually show (SQ-1280). [`draw_diagnostics_body`] windows
+/// this by `scroll_offset`; the row count is also the total this body needs, for the caller's
+/// scrollbar and [`crate::list_scroll::ListScroll`].
+fn build_diagnostics_rows(diag: &RoomDiagnostics, theme: &Theme, body: Style, heading: Style) -> Vec<(String, Style)> {
+    let distorted_style = theme.get("inspector_edge_distorted").style;
+    let ok_style = theme.get("inspector_edge_ok").style;
+    let label_style = heading;
+    let value_style = body;
+
+    let pos_str = match diag.pos {
+        Some((px, py)) => format!("({}, {})", px, py),
+        None => "unplaced".to_owned(),
+    };
+
+    let mut rows = Vec::new();
+    rows.push((format!("{} {}", diag.id_label, diag.name), label_style));
+    rows.push((format!("Layer {} \"{}\"", diag.layer_id, diag.layer_name), value_style));
+    rows.push((format!("Pos {}", pos_str), value_style));
+    // How this room was first detected (SQ-0527). Kept on the room, so it is
+    // still here long after the turn that discovered it — which the old map-corner
+    // indicator never was.
+    if let Some(m) = diag.loc_method.as_deref() {
+        rows.push((format!("Found by {m}"), value_style));
+    }
+    rows.push((String::new(), value_style)); // blank separator
+
+    for edge in &diag.edges {
+        let flag = if edge.distorted { "!" } else { " " };
+        let line = format!("{} {:?} {} {}", flag, edge.dir, edge.neighbour_id, edge.neighbour_name);
+        let style = if edge.distorted { distorted_style } else { ok_style };
+        rows.push((line, style));
+    }
+
+    rows.push((String::new(), value_style)); // blank separator
+    let summary = format!(
+        "{} edge{}, {} distorted",
+        diag.edge_count,
+        if diag.edge_count == 1 { "" } else { "s" },
+        diag.distorted_count,
+    );
+    rows.push((summary, label_style));
+
+    rows
+}
 
 /// Draw the diagnostics body into `area` — no chrome, no borders: the caller (the room dock) owns
 /// those.
 ///
 /// `theme` supplies the shared `inspector_edge_ok` / `inspector_edge_distorted` selectors;
 /// `body` / `heading` are the styles for ordinary lines and for the id/summary lines.
+/// `scroll_offset` is rows of content already scrolled past (SQ-1280), clamped here so a stale or
+/// out-of-range offset can never draw garbage or leave a trailing gap; a themed scrollbar
+/// (`scrollbar` / `scrollbar_track`, the same selectors every other scrollable list in the app
+/// already uses) takes the rightmost column when the content overflows `area`.
 ///
 /// It no longer draws a compass rose (SQ-0666): per-direction exploration is one fact, and the
 /// room-info card and the matrix view's `×`/`·` cells both say it, in a form that also names where
 /// each direction goes. The rose was the third dialect for the same knowledge and the least
 /// informative of the three.
+///
+/// Returns the body's total row count, for the caller to keep its `ListScroll` in sync — a room
+/// with many edges can run well past `area`'s height.
 pub fn draw_diagnostics_body(
     diag: &RoomDiagnostics,
     area: Rect,
@@ -104,90 +173,39 @@ pub fn draw_diagnostics_body(
     theme: &Theme,
     body: Style,
     heading: Style,
-) {
+    scroll_offset: u16,
+) -> u16 {
     if area.width == 0 || area.height == 0 {
-        return;
+        return 0;
     }
 
-    let distorted_style = theme.get("inspector_edge_distorted").style;
-    let ok_style = theme.get("inspector_edge_ok").style;
+    let rows = build_diagnostics_rows(diag, theme, body, heading);
+    let total = rows.len() as u16;
+    let viewport = area.height;
 
-    let inner_x = area.x;
-    let clip = area;
-    let label_style = heading;
-    let value_style = body;
+    let scrollbar_visible =
+        crate::render::scroll::needs_scrollbar(total as usize, viewport as usize) && area.width >= 2;
+    let text_w = if scrollbar_visible { area.width - 1 } else { area.width };
+    let clip = Rect::new(area.x, area.y, text_w, area.height);
+    let offset = scroll_offset.min(total.saturating_sub(viewport));
 
-    let mut row = area.y;
-    let max_y = area.bottom().saturating_sub(1);
-
-    let pos_str = match diag.pos {
-        Some((px, py)) => format!("({}, {})", px, py),
-        None => "unplaced".to_owned(),
-    };
-
-    // id + name
-    if row <= max_y {
-        let line = format!("#{} {}", diag.id, diag.name);
-        draw_str_clipped(buf, inner_x, row, &line, label_style, clip);
-        row += 1;
-    }
-    // layer
-    if row <= max_y {
-        let line = format!("Layer {} \"{}\"", diag.layer_id, diag.layer_name);
-        draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
-        row += 1;
-    }
-    // pos
-    if row <= max_y {
-        let line = format!("Pos {}", pos_str);
-        draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
-        row += 1;
-    }
-    // How this room was first detected (SQ-0527). Kept on the room, so it is
-    // still here long after the turn that discovered it — which the old map-corner
-    // indicator never was.
-    if let (Some(m), true) = (diag.loc_method.as_deref(), row <= max_y) {
-        draw_str_clipped(buf, inner_x, row, &format!("Found by {m}"), value_style, clip);
-        row += 1;
-    }
-    // blank separator
-    if row <= max_y {
-        row += 1;
+    for (i, (text, style)) in rows.iter().enumerate().skip(offset as usize).take(viewport as usize) {
+        let y = area.y + (i as u16 - offset);
+        draw_str_clipped(buf, area.x, y, text, *style, clip);
     }
 
-    // edges
-    for edge in &diag.edges {
-        if row > max_y {
-            break;
-        }
-        let dir_label = format!("{:?}", edge.dir);
-        let flag = if edge.distorted { "!" } else { " " };
-        let line = format!("{} {:?} {} {}", flag, edge.dir, edge.neighbour_id, edge.neighbour_name);
-        let style = if edge.distorted { distorted_style } else { ok_style };
-        // Draw direction indicator in edge style, then rest in value style.
-        let _ = dir_label; // used via format above
-        draw_str_clipped(buf, inner_x, row, &line, style, clip);
-        row += 1;
+    if scrollbar_visible {
+        let sb_area = Rect::new(area.right() - 1, area.y, 1, area.height);
+        let look = crate::render::scroll::ScrollbarLook::from_theme(theme);
+        crate::render::scroll::draw_scrollbar(buf, sb_area, total as usize, viewport as usize, offset as usize, look);
     }
 
-    // blank + summary
-    if row <= max_y {
-        row += 1;
-    }
-    if row <= max_y {
-        let summary = format!(
-            "{} edge{}, {} distorted",
-            diag.edge_count,
-            if diag.edge_count == 1 { "" } else { "s" },
-            diag.distorted_count,
-        );
-        draw_str_clipped(buf, inner_x, row, &summary, label_style, clip);
-    }
+    total
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
     use mapper::graph::MapGraph;
@@ -276,16 +294,31 @@ mod tests {
     fn diagnostics_distorted_loop_marks_at_least_one() {
         // An impossible 3-room northward loop: at least one edge must be distorted.
         let mut g = MapGraph::new();
-        for id in 1u16..=3 { g.upsert_room(id, "r".into()); }
+        for id in 1u16..=3 { g.upsert_room(id.into(), "r".into()); }
         g.add_edge(1, Direction::N, 2);
         g.add_edge(2, Direction::N, 3);
         g.add_edge(3, Direction::N, 1); // closes an impossible loop
         relayout_auto(&mut g);
         // At least one of the three rooms must report a distorted outgoing edge.
         let any_distorted = [1u16, 2, 3].iter().any(|&id| {
-            room_diagnostics(&g, id).map(|d| d.distorted_count > 0).unwrap_or(false)
+            room_diagnostics(&g, id.into()).map(|d| d.distorted_count > 0).unwrap_or(false)
         });
         assert!(any_distorted, "impossible loop must leave at least one distorted edge");
+    }
+
+    /// SQ-1300: the Diagnostics header shows BOTH forms for a synthetic room — its per-map
+    /// ordinal and the raw id underneath it — and only its plain decimal id for a Z-machine room.
+    #[test]
+    fn diagnostics_id_label_carries_both_forms_for_a_synthetic_room() {
+        let mut g = MapGraph::new();
+        let alley = crate::roomid::synthetic_room_id("Back Alley");
+        g.upsert_room(alley, "Back Alley".into());
+        let d = room_diagnostics(&g, alley).unwrap();
+        assert_eq!(d.id_label, format!("#1 ({:08X})", alley));
+
+        g.upsert_room(136, "Hallway".into());
+        let d2 = room_diagnostics(&g, 136).unwrap();
+        assert_eq!(d2.id_label, "#136", "a real object number carries no parenthetical");
     }
 
     #[test]
@@ -307,6 +340,7 @@ mod tests {
         let distorted_count = edges.iter().filter(|e| e.distorted).count();
         RoomDiagnostics {
             id,
+            id_label: crate::roomid::display_room_id(id),
             name: name.to_owned(),
             layer_id: 0,
             layer_name: "Main".to_owned(),
@@ -328,8 +362,18 @@ mod tests {
         let area = Rect::new(0, 0, w, h);
         let mut buf = Buffer::empty(area);
         let theme = test_theme();
-        draw_diagnostics_body(diag, area, &mut buf, &theme, Style::default(), Style::default());
+        draw_diagnostics_body(diag, area, &mut buf, &theme, Style::default(), Style::default(), 0);
         buf
+    }
+
+    /// Like [`render_body`], but at a given scroll offset — for the SQ-1280 scroll tests. Returns
+    /// the buffer alongside the total row count `draw_diagnostics_body` reported.
+    fn render_body_scrolled(diag: &RoomDiagnostics, w: u16, h: u16, scroll_offset: u16) -> (Buffer, u16) {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        let theme = test_theme();
+        let total = draw_diagnostics_body(diag, area, &mut buf, &theme, Style::default(), Style::default(), scroll_offset);
+        (buf, total)
     }
 
     #[test]
@@ -356,7 +400,7 @@ mod tests {
         // Zero-area is a no-op, not a panic.
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
         let theme = test_theme();
-        draw_diagnostics_body(&diag, Rect::new(0, 0, 0, 0), &mut buf, &theme, Style::default(), Style::default());
+        draw_diagnostics_body(&diag, Rect::new(0, 0, 0, 0), &mut buf, &theme, Style::default(), Style::default(), 0);
     }
 
     /// SQ-0391's compass rose was retired by SQ-0666, and this is the test that used to pin
@@ -421,11 +465,103 @@ mod tests {
         let diag = make_diag(1, "Start", edges);
         let area = Rect::new(0, 0, 60, 24);
         let mut buf = Buffer::empty(area);
-        draw_diagnostics_body(&diag, area, &mut buf, &theme, Style::default(), Style::default());
+        draw_diagnostics_body(&diag, area, &mut buf, &theme, Style::default(), Style::default(), 0);
 
         let has = |c: Color| (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
             .any(|(x, y)| buf.cell((x, y)).is_some_and(|cell| cell.style().fg == Some(c)));
         assert!(has(Color::Magenta), "an OK edge row must render in the overridden inspector_edge_ok colour");
         assert!(has(Color::Blue), "a distorted edge row must render in the overridden inspector_edge_distorted colour");
+    }
+
+    // ── Scrolling (SQ-1280) ───────────────────────────────────────────────────
+
+    /// A room with many edges draws the first N rows at offset 0, and scrolling reveals the LAST
+    /// row (the summary line) at the maximum offset — never past it, and a too-large offset
+    /// clamps rather than drawing garbage or leaving a blank window.
+    #[test]
+    fn scrolling_reveals_edges_below_the_fold_and_clamps_at_the_end() {
+        let edges: Vec<EdgeInfo> = (0..20)
+            .map(|i| EdgeInfo {
+                dir: Direction::E,
+                neighbour_id: i,
+                neighbour_name: format!("Room {i:02}"),
+                distorted: false,
+            })
+            .collect();
+        let diag = make_diag(1, "Hub", edges);
+        let (width, height) = (40u16, 4u16);
+
+        let (top, total) = render_body_scrolled(&diag, width, height, 0);
+        assert!(total > height, "twenty edges overflow a 4-row body: {total}");
+        assert!(buf_contains(&top, "Hub"), "the header rows are visible at offset 0");
+        assert!(!buf_contains(&top, "Room 00"), "the first edge is well below the fold at offset 0");
+        assert!(!buf_contains(&top, "20 edges, 0 distorted"), "the summary is far below the fold at offset 0");
+
+        let max_offset = total - height;
+        let (bottom, total_again) = render_body_scrolled(&diag, width, height, max_offset);
+        assert_eq!(total_again, total, "the same content reports the same total");
+        assert!(buf_contains(&bottom, "20 edges, 0 distorted"), "the summary reaches the bottom at the max offset");
+        assert!(!buf_contains(&bottom, "Room 00"), "the first edge has scrolled off the top");
+
+        // Scrolling PAST the end (or requesting an offset larger than the content allows) clamps
+        // to the same maximum — it is a no-op past the end, not a blank window.
+        let (past_end, _) = render_body_scrolled(&diag, width, height, max_offset + 50);
+        assert_eq!(
+            past_end.content().iter().map(|c| c.symbol().to_owned()).collect::<String>(),
+            bottom.content().iter().map(|c| c.symbol().to_owned()).collect::<String>(),
+            "an over-large offset clamps to the maximum, not past it",
+        );
+    }
+
+    /// A body that fits entirely in the dock never shows a scrollbar column, however far past
+    /// the end a (meaningless) offset is requested.
+    #[test]
+    fn a_body_that_fits_draws_no_scrollbar_and_ignores_any_offset() {
+        let diag = make_diag(1, "Start", vec![]);
+        let (fits, total) = render_body_scrolled(&diag, 60, 20, 0);
+        assert!(total < 20, "the content fits well inside 20 rows: {total}");
+        let (scrolled, _) = render_body_scrolled(&diag, 60, 20, 99);
+        assert_eq!(
+            fits.content().iter().map(|c| c.symbol().to_owned()).collect::<String>(),
+            scrolled.content().iter().map(|c| c.symbol().to_owned()).collect::<String>(),
+            "there is nothing to scroll, so an offset changes nothing",
+        );
+    }
+
+    /// The indicator itself: a themed scrollbar (the SAME `scrollbar`/`scrollbar_track`
+    /// selectors every other scrollable list in the app already uses — SQ-1280 adds no new
+    /// selector) appears in the rightmost column only when the body actually overflows.
+    #[test]
+    fn the_scrollbar_appears_only_when_the_body_overflows_and_uses_the_shared_selectors() {
+        let parsed = crate::theme::toml_schema::parse(
+            "[elements]\nscrollbar = { fg = \"magenta\" }\nscrollbar_track = { fg = \"yellow\" }\n",
+        )
+        .unwrap();
+        let theme = crate::theme::resolve::resolve_theme(&crate::colors::GhosttyScheme::default(), &parsed);
+        let edges: Vec<EdgeInfo> = (0..20)
+            .map(|i| EdgeInfo { dir: Direction::E, neighbour_id: i, neighbour_name: "R".into(), distorted: false })
+            .collect();
+        let diag = make_diag(1, "Hub", edges);
+
+        let has_bg = |buf: &Buffer, area: Rect, c: Color| {
+            (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
+                .any(|(x, y)| buf.cell((x, y)).is_some_and(|cell| cell.bg == c))
+        };
+
+        // Overflowing: the rightmost column carries the themed bar.
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        let total = draw_diagnostics_body(&diag, area, &mut buf, &theme, Style::default(), Style::default(), 0);
+        assert!(total > area.height, "twenty edges overflow a 4-row body: {total}");
+        assert!(has_bg(&buf, area, Color::Magenta), "the thumb uses the shared `scrollbar` selector");
+        assert!(has_bg(&buf, area, Color::Yellow), "the track uses the shared `scrollbar_track` selector");
+
+        // Fits: no bar anywhere.
+        let area = Rect::new(0, 0, 40, 40);
+        let mut buf = Buffer::empty(area);
+        let total = draw_diagnostics_body(&diag, area, &mut buf, &theme, Style::default(), Style::default(), 0);
+        assert!(total <= area.height, "content fits a 40-row body: {total}");
+        assert!(!has_bg(&buf, area, Color::Magenta), "no thumb when nothing overflows");
+        assert!(!has_bg(&buf, area, Color::Yellow), "no track when nothing overflows");
     }
 }

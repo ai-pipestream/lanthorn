@@ -349,6 +349,7 @@ pub const APPLE_DEFAULT_FOREGROUND: u8 = 9;
 /// `machine-screenshots/`, cell sizes included, so the proportions are the
 /// machine's rather than a guess at them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CursorShape {
     /// One pixel wide and a line tall, in the gap AFTER the last glyph rather than
     /// over a cell — the Macintosh insertion caret.
@@ -409,6 +410,7 @@ pub enum CursorShape {
 /// pair** — which is the finding that shaped [`PeriodLook`]. A field carrying only
 /// a page and an ink could express none of the last three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StatusBand {
     /// The body pair swapped, across the full width. The Apple II and the
     /// Commodore 128.
@@ -504,6 +506,7 @@ pub enum StatusBand {
 /// earlier build is evidence that a band need not be derivable, whether or not the
 /// row that reported it still does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PeriodLook {
     /// The body's ground.
     pub page: (u8, u8, u8),
@@ -525,6 +528,27 @@ pub struct PeriodLook {
     pub cursor_colour: (u8, u8, u8),
 }
 
+impl PeriodLook {
+    /// Build a `PeriodLook` from its fields. See the struct docs for what
+    /// each one means.
+    ///
+    /// - `page`: the body's ground colour.
+    /// - `ink`: the body's character colour.
+    /// - `status`: how the status line was set apart from the body pair.
+    /// - `cursor_shape`: the input cursor's shape.
+    /// - `cursor_colour`: the input cursor's colour (see [`Self::cursor_colour`]
+    ///   field docs above — not always the same as `ink`).
+    pub fn new(
+        page: (u8, u8, u8),
+        ink: (u8, u8, u8),
+        status: StatusBand,
+        cursor_shape: CursorShape,
+        cursor_colour: (u8, u8, u8),
+    ) -> Self {
+        Self { page, ink, status, cursor_shape, cursor_colour }
+    }
+}
+
 /// What a row STORES about its screen, which on one machine cannot be a
 /// [`PeriodLook`] at all (SQ-0983).
 ///
@@ -543,6 +567,7 @@ pub struct PeriodLook {
 /// Version, and one stored value cannot be true for both. The stored pair was not
 /// merely stale; it was answering a question that has two answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MachineLook {
     /// Every value read off a capture in `machine-screenshots/`, which is what a
     /// machine whose screen is simply a fact states. Eight of the nine rows.
@@ -604,6 +629,7 @@ const APPLE_PERIOD_LOOK: PeriodLook = PeriodLook {
 /// <https://inform-fiction.org/zmachine/standards/z1point1/sect08.html>. So neither
 /// answer is a compliance question; the only question is what the machine DID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum V6Emphasis {
     /// A rule along the bottom of the cell, the text's own colour, abutting the
     /// glyphs with no gap.
@@ -630,6 +656,7 @@ pub enum V6Emphasis {
 /// What a Version 6 window does with text that reaches its right margin — see
 /// [`V6WrapRegime`], which is where the machines disagree about how to choose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum V6TextFlow {
     /// Break after the last WORD that fits, and start the next line at the left
     /// margin (ZMSD §8.8.3.1.2.2).
@@ -679,6 +706,7 @@ pub enum V6TextFlow {
 /// the Amiga after `from`, the Macintosh after `you`, which is its proportional
 /// Geneva in a wider box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum V6WrapRegime {
     /// §8.8.3.1.1 and §8.8.3.1.2.2 as written: attribute 0 decides whether text
     /// breaks at all, attribute 3 whether it breaks by word.
@@ -747,6 +775,7 @@ impl V6WrapRegime {
 /// FIXED face's blit, which is how topaz 8's eight rows fill the Amiga's
 /// sixteen-row cell (SQ-1053).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum V6FaceSpace {
     /// The face is drawn in the ARCHIVE's picture space, so one face pixel is one
     /// art pixel and scales with the artwork.
@@ -828,6 +857,7 @@ impl V6FaceSpace {
 /// name. A row that states `None` reads a supplied disk and finds nothing, which
 /// is the same outcome as having no disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum V6SystemFace {
     /// A Macintosh font FAMILY number. A `FONT` resource id is
     /// `family * `[`MAC_FONT_FAMILY_STRIDE`]` + point size`, so a family names a
@@ -889,6 +919,7 @@ pub const MAC_GENEVA_FONT_FAMILY: i16 = 3;
 /// cannot source is declined (`None` / `false`) rather than guessed — see the
 /// module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MachineProfile {
     /// The §11.1.3 number this machine writes into header `$1E`.
     pub number: u8,
@@ -1113,6 +1144,10 @@ pub const MACINTOSH_STD_WINDOW: (u16, u16) = (320, 200);
 /// Blorb-sourced copy of the same game already gets.
 pub const AMIGA_STD_WINDOW: (u16, u16) = (320, 200);
 
+/// Every §11.1.3 machine number this crate models, one row per interpreter.
+/// [`machine`] looks a number up here; a number with no row is a machine the
+/// crate declines to model rather than mis-model (see the module docs' "Where
+/// a value cannot be sourced it is declined outright").
 pub const MACHINES: &[MachineProfile] = &[
     MachineProfile {
         number: APPLE_IIE_INTERPRETER_NUMBER,
@@ -1509,10 +1544,10 @@ pub fn period_look_for(number: u8, zversion: Option<u8>) -> Option<PeriodLook> {
 /// [`crate::screen::ega_true_colour`], which carries the tables and the evidence.
 ///
 /// Asked at boot, before the story runs and before the host resolves a single
-/// colour, because the palette is process-wide state that every consumer must agree
-/// on (`crate::screen::ACTIVE_PALETTE`'s own docs). A version-dependent palette that
-/// were asked LATER would mean one colour number looking like two colours on one
-/// screen, which is precisely what that global exists to prevent.
+/// colour, and then carried on the machine ([`crate::cpu::exec::Machine::palette`],
+/// SQ-1393). A version-dependent palette that were asked LATER, or asked twice on
+/// two paths, would mean one colour number looking like two colours on one screen
+/// — which is why the machine holds ONE answer that every consumer reads.
 pub fn palette_for(number: u8, zversion: Option<u8>) -> Palette {
     match machine(number).map(|m| m.palette) {
         Some(Palette::IbmXzip) if zversion == Some(6) => Palette::IbmYzip,

@@ -1,0 +1,973 @@
+//! `lanthorn-mapgen`: a story's complete map, read out of the story file with
+//! nothing played (SQ-1306).
+//!
+//! Every case drives [`app::mapgen::generate`] — the same library function the
+//! `lanthorn-mapgen` binary calls — rather than shelling out, so a failure
+//! points at a line of Rust instead of at a process exit code.
+//!
+//! **Three of the four sources run on CI.** `minizork.z3` (ZIL) and
+//! `tiny_cave.dat` (Scott Adams) are tracked fixtures, and `czech.z5` is the
+//! negative case: a real Z-machine story that declares no map at all. The two
+//! Inform sources — `i7-world` and `i6-library` — have no tracked fixture, so
+//! their cases resolve out of the gitignored `stories/` and skip vacuously
+//! without it. A skip reads exactly like a pass, so each of those cases prints
+//! what it skipped.
+
+use std::path::{Path, PathBuf};
+
+use app::mapgen::{self, EdgeKind, SourceKind};
+
+// Declared once per GROUP BINARY, not per suite — these suites are modules of
+// one crate, so a `#[path]` module here would be the same file loaded twice
+// (clippy::duplicate_mod). See the header of `tests/mapper_ui.rs`.
+use crate::fixture_paths::fixture_path;
+
+/// A story under the gitignored `stories/`, or `None` when this checkout has no
+/// copy — the CI-safe vacuous-skip pattern.
+fn story(name: &str) -> Option<PathBuf> {
+    let p = crate::fixture_paths::fixture_path(name);
+    p.is_file().then_some(p)
+}
+
+/// A fixture tracked in the repository, so CI reaches it.
+fn tracked(rel: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
+}
+
+/// Every room name in a generated map.
+fn names(map: &mapgen::GeneratedMap) -> Vec<String> {
+    map.graph.rooms().map(|r| r.label().to_string()).collect()
+}
+
+/// SQ-1356's ghost accounting, checked against the graph rather than eyeballed: every layer
+/// draws exactly one ghost box per ROOM beyond it that one of its own passages touches — never
+/// more, never fewer, none overlapping a room or another ghost, and every one naming a real room
+/// and a real layer. `mapgen` only ever cuts layers at a portal seam (Up/Down/In/Out — see
+/// `mapper::layer::planar_region`), so a real story's `stories/`-only fixture is the only place
+/// this exercises the general "compass or portal" rule `export_svg`'s own synthetic cases cannot
+/// reach.
+///
+/// One per room rather than one per PASSAGE (SQ-1319's rule): two staircases from one layer to
+/// the same room beyond it are two lines to one box, exactly as two passages between two rooms of
+/// one layer are.
+fn assert_ghost_accounting(svg: &str, graph: &mapper::graph::MapGraph) {
+    let doc = roxmltree::Document::parse(svg).expect("well-formed SVG");
+    let drawn = doc
+        .descendants()
+        .filter(|n| {
+            n.tag_name().name() == "rect"
+                && n.attribute("class") == Some("ghost")
+                && !app::export_svg::under_class(*n, "legend-block")
+        })
+        .count();
+
+    // The same count off the graph: per layer, the distinct foreign rooms its crossings touch.
+    let mut want = 0usize;
+    for &layer in graph.layers().keys() {
+        if graph.rooms_in_layer(layer).is_empty() {
+            continue;
+        }
+        let mut seen: std::collections::BTreeSet<mapper::graph::RoomId> = Default::default();
+        for c in graph.connections() {
+            if !mapper::layer::is_interlayer(graph, c) {
+                continue;
+            }
+            if graph.layer_of(c.origin) == layer {
+                seen.insert(c.dest);
+            } else if graph.layer_of(c.dest) == layer {
+                seen.insert(c.origin);
+            }
+        }
+        want += seen.len();
+    }
+    assert_eq!(drawn, want, "one ghost box per foreign room each layer's crossings touch");
+
+    let bad = app::export_svg::ghost_box_overlaps(svg);
+    assert!(bad.is_empty(), "ghost boxes must stay clear of rooms and each other: {bad:#?}");
+
+    // Every ghost names a real room — under whichever of SQ-1356's three labellings applies —
+    // and a real layer, never the legend's own sample. A long name wraps into several
+    // `ghost-name` lines inside one box, so the lines are joined back up per box first.
+    let room_names: std::collections::HashSet<&str> = graph.rooms().map(|r| r.label()).collect();
+    let layer_names: std::collections::HashSet<&str> =
+        graph.layers().keys().map(|&l| graph.layer_name(l)).collect();
+    let mut lines: Vec<String> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let flush = |lines: &mut Vec<String>, names: &mut Vec<String>| {
+        if !lines.is_empty() {
+            names.push(lines.join(" "));
+            lines.clear();
+        }
+    };
+    for n in doc.descendants() {
+        // Elements only: `descendants()` also yields each element's own TEXT node, which carries
+        // no class and would flush the run of `ghost-name` lines between every pair of them.
+        if !n.is_element() || app::export_svg::under_class(n, "legend-block") {
+            continue;
+        }
+        match n.attribute("class") {
+            Some("ghost-name") => lines.push(n.text().unwrap_or("").to_string()),
+            Some("ghost-layer") => {
+                flush(&mut lines, &mut names);
+                let text = n.text().unwrap_or("");
+                assert!(layer_names.contains(text), "ghost names a real layer, got {text:?}");
+            }
+            _ => flush(&mut lines, &mut names),
+        }
+    }
+    for name in names {
+        let bare = name.strip_prefix("to ").or_else(|| name.strip_prefix("from ")).unwrap_or(&name);
+        assert!(room_names.contains(bare), "ghost names a real room, got {name:?}");
+    }
+}
+
+/// True when `map` has an edge from a room named `from`, in direction `dir`, to
+/// a room named `to`. Names rather than ids on purpose: an id is an
+/// implementation detail of whichever engine read the story, and a test that
+/// pins one breaks when the reader improves without the MAP being wrong.
+fn has_edge(map: &mapgen::GeneratedMap, from: &str, dir: mapper::direction::Direction, to: &str) -> bool {
+    map.facts.iter().any(|f| {
+        f.dir == dir
+            && map.graph.room(f.origin).map(|r| r.label() == from).unwrap_or(false)
+            && map.graph.room(f.dest).map(|r| r.label() == to).unwrap_or(false)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// CI-runnable: Scott Adams
+// ---------------------------------------------------------------------------
+
+/// A Scott Adams database lists its whole map explicitly, so the generated map
+/// is exactly the database's own room table with nothing derived.
+///
+/// `tiny_cave.dat` is three rooms in a vertical chain — clearing, cave, grotto —
+/// plus the format's room-0 "no room" sentinel, which is not a place and is not
+/// in the map.
+#[test]
+fn scott_database_maps_completely() {
+    let map = mapgen::generate(&tracked("../scott/tests/tiny_cave.dat"), true)
+        .expect("tiny_cave.dat is a tracked fixture and must map");
+
+    assert_eq!(map.source, SourceKind::Scott);
+    assert_eq!(map.story.engine, "scott");
+    assert_eq!(map.graph.rooms().count(), 3, "three rooms; index 0 is the sentinel, not a place");
+
+    // A Scott Adams database has no release, serial or checksum field at all
+    // (SQ-1306) — unlike the Z-machine and an Inform-compiled Glulx image,
+    // which both self-identify. All three stay null rather than substituting
+    // the trailer's adventure number, which is a title id, not a build identity.
+    assert_eq!(map.story.release, None);
+    assert_eq!(map.story.serial, None);
+    assert_eq!(map.story.checksum, None);
+
+    // Four edges: down the chain twice, and back up twice. The grotto's DOWN
+    // and the clearing's UP are both 0 in the database, which means "no exit".
+    assert_eq!(map.facts.len(), 4, "edges: {:?}", map.facts);
+
+    let names = names(&map);
+    let clearing = names.iter().find(|n| n.contains("clearing")).expect("the sunlit clearing");
+    let cave = names.iter().find(|n| n.contains("cave")).expect("the damp cave");
+    assert!(
+        has_edge(&map, clearing, mapper::direction::Direction::Down, cave),
+        "the clearing's path leads DOWN into the cave"
+    );
+    assert!(
+        has_edge(&map, cave, mapper::direction::Direction::Up, clearing),
+        "and back up again"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CI-runnable: ZIL
+// ---------------------------------------------------------------------------
+
+/// Mini-Zork I (r34/s871124) is Infocom's own ZIL, and is tracked — so the ZIL
+/// reader has CI coverage that does not depend on `stories/`.
+///
+/// The white-house corner is the part of Zork every reader knows, and it is
+/// four UEXITs: West of House leads north and northeast to North of House, and
+/// south and southeast to South of House.
+#[test]
+fn zil_story_maps_from_its_exit_properties() {
+    use mapper::direction::Direction;
+    let map = mapgen::generate(&fixture_path("minizork-r34-s871124.z3"), true)
+        .expect("minizork.z3 is a tracked fixture and must map");
+
+    assert_eq!(map.source, SourceKind::Zil);
+    assert_eq!(map.story.engine, "z-machine");
+    assert_eq!(map.story.release, Some(34), "Mini-Zork I release 34");
+    assert_eq!(map.story.serial.as_deref(), Some("871124"));
+
+    // ZMSD §11.1: checksum is the word at $1C, reported as a lowercase
+    // `0x`-prefixed hex string. Read straight out of the fixture's own bytes
+    // rather than pinning a magic number, so this doesn't silently start
+    // testing the wrong fixture if minizork.z3 is ever replaced.
+    let bytes = std::fs::read(fixture_path("minizork-r34-s871124.z3")).unwrap();
+    let want_checksum = format!("0x{:04x}", u16::from_be_bytes([bytes[0x1C], bytes[0x1D]]));
+    assert_eq!(map.story.checksum.as_deref(), Some(want_checksum.as_str()));
+
+    assert!(has_edge(&map, "West of House", Direction::N, "North of House"));
+    assert!(has_edge(&map, "West of House", Direction::NE, "North of House"));
+    assert!(has_edge(&map, "West of House", Direction::S, "South of House"));
+    assert!(has_edge(&map, "West of House", Direction::SE, "South of House"));
+
+    // A ZIL CEXIT is a real passage behind a condition, and it is drawn. West
+    // of House leads southwest to the barrow only in the endgame; a reader that
+    // dropped conditional exits would lose it silently.
+    assert!(
+        map.facts.iter().any(|f| f.kind == EdgeKind::Conditional),
+        "Mini-Zork declares conditional exits and they must be on the map"
+    );
+
+    // Sanity on the whole map rather than on one corner: a real story has far
+    // more rooms than the handful this case names, and every room a Z-machine
+    // reader mints is an object number it can point at.
+    assert!(map.graph.rooms().count() > 40, "rooms: {}", map.graph.rooms().count());
+    for r in map.graph.rooms() {
+        assert!(
+            matches!(map.engine_refs.get(&r.id), Some(mapgen::EngineRef::ZObject(_))),
+            "every Z-machine room carries its object number: {:?}",
+            r.label()
+        );
+    }
+}
+
+/// SQ-1311: an object with no printed name whose only declared exit leads
+/// back to ITSELF is not a room. Mini-Zork's object #27 declares nothing but
+/// `IN -> 27` — a pseudo-room with no name and no way out — which passed the
+/// room-set derivation ("declares an exit") before this fix, because a
+/// self-referential exit is still an exit as far as "does this object declare
+/// anything at all" is concerned.
+#[test]
+fn a_self_referential_unnamed_exit_is_not_a_room() {
+    let map = mapgen::generate(&fixture_path("minizork-r34-s871124.z3"), false)
+        .expect("minizork.z3 is a tracked fixture and must map");
+
+    // The narrow rule doesn't forbid an empty name on its own — only an empty
+    // name COMBINED with exits that lead nowhere real — so check the specific
+    // object rather than asserting no story ever has a blank-named room.
+    assert!(
+        !map.engine_refs.values().any(|r| matches!(r, mapgen::EngineRef::ZObject(27))),
+        "object #27 (unnamed, self-referential IN) must not appear as a room"
+    );
+    assert!(
+        map.graph.rooms().all(|r| !r.label().trim().is_empty()),
+        "Mini-Zork has no other unnamed room, so none should remain: {:?}",
+        map.graph.rooms().filter(|r| r.label().trim().is_empty()).map(|r| r.id).collect::<Vec<_>>()
+    );
+}
+
+/// A story with no map anywhere in it is refused, and says so — this is the
+/// exit-2 path, and `czech.z5` (a Z-machine conformance test, not a game) is a
+/// tracked example of it.
+#[test]
+fn a_story_that_declares_no_map_is_refused() {
+    let err = mapgen::generate(&tracked("../zvm/tests/fixtures/czech.z5"), true)
+        .expect_err("czech.z5 is a conformance test with no rooms and must be refused");
+    assert!(
+        matches!(err, mapgen::GenError::NoStaticSource(_)),
+        "refusal must be NoStaticSource (the binary's exit 2), got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no static map source"),
+        "the message has to say what happened: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CI-runnable: the JSON map's shape
+// ---------------------------------------------------------------------------
+
+/// The JSON is a published format read by tools that have never seen lanthorn,
+/// so its required keys are pinned here: a change to any of them has to be a
+/// deliberate edit to this case, not a side effect.
+#[test]
+fn json_map_pins_its_format_and_required_keys() {
+    let map = mapgen::generate(&tracked("../scott/tests/tiny_cave.dat"), true).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&mapgen::render_json(&map)).expect("the JSON must round-trip");
+
+    assert_eq!(v["format"], "lanthorn-map");
+    assert_eq!(v["version"], 1);
+    for key in ["format", "version", "generator", "story", "directions", "rooms", "edges", "layers"] {
+        assert!(!v[key].is_null(), "top-level key {key:?} is required");
+    }
+    for key in ["file", "engine", "source", "generated_at"] {
+        assert!(!v["story"][key].is_null(), "story.{key} is required");
+    }
+    assert_eq!(v["story"]["source"], "scott");
+    assert!(v["generator"]["name"] == "lanthorn-mapgen");
+
+    // The direction vocabulary: the eight compass points carry a bearing and
+    // the four portals do not, which is what tells a consumer which of them it
+    // can lay out on a grid.
+    let dirs = v["directions"].as_array().expect("directions is an array");
+    assert_eq!(dirs.len(), 12);
+    let north = dirs.iter().find(|d| d["word"] == "north").expect("north");
+    assert_eq!(north["bearing"], 0);
+    assert_eq!(north["short"], "n");
+    let up = dirs.iter().find(|d| d["word"] == "up").expect("up");
+    assert!(up["bearing"].is_null(), "up is not a compass bearing");
+
+    // Every room the text dump lists is in the JSON, by the same id.
+    let dump = app::map_dump::render_dump(&map.graph, &app::symbols::SymbolSet::default());
+    let rooms = v["rooms"].as_array().expect("rooms is an array");
+    assert_eq!(rooms.len(), map.graph.rooms().count());
+    for r in rooms {
+        let name = r["name"].as_str().unwrap();
+        assert!(dump.contains(name), "the dump must list {name:?} too");
+        for key in ["id", "raw_id", "name", "ordinal", "layer", "flags", "engine_ref"] {
+            assert!(!r[key].is_null(), "room key {key:?} is required");
+        }
+        assert!(r["pos"]["x"].is_number(), "a laid-out map gives every room a position");
+        assert_eq!(r["engine_ref"]["kind"], "scott-room");
+    }
+
+    for e in v["edges"].as_array().expect("edges is an array") {
+        for key in ["from", "to", "dir", "kind", "reciprocal"] {
+            assert!(!e[key].is_null(), "edge key {key:?} is required");
+        }
+        assert!(e["reciprocal"].is_boolean());
+    }
+}
+
+/// With no layout there are no positions, and the JSON says so with `null`
+/// rather than by omitting the key or inventing an origin.
+#[test]
+fn json_map_reports_no_position_when_layout_was_skipped() {
+    let map = mapgen::generate(&tracked("../scott/tests/tiny_cave.dat"), false).unwrap();
+    assert!(map.layout_time.is_none());
+    let v: serde_json::Value = serde_json::from_str(&mapgen::render_json(&map)).unwrap();
+    for r in v["rooms"].as_array().unwrap() {
+        assert!(r["pos"].is_null(), "no layout means no position: {r}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Real-game: Inform 7 (Counterfeit Monkey)
+// ---------------------------------------------------------------------------
+
+/// The Inform 7 reader against the story it was built for.
+///
+/// The comparison set is the map a PLAYER built by walking Counterfeit Monkey —
+/// 84 distinct room names. A static map that misses any of them is missing a
+/// room the game really has, which is the failure this case exists to catch;
+/// having MORE is expected and fine, since the player never finished the game.
+/// Pinned to release 11 (`stories/CounterfeitMonkey-11.gblorb`) on purpose: it asserts the
+/// exact release/serial and a room list read off a release-11 playthrough (SQ-1454's
+/// disposition table). The IF Archive's current copy is release 10 and does not carry
+/// this data — `stories/`-only, skips vacuously on CI like `real_media_releases.rs`.
+#[test]
+fn counterfeit_monkey_static_map_covers_every_walked_room() {
+    use mapper::direction::Direction;
+    let Some(path) = story("CounterfeitMonkey-11.gblorb") else {
+        eprintln!("SKIP: stories/CounterfeitMonkey-11.gblorb absent");
+        return;
+    };
+    let map = mapgen::generate(&path, true).expect("Counterfeit Monkey must map");
+    assert_eq!(map.source, SourceKind::I7World, "CM is an Inform 7 build");
+
+    // Glulx-Inform-Tech.html §1 "Static Data": CM's own `Info` block reports
+    // release 11, serial "230220" — verified directly against the bytes at
+    // 0x24 in its embedded Glulx chunk. Every Glulx image also carries a
+    // whole-image checksum (Glulx spec §1.4, offset 0x20), which is never
+    // absent the way release/serial can be for a non-Inform build.
+    assert_eq!(map.story.release, Some(11), "Counterfeit Monkey release 11");
+    assert_eq!(map.story.serial.as_deref(), Some("230220"));
+    assert!(
+        matches!(map.story.checksum.as_deref(), Some(s) if s.starts_with("0x") && s.len() == 10),
+        "checksum must be a non-null 0x-prefixed 32-bit hex string: {:?}",
+        map.story.checksum
+    );
+
+    let generated = names(&map);
+    for walked in WALKED_COUNTERFEIT_MONKEY_ROOMS {
+        assert!(
+            generated.iter().any(|n| n == walked),
+            "the static map is missing {walked:?}, which a player walked into"
+        );
+    }
+
+    assert!(
+        has_edge(&map, "Sigil Street", Direction::E, "Ampersand Bend"),
+        "Sigil Street leads east to Ampersand Bend"
+    );
+
+    // I7 resolves a two-sided door's far side statically, so CM's doors are
+    // ordinary passages carrying the door's name rather than dead ends.
+    let doors: Vec<_> = map.facts.iter().filter(|f| f.kind == EdgeKind::Door).collect();
+    assert!(!doors.is_empty(), "Counterfeit Monkey has doors");
+    assert!(
+        doors.iter().all(|f| f.via.is_some()),
+        "every door edge names the door it goes through"
+    );
+}
+
+/// Layout on a real, large map: it finishes, and it satisfies the invariant
+/// `mapper::layout::relayout_auto` guarantees — no two rooms in one layer share
+/// a grid cell (`rooms_never_overlap_random_walk` in `mapper::layout` is the
+/// same assertion on synthetic graphs).
+/// Release-agnostic (SQ-1454's disposition table): a general layout invariant, not tied
+/// to any release's exact room list. Runs against the IF Archive's release 10 — local
+/// `stories/` first, the fetched fixture otherwise (`fixture_path`) — so CI reaches it.
+#[test]
+fn counterfeit_monkey_layout_places_every_room_in_its_own_cell() {
+    use std::collections::BTreeSet;
+    let path = fixture_path("CounterfeitMonkey-10.gblorb");
+    if !path.is_file() {
+        eprintln!("SKIP: CounterfeitMonkey-10.gblorb absent (stories/ and fetched fixtures)");
+        return;
+    }
+    let map = mapgen::generate(&path, true).expect("Counterfeit Monkey must map");
+    assert!(map.layout_time.is_some(), "layout was asked for and must have run");
+    assert!(map.graph.rooms().count() > 90, "a hundred-room graph is the point of this case");
+
+    for layer in map.graph.layers().keys() {
+        let cells: Vec<(i32, i32)> = map
+            .graph
+            .rooms_in_layer(*layer)
+            .into_iter()
+            .filter_map(|id| map.graph.room(id).and_then(|r| r.pos))
+            .collect();
+        let unique: BTreeSet<(i32, i32)> = cells.iter().copied().collect();
+        assert_eq!(cells.len(), unique.len(), "two rooms share a cell on layer {layer}");
+    }
+
+    // And the dump renders the whole thing without falling over — the artefact
+    // is the deliverable, not the graph.
+    let dump = app::map_dump::render_dump(&map.graph, &app::symbols::SymbolSet::default());
+    assert!(dump.contains("Sigil Street"), "the dump draws the map it was given");
+}
+
+// ---------------------------------------------------------------------------
+// Real-game: ZIL (Zork I) and the Inform 6 library on Glulx (Adventure)
+// ---------------------------------------------------------------------------
+
+/// Zork I's own release, as opposed to Mini-Zork's: the same white-house
+/// geography, from a much larger story, and a room count in a sane range.
+#[test]
+fn zork1_static_map_reads_its_zil_exits() {
+    use mapper::direction::Direction;
+    let Some(path) = story("zork1-invclues-r52-s871125.z5") else {
+        eprintln!("SKIP: stories/zork1-invclues-r52-s871125.z5 absent");
+        return;
+    };
+    let map = mapgen::generate(&path, true).expect("Zork I must map");
+    assert_eq!(map.source, SourceKind::Zil);
+    assert_eq!(map.story.release, Some(52));
+    assert_eq!(map.story.serial.as_deref(), Some("871125"));
+
+    assert!(has_edge(&map, "West of House", Direction::N, "North of House"));
+    assert!(has_edge(&map, "West of House", Direction::S, "South of House"));
+
+    // Zork I has on the order of a hundred rooms. The range is deliberately
+    // loose — this is a guard against a reader that finds two rooms or two
+    // thousand, not a pin on the exact count.
+    let rooms = map.graph.rooms().count();
+    assert!((80..=200).contains(&rooms), "room count out of range: {rooms}");
+
+    // The endgame barrow is a CEXIT, and the whole reason `ExitDetail` exists:
+    // `declared_exit` alone would report it as unresolvable code and the map
+    // would simply not have it.
+    assert!(
+        has_edge(&map, "West of House", Direction::SW, "Stone Barrow"),
+        "the conditional passage to the Stone Barrow is a real passage"
+    );
+
+    // SQ-1311: object #41 declares nothing but a self-referential `IN -> 41`
+    // and must not appear as a room, same shape as Mini-Zork's #27
+    // (`a_self_referential_unnamed_exit_is_not_a_room`, which carries the
+    // CI-runnable coverage of this same code path).
+    assert!(
+        !map.engine_refs.values().any(|r| matches!(r, mapgen::EngineRef::ZObject(41))),
+        "object #41 (unnamed, self-referential IN) must not appear as a room"
+    );
+
+    // SQ-1334: the Living Room's trap door down to the Cellar is a ZIL FEXIT
+    // (`TRAP-DOOR-EXIT`) — `Code`, with no destination of its own — but the
+    // Cellar's own plain Up exit names the Living Room, so the way back is
+    // declared even though the way there is code. Before this fix the map
+    // showed only `Cellar U -> Living Room`; the Down half is now drawn too,
+    // marked `routine`.
+    let trap_door = map
+        .facts
+        .iter()
+        .find(|f| {
+            f.dir == Direction::Down
+                && map.graph.room(f.origin).map(|r| r.label() == "Living Room").unwrap_or(false)
+                && map.graph.room(f.dest).map(|r| r.label() == "Cellar").unwrap_or(false)
+        })
+        .expect("Living Room's Down exit to the Cellar must be drawn");
+    assert_eq!(trap_door.kind, EdgeKind::Routine, "the trap door's kind must be `routine`");
+    assert_eq!(
+        trap_door.note.as_deref(),
+        Some("decided by the story's code; the way back is declared")
+    );
+
+    // The falsifier this rule guards against: a `Code` exit with NO declared
+    // reverse must stay undrawn, never invented. Kitchen's own Down to the
+    // Studio is a CEXIT joke gated on a flag the game never sets — already a
+    // real, drawn passage (`Conditional`, not `Code`) and untouched by the
+    // `routine` reconciliation, which only ever fires on an otherwise-empty
+    // `Code` exit.
+    let kitchen_down = map
+        .facts
+        .iter()
+        .find(|f| {
+            f.dir == Direction::Down
+                && map.graph.room(f.origin).map(|r| r.label() == "Kitchen").unwrap_or(false)
+        })
+        .expect("Kitchen's Down exit to the Studio must still be drawn");
+    assert_eq!(
+        kitchen_down.kind,
+        EdgeKind::Conditional,
+        "Kitchen's joke exit down to the Studio must stay `conditional`, not become `routine`"
+    );
+}
+
+/// SQ-1359: **the layer holding the room the story starts in is `Main`.**
+///
+/// Zork I r52 is the story that made the old rule visibly wrong. Its underground is 54 rooms
+/// against 21 above ground, so keeping the LARGEST component as Main put West of House, the
+/// white house, the forest and the whole surface on a layer called "Rocky Ledge" — named after
+/// the room a portal up from the mine happens to enter — and called the Cellar and its
+/// neighbours "Main". A player opening that map is looking for the room the game opens in.
+///
+/// Both halves are asserted, because only the pair is evidence: mapgen boots the story (see
+/// `app::mapgen::probe_start_room`) and finds West of House, and with that boot turned OFF the
+/// old answer comes back. The second half is the falsifier — without it this case would still
+/// pass if the split rule were reverted and Zork I merely happened to name its biggest component
+/// something else.
+#[test]
+fn zork1_main_layer_is_the_one_the_story_starts_in() {
+    let Some(path) = story("zork1-invclues-r52-s871125.z5") else {
+        eprintln!("SKIP: stories/zork1-invclues-r52-s871125.z5 absent");
+        return;
+    };
+    let map = mapgen::generate(&path, true).expect("Zork I must map");
+
+    // ── the boot found the room, by name and as the graph's current room ──
+    let start = map.start.room().expect("Zork I reaches its first prompt standing in a room");
+    assert_eq!(start.name, "West of House");
+    assert_eq!(
+        map.graph.current(),
+        Some(start.id),
+        "the start room is the map's current room, so a drawing highlights it"
+    );
+    assert_eq!(map.start.header_line(), format!("start room: West of House (#{})", start.id));
+
+    // ── and its layer is Main ────────────────────────────────────────────
+    assert_eq!(
+        map.graph.layer_of(start.id),
+        mapper::layer::MAIN_LAYER,
+        "West of House is on Main"
+    );
+    let main_names: Vec<&str> = map
+        .graph
+        .rooms_in_layer(mapper::layer::MAIN_LAYER)
+        .iter()
+        .filter_map(|&id| map.graph.room(id).map(|r| r.label()))
+        .collect();
+    for surface in ["North of House", "Behind House", "Kitchen", "Living Room"] {
+        assert!(main_names.contains(&surface), "the surface world is on Main; {surface} is not");
+    }
+
+    // ── the underground is a layer of its own, named after its own entrance ──
+    let cellar = map
+        .graph
+        .rooms()
+        .find(|r| r.label() == "Cellar")
+        .expect("Zork I has a Cellar")
+        .id;
+    let under = map.graph.layer_of(cellar);
+    assert_ne!(under, mapper::layer::MAIN_LAYER, "the underground is no longer Main");
+    assert!(
+        !map.graph.layer_name(under).is_empty() && map.graph.layer_name(under) != "Main",
+        "the underground layer is named after the room its entering portal leads into, got {:?}",
+        map.graph.layer_name(under)
+    );
+    assert!(
+        map.graph.rooms_in_layer(under).len() > main_names.len(),
+        "and it is the BIGGER of the two, which is the whole point of this case"
+    );
+
+    // ── the falsifier: the old rule, reproduced by skipping the boot ─────
+    let flat = mapgen::generate_with_options(
+        &path,
+        false,
+        &mapgen::MapgenOptions { boot_for_start: false, ..Default::default() },
+    )
+    .expect("Zork I must map with no boot too");
+    assert_eq!(flat.start, mapgen::StartProbe::Skipped);
+    assert_eq!(flat.graph.current(), None, "no boot, no current room");
+    let flat_start = flat.graph.rooms().find(|r| r.label() == "West of House").unwrap().id;
+    assert_ne!(
+        flat.graph.layer_of(flat_start),
+        mapper::layer::MAIN_LAYER,
+        "without the boot the largest component is Main and West of House is NOT on it — this is \
+         the defect SQ-1359 fixed, and if it stops reproducing the case above proves nothing"
+    );
+}
+
+/// The other half of SQ-1359, drawn: the SVG highlights exactly one room, and it is the one the
+/// story starts in.
+///
+/// The `room current` class is the yellow box `export_svg` draws for "you are here"; before this
+/// quest a generated map had no current room at all and drew none.
+#[test]
+fn zork1_svg_highlights_west_of_house_as_the_current_room() {
+    let Some(path) = story("zork1-invclues-r52-s871125.z5") else {
+        eprintln!("SKIP: stories/zork1-invclues-r52-s871125.z5 absent");
+        return;
+    };
+    let map = mapgen::generate(&path, true).expect("Zork I must map");
+    let svg = app::export_svg::render_svg_layered(&map.graph);
+
+    let doc = roxmltree::Document::parse(&svg).expect("well-formed SVG");
+    let current: Vec<_> = doc
+        .descendants()
+        .filter(|n| {
+            n.tag_name().name() == "rect"
+                && n.attribute("class") == Some("room current")
+                && !app::export_svg::under_class(*n, "legend-block")
+        })
+        .collect();
+    assert_eq!(current.len(), 1, "exactly one room is drawn as the current one");
+
+    // The room's label is the text element immediately after its rect (`export_svg` emits the
+    // box and then its caption), which is how the drawing itself associates the two.
+    let label = current[0]
+        .next_siblings()
+        .find(|n| n.is_element() && n.tag_name().name() == "text")
+        .and_then(|n| n.text())
+        .expect("the highlighted room carries a label");
+    assert_eq!(label, "West of House");
+}
+
+/// SQ-1392: `mapgen`'s own writer (`app::mapgen::write_artefacts`) calls
+/// [`app::export_svg::render_svg_layered_generated`], not the live app's
+/// [`app::export_svg::render_svg_layered`] — a generated map has no player, so its legend must not
+/// claim one is standing in the highlighted room. Drives a tracked fixture (not `stories/`) so it
+/// runs on CI.
+#[test]
+fn generated_svg_legend_says_starting_room_not_you_are_in_it() {
+    let path = fixture_path("minizork-r34-s871124.z3");
+    let map = mapgen::generate(&path, true).expect("minizork.z3 is a tracked fixture");
+
+    let svg = app::export_svg::render_svg_layered_generated(&map.graph);
+    assert!(svg.contains("starting room"), "mapgen's legend must say \"starting room\"");
+    assert!(
+        !svg.contains("the room you are in"),
+        "mapgen's legend must not claim a player is where nobody is"
+    );
+}
+
+/// The rule must not disturb a story whose start room was in the largest component ANYWAY —
+/// which is most of them, and is why this quest is a correction rather than a rearrangement.
+///
+/// Mini-Zork I (r34/s871124) is tracked, so this half runs on CI: its 58-room surface-and-cellar
+/// component holds West of House and is also the biggest, so booting for the start room changes
+/// nothing about the split. The current room is set either way it is learned, and that IS a
+/// change — the drawing now has a room to highlight.
+#[test]
+fn minizork_start_is_in_the_largest_component_so_the_split_is_unchanged() {
+    let path = fixture_path("minizork-r34-s871124.z3");
+    let booted = mapgen::generate(&path, false).expect("minizork.z3 is a tracked fixture");
+    let flat = mapgen::generate_with_options(
+        &path,
+        false,
+        &mapgen::MapgenOptions { boot_for_start: false, ..Default::default() },
+    )
+    .expect("minizork.z3 is a tracked fixture");
+
+    let layers = |m: &mapgen::GeneratedMap| -> Vec<(String, usize)> {
+        let mut ids: Vec<_> = m.graph.layers().keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .map(|id| (m.graph.layer_name(id).to_string(), m.graph.rooms_in_layer(id).len()))
+            .collect()
+    };
+    assert_eq!(layers(&booted), layers(&flat), "the split is identical either way");
+
+    let start = booted.start.room().expect("Mini-Zork opens in West of House");
+    assert_eq!(start.name, "West of House");
+    assert_eq!(booted.graph.layer_of(start.id), mapper::layer::MAIN_LAYER);
+    assert_eq!(booted.graph.current(), Some(start.id));
+    assert_eq!(flat.graph.current(), None, "and skipping the boot leaves no current room");
+}
+
+/// The SVG a generated Zork I map exports (SQ-1313): every room named, every
+/// drawn connector a stroked path, and not one segment running through a room
+/// box.
+///
+/// The synthetic graphs `app::export_svg`'s own unit cases build cannot produce
+/// the lane pressure a hundred-room map does — the crossing check only means
+/// something once several connectors are competing for one channel — so this is
+/// the case that actually exercises it, on the map the whole quest was reported
+/// against. It skips vacuously without `stories/`, so it prints what it skipped.
+#[test]
+fn zork1_svg_shows_every_room_and_no_connector_crosses_a_room() {
+    let Some(path) = story("zork1-invclues-r52-s871125.z5") else {
+        eprintln!("SKIP: stories/zork1-invclues-r52-s871125.z5 absent");
+        return;
+    };
+    let map = mapgen::generate(&path, true).expect("Zork I must map");
+    let svg = app::export_svg::render_svg_layered(&map.graph);
+
+    let doc = roxmltree::Document::parse(&svg).expect("the export must be well-formed XML");
+
+    // Every room the map holds is named on the drawing. Labels wrap onto at most
+    // two lines, so a name is matched against the concatenation of its own box's
+    // text rather than against any single `<text>`.
+    let drawn: Vec<String> = doc
+        .descendants()
+        .filter(|n| {
+            n.attribute("class").unwrap_or("").split_whitespace().any(|c| c == "room-label")
+        })
+        .map(|n| n.text().unwrap_or("").to_string())
+        .collect();
+    let haystack = drawn.join("\u{1}");
+    let mut missing: Vec<String> = Vec::new();
+    for room in map.graph.rooms() {
+        let label = room.label();
+        let joined = label.split_whitespace().collect::<Vec<_>>().join(" ");
+        // A label is drawn whole, or split across the two lines of its box.
+        let found = haystack.contains(&joined)
+            || haystack.replace('\u{1}', " ").contains(&joined)
+            || label.chars().count() > 34; // ellipsised at the widest box
+        if !found {
+            missing.push(label.to_string());
+        }
+    }
+    assert!(missing.is_empty(), "rooms missing from the SVG: {missing:?}");
+
+    // One stroked path per drawn connector — the export draws no bare polylines
+    // and no `<line>` for a real passage, so a count of `.edge` paths is the
+    // count of connectors reaching the drawing.
+    let edge_paths = doc
+        .descendants()
+        .filter(|n| {
+            n.tag_name().name() == "path"
+                && n.attribute("class").unwrap_or("").split_whitespace().any(|c| c == "edge")
+                // The legend draws a sample of every mark; only the map's own count matters.
+                && !app::export_svg::under_class(*n, "legend-block")
+        })
+        .count();
+    let drawn_connectors: usize = map
+        .graph
+        .layers()
+        .keys()
+        .copied()
+        .filter(|&l| !map.graph.rooms_in_layer(l).is_empty())
+        .map(|l| mapper::render::render_layer(&map.graph, l).plan.connectors.len())
+        .sum();
+    assert!(drawn_connectors > 40, "Zork I must route a real number of connectors, got {drawn_connectors}");
+    assert_eq!(
+        edge_paths, drawn_connectors,
+        "every routed connector must reach the drawing as its own path"
+    );
+
+    // The geometric invariant, checked by the same code the unit cases use.
+    let bad = app::export_svg::connector_room_crossings(&svg);
+    assert!(bad.is_empty(), "connectors must not run through room boxes: {bad:?}");
+
+
+    // And the typographic one (SQ-1317): no direction tag and no cross-layer badge name may sit
+    // on a room box or on another label. A hundred-room map is where that pressure is — this
+    // caught `Maze` written straight through `Cyclops Room`'s own name, which no synthetic
+    // fixture in `export_svg`'s own module produces.
+    let bad = app::export_svg::label_collisions(&svg);
+    assert!(bad.is_empty(), "labels must stay clear of rooms and of each other: {bad:#?}");
+
+    // SQ-1319: Kitchen's Down passage to Studio (a layer peeled off by a portal seam) is the
+    // exact case `place_ghost`'s fallback exists for — its ghost was dropped outright under the
+    // fixed-candidate search SQ-1317 shipped with, on this map's dense house layer.
+    assert_ghost_accounting(&svg, &map.graph);
+
+    // SQ-1334/SQ-1356: the trap door's Down half means the Living Room ⇄ Cellar crossing runs
+    // both ways, so the Living Room's own panel names the Cellar PLAINLY — a `to Cellar` there
+    // would say the trap door is one-way, which is exactly what SQ-1334 fixed.
+    let cellar_labels: Vec<String> = doc
+        .descendants()
+        .filter(|n| {
+            n.attribute("class") == Some("ghost-name")
+                && !app::export_svg::under_class(*n, "legend-block")
+        })
+        .filter_map(|n| n.text().map(str::to_string))
+        .filter(|t| t.contains("Cellar"))
+        .collect();
+    assert!(!cellar_labels.is_empty(), "the Living Room's panel must ghost the Cellar");
+    assert!(
+        cellar_labels.iter().all(|t| !t.starts_with("to ") && !t.starts_with("from ")),
+        "a two-way crossing names the room plainly: {cellar_labels:?}"
+    );
+
+    // SQ-1322: no two adjacent rooms — Cyclops Room ↔ Strange Passage at the minimum gutter is
+    // the reported case — sit close enough to leave a two-way passage's heads meeting or
+    // overlapping (a "bowtie", `◄►`) rather than showing a real shaft between them.
+    let bad = app::export_svg::narrow_channel_gaps(&svg);
+    assert!(bad.is_empty(), "every adjacent-room channel must meet the SVG's pixel floor: {bad:?}");
+}
+
+/// The same ghost accounting as Zork I, on a denser Glulx map — Anchorhead's own house has more
+/// rooms competing for the same badge sides than Zork I's does, which is the density SQ-1319's
+/// fallback has to survive rather than merely pass on a roomy layer.
+#[test]
+fn anchorhead_svg_ghosts_every_cross_layer_passage() {
+    let Some(path) = story("Anchorhead.gblorb") else {
+        eprintln!("SKIP: stories/Anchorhead.gblorb absent");
+        return;
+    };
+    let map = mapgen::generate(&path, true).expect("Anchorhead must map");
+    let svg = app::export_svg::render_svg_layered(&map.graph);
+    roxmltree::Document::parse(&svg).expect("the export must be well-formed XML");
+
+    let bad = app::export_svg::connector_room_crossings(&svg);
+    assert!(bad.is_empty(), "connectors must not run through room boxes: {bad:?}");
+    let bad = app::export_svg::label_collisions(&svg);
+    assert!(bad.is_empty(), "labels must stay clear of rooms and of each other: {bad:#?}");
+
+    assert_ghost_accounting(&svg, &map.graph);
+
+    let bad = app::export_svg::narrow_channel_gaps(&svg);
+    assert!(bad.is_empty(), "every adjacent-room channel must meet the SVG's pixel floor: {bad:?}");
+}
+
+/// The Inform 6 library on Glulx — a different reader from Inform 7's, reached
+/// only when no `Map_Storage` table is found.
+#[test]
+fn adventure_static_map_reads_the_inform6_library() {
+    use mapper::direction::Direction;
+    let Some(path) = story("advent.blb") else {
+        eprintln!("SKIP: stories/advent.blb absent");
+        return;
+    };
+    let map = mapgen::generate(&path, true).expect("Adventure must map");
+    assert_eq!(map.source, SourceKind::I6Library, "advent.blb is an Inform 6 build");
+    assert_eq!(map.story.engine, "glulx");
+
+    // The Inform 6 library build carries its own `Info` block too — reading
+    // it does not depend on the I7 world model, which this build has none of.
+    assert_eq!(map.story.release, Some(5), "advent.blb release 5");
+    assert_eq!(map.story.serial.as_deref(), Some("961209"));
+    assert!(map.story.checksum.is_some());
+
+    let generated = names(&map);
+    assert!(
+        generated.iter().any(|n| n == "At End Of Road"),
+        "the road outside the wellhouse is where Colossal Cave starts"
+    );
+    assert!(has_edge(&map, "At End Of Road", Direction::E, "Inside Building"));
+    assert!(has_edge(&map, "At End Of Road", Direction::W, "At Hill In Road"));
+    assert!(has_edge(&map, "At End Of Road", Direction::Down, "In A Valley"));
+}
+
+/// A story the Inform 7 reader refuses AND that declares no Inform 6 exits
+/// either is refused outright — the binary's exit 2. Kerkerkruip is one of the
+/// eight the I7 reader declines.
+#[test]
+fn kerkerkruip_has_no_static_map_source() {
+    let Some(path) = story("Kerkerkruip.gblorb") else {
+        eprintln!("SKIP: stories/Kerkerkruip.gblorb absent");
+        return;
+    };
+    let err = mapgen::generate(&path, true).expect_err("Kerkerkruip declares no static map");
+    assert!(
+        matches!(err, mapgen::GenError::NoStaticSource(_)),
+        "must be the exit-2 refusal, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("Map_Storage"), "the message names what was looked for: {msg}");
+}
+
+/// The 84 distinct room names a player reached walking Counterfeit Monkey,
+/// taken from a real `.map.txt` dump of that session. Not the game's whole map
+/// — the player never finished it — which is why the assertion above is
+/// "every one of these is present" rather than an equality.
+const WALKED_COUNTERFEIT_MONKEY_ROOMS: &[&str] = &[
+    "Abandoned Park",
+    "Abandoned Shore",
+    "Ampersand Bend",
+    "Antechamber",
+    "Apartment Bathroom",
+    "Aquarium Bookstore",
+    "Arbot Maps & Antiques",
+    "Babel Café",
+    "Back Alley",
+    "Bureau Basement Middle",
+    "Bureau Basement Secret Section",
+    "Bureau Basement South",
+    "Bureau Hallway",
+    "Bus Station",
+    "Cathedral Gift Shop",
+    "Church Forecourt",
+    "Cinema Lobby",
+    "Cold Storage",
+    "Counterfeit Monkey",
+    "Crew Cabin",
+    "Crumbling Wall Face",
+    "Customs House",
+    "Deep Street",
+    "Display Reloading Room",
+    "Docks",
+    "Dormitory Room",
+    "Equipment Archive",
+    "Fair",
+    "Fish Market",
+    "Fleur d'Or Drinks Club",
+    "Fleur d'Or Lobby",
+    "Foredeck",
+    "Galley",
+    "Generator Room",
+    "Heritage Corner",
+    "Hesychius Street",
+    "Higgate's office",
+    "High Street",
+    "Hostel",
+    "Language Studies Department Office",
+    "Long Street North",
+    "Long Street South",
+    "Midway",
+    "Monumental Staircase",
+    "My Apartment",
+    "Navigation Area",
+    "New Church",
+    "Old City Walls",
+    "Open Sea",
+    "Oracle Project",
+    "Outdoor Café",
+    "Palm Square",
+    "Park Center",
+    "Patriotic Chard-Garden",
+    "Personal Apartment",
+    "Precarious Perch",
+    "Private Solarium",
+    "Projection Booth",
+    "Public Convenience",
+    "Rectification Room",
+    "Roget Close",
+    "Rotunda",
+    "Roundabout",
+    "Samuel Johnson Basement",
+    "Samuel Johnson Hall",
+    "Screening Room",
+    "Sensitive Equipment Testing Room",
+    "Sigil Street",
+    "Slango's Bunk",
+    "Slango's Head",
+    "Sunning Deck",
+    "Surveillance Room",
+    "Tall Street",
+    "Tin Hut",
+    "Traffic Circle",
+    "Tunnel through Chalk",
+    "University Oval",
+    "Waterstone's Office",
+    "Webster Court",
+    "Winding Footpath",
+    "Wonderland",
+    "Workshop",
+    "Your Bunk",
+    "Your Head",
+];

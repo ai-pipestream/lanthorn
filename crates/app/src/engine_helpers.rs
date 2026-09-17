@@ -28,7 +28,7 @@ pub(crate) fn zvm_session_mut(engine: &mut dyn Engine) -> &mut GameSession {
 
 /// Non-panicking downcast to the Z-machine session: `Some` for a Z-code game,
 /// `None` for Glulx. The archive-save paths use it to source the **zvm-only**
-/// `screen.json` (`Some(&z.machine.screen)` for the Z-machine, `None` for Glulx —
+/// `screen.bin` (`Some(&z.machine.screen)` for the Z-machine, `None` for Glulx —
 /// whose display lives inside its `EngineSave`); the save itself routes through
 /// the engine-neutral `Engine::save_state` for both engines.
 pub(crate) fn zvm_session_opt(engine: &dyn Engine) -> Option<&GameSession> {
@@ -36,7 +36,7 @@ pub(crate) fn zvm_session_opt(engine: &dyn Engine) -> Option<&GameSession> {
 }
 
 /// Mutable non-panicking downcast to the Z-machine session: `Some` for a Z-code
-/// game, `None` for Glulx. Used to reinstate the zvm-only `screen.json` after an
+/// game, `None` for Glulx. Used to reinstate the zvm-only `screen.bin` after an
 /// archive restore without panicking on a Glulx engine.
 pub(crate) fn zvm_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut GameSession> {
     engine.as_any_mut().downcast_mut::<GameSession>()
@@ -79,7 +79,15 @@ pub(crate) fn apply_v6_pictures(session: &mut dyn Engine, ac: &app::archive::Arc
     let Some(z) = zvm_session_opt_mut(session) else { return };
     match &ac.display {
         Some(d) => z.load_display_list(d, &ac.pictures),
-        None => z.load_pictures_png(&ac.pictures),
+        None => {
+            // No display list at all (a pre-SQ-1403 archive, or a non-v6 story) —
+            // `load_display_list` is not reached to reset the paint log for us, so
+            // do it directly: without it a pre-restore session's log would survive
+            // into this one and the first palette change after this restore would
+            // replay ITS pictures over these fresh pixels (SQ-0587's class).
+            let _ = z.machine.restore_paint_log(&[]);
+            z.load_pictures_png(&ac.pictures);
+        }
     }
     // The painted ground under all of them (SQ-0787). UNCONDITIONAL, including
     // when the archive carries none: `auto_load` restores after the story has
@@ -195,6 +203,17 @@ pub(crate) enum RestoreOutcome {
 /// used to call `restore_state` unconditionally, landing the VM on the descriptor
 /// instead of past it. Shared by every host load/restore site (saves-manager Load,
 /// `/restore-state`, and a `.lanthorn` picked from the in-game restore picker).
+///
+/// A Scott Adams game additionally accepts a BARE save file with no reserved
+/// extension (SQ-1413) — neither this crate's own binary snapshot nor a
+/// ScottFree 1.14 text save gets one the way a Z-machine `.qzl` does, so the
+/// two are told apart by content instead
+/// (`ScottSession::restore_game_save`). Checked before `load_archive`, which
+/// expects a `.lanthorn` zip and would otherwise fail on either bare format —
+/// this is what lets a player point the restore-file picker straight at a
+/// loose `.sav` (lanthorn's own saves manager lists only `.lanthorn`
+/// archives, so this path matters specifically for the general file browser,
+/// reached from Host Load).
 pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine) -> Result<RestoreOutcome, String> {
     if app::persist_files::is_game_save(path) {
         let bytes = app::archive::read_quetzal_from_file(path).map_err(|e| e.to_string())?;
@@ -203,6 +222,16 @@ pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine
         return Ok(RestoreOutcome::DescriptorCompleted(None));
     }
     let tag = engine_tag(&*session);
+    if tag == app::scott_session::SCOTT_ENGINE {
+        if let Ok(bytes) = std::fs::read(path) {
+            let is_scott_save = bytes.starts_with(&scott::Vm::SNAPSHOT_MAGIC)
+                || scott::looks_like_scottfree_save(&bytes);
+            if is_scott_save {
+                session.restore_game_save(&bytes).map_err(restore_error_msg)?;
+                return Ok(RestoreOutcome::DescriptorCompleted(None));
+            }
+        }
+    }
     let ac = load_archive(path).map_err(|e| e.to_string())?;
     if ac.meta.trigger.is_portable() {
         // An in-game `@save`: the same guard `restore_state` applies internally,
@@ -248,6 +277,36 @@ pub(crate) fn note_bare_quetzal_width(session: &mut dyn Engine) {
     }
 }
 
+/// Whether `session` is a Z-machine Version 6 story. `false` for Glulx/Scott
+/// and for a bare `dyn Engine` that doesn't downcast to a Z-machine session.
+/// Used only to decide whether a restored archive's missing paint log
+/// (SQ-1410) is a real degradation — a non-v6 story has no paint log at any
+/// format version, so it never misses one.
+pub(crate) fn is_v6_session(session: &dyn Engine) -> bool {
+    zvm_session_opt(session).is_some_and(|z| z.machine.mem.version() == 6)
+}
+
+/// Push a restore-time notice into the transcript when the just-restored
+/// archive predates `screen.bin` (SQ-1401) or `display.bin` (SQ-1403) — see
+/// [`app::archive::RestoreDegradation`]. A no-op for a current-format archive.
+///
+/// Same mechanism as every other host warning surfaced at startup/restore (a
+/// broken `config.toml`, an unreadable per-game `pictures` key, a theme
+/// warning — see `startup.rs`): a persistent `TranscriptKind::Warning` line,
+/// not a `push_notice` toast, because the player should still be able to read
+/// it after it scrolls by. Shared by every restore site — `apply_archive_state`
+/// below and the auto-resume path in `startup.rs`, which restores before
+/// `AppState` exists and so cannot call `apply_archive_state` itself — so the
+/// wording and styling live in exactly one place.
+pub(crate) fn push_restore_degradation_notice(
+    state: &mut app::state::AppState,
+    degradation: app::archive::RestoreDegradation,
+) {
+    if let Some(msg) = degradation.notice_text() {
+        state.push_transcript_internal(&msg, app::state::TranscriptKind::Warning);
+    }
+}
+
 /// Reinstate everything an archive carries OUTSIDE the VM: the map, the
 /// transcript (styles, paragraph layout, and inline art), the Z-machine screen,
 /// the v6 graphics canvases, aux data, turn history, and the turn counter.
@@ -262,6 +321,21 @@ pub(crate) fn apply_archive_state(
     mapper: &mut mapper::mapper::Mapper,
     state: &mut app::state::AppState,
 ) {
+    // A restore swaps the world out from under everything derived from it, so it
+    // is a turn boundary like any other (SQ-1175): the epoch bump is what tells
+    // the epoch-gated readers (the command band's object columns) to re-read the
+    // engine, and `begin_turn` also retires anything the previous world was
+    // still waiting on (a pending vocab offer, a lit reveal).
+    state.begin_turn();
+    // A restore resumes play, so any earlier clean-quit marker no longer
+    // describes where the session is (SQ-1342) — otherwise a Scott game-over
+    // "Restore" that loads a save and is later left with a host `/quit` would
+    // wrongly read as a game-driven exit and clear the resume point.
+    state.game_ended = false;
+    // Computed before `ac.meta` is consumed below (SQ-1410) — the version says
+    // plainly what this archive is missing; see `RestoreDegradation`.
+    let degradation =
+        app::archive::RestoreDegradation::from_format_version(ac.meta.format_version, is_v6_session(session));
     if let Some(scr) = ac.screen.clone() {
         if let Some(z) = zvm_session_opt_mut(session) {
             app::session::restore_screen(z, scr);
@@ -301,6 +375,9 @@ pub(crate) fn apply_archive_state(
     // Restoring to before a word was printed therefore takes the word away,
     // which is the correct per-save answer and comes free from deriving it.
     app::input::refresh_seen_words(state, &*session);
+    // After the restored transcript above, not before: this line must survive
+    // as the last one on screen, not be overwritten by `state.transcript = ac.transcript`.
+    push_restore_degradation_notice(state, degradation);
 }
 
 /// Hand a resumed session the room the archive recorded (SQ-0523).
@@ -332,7 +409,7 @@ pub(crate) fn engine_supports_save(engine: &dyn Engine) -> bool {
     engine.as_any().downcast_ref::<GameSession>().is_some()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod tests {
     // ── SQ-0227 Task 3: restore dispatch on file extension ──────────────────────
     //
@@ -343,7 +420,7 @@ mod tests {
     // a host restore of an in-game `@save` (`.qzl`) landed the VM on the
     // descriptor instead of past it.
 
-    use crate::tests::read_char_then_save_v4_story;
+    use crate::read_char_then_save_v4_story;
 
     /// SQ-0681. A bare Quetzal carries game memory but no screen, so the width
     /// its status layout was baked at is unknowable — `note_bare_quetzal_width`
@@ -540,7 +617,7 @@ mod tests {
         // typed command). This minimal story quits right after @save, so it runs
         // to quit; a real game lands at its next read (covered by
         // session::tests::game_save_restore_via_manager_accepts_next_command).
-        assert_ne!(fresh.machine.state.pc, 0x46,
+        assert_ne!(fresh.machine.state.pc(), 0x46,
             "restore runs forward past the @save descriptor, not parked on it (SQ-0233)");
         let _ = std::fs::remove_file(&qzl_path);
 
@@ -549,7 +626,7 @@ mod tests {
         // instead do a full session resume, landing exactly at the saved PC.
         let sess2 = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
         assert_eq!(sess2.pending_input(), InputKind::Char);
-        let pc_before_restore = sess2.machine.state.pc;
+        let pc_before_restore = sess2.machine.state.pc();
         let save = sess2.save_state();
 
         let lanthorn_path = std::env::temp_dir().join(format!("bm-t3-{}.lanthorn", std::process::id()));
@@ -559,7 +636,7 @@ mod tests {
         let mut fresh2 = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
         let outcome2 = super::restore_from_file(&lanthorn_path, &mut fresh2).expect("restore .lanthorn Save State");
         assert!(matches!(outcome2, super::RestoreOutcome::Resumed(_)));
-        assert_eq!(fresh2.machine.state.pc, pc_before_restore, "resume convention: lands exactly at the saved PC, not the @save descriptor");
+        assert_eq!(fresh2.machine.state.pc(), pc_before_restore, "resume convention: lands exactly at the saved PC, not the @save descriptor");
         assert_eq!(fresh2.machine.global(0), 0, "resume: @save never ran, G0 untouched (contrast with descriptor completion's 2 above)");
         let _ = std::fs::remove_file(&lanthorn_path);
     }
@@ -620,5 +697,81 @@ mod tests {
         .unwrap();
         let boxed: Box<dyn app::engine::Engine> = Box::new(s);
         assert_eq!(super::engine_tag(&*boxed), "scott");
+    }
+
+    // ── SQ-1413: restore_from_file accepts a bare ScottFree save ────────────────
+
+    /// A hand-authored ScottFree 1.14 save — same field order as
+    /// `scott::scottfree_save`'s own fixture (see the field order documented
+    /// on `scott::Vm::restore_scottfree`): 16 `counter room` pairs, a state
+    /// line, then one location per item. Shaped for `tiny_cave.dat`
+    /// (`NumItems=9`, 10 item slots, 4 rooms 0..=3) — see
+    /// `crates/scott/tests/tiny_cave.dat`.
+    fn tiny_cave_scottfree_save() -> String {
+        let mut s = String::new();
+        for ct in 0..16 {
+            s.push_str(&format!("{} 1\n", ct + 1)); // Counters[ct]=ct+1, RoomSaved[ct]=room 1
+        }
+        // BitFlags DarkFlag MyLoc CurrentCounter SavedRoom LightTime
+        s.push_str("0 0 3 7 1 42\n");
+        // 10 item locations: item1 (the idol) carried (255), item9 (the lamp,
+        // LIGHT_SOURCE) in room 1, everything else nowhere.
+        s.push_str("0\n255\n0\n0\n0\n0\n0\n0\n0\n1\n");
+        s
+    }
+
+    /// End-to-end through the app's own restore-file dispatch
+    /// (`restore_from_file`, the shared host restore site): a bare ScottFree
+    /// save file, with no `.lanthorn`/`.qzl` wrapper, restores through
+    /// `ScottSession::restore_game_save`'s shape detection and lands the
+    /// room and item locations the save file itself named.
+    #[test]
+    fn restore_from_file_accepts_a_bare_scottfree_save() {
+        let mut session: Box<dyn app::engine::Engine> = Box::new(
+            app::scott_session::ScottSession::new(
+                include_bytes!("../../scott/tests/tiny_cave.dat").to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+        assert_eq!(session.current_location().unwrap().number, 1, "tiny_cave starts in room 1");
+
+        let dir = app::scratch_dir("scott-scottfree-save");
+        let path = dir.join("cellar.sav");
+        std::fs::write(&path, tiny_cave_scottfree_save()).unwrap();
+
+        let outcome = super::restore_from_file(&path, &mut *session).expect("restore a bare ScottFree save");
+        assert!(matches!(outcome, super::RestoreOutcome::DescriptorCompleted(None)));
+
+        let loc = session.current_location().expect("a location after restore");
+        assert_eq!(loc.number, 3, "MyLoc=3 from the save file");
+        assert!(loc.name.contains("crystal grotto"), "room 3's own name: {:?}", loc.name);
+
+        let scott = super::scott_session_opt(&*session).expect("still a Scott session");
+        assert_eq!(scott.item_loc(1), -1, "the idol (255 in the save) normalises to CARRIED");
+        assert_eq!(scott.item_loc(9), 1, "the lamp (LIGHT_SOURCE) is in room 1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Neither this crate's own binary snapshot nor a well-formed ScottFree
+    /// save: refused with an error, not a panic, and falls through to the
+    /// ordinary `.lanthorn`-archive path's own (also graceful) failure.
+    #[test]
+    fn restore_from_file_rejects_garbage_for_a_scott_engine() {
+        let mut session: Box<dyn app::engine::Engine> = Box::new(
+            app::scott_session::ScottSession::new(
+                include_bytes!("../../scott/tests/tiny_cave.dat").to_vec(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        let dir = app::scratch_dir("scott-garbage-save");
+        let path = dir.join("garbage.sav");
+        std::fs::write(&path, b"this is not a scott save of either format").unwrap();
+
+        assert!(super::restore_from_file(&path, &mut *session).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

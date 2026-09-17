@@ -1,8 +1,8 @@
-// Z-machine instruction decoder — ZMSD §4, §14.
-//
-// Decodes one instruction at `pc` into a structured `Instr` value.
-// Four instruction forms: Long, Short, Variable, Extended.
-// After operands, reads store/branch/text bytes per the opcode's signature.
+//! Z-machine instruction decoder — ZMSD §4, §14.
+//!
+//! Decodes one instruction at `pc` into a structured [`Instr`] value.
+//! Four instruction forms: Long, Short, Variable, Extended.
+//! After operands, reads store/branch/text bytes per the opcode's signature.
 
 use crate::memory::Memory;
 use crate::text::decode::decode_string;
@@ -11,8 +11,19 @@ use crate::text::decode::decode_string;
 // Public types
 // ---------------------------------------------------------------------------
 
+/// The widest operand list any Z-machine instruction decodes.
+///
+/// The bound is the encoding's, not a guess: a type byte describes four
+/// operands, only `call_vs2`/`call_vn2` carry a second type byte, and every
+/// other form reads at most two. `decode_into` below is the only producer, so
+/// a caller that has an [`Instr`] from it may size a fixed buffer by this
+/// (which is what `Machine::execute` does for the resolved
+/// values — SQ-1431).
+pub const MAX_OPERANDS: usize = 8;
+
 /// A single operand value.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Operand {
     /// 2-byte large constant.
     Large(u16),
@@ -24,20 +35,42 @@ pub enum Operand {
 
 /// Instruction encoding form (ZMSD §4.3).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Form {
+    /// Top bit of the opcode byte is 0 (`0x00`-`0x7F`). Always 2OP; the two
+    /// operand types are packed into bits 6 and 5 of the opcode byte itself
+    /// (0 = small constant, 1 = variable) rather than a separate type byte.
     Long,
+    /// Top two bits of the opcode byte are `10` (`0x80`-`0xBF`). Bits 5-4
+    /// give the single operand's type; type `11` means no operand (0OP)
+    /// instead of one (1OP).
     Short,
+    /// Top two bits of the opcode byte are `11` (`0xC0`-`0xFF`). Bit 5
+    /// distinguishes VAR (1) from 2OP (0); operand types are read from a
+    /// following type byte (two, for `call_vs2`/`call_vn2`).
     Variable,
+    /// Opcode byte `0xBE` (v5+ only): a second byte names the actual EXT
+    /// opcode, and operand types are read from a type byte exactly as in
+    /// [`Form::Variable`].
     Extended,
 }
 
 /// Operand count class — disambiguates same-numbered opcodes in different classes.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum OperandCount {
+    /// 0OP: no operands (e.g. `rtrue`, `quit`).
     Zero,
+    /// 1OP: exactly one operand.
     One,
+    /// 2OP: exactly two operands.
     Two,
+    /// VAR: a variable number of operands (0 up to [`MAX_OPERANDS`]), counted
+    /// by the trailing omitted slot in the type byte(s) rather than fixed by
+    /// the opcode.
     Var,
+    /// EXT (v5+): an extended opcode, encoded and operand-counted the same
+    /// way as [`OperandCount::Var`] but reached through [`Form::Extended`].
     Ext,
 }
 
@@ -142,8 +175,22 @@ fn one_op_sig(opcode: u8, version: u8) -> (bool, bool, bool) {
 /// Returns (stores, branches, has_text) for 0OP opcodes.
 /// Version-dependent:
 ///   0x02 print / 0x03 print_ret carry inline text.
-///   0x05 save / 0x06 restore: branch in v3, store in v4+.
+///   0x05 save / 0x06 restore: branch in v1–v3, store in v4+.
 ///   0x09: pop (nothing) in v1-4, catch (stores) in v5+.
+///
+/// **The opcodes that do not EXIST below Version 3 are decoded anyway**, and
+/// that is deliberate. §14 lists `show_status` (0x0C), `verify` (0x0D),
+/// `split_window`, `set_window`, `output_stream` and `input_stream` as Version
+/// 3, and §14.2 says a game carrying an opcode outside its version is illegal
+/// and "an interpreter should normally halt" — but "should normally" leaves
+/// room not to, and lanthorn chooses not to: halting would turn a story whose
+/// compiler emitted one stray byte into a dead session, where decoding and
+/// executing it anyway is harmless — no Version 1 or 2 release contains these
+/// opcodes, so the choice can only ever be felt by a malformed file. Frotz
+/// makes the same choice (its opcode-dispatch table holds `z_show_status` and
+/// `z_verify` for every version, swapping only `pop`/`catch` and
+/// `not`/`call_1n` by version — exactly the two rows above), which is a second
+/// interpreter agreeing that leniency here is the right reading (SQ-1422).
 fn zero_op_sig(opcode: u8, version: u8) -> (bool, bool, bool) {
     match opcode {
         0x00 => (false, false, false), // rtrue
@@ -261,6 +308,11 @@ fn get_signature(oc: &OperandCount, opcode: u8, version: u8) -> (bool, bool, boo
 
 /// Read one operand from `*pc` given a 2-bit type code.
 /// Returns `None` for type 0b11 (omitted).
+///
+/// `#[inline]`: a handful of instructions called two to eight times per
+/// decoded instruction, which nonetheless showed as its own ~5% self-time
+/// frame in the SQ-1431 profile — i.e. it was being CALLED.
+#[inline]
 fn read_operand(mem: &Memory, typ: u8, pc: &mut u32) -> Option<Operand> {
     match typ & 0b11 {
         0b00 => {
@@ -283,7 +335,9 @@ fn read_operand(mem: &Memory, typ: u8, pc: &mut u32) -> Option<Operand> {
 }
 
 /// Read up to 4 operands from the given type byte (MSB pair first).
-/// Stops at the first omitted slot.
+/// Stops at the first omitted slot. `#[inline]` for the same reason as
+/// [`read_operand`] (SQ-1431).
+#[inline]
 fn read_operands_from_type_byte(
     mem: &Memory,
     type_byte: u8,
@@ -367,6 +421,19 @@ pub fn decode_branch_at(mem: &crate::memory::Memory, addr: u32) -> Branch {
 
 /// Decode the instruction at `pc` in `mem` for Z-machine `version`.
 pub fn decode(mem: &Memory, pc: u32, version: u8) -> Instr {
+    decode_into(mem, pc, version, Vec::new())
+}
+
+/// Same as [`decode`], but fills the caller-supplied `operands` buffer
+/// instead of allocating a fresh `Vec` — the buffer is cleared first, then
+/// moved into the returned [`Instr`]. A caller that recovers it back out
+/// (e.g. via `std::mem::take(&mut instr.operands)` once it is done with the
+/// instruction) can hand the same allocation to the next `decode_into` call,
+/// which is what [`crate::cpu::exec::Machine::step`] does to keep this off
+/// the allocator on the per-instruction path (SQ-1438). Semantics are
+/// otherwise identical to [`decode`].
+pub fn decode_into(mem: &Memory, pc: u32, version: u8, mut operands: Vec<Operand>) -> Instr {
+    operands.clear();
     let mut cursor = pc;
     let opcode_byte = mem.read_byte(cursor);
     cursor += 1;
@@ -374,7 +441,6 @@ pub fn decode(mem: &Memory, pc: u32, version: u8) -> Instr {
     let (form, operand_count, opcode) = decode_form(mem, opcode_byte, &mut cursor, version);
 
     // Read operands based on form
-    let mut operands: Vec<Operand> = Vec::new();
     match form {
         Form::Long => {
             // Bits 6 and 5 of opcode_byte give operand types:
@@ -421,14 +487,15 @@ pub fn decode(mem: &Memory, pc: u32, version: u8) -> Instr {
     let (mut stores, branches, has_text) = get_signature(&operand_count, opcode, version);
 
     // v6 `pull` (ZMSD §15): the instruction is `pull stack -> (result)` — it
-    // ALWAYS carries a store byte in v6, whatever the operand encoding (frotz
-    // z_pull calls store() unconditionally in its V6 branch; user vs game stack
-    // is picked by argument count at execution, not operand type). Missing the
-    // store byte mis-reads it as the next opcode, silently corrupting all
+    // ALWAYS carries a store byte in v6, whatever the operand encoding (user
+    // vs game stack is picked by argument count at execution, not operand
+    // type, so the store target cannot be conditional on that either). Missing
+    // the store byte mis-reads it as the next opcode, silently corrupting all
     // following decode — the failure behind the SQ-0452 parser soft-lock. An
     // earlier fix keyed this off a Large-constant operand only, which repaired
     // direction parsing but left Zork Zero's verb path (Var-operand encoding)
-    // corrupted.
+    // corrupted. Frotz's own v6 `pull` handling stores unconditionally too,
+    // for the same reason.
     if version == 6 && operand_count == OperandCount::Var && opcode == 0x09 {
         stores = true;
     }
@@ -789,10 +856,11 @@ mod tests {
     }
 
     // v6 `pull stack -> (result)` ALWAYS carries a store byte, whatever the
-    // operand encoding — frotz z_pull calls store() unconditionally in its V6
-    // branch and picks user vs game stack by argc, not operand type. Zork Zero's
-    // verb parse path encodes the stack address as a Var operand; keying the
-    // store byte off Operand::Large alone corrupted decode there (SQ-0452).
+    // operand encoding — user vs game stack is picked by argument count at
+    // execution, not by operand type, so the store byte cannot be conditional
+    // on that either. Zork Zero's verb parse path encodes the stack address as
+    // a Var operand; keying the store byte off Operand::Large alone corrupted
+    // decode there (SQ-0452). Frotz stores unconditionally here too.
     #[test]
     fn v6_pull_var_operand_has_store_byte() {
         let mut m = Memory::new(sample_story(6)).unwrap();

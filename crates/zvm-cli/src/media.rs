@@ -81,7 +81,8 @@ impl Candidate {
     /// either alone.
     fn build(&self) -> Option<(u8, u16, String)> {
         let b = &self.bytes;
-        if b.len() < 0x18 || !(3..=8).contains(&b[0]) {
+        // Every published Z-machine version, 1 to 8 (ZMSD §11.1's byte 0).
+        if b.len() < 0x18 || !(1..=8).contains(&b[0]) {
             return None;
         }
         let serial: String = b[0x12..0x18].iter().map(|c| char::from(c & 0x7f)).collect();
@@ -324,6 +325,55 @@ mod tests {
         }
     }
 
+    /// **A Scott Adams Atari disk mounts, and is refused as a Z-machine story
+    /// with a sentence rather than a failure** (SQ-1458).
+    ///
+    /// This is the shape SQ-0840 was filed for, arriving from the other side.
+    /// `blorb` learned three Scott Adams media, so `zvm-cli` now detects and
+    /// mounts disks that carry no Z-code at all; the failure mode to avoid is
+    /// "cannot mount the disk image", which reads as a broken file. What a
+    /// person must get instead is the honest answer: the disk opened, here is
+    /// what is on it, and none of it is for this interpreter.
+    ///
+    /// `stories/` is gitignored, so this skips vacuously on CI.
+    #[test]
+    fn an_atari_scott_adams_disk_mounts_and_reports_no_z_machine_story() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/scott-dialects/atari/SAGA #1 - Adventureland [side A].atr");
+        let Ok(raw) = std::fs::read(&path) else {
+            eprintln!("SKIP: gitignored fixture missing at {}", path.display());
+            return;
+        };
+        assert_eq!(DiskImage::detect(&raw), Some(DiskImage::AtariDos2));
+        assert!(looks_like_image(&raw), "the front-end claims what blorb detects");
+        let Err(refused) = story_candidates(&path, raw) else { panic!("there is no Z-code on it") };
+        assert!(
+            refused.starts_with("Error: no story file on this disk image"),
+            "it opened and then declined, rather than failing to open:\n{refused}"
+        );
+        assert!(refused.contains("2 files mounted"), "…and said what it found:\n{refused}");
+        assert!(
+            !refused.contains("cannot mount"),
+            "a mountable disk must never report a mount failure:\n{refused}"
+        );
+    }
+
+    /// The same, for the one medium here that is not a disk at all: an Atari
+    /// loadable binary lists its single entry and offers no Z-machine story.
+    #[test]
+    fn an_atari_loadable_binary_mounts_and_reports_no_z_machine_story() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/scott-dialects/atari/The Hulk.xex");
+        let Ok(raw) = std::fs::read(&path) else {
+            eprintln!("SKIP: gitignored fixture missing at {}", path.display());
+            return;
+        };
+        assert_eq!(DiskImage::detect(&raw), Some(DiskImage::AtariXex));
+        let Err(refused) = story_candidates(&path, raw) else { panic!("there is no Z-code in it") };
+        assert!(refused.contains("1 file mounted"), "{refused}");
+        assert!(!refused.contains("cannot mount"), "{refused}");
+    }
+
     /// **The menu is the release's, not the platter's** (SQ-0961), on both
     /// presses of *The Lost Treasures of Infocom* in `treasures/`.
     ///
@@ -343,8 +393,8 @@ mod tests {
     fn the_menu_lists_the_whole_release() {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../treasures");
         let presses = [
-            "Lost Treasures of Infocom, The_Disk3.adf",
-            "The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
+            "Amiga/Lost Treasures of Infocom, The_Disk3.adf",
+            "Mac/The Lost Treasures of Infocom - Disk 1 - Beyond Zork, Lurking Horror.dc42",
         ];
         let mut ran = 0;
         for name in presses {

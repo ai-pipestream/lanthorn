@@ -34,11 +34,22 @@ pub(crate) fn try_blit_band_row(
 ) -> bool {
     if let Some(band) = &wr.band {
         if let Some(picker) = state.game_picker.as_ref() {
-            blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), buf);
+            let suppress = sixel_scroll_suppress(state, picker);
+            blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), suppress, buf);
         }
         return true;
     }
     false
+}
+
+/// True while a sixel image band should render as a background-filled footprint
+/// instead of its full payload (SQ-1198): the transcript viewport is still in
+/// motion from a recent scroll, and the active backend is sixel — the one
+/// protocol with no image ids, so scrolling a placed image past its anchor cell
+/// re-emits the whole payload rather than re-placing an existing upload the way
+/// kitty does. Kitty and half-blocks are untouched: neither pays that cost.
+fn sixel_scroll_suppress(state: &AppState, picker: &Picker) -> bool {
+    picker.protocol_type() == ratatui_image::picker::ProtocolType::Sixel && state.transcript_scroll_in_motion()
 }
 
 /// Blit a left-margin float's picture strip (`x_off == 0`) for one row. Unlike
@@ -54,7 +65,8 @@ pub(crate) fn blit_float_row(
     buf: &mut Buffer,
 ) {
     if let Some(picker) = state.game_picker.as_ref() {
-        blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), buf);
+        let suppress = sixel_scroll_suppress(state, picker);
+        blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, float_page(state), suppress, buf);
     }
 }
 
@@ -71,6 +83,7 @@ pub(crate) fn blit_band(
     area_width: u16,
     row_y: u16,
     page: Option<image::Rgba<u8>>,
+    suppress: bool,
     buf: &mut Buffer,
 ) {
     let dest = Rect::new(
@@ -79,7 +92,7 @@ pub(crate) fn blit_band(
         band.cols.min(area_width.saturating_sub(band.x_off)),
         1,
     );
-    render.borrow_mut().render_row(picker, band, dest, page, buf);
+    render.borrow_mut().render_row(picker, band, dest, page, suppress, buf);
 }
 
 /// Cache key for one band row's built protocol: the image's pixel-buffer
@@ -107,6 +120,16 @@ type BandCacheKey = (usize, u16, u16, u16, u32, u16, u16);
 /// page, since the fit is the whole picture and predates both. It carries the
 /// cell size for the same reason (SQ-1003).
 type FittedKey = (usize, u16, u16, u16, u16);
+
+/// Fold a resolved page into the `u32` both [`BandCacheKey`] and [`FittedKey`]
+/// carry it as: `0` for "no page" (never a valid encoded colour, since a real
+/// one always sets the leading tag byte), else `[1, r, g, b]` big-endian. Shared
+/// by [`InlineImageRender::render_row`] (building a key) and
+/// [`InlineImageRender::retain_live`] (matching against the CURRENT one), so
+/// the two can never encode the same page two different ways.
+fn page_cache_key(page: Option<image::Rgba<u8>>) -> u32 {
+    page.map_or(0, |p| u32::from_be_bytes([1, p[0], p[1], p[2]]))
+}
 
 /// Resize `src` to sit inside a `box_w × box_h` pixel box WITHOUT distorting it,
 /// centred, with the leftover margin left transparent (SQ-0704).
@@ -247,7 +270,15 @@ pub struct InlineImageRender {
     /// `Arc` keeps its pixel-buffer address reserved while cached, so the
     /// pointer-based key can never collide with a later image that reuses a
     /// freed address (the ABA bug). Same shared allocation the live image holds.
-    cache: std::collections::HashMap<BandCacheKey, (std::sync::Arc<image::RgbaImage>, Protocol)>,
+    ///
+    /// The third element is the kitty image id `place_protocol` returned the
+    /// last time this entry was placed (`None` off-kitty, or before the first
+    /// placement) — one id per cache entry, since each key already names a
+    /// distinct row of a distinct band at a distinct page/cell size, so no two
+    /// entries are ever the same upload (SQ-1190). `retain_live` reads it back
+    /// out to free the upload a dropped entry still owns in the terminal,
+    /// mirroring `GraphicsRender::chrome_bands` (SQ-0753).
+    cache: std::collections::HashMap<BandCacheKey, (std::sync::Arc<image::RgbaImage>, Protocol, Option<u32>)>,
     /// The whole source image fitted to a band's cell box, cached per
     /// [`FittedKey`] and SHARED by every row of that band. The
     /// fit `resize_exact` is by far the expensive step (a full-image resample);
@@ -267,7 +298,13 @@ impl std::fmt::Debug for InlineImageRender {
 
 impl InlineImageRender {
     /// Blit the strip for `band.row` (of `band.rows`) into the 1-row `dest`.
-    pub(crate) fn render_row(&mut self, picker: &Picker, band: &ImageBand, dest: Rect, page: Option<image::Rgba<u8>>, buf: &mut Buffer) {
+    ///
+    /// `suppress` (SQ-1198) skips the protocol build/placement entirely and
+    /// leaves the destination as the letterbox fill below — the image's
+    /// background-filled footprint — so a sixel image mid-scroll costs no
+    /// payload at all instead of re-emitting its full data every step. Set only
+    /// by [`sixel_scroll_suppress`]; kitty and half-blocks always pass `false`.
+    pub(crate) fn render_row(&mut self, picker: &Picker, band: &ImageBand, dest: Rect, page: Option<image::Rgba<u8>>, suppress: bool, buf: &mut Buffer) {
         if dest.width == 0 || dest.height == 0 {
             return;
         }
@@ -283,13 +320,14 @@ impl InlineImageRender {
                 }
             }
         }
+        if suppress {
+            return;
+        }
         let src_ptr = std::sync::Arc::as_ptr(&band.image.pixels) as usize;
         // The page joins the key: the same strip over a different page is a
         // different image, and serving the cached one would keep the old ground
         // after a theme switch or `/set-game-colours`.
-        let page_key = page.map_or(0, |p| {
-            u32::from_be_bytes([1, p[0], p[1], p[2]])
-        });
+        let page_key = page_cache_key(page);
         // Cell pixel size comes from the picker font, and joins both keys: it is
         // what the resample below is measured in, and it moves under a terminal
         // font-size change that leaves `cols`/`rows` alone (SQ-1003).
@@ -340,24 +378,74 @@ impl InlineImageRender {
                 None => strip,
             };
             if let Ok(proto) = picker.new_protocol(strip, Size::new(band.cols, 1), Resize::Fit(None)) {
-                self.cache.insert(key, (band.image.pixels.clone(), proto));
+                self.cache.insert(key, (band.image.pixels.clone(), proto, None));
             }
         }
-        if let Some((_, proto)) = self.cache.get(&key) {
-            crate::render::graphics::place_protocol(proto, dest, buf);
+        // Placed every frame this row is drawn, not only on a cache miss — the id
+        // is stable for a given `Protocol`, so re-recording it is idempotent, and
+        // it is how a freshly-built entry (still `None` above) learns the id it
+        // was just placed under (SQ-1190).
+        let placed = self.cache.get(&key).map(|(_, proto, _)| crate::render::graphics::place_protocol(proto, dest, buf));
+        if let Some(id) = placed {
+            if let Some(entry) = self.cache.get_mut(&key) {
+                entry.2 = id;
+            }
         }
     }
 
     /// Drop cache entries for bands no longer live, keyed by source Arc-ptr
-    /// (`live` holds the currently-visible bands' pointers). Bounds growth and,
-    /// with the pinned Arc in the value, releases addresses only once truly gone.
-    pub fn retain_live(&mut self, live: &std::collections::HashSet<usize>) {
-        self.cache.retain(|key, _| live.contains(&key.0));
-        self.fitted.retain(|key, _| live.contains(&key.0));
+    /// (`live` holds the currently-visible bands' pointers) — AND drop entries
+    /// for still-live bands whose cell size or page no longer matches
+    /// `current_cell` / `current_page`. Bounds growth and, with the pinned Arc
+    /// in the value, releases addresses only once truly gone.
+    ///
+    /// A live image keeps every variant it has EVER been rendered at unless this
+    /// also drops the stale ones: `BandCacheKey`/`FittedKey` fold the cell size
+    /// and (for `cache`) the page into the key precisely so a flip re-encodes
+    /// instead of reusing a strip resampled for the old cell (SQ-1003) or baked
+    /// over the old page (SQ-0704) — but a key a caller stops asking for is
+    /// never looked up again, so without this the old variant just sits there
+    /// for as long as the image stays live. A theme flip, `/set-game-colours`,
+    /// or a terminal font-size change is exactly when this matters most: the
+    /// old variant becomes unreachable in the same frame that mints the new
+    /// one, and previously nothing dropped it until the image itself scrolled
+    /// out of the transcript (SQ-1195).
+    ///
+    /// Returns the kitty image ids the evicted entries were placed under, so the
+    /// caller can free them in the terminal (`GraphicsRender::queue_external_deletes`)
+    /// rather than merely forgetting the struct that named them (SQ-1190,
+    /// mirroring SQ-0753's `GraphicsRender::retain_live`/`retain_chrome_bands`).
+    /// One id per evicted entry: each `BandCacheKey` names a distinct row of a
+    /// distinct band at a distinct page/cell size, so eviction here can never
+    /// free an id another surviving entry still places.
+    pub fn retain_live(
+        &mut self,
+        live: &std::collections::HashSet<usize>,
+        current_cell: (u16, u16),
+        current_page: Option<image::Rgba<u8>>,
+    ) -> Vec<u32> {
+        let (cw, ch) = current_cell;
+        let page_key = page_cache_key(current_page);
+        // `key.4`/`key.5`/`key.6` are `BandCacheKey`'s page/cw/ch; `.0` is the
+        // src-ptr shared with `FittedKey`. `cols`/`rows`/`row` (`.1`/`.2`/`.3`)
+        // are NOT filtered: they name which strip of the CURRENT geometry a row
+        // is, not a stale dimension — a font-size change already changes them,
+        // via the wrap that rebuilds every band's `cols`/`rows` before the next
+        // `render_row` call, so the value here is always the current one anyway.
+        let cache_current = |key: &BandCacheKey| key.4 == page_key && key.5 == cw && key.6 == ch;
+        let dropped: Vec<u32> = self
+            .cache
+            .iter()
+            .filter(|(key, _)| !live.contains(&key.0) || !cache_current(key))
+            .filter_map(|(_, (_, _, id))| *id)
+            .collect();
+        self.cache.retain(|key, _| live.contains(&key.0) && cache_current(key));
+        self.fitted.retain(|key, _| live.contains(&key.0) && key.3 == cw && key.4 == ch);
+        dropped
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
     use ratatui::buffer::Buffer;
@@ -374,12 +462,13 @@ mod tests {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
+            rule: None, link: 0,
         };
         let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
         let picker = Picker::halfblocks();
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
         let mut r = InlineImageRender::default();
-        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, false, &mut buf);
         // No panic == pass; the halfblock protocol writes into (0,0)..(2,1).
     }
 
@@ -403,6 +492,7 @@ mod tests {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
+            rule: None, link: 0,
         };
         let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
         let picker = Picker::halfblocks();
@@ -410,7 +500,7 @@ mod tests {
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
         let mut r = InlineImageRender::default();
-        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), white, &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), white, false, &mut buf);
         for x in 0..2 {
             let cell = buf.cell((x, 0)).expect("the band wrote this cell");
             assert_eq!(
@@ -423,7 +513,7 @@ mod tests {
         // A different page is a different image: the cache must not serve the
         // strip baked over the old one after a theme or game-colour change.
         let black = Some(image::Rgba([0, 0, 0, 255]));
-        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), black, &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), black, false, &mut buf);
         assert_eq!(r.cache.len(), 2, "the page is part of the cache key");
     }
 
@@ -542,21 +632,22 @@ mod tests {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
+            rule: None, link: 0,
         };
         let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
         let picker = Picker::halfblocks();
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
         let mut r = InlineImageRender::default();
         assert_eq!(r.cache.len(), 0);
-        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, false, &mut buf);
         assert_eq!(r.cache.len(), 1);
         // A second render of the same band/row reuses the cached protocol
         // rather than inserting a new entry.
-        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, false, &mut buf);
         assert_eq!(r.cache.len(), 1);
         // A different row of the same band gets its own cache entry.
         let band_row1 = crate::render::transcript::ImageBand { row: 1, ..band };
-        r.render_row(&picker, &band_row1, Rect::new(0, 0, 2, 1), None, &mut buf);
+        r.render_row(&picker, &band_row1, Rect::new(0, 0, 2, 1), None, false, &mut buf);
         assert_eq!(r.cache.len(), 2);
     }
 
@@ -575,6 +666,7 @@ mod tests {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
+            rule: None, link: 0,
         };
         let (cols, rows) = (4u16, 2u16);
         let band = crate::render::transcript::ImageBand { image: img, cols, rows, row: 0, x_off: 0 };
@@ -582,13 +674,13 @@ mod tests {
         picker.set_font_size(ratatui_image::FontSize::new(8, 16));
         let mut buf = Buffer::empty(Rect::new(0, 0, cols + 2, rows + 2));
         let mut r = InlineImageRender::default();
-        r.render_row(&picker, &band, Rect::new(0, 0, cols, 1), None, &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, cols, 1), None, false, &mut buf);
         let small = r.fitted.values().next().expect("the band was fitted").1.clone();
         assert_eq!((small.width(), small.height()), (32, 32), "fitted to the 8x16 cell");
 
         // The same band, the same cell COUNT, a bigger cell.
         picker.set_font_size(ratatui_image::FontSize::new(16, 32));
-        r.render_row(&picker, &band, Rect::new(0, 0, cols, 1), None, &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, cols, 1), None, false, &mut buf);
         assert_eq!(r.fitted.len(), 2, "the new cell size is a new fit, not a hit on the old one");
         let big = r
             .fitted
@@ -598,6 +690,84 @@ mod tests {
             .expect("two fits");
         assert_eq!(big, (64, 64), "fitted to the 16x32 cell — the picture is resampled, not rescaled by the terminal");
         assert_eq!(r.cache.len(), 2, "and the row's built protocol is rebuilt with it");
+    }
+
+    /// SQ-1195 (Part A): a font-size flip mints a NEW variant at the new cell
+    /// size but leaves the old one in the cache — `retain_live` only checked
+    /// the source pointer, and a still-live image's ptr never changes across a
+    /// flip. So the stale 8x16 variant sat there for as long as the image
+    /// stayed on screen, unreachable (nothing will ever build that key again)
+    /// but never dropped.
+    ///
+    /// Falsified by calling `retain_live` with the OLD signature (ptr-only): it
+    /// would keep both variants — this asserts only the CURRENT one survives.
+    #[test]
+    fn retain_live_drops_the_stale_cell_size_variant_after_a_flip() {
+        let px = image::RgbaImage::new(32, 32);
+        let img = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(px),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None, margin_px: None,
+            rule: None, link: 0,
+        };
+        let ptr = std::sync::Arc::as_ptr(&img.pixels) as usize;
+        let (cols, rows) = (4u16, 2u16);
+        let band = crate::render::transcript::ImageBand { image: img, cols, rows, row: 0, x_off: 0 };
+        let mut picker = Picker::halfblocks();
+        picker.set_font_size(ratatui_image::FontSize::new(8, 16));
+        let mut buf = Buffer::empty(Rect::new(0, 0, cols + 2, rows + 2));
+        let mut r = InlineImageRender::default();
+
+        // Render once at the small cell, then flip to a bigger one and render
+        // again — same live image, two variants now sitting in both caches.
+        r.render_row(&picker, &band, Rect::new(0, 0, cols, 1), None, false, &mut buf);
+        picker.set_font_size(ratatui_image::FontSize::new(16, 32));
+        r.render_row(&picker, &band, Rect::new(0, 0, cols, 1), None, false, &mut buf);
+        assert_eq!(r.cache.len(), 2, "both cell-size variants are cached going in");
+        assert_eq!(r.fitted.len(), 2, "and both fitted resamples");
+
+        // The image is still live — only the cell size changed. `retain_live`
+        // must drop the 8x16 variant and keep only the 16x32 one.
+        let live = std::collections::HashSet::from([ptr]);
+        r.retain_live(&live, (16, 32), None);
+        assert_eq!(r.cache.len(), 1, "the stale 8x16 variant is gone");
+        assert_eq!(r.fitted.len(), 1, "and its shared fit with it");
+        assert_eq!(r.cache.keys().next().unwrap().5, 16, "the surviving variant is the current 16x32 one");
+        assert_eq!(r.cache.keys().next().unwrap().6, 32);
+        assert_eq!(r.fitted.keys().next().unwrap().3, 16);
+        assert_eq!(r.fitted.keys().next().unwrap().4, 32);
+    }
+
+    /// SQ-1195 (Part A): the same drop applies to a PAGE change (a theme flip
+    /// or `/set-game-colours`) at a fixed cell size, since `cache`'s key folds
+    /// the page in too.
+    #[test]
+    fn retain_live_drops_the_stale_page_variant_after_a_colour_change() {
+        let px = image::RgbaImage::new(32, 32);
+        let img = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(px),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None, margin_px: None,
+            rule: None, link: 0,
+        };
+        let ptr = std::sync::Arc::as_ptr(&img.pixels) as usize;
+        let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
+        let picker = Picker::halfblocks();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
+        let mut r = InlineImageRender::default();
+        let fs = picker.font_size();
+        let cell = (fs.width.max(1), fs.height.max(1));
+
+        let white = Some(image::Rgba([255, 255, 255, 255]));
+        let black = Some(image::Rgba([0, 0, 0, 255]));
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), white, false, &mut buf);
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), black, false, &mut buf);
+        assert_eq!(r.cache.len(), 2, "both page variants are cached going in");
+
+        let live = std::collections::HashSet::from([ptr]);
+        r.retain_live(&live, cell, black);
+        assert_eq!(r.cache.len(), 1, "the stale white-page variant is gone");
+        assert_eq!(r.cache.keys().next().unwrap().4, page_cache_key(black), "the surviving entry is the current page");
     }
 
     #[test]
@@ -612,6 +782,7 @@ mod tests {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
+            rule: None, link: 0,
         };
         let picker = Picker::halfblocks();
         let (cols, rows) = (6u16, 8u16);
@@ -619,12 +790,13 @@ mod tests {
         let mut r = InlineImageRender::default();
         for row in 0..rows {
             let band = crate::render::transcript::ImageBand { image: img.clone(), cols, rows, row, x_off: 0 };
-            r.render_row(&picker, &band, Rect::new(0, row, cols, 1), None, &mut buf);
+            r.render_row(&picker, &band, Rect::new(0, row, cols, 1), None, false, &mut buf);
         }
         assert_eq!(r.fitted.len(), 1, "the whole image is fit-resized once per band, shared by every row");
         assert_eq!(r.cache.len(), rows as usize, "each row still gets its own cheap cropped protocol");
         // Eviction of the band releases BOTH the protocols and the shared fit.
-        r.retain_live(&std::collections::HashSet::new());
+        let fs = picker.font_size();
+        r.retain_live(&std::collections::HashSet::new(), (fs.width.max(1), fs.height.max(1)), None);
         assert_eq!(r.fitted.len(), 0, "retain_live evicts the fitted-image cache too");
         assert_eq!(r.cache.len(), 0);
     }
@@ -634,6 +806,7 @@ mod tests {
             pixels,
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
+            rule: None, link: 0,
         };
         crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 }
     }
@@ -651,7 +824,7 @@ mod tests {
         let arc_a = std::sync::Arc::new(image::RgbaImage::new(16, 16));
         let ptr_a = std::sync::Arc::as_ptr(&arc_a) as usize;
         let band_a = band_for(arc_a.clone());
-        r.render_row(&picker, &band_a, Rect::new(0, 0, 2, 1), None, &mut buf);
+        r.render_row(&picker, &band_a, Rect::new(0, 0, 2, 1), None, false, &mut buf);
         assert_eq!(r.cache.len(), 1);
         // Drop every strong reference to A that this test holds; only the cache
         // still pins it. Its address stays reserved and un-reusable.
@@ -663,7 +836,7 @@ mod tests {
         // The pin guarantees B cannot land on A's still-reserved address.
         assert_ne!(ptr_b, ptr_a, "cached Arc must keep A's address reserved");
         let band_b = band_for(arc_b);
-        r.render_row(&picker, &band_b, Rect::new(0, 0, 2, 1), None, &mut buf);
+        r.render_row(&picker, &band_b, Rect::new(0, 0, 2, 1), None, false, &mut buf);
         // B is a fresh, distinct entry — it never reuses A's cached protocol.
         assert_eq!(r.cache.len(), 2);
     }
@@ -678,14 +851,148 @@ mod tests {
         let arc2 = std::sync::Arc::new(image::RgbaImage::new(16, 16));
         let ptr1 = std::sync::Arc::as_ptr(&arc1) as usize;
         let ptr2 = std::sync::Arc::as_ptr(&arc2) as usize;
-        r.render_row(&picker, &band_for(arc1.clone()), Rect::new(0, 0, 2, 1), None, &mut buf);
-        r.render_row(&picker, &band_for(arc2.clone()), Rect::new(0, 0, 2, 1), None, &mut buf);
+        r.render_row(&picker, &band_for(arc1.clone()), Rect::new(0, 0, 2, 1), None, false, &mut buf);
+        r.render_row(&picker, &band_for(arc2.clone()), Rect::new(0, 0, 2, 1), None, false, &mut buf);
         assert_eq!(r.cache.len(), 2);
 
         // Only band 1 is still live: band 2's entry is evicted, band 1's kept.
-        r.retain_live(&std::collections::HashSet::from([ptr1]));
+        // The current cell/page match what both bands were rendered at, so
+        // band 1's entry survives on liveness alone (Part A cell/page
+        // matching is covered separately below).
+        let fs = picker.font_size();
+        r.retain_live(&std::collections::HashSet::from([ptr1]), (fs.width.max(1), fs.height.max(1)), None);
         assert_eq!(r.cache.len(), 1);
         assert!(r.cache.keys().any(|k| k.0 == ptr1));
         assert!(!r.cache.keys().any(|k| k.0 == ptr2));
+    }
+
+    /// SQ-1190: an evicted band's kitty upload must be freed in the terminal,
+    /// not merely forgotten here. `place_protocol` is the only place that ever
+    /// learns the id `render_row` placed a band's `Protocol` under — this
+    /// asserts `retain_live` reads it back out of the entry it drops and hands
+    /// it to the caller, rather than discarding it along with the struct.
+    ///
+    /// Falsified by reverting the `entry.2 = id` write-back in `render_row`:
+    /// every entry then stays `None` and this returns an empty `Vec` instead
+    /// of the id, exactly the leak this quest fixes.
+    #[test]
+    fn retain_live_returns_the_evicted_kitty_ids_to_delete() {
+        let mut px = image::RgbaImage::new(16, 16);
+        for p in px.pixels_mut() {
+            *p = image::Rgba([200, 0, 0, 255]);
+        }
+        let img = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(px),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None, margin_px: None,
+            rule: None, link: 0,
+        };
+        let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
+        // A real kitty picker (not `Picker::halfblocks()`), so `place_protocol`
+        // actually has an id to hand back.
+        let picker = crate::render::graphics::kitty_picker(8, 16);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
+        let mut r = InlineImageRender::default();
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, false, &mut buf);
+        let id = r
+            .cache
+            .values()
+            .next()
+            .and_then(|(_, _, id)| *id)
+            .expect("a kitty placement must have named an id");
+
+        let fs = picker.font_size();
+        let cell = (fs.width.max(1), fs.height.max(1));
+        let evicted = r.retain_live(&std::collections::HashSet::new(), cell, None);
+        assert_eq!(evicted, vec![id], "the evicted entry's id must be handed back for deletion");
+
+        // A second eviction of the same (now-empty) cache frees nothing new.
+        assert!(r.retain_live(&std::collections::HashSet::new(), cell, None).is_empty());
+    }
+
+    // ── SQ-1198: sixel scroll-settle debounce ─────────────────────────────────
+    //
+    // `pty_stream` (crates/app/tests/pty_stream) can only pose convincingly as
+    // kitty — its responder's DA1 deliberately omits sixel's `4` "so a fallback
+    // path never looks like a success" — so it cannot honestly capture a sixel
+    // byte stream. These two layers are the honest ones instead: the suppression
+    // DECISION (`sixel_scroll_suppress`, pure function of protocol type + motion)
+    // and the render OUTCOME (`render_row`'s `suppress` arm, asserted on the
+    // buffer cells it writes — the same oracle `render_row_caches_built_protocol`
+    // above already uses for the un-suppressed path).
+
+    /// `sixel_scroll_suppress` gates on BOTH the backend and the motion window:
+    /// only sixel, and only while `transcript_scroll_in_motion()`. Kitty
+    /// re-places an existing upload by id for free and half-blocks are ordinary
+    /// cells, so neither pays the cost this debounce exists to avoid, and the
+    /// design commits to leaving both untouched.
+    #[test]
+    fn sixel_scroll_suppress_gates_on_protocol_and_motion() {
+        let mut state = AppState::default();
+        let mut sixel = crate::render::graphics::kitty_picker(8, 16);
+        sixel.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+        let kitty = crate::render::graphics::kitty_picker(8, 16);
+        let halfblocks = Picker::halfblocks();
+
+        // A still screen (no scroll in flight): never suppressed, whatever the
+        // backend — first render of an image is unchanged.
+        assert!(!sixel_scroll_suppress(&state, &sixel), "no motion yet");
+        assert!(!sixel_scroll_suppress(&state, &kitty));
+        assert!(!sixel_scroll_suppress(&state, &halfblocks));
+
+        // In motion: sixel alone is suppressed.
+        state.sixel_scroll_motion_at = Some(std::time::Instant::now());
+        assert!(sixel_scroll_suppress(&state, &sixel), "sixel mid-scroll must suppress");
+        assert!(!sixel_scroll_suppress(&state, &kitty), "kitty is untouched by the debounce");
+        assert!(!sixel_scroll_suppress(&state, &halfblocks), "half-blocks is untouched by the debounce");
+    }
+
+    /// Falsification target for case (1): while suppressed, a sixel band row
+    /// renders as its background-filled footprint — no protocol is built, no
+    /// entry is cached, and the anchor cell carries no payload — where an
+    /// un-suppressed render of the exact same row places a real sixel protocol,
+    /// whose fork-patched encoder (`ratatui-image`'s `src/protocol/sixel.rs`)
+    /// writes the WHOLE sixel data string into the anchor cell's symbol
+    /// (SQ-1198). Falsified by deleting the `if suppress { return; }` early
+    /// return in `render_row`: the cache then gains an entry and the anchor
+    /// carries the payload on the suppressed call too — confirmed by hand before
+    /// trusting this test.
+    #[test]
+    fn suppressed_render_leaves_only_the_footprint_no_payload() {
+        let mut px = image::RgbaImage::new(16, 16);
+        for p in px.pixels_mut() {
+            *p = image::Rgba([200, 0, 0, 255]);
+        }
+        let img = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(px),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None, margin_px: None,
+            rule: None, link: 0,
+        };
+        let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
+        let mut picker = crate::render::graphics::kitty_picker(8, 16);
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
+        let mut r = InlineImageRender::default();
+
+        // Case (1): mid-scroll, no sixel payload is emitted at all.
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, true, &mut buf);
+        assert_eq!(r.cache.len(), 0, "a suppressed render must not build (or cache) a sixel protocol");
+        let anchor = buf.cell((0, 0)).expect("the band wrote this cell");
+        assert_eq!(anchor.symbol(), " ", "no sixel payload rides the anchor cell during motion");
+
+        // Case (2): settled (suppress = false), exactly one full emit lands.
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, false, &mut buf);
+        assert_eq!(r.cache.len(), 1, "the settled render builds and caches the protocol");
+        let anchor = buf.cell((0, 0)).expect("the band wrote this cell");
+        assert!(
+            anchor.symbol().len() > 16,
+            "the settled anchor cell carries the real sixel payload, not a bare space"
+        );
+
+        // A second settled render of the SAME row is a cache hit, not a rebuild —
+        // exactly one full emit per settle, not one per subsequent frame.
+        r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), None, false, &mut buf);
+        assert_eq!(r.cache.len(), 1, "a settled re-render of the same row reuses the cached protocol");
     }
 }

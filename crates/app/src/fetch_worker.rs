@@ -162,15 +162,22 @@ impl Fetcher {
 /// computed IFID never resolves on IFDB, so the fetch looks the game up by this
 /// id instead. Scott databases are small ASCII text, so the read is capped — a
 /// large binary story (Glulx/Z-code) fails the sniff without being slurped whole.
-fn scott_ifdb_id(path: &Path) -> Option<String> {
+fn scott_ifdb_id(path: &Path, disk_entry: Option<&str>) -> Option<String> {
     // Recognise a Scott story the same way the picker does, so a `.blb` blorb
     // (whose SAAI exec chunk holds the `.dat`) is detected as well as a raw
     // `.dat` — sniffing the raw file text alone misses the binary blorb. The
     // TUID is keyed by filename stem, since a Scott database has no embedded IFID.
-    if !matches!(crate::hints::load_story(path), Ok(crate::hints::LoadedStory::Scott(_))) {
+    //
+    // For a story inside a zip the stem is the ENTRY's (`adv01` in
+    // `AdamsGames.zip`), which is the name the table knows; the archive's own
+    // stem names nothing, and the eighteen games in that zip fetched as
+    // "not on IFDB" until this looked at the right name.
+    let (loaded, _) = crate::hints::load_mounted_story_from(path, disk_entry).ok()?;
+    if !matches!(loaded, crate::hints::LoadedStory::Scott(_)) {
         return None;
     }
-    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    let named: &Path = disk_entry.map(Path::new).unwrap_or(path);
+    let stem = named.file_stem().and_then(|s| s.to_str())?;
     crate::picker::scott_tuid(stem).map(str::to_string)
 }
 
@@ -197,6 +204,20 @@ fn fetch_one(
         &crate::storage::story_key_at_from(&path, disk_entry.as_deref()),
     );
     let existing = story_info::load(&game_dir, &ifid);
+    // The IFDB page id a previous answer recorded — from a hand-set IFDB URL
+    // (SQ-0371), from an IFDB-search download, or from an ordinary by-IFID
+    // fetch. Reused, because the *reason* a story has one is usually that IFDB
+    // does not index the IFID we compute for it: asking by IFID again answers
+    // an authoritative NotFound, and `write_fetched` then replaces a perfectly
+    // good record with that not-found block. `f` on *City of Secrets* — Inform 6
+    // Glulx, whose Treaty IFID is its file's MD5 and not our `GLULX-…` hash —
+    // emptied the row it was pressed on (SQ-1226). The sidecar's identity check
+    // is what makes this safe: swap a different game in under the same filename
+    // and `existing` is `None`, so nothing is remembered on its behalf.
+    let remembered = existing
+        .as_ref()
+        .and_then(|i| i.fetched.as_ref())
+        .and_then(|f| f.ifdb_tuid.clone());
 
     // A manual IFDB-id fetch (SQ-0371) always runs and always fetches by that
     // id; only an IFID-keyed fetch consults the skip cache.
@@ -206,9 +227,14 @@ fn fetch_one(
     } else {
         // A known Scott Adams adventure is fetched by its mapped IFDB id (its own
         // computed IFID never resolves on IFDB). A manual id_override (SQ-0371)
-        // still wins.
-        let scott_id = if id_override.is_none() { scott_ifdb_id(&path) } else { None };
-        let fetched = match id_override.or(scott_id.as_deref()) {
+        // still wins, and so does a remembered page id — both name THIS story's
+        // page, where the bundled table only knows a filename stem.
+        let scott_id = if id_override.is_none() && remembered.is_none() {
+            scott_ifdb_id(&path, disk_entry.as_deref())
+        } else {
+            None
+        };
+        let fetched = match id_override.or(remembered.as_deref()).or(scott_id.as_deref()) {
             Some(id) => source.fetch_by_id(id),
             None => source.fetch(&ifid),
         };
@@ -336,11 +362,11 @@ fn stem_title(path: &Path) -> String {
     path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string()
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     jiff::Timestamp::now().to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-picker"))]
 mod tests {
     use super::*;
     use crate::story_info::ProbeMeta;
@@ -398,18 +424,18 @@ mod tests {
         let dir = tmp();
         let dat = dir.join("adv01.dat");
         std::fs::write(&dat, MINI).unwrap();
-        assert_eq!(super::scott_ifdb_id(&dat).as_deref(), Some("dy4ok8sdlut6ddj7"));
+        assert_eq!(super::scott_ifdb_id(&dat, None).as_deref(), Some("dy4ok8sdlut6ddj7"));
 
         // The same Scott `.dat` wrapped in a `.blb` blorb (SAAI exec chunk) is
         // detected too, keyed by its filename stem (`circus`).
         let blb = dir.join("circus.blb");
         std::fs::write(&blb, blb_wrapping_saai(MINI.as_bytes())).unwrap();
-        assert_eq!(super::scott_ifdb_id(&blb).as_deref(), Some("bdnprzz9zomlge4b"));
+        assert_eq!(super::scott_ifdb_id(&blb, None).as_deref(), Some("bdnprzz9zomlge4b"));
 
         // A binary (non-Scott) story yields no Scott id.
         let z = dir.join("story.z5");
         std::fs::write(&z, [3u8, 0, 0, 0, 0, 0]).unwrap();
-        assert_eq!(super::scott_ifdb_id(&z), None);
+        assert_eq!(super::scott_ifdb_id(&z, None), None);
     }
 
     #[derive(Clone)]
@@ -427,9 +453,17 @@ mod tests {
         calls: Arc<Mutex<Vec<String>>>,
         cover_calls: Arc<Mutex<Vec<String>>>,
         cover_bytes: Vec<u8>,
-        /// Artificial per-call delay, used only by the cancel test to open a
-        /// deterministic window between "fetch started" and "fetch returned".
-        fetch_sleep: Duration,
+        /// Set only by the cancel test: every fetch announces itself on
+        /// `started` and then parks until the test sends on `release`, so
+        /// "cancel arrived mid-fetch" is a fact the test arranges rather than
+        /// a race it hopes to win. A 20ms-sleep-then-cancel against a 150ms
+        /// fetch lost that race on a loaded macOS runner and fetched story 2.
+        fetch_gate: Option<FetchGate>,
+    }
+
+    struct FetchGate {
+        started: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
     }
 
     impl Fake {
@@ -441,7 +475,7 @@ mod tests {
                 // A real decodable PNG: `maybe_fetch_cover` validates the
                 // bytes decode before writing (SQ-0660).
                 cover_bytes: real_png_bytes(),
-                fetch_sleep: Duration::ZERO,
+                fetch_gate: None,
             }
         }
     }
@@ -449,8 +483,9 @@ mod tests {
     impl MetadataSource for Fake {
         fn fetch(&self, ifid: &str) -> Result<FetchOutcome, FetchError> {
             self.calls.lock().unwrap().push(ifid.to_string());
-            if !self.fetch_sleep.is_zero() {
-                thread::sleep(self.fetch_sleep);
+            if let Some(gate) = &self.fetch_gate {
+                let _ = gate.started.send(());
+                let _ = gate.release.lock().unwrap().recv();
             }
             match self.responses.get(ifid) {
                 Some(FakeResp::Found(f)) => Ok(FetchOutcome::Found(f.clone())),
@@ -513,6 +548,30 @@ mod tests {
             cover: None,
             not_found: false,
         }
+    }
+
+    /// A Scott game inside a zip is keyed by the entry's stem, not the zip's.
+    #[test]
+    fn scott_ifdb_id_inside_a_zip_uses_the_entry_name() {
+        const MINI: &str = "\n32767 1 0 1 2 6 1 0 3 125 0 1\n150 1 0 0 0 0 0 0\n\
+\"AUTO 0\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\
+0 0 0 0 0 0 0\n\"*you are in a room\"\n\"\"\n\"*\"\n\"\"\n0\n0\n0\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n\"\"\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n0 0\n\
+0\n0\n0\n0\n1\n0\n0\n";
+        let dir = crate::scratch_dir("scott-zip-tuid");
+        let zip_path = dir.join("AdamsGames.zip");
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            for name in ["adv01.dat", "notes.txt"] {
+                zw.start_file(name, opts).unwrap();
+                std::io::Write::write_all(&mut zw, if name.ends_with(".dat") { MINI.as_bytes() } else { b"readme" }).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        assert_eq!(scott_ifdb_id(&zip_path, Some("adv01.dat")).as_deref(), Some("dy4ok8sdlut6ddj7"), "Adventureland, by its entry");
+        assert_eq!(scott_ifdb_id(&zip_path, None), None, "the archive's own stem names nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -652,6 +711,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_base);
     }
 
+    /// SQ-1226: a story only HAS a remembered tuid because something found it
+    /// on IFDB by page id — an `f` that went back to the IFID would get the
+    /// authoritative NotFound that made the page id necessary in the first
+    /// place, and `write_fetched` would replace the record with it. *City of
+    /// Secrets* is the reported case: an Inform 6 Glulx game whose Treaty IFID
+    /// (its file's MD5) is not the `GLULX-…` hash we compute, so IFDB indexes
+    /// nothing we can ask it for.
+    #[test]
+    fn a_remembered_ifdb_tuid_is_reused_so_a_forced_refetch_cannot_lose_the_metadata() {
+        let data_base = tmp();
+        let path = data_base.join("CoS.gblorb");
+        let ifid = "GLULX-0123456789ABCDEF".to_string();
+        let tuid = "0dbnusxunq7fw5ro".to_string();
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key_at(&path));
+
+        // The sidecar an IFDB-search download leaves behind: found, current,
+        // and carrying the page id it was found under.
+        let mut meta = up_to_date_meta();
+        meta.title = Some("City of Secrets".into());
+        meta.ifdb_tuid = Some(tuid.clone());
+        story_info::save(&game_dir, &stub_info(&ifid, Some(meta))).unwrap();
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            tuid.clone(),
+            FakeResp::Found(Box::new(IFiction {
+                title: Some("City of Secrets".into()),
+                ifdb: Some(crate::ifiction::IfdbExt {
+                    tuid: tuid.clone(),
+                    link: None,
+                    cover_url: None,
+                    average_rating: None,
+                    rating_count: None,
+                }),
+                ..Default::default()
+            })),
+        );
+        responses.insert(ifid.clone(), FakeResp::NotFound); // IFDB indexes no such IFID
+        let fake = Fake::new(responses);
+        let calls = Arc::clone(&fake.calls);
+        let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
+        fetcher.request(FetchOrder {
+            stories: vec![FetchTarget { path, disk_entry: None, ifid: ifid.clone() }],
+            forced: true,
+            id_override: None,
+        });
+
+        let progress = wait_for(&fetcher, 1);
+        assert_eq!(
+            progress[0].outcome,
+            Outcome::Fetched,
+            "not the NotFound a by-IFID lookup answers with"
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[format!("id:{tuid}")],
+            "asked by the remembered page id, never by the IFID"
+        );
+
+        let reloaded = story_info::load(&game_dir, &ifid).and_then(|i| i.fetched).expect("sidecar");
+        assert!(!reloaded.not_found, "the found record survives a forced refetch");
+        assert_eq!(reloaded.title.as_deref(), Some("City of Secrets"));
+        assert_eq!(reloaded.ifdb_tuid.as_deref(), Some(tuid.as_str()), "and so does the page id");
+
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
     #[test]
     fn cancel_mid_order_stops_before_the_next_story_and_keeps_prior_writes() {
         let data_base = tmp();
@@ -672,9 +798,11 @@ mod tests {
             );
         }
         let mut fake = Fake::new(responses);
-        // Generous window: the worker blocks here on story 1 long enough for
-        // the test thread to call cancel() before story 2 is ever attempted.
-        fake.fetch_sleep = Duration::from_millis(150);
+        // The worker parks inside story 1's fetch until we say so, so cancel()
+        // is guaranteed to land before story 1 returns and story 2 is weighed.
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        fake.fetch_gate = Some(FetchGate { started: started_tx, release: Mutex::new(release_rx) });
         let calls = Arc::clone(&fake.calls);
 
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
@@ -688,8 +816,9 @@ mod tests {
             id_override: None,
         });
 
-        thread::sleep(Duration::from_millis(20)); // comfortably inside story 1's fetch
+        started_rx.recv_timeout(Duration::from_secs(5)).expect("story 1's fetch never started");
         fetcher.cancel();
+        release_tx.send(()).unwrap();
 
         // Bounded wait for the worker to settle (story 1 finishes, sees
         // cancel, and stops).

@@ -48,19 +48,46 @@
 //! the upper window, because memory restored without a screen must not be read
 //! against another moment's screen (SQ-0785).
 //!
+//! **A shadow that DIED did not move, it was relocated** (SQ-1506). Zork I's
+//! troll kills the shadow the turn it walks into the Troll Room and the game
+//! wakes it up in the Forest — a room the map already holds, so nothing below
+//! could tell the resurrection from an arrival, and `north` out of the Cellar
+//! was minted as a passage to `Forest ¹`. The same thing in the maze, and the
+//! same thing wherever a grue eats a shadow in the dark. The live turn path has
+//! read this since SQ-0259 ([`crate::session::turn_reports_death`], and
+//! [`mapper::mapper::Mapper::observe_relocation`] rather than a minted edge); the
+//! shadow now reads the identical fact off its own step, as
+//! [`crate::probe::ProbeStep::died`].
+//!
 //! That is also why this consumer needs none of the probe seam's
 //! [`crate::probe::Refusals`] machinery. A vocabulary offer has to read the
 //! story's prose to find out whether anything happened, because "did this verb
 //! do something" is only answerable in words. "Am I back where I started" is
 //! answerable in a room number.
 //!
-//! **A probe that lands in a room the map does NOT hold records the ATTEMPT and
-//! nothing else.** Not room C, not the edge to it, not its existence. The map is
-//! a record of what the PLAYER has seen, and keeping C "known but hidden" would
-//! leak straight back out through the layout, the pathfinder and click-to-route.
-//! Total failure likewise says nothing about the map: it proves only that these
-//! directions did not work from here, this time. A door may need opening, and a
-//! one-way passage is a real and beloved part of these games.
+//! **A probe that lands in a room the map does NOT hold records NOTHING — not
+//! even the attempt** (SQ-1292). Not room C, not the edge to it, not its
+//! existence, and not "this direction is spent". The map is a record of what the
+//! PLAYER has seen, and keeping C "known but hidden" would leak straight back out
+//! through the layout, the pathfinder and click-to-route. Total failure likewise
+//! says nothing about the map: it proves only that these directions did not work
+//! from here, this time. A door may need opening, and a one-way passage is a real
+//! and beloved part of these games.
+//!
+//! The attempt itself is withheld for the same reason the room is. `probed` is
+//! read forever after by [`mapper::graph::MapGraph::probe_candidates`], which
+//! never offers a direction it holds — so a mark is permanent, and it has to
+//! state a fact about the WORLD rather than about the map's coverage at one
+//! instant. "Wherever that goes, the player has not been there yet" is the second
+//! kind, and it stops being true the moment they walk in. Marking it anyway spent
+//! the direction for good: Zork I's forest and cellar rooms finish a playthrough
+//! with all twelve marked, and every later arrival there finds no way back until
+//! the player walks it. A REFUSED move is not affected — it names no room at all
+//! ("The windows are all boarded" moves nobody, so the step reports no location),
+//! which is as informative as it will ever be, so it is remembered and never
+//! re-asked. Two attempts are held open: a landing the map could not READ, and —
+//! since SQ-1506 — one that KILLED the shadow, because a shadow may die by dice
+//! and "the troll won this round" is not a fact about the world.
 //!
 //! **But a room the map ALREADY HOLDS is a room the player has stood in**, and a
 //! passage between two such rooms reveals nothing unseen — so it is recorded even
@@ -94,11 +121,29 @@
 //!
 //! The way back is overwhelmingly the way you came, so the search leads with
 //! `opposite(D)`, then the two perpendiculars, then the two diagonals beside the
-//! opposite, then everything else — all twelve real passages. Starting wide is
-//! deliberate: narrowing the list is a measurement decision and there was no
-//! measurement yet. Every attempt that is answered is recorded permanently, so
-//! the cost of a wide list is paid once per room in the life of a map, not once
-//! per visit.
+//! opposite, then everything else — the eight compass points, and never a
+//! portal that was not the seed itself (see below). Starting wide is
+//! deliberate: narrowing the list further is a measurement decision and there
+//! was no measurement yet. Every attempt that is answered is recorded
+//! permanently, so the cost of a wide list is paid once per room in the life
+//! of a map, not once per visit.
+//!
+//! **Up/Down/In/Out are asked only as the direct reciprocal of a portal move
+//! the player just made** (SQ-1290) — climb down and the seed is Up, walk in
+//! and the seed is Out — never as a blind fallback once the compass words run
+//! out. A search that did not just cross a portal has no business revealing
+//! one the player has not walked: on an ordinary compass map the only way
+//! back from some room may genuinely be `up`, and finding that and drawing it
+//! before the player has ever gone up is exactly what this search must not
+//! do. See [`mapper::direction::PROBE_FALLBACK_DIRS`].
+//!
+//! **And the reciprocal is asked in the player's OWN words, when their move
+//! belongs to a vocabulary family the compass does not cover.** After `fore`
+//! the way back is `aft`, not the compass `south` — both fill the same
+//! [`mapper::direction::Direction::S`] slot, but a story that models
+//! FORE/AFT/PORT/STARBOARD as exits distinct from the compass (Shogun) refuses
+//! the compass word and answers only the nautical one. See
+//! [`mapper::direction::reciprocal_word`].
 //!
 //! # On the worker, and why staleness does not apply
 //!
@@ -118,12 +163,13 @@
 //! turn that does not move the player (`look`, `take lamp`, a refused direction)
 //! leaves the search running.
 //!
-//! Aborting is cheap because progress is durable: every answered attempt marks
-//! the probed record before anything else happens, so the next visit resumes
-//! where this one stopped instead of starting over. The single attempt that was
-//! IN FLIGHT when the abort came is the one thing not carried — its answer was
-//! never read, so nothing was learned about it, and it is offered again next
-//! time rather than being written off.
+//! Aborting is cheap because progress is durable: every ANSWERED attempt marks
+//! the probed record, so the next visit resumes where this one stopped instead of
+//! starting over. Two things are deliberately not carried. The attempt that was
+//! IN FLIGHT when the abort came — its answer was never read, so nothing was
+//! learned about it. And any attempt that came out where the map could not name
+//! it (above): that one is offered again on a later visit precisely because the
+//! map may by then be able to.
 //!
 //! # Sharing one shadow with the vocabulary offer
 //!
@@ -160,11 +206,14 @@ pub struct ReturnSearch {
     /// The room the player is standing in, and the room every attempt starts from.
     /// The search ends the moment this stops being where they are.
     here: RoomId,
-    /// The directions still to try, best first — [`MapGraph::probe_candidates`]'s
-    /// order, taken once when the search is armed.
+    /// The directions still to try, best first, each paired with the WORD that attempt sends —
+    /// [`MapGraph::probe_candidates`]'s order, taken once when the search is armed, with one word
+    /// substituted (SQ-1290): see [`arm_return_search`]. The vocabulary is a property of the
+    /// candidate, not a special case in the pump loop — every entry already carries the exact
+    /// command to send, so [`pump_return_search`] never re-derives one from the direction.
     ///
     /// [`MapGraph::probe_candidates`]: mapper::graph::MapGraph::probe_candidates
-    queue: Vec<Direction>,
+    queue: Vec<(Direction, &'static str)>,
     /// The attempt out with the worker, if any.
     attempt: Option<Attempt>,
     /// The moment every attempt is asked from: the live game as it stood the
@@ -223,6 +272,7 @@ pub fn arm_return_search(
     live: &dyn Engine,
     cmd: &str,
     room_before: Option<RoomId>,
+    turn_save: &mut crate::engine::TurnSave,
 ) {
     let here = mapper.graph.current();
     // A move ends any search that was running: the room it was asking about is
@@ -246,13 +296,29 @@ pub fn arm_return_search(
     if mapper.graph.connections().iter().any(|c| c.origin == here && c.dest == origin) {
         return;
     }
-    let mut queue = mapper.graph.probe_candidates(here, mapper::direction::parse_direction(cmd));
-    if queue.is_empty() {
+    let candidates = mapper.graph.probe_candidates(here, mapper::direction::parse_direction(cmd));
+    if candidates.is_empty() {
         return;
     }
+    let mut queue: Vec<(Direction, &'static str)> =
+        candidates.iter().map(|&d| (d, long_label(d))).collect();
+    // SQ-1290: ask the way back in the player's OWN vocabulary first. After "fore" the way back
+    // is overwhelmingly "aft", not the compass "south" — both fill the same slot
+    // ([`mapper::direction::reciprocal_word`]'s second element), but a story that models
+    // FORE/AFT/PORT/STARBOARD as exits distinct from the compass (Shogun) refuses the compass
+    // word and answers only the nautical one. Only when that slot survived
+    // `probe_candidates`'s own tried/probed filter — respecting the same "never re-ask a
+    // direction already spent" rule as every other candidate, not a special case for this one.
+    if let Some((word, dir)) = mapper::direction::reciprocal_word(cmd) {
+        if candidates.contains(&dir) {
+            queue.insert(0, (dir, word));
+        }
+    }
     // The one snapshot the whole search runs from, and the one thing here the
-    // player's thread pays for. Taken now rather than per attempt.
-    let Some(from) = state.probe.snapshot(live) else { return };
+    // player's thread pays for. Taken now rather than per attempt — and shared
+    // with this turn's history capture and auto-save (SQ-1178), so arming a
+    // search costs no extra save_state when either of those already paid.
+    let Some(from) = state.probe.snapshot_from(live, || turn_save.get(live)) else { return };
     queue.reverse(); // popped from the back, so the best candidate goes last
     state.return_search = Some(ReturnSearch { origin, here, queue, attempt: None, from });
 }
@@ -268,13 +334,13 @@ pub fn pump_return_search(state: &mut AppState) -> bool {
     if search.attempt.is_some() {
         return false; // one out already
     }
-    let Some(&dir) = search.queue.last() else {
+    let Some(&(dir, word)) = search.queue.last() else {
         // Nothing left to try. Total failure records nothing about the map: a
         // door may need opening, and a one-way passage is a real answer.
         state.return_search = None;
         return false;
     };
-    let Some(token) = state.probe.ask_from(&search.from, &[long_label(dir).to_string()]) else {
+    let Some(token) = state.probe.ask_from(&search.from, &[word.to_string()]) else {
         return false; // busy, unarmed, or mid-save — ask again next pass
     };
     if let Some(search) = &mut state.return_search {
@@ -296,20 +362,26 @@ pub fn owns(state: &AppState, token: u64) -> bool {
 ///
 /// Four outcomes, in the order they are decided:
 ///
-/// 1. **The attempt is recorded as probed, whatever it found.** First, and
-///    unconditionally, so an abort a moment later still leaves the search one
-///    step further along than it was.
-/// 2. **It came out in a room the map already holds** — the passage is real, and
+/// 1. **It came out in a room the map already holds** — the passage is real, and
 ///    goes on the map through the same call a walked crossing makes.
 ///    [`Mapper::record_probed_passage`] is what enforces the no-leak rule: it
 ///    refuses a room the map does not have, so an unvisited room cannot arrive
 ///    this way however the probe lands.
+/// 2. **…and the attempt is recorded as probed** — but ONLY here, because only an
+///    ANSWERED attempt is spent (SQ-1292). See the comment at the mark itself: a
+///    landing the map cannot name says nothing permanent, and remembering it as
+///    spent is what stopped a room from ever learning its way back.
 /// 3. **…and if that room is the one the player LEFT, the search is over.**
 ///    Otherwise it keeps going: the gap it was opened to close is still open, and
 ///    what it just recorded is a different question's answer (SQ-0785).
 /// 4. **Anything else** — an unknown room, nowhere at all, a death, a story that
-///    ended, an engine that cannot say where it is — and nothing is recorded but
-///    the attempt. The search moves on to the next direction.
+///    ended, an engine that cannot say where it is — and nothing is recorded at
+///    all, the attempt included. The search moves on to the next direction, and a
+///    later visit may ask this one again.
+///
+/// A DEATH is outcome 4 and never outcome 1, however nameable the room it woke up
+/// in (SQ-1506): the game relocated the shadow, and a resurrection room is not a
+/// destination. [`crate::probe::ProbeStep::landing`] is where that is decided.
 pub fn deliver(
     state: &mut AppState,
     mapper: &mut Mapper,
@@ -320,17 +392,54 @@ pub fn deliver(
     search.attempt = None;
     let (here, origin) = (search.here, search.origin);
 
-    // (1) The attempt is durable before anything is judged.
-    mapper.graph.mark_probed(here, attempt.dir);
-
-    // (2) WHERE did it come out? Room identity and nothing else — a step that
-    // ended the story or reached for a file answers nothing about the map,
-    // whatever `location` happens to hold.
-    let landed = answer.run.as_ref().and_then(|run| {
-        run.steps.first().filter(|s| !s.quit && !s.escaped).and_then(|s| s.location)
-    });
-    let Some(landed) = landed else {
-        return None; // no room. Nothing about it is recorded, not even that it exists.
+    // (1) WHERE did it come out? Room identity and nothing else — a step that
+    // ended the story, reached for a file, or got the shadow KILLED answers
+    // nothing about the map, whatever `location` happens to hold.
+    // `ProbeStep::landing` is where that reading lives, shared with the
+    // random-exit probe so the two cannot drift about what an attempt proved.
+    let step = answer.run.as_ref().and_then(|run| run.steps.first());
+    let died = step.is_some_and(|s| s.died);
+    let landed = step.and_then(|s| s.landing());
+    // (2) The attempt is spent unless it was ANSWERED — when the shadow came
+    // out somewhere the map can name (SQ-1292). `probed` is consulted forever
+    // after by `MapGraph::probe_candidates`, which never offers a direction it
+    // holds, so a mark written here is permanent: it must therefore record a
+    // fact about the WORLD ("this way leads there", or "this way is refused"),
+    // never one about the map's coverage at this instant.
+    //
+    // A landing in a room the map does not hold is the second kind. It says only
+    // "wherever that goes, the player has not been there YET" — which stops being
+    // true the moment they walk in, and by then the direction is on the record and
+    // can never be asked again. That is the reported defect: Zork I's forest and
+    // cellar rooms end a playthrough with every one of the twelve directions
+    // marked, so every later arrival there finds no way back until the player
+    // walks it themselves. And it is DIRECTION-SHAPED, which is how it was seen:
+    // a failing search burns the cardinals first (the seed, the two
+    // perpendiculars, then the head of `PROBE_FALLBACK_DIRS`), the diagonals only
+    // if it gets that far, and — since SQ-1290 took portals out of that fallback —
+    // Up/Down/In/Out never at all. So the way back showed up reliably for a
+    // staircase, usually for a diagonal, and not until walked for a compass exit.
+    //
+    // A move that named NO room still burns — a refusal (which moves nobody, so
+    // the step reports no location at all) or a story that ended. Those are as
+    // informative as they will ever be, and re-asking them every visit would buy
+    // nothing.
+    //
+    // **A DEATH is the third kind, and it withholds the mark too** (SQ-1506). The
+    // shadow may die by DICE: Zork I's troll kills it on one restore of the
+    // Cellar snapshot and lets it past on the next, and the grue is a coin flip
+    // against a lamp that may be lit by the time the player comes back. "The
+    // shadow was killed this time" is a fact about one attempt's luck, not about
+    // the world, and a permanent mark may only carry the second kind — the same
+    // rule, and the same reasoning, as the unreadable landing above. Burning it
+    // would spend `north` out of the Cellar for the life of the map on a combat
+    // round that went the other way.
+    let unnameable = landed.is_some_and(|r| mapper.graph.room(r).is_none());
+    if !unnameable && !died {
+        mapper.graph.mark_probed(here, attempt.dir);
+    }
+    let Some(landed) = landed.filter(|_| !unnameable) else {
+        return None; // no room, or none this map can name: nothing is recorded.
     };
 
     // (3) A room the map already holds is a room the PLAYER has stood in, so the
@@ -398,7 +507,7 @@ pub fn settle_return_search(state: &mut AppState, mapper: &mut Mapper) -> Option
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod tests {
     use super::*;
 
@@ -434,16 +543,19 @@ mod tests {
         let mut m = Mapper::default();
         walked(&mut m);
         let mut state = armed_state();
-        arm_return_search(&mut state, &m, &blind(), "enter window", Some(1));
+        arm_return_search(&mut state, &m, &blind(), "enter window", Some(1), &mut crate::engine::TurnSave::default());
         let s = state.return_search.as_ref().expect("a gap to close");
         assert_eq!((s.here(), s.origin()), (2, 1));
-        assert_eq!(s.remaining(), 12, "all twelve, best first");
+        // SQ-1290: Out (the seeded portal reciprocal of `enter`), plus the eight compass
+        // points — nine, not twelve, since Up/Down/In/Out no longer fall through as a
+        // blind fallback (`PROBE_FALLBACK_DIRS` carries only the compass eight).
+        assert_eq!(s.remaining(), 9, "the seeded portal reciprocal, then all eight compass points");
 
         // Now the player walks back themselves, and the gap is gone.
         m.observe(1, "Behind House", Some(Direction::E));
         m.observe(2, "Kitchen", Some(Direction::In));
         let mut state = armed_state();
-        arm_return_search(&mut state, &m, &blind(), "enter window", Some(1));
+        arm_return_search(&mut state, &m, &blind(), "enter window", Some(1), &mut crate::engine::TurnSave::default());
         assert!(state.return_search.is_none(), "no gap, no probe");
     }
 
@@ -456,11 +568,11 @@ mod tests {
         walked(&mut m);
         let mut state = armed_state();
 
-        arm_return_search(&mut state, &m, &blind(), "look", Some(2));
+        arm_return_search(&mut state, &m, &blind(), "look", Some(2), &mut crate::engine::TurnSave::default());
         assert!(state.return_search.is_none(), "the player did not cross anything");
 
         m.observe_relocation(3, "Forest");
-        arm_return_search(&mut state, &m, &blind(), "north", Some(2));
+        arm_return_search(&mut state, &m, &blind(), "north", Some(2), &mut crate::engine::TurnSave::default());
         assert!(state.return_search.is_none(), "a relocation walked no passage");
     }
 
@@ -473,13 +585,13 @@ mod tests {
 
         let mut off = armed_state();
         off.config.return_probe = false;
-        arm_return_search(&mut off, &m, &blind(), "enter window", Some(1));
+        arm_return_search(&mut off, &m, &blind(), "enter window", Some(1), &mut crate::engine::TurnSave::default());
         assert!(off.return_search.is_none());
 
         let mut unarmed = AppState::default();
         unarmed.config.return_probe = true;
         assert!(!unarmed.probe.is_armed());
-        arm_return_search(&mut unarmed, &m, &blind(), "enter window", Some(1));
+        arm_return_search(&mut unarmed, &m, &blind(), "enter window", Some(1), &mut crate::engine::TurnSave::default());
         assert!(unarmed.return_search.is_none());
     }
 
@@ -490,14 +602,14 @@ mod tests {
         let mut m = Mapper::default();
         walked(&mut m);
         let mut state = armed_state();
-        arm_return_search(&mut state, &m, &blind(), "enter window", Some(1));
+        arm_return_search(&mut state, &m, &blind(), "enter window", Some(1), &mut crate::engine::TurnSave::default());
         assert!(state.return_search.is_some());
 
-        arm_return_search(&mut state, &m, &blind(), "take lamp", Some(2));
+        arm_return_search(&mut state, &m, &blind(), "take lamp", Some(2), &mut crate::engine::TurnSave::default());
         assert!(state.return_search.is_some(), "a still turn leaves it alone");
 
         m.observe(3, "Attic", Some(Direction::Up));
-        arm_return_search(&mut state, &m, &blind(), "up", Some(2));
+        arm_return_search(&mut state, &m, &blind(), "up", Some(2), &mut crate::engine::TurnSave::default());
         let s = state.return_search.as_ref().expect("a fresh search from the new room");
         assert_eq!((s.here(), s.origin()), (3, 2), "the old one is gone, not resumed");
     }
@@ -512,8 +624,99 @@ mod tests {
         m.graph.mark_probed(2, Direction::Out); // an earlier search got this far
         m.graph.mark_probed(2, Direction::N);
         let mut state = armed_state();
-        arm_return_search(&mut state, &m, &blind(), "enter window", Some(1));
+        arm_return_search(&mut state, &m, &blind(), "enter window", Some(1), &mut crate::engine::TurnSave::default());
         let s = state.return_search.as_ref().expect("still worth asking");
-        assert_eq!(s.remaining(), 10, "the two already walked are not offered again");
+        // SQ-1290: nine to begin with (see above), minus the two already walked.
+        assert_eq!(s.remaining(), 7, "the two already walked are not offered again");
+    }
+
+    /// One search, armed and pumped for real, answered with a hand-built run — so the only thing
+    /// that differs between the two halves below is the one fact SQ-1506 added.
+    ///
+    /// Returns the map, the state and whether `deliver` recorded a passage.
+    fn deliver_a_landing_in_the_resurrection_room(died: bool) -> (Mapper, AppState, bool) {
+        let mut m = Mapper::default();
+        walked(&mut m);
+        // The resurrection room, and the whole point: a room the map ALREADY HOLDS, so every
+        // guard `deliver` had before SQ-1506 lets it through.
+        m.graph.upsert_room(3, "Forest".to_string());
+        m.graph.set_pos(3, (5, 5));
+
+        let mut state = armed_state();
+        arm_return_search(
+            &mut state,
+            &m,
+            &blind(),
+            "enter window",
+            Some(1),
+            &mut crate::engine::TurnSave::default(),
+        );
+        assert!(pump_return_search(&mut state), "an attempt goes out to the worker");
+        let real = state.probe.settle().expect("the shadow answers");
+        assert!(owns(&state, real.token), "and it is this search's answer");
+
+        // Zork I's own words on the turn the troll kills you, abridged to the two lines the
+        // detector reads — the banner, and the resurrection's room heading after it.
+        let run = crate::probe::ProbeRun {
+            baseline: crate::probe::WorldPrint::default(),
+            steps: vec![crate::probe::ProbeStep {
+                command: "out".to_string(),
+                reply: "The Troll Room\nConquering his fears, the troll puts you to death.\n\
+                        \n   ****  You have died  **** \n\nForest\n"
+                    .to_string(),
+                location: Some(3),
+                world: crate::probe::WorldPrint::default(),
+                quit: false,
+                escaped: false,
+                died,
+            }],
+        };
+        let recorded =
+            deliver(&mut state, &mut m, &crate::probe::test_answer(real.token, Some(run))).is_some();
+        (m, state, recorded)
+    }
+
+    /// SQ-1506: a shadow the story KILLED was relocated, so the room it woke up in is not a
+    /// destination — nothing is minted, and the attempt is not spent either.
+    ///
+    /// Not spent is the second half and it matters as much as the first: a shadow may die by
+    /// DICE (Zork I's troll kills it on one restore of the Cellar snapshot and lets it past on
+    /// the next), and `probed` is read forever after by `MapGraph::probe_candidates`. Burning
+    /// `north` out of the Cellar on one unlucky combat round would spend it for the life of the
+    /// map — the same permanence argument SQ-1292 made about a landing the map could not read.
+    #[test]
+    fn a_shadow_that_died_mints_nothing_and_spends_no_attempt() {
+        let (m, state, recorded) = deliver_a_landing_in_the_resurrection_room(true);
+        assert!(!recorded, "a resurrection is not a passage");
+        assert!(
+            !m.graph.connections().iter().any(|c| c.origin == 2 && c.dest == 3),
+            "no edge to the room the game resurrected the shadow in"
+        );
+        assert!(
+            state.return_search.is_some(),
+            "the gap the search was opened to close is still open"
+        );
+        assert!(
+            !mapper::direction::PROBE_DIRS.iter().any(|&d| m.graph.is_probed(2, d)),
+            "and no direction was marked probed: the shadow may die by dice, so the attempt is \
+             offered again on a later visit"
+        );
+    }
+
+    /// The falsification twin, and the proof that `died` is the only thing doing the work above:
+    /// the identical answer with the death unnoticed mints exactly the edge the player reported
+    /// (`Cellar —N→ Forest ¹`, here `2 → 3`) and burns the direction for good.
+    #[test]
+    fn the_same_landing_without_the_death_is_what_the_report_saw() {
+        let (m, _state, recorded) = deliver_a_landing_in_the_resurrection_room(false);
+        assert!(recorded, "an ordinary landing in a known room is recorded");
+        assert!(
+            m.graph.connections().iter().any(|c| c.origin == 2 && c.dest == 3),
+            "which is the false passage SQ-1506 is about"
+        );
+        assert!(
+            mapper::direction::PROBE_DIRS.iter().any(|&d| m.graph.is_probed(2, d)),
+            "and the attempt is spent"
+        );
     }
 }

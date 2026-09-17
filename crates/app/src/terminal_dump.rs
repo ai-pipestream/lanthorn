@@ -212,6 +212,10 @@ pub struct TerminalSnapshot {
     pub capabilities: Vec<String>,
     /// The terminal answered the `o=z` probe.
     pub kitty_compression: bool,
+    /// The terminal answered the `t=s` shared memory probe (SQ-1374). False also
+    /// when `kitty_shared_memory = "off"` sent no probe at all — the config is
+    /// honoured by not asking, so from here the two are the same state.
+    pub kitty_shared_memory: bool,
     /// The story pane in terminal cells.
     pub pane_cells: (u16, u16),
     pub render: Option<RenderFacts>,
@@ -220,6 +224,8 @@ pub struct TerminalSnapshot {
     pub traffic: Option<TrafficStats>,
     /// Uploads the chrome-band and composite path has encoded since launch.
     pub band_encodes: u64,
+    /// Per-phase kitty-encode wall-clock timings since launch (SQ-1338).
+    pub encode_timings: crate::render::graphics::EncodeTimings,
     /// What every kitty upload since launch cost the wire, against what the same
     /// pixels would have cost uncompressed (SQ-1005).
     pub uploads: crate::render::graphics::UploadBytes,
@@ -435,6 +441,28 @@ pub fn dump_lines(s: &TerminalSnapshot) -> Vec<DumpLine> {
                  probe, and a transmit it cannot inflate would store no image at all",
             )
         });
+        // SQ-1374: which of the three routes a graphics window's pixels actually
+        // take. Stated as one line naming the route in force rather than as a
+        // second yes/no, because the three are alternatives — shared memory does
+        // not compress, and cannot, since there is nothing on the wire to shrink.
+        out.push(if s.kitty_shared_memory {
+            value(
+                "    window transmit: SHARED MEMORY — the terminal answered the t=s probe, so a \
+                 graphics window's pixels are handed over in a POSIX shared memory object and \
+                 never reach the wire at all",
+            )
+        } else if s.kitty_compression {
+            value(
+                "    window transmit: ZLIB — no t=s answer (a remote terminal cannot open our \
+                 shared memory, and kitty_shared_memory = \"off\" does not ask), so the pixels go \
+                 down the wire deflated",
+            )
+        } else {
+            assumed(
+                "    window transmit: PLAIN BASE64 — neither the t=s nor the o=z probe was \
+                 answered, so every pixel goes down the wire base64-encoded and whole",
+            )
+        });
     }
 
     // ── render state, insofar as it explains the traffic ─────────────────────
@@ -571,8 +599,55 @@ pub fn dump_lines(s: &TerminalSnapshot) -> Vec<DumpLine> {
              `S` when one is declared. The uncompressed figure is base64'd too, since `o=z` never \
              removed the 4/3 expansion and crediting it with that would flatter the ratio.)",
         ));
+        // SQ-1201: whether an eviction/replacement actually freed the upload it
+        // replaced, or just forgot it (SQ-1190's bug class). `stranded_uploads` is
+        // this struct's own traffic still resident by id — kept live as typed
+        // state (`GraphicsRender::outstanding`), not re-scanned off the wire.
+        out.push(value(format!(
+            "  wire hygiene: {} delete(s) · {} pixel bytes freed · {} upload(s) stranded ({} pixel bytes)",
+            thousands(u.deletes),
+            thousands(u.freed_pixels),
+            thousands(u.stranded_uploads),
+            thousands(u.stranded_pixels),
+        )));
     }
+    // SQ-1338: per-phase kitty-encode wall-clock cost since launch. `Instant::now()`
+    // at a handful of phase boundaries per encode — nothing inside the base64 or
+    // chunk loop, nothing on the idle render path (it encodes nothing).
+    for (label, stat) in [
+        ("raster resize", s.encode_timings.raster_resize),
+        ("raster encode", s.encode_timings.raster_encode),
+        ("band encode", s.encode_timings.band_encode),
+        ("window deflate", s.encode_timings.window_deflate),
+        ("window base64", s.encode_timings.window_base64),
+        ("window shared memory", s.encode_timings.window_shm),
+    ] {
+        if stat.count == 0 {
+            out.push(value(format!("  encode time, {label}: never ran this session")));
+        } else {
+            out.push(value(format!(
+                "  encode time, {label}: {} run(s) — min {} ms, mean {} ms, max {} ms",
+                thousands(stat.count),
+                format_ms(stat.min),
+                format_ms(stat.mean().expect("count > 0 was just checked")),
+                format_ms(stat.max),
+            )));
+        }
+    }
+    out.push(assumed(
+        "  (wall-clock, not CPU time: measured on the encode worker for raster resize/encode and \
+         band encode, and on the render thread for the graphics-window phases. `encode` for raster \
+         and bands is deflate and base64 FUSED into one `ratatui-image` call this app cannot see \
+         inside of; graphics windows deflate themselves first, so their two phases are measured \
+         separately.)",
+    ));
     out
+}
+
+/// A [`std::time::Duration`] as milliseconds to two decimal places, for the encode
+/// timing lines.
+fn format_ms(d: std::time::Duration) -> String {
+    format!("{:.2}", d.as_secs_f64() * 1000.0)
 }
 
 /// The report as plain text, for the `dump-terminal.log` mirror.
@@ -580,7 +655,7 @@ pub fn dump_text(s: &TerminalSnapshot) -> Vec<String> {
     dump_lines(s).into_iter().map(|l| l.text).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-misc"))]
 mod tests {
     use super::*;
 
@@ -594,15 +669,21 @@ mod tests {
             reported_cell: Some((8, 18)),
             ioctl_cell: Some((8, 18)),
             capabilities: vec!["Kitty".into(), "KittyCompression".into()],
+            kitty_shared_memory: false,
             kitty_compression: true,
             pane_cells: (115, 61),
             render: None,
             traffic: Some(TrafficStats { total_bytes: 1_234_567, flushes: 20, last_flush_bytes: 48_213 }),
             band_encodes: 87,
+            encode_timings: crate::render::graphics::EncodeTimings::default(),
             uploads: crate::render::graphics::UploadBytes {
                 wire: 200_000,
                 pixels: 12_000_000,
                 uploads: 9,
+                deletes: 6,
+                freed_pixels: 8_000_000,
+                stranded_uploads: 2,
+                stranded_pixels: 4_000_000,
             },
             ops: OpCounts { uploads: 3, reuses: 12, places: 15, drops: 2, placed_cells: 65_952 },
         }
@@ -716,6 +797,47 @@ mod tests {
         );
     }
 
+    /// SQ-1374: which route a graphics window's pixels take is one line naming
+    /// one of three, because they are alternatives rather than three yes/nos —
+    /// shared memory does not compress and cannot, since nothing is on the wire
+    /// to shrink.
+    ///
+    /// The plain-base64 case is the only one flagged: it is the silently slow one,
+    /// where a megabyte of pixels goes down the wire whole every frame.
+    #[test]
+    fn the_window_transmit_route_is_named_and_only_one_of_them_is() {
+        let mut s = snap();
+        s.kitty_shared_memory = true;
+        let l = dump_lines(&s).into_iter().find(|l| l.text.contains("window transmit")).unwrap();
+        assert_eq!(l.kind, DumpKind::Value, "{}", l.text);
+        assert!(l.text.contains("SHARED MEMORY"), "{}", l.text);
+        assert!(!l.text.contains("ZLIB"), "one route, not a list: {}", l.text);
+
+        // The o=z answer is still true here, and still irrelevant to this line.
+        let mut s = snap();
+        s.kitty_shared_memory = false;
+        assert!(s.kitty_compression, "snap() answers the o=z probe");
+        let l = dump_lines(&s).into_iter().find(|l| l.text.contains("window transmit")).unwrap();
+        assert_eq!(l.kind, DumpKind::Value, "{}", l.text);
+        assert!(l.text.contains("ZLIB"), "{}", l.text);
+
+        let mut s = snap();
+        s.kitty_shared_memory = false;
+        s.kitty_compression = false;
+        s.capabilities = vec!["Kitty".into()];
+        let l = dump_lines(&s).into_iter().find(|l| l.text.contains("window transmit")).unwrap();
+        assert_eq!(l.kind, DumpKind::Assumed, "a whole-pixel wire needs marking: {}", l.text);
+        assert!(l.text.contains("PLAIN BASE64"), "{}", l.text);
+
+        // And it is a kitty question, exactly like the compression lines above it.
+        let mut s = snap();
+        s.protocol = Some("sixel".into());
+        assert!(
+            !text(&s).contains("window transmit"),
+            "`t=s` is a kitty key; a sixel terminal has no answer to give"
+        );
+    }
+
     /// Not-kitty must not claim either answer — `o=z` is a kitty key and a sixel
     /// session has no opinion about it.
     #[test]
@@ -743,6 +865,20 @@ mod tests {
         assert!(t.contains("200,000 bytes, against 16,000,000 uncompressed"), "both sides: {t}");
         assert!(t.contains("80.0x smaller"), "the ratio: {t}");
         assert!(t.contains("15,800,000 bytes saved (98%)"), "the saving: {t}");
+    }
+
+    /// SQ-1201: the freed-vs-stranded line beside the upload counter — the one
+    /// SQ-1190's whole class of bug (an eviction that replaced or dropped a
+    /// `Protocol` without ever emitting its `a=d`) would have been caught by, had
+    /// it existed then.
+    #[test]
+    fn the_wire_hygiene_line_reports_deletes_freed_and_stranded() {
+        let t = text(&snap());
+        assert!(
+            t.contains("wire hygiene: 6 delete(s) · 8,000,000 pixel bytes freed · 2 upload(s) stranded \
+                        (4,000,000 pixel bytes)"),
+            "{t}"
+        );
     }
 
     /// With no terminal there are no byte counts, and saying so is the honest
@@ -872,6 +1008,38 @@ mod tests {
         s.forced_protocol = Some("kitty".into());
         assert!(text(&s).contains("FORCED by --image-protocol kitty"), "{}", text(&s));
         assert!(text(&snap()).contains("(auto-detected)"));
+    }
+
+    /// SQ-1338: every phase gets a line, and a phase that never ran says so
+    /// plainly rather than printing a mean of zero.
+    #[test]
+    fn a_zero_count_encode_phase_reads_never_ran() {
+        let s = snap(); // encode_timings defaults to every phase at count 0
+        let t = text(&s);
+        assert!(t.contains("encode time, raster resize: never ran this session"), "{t}");
+        assert!(t.contains("encode time, raster encode: never ran this session"), "{t}");
+        assert!(t.contains("encode time, band encode: never ran this session"), "{t}");
+        assert!(t.contains("encode time, window deflate: never ran this session"), "{t}");
+        assert!(t.contains("encode time, window base64: never ran this session"), "{t}");
+    }
+
+    /// A populated phase prints its run count and its min/mean/max in milliseconds.
+    #[test]
+    fn a_populated_encode_phase_prints_count_and_milliseconds() {
+        let mut s = snap();
+        let mut stat = crate::render::graphics::PhaseStat::default();
+        stat.record(std::time::Duration::from_micros(410));
+        stat.record(std::time::Duration::from_millis(1));
+        stat.record(std::time::Duration::from_millis(3));
+        s.encode_timings.raster_resize = stat;
+        let line = dump_lines(&s)
+            .into_iter()
+            .find(|l| l.text.contains("encode time, raster resize"))
+            .expect("a raster resize line");
+        assert_eq!(line.kind, DumpKind::Value);
+        assert!(line.text.contains("3 run(s)"), "{}", line.text);
+        assert!(line.text.contains("ms"), "{}", line.text);
+        assert!(!line.text.contains("never ran"), "{}", line.text);
     }
 
     /// `dump_text` and `dump_lines` are the same report — the file mirror must

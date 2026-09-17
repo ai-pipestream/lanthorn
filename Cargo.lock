@@ -113,46 +113,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
-name = "app"
-version = "0.3.0"
-dependencies = [
- "audio",
- "blorb",
- "buildinfo",
- "clap",
- "cli-host",
- "crossterm",
- "flate2",
- "font8x8",
- "fontdue",
- "grammar-model",
- "gvm",
- "hyperrat",
- "image",
- "jiff",
- "libc",
- "mapper",
- "notify",
- "qwertty-term-vt",
- "ratatui",
- "ratatui-image",
- "regex",
- "roxmltree",
- "scott",
- "serde",
- "serde_json",
- "signal-hook",
- "toml",
- "toml_edit 0.22.27",
- "unicode-segmentation",
- "unicode-width 0.1.14",
- "ureq",
- "verb-synonyms",
- "zip",
- "zvm",
-]
-
-[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -186,13 +146,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "audio"
-version = "0.3.0"
+name = "audio-relay"
+version = "0.7.0"
 dependencies = [
- "rodio",
- "self_cell",
- "xmrs",
- "xmrsplayer",
+ "libc",
+ "tungstenite",
 ]
 
 [[package]]
@@ -282,14 +240,6 @@ checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
 ]
-
-[[package]]
-name = "blorb"
-version = "0.3.0"
-
-[[package]]
-name = "buildinfo"
-version = "0.3.0"
 
 [[package]]
 name = "bumpalo"
@@ -477,13 +427,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4bfbf56724aa9eca8afa4fcfadeb479e722935bb2a0900c2d37e0cc477af0688"
 
 [[package]]
-name = "cli-host"
-version = "0.3.0"
-dependencies = [
- "blorb",
- "crossterm",
- "qwertty-term-vt",
-]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
 name = "colorchoice"
@@ -749,6 +696,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
+name = "data-encoding"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
+
+[[package]]
 name = "deflate64"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -839,6 +792,27 @@ dependencies = [
  "block-buffer",
  "crypto-common",
  "subtle",
+]
+
+[[package]]
+name = "directories"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16f5094c54661b38d03bd7e50df373292118db60b585c08a411c6d840017fe7d"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1095,34 +1069,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
-
-[[package]]
-name = "grammar-model"
-version = "0.3.0"
-
-[[package]]
-name = "gvm"
-version = "0.3.0"
-dependencies = [
- "blorb",
- "grammar-model",
-]
-
-[[package]]
-name = "gvm-cli"
-version = "0.3.0"
-dependencies = [
- "blorb",
- "buildinfo",
- "cli-host",
- "crossterm",
- "gvm",
- "jiff",
-]
 
 [[package]]
 name = "hashbrown"
@@ -1234,11 +1194,32 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
  "moxcms",
  "num-traits",
  "png",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
@@ -1477,6 +1458,151 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf36173d4167ed999940f804952e6b08197cae5ad5d572eb4db150ce8ad5d58f"
 
 [[package]]
+name = "lanthorn"
+version = "0.7.0"
+dependencies = [
+ "clap",
+ "crossterm",
+ "flate2",
+ "font8x8",
+ "fontdue",
+ "hyperrat",
+ "image",
+ "jiff",
+ "lanthorn-audio",
+ "lanthorn-blorb",
+ "lanthorn-buildinfo",
+ "lanthorn-cli-host",
+ "lanthorn-grammar-model",
+ "lanthorn-gvm",
+ "lanthorn-mapper",
+ "lanthorn-scott",
+ "lanthorn-verb-synonyms",
+ "lanthorn-zvm",
+ "libc",
+ "notify",
+ "qwertty-term-vt",
+ "ratatui",
+ "ratatui-image",
+ "regex",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+ "unicode-segmentation",
+ "unicode-width 0.1.14",
+ "ureq",
+ "zip",
+]
+
+[[package]]
+name = "lanthorn-audio"
+version = "0.7.0"
+dependencies = [
+ "rodio",
+ "self_cell",
+ "xmrs",
+ "xmrsplayer",
+]
+
+[[package]]
+name = "lanthorn-blorb"
+version = "0.7.0"
+dependencies = [
+ "regenerator2000-core",
+]
+
+[[package]]
+name = "lanthorn-buildinfo"
+version = "0.7.0"
+
+[[package]]
+name = "lanthorn-cli-host"
+version = "0.7.0"
+dependencies = [
+ "crossterm",
+ "lanthorn-blorb",
+ "qwertty-term-vt",
+]
+
+[[package]]
+name = "lanthorn-grammar-model"
+version = "0.7.0"
+
+[[package]]
+name = "lanthorn-gvm"
+version = "0.7.0"
+dependencies = [
+ "lanthorn-blorb",
+ "lanthorn-grammar-model",
+]
+
+[[package]]
+name = "lanthorn-gvm-cli"
+version = "0.7.0"
+dependencies = [
+ "crossterm",
+ "jiff",
+ "lanthorn-blorb",
+ "lanthorn-buildinfo",
+ "lanthorn-cli-host",
+ "lanthorn-gvm",
+]
+
+[[package]]
+name = "lanthorn-mapper"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lanthorn-scott"
+version = "0.7.0"
+dependencies = [
+ "lanthorn-grammar-model",
+]
+
+[[package]]
+name = "lanthorn-scott-cli"
+version = "0.7.0"
+dependencies = [
+ "crossterm",
+ "lanthorn-blorb",
+ "lanthorn-buildinfo",
+ "lanthorn-cli-host",
+ "lanthorn-scott",
+]
+
+[[package]]
+name = "lanthorn-verb-synonyms"
+version = "0.7.0"
+
+[[package]]
+name = "lanthorn-zvm"
+version = "0.7.0"
+dependencies = [
+ "lanthorn-grammar-model",
+ "lanthorn-zvm",
+]
+
+[[package]]
+name = "lanthorn-zvm-cli"
+version = "0.7.0"
+dependencies = [
+ "crossterm",
+ "lanthorn-audio",
+ "lanthorn-blorb",
+ "lanthorn-buildinfo",
+ "lanthorn-cli-host",
+ "lanthorn-zvm",
+ "qwertty-term-vt",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1495,9 +1621,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libloading"
@@ -1514,6 +1640,15 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "libredox"
+version = "0.1.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6480ccc157a1389bb2e4891b24751b0f798ba640d22386f23143fbcc89da195a"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "line-clipping"
@@ -1607,14 +1742,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mapper"
-version = "0.3.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1673,6 +1800,16 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mos6502"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dd8384601f3b3a7e258d1f7a5c77f448e7bd26792958de10b8a56fff6c9c9df"
+dependencies = [
+ "bitflags 2.13.0",
+ "log",
 ]
 
 [[package]]
@@ -1857,6 +1994,12 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "option-ext"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "ordered-float"
@@ -2152,8 +2295,7 @@ dependencies = [
 [[package]]
 name = "qwertty-term-vt"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e4ff8632bf9e8274f1e6f83c5fb6a56c5c0e3086c430e67f0145d5614d1a8aa"
+source = "git+https://github.com/sharkusk/qwertty-term?branch=lanthorn-0.4.0-chunked-fix#91d2dd0412dd3496352e6bd34831e2cb72f5513e"
 dependencies = [
  "base64",
 ]
@@ -2183,7 +2325,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
  "libc",
- "rand_chacha",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]
 
@@ -2193,6 +2335,7 @@ version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
 dependencies = [
+ "rand_chacha 0.9.0",
  "rand_core 0.9.5",
 ]
 
@@ -2204,6 +2347,16 @@ checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -2220,6 +2373,9 @@ name = "rand_core"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
+dependencies = [
+ "getrandom 0.3.4",
+]
 
 [[package]]
 name = "rand_xoshiro"
@@ -2282,8 +2438,8 @@ dependencies = [
 
 [[package]]
 name = "ratatui-image"
-version = "11.0.6"
-source = "git+https://github.com/sharkusk/ratatui-image?branch=lanthorn-11.0.6-u16-fix#fe7db0c46e99838718290ed76a95b562df46d477"
+version = "11.0.8"
+source = "git+https://github.com/sharkusk/ratatui-image?branch=lanthorn-shm#360541cb1f43968dccee7599eac0a230870f1ae5"
 dependencies = [
  "base64-simd",
  "flate2",
@@ -2378,6 +2534,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "redox_users"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
+dependencies = [
+ "libredox",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ref-cast"
 version = "1.0.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2395,6 +2561,25 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "regenerator2000-core"
+version = "0.9.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6876345948d17944776b552e9d56dabc32564edf8ac54aeacdf8239046a88d4f"
+dependencies = [
+ "anyhow",
+ "base64",
+ "directories",
+ "flate2",
+ "include_dir",
+ "log",
+ "mos6502",
+ "regex",
+ "serde",
+ "serde_json",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
@@ -2576,23 +2761,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "scott"
-version = "0.3.0"
-dependencies = [
- "grammar-model",
-]
-
-[[package]]
-name = "scott-cli"
-version = "0.3.0"
-dependencies = [
- "buildinfo",
- "cli-host",
- "crossterm",
- "scott",
-]
-
-[[package]]
 name = "self_cell"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2654,6 +2822,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]
@@ -3047,9 +3224,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "toml"
+version = "1.1.6+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned 1.1.1",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.3",
 ]
 
 [[package]]
@@ -3078,7 +3270,7 @@ checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
 dependencies = [
  "indexmap",
  "serde",
- "serde_spanned",
+ "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_write",
  "winnow 0.7.15",
@@ -3098,9 +3290,9 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.2+spec-1.1.0"
+version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow 1.0.3",
 ]
@@ -3112,12 +3304,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
+name = "toml_writer"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
+
+[[package]]
 name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.26.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "sha1",
+ "thiserror 2.0.18",
+ "utf-8",
 ]
 
 [[package]]
@@ -3209,6 +3424,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
+
+[[package]]
 name = "utf8-zero"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3233,18 +3454,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "verb-synonyms"
-version = "0.3.0"
-
-[[package]]
 name = "verb-synonyms-gen"
-version = "0.3.0"
+version = "0.7.0"
 dependencies = [
- "blorb",
- "grammar-model",
- "gvm",
- "scott",
- "zvm",
+ "lanthorn-blorb",
+ "lanthorn-grammar-model",
+ "lanthorn-gvm",
+ "lanthorn-scott",
+ "lanthorn-zvm",
 ]
 
 [[package]]
@@ -3368,6 +3585,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
 name = "wezterm-bidi"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3471,7 +3694,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3982,24 +4205,4 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
-]
-
-[[package]]
-name = "zvm"
-version = "0.3.0"
-dependencies = [
- "grammar-model",
-]
-
-[[package]]
-name = "zvm-cli"
-version = "0.3.0"
-dependencies = [
- "audio",
- "blorb",
- "buildinfo",
- "cli-host",
- "crossterm",
- "qwertty-term-vt",
- "zvm",
 ]

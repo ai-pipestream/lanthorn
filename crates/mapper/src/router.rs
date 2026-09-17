@@ -36,11 +36,53 @@
 //! order); both are geometrically equivalent so render output is unaffected.
 //! Stubs (Up/Down/In/Out/Unknown) are never deduped.
 //!
-//! # v1 limitations
+//! # Crossings are fine; OVERLAPS are not
 //!
-//! Full crossing-minimisation is NOT implemented. The L/Z router is deterministic and correct
-//! but may produce crossings when connections overlap in the grid. A future version may apply
-//! a Sugiyama-style crossing-reduction step.
+//! The rule the drawn map is held to is the user's, verbatim: *"crossings are okay, overlaps
+//! need to be avoided."* Two connectors meeting perpendicular at a point is a crossing — the
+//! terminal breaks the horizontal for one cell and both lines stay followable. Two connectors
+//! running ALONG each other for any length is an overlap, and one of the two passages simply
+//! disappears under the other.
+//!
+//! This module's `route_all` is the STUB router: one polyline per connection, first
+//! non-colliding L, no lanes and no notion of what anything else is doing. Nothing here can
+//! honour that rule, and nothing here is asked to — the drawn map is routed by
+//! [`crate::route::route_lanes`], and that is where the cost model lives:
+//!
+//! * **`route_topology_with` chooses a route by cost, not by first fit.** Each connector is
+//!   offered both L orientations, the unsnapped L on its own two anchors (`anchor_l_points`),
+//!   and — for a one-way — the entry sides still facing its origin. The cost keys, in order:
+//!
+//!   1. **An overlap on a room LINE is forbidden.** A room row or column carries no lane, so two
+//!      connectors that share one are on top of each other for good (`unlaned_overlap`).
+//!   2. **An overlap in a CHANNEL is merely bad** (`has_parallel_overlap`): `assign_lanes` can
+//!      widen the channel and give each run its own lane, so this is a route scored down rather
+//!      than refused.
+//!   3. **Bends**, and they outrank crossings (SQ-1332). The user's rule, verbatim: *"MANY cases
+//!      where our path makes unnecessary turns before reaching the destination … when there is
+//!      no room in the way it looks messy."* A crossing is legible and a detour is not, so a
+//!      connector takes the straight line when its anchors align and a single L when they do
+//!      not; a Z or anything longer is only ever the price of dodging a room box or an overlap.
+//!   4. **Crossings**, then **length**, then a fixed preference rank, then the points
+//!      themselves, so the choice is deterministic.
+//!
+//!   **Nothing here reads `distorted`, and nothing should.** A distorted one-way is an edge whose
+//!   direction the layout could not honour, not an edge that deserves a longer route: it takes
+//!   the direct L like everything else and crosses what it must. (`arrival_corner_owners` is the
+//!   one place the flag is read at all, and only to settle which of two arrivals keeps a corner.)
+//! * **`assign_lanes` then separates what shares a channel**, and its cost is the lane index:
+//!   a busy channel simply widens (`render::map::channel_width` grows with the lane count)
+//!   rather than stacking two lines on one. Its ordering is a hard constraint, not a
+//!   preference — see [`crate::route::Claim`] for why a connector occupies more of a channel
+//!   than its own lane, and what happens when two of them bridge in from opposite sides.
+//!
+//! `crate::route::plan_overlaps` states the invariant on the finished plan, renderer-
+//! independently; `render::map::overlap_cells` states it again on the drawn cells. Both are
+//! zero on the Zork I map (SQ-1316).
+//!
+//! Full crossing MINIMISATION — a Sugiyama-style global reduction — is still not implemented,
+//! and is a much weaker want: a crossing is legible, so the greedy per-connector reduction
+//! `route_topology` already does is enough.
 
 use std::collections::HashSet;
 
@@ -184,13 +226,6 @@ pub struct RoutedEdge {
     /// the renderer can label the badge without re-resolving it (and so the target may live
     /// off the current layer in future). `None` for routed compass edges.
     pub dest_label: Option<String>,
-    /// True when `dest` lives on a DIFFERENT layer than `origin` (SQ-0223).
-    ///
-    /// Set only by `interlayer_badges`; every route within one layer is `false`. The renderer
-    /// needs this to tell a cross-layer badge from an ordinary stub, and it cannot infer it —
-    /// `dest` is simply absent from the layer's rooms, which is indistinguishable from a room
-    /// that has no position yet.
-    pub is_interlayer: bool,
 }
 
 // ── route_all ─────────────────────────────────────────────────────────────────
@@ -244,7 +279,6 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
                 label,
                 arrival_dir: None,
                 dest_label: graph.room(conn.dest).map(|r| r.label().to_string()),
-                is_interlayer: false,
             });
             continue;
         }
@@ -287,7 +321,6 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
             label: None,
             arrival_dir,
             dest_label: None,
-                is_interlayer: false,
         });
 
         emitted.insert((conn.origin, conn.dir, conn.dest));

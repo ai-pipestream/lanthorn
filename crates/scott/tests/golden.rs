@@ -20,6 +20,27 @@
 //!     set/stash/change/stash-back round trip restores the original value (7),
 //!     which the old select-an-index counter model would report as 3.
 //!
+//! SQ-1412 (ScottFree parity) touched this transcript twice: opcode 78 (TALLY)
+//! prints the counter as `"N "` — a trailing space, no newline — so each
+//! TALLY line now runs straight into the next `> cmd` with no line break
+//! between them; and opcode 63 (the win action's quit) prints ScottFree's
+//! own `"The game is now over."` before ending the game.
+//!
+//! SQ-1413 (ScottFree wording) touched it twice more, both defaults —
+//! `Options::default()` (this fixture never sets `you_are`):
+//!   * GET success is `"O.K. "`, a trailing space and no newline, replacing
+//!     this crate's old ad hoc `"OK.\n"` — so `take lamp`/`get idol` now run
+//!     straight into the following `> down`/`You hear water...` line with no
+//!     break.
+//!   * SCORE (opcode 65) now prints ScottFree's own sentence,
+//!     `Wording::stored_prefix` + the count + `" treasures.  On a scale of 0
+//!     to 100, that rates "` + the percentage + `".\n"`, replacing this
+//!     crate's old ad hoc `"You have N out of M treasures.\n"`. The number
+//!     primitive's own trailing space (shared with opcode 78) means the
+//!     rendered line carries a genuine double space before "treasures" and
+//!     before the final period — not a typo, ScottFree's own raw
+//!     concatenation.
+//!
 //! A second test exercises `Vm::snapshot`/`Vm::restore`.
 
 use scott::{Database, Vm};
@@ -94,34 +115,29 @@ A hidden door grinds open.\n\
 Dust settles in the chamber.\n\
 > count\n\
 > tally\n\
-7\n\
+7 > stash\n\
+> tally\n\
+0 > mark\n\
 > stash\n\
 > tally\n\
-0\n\
-> mark\n\
-> stash\n\
-> tally\n\
-7\n\
-> take lamp\n\
-OK.\n\
-> down\n\
+7 > take lamp\n\
+O.K. > down\n\
 You hear water dripping somewhere in the darkness.\n\
 > rub lamp\n\
 The lamp's glow reveals a niche in the rock - and within it, a gleaming gold idol!\n\
 You hear water dripping somewhere in the darkness.\n\
 > get idol\n\
-OK.\n\
-You hear water dripping somewhere in the darkness.\n\
+O.K. You hear water dripping somewhere in the darkness.\n\
 > up\n\
 > down\n\
 You hear water dripping somewhere in the darkness.\n\
 > down\n\
 > score\n\
-You have 0 out of 1 treasures.\n\
+I've stored 0  treasures.  On a scale of 0 to 100, that rates 0 .\n\
 > drop idol\n\
-OK.\n\
-> score\n\
-You set the idol down. *** You have won! ***\n";
+O.K. > score\n\
+You set the idol down. *** You have won! ***\n\
+The game is now over.\n";
     assert_eq!(transcript, expected);
     assert!(vm.has_quit(), "win action should have executed opcode 63 (quit)");
 
@@ -150,7 +166,7 @@ fn snapshot_restore_round_trip() {
         vm.take_output();
     }
     assert_eq!(vm.current_room(), 2);
-    assert_eq!(vm.item_loc(9), scott::CARRIED); // lamp carried
+    assert_eq!(vm.item_loc(9), scott::database::CARRIED); // lamp carried
     assert!(vm.flag(3)); // RUB LAMP guard flag set
     assert_eq!(vm.counter(), 7); // current_counter
 
@@ -165,12 +181,12 @@ fn snapshot_restore_round_trip() {
     vm.take_output();
 
     assert_ne!(vm.current_room(), 2);
-    assert_ne!(vm.item_loc(9), scott::CARRIED);
+    assert_ne!(vm.item_loc(9), scott::database::CARRIED);
 
     vm.restore(&snap).expect("restore succeeds");
 
     assert_eq!(vm.current_room(), 2);
-    assert_eq!(vm.item_loc(9), scott::CARRIED);
+    assert_eq!(vm.item_loc(9), scott::database::CARRIED);
     assert!(vm.flag(3));
     assert_eq!(vm.counter(), 7);
 }
@@ -186,7 +202,7 @@ fn restore_rejects_malformed_input() {
     snap.truncate(snap.len() - 1);
     assert!(vm.restore(&snap).is_err()); // truncated
 
-    let mut bad_count = vm.snapshot();
-    bad_count[0] = 0xFF; // corrupt the item_loc length prefix
-    assert!(vm.restore(&bad_count).is_err());
+    let mut bad_magic = vm.snapshot();
+    bad_magic[0] = 0xFF; // corrupt the SQ-1402 magic (byte 0 of the header, not a field any more)
+    assert!(vm.restore(&bad_magic).is_err());
 }

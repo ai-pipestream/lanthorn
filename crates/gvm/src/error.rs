@@ -1,11 +1,12 @@
-// Glulx interpreter load/parse error types.
-//
-// These are *load-time* errors returned by `Memory::new`. Runtime faults (bad
-// opcode, out-of-range access, div-by-zero) never use these — they record a
-// diagnostic string and Quit, per the Phase 2a design.
+//! Glulx interpreter load/parse error types.
+//!
+//! These are *load-time* errors returned by `Memory::new`. Runtime faults (bad
+//! opcode, out-of-range access, div-by-zero) never use these — they record a
+//! diagnostic string and Quit, per the Phase 2a design.
 
 /// Errors that can arise while loading a Glulx image.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GError {
     /// The image is too short to contain the 36-byte header.
     TooShort,

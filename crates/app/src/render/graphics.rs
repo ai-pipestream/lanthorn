@@ -489,6 +489,47 @@ fn scale_halo(s: f32) -> u32 {
     }
 }
 
+/// Fold the canvas pixels of the native rect `[x0, x1) × [y0, y1)` into `h` —
+/// the content half of every band freshness hash. One definition so the crop
+/// and stretch draws cannot disagree about what "the footprint's pixels"
+/// means, and so the walk has one place to be made fast.
+///
+/// SQ-1189: one hasher write per ROW over `as_raw()`, not one `Hash` call per
+/// pixel. `get_pixel().0.hash()` cost four bounds-checked sample reads plus a
+/// SipHash round per pixel — ~1M rounds for a 640x400 footprint — where the
+/// backing buffer is already one contiguous RGBA byte run per row. Semantics
+/// are equivalent by construction: the same canvas hashes the same bytes in
+/// the same order, and any changed pixel inside the footprint changes the byte
+/// stream. The footprint bounds (and their SQ-0824 halo) are unchanged — the
+/// callers still hash the coords themselves, so a moved footprint over
+/// identical bytes still misses.
+///
+/// The finer generation this cannot become: the chrome canvas is a per-frame
+/// COMPOSITE of many windows, the paint ground and the theme's pages, so no
+/// single `GraphicsWindow::version` describes it — the version-shaped gate
+/// exists one level up instead, where SQ-1187's whole-frame key skips this
+/// hash entirely on a replay frame.
+fn hash_canvas_rows(
+    h: &mut std::collections::hash_map::DefaultHasher,
+    canvas: &image::RgbaImage,
+    x0: u32,
+    x1: u32,
+    y0: u32,
+    y1: u32,
+) {
+    use std::hash::Hasher;
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let w = canvas.width() as usize;
+    let raw = canvas.as_raw();
+    let len = (x1 - x0) as usize * 4;
+    for ny in y0..y1 {
+        let base = (ny as usize * w + x0 as usize) * 4;
+        h.write(&raw[base..base + len]);
+    }
+}
+
 /// Render a graphics window directly as per-cell background colours when it is a
 /// solid fill or a thin strip — the shape games use for chrome: panel dividers,
 /// colour bars, backgrounds (e.g. Kerkerkruip draws its rules as 1×N / N×1 solid
@@ -506,12 +547,32 @@ fn scale_halo(s: f32) -> u32 {
 /// solid grey letterbox over each mostly-empty canvas and clobber the layers
 /// beneath. Non-v6 (Glulx) callers pass `false` to keep the detailed-image path.
 pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffer, force: bool) -> bool {
+    paint_cell_plan(&classify_graphics_as_cells(gw, area, force), area, buf)
+}
+
+/// The outcome of classifying a graphics window for [`render_graphics_as_cells`]:
+/// either it stays an image (the caller falls through to the protocol path), or
+/// it is drawn as cells — an optional rule glyph, plus each cell's colour
+/// (`None` = no opaque pixels there, so the underlying cell is left untouched).
+///
+/// Split out from the classify/paint walk below so [`GraphicsRender::render_as_cells`]
+/// can memoize this outcome (SQ-1200) instead of recomputing it on every redraw.
+enum CellPlan {
+    Unhandled,
+    Handled { line_glyph: Option<&'static str>, colors: Vec<Option<image::Rgba<u8>>> },
+}
+
+/// The blank/uniform/rule_like scans and the per-cell region-averaging that used
+/// to run inline in [`render_graphics_as_cells`] on every call. Pulled out on its
+/// own (SQ-1200) so [`GraphicsRender::render_as_cells`] can memoize the result on
+/// `(gw.version, area, force)` and skip re-walking an unchanged canvas.
+fn classify_graphics_as_cells(gw: &GraphicsWindow, area: Rect, force: bool) -> CellPlan {
     if area.width == 0 || area.height == 0 {
-        return false;
+        return CellPlan::Unhandled;
     }
     let (cw, ch) = (gw.canvas.width(), gw.canvas.height());
     if cw == 0 || ch == 0 {
-        return false;
+        return CellPlan::Unhandled;
     }
     // A window with no opaque pixel anywhere is blank — the game opened it but
     // never painted it (narco frames its story with graphics windows it leaves
@@ -520,7 +581,8 @@ pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffe
     // chars/lines over the neighbouring windows. The scan short-circuits on the
     // first opaque pixel, so a real image pays almost nothing. (SQ-0338)
     if !gw.canvas.pixels().any(|p| p[3] >= 128) {
-        return true;
+        let colors = vec![None; area.width as usize * area.height as usize];
+        return CellPlan::Handled { line_glyph: None, colors };
     }
     // A cell's colour is the AVERAGE of the OPAQUE pixels in its canvas region, or
     // `None` if the region has none. Scanning the whole region (not just the centre
@@ -576,7 +638,7 @@ pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffe
         })
     };
     if !(force || rule_like || uniform) {
-        return false;
+        return CellPlan::Unhandled;
     }
     // A window ≤2 cells in one dimension IS a rule/divider (Kerkerkruip's panel
     // borders). Draw it as a thin line GLYPH (fg = the rule colour, background
@@ -590,9 +652,29 @@ pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffe
     } else {
         None
     };
+    let mut colors = Vec::with_capacity(area.width as usize * area.height as usize);
     for cy in 0..area.height {
         for cx in 0..area.width {
-            let Some(p) = cell_color(cx, cy) else {
+            colors.push(cell_color(cx, cy));
+        }
+    }
+    CellPlan::Handled { line_glyph, colors }
+}
+
+/// Apply a [`CellPlan`] to `buf` — the write half of what
+/// [`render_graphics_as_cells`] used to do inline. Returns whether the window
+/// was drawn as cells (`Handled`) or left for the caller's image-protocol
+/// fallback (`Unhandled`). Never approximates: the plan already carries the
+/// exact per-cell colours [`classify_graphics_as_cells`] computed, so a memoized
+/// replay (SQ-1200) paints byte-identically to a fresh classify+paint.
+fn paint_cell_plan(plan: &CellPlan, area: Rect, buf: &mut Buffer) -> bool {
+    let CellPlan::Handled { line_glyph, colors } = plan else {
+        return false;
+    };
+    for cy in 0..area.height {
+        for cx in 0..area.width {
+            let idx = cy as usize * area.width as usize + cx as usize;
+            let Some(p) = colors[idx] else {
                 continue; // no opaque pixels here → leave the underlying cell
             };
             if let Some(c) = buf.cell_mut((area.x + cx, area.y + cy)) {
@@ -932,6 +1014,88 @@ pub fn kitty_compression(picker: &Picker) -> bool {
     picker.capabilities().contains(&ratatui_image::picker::Capability::KittyCompression)
 }
 
+/// Whether this terminal can open a POSIX shared memory object we write (SQ-1374).
+///
+/// The same shape as [`kitty_compression`] and for the same reason: `t=s` is not a
+/// hint. A terminal that cannot reach the object refuses the transmission, stores
+/// no image, and every placement naming it draws nothing — and "cannot reach"
+/// covers the ordinary case of a terminal at the other end of an ssh connection,
+/// which is a first-class way to run this app. So it is ASKED, by setting
+/// `ratatui-image`'s `kitty_shared_memory_object` (SQ-1382: one option, not a
+/// separate probe flag): a one-pixel object created at startup, named in the
+/// capability query with `a=q,t=s`, and reported only on `OK`.
+///
+/// An empty capability list therefore means no, exactly as it does for
+/// compression, and so does `kitty_shared_memory = "off"` — that key is honoured
+/// by never sending the probe (see `picker_ui::build_cover_picker`), so a user who
+/// declined it looks from here like a terminal that cannot do it, which is the
+/// same thing for every decision downstream.
+pub fn kitty_shared_memory(picker: &Picker) -> bool {
+    picker.capabilities().contains(&ratatui_image::picker::Capability::KittySharedMemory)
+}
+
+/// How a graphics window's pixels reach this terminal (SQ-1374).
+///
+/// Two capabilities the terminal answers separately, kept as one value because
+/// every decision downstream needs BOTH: shared memory is preferred where it is
+/// available, and the deflate answer is still what the fallback needs when a
+/// shared memory write fails at runtime. Passing them as two booleans down the
+/// same call chain is the shape this codebase has been bitten by (see the
+/// refactoring policy in CLAUDE.md) — one of them gets dropped at a call site and
+/// the frame that comes out is self-consistent and wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowWire {
+    /// The terminal answered the `o=z` probe: a deflated payload will be inflated.
+    pub compress: bool,
+    /// The terminal answered the `t=s` probe: it can open an object we write.
+    pub shared_memory: bool,
+}
+
+/// What [`WindowWire`] this picker's terminal is owed.
+pub fn window_wire(picker: &Picker) -> WindowWire {
+    WindowWire { compress: kitty_compression(picker), shared_memory: kitty_shared_memory(picker) }
+}
+
+/// Build a `Protocol::Kitty` directly, under a caller-chosen image id, without
+/// the fork-only `Picker::new_protocol_with_id` (SQ-1513).
+///
+/// Upstream now exposes everything the id-stability path (SQ-0995/SQ-0996)
+/// needs: [`Picker::tmux_detected`], [`Picker::capabilities`], and the
+/// already-public `Kitty::new` and [`Resize::size_for`]/[`Resize::resize`].
+/// This reproduces exactly what the fork's `new_protocol_id` did for the
+/// Kitty arm — `size_for` computes the cell area the image resizes into,
+/// `resize` performs it (background `None`, matching every picker lanthorn
+/// builds — see [`fit_for_protocol`]'s doc), and the result goes to
+/// `Kitty::new` under `id` instead of a random draw. Skipping the crate's own
+/// `needs_resize` short-circuit costs one redundant resize call when the
+/// image is already exactly cell-sized (every caller here pre-fits for
+/// exactly that reason — see [`v6_pad_to_cells`]), but produces the same
+/// pixels: a `Resize::Fit`/`Nearest` resample at 1:1 is an identity.
+///
+/// The shared-memory pid mirrors `Picker`'s own rule (`picker_ui::query_options`
+/// passes `std::process::id()` as `kitty_shared_memory_object` only when
+/// probing; `Picker` retains it only when the terminal answered `t=s`) rather
+/// than reading a field the crate does not expose.
+fn kitty_protocol_with_id(
+    picker: &Picker,
+    image: image::DynamicImage,
+    size: Size,
+    resize: Resize,
+    id: u32,
+) -> Result<Protocol, ratatui_image::errors::Errors> {
+    let font_size = picker.font_size();
+    let area = resize.size_for(&image, font_size, size);
+    let image = resize.resize(&image, font_size, area, None);
+    Ok(Protocol::Kitty(ratatui_image::protocol::kitty::Kitty::new(
+        image,
+        area,
+        id,
+        picker.tmux_detected(),
+        kitty_compression(picker),
+        kitty_shared_memory(picker).then(std::process::id),
+    )?))
+}
+
 /// The cell rect the v6 composite occupies under HALF-BLOCKS, without building a
 /// pixel of it (SQ-0973).
 ///
@@ -1052,6 +1216,14 @@ struct V6Ready {
     /// single largest upload lanthorn makes, 2.8 MB on Journey — can only be
     /// forgotten, never freed.
     placed_id: Option<u32>,
+    /// SQ-1338: how long this encode's own resize step took — `None` on the
+    /// half-blocks arm, which resolves straight onto the cell grid and has no
+    /// separate resize to time (see [`GraphicsRender::encode_v6`]).
+    resize: Option<std::time::Duration>,
+    /// SQ-1338: how long the `picker.new_protocol*` call took — deflate and
+    /// base64 fused into one step inside `ratatui-image`, which this file
+    /// cannot time separately without patching the fork.
+    encode: std::time::Duration,
 }
 
 /// The worker-thread handle for an in-flight v6 raster encode (SQ-0469). The
@@ -1134,9 +1306,112 @@ pub enum BandSlot {
 /// A chrome-band cache key: its [`BandSlot`] plus the cell rect it is drawn at.
 pub type BandKey = (u8, u16, u16, u16, u16);
 
+/// One band encode staged for the background worker (SQ-1188): the finished
+/// (sealed) band image, the cache key it will land under, the content hash it
+/// answers for, and the kitty id it re-transmits to (SQ-0996).
+struct PendingBand {
+    key: BandKey,
+    band: Rect,
+    hash: u64,
+    img: image::DynamicImage,
+    reuse: Option<u32>,
+}
+
+/// One band the worker finished encoding (SQ-1188). `proto` is `None` when the
+/// encode failed — the staging is then un-marked so the next frame retries.
+struct BandEncoded {
+    key: BandKey,
+    band: Rect,
+    hash: u64,
+    reuse: Option<u32>,
+    proto: Option<Protocol>,
+    /// SQ-1338: how long the `picker.new_protocol*` call took on the worker.
+    encode: std::time::Duration,
+}
+
+/// SQ-1188: whether this backend's band encodes are worth a worker thread.
+/// Kitty and iTerm2 pay zlib-L6 + base64 per encode and sixel pays icy_sixel's
+/// quantization; half-blocks "encodes" straight into cells with no compression
+/// stage at all, so the worker would buy a frame of latency and save nothing —
+/// it (and therefore every cell-buffer test harness) stays synchronous.
+fn band_encode_offthread(picker: &Picker) -> bool {
+    !matches!(picker.protocol_type(), ratatui_image::picker::ProtocolType::Halfblocks)
+}
+
+/// One phase's timing distribution since launch (SQ-1338): how many times it ran
+/// and the min/mean/max wall-clock cost. `Default` is the "never ran" state, which
+/// [`Self::mean`] reports as `None` rather than a mean of zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PhaseStat {
+    pub count: u64,
+    pub min: std::time::Duration,
+    pub max: std::time::Duration,
+    pub total: std::time::Duration,
+}
+
+impl PhaseStat {
+    /// Fold one measurement in. The first ever measurement sets both `min` and
+    /// `max` to itself rather than comparing against `Duration::default()`'s
+    /// zero, which a real encode can never beat.
+    pub fn record(&mut self, d: std::time::Duration) {
+        if self.count == 0 {
+            self.min = d;
+            self.max = d;
+        } else {
+            self.min = self.min.min(d);
+            self.max = self.max.max(d);
+        }
+        self.total += d;
+        self.count += 1;
+    }
+
+    /// The mean cost, or `None` before this phase has ever run.
+    pub fn mean(&self) -> Option<std::time::Duration> {
+        (self.count > 0).then(|| self.total / self.count as u32)
+    }
+}
+
+/// Wall-clock cost of each kitty-encode phase since launch (SQ-1338): the v6
+/// raster composite's resize and encode, one chrome band's encode, and a
+/// graphics window's own deflate and base64 steps (which `ratatui-image` fuses
+/// into one `encode` for the raster composite and chrome bands — see
+/// [`GraphicsRender::encode_v6`] and [`kitty_transmit_virtual_timed`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EncodeTimings {
+    pub raster_resize: PhaseStat,
+    pub raster_encode: PhaseStat,
+    pub band_encode: PhaseStat,
+    pub window_deflate: PhaseStat,
+    pub window_base64: PhaseStat,
+    /// Writing one graphics window's pixels into a shared memory object
+    /// (SQ-1374). Runs INSTEAD of `window_deflate` and `window_base64`, not
+    /// beside them, so a session where this one has run and those two have not is
+    /// the normal shape on a terminal that took the `t=s` probe.
+    pub window_shm: PhaseStat,
+}
+
 #[derive(Default)]
 pub struct GraphicsRender {
     cache: std::collections::HashMap<u32, (u64, u16, u16, Protocol)>,
+    /// Per-window memo of [`classify_graphics_as_cells`] (SQ-1200): the
+    /// blank/uniform/rule_like scans and their region-averaging `cell_color`
+    /// walk the whole canvas, so a redraw of an unchanged window — the common
+    /// uniform backdrop, `force` included — otherwise pays roughly two full
+    /// passes over it for nothing. Keyed and invalidated exactly like `cache`
+    /// above — see [`Self::retain_live`] and [`Self::invalidate_cell_geometry`]
+    /// — with `force` added to the freshness tuple because the classification
+    /// depends on it exactly as directly as it depends on the canvas: the
+    /// image-protocol call site asks the SAME window/version/area once with
+    /// `force = false` (falls through to the image protocol on a detailed
+    /// canvas) and, on its no-picker fallback, once with `force = true`
+    /// (always painted as cells) — two different outcomes that must not share
+    /// one cached answer.
+    cell_memo: std::collections::HashMap<u32, (u64, Rect, bool, CellPlan)>,
+    /// Count of [`classify_graphics_as_cells`] calls (`cell_memo` misses), for
+    /// a test to assert an unchanged redraw reuses the memo instead of
+    /// rescanning (SQ-1200).
+    #[cfg(all(test, feature = "t-render"))]
+    classify_calls: u64,
     /// Letterbox geometry recorded by the most recent v6 draw, for inverting a
     /// terminal click back to a game pixel (Lane M mouse input). `None` until a
     /// v6 frame has been drawn.
@@ -1199,16 +1474,81 @@ pub struct GraphicsRender {
     /// happened across an event like a restore. Dump it either side: if the number
     /// has not moved, every band was a cache hit and the terminal was sent nothing.
     pub band_encodes: u64,
+    /// SQ-1338: wall-clock cost of each kitty-encode phase since launch, as
+    /// min/mean/max over every run. Folded in on the MAIN thread by whichever
+    /// install site consumes a worker's result (`poll_v6_job`, `poll_band_job`,
+    /// `band_encode`, `render_kitty_virtual`) — the timing itself happens on the
+    /// worker (raster, bands) or inline (graphics windows), but the write into
+    /// this field never does, so the per-frame path takes no lock or atomic for
+    /// it. Read only when `/dump-terminal` runs.
+    pub encode_timings: EncodeTimings,
     /// What every kitty upload since launch has cost the wire, and what the same
     /// pixels would have cost raw (SQ-1005). Measured off the transmits themselves,
     /// so it covers `ratatui-image`'s encoder as well as ours.
+    ///
+    /// Its `deletes`/`freed_pixels`/`stranded_uploads`/`stranded_pixels` (SQ-1201)
+    /// are kept in sync with [`Self::outstanding`] below rather than measured off
+    /// text: every id this struct ever transmits or deletes is already known as a
+    /// typed value at the call site (`entry.id`, the id [`reseat_kitty_placement`]
+    /// hands back, the id a `queue_*` method takes), so pairing it against
+    /// `outstanding` is a `HashMap` lookup, cheaper and more exact than re-parsing
+    /// the escape a second time. [`crate::render::graphics::measure_traffic`] is
+    /// the byte-scanning sibling, for a caller (the pty-stream harness) that only
+    /// has the wire and no such call sites to hook.
     pub uploads: UploadBytes,
+    /// Kitty ids transmitted by THIS struct that no later delete (`queue_kitty_deletes`,
+    /// `queue_protocol_delete`, `queue_protocol_delete_after_place`) has named yet —
+    /// `id → pixel bytes` of the upload currently resident under it (SQ-1201). A
+    /// re-transmit to an id already here OVERWRITES the entry rather than adding to
+    /// it, matching the kitty spec's own rule that re-transmitting to an id replaces
+    /// what it held; [`Self::note_upload_id`]/[`Self::note_delete_id`] are the only
+    /// writers, and [`Self::sync_stranded`] mirrors its live size/sum into
+    /// `uploads.stranded_uploads`/`stranded_pixels` after each change.
+    ///
+    /// Scoped to this struct's own traffic — the picker's `KittyDeleteQueue` caches
+    /// (`cover.rs`/`picker_ui.rs`) run before any `GraphicsRender` exists and keep
+    /// no ledger of their own; see [`measure_traffic`] for the whole-wire answer.
+    outstanding: std::collections::HashMap<u32, u64>,
     /// The whole native chrome canvas scaled to device pixels, shared across all
     /// bands of a frame so the expensive Nearest resize runs at most ONCE per
     /// changed frame instead of once per band (SQ-0514). Keyed on the canvas
     /// content + scale + scaled dimensions; each band crops its sub-rect from it,
     /// so band output stays byte-identical to a per-band whole-canvas resize.
     chrome_scaled: Option<(u64, image::RgbaImage)>,
+    /// SQ-1187: the cached hybrid chrome-ring frame — canvases, strips, band
+    /// placements, viewport — replayed whole when `v6_hybrid_gen`'s key holds
+    /// still. Lives here (not on `AppState`) because this is the object whose
+    /// band caches the replay leans on, and the two must be invalidated
+    /// together on a font-size change.
+    pub(crate) hybrid: Option<crate::render::screen::HybridFrame>,
+    /// How many times the hybrid ring frame has been COMPUTED since launch
+    /// (SQ-1187). The gate's oracle: an unchanged frame replayed from cache
+    /// leaves it still, any input change bumps it. Public for the gate's
+    /// falsification suite, and cheap enough to keep forever.
+    pub hybrid_builds: u64,
+    /// SQ-1187: true while the current frame REPLAYS an unchanged hybrid
+    /// frame. The whole-frame generation key has already proven every input to
+    /// the per-band content hashes unchanged, so the three band draws reuse
+    /// their stored hashes instead of re-walking canvas pixels. Reset by
+    /// [`Self::begin_band_log`] so it can never leak across frames or into the
+    /// raster path.
+    band_replay: bool,
+    /// SQ-1188: band encodes staged this frame for the background worker —
+    /// content that changed while an older upload is still placed. Drained by
+    /// [`Self::spawn_band_jobs`] at the end of the hybrid draw.
+    band_pending: Vec<PendingBand>,
+    /// The in-flight background band-encode batch, if any (SQ-1188) — one at a
+    /// time, coalesced exactly like the raster worker's `v6_job`.
+    band_job: Option<std::thread::JoinHandle<Vec<BandEncoded>>>,
+    /// What the in-flight batch carries, `key → content hash` — so a staging
+    /// dropped while the worker runs knows whether its content is already on
+    /// the way (kept dirty) or superseded (un-marked, restaged next frame).
+    band_inflight: std::collections::HashMap<BandKey, u64>,
+    /// Bands whose cached upload LAGS the canvas: staged or in flight,
+    /// `key → the content hash on its way`. A dirty band is excluded from the
+    /// SQ-1187 replay fast path (its stored hash is known-stale) and skips
+    /// re-staging while the same content is already queued.
+    band_dirty: std::collections::HashMap<BandKey, u64>,
     /// Kitty-protocol graphics windows: one transmitted image per window,
     /// placed with an EXPLICIT r×c grid so the terminal scales the canvas to
     /// exactly the window's cell rect (SQ-0520 — see `render_kitty_virtual`).
@@ -1345,19 +1685,6 @@ pub fn kitty_picker(cell_w: u16, cell_h: u16) -> Picker {
     picker
 }
 
-/// The placement id every graphics-window transmit names (SQ-0995).
-///
-/// Placement ids are scoped to their image, so one constant serves every window.
-/// It has to be stated rather than left at the protocol's default of 0, because
-/// `p=0` means "assign me an internal id" and this path now re-transmits to the
-/// SAME image id on every content change: an unnamed placement would be a fresh
-/// internal placement each time, piling up unreachable duplicates for the life of
-/// the window. Naming it makes each re-transmit REPLACE the one placement the
-/// window owns. The placeholder cells still encode placement 0 — "any virtual
-/// placement of this image" — which resolves to it precisely because it is the
-/// only one.
-const KITTY_PLACEMENT: u32 = 1;
-
 /// The kitty image backing one graphics window (SQ-0520/SQ-0995).
 struct KittyWindowImage {
     /// Canvas version the upload was last reconciled against. Hashing a canvas
@@ -1398,6 +1725,25 @@ impl std::fmt::Debug for GraphicsRender {
 }
 
 impl GraphicsRender {
+    /// Memoized [`render_graphics_as_cells`] (SQ-1200): reuses the last
+    /// classification for this window when `(gw.version, area, force)` are
+    /// unchanged, instead of rescanning `gw.canvas`. See [`Self::cell_memo`]'s
+    /// docs for the keying and invalidation this mirrors.
+    pub fn render_as_cells(&mut self, gw: &GraphicsWindow, area: Rect, buf: &mut Buffer, force: bool) -> bool {
+        let fresh = matches!(self.cell_memo.get(&gw.win),
+            Some((v, a, f, _)) if *v == gw.version && *a == area && *f == force);
+        if !fresh {
+            let plan = classify_graphics_as_cells(gw, area, force);
+            self.cell_memo.insert(gw.win, (gw.version, area, force, plan));
+            #[cfg(all(test, feature = "t-render"))]
+            {
+                self.classify_calls += 1;
+            }
+        }
+        let (.., plan) = self.cell_memo.get(&gw.win).expect("just inserted above, or already fresh");
+        paint_cell_plan(plan, area, buf)
+    }
+
     pub fn render(&mut self, picker: &Picker, gw: &GraphicsWindow, area: Rect, letterbox: Style, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -1418,7 +1764,7 @@ impl GraphicsRender {
         // (Ghostty/macOS 2×), the image covered only part of the window and
         // mouse clicks mapped to the wrong game pixels. (SQ-0520)
         if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty {
-            self.render_kitty_virtual(gw, area, kitty_compression(picker), buf);
+            self.render_kitty_virtual(gw, area, window_wire(picker), buf);
             return;
         }
         let fresh = matches!(self.cache.get(&gw.win),
@@ -1455,12 +1801,57 @@ impl GraphicsRender {
     /// forgotten (SQ-0637) — see [`GraphicsRender::queue_kitty_deletes`].
     pub fn retain_live(&mut self, live: &std::collections::HashSet<u32>) {
         self.cache.retain(|win, _| live.contains(win));
+        self.cell_memo.retain(|win, _| live.contains(win));
         let dead: Vec<u32> = self.kitty_wins.keys().copied().filter(|w| !live.contains(w)).collect();
         for win in dead {
             if let Some(entry) = self.kitty_wins.remove(&win) {
                 self.queue_kitty_deletes(&entry, win);
             }
         }
+    }
+
+    /// How many times [`Self::render_as_cells`] has recomputed a classification
+    /// (a `cell_memo` miss), for a test to assert an unchanged redraw hits the
+    /// memo instead (SQ-1200).
+    #[cfg(all(test, feature = "t-render"))]
+    pub(crate) fn classify_calls(&self) -> u64 {
+        self.classify_calls
+    }
+
+    /// Record a transmit of `pixels` bytes under `id` in [`Self::outstanding`]
+    /// (SQ-1201) and mirror the map's live size/sum into `uploads.stranded_*`.
+    /// A no-op for `pixels == 0` — a re-place of already-uploaded content, which
+    /// leaves whatever the id already holds (or does not) exactly as it was.
+    fn note_upload_id(&mut self, id: Option<u32>, pixels: u64) {
+        if let Some(id) = id {
+            if pixels > 0 {
+                self.outstanding.insert(id, pixels);
+            }
+        }
+        self.sync_stranded();
+    }
+
+    /// Record an `a=d` delete for `id` in [`Self::outstanding`] (SQ-1201):
+    /// `uploads.deletes` counts the command regardless, and `uploads.freed_pixels`
+    /// is credited only when `id` was still outstanding — a delete for an id this
+    /// struct never transmitted, or already freed, is counted but not credited.
+    fn note_delete_id(&mut self, id: Option<u32>) {
+        if let Some(id) = id {
+            self.uploads.deletes += 1;
+            if let Some(px) = self.outstanding.remove(&id) {
+                self.uploads.freed_pixels += px;
+            }
+        }
+        self.sync_stranded();
+    }
+
+    /// Mirror [`Self::outstanding`]'s current size/sum into `uploads`. A snapshot,
+    /// not a running total — called after every [`Self::note_upload_id`]/
+    /// [`Self::note_delete_id`] so `stranded_uploads`/`stranded_pixels` always read
+    /// "as of now" rather than something `UploadBytes::add` accumulated.
+    fn sync_stranded(&mut self) {
+        self.uploads.stranded_uploads = self.outstanding.len() as u64;
+        self.uploads.stranded_pixels = self.outstanding.values().sum();
     }
 
     /// Queue an `a=d,d=I` delete for the id an abandoned [`KittyWindowImage`] still
@@ -1479,6 +1870,7 @@ impl GraphicsRender {
         }
         let id = entry.id;
         write!(self.pending_deletes, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\").expect("write to String");
+        self.note_delete_id(Some(id));
         self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Window(win) });
     }
 
@@ -1503,6 +1895,20 @@ impl GraphicsRender {
         if let Some(id) = id {
             write!(self.pending_deletes, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\").expect("write to String");
         }
+        self.note_delete_id(id);
+    }
+
+    /// Queue `a=d,d=I` deletes for uploads a SIBLING cache owns (SQ-1190): the
+    /// inline-image transcript bands and the picker's cover/gallery tiles are
+    /// placed through [`place_protocol`], exactly like a chrome band, but they
+    /// live in `InlineImageRender`/`cover.rs`, not here — `queue_protocol_delete`
+    /// is private, so this is the seam that lets their eviction share this queue
+    /// and [`Self::flush_kitty_deletes`]'s no-flicker sequencing instead of
+    /// duplicating either.
+    pub(crate) fn queue_external_deletes(&mut self, ids: impl IntoIterator<Item = u32>) {
+        for id in ids {
+            self.queue_protocol_delete(Some(id));
+        }
     }
 
     /// Queue a delete for an upload that is being REPLACED IN PLACE — one still
@@ -1520,6 +1926,7 @@ impl GraphicsRender {
             write!(self.deletes_after_place, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\")
                 .expect("write to String");
         }
+        self.note_delete_id(id);
     }
 
     /// Flush any queued kitty deletes into `buf` when no graphics window will place
@@ -1581,10 +1988,10 @@ impl GraphicsRender {
     ///
     /// The protocol licenses it: *"When re-transmitting image data for a specific
     /// id, the existing image and all its placements must be deleted"* — the data
-    /// is replaced wholesale, and our `a=T,U=1,r,c,p=1` re-creates the window's one
-    /// placement in the same command, so the cells never stop resolving. The old
-    /// image also stays on screen throughout, because a chunked transmit commits
-    /// only on its final chunk: nothing blanks mid-transfer.
+    /// is replaced wholesale, and our `a=T,U=1,r,c` re-creates the window's
+    /// anonymous placement in the same command, so the cells never stop resolving.
+    /// The old image also stays on screen throughout, because a chunked transmit
+    /// commits only on its final chunk: nothing blanks mid-transfer.
     ///
     /// A repaint that lands on identical pixels still costs nothing — advent.blb's
     /// toolbar redraws itself from scratch to press and release a button, bumping
@@ -1595,7 +2002,7 @@ impl GraphicsRender {
         &mut self,
         gw: &GraphicsWindow,
         area: Rect,
-        compress: bool,
+        wire: WindowWire,
         buf: &mut Buffer,
     ) {
         // A resize invalidates this window's upload: the placement's r×c grid is
@@ -1637,9 +2044,20 @@ impl GraphicsRender {
                     id: Some(entry.id),
                 });
             } else {
-                let transmit =
-                    kitty_transmit_virtual(&gw.canvas, entry.id, area.height, area.width, compress);
-                self.uploads.add(measure_transmit(&transmit));
+                let (transmit, timing) =
+                    kitty_transmit_virtual_wire(&gw.canvas, entry.id, area.height, area.width, wire);
+                if let Some(d) = timing.shm {
+                    self.encode_timings.window_shm.record(d);
+                }
+                if let Some(d) = timing.deflate {
+                    self.encode_timings.window_deflate.record(d);
+                }
+                if let Some(d) = timing.base64 {
+                    self.encode_timings.window_base64.record(d);
+                }
+                let measured = measure_transmit(&transmit);
+                self.note_upload_id(Some(entry.id), measured.pixels);
+                self.uploads.add(measured);
                 entry.pending_transmit = Some(transmit);
                 entry.uploaded = Some(hash);
                 self.note_op(GraphicsOp::Upload {
@@ -1668,13 +2086,13 @@ impl GraphicsRender {
     /// transmit, 1 thereafter) and the id they live under (observability hook,
     /// SQ-0564/SQ-0995). The count is the thing worth asserting: an id that is
     /// replaced in place can never grow it.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "t-render"))]
     fn kitty_uploads(&self, win: u32) -> Option<(usize, u32)> {
         self.kitty_wins.get(&win).map(|e| (usize::from(e.uploaded.is_some()), e.id))
     }
 
     /// The kitty delete escapes waiting to be written to the terminal (SQ-0637).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "t-render"))]
     fn queued_deletes(&self) -> &str {
         &self.pending_deletes
     }
@@ -1682,7 +2100,7 @@ impl GraphicsRender {
     /// The deletes waiting to ride out BEHIND the placement that supersedes them
     /// (SQ-0817). Separate from [`Self::queued_deletes`] because "nothing was
     /// freed" is only true when both are empty (SQ-0996).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "t-render"))]
     fn queued_deletes_after_place(&self) -> &str {
         &self.deletes_after_place
     }
@@ -1691,7 +2109,7 @@ impl GraphicsRender {
     /// `(non-kitty window protocols, chrome bands, kitty window uploads,
     /// a raster composite?)`. One accessor rather than four because the whole
     /// question is which of them survive an invalidation and which must not.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "t-render"))]
     fn cell_keyed_cache_sizes(&self) -> (usize, usize, usize, bool) {
         (self.cache.len(), self.chrome_bands.len(), self.kitty_wins.len(), self.v6.is_some())
     }
@@ -1730,33 +2148,43 @@ impl GraphicsRender {
         let fs = picker.font_size();
         let box_w = area.width as u32 * fs.width.max(1) as u32;
         let box_h = area.height as u32 * fs.height.max(1) as u32;
-        let (proto, pic) = if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
-            // Half-blocks never had the stretch to fix: `Halfblocks::encode` resolves
-            // the image onto the cell grid itself, so there is no pixel size for a
-            // terminal to disagree with. Its own arm builds the grid exactly, and its
-            // picture therefore IS the whole cell rect.
-            let proto = v6_halfblocks_protocol(canvas, box_w, box_h, fs, lock)?;
-            let sz = proto.size();
-            let box_px = (
-                0,
-                0,
-                u32::from(sz.width) * u32::from(fs.width.max(1)),
-                u32::from(sz.height) * u32::from(fs.height.max(1)),
-            );
-            (proto, box_px)
-        } else {
-            let (img, fit) = v6_fit_source(canvas, box_w, box_h, lock, v6_upscale_cap(picker));
-            // Out to whole cells, so the terminal blits the composite 1:1 instead of
-            // resampling it into a box up to a cell bigger than itself (SQ-1081).
-            let (img, pic) = v6_pad_to_cells(img, box_w, box_h, fs);
-            let img = image::DynamicImage::ImageRgba8(img);
-            let size = Size::new(area.width, area.height);
-            let proto = match reuse {
-                Some(id) => picker.new_protocol_with_id(img, size, fit, id).ok()?,
-                None => picker.new_protocol(img, size, fit).ok()?,
+        let (proto, pic, resize, encode) =
+            if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
+                // Half-blocks never had the stretch to fix: `Halfblocks::encode` resolves
+                // the image onto the cell grid itself, so there is no pixel size for a
+                // terminal to disagree with. Its own arm builds the grid exactly, and its
+                // picture therefore IS the whole cell rect. No separate resize step to
+                // time (SQ-1338): the resample happens inside this one call.
+                let t0 = std::time::Instant::now();
+                let proto = v6_halfblocks_protocol(canvas, box_w, box_h, fs, lock)?;
+                let encode = t0.elapsed();
+                let sz = proto.size();
+                let box_px = (
+                    0,
+                    0,
+                    u32::from(sz.width) * u32::from(fs.width.max(1)),
+                    u32::from(sz.height) * u32::from(fs.height.max(1)),
+                );
+                (proto, box_px, None, encode)
+            } else {
+                let t0 = std::time::Instant::now();
+                let (img, fit) = v6_fit_source(canvas, box_w, box_h, lock, v6_upscale_cap(picker));
+                // Out to whole cells, so the terminal blits the composite 1:1 instead of
+                // resampling it into a box up to a cell bigger than itself (SQ-1081).
+                let (img, pic) = v6_pad_to_cells(img, box_w, box_h, fs);
+                let resize = t0.elapsed();
+                let img = image::DynamicImage::ImageRgba8(img);
+                let size = Size::new(area.width, area.height);
+                let t1 = std::time::Instant::now();
+                let proto = match reuse {
+                    Some(id) if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty => {
+                        kitty_protocol_with_id(picker, img, size, fit, id).ok()?
+                    }
+                    _ => picker.new_protocol(img, size, fit).ok()?,
+                };
+                let encode = t1.elapsed();
+                (proto, pic, Some(resize), encode)
             };
-            (proto, pic)
-        };
         Some(V6Ready {
             pic,
             gen,
@@ -1768,6 +2196,8 @@ impl GraphicsRender {
             // The id this composite is already placed under, carried across the
             // re-encode: `redraw_v6` re-confirms it off the placement it writes.
             placed_id: reuse,
+            resize,
+            encode,
         })
     }
 
@@ -1820,6 +2250,12 @@ impl GraphicsRender {
         let reuse = self.v6.as_ref().and_then(|r| r.placed_id);
         if self.v6.is_none() {
             self.v6 = Self::encode_v6(picker, &canvas, gen, area, frame, None);
+            if let Some(r) = &self.v6 {
+                if let Some(d) = r.resize {
+                    self.encode_timings.raster_resize.record(d);
+                }
+                self.encode_timings.raster_encode.record(r.encode);
+            }
             return;
         }
         let picker = picker.clone();
@@ -1867,9 +2303,9 @@ impl GraphicsRender {
     ///   showing a picture resampled to the old pixel size. STALE, and the most
     ///   visible of the two.
     ///
-    /// And three that are already safe — checked, not assumed, because two of
-    /// them share the suspect key shape and only one of the three is safe for
-    /// the same reason:
+    /// And four that are already safe — checked, not assumed, because most of
+    /// them share the suspect key shape and only some of them are safe for the
+    /// same reason:
     ///
     /// * `chrome_bands` — the key IS in cells, but the freshness HASH mixes in
     ///   `(bw, bh)` in device pixels, so a font change makes every band miss and
@@ -1883,11 +2319,17 @@ impl GraphicsRender {
     ///   `picker.font_size()` at all, so there is nothing in that cache fitted
     ///   to a cell, and re-uploading would spend a full canvas to arrive at the
     ///   same pixels.
+    /// * `cell_memo` (SQ-1200) — keyed `(version, area, force)` in cells, and
+    ///   immune for the same reason as `kitty_wins`: [`classify_graphics_as_cells`]
+    ///   reads only `gw.canvas`'s NATIVE pixel dimensions and `area`'s cell
+    ///   count, never a device-pixel size or `picker.font_size()`, so its answer
+    ///   for an unchanged `(version, area, force)` is unchanged by a font-size
+    ///   change too.
     ///
     /// The two device-pixel caches are dropped anyway even though they would
     /// re-encode by themselves: they are cheap to rebuild, and a ring whose
     /// bands survived a font change while the composite behind them did not is a
-    /// seam waiting to happen. `kitty_wins` is deliberately KEPT.
+    /// seam waiting to happen. `kitty_wins` and `cell_memo` are deliberately KEPT.
     ///
     /// Every drop frees its upload in the terminal rather than merely forgetting
     /// it (SQ-0753), which is why this delegates instead of clearing the maps.
@@ -1896,6 +2338,11 @@ impl GraphicsRender {
         self.invalidate_v6();
         self.invalidate_chrome_bands();
         self.chrome_scaled = None;
+        // The hybrid frame's generation key covers the font size, so a font
+        // change would rebuild it anyway — dropped here too so a frame fitted
+        // against the old cell can never outlive the band caches it replays
+        // (SQ-1187).
+        self.hybrid = None;
     }
 
     /// Poll the background v6 encode: if it finished, install its protocol as the
@@ -1905,12 +2352,23 @@ impl GraphicsRender {
     /// an out-of-date entry is still rendered until the next encode lands, so the
     /// pane never blanks. (SQ-0469)
     pub fn poll_v6_job(&mut self) -> bool {
+        // SQ-1188: the chrome-band worker is polled on the same tick — one
+        // caller (`AppState::poll_v6_encode_job`), two workers, either can
+        // warrant the redraw.
+        let bands = self.poll_band_job();
         let done = self.v6_job.as_ref().is_some_and(|j| j.is_finished());
         if !done {
-            return false;
+            return bands;
         }
         let job = self.v6_job.take().expect("checked above");
         if let Ok(Some(ready)) = job.join() {
+            // SQ-1338: fold the worker's own timings in on this (main) thread — the
+            // worker measured them, but only the installer writes them, so the
+            // per-frame path never takes a lock for this.
+            if let Some(d) = ready.resize {
+                self.encode_timings.raster_resize.record(d);
+            }
+            self.encode_timings.raster_encode.record(ready.encode);
             // The composite being replaced is a whole-pane upload; free it in the
             // terminal rather than letting the assignment orphan it (SQ-0753). A
             // raster-mode game re-encodes on every visible change, so this is the
@@ -1961,6 +2419,7 @@ impl GraphicsRender {
         let after = std::mem::take(&mut self.deletes_after_place);
         let (placed_id, placed_bytes) = place_protocol_with(proto, dest, buf, &pending, &after);
         self.uploads.add(placed_bytes);
+        self.note_upload_id(placed_id, placed_bytes.pixels);
         if placed_id.is_none() {
             self.pending_deletes = pending;
             // Nothing was placed, so nothing on screen depends on these either:
@@ -2085,6 +2544,14 @@ impl GraphicsRender {
         self.band_mags.clear();
         self.ops.clear();
         self.band_ground = None;
+        self.band_replay = false;
+    }
+
+    /// SQ-1187: declare whether this frame REPLAYS an unchanged hybrid frame —
+    /// see the field. Set by the hybrid draw half right after the frame gate,
+    /// never anywhere else.
+    pub fn set_band_replay(&mut self, on: bool) {
+        self.band_replay = on;
     }
 
     /// Declare the ground this frame's chrome bands resolve their transparency
@@ -2146,6 +2613,12 @@ impl GraphicsRender {
             self.queue_protocol_delete(id);
             self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Band(x, y, w, h) });
         }
+        // SQ-1188: staged and in-flight encodes answered for entries that no
+        // longer exist — cancel them (an in-flight batch is left to finish; its
+        // results find their dirty marks gone and are dropped on install).
+        self.band_pending.clear();
+        self.band_dirty.clear();
+        self.band_inflight.clear();
     }
 
     pub fn retain_chrome_bands(&mut self, live: &std::collections::HashSet<BandKey>) {
@@ -2175,7 +2648,7 @@ impl GraphicsRender {
 
     /// The kitty image id a cached chrome band is currently placed as, if any
     /// (observability hook, SQ-0753).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "t-render"))]
     fn chrome_band_id(&self, key: BandKey) -> Option<u32> {
         self.chrome_bands.get(&key).and_then(|(_, _, id)| *id)
     }
@@ -2249,7 +2722,6 @@ impl GraphicsRender {
         let sy_hi = (rel_y0 as i64 + bh as i64 - scale.off_y as i64).clamp(sy_lo, sh as i64);
 
         use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
         // Hash ONLY the band's own native footprint (not the whole canvas): a
         // change confined to another band's native pixels then leaves this band's
         // hash — and its cached upload — untouched (SQ-0514). The footprint is the
@@ -2273,60 +2745,82 @@ impl GraphicsRender {
             let ny0 = scaled_to_native(sy_lo as u32, nh, sh).saturating_sub(halo);
             let ny1 = (scaled_to_native(sy_hi as u32 - 1, nh, sh) + 1 + halo).min(nh);
             footprint = Some((nx0, ny0, nx1 - nx0, ny1 - ny0));
-            (nx0, nx1, ny0, ny1).hash(&mut h);
-            for ny in ny0..ny1 {
-                for nx in nx0..nx1 {
-                    chrome_canvas.get_pixel(nx, ny).0.hash(&mut h);
-                }
-            }
-        } else {
-            // Fully in the letterbox margin — no native pixels feed it.
-            0u8.hash(&mut h);
         }
-        self.band_ground.map(|p| p.0).hash(&mut h);
-        scale.s.to_bits().hash(&mut h);
-        (scale.off_x, scale.off_y).hash(&mut h);
-        (cw, ch).hash(&mut h);
-        (rel_x0, rel_y0, bw, bh).hash(&mut h);
-        let hash = h.finish();
         let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
-        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _, _)) if *v == hash);
-        if !fresh {
+        let cached_hash = self.chrome_bands.get(&key).map(|(v, _, _)| *v);
+        // SQ-1187: on a replay frame the whole-frame generation key has already
+        // proven every input to this hash unchanged, so the stored hash IS the
+        // hash and no pixel is walked. Any frame that could have moved an input
+        // rebuilt the HybridFrame, and that frame carries `band_replay = false`.
+        let hash = match cached_hash.filter(|_| self.band_replay && !self.band_dirty.contains_key(&key)) {
+            Some(v) => v,
+            None => {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                match footprint {
+                    Some((nx0, ny0, fw, fh)) => {
+                        (nx0, nx0 + fw, ny0, ny0 + fh).hash(&mut h);
+                        hash_canvas_rows(&mut h, chrome_canvas, nx0, nx0 + fw, ny0, ny0 + fh);
+                    }
+                    // Fully in the letterbox margin — no native pixels feed it.
+                    None => 0u8.hash(&mut h),
+                }
+                self.band_ground.map(|p| p.0).hash(&mut h);
+                scale.s.to_bits().hash(&mut h);
+                (scale.off_x, scale.off_y).hash(&mut h);
+                (cw, ch).hash(&mut h);
+                (rel_x0, rel_y0, bw, bh).hash(&mut h);
+                h.finish()
+            }
+        };
+        let fresh = cached_hash == Some(hash);
+        let status = if fresh {
+            self.note_op(GraphicsOp::Reuse {
+                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
+                id: None,
+            });
+            "cache HIT"
+        } else if self.band_queued(key, hash) {
+            // SQ-1188: exactly this content is already on its way to the worker
+            // — keep placing the old upload below until the result lands.
+            "encode queued (worker)"
+        } else {
             // Copy the sub-rect under this band out of the frame-shared scaled
             // chrome into a band-sized image (letterbox area outside the scaled
             // chrome stays transparent). The whole-canvas resize happens at most
             // once per changed frame (cached in `chrome_scaled`), not per band.
             let band_img = {
                 let scaled = self.scaled_chrome(chrome_canvas, scale.s, sw, sh);
-                let mut band_img = image::RgbaImage::new(bw, bh);
-                for by in 0..bh {
-                    let sy = rel_y0 as i64 + by as i64 - scale.off_y as i64;
-                    if sy < 0 || sy as u32 >= sh {
-                        continue;
-                    }
-                    for bx in 0..bw {
-                        let sx = rel_x0 as i64 + bx as i64 - scale.off_x as i64;
-                        if sx < 0 || sx as u32 >= sw {
+                // SQ-1188: the in-bounds sx range is one contiguous byte run per
+                // row — copy rows, not pixels. `sx = rel_x0 + bx - off_x`, so bx
+                // is in-bounds on [off_x - rel_x0, off_x - rel_x0 + sw).
+                let lo = (scale.off_x as i64 - rel_x0 as i64).max(0);
+                let hi = ((scale.off_x as i64 - rel_x0 as i64) + sw as i64).min(bw as i64);
+                let mut data = vec![0u8; bw as usize * bh as usize * 4];
+                if lo < hi {
+                    let len = (hi - lo) as usize * 4;
+                    let sx0 = (rel_x0 as i64 + lo - scale.off_x as i64) as usize;
+                    let raw = scaled.as_raw();
+                    for by in 0..bh {
+                        let sy = rel_y0 as i64 + by as i64 - scale.off_y as i64;
+                        if sy < 0 || sy as u32 >= sh {
                             continue;
                         }
-                        band_img.put_pixel(bx, by, *scaled.get_pixel(sx as u32, sy as u32));
+                        let src = (sy as usize * sw as usize + sx0) * 4;
+                        let dst = (by as usize * bw as usize + lo as usize) * 4;
+                        data[dst..dst + len].copy_from_slice(&raw[src..src + len]);
                     }
                 }
-                band_img
+                image::RgbaImage::from_raw(bw, bh, data).expect("sized above")
             };
             let img = self.seal_band(band_img);
             // Under the id this band is already placed as, when it has one — see
-            // [`Self::band_encode`] (SQ-0996).
-            let reuse = self.chrome_bands.get(&key).and_then(|(_, _, id)| *id);
-            if self.band_encode(picker, img, key, band, hash, reuse).is_none() {
+            // [`Self::band_encode`] (SQ-0996); off the main thread when the old
+            // upload can cover for it (SQ-1188).
+            let Some(status) = self.stage_band_encode(picker, img, key, band, hash) else {
                 return;
-            }
-        } else {
-            self.note_op(GraphicsOp::Reuse {
-                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
-                id: None,
-            });
-        }
+            };
+            status
+        };
         // The band image is exactly band-sized, so it places at the band's
         // top-left (no centering — the crop is already positioned).
         //
@@ -2349,15 +2843,16 @@ impl GraphicsRender {
             // deletes either — hand them to the ordinary queue rather than strand them.
             self.pending_deletes.push_str(&after);
         }
-        if let Some((_, _, (_, bytes))) = placed {
+        if let Some((_, _, (id, bytes))) = placed {
             self.uploads.add(bytes);
+            self.note_upload_id(id, bytes.pixels);
         }
         match placed {
             Some((dest, sz, (id, _))) => {
                 self.band_log.push(format!(
                     "band {}x{}@({},{}): {} · proto {}x{} · placed {}x{} at ({},{}) · native {} · {}",
                     band.width, band.height, band.x, band.y,
-                    if fresh { "cache HIT" } else { "encoded" },
+                    status,
                     sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
                     match footprint {
                         Some((x, y, w, h)) => format!("{w}x{h}@({x},{y})"),
@@ -2430,11 +2925,16 @@ impl GraphicsRender {
         reuse: Option<u32>,
     ) -> Option<()> {
         let size = Size::new(band.width, band.height);
+        let t0 = std::time::Instant::now();
         let encoded = match reuse {
-            Some(id) => picker.new_protocol_with_id(img, size, Resize::Fit(None), id),
-            None => picker.new_protocol(img, size, Resize::Fit(None)),
+            Some(id) if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty => {
+                kitty_protocol_with_id(picker, img, size, Resize::Fit(None), id)
+            }
+            _ => picker.new_protocol(img, size, Resize::Fit(None)),
         };
+        let elapsed = t0.elapsed();
         let p = encoded.ok()?;
+        self.encode_timings.band_encode.record(elapsed);
         self.band_encodes += 1;
         // The id carries forward with the new protocol, so the placement's cells
         // are the ones already on screen and `remember_band_id` re-confirms it.
@@ -2453,6 +2953,131 @@ impl GraphicsRender {
             cells: (band.width, band.height),
         });
         Some(())
+    }
+
+    /// SQ-1188: is an encode for exactly this band content already staged or in
+    /// flight? Then the caller skips rebuilding the band image and keeps
+    /// placing the old upload until the worker's result lands.
+    fn band_queued(&self, key: BandKey, hash: u64) -> bool {
+        self.band_dirty.get(&key) == Some(&hash)
+    }
+
+    /// SQ-1188: hand a changed band to the encoder — the background worker when
+    /// this backend's encode is worth a thread AND an older upload is still
+    /// placed to keep showing; synchronously otherwise. The three outcomes are
+    /// the band log's status words.
+    ///
+    /// The synchronous cases are deliberate, not leftovers:
+    /// * **no cached upload** — a first appearance or a post-resume re-upload
+    ///   has no honest previous image to keep placed, so deferring it would
+    ///   blank the band for a frame. This is exactly `spawn_v6_encode`'s rule
+    ///   for the raster composite's first frame (SQ-0578).
+    /// * **half-blocks** — see [`band_encode_offthread`].
+    fn stage_band_encode(
+        &mut self,
+        picker: &Picker,
+        img: image::DynamicImage,
+        key: BandKey,
+        band: Rect,
+        hash: u64,
+    ) -> Option<&'static str> {
+        let reuse = self.chrome_bands.get(&key).and_then(|(_, _, id)| *id);
+        if !band_encode_offthread(picker) || !self.chrome_bands.contains_key(&key) {
+            self.band_dirty.remove(&key);
+            return self.band_encode(picker, img, key, band, hash, reuse).map(|()| "encoded");
+        }
+        self.band_dirty.insert(key, hash);
+        self.band_pending.push(PendingBand { key, band, hash, img, reuse });
+        Some("encode queued (worker)")
+    }
+
+    /// SQ-1188: hand this frame's staged band encodes to one background worker.
+    /// Called at the end of the hybrid draw, once per frame. Coalesced exactly
+    /// like the raster worker: one batch at a time, and stagings that arrive
+    /// while a batch runs are dropped and re-staged by a later frame (their
+    /// dirty marks are lifted so the re-stage actually happens — except where
+    /// the in-flight batch already carries the same content).
+    pub fn spawn_band_jobs(&mut self, picker: &Picker) {
+        let pending = std::mem::take(&mut self.band_pending);
+        if pending.is_empty() {
+            return;
+        }
+        if self.band_job.is_some() {
+            for p in pending {
+                if self.band_inflight.get(&p.key) != Some(&p.hash) {
+                    self.band_dirty.remove(&p.key);
+                }
+            }
+            return;
+        }
+        self.band_inflight = pending.iter().map(|p| (p.key, p.hash)).collect();
+        let picker = picker.clone();
+        self.band_job = Some(std::thread::spawn(move || {
+            pending
+                .into_iter()
+                .map(|p| {
+                    let size = Size::new(p.band.width, p.band.height);
+                    // The id-reuse discipline rides into the worker unchanged
+                    // (SQ-0996): the encode goes out under the id the band is
+                    // already placed as, so the placeholder cells stay stable.
+                    let t0 = std::time::Instant::now();
+                    let proto = match p.reuse {
+                        Some(id) if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty => {
+                            kitty_protocol_with_id(&picker, p.img, size, Resize::Fit(None), id)
+                        }
+                        _ => picker.new_protocol(p.img, size, Resize::Fit(None)),
+                    }
+                    .ok();
+                    let encode = t0.elapsed();
+                    BandEncoded { key: p.key, band: p.band, hash: p.hash, reuse: p.reuse, proto, encode }
+                })
+                .collect()
+        }));
+    }
+
+    /// SQ-1188: reap the background band batch. Installs each result whose band
+    /// still expects exactly that content — a band that changed again while the
+    /// worker ran, or was evicted, drops its result on the floor (its staging
+    /// mark is lifted so the next frame re-stages the CURRENT content instead).
+    /// Returns true whenever a batch was reaped, so the caller schedules the
+    /// redraw that places the new uploads (and re-stages whatever is still
+    /// stale) — the raster worker's last-ready shape.
+    fn poll_band_job(&mut self) -> bool {
+        let done = self.band_job.as_ref().is_some_and(|j| j.is_finished());
+        if !done {
+            return false;
+        }
+        let job = self.band_job.take().expect("checked above");
+        if let Ok(results) = job.join() {
+            for r in results {
+                if self.band_dirty.get(&r.key) != Some(&r.hash) {
+                    continue; // superseded or cancelled — a newer staging owns this band
+                }
+                self.band_dirty.remove(&r.key);
+                let Some(proto) = r.proto else { continue }; // failed encode: retried by the next frame
+                let Some(entry) = self.chrome_bands.get_mut(&r.key) else { continue }; // evicted
+                let stale_id = entry.2;
+                *entry = (r.hash, proto, r.reuse);
+                self.band_encodes += 1;
+                self.encode_timings.band_encode.record(r.encode);
+                if stale_id != r.reuse {
+                    self.queue_protocol_delete_after_place(stale_id);
+                }
+                self.note_op(GraphicsOp::Upload {
+                    target: GraphicsTarget::Band(r.key.1, r.key.2, r.key.3, r.key.4),
+                    id: r.reuse,
+                    cells: (r.band.width, r.band.height),
+                });
+            }
+        }
+        self.band_inflight.clear();
+        true
+    }
+
+    /// True while any band encode is staged or in flight (SQ-1188) — the test
+    /// harness's settle probe, mirroring [`Self::v6_encode_in_flight`].
+    pub fn band_encode_in_flight(&self) -> bool {
+        self.band_job.is_some() || !self.band_pending.is_empty() || !self.band_dirty.is_empty()
     }
 
     /// SQ-0511: draw ONE side flank band VERTICALLY STRETCHED — sample the native
@@ -2502,55 +3127,60 @@ impl GraphicsRender {
         let bh = band.height as u32 * ch;
 
         use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        // Hash ONLY the crop's native footprint (coords + pixels) plus the target
-        // device size — the stretch factor is (bw,bh)/(cw_n,ch_n), so both ends are
-        // covered. A change outside this native rect (e.g. the banner's Score/Moves)
-        // never alters the hash, keeping the flank's cached upload fresh (SQ-0514).
-        (slot as u8).hash(&mut h); // discriminator vs. draw_chrome_band keys on the same map
-        (cx, cy, cw_n, ch_n).hash(&mut h);
         let x1 = (cx + cw_n).min(canvas_w);
         let y1 = (cy + ch_n).min(canvas_h);
-        for ny in cy..y1 {
-            for nx in cx..x1 {
-                chrome_canvas.get_pixel(nx, ny).0.hash(&mut h);
-            }
-        }
-        self.band_ground.map(|p| p.0).hash(&mut h);
-        (bw, bh).hash(&mut h);
-        let hash = h.finish();
         let key = (slot as u8, band.x, band.y, band.width, band.height);
-        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _, _)) if *v == hash);
-        if !fresh {
-            // Copy the native crop (clamped to the canvas) into its own image, then
-            // resize it to the band's device box. Transparent native pixels stay
-            // transparent, so the theme backdrop shows through gaps in the flank.
-            let mut src = image::RgbaImage::new(cw_n, ch_n);
-            for oy in 0..ch_n {
-                let ny = cy + oy;
-                if ny >= canvas_h {
-                    break;
-                }
-                for ox in 0..cw_n {
-                    let nx = cx + ox;
-                    if nx >= canvas_w {
-                        break;
-                    }
-                    src.put_pixel(ox, oy, *chrome_canvas.get_pixel(nx, ny));
-                }
+        let cached_hash = self.chrome_bands.get(&key).map(|(v, _, _)| *v);
+        // SQ-1187: on a replay frame the stored hash is the hash — see
+        // `draw_chrome_band`.
+        let hash = match cached_hash.filter(|_| self.band_replay && !self.band_dirty.contains_key(&key)) {
+            Some(v) => v,
+            None => {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                // Hash ONLY the crop's native footprint (coords + pixels) plus the target
+                // device size — the stretch factor is (bw,bh)/(cw_n,ch_n), so both ends are
+                // covered. A change outside this native rect (e.g. the banner's Score/Moves)
+                // never alters the hash, keeping the flank's cached upload fresh (SQ-0514).
+                (slot as u8).hash(&mut h); // discriminator vs. draw_chrome_band keys on the same map
+                (cx, cy, cw_n, ch_n).hash(&mut h);
+                hash_canvas_rows(&mut h, chrome_canvas, cx, x1, cy, y1);
+                self.band_ground.map(|p| p.0).hash(&mut h);
+                (bw, bh).hash(&mut h);
+                h.finish()
             }
-            let stretched = resize_directional(&src, bw, bh);
-            let img = self.seal_band(stretched);
-            let reuse = self.chrome_bands.get(&key).and_then(|(_, _, id)| *id);
-            if self.band_encode(picker, img, key, band, hash, reuse).is_none() {
-                return;
-            }
-        } else {
+        };
+        let fresh = cached_hash == Some(hash);
+        let status = if fresh {
             self.note_op(GraphicsOp::Reuse {
                 target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
                 id: None,
             });
-        }
+            "cache HIT"
+        } else if self.band_queued(key, hash) {
+            // SQ-1188: this content is already on its way to the worker — keep
+            // placing the old upload below until the result lands.
+            "encode queued (worker)"
+        } else {
+            // Copy the native crop (clamped to the canvas) into its own image, then
+            // resize it to the band's device box. Transparent native pixels stay
+            // transparent, so the theme backdrop shows through gaps in the flank.
+            // SQ-1188: rows, not pixels — each crop row is one contiguous byte run.
+            let mut data = vec![0u8; cw_n as usize * ch_n as usize * 4];
+            let cols = (x1 - cx) as usize * 4;
+            let raw = chrome_canvas.as_raw();
+            for oy in 0..(y1 - cy) {
+                let srow = ((cy + oy) as usize * canvas_w as usize + cx as usize) * 4;
+                let drow = oy as usize * cw_n as usize * 4;
+                data[drow..drow + cols].copy_from_slice(&raw[srow..srow + cols]);
+            }
+            let src = image::RgbaImage::from_raw(cw_n, ch_n, data).expect("sized above");
+            let stretched = resize_directional(&src, bw, bh);
+            let img = self.seal_band(stretched);
+            let Some(status) = self.stage_band_encode(picker, img, key, band, hash) else {
+                return;
+            };
+            status
+        };
         // SQ-0747: a STRETCHED band goes in the band log too. It never did, and that
         // is why every `/dump-windows` capture of Journey's menu listed the right-hand
         // flank and the bottom strip and no left flank at all — the picture column is
@@ -2578,15 +3208,16 @@ impl GraphicsRender {
             // deletes either — hand them to the ordinary queue rather than strand them.
             self.pending_deletes.push_str(&after);
         }
-        if let Some((_, _, (_, bytes))) = placed {
+        if let Some((_, _, (id, bytes))) = placed {
             self.uploads.add(bytes);
+            self.note_upload_id(id, bytes.pixels);
         }
         match placed {
             Some((dest, sz, (id, _))) => {
                 self.band_log.push(format!(
                     "band {}x{}@({},{}) [{slot:?}, stretched]: {} · proto {}x{} · placed {}x{} at ({},{}) · native {cw_n}x{ch_n}@({cx},{cy}) · {}",
                     band.width, band.height, band.x, band.y,
-                    if fresh { "cache HIT" } else { "encoded" },
+                    status,
                     sz.width, sz.height, dest.width, dest.height, dest.x, dest.y,
                     resample_note(cw_n, ch_n, bw, bh),
                 ));
@@ -2660,17 +3291,35 @@ impl GraphicsRender {
         }
 
         use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        (slot as u8).hash(&mut h);
-        (src.width(), src.height()).hash(&mut h);
-        src.as_raw().hash(&mut h);
-        (bw, bh).hash(&mut h);
-        self.band_ground.map(|p| p.0).hash(&mut h);
-        (dx, dy, dw, dh).hash(&mut h);
-        let hash = h.finish();
         let key = (slot as u8, band.x, band.y, band.width, band.height);
-        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _, _)) if *v == hash);
-        if !fresh {
+        let cached_hash = self.chrome_bands.get(&key).map(|(v, _, _)| *v);
+        // SQ-1187: on a replay frame the stored hash is the hash — see
+        // `draw_chrome_band`.
+        let hash = match cached_hash.filter(|_| self.band_replay && !self.band_dirty.contains_key(&key)) {
+            Some(v) => v,
+            None => {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (slot as u8).hash(&mut h);
+                (src.width(), src.height()).hash(&mut h);
+                src.as_raw().hash(&mut h);
+                (bw, bh).hash(&mut h);
+                self.band_ground.map(|p| p.0).hash(&mut h);
+                (dx, dy, dw, dh).hash(&mut h);
+                h.finish()
+            }
+        };
+        let fresh = cached_hash == Some(hash);
+        let status = if fresh {
+            self.note_op(GraphicsOp::Reuse {
+                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
+                id: None,
+            });
+            "cache HIT"
+        } else if self.band_queued(key, hash) {
+            // SQ-1188: this content is already on its way to the worker — keep
+            // placing the old upload below until the result lands.
+            "encode queued (worker)"
+        } else {
             let scaled = resize_directional(src, dw, dh);
             // The band is `dest` and transparent everywhere else. When `dest` IS the
             // band — every pane where the letterbox leaves no margin beside this
@@ -2683,16 +3332,11 @@ impl GraphicsRender {
                 band_img
             };
             let img = self.seal_band(scaled);
-            let reuse = self.chrome_bands.get(&key).and_then(|(_, _, id)| *id);
-            if self.band_encode(picker, img, key, band, hash, reuse).is_none() {
+            let Some(status) = self.stage_band_encode(picker, img, key, band, hash) else {
                 return;
-            }
-        } else {
-            self.note_op(GraphicsOp::Reuse {
-                target: GraphicsTarget::Band(key.1, key.2, key.3, key.4),
-                id: None,
-            });
-        }
+            };
+            status
+        };
         // Any deletes queued above (this band's own predecessor, or another band's)
         // ride out on this placement, in the same batch (SQ-0637's rule). Restored
         // to the queue when nothing was placed, or when the backend has no
@@ -2712,8 +3356,9 @@ impl GraphicsRender {
             // deletes either — hand them to the ordinary queue rather than strand them.
             self.pending_deletes.push_str(&after);
         }
-        if let Some((_, _, (_, bytes))) = placed {
+        if let Some((_, _, (id, bytes))) = placed {
             self.uploads.add(bytes);
+            self.note_upload_id(id, bytes.pixels);
         }
         match placed {
             Some((placed_at, sz, (id, _))) => {
@@ -2721,7 +3366,7 @@ impl GraphicsRender {
                 self.band_log.push(format!(
                     "band {}x{}@({},{}) [{slot:?}, tiled]: {} · proto {}x{} · placed {}x{} at ({},{}) · source {}x{} native px · into {dw}x{dh}px at ({dx},{dy}) of {bw}x{bh} · blank rows {}, longest run {} at {} · {}",
                     band.width, band.height, band.x, band.y,
-                    if fresh { "cache HIT" } else { "encoded" },
+                    status,
                     sz.width, sz.height, placed_at.width, placed_at.height, placed_at.x, placed_at.y,
                     src.width(), src.height(),
                     blank, run, run_at,
@@ -2739,6 +3384,76 @@ impl GraphicsRender {
                 band.width, band.height, band.x, band.y
             )),
         }
+    }
+}
+
+// ── Delete queues detached from a `GraphicsRender` instance (SQ-1190) ────────
+//
+// `GraphicsRender` lives on `AppState`, but two other `Protocol` caches place
+// uploads through the same `place_protocol` and have no `AppState` to share it
+// with: the pre-game picker's cover/tile/preview caches (`cover.rs`,
+// `picker_ui.rs`) run their own event loop before any `AppState` exists. The
+// two pieces below are `GraphicsRender::queue_protocol_delete` and
+// `flush_kitty_deletes`, detached from `self` so a queue with no instance in
+// common can still emit the identical bytes and no-flicker sequencing instead
+// of duplicating either by hand.
+
+/// The literal escape that frees one kitty image id — `a=d,d=I` deletes the
+/// image data and every placement of it at once, exactly what
+/// `GraphicsRender::queue_protocol_delete` writes.
+pub(crate) fn kitty_delete_escape(id: u32) -> String {
+    format!("\x1b_Gq=2,a=d,d=I,i={id}\x1b\\")
+}
+
+/// [`GraphicsRender::flush_kitty_deletes`], operating on a caller-owned `pending`
+/// string instead of `self.pending_deletes`. Kept in sync with that method by
+/// hand — the two have no instance to share, so this is the alternative to
+/// duplicating the caller-facing queue itself.
+fn flush_kitty_deletes_into(pending: &mut String, area: Rect, buf: &mut Buffer) {
+    use ratatui::buffer::CellDiffOption;
+    if pending.is_empty() || area.width == 0 || area.height == 0 {
+        return;
+    }
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let Some(cell) = buf.cell_mut((x, y)) else { continue };
+            let plain = cell.diff_option == CellDiffOption::None
+                && cell.symbol().len() == 1
+                && cell.symbol().is_ascii()
+                && !cell.symbol().starts_with(char::is_control);
+            if !plain {
+                continue;
+            }
+            let symbol = format!("{}{}", pending, cell.symbol());
+            cell.set_symbol(&symbol)
+                .set_diff_option(CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap()));
+            pending.clear();
+            return;
+        }
+    }
+}
+
+/// A delete queue for a `Protocol` cache with no `GraphicsRender` to share
+/// (SQ-1190) — see the section header above. Same two-step shape as
+/// `GraphicsRender`'s own queue: [`Self::queue`] an id an eviction/replacement
+/// abandoned, [`Self::flush`] it into a frame's buffer once a plain cell can
+/// carry it.
+#[derive(Default)]
+pub struct KittyDeleteQueue(String);
+
+impl KittyDeleteQueue {
+    /// Queue a delete for an upload nothing on screen depends on any more. A
+    /// no-op for `None` — a non-kitty protocol, or an entry never placed.
+    pub fn queue(&mut self, id: Option<u32>) {
+        if let Some(id) = id {
+            self.0.push_str(&kitty_delete_escape(id));
+        }
+    }
+
+    /// Flush queued deletes into `buf`, riding on the first plain cell found in
+    /// `area` (never dropped — deferred to a later flush if none is found).
+    pub fn flush(&mut self, area: Rect, buf: &mut Buffer) {
+        flush_kitty_deletes_into(&mut self.0, area, buf);
     }
 }
 
@@ -2900,35 +3615,75 @@ fn zlib_deflate(raw: &[u8]) -> Vec<u8> {
 /// `q`, as the spec demands, so `o=z` is stated once on the first chunk and
 /// governs the reassembled whole.
 ///
-/// **`p=` names the placement** (SQ-0995), because `id` is now stable across a
-/// window's whole life and this command is re-issued whenever the canvas changes.
-/// The protocol says *"When re-transmitting image data for a specific id, the
-/// existing image and all its placements must be deleted"*, so on a conforming
-/// terminal this command replaces both; but Ghostty's storage replaces only the
-/// image and leaves placements alone, and an unnamed placement (`p=0`) is
-/// *"assign me an internal id"* — so a hundred re-transmits would leave a hundred
-/// duplicate placements. A named one is replaced in the map. The placeholder cells
-/// still encode placement 0, which resolves to "the first virtual placement of
-/// this image" and therefore to the only one.
-fn kitty_transmit_virtual(
+/// **The placement is left anonymous (`p=0`, i.e. no `p=` key at all)** (SQ-0995,
+/// SQ-1512). `id` is stable across a window's whole life and this command is
+/// re-issued whenever the canvas changes; the protocol says *"When re-transmitting
+/// image data for a specific id, the existing image and all its placements must be
+/// deleted"*, which a conforming terminal honors in full. Ghostty's storage (≤1.3.1)
+/// did not: it replaced only the image and left the placement behind, so this file
+/// used to name the placement (`p=1`) to force each re-transmit to replace it in
+/// the map rather than leaving a stranded duplicate. Ghostty's own fix
+/// (ghostty#13723) replaces placements correctly now, and measuring the ≤1.3.1
+/// leak directly — 200,000 re-transmits, ~30MB resident growth, no visible artifact,
+/// no measurable latency cost — settled that the workaround costs more (a named
+/// placement is one more invariant to keep straight) than the leak it prevented on
+/// an old release. The placeholder cells still encode placement 0, which resolves
+/// to "the first virtual placement of this image" and therefore to the only one,
+/// same as before.
+// SQ-1338: the production caller now goes straight to `kitty_transmit_virtual_timed`
+// so it can fold the timing in; this thin wrapper exists only for the ~8 test
+// callers below that don't care about it, so it is test-only rather than a live
+// (and therefore dead-code-warned) production entry point.
+#[cfg(all(test, feature = "t-render"))]
+fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u16, compress: bool) -> String {
+    kitty_transmit_virtual_timed(canvas, id, rows, cols, compress).0
+}
+
+/// Wall-clock split of one [`kitty_transmit_virtual`] call (SQ-1338). Unlike the
+/// raster composite and chrome bands, whose deflate and base64 are fused inside
+/// one `ratatui-image` call this file cannot see into, a graphics window deflates
+/// its own payload before base64-chunking it — two real steps this file DOES
+/// control the boundary of.
+struct WindowTiming {
+    /// `None` when `compress` was false: there was no deflate to time.
+    deflate: Option<std::time::Duration>,
+    /// The whole chunk/base64 loop, timed once — not per chunk. `None` when the
+    /// pixels went through shared memory, where there is no payload to encode
+    /// (SQ-1374).
+    base64: Option<std::time::Duration>,
+    /// Writing the pixels into a shared memory object — `shm_open` plus a
+    /// `write(2)` on Linux, or `shm_open`, `ftruncate` and one copy through a
+    /// mapping elsewhere (SQ-1380). `None` on every other route.
+    shm: Option<std::time::Duration>,
+}
+
+/// [`kitty_transmit_virtual`] plus its own timing (SQ-1338). Split out as its own
+/// function, rather than widening the public-facing one, so the ~8 existing test
+/// callers of [`kitty_transmit_virtual`] need no change; the render path is the
+/// only caller that wants the timing.
+fn kitty_transmit_virtual_timed(
     canvas: &image::RgbaImage,
     id: u32,
     rows: u16,
     cols: u16,
     compress: bool,
-) -> String {
+) -> (String, WindowTiming) {
     use std::fmt::Write as _;
     let (w, h) = (canvas.width(), canvas.height());
     let deflated;
+    let mut deflate_time = None;
     // SQ-0997: `compress` is [`kitty_compression`]'s answer for the picker in
     // force. Raw when it is false — the geometry keys are untouched either way,
     // because `o=z` describes the payload's encoding and nothing about the image.
     let (payload, encoding): (&[u8], &str) = if compress {
+        let t0 = std::time::Instant::now();
         deflated = zlib_deflate(canvas.as_raw());
+        deflate_time = Some(t0.elapsed());
         (&deflated, "o=z,")
     } else {
         (canvas.as_raw(), "")
     };
+    let t1 = std::time::Instant::now();
     let chunks: Vec<&[u8]> = payload.chunks(3072).collect();
     let n = chunks.len();
     let mut out = String::with_capacity(payload.len() / 3 * 4 + n * 24);
@@ -2937,7 +3692,7 @@ fn kitty_transmit_virtual(
         if i == 0 {
             write!(
                 out,
-                "\x1b_Gq=2,i={id},p={KITTY_PLACEMENT},a=T,U=1,f=32,{encoding}t=d,\
+                "\x1b_Gq=2,i={id},a=T,U=1,f=32,{encoding}t=d,\
                  s={w},v={h},r={rows},c={cols},m={more};"
             )
             .unwrap();
@@ -2947,7 +3702,227 @@ fn kitty_transmit_virtual(
         out.push_str(&kitty_b64(chunk));
         out.push_str("\x1b\\");
     }
-    out
+    let base64_time = t1.elapsed();
+    (out, WindowTiming { deflate: deflate_time, base64: Some(base64_time), shm: None })
+}
+
+/// The name of the shared memory object one graphics-window transmit is handed
+/// over in (SQ-1374).
+///
+/// **Short on purpose, and per-transmit rather than per-image.**
+///
+/// Short, because macOS caps a POSIX shared memory name at 31 bytes *including*
+/// the leading slash (`PSHMNAMLEN`) and refuses anything longer with
+/// `ENAMETOOLONG` — measured, and the reason the upstream `t=s` patch transmitted
+/// nothing at all on macOS until its names were shortened too. At `u32::MAX` for
+/// both numbers this is 26 bytes.
+///
+/// Per-transmit, because the object is handed over ASYNCHRONOUSLY: the escape
+/// rides out on the next flush and the terminal opens the object whenever it gets
+/// to it. Naming the object after the window's image id — which is stable across
+/// re-transmits, deliberately (SQ-0995) — would let a second transmit truncate the
+/// object out from under a terminal still reading the first. A fresh name per
+/// transmit cannot race, and the id in the escape is still the stable one, so
+/// nothing about the placement changes.
+#[cfg(unix)]
+fn kitty_shm_name(serial: u32) -> String {
+    format!("/lnt-{}-{serial}", std::process::id())
+}
+
+/// Write `bytes` into a fresh shared memory object called `name`, or `None` if the
+/// platform refuses (SQ-1374, SQ-1380).
+///
+/// **Linux writes through the descriptor.** `write(2)` on a POSIX shared memory
+/// object allocates the `tmpfs` pages it touches inside the syscall itself — unlike
+/// `ftruncate`, which only names a length and lets `tmpfs` allocate on first touch
+/// — so there is nothing to reserve up front and no mapping to make: a graphics
+/// window bigger than the remaining space in `/dev/shm` (64 MB by default in a
+/// Docker container) answers `write_all` with an ordinary `io::Error` — `ENOSPC`,
+/// or a short write — which takes the same failure path as any other: the object
+/// is unlinked and this function returns `None`, and the caller already falls back
+/// to the wire. `ftruncate` is unnecessary too, since the write itself sets the
+/// object's length. `File::from_raw_fd` is the one `unsafe` this path still needs,
+/// to hand the descriptor `shm_open` returned to something that can `write_all`;
+/// past that point the file owns it and closes it on drop like any other.
+///
+/// The object still ends up sized to exactly the payload — a terminal rejects one
+/// smaller than `s * v * bpp` (Ghostty says "shared memory size too small") — which
+/// falls out of `write_all` writing exactly `bytes.len()` bytes to a fresh object.
+///
+/// **A successful object is not unlinked here.** The protocol makes the terminal
+/// responsible: it unlinks the object once it has read it, which is what lets the
+/// handover need no synchronisation. An object no terminal ever reads does outlive
+/// us — which is exactly why [`kitty_shared_memory`] refuses this route unless the
+/// terminal answered a probe by reading one. A FAILED write is unlinked, because
+/// a half-written object is one nothing will ever be told about.
+#[cfg(target_os = "linux")]
+fn kitty_shm_write(name: &str, bytes: &[u8]) -> Option<()> {
+    use std::io::Write as _;
+    use std::os::unix::io::FromRawFd as _;
+
+    if bytes.is_empty() {
+        return None;
+    }
+    let cname = std::ffi::CString::new(name).ok()?;
+    // SAFETY: `cname` is a NUL-terminated string, and the returned descriptor is
+    // checked against its documented failure value before use.
+    let fd = unsafe { libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC, 0o600) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: `fd` is the valid, freshly-opened descriptor checked above, and
+    // nothing else holds or closes it — `File` becomes its sole owner and closes
+    // it on drop, on every path out of this function.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let written = file.write_all(bytes).is_ok();
+    if !written {
+        // SAFETY: `cname` is the same NUL-terminated string used to open it.
+        unsafe {
+            libc::shm_unlink(cname.as_ptr());
+        }
+        return None;
+    }
+    Some(())
+}
+
+/// Write `bytes` into a fresh shared memory object called `name`, or `None` if the
+/// platform refuses (SQ-1374, SQ-1380).
+///
+/// **Every non-Linux Unix goes in through a mapping instead of `write(2)`**,
+/// because macOS does not implement read/write on a shared memory object at all —
+/// the descriptor opens, `ftruncate` succeeds, and the first write answers
+/// `ENXIO`. A mapping is also how the terminal reads the object back. macOS has no
+/// `tmpfs` quota to run out of either: its shared memory objects are ordinary
+/// anonymous memory, so `ftruncate` here already reserves what it names and needs
+/// no `posix_fallocate`-style forcing the way Linux's `tmpfs` does (see the
+/// `target_os = "linux"` twin of this function).
+///
+/// The object is sized to exactly the payload: a terminal rejects one smaller than
+/// `s * v * bpp` (Ghostty says "shared memory size too small"), and one larger
+/// wastes a page it will never look at.
+///
+/// **A successful object is not unlinked here.** The protocol makes the terminal
+/// responsible: it unlinks the object once it has read it, which is what lets the
+/// handover need no synchronisation. An object no terminal ever reads does outlive
+/// us — which is exactly why [`kitty_shared_memory`] refuses this route unless the
+/// terminal answered a probe by reading one. A FAILED write is unlinked, because
+/// a half-written object is one nothing will ever be told about.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn kitty_shm_write(name: &str, bytes: &[u8]) -> Option<()> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let cname = std::ffi::CString::new(name).ok()?;
+    // SAFETY: `cname` is a NUL-terminated string that outlives every call below;
+    // each descriptor and pointer is checked against its documented failure value
+    // before use, and both the mapping and the descriptor are released here.
+    unsafe {
+        let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC, 0o600);
+        if fd < 0 {
+            return None;
+        }
+        let sized = libc::ftruncate(fd, bytes.len() as libc::off_t) == 0;
+        let filled = if sized {
+            let ptr = libc::mmap(
+                std::ptr::null_mut(),
+                bytes.len(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if ptr == libc::MAP_FAILED {
+                false
+            } else {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.cast::<u8>(), bytes.len());
+                libc::munmap(ptr, bytes.len());
+                true
+            }
+        } else {
+            false
+        };
+        libc::close(fd);
+        if !filled {
+            libc::shm_unlink(cname.as_ptr());
+            return None;
+        }
+    }
+    Some(())
+}
+
+/// The kitty transmit sequence for `canvas` as image `id`, handed over through a
+/// POSIX shared memory object instead of down the wire (SQ-1374).
+///
+/// The same virtual placement [`kitty_transmit_virtual_timed`] emits — `U=1` with
+/// an explicit `r×c` grid, `f=32` RGBA and the canvas's own `s`/`v` — with two
+/// differences, both of them the point:
+///
+///   * `t=s` instead of `t=d`, and the payload is the base64 of the object's NAME
+///     rather than of a megabyte of pixels. One chunk, always: there is nothing to
+///     chunk, and `m=0` says so.
+///   * No `o=z`. Deflate exists to make the wire smaller and the pixels are not on
+///     the wire, so compressing them would cost the deflate and buy nothing — the
+///     terminal reads the object with a copy.
+///
+/// `None` when the object could not be written, and the caller falls back to the
+/// inline route. That fallback is load-bearing rather than defensive: a machine can
+/// run out of shared memory, and a window that draws nothing is the failure mode
+/// this whole path exists to avoid.
+#[cfg(unix)]
+fn kitty_transmit_virtual_shm(
+    canvas: &image::RgbaImage,
+    id: u32,
+    rows: u16,
+    cols: u16,
+    serial: u32,
+) -> Option<(String, std::time::Duration)> {
+    use std::fmt::Write as _;
+    let (w, h) = (canvas.width(), canvas.height());
+    let name = kitty_shm_name(serial);
+    let t0 = std::time::Instant::now();
+    kitty_shm_write(&name, canvas.as_raw())?;
+    let elapsed = t0.elapsed();
+
+    let mut out = String::with_capacity(name.len() * 2 + 80);
+    write!(
+        out,
+        "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=s,\
+         s={w},v={h},r={rows},c={cols},m=0;"
+    )
+    .unwrap();
+    out.push_str(&kitty_b64(name.as_bytes()));
+    out.push_str("\x1b\\");
+    Some((out, elapsed))
+}
+
+/// One graphics-window transmit, by whichever route this terminal answered for
+/// (SQ-1374).
+///
+/// Shared memory first where the terminal took that probe; the inline route —
+/// deflated or raw, per the same terminal's `o=z` answer — everywhere else, and
+/// whenever a shared memory write fails. That fallback is why [`WindowWire`] is one
+/// value rather than two parameters: the deflate answer is still needed on the path
+/// where shared memory was preferred and did not work.
+fn kitty_transmit_virtual_wire(
+    canvas: &image::RgbaImage,
+    id: u32,
+    rows: u16,
+    cols: u16,
+    wire: WindowWire,
+) -> (String, WindowTiming) {
+    #[cfg(unix)]
+    if wire.shared_memory {
+        // A serial per transmit, never the image id — see [`kitty_shm_name`].
+        // Wrapping is fine and unreachable in practice: it would take four billion
+        // window repaints, and the name only has to be unique against objects a
+        // terminal has not finished reading yet.
+        static SERIAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some((out, elapsed)) = kitty_transmit_virtual_shm(canvas, id, rows, cols, serial) {
+            return (out, WindowTiming { deflate: None, base64: None, shm: Some(elapsed) });
+        }
+    }
+    kitty_transmit_virtual_timed(canvas, id, rows, cols, wire.compress)
 }
 
 /// What kitty uploads have cost, and what the same pixels would have cost with no
@@ -2969,13 +3944,43 @@ pub struct UploadBytes {
     pub pixels: u64,
     /// Transmits counted — a first chunk each, so this is images and not chunks.
     pub uploads: u64,
+    /// `a=d` delete commands seen, whether or not they named an id this
+    /// particular measurement can account for (SQ-1201). Always incremented on
+    /// sight — pairing is what decides [`Self::freed_pixels`], not this.
+    pub deletes: u64,
+    /// Pixel bytes a delete freed: credited only when the delete's `i=` named an
+    /// id this measurement had already seen transmitted (and no LATER delete in
+    /// between had already freed it). A delete for an unknown or already-freed id
+    /// still counts toward [`Self::deletes`] above, just not here — SQ-1190's bug
+    /// was exactly a delete that never got SENT, which this cannot see either;
+    /// what it catches is the transmit whose delete never arrives at all.
+    pub freed_pixels: u64,
+    /// Uploads measured here whose id no LATER delete in the same measurement
+    /// named — still resident in the terminal (or, for [`GraphicsRender::uploads`],
+    /// resident as of the last id this struct's own traffic touched) when the
+    /// measurement ended. Zero for [`measure_transmit`] on a single small
+    /// fragment, where a transmit and the delete that eventually frees it are
+    /// almost always in two DIFFERENT fragments — see [`measure_traffic`] for the
+    /// function built to pair them, and [`GraphicsRender::note_upload_id`] for the
+    /// live equivalent kept as typed state instead of re-scanned text.
+    pub stranded_uploads: u64,
+    /// Pixel bytes those stranded uploads account for.
+    pub stranded_pixels: u64,
 }
 
 impl UploadBytes {
+    /// Sums every genuinely cumulative field. `stranded_uploads`/`stranded_pixels`
+    /// are deliberately NOT summed: they are a snapshot of "what is outstanding
+    /// right now", and adding two snapshots together does not mean anything — a
+    /// caller that wants them kept current across many `add` calls (as
+    /// [`GraphicsRender`] does) assigns them separately, from state that persists
+    /// across the calls this discards.
     fn add(&mut self, other: UploadBytes) {
         self.wire += other.wire;
         self.pixels += other.pixels;
         self.uploads += other.uploads;
+        self.deletes += other.deletes;
+        self.freed_pixels += other.freed_pixels;
     }
 
     /// What [`Self::pixels`] would have occupied on the wire uncompressed: base64
@@ -2990,6 +3995,57 @@ impl UploadBytes {
     }
 }
 
+/// One kitty APC chunk's control block (everything up to its first `;`, or its
+/// whole body if it has none) and the chunk's total wire length (control block +
+/// base64 + the `ESC \` terminator). Shared by [`measure_transmit`] and
+/// [`measure_traffic`] so the two ways of reading this file's own emitted bytes
+/// agree on where one chunk ends and the next begins.
+fn kitty_chunks(text: &str) -> Vec<(&str, u64)> {
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    let mut out = Vec::new();
+    while let Some(rel) = b[i..].windows(3).position(|w| w == b"\x1b_G") {
+        let start = i + rel;
+        // The chunk runs to its `ESC \`; a truncated one is measured to the end.
+        let term = b[start..].windows(2).position(|w| w == b"\x1b\\");
+        let end = term.map_or(b.len(), |p| start + p + 2);
+        // `content_end` excludes the terminator itself, so a chunk with no `;` —
+        // every delete escape, which has no payload to introduce one — does not
+        // read its own `ESC \` as part of the last param's value (SQ-1201: that
+        // silently broke `i=<id>` parsing on a delete, which has no other
+        // separator after it).
+        let content_end = term.map_or(b.len(), |p| start + p);
+        let head_end = b[start..content_end].iter().position(|&c| c == b';').map_or(content_end, |p| start + p);
+        out.push((&text[start + 3..head_end], (end - start) as u64));
+        i = end;
+        if i >= b.len() {
+            break;
+        }
+    }
+    out
+}
+
+fn kitty_param(params: &str, key: &str) -> Option<u64> {
+    params.split(',').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+}
+
+/// Whether a chunk's own params (never its neighbours') are a transmit's — `a=T`
+/// (transmit and display) or `a=t` (transmit only), the two spellings
+/// `kitty_transmit_virtual` and `ratatui-image`'s encoder emit.
+///
+/// The gate `measure_traffic` needed and `measure_transmit` never did: lanthorn's
+/// own kitty capability PROBE (`a=q`, sent once at startup to ask whether the
+/// terminal answers at all) transmits a throwaway 1x1 `s=1,v=1` image too — s/v
+/// alone is not "this is an upload", it is "this chunk names pixel geometry",
+/// and a query names it for the same reason a transmit does. `measure_transmit`
+/// was never fed that probe (only its own already-known-good transmit text), so
+/// this never manifested there; `measure_traffic` reads the WHOLE wire, probe
+/// included, and without this gate counted it as two extra uploads and two
+/// falsely-stranded ids (SQ-1201).
+fn kitty_is_upload_action(params: &str) -> bool {
+    params.split(',').any(|kv| kv == "a=T" || kv == "a=t")
+}
+
 /// Measure one transmit's cost off its own bytes. See [`UploadBytes`].
 ///
 /// Cheap on purpose: it reads each chunk's control block — the few dozen bytes
@@ -2999,38 +4055,100 @@ impl UploadBytes {
 ///
 /// A chunk with no `s`/`v` is a continuation (`m=1` carries no geometry) and adds
 /// wire without adding pixels, so a chunked upload is counted once.
+///
+/// `deletes` is counted here too (an `a=d` chunk, by `,a=d,` appearing in the
+/// params — cheap, no allocation) but `freed_pixels`/`stranded_*` are always zero:
+/// pairing a delete against the transmit it frees needs to have seen BOTH within
+/// one measurement, and every call site that feeds this function a small
+/// per-frame fragment (SQ-1005) never has both in the same fragment — the delete
+/// for THIS id rides on a placement several frames later. [`measure_traffic`] is
+/// the whole-capture sibling that does the pairing.
 pub fn measure_transmit(transmit: &str) -> UploadBytes {
     let mut out = UploadBytes::default();
-    let b = transmit.as_bytes();
-    let mut i = 0usize;
-    while let Some(rel) = b[i..].windows(3).position(|w| w == b"\x1b_G") {
-        let start = i + rel;
-        // The chunk runs to its `ESC \`; a truncated one is measured to the end.
-        let end = b[start..]
-            .windows(2)
-            .position(|w| w == b"\x1b\\")
-            .map_or(b.len(), |p| start + p + 2);
-        out.wire += (end - start) as u64;
-        let head_end = b[start..end].iter().position(|&c| c == b';').map_or(end, |p| start + p);
-        let params = &transmit[start + 3..head_end];
-        let get = |key: &str| -> Option<u64> {
-            params.split(',').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
-        };
+    for (params, wire) in kitty_chunks(transmit) {
+        out.wire += wire;
+        if params.split(',').any(|kv| kv == "a=d") {
+            out.deletes += 1;
+            continue;
+        }
+        if !kitty_is_upload_action(params) {
+            continue;
+        }
         // `S` is the kitty spec's own "size of the uncompressed data" and only ever
         // accompanies a compressed PNG; for the `f=32` RGBA we and the crate emit,
         // the declared geometry is the same fact and is always present.
-        if let Some(size) = get("S") {
+        if let Some(size) = kitty_param(params, "S") {
             out.pixels += size;
             out.uploads += 1;
-        } else if let (Some(w), Some(h)) = (get("s"), get("v")) {
+        } else if let (Some(w), Some(h)) = (kitty_param(params, "s"), kitty_param(params, "v")) {
             out.pixels += w * h * 4;
             out.uploads += 1;
         }
-        i = end;
-        if i >= b.len() {
-            break;
+    }
+    out
+}
+
+/// Measure a WHOLE capture's kitty traffic — every transmit and every delete in
+/// `text`, paired by `i=<id>` (SQ-1201).
+///
+/// This is [`measure_transmit`] with the one thing a single small fragment can
+/// never show it: a delete's OWN id, matched against a transmit the same text
+/// also contains. A transmit sets/overwrites a local `id → pixels` ledger — a
+/// re-transmit to an id already held REPLACES it in the terminal, per the kitty
+/// spec's own re-transmit rule, so the ledger does too, rather than accumulating
+/// both sizes — and a delete removes its id from the ledger, crediting
+/// `freed_pixels`. Whatever the ledger still holds when `text` runs out is
+/// `stranded_uploads`/`stranded_pixels`: transmitted in this capture, never freed
+/// in it.
+///
+/// A delete naming an id nothing in `text` transmitted (freed by an EARLIER
+/// capture not included here, or already freed once and named again) still counts
+/// toward `deletes`, just not `freed_pixels` — there is nothing in this text to
+/// credit it against.
+///
+/// A transmit with no `i=` is invisible to the ledger — neither freed nor
+/// stranded — rather than assumed safe: `kitty_transmit_virtual` and
+/// `ratatui-image`'s own kitty encoder both always state one (every id lanthorn
+/// emits is meant to be freed later), so this is unreached on lanthorn's own
+/// traffic today, and an id-less transmit still counts toward `pixels`/`uploads`
+/// above, just not toward stranding.
+///
+/// Whole-capture, not per-frame: meant for a caller holding the ENTIRE emitted
+/// stream at once (the pty-stream harness), where the cost of one `HashMap` is
+/// nothing beside the megabytes of image data already in hand. [`measure_transmit`]
+/// stays the frame-path measurer, unchanged, for exactly that reason.
+pub fn measure_traffic(text: &str) -> UploadBytes {
+    let mut out = UploadBytes::default();
+    let mut outstanding: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    for (params, wire) in kitty_chunks(text) {
+        out.wire += wire;
+        let id = kitty_param(params, "i").map(|v| v as u32);
+        if params.split(',').any(|kv| kv == "a=d") {
+            out.deletes += 1;
+            if let Some(id) = id {
+                if let Some(px) = outstanding.remove(&id) {
+                    out.freed_pixels += px;
+                }
+            }
+            continue;
+        }
+        if !kitty_is_upload_action(params) {
+            continue;
+        }
+        let size = kitty_param(params, "S").or_else(|| {
+            let (w, h) = (kitty_param(params, "s")?, kitty_param(params, "v")?);
+            Some(w * h * 4)
+        });
+        if let Some(size) = size {
+            out.pixels += size;
+            out.uploads += 1;
+            if let Some(id) = id {
+                outstanding.insert(id, size);
+            }
         }
     }
+    out.stranded_uploads = outstanding.len() as u64;
+    out.stranded_pixels = outstanding.values().sum();
     out
 }
 
@@ -3312,7 +4430,7 @@ fn parse_placement_row(symbol: &str) -> Option<PlacementRow<'_>> {
 ///
 /// FALSIFY by restoring `image::imageops::resize(src, tw, th, FilterType::Nearest)` as
 /// the body of `resize_directional`: every minifying case fails on its RMS bound.
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod resample_tests {
     // SQ-0973's cases below drive the shipped half-blocks composite end to end, so this
     // module now needs the render types (`Picker`, `Protocol`, `Buffer`, …) alongside
@@ -4726,9 +5844,26 @@ mod resample_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
+
+    /// SQ-1338: three measurements fold in as count/min/max/mean, and `mean()`
+    /// is `None` before anything has ever run.
+    #[test]
+    fn phase_stat_folds_count_min_max_mean() {
+        let mut p = PhaseStat::default();
+        assert_eq!(p.mean(), None, "nothing recorded yet");
+
+        p.record(std::time::Duration::from_millis(3));
+        p.record(std::time::Duration::from_millis(1));
+        p.record(std::time::Duration::from_millis(5));
+
+        assert_eq!(p.count, 3);
+        assert_eq!(p.min, std::time::Duration::from_millis(1));
+        assert_eq!(p.max, std::time::Duration::from_millis(5));
+        assert_eq!(p.mean(), Some(std::time::Duration::from_millis(3)));
+    }
 
     // A 100×100 native image drawn 1:1 (scale 1) into a pane at the origin with
     // 10×10-pixel cells — one cell == 10 game pixels.
@@ -4908,7 +6043,7 @@ mod tests {
         // No `o=z`: `from_fontsize` asks the terminal nothing, so its capability
         // list is empty and the transmit must go out raw (SQ-0997).
         assert!(first.contains("a=T,U=1,f=32,t=d"), "virtual placement transmit present");
-        assert!(first.contains(",p=1,"), "and names the placement it owns (SQ-0995)");
+        assert!(!first.contains(",p="), "placement is anonymous, not named (Ghostty leak fixed upstream)");
         assert!(first.contains('\u{10EEEE}'), "placeholder run present");
         assert!(!first.contains("a=d"), "first transmit deletes nothing");
         assert!(buf.cell((0, 1)).unwrap().symbol().contains('\u{10EEEE}'), "second row placed");
@@ -5002,6 +6137,11 @@ mod tests {
         let d = frame(&mut gr, 4, 2);
         assert_eq!(c.diff(&d).len(), 0, "a settled window emits nothing at all");
         assert_eq!(gr.kitty_uploads(2), Some((1, id_of(&lead_a))), "one upload, still placed");
+        // SQ-1338: exactly one base64 timing per real transmit (frames a and b) —
+        // not per redraw (c and d transmit nothing). `kitty_picker` sets no
+        // compression capability in these tests, so there is no deflate to time.
+        assert_eq!(gr.encode_timings.window_base64.count, 2, "one timing per real transmit");
+        assert_eq!(gr.encode_timings.window_deflate.count, 0, "no compression capability here");
     }
 
     /// A window animating through many canvases never holds more than ONE image in
@@ -5090,6 +6230,41 @@ mod tests {
     }
 
     #[test]
+    fn render_as_cells_memoizes_the_classification_on_version_and_area() {
+        // SQ-1200: a redraw with the SAME (version, area, force) must reuse the
+        // last classification instead of re-running the blank/uniform/rule_like
+        // scans and the region-averaging cell_color over the whole canvas —
+        // roughly two full passes for a window that has not repainted.
+        let mut gr = GraphicsRender::default();
+        let gw = solid(1, 90, 190, [10, 20, 30, 255]);
+        let area = Rect::new(0, 0, 10, 10);
+
+        let mut buf = Buffer::empty(area);
+        assert!(gr.render_as_cells(&gw, area, &mut buf, false), "uniform → cells");
+        assert_eq!(gr.classify_calls(), 1, "first draw classifies");
+        assert_eq!(buf.cell((5, 5)).unwrap().style().bg, Some(Color::Rgb(10, 20, 30)));
+
+        // Same window, same version, same area: must hit the memo.
+        let mut buf2 = Buffer::empty(area);
+        assert!(gr.render_as_cells(&gw, area, &mut buf2, false));
+        assert_eq!(gr.classify_calls(), 1, "an unchanged redraw reuses the memo");
+        assert_eq!(
+            buf2.cell((5, 5)).unwrap().style().bg,
+            Some(Color::Rgb(10, 20, 30)),
+            "a memo replay paints the same colour a fresh classify+paint would"
+        );
+
+        // A version bump (a repaint) must recompute, and reflect the new pixels.
+        let mut gw2 = gw.clone();
+        gw2.version = 2;
+        gw2.canvas = std::sync::Arc::new(image::RgbaImage::from_pixel(90, 190, image::Rgba([200, 0, 0, 255])));
+        let mut buf3 = Buffer::empty(area);
+        assert!(gr.render_as_cells(&gw2, area, &mut buf3, false));
+        assert_eq!(gr.classify_calls(), 2, "a version bump recomputes");
+        assert_eq!(buf3.cell((5, 5)).unwrap().style().bg, Some(Color::Rgb(200, 0, 0)), "the new colour is painted");
+    }
+
+    #[test]
     fn detailed_graphics_falls_back_to_protocol() {
         // A non-thin, non-uniform canvas (checker) must NOT be handled as cells.
         let mut img = image::RgbaImage::new(90, 190);
@@ -5142,6 +6317,10 @@ mod tests {
         assert!(gr.v6_job.is_none(), "a cold-start encode runs synchronously, no worker");
         assert!(gr.v6.is_some(), "the cold-start encode installed immediately");
         assert_eq!(gr.v6.as_ref().unwrap().gen, 7);
+        // SQ-1338: the synchronous first-frame encode is folded in on install, same
+        // as the worker path below. Half-blocks has no separate resize step.
+        assert_eq!(gr.encode_timings.raster_encode.count, 1, "the sync encode is timed too");
+        assert_eq!(gr.encode_timings.raster_resize.count, 0, "half-blocks has no resize phase to time");
 
         // With a composite ready, a NEW generation encodes off-thread. While the
         // encode is in flight, no second build is requested — coalesced, even
@@ -5155,6 +6334,12 @@ mod tests {
         drain_v6_job(&mut gr);
         assert!(gr.v6.is_some(), "the worker installed the encoded protocol");
         assert_eq!(gr.v6.as_ref().unwrap().gen, 8);
+        // SQ-1338: the worker's own timing is folded in when its result is installed.
+        assert_eq!(gr.encode_timings.raster_encode.count, 2, "the worker's encode is timed too");
+        assert!(
+            gr.encode_timings.raster_encode.max >= gr.encode_timings.raster_encode.min,
+            "max must never fall below min"
+        );
 
         // `invalidate_v6` (the hybrid band path ran): back to cold — the next
         // raster frame wants a build and will encode synchronously again.
@@ -5267,6 +6452,12 @@ mod tests {
             let settled = draw(&mut gr, 40);
             let id = gr.chrome_band_id(key).expect("a kitty placement names its image");
 
+            // The change frame stages the encode for the worker and keeps the old
+            // upload placed (SQ-1188); the frame after the result lands is the one
+            // that carries the transmit, and it is the one whose diff is measured.
+            let _ = draw(&mut gr, 90);
+            gr.spawn_band_jobs(&picker);
+            settle_bands(&mut gr);
             let changed = draw(&mut gr, 90);
             // The DIFF first: it is the symptom, and a fix that held the id while
             // rewriting the cells anyway would sail past the id assertion below.
@@ -5541,6 +6732,203 @@ mod tests {
 
         assert_ne!(before[&top_key], after[&top_key], "the changed top band re-encodes (hash changed)");
         assert_eq!(before[&bot_key], after[&bot_key], "the disjoint bottom band stays fresh (hash unchanged)");
+    }
+
+    #[test]
+    fn hash_canvas_rows_tracks_footprint_pixels_exactly() {
+        // SQ-1189: the row-slice walk must be semantically equivalent to the
+        // per-pixel walk it replaced — same canvas → same key, any changed
+        // pixel INSIDE the footprint → changed key, any change strictly
+        // OUTSIDE it → same key.
+        use std::hash::Hasher;
+        let hash = |c: &image::RgbaImage| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            hash_canvas_rows(&mut h, c, 2, 12, 1, 9);
+            h.finish()
+        };
+        let mut canvas = image::RgbaImage::new(20, 10);
+        for (x, y, p) in canvas.enumerate_pixels_mut() {
+            *p = image::Rgba([(x * 13) as u8, (y * 7) as u8, ((x + y) * 5) as u8, 255]);
+        }
+        let base = hash(&canvas);
+        assert_eq!(base, hash(&canvas.clone()), "same canvas → same key");
+
+        let mut inside = canvas.clone();
+        inside.put_pixel(11, 8, image::Rgba([1, 2, 3, 4])); // last col/row of the footprint
+        assert_ne!(base, hash(&inside), "a changed pixel inside the footprint changes the key");
+        let mut corner = canvas.clone();
+        corner.put_pixel(2, 1, image::Rgba([9, 9, 9, 9])); // first col/row of the footprint
+        assert_ne!(base, hash(&corner), "the footprint's first pixel is covered too");
+
+        let mut outside = canvas.clone();
+        outside.put_pixel(12, 8, image::Rgba([1, 2, 3, 4])); // one column past x1
+        outside.put_pixel(1, 5, image::Rgba([1, 2, 3, 4])); // one column before x0
+        outside.put_pixel(5, 0, image::Rgba([1, 2, 3, 4])); // one row above y0
+        outside.put_pixel(5, 9, image::Rgba([1, 2, 3, 4])); // one row below y1
+        assert_eq!(base, hash(&outside), "a change strictly outside the footprint leaves the key alone");
+
+        // A degenerate footprint hashes nothing and does not panic.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        hash_canvas_rows(&mut h, &canvas, 5, 5, 2, 8);
+        hash_canvas_rows(&mut h, &canvas, 3, 9, 6, 6);
+    }
+
+    /// A kitty picker at a stated cell size — the backend whose band encodes go
+    /// to the background worker (SQ-1188).
+    fn kitty_picker(w: u16, h: u16) -> Picker {
+        #[allow(deprecated)]
+        let mut p = Picker::from_fontsize(ratatui_image::FontSize::new(w, h));
+        p.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        p
+    }
+
+    /// Reap the band worker, driving `poll_v6_job` the way the app's loop tick
+    /// does. Panics rather than hangs when nothing ever lands.
+    fn settle_bands(gr: &mut GraphicsRender) {
+        for _ in 0..500 {
+            if gr.poll_v6_job() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("band worker never landed");
+    }
+
+    /// SQ-1188: a 1:1 kitty band fixture — canvas the pane's device size, one
+    /// band covering the top row. Returns (gr, picker, chrome, scale, pane, band).
+    fn kitty_band_fixture() -> (GraphicsRender, Picker, image::RgbaImage, crate::render::v6_layout::Scale, Rect, Rect)
+    {
+        use crate::render::v6_layout::uniform_scale;
+        let picker = kitty_picker(4, 7);
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+        let (cols, rows) = (2u16, 4u16);
+        let (nw, nh) = (cols as u32 * cw, rows as u32 * ch);
+        let chrome = image::RgbaImage::from_pixel(nw, nh, image::Rgba([10, 20, 30, 255]));
+        let pane = Rect::new(0, 0, cols, rows);
+        let scale = uniform_scale((nw as u16, nh as u16), (nw, nh));
+        assert_eq!((scale.s, scale.off_x, scale.off_y), (1.0, 0, 0), "fixture must map 1:1");
+        let band = Rect::new(0, 0, cols, 1);
+        (GraphicsRender::default(), picker, chrome, scale, pane, band)
+    }
+
+    #[test]
+    fn a_changed_band_keeps_its_old_upload_until_the_worker_lands() {
+        // SQ-1188: on kitty, a band's FIRST encode is synchronous (no honest
+        // previous image), a CHANGED band's encode runs on the worker while the
+        // old upload stays placed, and the result installs via poll_v6_job.
+        let (mut gr, picker, mut chrome, scale, pane, band) = kitty_band_fixture();
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+        let mut buf = Buffer::empty(pane);
+
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert_eq!(gr.band_encodes, 1, "first appearance encodes synchronously");
+        assert!(!gr.band_encode_in_flight(), "nothing staged after a sync encode");
+        assert_eq!(gr.encode_timings.band_encode.count, 1, "SQ-1338: the sync band encode is timed too");
+        let h0 = gr.chrome_band_hashes()[&key];
+
+        chrome.put_pixel(1, 1, image::Rgba([200, 0, 0, 255]));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert_eq!(gr.band_encodes, 1, "the change frame encodes nothing on this thread");
+        assert_eq!(gr.chrome_band_hashes()[&key], h0, "the OLD upload (old hash) is still what is placed");
+        assert!(gr.band_encode_in_flight(), "the encode is staged for the worker");
+        assert!(
+            gr.band_log.last().is_some_and(|l| l.contains("encode queued (worker)")),
+            "the band log says what happened: {:?}",
+            gr.band_log.last()
+        );
+
+        gr.spawn_band_jobs(&picker);
+        settle_bands(&mut gr);
+        assert_eq!(gr.band_encodes, 2, "the worker's install counts the encode");
+        assert_ne!(gr.chrome_band_hashes()[&key], h0, "the installed entry answers for the NEW content");
+        assert!(!gr.band_encode_in_flight(), "nothing left staged");
+        assert_eq!(gr.encode_timings.band_encode.count, 2, "SQ-1338: the worker's band encode is timed too");
+
+        // The next frame's draw is a plain cache hit on the new content.
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert_eq!(gr.band_encodes, 2, "the settled band is a cache hit");
+        assert!(
+            gr.band_log.last().is_some_and(|l| l.contains("cache HIT")),
+            "the settled band logs a hit: {:?}",
+            gr.band_log.last()
+        );
+    }
+
+    #[test]
+    fn a_stale_band_result_is_dropped_when_the_band_changed_again() {
+        // SQ-1188: results are keyed by the content they answer for — a band
+        // that changed AGAIN while its encode ran drops the stale result and
+        // re-stages the current content on the next frame.
+        let (mut gr, picker, mut chrome, scale, pane, band) = kitty_band_fixture();
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+        let mut buf = Buffer::empty(pane);
+
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        let h0 = gr.chrome_band_hashes()[&key];
+
+        chrome.put_pixel(1, 1, image::Rgba([200, 0, 0, 255])); // content B
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        gr.spawn_band_jobs(&picker); // B's encode is now in flight
+        chrome.put_pixel(1, 1, image::Rgba([0, 200, 0, 255])); // content C, superseding B
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        gr.spawn_band_jobs(&picker); // coalesced: C is dropped and un-marked
+        settle_bands(&mut gr);
+        assert_eq!(gr.chrome_band_hashes()[&key], h0, "B's stale result must not install over a superseded band");
+        assert_eq!(gr.band_encodes, 1, "nothing installed");
+
+        // The redraw poll_v6_job's true return schedules re-stages C and lands it.
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        gr.spawn_band_jobs(&picker);
+        settle_bands(&mut gr);
+        assert_ne!(gr.chrome_band_hashes()[&key], h0, "the current content lands on the retry");
+        assert_eq!(gr.band_encodes, 2);
+    }
+
+    #[test]
+    fn an_invalidation_cancels_staged_band_encodes() {
+        // SQ-1188: a resume/font-change invalidation must not let an in-flight
+        // result resurrect an entry the invalidation just freed.
+        let (mut gr, picker, mut chrome, scale, pane, band) = kitty_band_fixture();
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+        let mut buf = Buffer::empty(pane);
+
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        chrome.put_pixel(1, 1, image::Rgba([200, 0, 0, 255]));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        gr.spawn_band_jobs(&picker);
+        gr.invalidate_chrome_bands();
+        settle_bands(&mut gr);
+        assert!(!gr.chrome_band_hashes().contains_key(&key), "the result found no entry and was dropped");
+        assert!(!gr.band_encode_in_flight(), "the cancellation cleared every mark");
+    }
+
+    #[test]
+    fn halfblocks_band_encodes_stay_synchronous() {
+        // SQ-1188: half-blocks builds cells with no compression stage — the
+        // worker would buy a frame of latency and save nothing, so a changed
+        // band installs on the calling thread exactly as before (and every
+        // cell-buffer harness stays deterministic).
+        use crate::render::v6_layout::uniform_scale;
+        let picker = Picker::halfblocks();
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+        let (nw, nh) = (2 * cw, 4 * ch);
+        let mut chrome = image::RgbaImage::from_pixel(nw, nh, image::Rgba([10, 20, 30, 255]));
+        let pane = Rect::new(0, 0, 2, 4);
+        let scale = uniform_scale((nw as u16, nh as u16), (nw, nh));
+        let band = Rect::new(0, 0, 2, 1);
+        let key = (BandSlot::Art as u8, band.x, band.y, band.width, band.height);
+        let mut gr = GraphicsRender::default();
+        let mut buf = Buffer::empty(pane);
+
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        let h0 = gr.chrome_band_hashes()[&key];
+        chrome.put_pixel(1, 1, image::Rgba([200, 0, 0, 255]));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert_ne!(gr.chrome_band_hashes()[&key], h0, "half-blocks installs the change immediately");
+        assert!(!gr.band_encode_in_flight(), "nothing is staged for a worker");
+        assert_eq!(gr.band_encodes, 2);
     }
 
     #[test]
@@ -5874,8 +7262,16 @@ mod tests {
         assert!(freed_ids(&gr, &buf).is_empty(), "a cache hit must not free the image it is re-placing");
         assert_eq!(gr.chrome_band_id(key), Some(first), "and it stays the same image");
 
-        // Change a pixel inside this band's native footprint → re-encode.
+        // Change a pixel inside this band's native footprint → re-encode. On
+        // kitty the encode runs on the worker (SQ-1188): the change frame keeps
+        // the old upload placed, and the next frame after the result lands is
+        // the one that transmits the new pixels — under the SAME id.
         chrome.put_pixel(1, 2, image::Rgba([255, 0, 0, 255]));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert_eq!(gr.chrome_band_id(key), Some(first), "the change frame still shows the old upload's id");
+        gr.spawn_band_jobs(&picker);
+        settle_bands(&mut gr);
+        let mut buf = Buffer::empty(pane);
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
         assert_eq!(
             gr.chrome_band_id(key),
@@ -5926,12 +7322,18 @@ mod tests {
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
         let first = gr.chrome_band_id(key).expect("placed");
 
+        // The change is encoded on the worker (SQ-1188); the frame AFTER it lands
+        // is the one that transmits the replacement, so that is the frame the
+        // supersede delete is queued onto.
+        chrome.put_pixel(1, 2, image::Rgba([255, 0, 0, 255]));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        gr.spawn_band_jobs(&picker);
+        settle_bands(&mut gr);
         // The replacement frame gets a clean buffer, so what it carries is its own —
         // and an upload that is still covering this very rect is queued to be freed
         // on it.
         let mut buf = Buffer::empty(pane);
         gr.queue_protocol_delete_after_place(Some(first));
-        chrome.put_pixel(1, 2, image::Rgba([255, 0, 0, 255]));
         gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
 
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
@@ -6177,6 +7579,110 @@ mod tests {
             assert_eq!(both.wire, (a.len() + b.len()) as u64);
         }
 
+        // ── measure_traffic: pairing a whole capture's deletes against its
+        // transmits (SQ-1201) ──────────────────────────────────────────────────
+
+        /// A transmit followed by the `a=d` that frees it: `freed_pixels` credits
+        /// the id, and it no longer counts as stranded.
+        ///
+        /// Falsified by hand: commenting out the `outstanding.remove(&id)` credit
+        /// in `measure_traffic` (crediting nothing and leaving the id stranded)
+        /// turns this into `freed_pixels: 0, stranded_uploads: 1` and fails both
+        /// assertions below — the pairing is load-bearing, not a tautology of
+        /// `deletes == 1`.
+        #[test]
+        fn a_transmit_and_its_later_delete_pair_into_freed_pixels() {
+            let pixels = 64u64 * 32 * 4;
+            let transmit = kitty_transmit_virtual(&canvas(64, 32), 0x00B0_0001, 2, 8, false);
+            let text = format!("{transmit}{}", kitty_delete_escape(0x00B0_0001));
+            let m = measure_traffic(&text);
+            assert_eq!(m.uploads, 1);
+            assert_eq!(m.pixels, pixels);
+            assert_eq!(m.deletes, 1);
+            assert_eq!(m.freed_pixels, pixels, "the delete named the transmit's own id");
+            assert_eq!(m.stranded_uploads, 0, "freed, not stranded");
+            assert_eq!(m.stranded_pixels, 0);
+        }
+
+        /// A transmit with no delete anywhere in the capture is stranded: still
+        /// resident in the terminal as far as this measurement can tell.
+        #[test]
+        fn a_transmit_with_no_delete_is_stranded() {
+            let pixels = 64u64 * 32 * 4;
+            let transmit = kitty_transmit_virtual(&canvas(64, 32), 0x00B0_0002, 2, 8, false);
+            let m = measure_traffic(&transmit);
+            assert_eq!(m.deletes, 0);
+            assert_eq!(m.freed_pixels, 0);
+            assert_eq!(m.stranded_uploads, 1);
+            assert_eq!(m.stranded_pixels, pixels);
+        }
+
+        /// A delete naming an id nothing in this capture transmitted still counts
+        /// as a delete COMMAND, but frees nothing — there is no pixel size in this
+        /// text to credit it against (the transmit that set it happened earlier,
+        /// outside this capture, or it was already freed once).
+        #[test]
+        fn a_delete_for_an_unknown_id_is_counted_but_not_credited() {
+            let m = measure_traffic(&kitty_delete_escape(0x00B0_00FF));
+            assert_eq!(m.deletes, 1);
+            assert_eq!(m.freed_pixels, 0);
+            assert_eq!(m.stranded_uploads, 0, "nothing was transmitted here to strand");
+        }
+
+        /// The measurer keys on `a=d` alone; the `d=` value (`I` frees the image
+        /// data and every placement, `i` frees one placement) never enters the
+        /// classification, so a hand-built `d=i` pairs exactly like `d=I` does.
+        /// lanthorn itself only ever emits `d=I` (`kitty_delete_escape`) — this
+        /// documents that the OTHER spelling the kitty spec allows is not silently
+        /// mis-measured if it is ever emitted, without inventing a form nobody
+        /// sends today.
+        #[test]
+        fn d_lowercase_i_deletes_pair_exactly_like_d_uppercase_i() {
+            let pixels = 16u64 * 16 * 4;
+            let transmit = kitty_transmit_virtual(&canvas(16, 16), 0x00B0_0003, 1, 2, false);
+            let lowercase_delete = "\x1b_Gq=2,a=d,d=i,i=11534339\x1b\\"; // 0x00B0_0003
+            let m = measure_traffic(&format!("{transmit}{lowercase_delete}"));
+            assert_eq!(m.deletes, 1);
+            assert_eq!(m.freed_pixels, pixels, "d=i pairs by id exactly like d=I");
+            assert_eq!(m.stranded_uploads, 0);
+        }
+
+        /// A re-transmit to an id already held REPLACES it (the kitty spec's own
+        /// rule for re-transmitting to an existing id) — the ledger holds the
+        /// LATEST size under that id, not the sum of every transmit to it, so a
+        /// window re-transmitting three times and never being deleted is one
+        /// stranded upload at its last size, not three.
+        #[test]
+        fn a_retransmit_to_the_same_id_replaces_the_ledger_entry_not_adds_to_it() {
+            let id = 0x00B0_0004;
+            let first = kitty_transmit_virtual(&canvas(8, 8), id, 1, 1, false);
+            let second = kitty_transmit_virtual(&canvas(64, 64), id, 2, 2, false);
+            let m = measure_traffic(&format!("{first}{second}"));
+            assert_eq!(m.uploads, 2, "both transmits still cost the wire");
+            assert_eq!(m.stranded_uploads, 1, "one id, held once");
+            assert_eq!(m.stranded_pixels, 64 * 64 * 4, "the LATEST size, not 8x8 + 64x64");
+        }
+
+        /// SQ-1201: the kitty capability PROBE lanthorn sends at startup (`a=q`) also
+        /// declares `s=1,v=1` — a tiny throwaway image, never placed and never meant
+        /// to be freed — and a whole-capture measurement sees it right beside the
+        /// real transmits. `s`/`v` alone cannot be "this is an upload"; the action
+        /// has to be `a=T`/`a=t`, or a capability probe on a real capture inflates
+        /// `uploads` and manufactures a phantom stranded id for every query sent.
+        #[test]
+        fn a_capability_query_is_not_counted_as_an_upload() {
+            let query = "\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+            let m = measure_traffic(query);
+            assert_eq!(m.uploads, 0, "a query is not an upload");
+            assert_eq!(m.stranded_uploads, 0, "and nothing here to strand");
+
+            // A real transmit alongside it is still counted normally.
+            let transmit = kitty_transmit_virtual(&canvas(16, 16), 0x00B0_0005, 1, 2, false);
+            let m = measure_traffic(&format!("{query}{transmit}"));
+            assert_eq!(m.uploads, 1, "the query still does not count");
+            assert_eq!(m.stranded_uploads, 1, "only the real transmit is stranded");
+        }
+
         #[test]
         fn the_transmit_declares_o_z_and_the_canvas_own_uncompressed_dimensions() {
             let img = canvas(640, 400);
@@ -6241,6 +7747,196 @@ mod tests {
             assert!(keys.contains(",s=232,v=304,"), "the pixel dimensions do not move: {keys}");
             assert!(keys.contains(",r=19,c=29,"), "nor does the explicit placeholder grid: {keys}");
             assert_eq!(payload, *img.as_raw(), "the payload IS the canvas, undeflated");
+        }
+
+        // ── SQ-1374: the shared memory route ─────────────────────────────────
+
+        /// A shared memory name over 31 bytes is refused on macOS
+        /// (`ENAMETOOLONG`), and the failure is silent on the screen — so the
+        /// WIDEST name the scheme can produce has to fit, not a typical one.
+        #[test]
+        #[cfg(unix)]
+        fn a_shared_memory_name_fits_the_tightest_platform_limit() {
+            const PSHMNAMLEN: usize = 31;
+            // `kitty_shm_name` takes only the serial; the pid is this process's,
+            // so the widest name is the widest pid with the widest serial.
+            let widest = kitty_shm_name(u32::MAX).len() - std::process::id().to_string().len() + 10;
+            assert!(widest <= PSHMNAMLEN, "{widest} bytes at the widest pid, macOS allows {PSHMNAMLEN}");
+            let name = kitty_shm_name(1);
+            assert!(
+                name.starts_with('/') && !name[1..].contains('/'),
+                "one leading slash and no others, for portability: {name}"
+            );
+        }
+
+        /// The object really is created, sized and filled — the syscalls, not the
+        /// string that names them. macOS answers `ENXIO` to `write(2)` on a shared
+        /// memory object, so a write loop here would build a perfectly good escape
+        /// pointing at an empty object and the window would draw nothing.
+        #[test]
+        #[cfg(unix)]
+        fn the_shared_memory_object_holds_the_pixels() {
+            let img = canvas(16, 9);
+            let name = kitty_shm_name(0xFEED);
+            kitty_shm_write(&name, img.as_raw()).expect("this platform writes a shared memory object");
+
+            let cname = std::ffi::CString::new(name.as_str()).unwrap();
+            // SAFETY: reading back the object just written, unmapped and closed
+            // before this block ends, and unlinked afterwards.
+            let read_back = unsafe {
+                let fd = libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0);
+                assert!(fd >= 0, "the object exists after the write");
+                let len = img.as_raw().len();
+                let ptr = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0);
+                assert!(ptr != libc::MAP_FAILED, "and it is at least as big as the pixels");
+                let out = std::slice::from_raw_parts(ptr.cast::<u8>(), len).to_vec();
+                libc::munmap(ptr, len);
+                libc::close(fd);
+                libc::shm_unlink(cname.as_ptr());
+                out
+            };
+            assert_eq!(read_back, *img.as_raw(), "byte for byte, the canvas the terminal will read");
+        }
+
+        /// A second, differently-sized object proves the round-trip above is not a
+        /// coincidence of one buffer's length — on Linux this exercises the
+        /// `write(2)` path (SQ-1380), and on every other Unix the `ftruncate` +
+        /// `mmap` path (SQ-1374, SQ-1379), whichever `kitty_shm_write` compiles to
+        /// on the platform running this test.
+        #[test]
+        #[cfg(unix)]
+        fn a_written_shared_memory_object_round_trips_its_bytes_on_this_platforms_path() {
+            let img = canvas(24, 17);
+            let name = kitty_shm_name(0xC0FFEE);
+            kitty_shm_write(&name, img.as_raw()).expect("this platform writes a shared memory object");
+
+            let cname = std::ffi::CString::new(name.as_str()).unwrap();
+            // SAFETY: reading back the object just written, unmapped and closed
+            // before this block ends, and unlinked afterwards.
+            let read_back = unsafe {
+                let fd = libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0);
+                assert!(fd >= 0, "the object exists after the write");
+                let len = img.as_raw().len();
+                let ptr = libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd, 0);
+                assert!(ptr != libc::MAP_FAILED, "and it is at least as big as the pixels");
+                let out = std::slice::from_raw_parts(ptr.cast::<u8>(), len).to_vec();
+                libc::munmap(ptr, len);
+                libc::close(fd);
+                libc::shm_unlink(cname.as_ptr());
+                out
+            };
+            assert_eq!(read_back, *img.as_raw(), "byte for byte, on a second, differently-sized object");
+        }
+
+        /// The `t=s` escape hands over a NAME, and only a name: same placement,
+        /// same geometry, one chunk, and nothing claiming to be compressed.
+        #[test]
+        #[cfg(unix)]
+        fn a_shared_memory_transmit_names_the_object_and_never_deflates() {
+            let img = canvas(640, 400);
+            let (out, _) = kitty_transmit_virtual_shm(&img, 0x00B0_0007, 25, 80, 0xC0DE)
+                .expect("this platform writes a shared memory object");
+            let (keys, payload) = parse(&out);
+
+            assert!(keys.contains(",t=s,"), "the transmission medium is the object: {keys}");
+            assert!(!keys.contains("t=d"), "and nothing is inline: {keys}");
+            assert!(!keys.contains("o=z"), "nothing on the wire to deflate: {keys}");
+            assert!(keys.contains(",f=32,"), "the format the terminal finds is still RGBA: {keys}");
+            assert!(keys.contains(",s=640,v=400,"), "the canvas's own dimensions: {keys}");
+            assert!(keys.contains(",r=25,c=80,"), "the explicit placeholder grid survives (SQ-0520): {keys}");
+            assert!(keys.contains("i=11534343"), "the window's stable image id: {keys}");
+            assert!(!keys.contains(",p="), "the placement is anonymous, not named: {keys}");
+            assert!(keys.contains(",m=0"), "one chunk: a name never needs a second: {keys}");
+            assert_eq!(out.matches("\x1b_G").count(), 1, "and there IS only one command: {out}");
+
+            let name = String::from_utf8(payload).expect("the payload is the object's name");
+            assert_eq!(name, kitty_shm_name(0xC0DE));
+            assert!(
+                out.len() < 200,
+                "a megabyte of pixels became {} bytes on the wire",
+                out.len()
+            );
+
+            let cname = std::ffi::CString::new(name).unwrap();
+            // SAFETY: unlinking an object this test created and nothing reads.
+            unsafe { libc::shm_unlink(cname.as_ptr()) };
+        }
+
+        /// Without the capability the route is unchanged, byte for byte — the
+        /// gate that keeps every terminal that did not answer the `t=s` probe (an
+        /// ssh session, `kitty_shared_memory = "off"`, Windows) exactly where it
+        /// was.
+        ///
+        /// FALSIFY by making `kitty_transmit_virtual_wire` reach for shared memory
+        /// unconditionally: both assertions fail, with a name where the pixels
+        /// should be.
+        #[test]
+        fn a_terminal_that_did_not_answer_the_probe_gets_the_wire_it_always_got() {
+            let img = canvas(64, 32);
+            for compress in [false, true] {
+                let wire = WindowWire { compress, shared_memory: false };
+                let (got, timing) = kitty_transmit_virtual_wire(&img, 9, 4, 8, wire);
+                assert_eq!(
+                    got,
+                    kitty_transmit_virtual(&img, 9, 4, 8, compress),
+                    "compress={compress}: identical to the pre-SQ-1374 transmit"
+                );
+                assert!(timing.shm.is_none(), "no object was written, so there is nothing to report");
+                assert!(timing.base64.is_some(), "the payload was encoded, and the dump says what it cost");
+                assert_eq!(timing.deflate.is_some(), compress);
+            }
+        }
+
+        /// And with it, the wire carries a name — with the deflate answer still
+        /// riding along, because it is what the fallback needs when a shared
+        /// memory write fails at runtime.
+        #[test]
+        #[cfg(unix)]
+        fn a_terminal_that_answered_the_probe_is_handed_an_object() {
+            let img = canvas(64, 32);
+            let (got, timing) = kitty_transmit_virtual_wire(
+                &img,
+                9,
+                4,
+                8,
+                WindowWire { compress: true, shared_memory: true },
+            );
+            let (keys, payload) = parse(&got);
+            assert!(keys.contains(",t=s,"), "shared memory outranks compression: {keys}");
+            assert!(!keys.contains("o=z"), "and there is nothing left to compress: {keys}");
+            assert!(timing.shm.is_some(), "the object write is what /dump-terminal times here");
+            assert!(timing.deflate.is_none() && timing.base64.is_none(), "neither of the other two ran");
+
+            let cname = std::ffi::CString::new(payload).unwrap();
+            // SAFETY: unlinking an object this test created and nothing reads.
+            unsafe { libc::shm_unlink(cname.as_ptr()) };
+        }
+
+        /// Two transmits never name one object, because the terminal reads them
+        /// asynchronously: a second write to the first one's name would truncate
+        /// it under a terminal halfway through it. The image id is deliberately
+        /// stable (SQ-0995), so the name cannot be built from it.
+        #[test]
+        #[cfg(unix)]
+        fn two_transmits_of_one_image_id_use_two_objects() {
+            let img = canvas(16, 16);
+            let wire = WindowWire { compress: false, shared_memory: true };
+            let (a, _) = kitty_transmit_virtual_wire(&img, 0x00B0_0001, 1, 2, wire);
+            let (b, _) = kitty_transmit_virtual_wire(&img, 0x00B0_0001, 1, 2, wire);
+            let (ka, na) = parse(&a);
+            let (kb, nb) = parse(&b);
+            assert_eq!(
+                kitty_param(&ka, "i"),
+                kitty_param(&kb, "i"),
+                "the same window, so the same image id"
+            );
+            assert_ne!(na, nb, "but never the same object");
+
+            for name in [na, nb] {
+                let cname = std::ffi::CString::new(name).unwrap();
+                // SAFETY: unlinking objects this test created and nothing reads.
+                unsafe { libc::shm_unlink(cname.as_ptr()) };
+            }
         }
     }
 

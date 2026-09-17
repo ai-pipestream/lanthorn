@@ -3,27 +3,84 @@
 #   mkdir -p stories        # drop your story files in here
 #   docker compose up -d    # then open http://localhost:7681
 #
-# Each browser connection gets its own lanthorn process; they share the
-# /stories library and the /data home (saves, config, map archives), so a
-# game saved in one session can be restored in the next.
+# Each browser gets its own lanthorn session, and the session OUTLIVES the
+# connection: close the tab, lose the Wi-Fi, let a tablet sleep, and coming
+# back to the same URL puts you back in the same game, mid-sentence. Sessions
+# share the /stories library and the /data home (saves, config, map archives).
+# An abandoned one is ended after six hours (LANTHORN_WEB_SESSION_TTL) with its
+# progress saved, so it can still be resumed from the archive after that.
 #
-# See docs/features/docker.md for details and docker/entrypoint.sh for the
+# See docs/internals/docker.md for details and docker/entrypoint.sh for the
 # full list of serve-mode environment knobs.
 services:
   lanthorn:
-    build: .
-    # Or run a published image instead of building:
-    # image: ghcr.io/sharkusk/lanthorn:latest
+    # `docker compose pull` picks up a new release. Pin a minor line instead
+    # of floating on `latest` with e.g. ghcr.io/sharkusk/lanthorn:0.4.
+    image: ghcr.io/sharkusk/lanthorn:latest
+    # Developers: build from this checkout instead of the published image:
+    # build: .
     command: serve
+    # A real init as pid 1, so the reaped session processes are collected
+    # rather than left as zombies: ttyd is pid 1 without this and does not
+    # wait() for children it did not spawn.
+    init: true
     ports:
-      - "7681:7681"
+      - "7681:7681"   # the terminal
+      - "7682:7682"   # the game's sound, streamed to the browser
     volumes:
       - ./stories:/stories
       - lanthorn-data:/data
+      # Alternative to the named volume above: keep saves in a host
+      # directory instead. Two facts make this work:
+      #   (a) the container's $HOME is /data, so the host directory that
+      #       corresponds to a native install's ~/.lanthorn mounts at
+      #       /data/.lanthorn, NOT at /data:
+      #         - ~/lanthorn-docker:/data/.lanthorn
+      #   (b) the container runs as uid 1000, so the host directory must
+      #       either be writable by uid 1000, or the service needs:
+      #         user: "${UID:-1000}:${GID:-1000}"
+      #       (compose reads UID/GID from the environment; most shells
+      #       don't export UID, so `export UID GID` first or put them in
+      #       a .env file)
+      #
+      # Don't point this at your native ~/.lanthorn: config.toml's story
+      # paths and recent-stories list are container paths (/stories/...)
+      # that mean nothing to a native lanthorn on the host, and vice versa
+      # — the two installs would fight over one config. Use a dedicated
+      # directory (e.g. ~/lanthorn-docker) if you want a bind mount at
+      # all; otherwise the named volume above is upgrade-safe with no uid
+      # fuss. Back it up with:
+      #   docker run --rm -v lanthorn-data:/data -v "$PWD":/backup debian \
+      #     tar czf /backup/lanthorn-data.tgz -C /data .
     # Uncomment to require HTTP basic auth (strongly recommended before
     # exposing the port beyond localhost; add TLS via a reverse proxy):
     # environment:
     #   LANTHORN_WEB_CREDENTIAL: "player:change-me"
+    # Uncomment to prefer another font over the page's embedded IosevkaTerm
+    # Nerd Font Mono (which still loads as a fallback):
+    # environment:
+    #   LANTHORN_WEB_FONT: "JetBrainsMono Nerd Font Mono"
+    #
+    # Uncomment to keep an abandoned game for a different length of time
+    # (seconds; the default is six hours). A longer TTL costs memory — every
+    # waiting session is a live interpreter — and a shorter one is friendlier
+    # to a busy public server; either way the game's progress is saved before
+    # the session is ended:
+    # environment:
+    #   LANTHORN_WEB_SESSION_TTL: "21600"
+    #
+    # Uncomment to change how wide the draggable pane boundaries are, in
+    # cells (1-6, or `off` to leave lanthorn's own default of 2 alone). The
+    # browser image seeds 4, because a fingertip is not a mouse pointer:
+    # environment:
+    #   LANTHORN_WEB_GRAB_ZONE: "4"
+    #
+    # Uncomment to turn the whole thing off and take the other side of the
+    # trade: a dropped connection ends the game (its progress still saved and
+    # resumed next time), and in exchange the browser gets the game's SOUND,
+    # which a detachable session cannot have — see docker/serve-session.sh:
+    # environment:
+    #   LANTHORN_WEB_DETACH: "off"
     restart: unless-stopped
 
 volumes:

@@ -125,9 +125,25 @@ FramePtr   u32     (caller frame pointer)
 ```
 
 DestType: `0` discard, `1` store to main memory at DestAddr, `2` store to local
-at `(FramePtr+LocalsPos)+DestAddr`, `3` push on stack. (For glk/string
-intermediate stubs the spec also defines 0x10/0x11/0x12/0x13 — not needed in
-2a.)
+at `(FramePtr+LocalsPos)+DestAddr`, `3` push on stack.
+
+DestTypes **10-14** are not destinations at all but PRINT RESUME STATES (spec
+§1.3.2 — note the spec numbers this §1.3.2 and output filtering §1.3.5, not
+§1.8.x). The returning function was a filter-iosys callback or a string-embedded
+routine, its return value is discarded, and what resumes is the *print*:
+
+| DestType | resumes | PC field | DestAddr field |
+|---|---|---|---|
+| 10 | a compressed (E1) string | address of the byte within the string | bit number 0-7 within it |
+| 11 | function code after the string completes | the program counter as usual | 0 (FramePtr ignored) |
+| 12 | a signed decimal integer | **the integer itself** | position of the next digit |
+| 13 | a C-style (E0) string | address of the next character | 0 |
+| 14 | a Unicode (E2) string | address of the next 4-byte character | 0 |
+
+They are pushed with the ordinary four-word layout and are ordinary stack words,
+so a Quetzal `Stks` chunk carries them and any interpreter resumes the print
+after a restore. See §9's "Calling functions from within strings" for how the
+printing engine drives them.
 
 ### Return
 
@@ -185,10 +201,18 @@ unsigned: jltu/jgeu/jgtu/jleu. Shifts by ≥ 32: `shiftl`/`ushiftr` yield 0,
 `setiosys(mode, rock)` / `getiosys → (mode, rock)`:
 - mode `0` — null: all output discarded.
 - mode `1` — filter: rock is a function address; each output character is passed
-  as a single argument (its code point) to that function via a VM call
-  (`run_call_to_return`), per spec §7.2. Re-entrant filter calls are bounded by a
-  native-stack depth guard.
+  as a single argument (its code point) to that function via a VM call, per spec
+  §1.3.5. The call runs on the **Glulx stack**, not in a native loop: a call stub
+  records where the print resumes and control returns to the interpreter loop
+  (SQ-1418, see §9). So filter recursion is bounded by the story's own declared
+  stack size and faults with a stack overflow when it runs away — as glulxe's
+  "Stack overflow in callstub" does — rather than being silently capped.
 - mode `2` — Glk: stream opcodes route to `Output::print`.
+- any other mode — normalized to `0` (null) with rock `0` (spec §2.11: "If the
+  system L1 is not supported by the interpreter, it will default to the null
+  system"). Modes `0` and `2` always zero the rock too, matching glulxe's
+  `stream_set_iosys` (`string.c`) — only mode `1` (filter) keeps the caller's
+  rock, since there it names the filter routine (SQ-1415).
 
 - `streamchar L1` — emit `L1 & 0xFF` as one Latin-1 char.
 - `streamunichar L1` — emit the 32-bit Unicode code point `L1`.
@@ -277,16 +301,57 @@ For 0x08/0x0A the address names the object directly; for 0x09/0x0B it names a
 is printed (args ignored); if it is a function it is **called** (with the given
 args, or none for 0x08/0x09) and its output is streamed in place.
 
-### Calling functions from within strings (spec §1.3.4)
+### Calling functions from within strings (spec §1.3.5)
 
-The spec models a string-called function with type-10/11/13/14 call stubs so
-that a normal `return` resumes string decoding. We instead execute the call
-**synchronously**: decoding is a recursive Rust walk, and a function node calls
-the function and runs the VM run-loop until that frame returns (tracked by the
-frame pointer), then resumes the walk. This is observably equivalent for
-well-behaved veneer functions (their output is streamed in order). A recursion
-depth limit guards against pathological/cyclic tables (fault, never a Rust stack
-overflow).
+The spec models a string-called function with type-10/11/12/13/14 call stubs so
+that a normal `return` resumes string decoding, and **that is what gvm does**
+(SQ-1418). `stream_string` / `stream_num` / `stream_char` push the stub, set the
+PC to the resume position, enter the callee and RETURN to the interpreter loop;
+`pop_save_stub_and_store` recognises DestTypes 10-14 and re-enters the print, and
+`pop_callstub_string` unwinds the `0x11` terminator at the end. An embedded
+object reference (node types `0x08`-`0x0B`) goes through the stack in **every**
+I/O system, not only the filter one, matching glulxe.
+
+Consequences worth stating, because each was a defect before the redesign:
+
+- Filter recursion is bounded by the story's own stack, not by a native cap. It
+  used to stop at 33 nested calls and carry on as if the rest had printed.
+- A `@throw` past a print is an ordinary unwind — the string stubs above the
+  catch token are simply discarded with the rest of the stack — where a native
+  loop waiting on a frame pointer could never see the frame it wanted again.
+- A `@save`, `@restore`, `@saveundo` or `@restoreundo` taken mid-print carries
+  the resume state, because the stubs are ordinary stack words in the `Stks`
+  chunk. A restore resumes the interrupted string or number.
+- The machine keeps **no printing state of its own**. Everything is on the stack.
+
+**Historical note, since a "synchronous decode" reads as simpler:** it was a
+recursive Rust walk with `run_call_to_return` spinning `step_once` until the
+callee's frame returned. All four bullets above are consequences of that one
+choice, and no cap or guard could have fixed them individually.
+
+**The one remaining native nest** is capture mode (`emit_capture`): the
+compressed-string decoder behind `glk_put_string` owes a Glk dispatch call a
+finished `String`, so it cannot suspend into the interpreter loop. It is bounded
+by `CAPTURE_MAX_DEPTH`, never involves the filter (capture bypasses the iosys),
+and `run_call_to_return` refuses an unwind past its own frame rather than
+spinning on it.
+
+**Reference and provenance.** The design was matched against glulxe 0.6.1
+(`string.c` `stream_string`/`stream_num`/`filio_char_han`, `funcs.c`
+`push_callstub`/`pop_callstub`/`pop_callstub_string`, `exec.c`'s dispatch of the
+stream opcodes) at commit `56ab8743bab565de307bd892c555d8d8897ed517`. glulxe is
+**MIT-licensed** (Copyright (c) 1999-2023, Andrew Plotkin), which is compatible
+with lanthorn's BSD-3-Clause; the Rust here is written from the algorithm, not
+transcribed. Two synthetic `.ulx` images — a 201-deep filter recursion and a
+`@saveundo`/`@restoreundo` inside a filter mid-`streamnum` — produce
+byte-identical output under gvm and under glulxe/cheapglk 1.0.7.
+
+**A divergence the reference cannot arbitrate:** glulxe's `serial.c` refuses
+`@save`/`@restore` outright unless the I/O system is Glk ("Streams are only
+available in Glk I/O system"), which is a limitation of its stream writer rather
+than a spec rule — `@save` is defined on any writable Glk stream. gvm has no such
+restriction, so an in-filter `@save` works here and cannot be cross-checked
+against glulxe; the `@saveundo` path, which touches no stream, can be and was.
 
 ### `getstringtbl` / `setstringtbl`
 
@@ -417,22 +482,44 @@ run-length-encoded: a non-zero byte is literal; a run of 1..=256 zero bytes is a
 original image, then apply the diff (so bytes absent from the save return to
 their load-time values).
 
+**A foreign writer may end the `CMem` stream early, and that is not corruption
+(SQ-1415).** glulxe's own writer (`serial.c` `write_memstate`) omits the
+trailing zero run once every remaining byte is unchanged from the original
+image — "it's possible we've got a run left over, but we don't write it" — and
+its reader treats running out of stream as "the final, unstored run", filling
+the rest with zero diff. `decompress_ram` does the same: exhausting the `CMem`
+bytes before `memsize` fills `[addr, memsize)` from the original image rather
+than returning `BadSave`. Only a *decoded* run whose length would write past
+`memsize` is still rejected — glulxe's writer can never produce one, so that
+shape means a corrupted or hostile file. This is what makes
+`tests/fixtures/startsavetest.gblorb` (glulxe's own save/restore unit-test
+game, `tests/startsavetest_boots.rs`) and Counterfeit Monkey's shipped
+resource `9998` boot save restore instead of being rejected.
+
 **`Stks` (spec §1.8 / §1.3.1):** the stack is one byte-addressed buffer already
 in the spec's call-frame layout, so the chunk is simply `stack[0..sp]`. We store
 sp/fp/pc explicitly in `GReg` rather than deriving them from a top-of-stack call
 stub (a real Quetzal reader's job); `GReg` is this implementation's extension to
 keep `save_state`/`restore_state` self-contained for headless testing.
 
-**Restore order:** parse chunks → snapshot the currently-protected bytes →
-decompress `CMem` (reset+diff) → re-impose the protected bytes → load the stack
-and registers from `Stks`/`GReg` → rebuild the heap from `MAll` → recompute the
-frame cache. The **protected range** (§16) is preserved across restore: bytes in
-the current protect range keep their pre-restore values.
+**Restore order:** parse chunks → decompress `CMem`/`UMem` (reset+diff), SKIPPING
+any byte inside the *live* protect range → load the stack and registers from
+`Stks`/`GReg` → rebuild the heap from `MAll` → recompute the frame cache. The
+**protected range** (§16) is preserved across restore: bytes in the current
+protect range keep their pre-restore values, because `decompress_ram`/
+`load_umem` simply never write them (SQ-1415: no longer a snapshot-then-
+reimpose over a materialised `Vec` of every protected byte, which for a
+hostile multi-GiB `@protect` range was itself an unbounded allocation).
 
 Per the spec, an interpreter's Glk state, RNG internal state, protect range, and
 I/O-system/string-table settings are not part of a real Quetzal *file*; our
 internal snapshot additionally carries iosys/string-table/protect in `GReg` so
-that `saveundo`/`restoreundo` (§15) restore the full VM state exactly.
+that **`restore_state`** (the host Save State path) restores the full VM state
+exactly, including the saved protect range. **`saveundo`/`restoreundo` (§15) are
+different: per spec §2.16 the protect range is explicitly not part of the saved
+undo state**, so `restoreundo` puts the LIVE range (as it stood right before the
+undo) back after the shared restore core runs, rather than trusting the
+snapshot's `GReg` the way `restore_state` does (SQ-1415).
 
 **A second, spec-conformant standard serializer (`@save`/`@restore`, SQ-0283).**
 `save_state`/`restore_state` above back the host **Save State** (Layer 2, a
@@ -493,6 +580,54 @@ in `supply_filename`); `create_by_name`/`create_by_usage`/`create_temp` are
 flag is session-transient (defaults `false` on a Glk-snapshot restore) and adds
 no `StepResult` variant (it stays `Copy`).
 
+**Foreign-save interop, closing SQ-0229 (SQ-1417).** SQ-0229 deferred the
+cross-interpreter half of `@save`/`@restore` testing twice (2026-07-11,
+2026-07-15) for want of a headless oracle and an observable-state fixture.
+Both now exist: glulxe 0.6.1 built from source against cheapglk 1.0.7 (see
+this crate's `tests/glk_conformance_corpus.rs` module doc for how), and
+`unit_tests/statusbufferwin.ulx` (vendored by SQ-1417's corpus widening,
+where SQ-0229 originally wanted a purpose-authored `counter.ulx`) whose
+inventory state is directly observable through the standard library's
+INVENTORY/TAKE verbs — no bespoke fixture needed after all.
+
+`crates/gvm/tests/fixtures/statusbufferwin_apple_{glulxe,gvm}.glksave` are two
+`FORM IFZS` saves of the identical state (`take apple` then `save`), one
+written by each interpreter. Both directions were verified:
+
+- **glulxe's save, restored by gvm**
+  (`crates/gvm/tests/foreign_save_interop.rs`,
+  `restores_a_glulxe_written_save_and_the_apple_is_there`): automated, runs in
+  the normal test suite. Drives `statusbufferwin.ulx` to `restore`, applies
+  `statusbufferwin_apple.glulxe.glksave` via `complete_restore_quetzal`, then
+  — per this project's restore-testing convention (perturb before asserting,
+  `docs`/`CLAUDE.md` Testing conventions) — issues one more command
+  (`inventory`) and asserts the apple is there.
+- **gvm's save, restored by glulxe**: verified manually (glulxe/cheapglk are
+  an external oracle, not a workspace dependency — nothing to automate this
+  *into* without vendoring a C toolchain build into CI). `glulxe -q -u
+  statusbufferwin.ulx` scripted `restore` / `save.glksave` (cheapglk resolves
+  a by-prompt fileref relative to the STORY FILE's own directory, not the
+  process cwd — `glkunix_set_base_file`/`cgfref.c`, the thing that cost the
+  first attempt at this an hour) / `inventory`, with
+  `statusbufferwin_apple.gvm.glksave` copied to that resolved path first.
+  Output: `Enter saved game to load: Ok.` then `You are carrying: an apple`
+  — the restore succeeds and the state matches. (An initial attempt failed
+  with `Restore failed.` for an unrelated reason — the save file was in the
+  wrong directory per the `cgfref.c` resolution rule above, not a format
+  defect; instrumenting glulxe's own `perform_restore` with temporary debug
+  prints, reverted afterward, confirmed `perform_restore` was never even
+  reached — cheapglk's `access(newbuf, R_OK)` check failed first and
+  `glk_fileref_create_by_prompt` returned `NULL` before any Quetzal parsing.)
+
+Both saves' `MAll` chunks are worth noting since they look different at the
+byte level for equivalent, both spec-legal reasons: gvm's writer always emits
+`heap-start(0), count(0)` (8 bytes) when the heap was never activated, where
+glulxe's omits the chunk body entirely (0 bytes) — glulxe's own
+`heap_apply_summary` (`heap.c`) has an explicit `valcount == 2 && summary[0]
+== 0 && summary[1] == 0` case that treats gvm's shape as "no heap" too, so
+this is not a defect in either writer, just two valid spellings of the same
+fact.
+
 ## 15. Undo (Phase 2c, spec §2.11)
 
 | Opcode      | Num   | L | S | Effect                                            |
@@ -523,13 +658,36 @@ when full. (`@save`/`@restore` to a real file are now implemented — see §14's
 |---------|-------|---|---|-----------------------------------------------------|
 | protect | 0x127 | 2 | 0 | preserve RAM `[L1, L1+L2)` across restore/restoreundo; `L2 == 0` clears |
 
-The protected range `(addr, len)` lives on the `Machine`. During restore (§14)
-the bytes currently in the protected range are snapshotted before RAM is reset,
-then written back after the saved diff is applied — so a protected byte keeps its
-**current** value rather than the restored image's. `protect(_, 0)` clears
-protection. Our internal snapshot also carries the range in `GReg`, so a
-`saveundo`/`restoreundo` round-trip preserves it. (The spec also lists `restart`
-among the operations protect guards; `restart` is not implemented in 2c.)
+The protected range `(addr, len)` lives on the `Machine`, stored as `(start,
+len)` rather than `(start, end)` — glulxe's own `op_protect` (exec.c) computes
+`end = start + len` and validates nothing, so a hostile range is ordinary
+input there too, and every reader of the range here (`decompress_ram`/
+`load_umem`/`reset_ram`) computes its end with `saturating_add` rather than
+trusting one (SQ-1415). During restore (§14), `decompress_ram`/`load_umem`
+simply never write a byte inside the live protected range, so it keeps its
+**current** value rather than the restored image's — a live skip, not a
+snapshot-then-reimpose, precisely so a hostile multi-GiB range is never
+materialised into a `Vec`. `protect(_, 0)` clears protection.
+
+**`restart` and `restoreundo` treat the protect range oppositely, and both
+match the spec (SQ-1415):**
+
+- **`@restart` (spec §2.9) honors it and does NOT reset it.** `reset_ram`
+  (memory.rs) reloads `[RAMSTART, EXTSTART)` from the original image and
+  zeroes `[EXTSTART, ENDMEM)` while skipping `[protectstart, protectend)`,
+  mirroring glulxe's `vm_restart` (`vm.c`) exactly — it reloads the game file
+  byte-by-byte, `if (lx >= protectstart && lx < protectend) continue;`, and
+  its own comment says "we do not reset the protection range". `op_restart`
+  leaves `self.protect` untouched (previously it zeroed it, which the spec
+  never asked for).
+- **`saveundo`/`restoreundo` (§15) do NOT honor it — per spec §2.16 the
+  protect range is explicitly not part of the saved undo state.** Our
+  internal snapshot format (`GReg`) DOES carry the range (so **`restore_state`**,
+  the unrelated host Save State path, can restore it exactly), but
+  `restoreundo` captures the LIVE range before calling the shared restore
+  core and puts it back afterward, rather than trusting what `GReg` says —
+  otherwise an undo would silently reinstate whatever range was live when
+  `saveundo` ran, which is exactly the "part of saved state" the spec denies.
 
 ## 17. Acceleration (Phase 2c, spec §2.18 / §1.4)
 
@@ -548,7 +706,10 @@ and opcode dispatch entirely. Interception happens at the two call choke
 points — `call_function` and `op_tailcall` — so it applies uniformly whether a
 game calls an accelerated function directly or tail-calls into one. This is
 behaviorally transparent (the transcript is byte-identical with acceleration on
-or off) and is **on by default**, with an `--accel on|off` flag (`gvm-cli` and the
+or off, including the three functions' `[** Programming error: … **]`
+diagnostics on malformed input — `accel_error` writes them through the current
+Glk stream, matching glulxe's `accel.c`, and only when the I/O system is Glk;
+SQ-1416) and is **on by default**, with an `--accel on|off` flag (`gvm-cli` and the
 app) as an escape hatch for diagnosing any mismatch. On CounterfeitMonkey-11,
 acceleration cuts the dispatched-opcode count from init to the first prompt by
 roughly 7.9× (23.78M → 3.00M). Accordingly the `Acceleration` (9) and
@@ -595,7 +756,7 @@ suspend/resume are 3a-2). All constant values below are from `glk.h`.
 | Type             | Value | Notes                                  |
 |------------------|-------|----------------------------------------|
 | wintype_Pair     | 1     | internal layout node (split-created)   |
-| wintype_Blank    | 2     | out of scope                           |
+| wintype_Blank    | 2     | real window: no text, no output, `glk_window_get_size` always (0,0) — pure layout filler (SQ-1416) |
 | wintype_TextBuffer | 3   | scrolling main window                  |
 | wintype_TextGrid | 4     | fixed character grid / status window   |
 | wintype_Graphics | 5     | out of scope                           |
@@ -626,10 +787,22 @@ is tagged with it. The backend maps classes → display attributes (SGR in the C
 
 Version 0, CharInput 1, LineInput 2, CharOutput 3 (returns CannotPrint 0 /
 ApproxPrint 1 / ExactPrint 2), MouseInput 4, Timer 5, Graphics 6, Unicode 15,
-LineInputEcho 17, LineTerminators 18, … We report `Version` = 0x00000705,
-`CharInput` = 1, `LineInput` = 1, `CharOutput` = ExactPrint for any code point
-(Unicode capable), `Unicode` = 1, and **0** for mouse/timer/graphics/sound/
-hyperlinks/echo/terminators (truthful: not supported).
+LineInputEcho 17, LineTerminators 18, DrawImageScale 24, … We report `Version`
+= 0x00000706 (0.7.6; SQ-1416 had dropped it to 0.7.5 while
+`0x00EC glk_image_draw_scaled_ext` was unimplemented, and SQ-1424 implemented
+it — including the part that made it its own quest, `imagerule_WidthRatio` in
+a `wintype_TextBuffer` window, which the spec makes STANDING rather than
+one-shot: the rule is stored beside the inline image and re-resolved against
+the window's current width on every relayout, so a resize resizes the picture.
+`DrawImageScale` (24) therefore now mirrors `DrawImage` (7): supported for
+`wintype_Graphics` and `wintype_TextBuffer` whenever graphics are enabled),
+`CharInput` = 1,
+`LineInput` = 1, `CharOutput` answered per code point from
+`GlkBackend::char_output_gestalt` (default: CannotPrint for the eight-bit
+control ranges the spec names, ExactPrint for the rest of Latin-1, ApproxPrint
+beyond that — not a blanket ExactPrint; SQ-1416), `Unicode` = 1, and **0** for
+mouse/timer/graphics/sound/hyperlinks/echo/terminators (truthful: not
+supported).
 
 ### Dispatch selector codes implemented (output subset; from `gi_dispa.c`)
 
@@ -713,10 +886,22 @@ line input — like a stdio Glk, the display backend/terminal handles echo.
 **Cancel + other event selectors:** `glk_cancel_line_event` 0x00D1 (drops the
 request, reports `evtype_LineInput` with the `initlen` chars already in the
 buffer, else `evtype_None`), `glk_cancel_char_event` 0x00D3 (drops the request),
-`glk_select_poll` 0x00C1 (returns a queued internal event or `evtype_None`,
-never input, never suspends). **Arrange:** `glk_window_set_arrangement` queues an
-`evtype_Arrange` (win 0); `glk_select` delivers any queued non-input event before
-suspending for input. **Diagnosed no-ops (out of scope):**
+`glk_select_poll` 0x00C1 (never suspends; returns the first queued Timer/
+Arrange/Redraw/SoundNotify/VolumeNotify event, skipping over — and leaving
+queued — any Char/Line/Mouse/Hyperlink ahead of it, per Glk spec §4.2's "does
+not check for or return evtype_CharInput, evtype_LineInput, or
+evtype_MouseInput"; Hyperlink is excluded the same way, a per-window
+player-input request like Mouse; SQ-1416). **Arrange:** `glk_window_set_arrangement`
+queues an `evtype_Arrange` (win 0), and so does `deliver_arrange` when nothing
+is currently blocked on a select (SQ-1416: it used to drop the event on the
+floor instead, unlike its sound/timer/mouse/hyperlink siblings); `glk_select`
+delivers any queued non-input event before suspending for input. A suspended
+`glk_select`'s S1 (always 0) is stored only once the event is actually
+delivered on resume, AFTER any stack-pushed event words — Glulx spec §2.18:
+"Stack output references are pushed after the Glk call, but before the S1
+result value is stored" (SQ-1416 item 3; `PendingInput`/`PendingEvent` carry
+the deferred store target the same way `PendingFileref` already did for
+`glk_fileref_create_by_prompt`). **Diagnosed no-ops (out of scope):**
 `glk_request_timer_events` 0x00D6, `glk_request_mouse_event` 0x00D4,
 `glk_cancel_mouse_event` 0x00D5. **Accepted best-effort:**
 `glk_set_echo_line_event` 0x0150, `glk_set_terminators_line_event` 0x0151.
@@ -740,6 +925,23 @@ the Glulx Glk dispatch (gi_dispa) and glk.h:
   `glk_window_get_arrangement`, the `*_iterate` rocks, and the `event_t*` of
   `glk_select`/`glk_select_poll`. Inform's veneer (`PrintAnyToArray`) relies on
   this to read a memory stream's write count without a stat buffer.
+- **The same -1 convention has an INPUT direction too** (SQ-1416 item 2): a
+  reference to a Glk INPUT structure at `-1` is popped off the stack instead of
+  read from memory, field 0 topmost (Glulx spec §2.18: "an input structure is
+  popped off first-topmost" — the mirror image of the output rule above, and
+  matching cheapglk `glkop.c`'s `ReadStructField` macro, which pops once per
+  field in increasing field-index order). `read_timeval`/`read_glkdate` (used
+  by the six §2.10 date/time selectors `0x0168`, `0x0169`, `0x016C`–`0x016F`)
+  honor it; they used to always read from memory even when handed `-1`.
+- **Fileref name simplification** (`Model::sanitize_fileref_name`, SQ-1416 item
+  6): a `glk_fileref_create_by_name`/`_by_prompt` name is simplified per the
+  Glk spec's recommended rule (cheapglk `cgfref.c`'s comment on
+  `glk_fileref_create_by_name`) — delete `" \ / > < : | ? *`, keep only the
+  part before the first `.`, `"null"` if that leaves nothing, then append the
+  usage's suffix (`.glkdata` Data, `.glksave` SavedGame, `.txt`
+  Transcript/InputRecord). This is what other Glk interpreters do, so a file a
+  Glulx story writes exchanges with them; it also means a `SavedGame` fileref's
+  on-disk name now carries a `.glksave` suffix it did not before.
 
 ### Core opcodes completed alongside (Glulx spec §2)
 

@@ -30,7 +30,7 @@ fn treasures_dir() -> PathBuf {
 
 /// The Amiga Lurking Horror, on the disk of the *Lost Treasures* set that carries it.
 fn lurking() -> Option<PathBuf> {
-    let p = treasures_dir().join("Lost Treasures of Infocom, The_Disk4.adf");
+    let p = treasures_dir().join("Amiga/Lost Treasures of Infocom, The_Disk4.adf");
     p.is_file().then_some(p)
 }
 
@@ -316,7 +316,7 @@ fn the_pitch_model_reproduces_both_blorbs() {
 /// within a couple of counts of silence, exactly as the Amiga's does.
 #[test]
 fn the_macintosh_payload_is_offset_binary() {
-    let iso = treasures_dir().join("LostTreasures2.iso");
+    let iso = treasures_dir().join("ISOs/LostTreasures2.iso");
     let adf = stories_dir().join("Sherlock - The Riddle of the Crown Jewels.adf");
     if !iso.is_file() || !adf.is_file() {
         eprintln!("SKIP: gitignored Lost Treasures disc 2 or Sherlock floppy absent");
@@ -420,7 +420,7 @@ fn the_macintosh_payload_is_offset_binary() {
 /// `the_decoded_samples_are_the_blorbs_samples`.
 #[test]
 fn the_macintosh_release_bends_the_shared_heartbeat() {
-    let iso = treasures_dir().join("LostTreasures2.iso");
+    let iso = treasures_dir().join("ISOs/LostTreasures2.iso");
     if !iso.is_file() {
         eprintln!("SKIP: gitignored Lost Treasures disc 2 absent");
         return;

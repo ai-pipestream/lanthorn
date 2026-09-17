@@ -401,6 +401,11 @@ fn drive(
         match machine.step() {
             StepResult::Continue => {}
             StepResult::Quit => break,
+            // A real VM fault (SQ-1395): also breaks the drive loop, same as a
+            // clean quit — the teardown below reads `take_fault_trace()` and
+            // `diagnostics` regardless of which one happened and reports/exits
+            // non-zero accordingly, so no separate handling is needed here.
+            StepResult::Fault => break,
             // A glk_select waiting only on a non-input event (Glk §4.4). With a
             // timer armed, drive its clock synchronously; a bare mouse/hyperlink
             // wait has no click to deliver headless, so treat it as end-of-input.
@@ -633,6 +638,7 @@ fn drive(
                     }
                 }
             }
+            _ => break,
         }
     }
 }
@@ -758,14 +764,14 @@ const OPTS: &[cli_host::Opt] = &[
 
 fn main() {
     let argv: Vec<String> = env::args().collect();
-    if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
+    if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_BIN_NAME"), buildinfo::LONG) {
         return;
     }
     // Resolve the terminal mode FIRST: `TerminalBackend::new` below reads the
     // installed mode to decide whether it may emit escapes, so `--plain` has to
     // be known before the backend exists (SQ-0606).
     let mode = HostMode::detect_with(cli_host::plain_requested(&argv)).install();
-    let name = env!("CARGO_PKG_NAME");
+    let name = env!("CARGO_BIN_NAME");
     let m = match cli_host::scan(&argv, OPTS) {
         Ok(m) => m,
         Err(e) => cli_host::usage_error(name, &e, HELP),
@@ -958,13 +964,13 @@ fn main() {
             eprintln!("{line}");
         }
         // Still surface any other diagnostics, then exit non-zero.
-        for d in &machine.diagnostics {
+        for d in machine.diagnostics() {
             eprintln!("gvm: {d}");
         }
         std::process::exit(70);
     }
 
-    for d in &machine.diagnostics {
+    for d in machine.diagnostics() {
         eprintln!("gvm: {d}");
     }
 }

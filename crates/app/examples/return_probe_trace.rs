@@ -1,7 +1,7 @@
 //! Instrument (SQ-0785): what the return search ASKS and what comes back, one
 //! move at a time — beside `return_probe_cost`, which measures what it costs.
 //!
-//!   cargo run -p app --example return_probe_trace -- \
+//!   cargo run -p lanthorn --example return_probe_trace -- \
 //!       --story zork1-invclues-r52-s871125.z5 --walk 'n;n;n'
 //!
 //! For each crossing it prints the rooms, the gate's two conditions, the
@@ -10,7 +10,7 @@
 //! empty-handed apart: the gate refused to arm, the candidates were filtered
 //! away, or an attempt landed somewhere the map could not identify.
 //!
-//! **An example rather than a test, deliberately.** `-p app` links all fourteen
+//! **An example rather than a test, deliberately.** `-p lanthorn` links all fourteen
 //! test group binaries whatever a filter selects, so reaching one case costs the
 //! full ~150s link; this builds the `app` lib and itself, and answered SQ-0785's
 //! two field reports in about 26s each.
@@ -101,7 +101,10 @@ fn main() {
             );
         }
 
-        app::return_probe::arm_return_search(&mut state, &mapper, &*session, cmd, before);
+        app::return_probe::arm_return_search(
+            &mut state, &mapper, &*session, cmd, before,
+            &mut app::engine::TurnSave::default(),
+        );
         if state.return_search.is_none() {
             println!("    NO SEARCH ARMED");
             continue;
@@ -126,11 +129,13 @@ fn main() {
             if let Some(run) = &answer.run {
                 for st in &run.steps {
                     println!(
-                        "      try {:<10} -> loc={:?} quit={} escaped={} | {:?}",
+                        "      try {:<10} -> loc={:?} landing={:?} quit={} escaped={} died={} | {:?}",
                         st.command,
                         st.location,
+                        st.landing(),
                         st.quit,
                         st.escaped,
+                        st.died,
                         st.reply.trim().lines().next().unwrap_or("")
                     );
                 }
@@ -212,6 +217,6 @@ fn boot_bytes(story: &str) -> Vec<u8> {
     }
 }
 
-fn room(m: &Mapper, id: Option<mapper::graph::RoomId>) -> Option<(u16, String)> {
+fn room(m: &Mapper, id: Option<mapper::graph::RoomId>) -> Option<(mapper::graph::RoomId, String)> {
     id.and_then(|i| m.graph.room(i).map(|r| (i, r.name.clone())))
 }

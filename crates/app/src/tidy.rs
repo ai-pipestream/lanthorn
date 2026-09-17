@@ -48,7 +48,7 @@ fn replay_build_and_placement(
     use mapper::layout::{place_incremental, TidyStats};
 
     let name_of = |g: &MapGraph, id: RoomId| -> String {
-        g.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id}"))
+        g.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| crate::roomid::room_label_no(g, id))
     };
 
     let conns = sub.connections();
@@ -380,6 +380,15 @@ fn run_layer_ops_silent(
     let mut sub = graph.layer_subgraph(layer);
     ops(&mut sub);
 
+    // Re-derive every compass edge's `distorted` flag from the positions `ops` actually
+    // settled on, whatever stages it ran (SQ-1377). `relayout_auto`'s own marking, inside
+    // `ops`, can go stale the moment a later stage in the same closure — `cleanup_overlaps`,
+    // `repair_directional_hints`, or plain `cleanup_overlaps` alone as `ops` — moves a room:
+    // a bearing the solver dropped may end up honoured after all, or an aligned pair may get
+    // nudged off its row. This runs last, after every stage, so the flag written back below
+    // always answers to the FINAL geometry rather than to a snapshot from partway through.
+    mapper::layout::remark_distorted(&mut sub);
+
     // Write final positions back into the live graph.
     for id in graph.rooms_in_layer(layer) {
         if let Some(p) = sub.room(id).and_then(|r| r.pos) {
@@ -509,7 +518,7 @@ pub fn should_bg_tidy(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-state"))]
 mod tests {
     use super::*;
 
@@ -521,7 +530,7 @@ mod tests {
     fn retidy_keeps_180_north_west_of_80_and_south_west_of_81() {
         use mapper::direction::Direction::*;
         let mut g = mapper::graph::MapGraph::new();
-        for id in [25u16, 26, 27, 74, 75, 76, 77, 78, 79, 80, 81, 88, 136, 143, 180, 193, 201, 203, 239] {
+        for id in [25u32, 26, 27, 74, 75, 76, 77, 78, 79, 80, 81, 88, 136, 143, 180, 193, 201, 203, 239] {
             g.upsert_room(id, "r".into());
         }
         for (o, d, dst) in [
@@ -541,7 +550,7 @@ mod tests {
         let region = mapper::layer::planar_region(&g, 27); // the user's scenario: 27/136 in their own layer
         let _ = mapper::layer::move_region(&mut g, &region, mapper::layer::MoveTarget::New);
         run_tidy_pipeline(&mut g, 0, None);
-        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        let p = |id: mapper::graph::RoomId| g.room(id).unwrap().pos.unwrap();
         let (a, b, c) = (p(180), p(80), p(81));
         assert!(a.0 < b.0 && a.1 < b.1, "180 {a:?} must be NW of 80 {b:?}");
         assert!(a.0 < c.0 && a.1 > c.1, "180 {a:?} must be SW of 81 {c:?}");
@@ -574,6 +583,87 @@ mod tests {
         let c = g.room(3).unwrap().pos.unwrap();
         assert_eq!(a.0, b.0, "reciprocal N/S pair shares a column");
         assert_ne!(c, b, "the up/down room does not sit on top of the reciprocal neighbor");
+    }
+
+    /// SQ-1377: `run_layer_ops_silent` re-derives every `distorted` flag from the FINAL
+    /// positions `ops` leaves behind, not from a stale snapshot `ops` wrote partway through.
+    ///
+    /// Simulates the exact shape of the defect without the real solver: `ops` first marks a
+    /// connection distorted (standing in for `relayout_auto`'s own `mark_distorted`, which
+    /// `app` cannot call directly — it is `pub(crate)` to `mapper`), then moves the destination
+    /// room onto the cell the bearing actually names (standing in for `repair_directional_hints`
+    /// putting a dropped bearing back). Before SQ-1377 the flag `run_layer_ops_silent` wrote
+    /// back was whatever `ops` left it at — `true`, though the final geometry says the passage
+    /// is honoured. After, the flag is re-derived last and must be `false`.
+    #[test]
+    fn a_bearing_marked_distorted_then_honoured_by_a_later_move_draws_plain() {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::S, 2);
+        let layer = g.layer_of(1);
+
+        run_layer_ops_silent(&mut g, layer, |sub| {
+            // Snapshot mid-solve: room 2 is off room 1's column, so the S bearing is violated —
+            // the same shape a dropped cycle-closing constraint leaves behind.
+            sub.set_pos(1, (0, 0));
+            sub.set_pos(2, (5, 5));
+            let idx = sub
+                .connections()
+                .iter()
+                .position(|c| c.origin == 1 && c.dir == Direction::S && c.dest == 2)
+                .expect("the S edge exists");
+            sub.set_conn_distorted(idx, true);
+
+            // The repair stage puts the dropped bearing back: room 2 lands directly south.
+            sub.set_pos(2, (0, 1));
+        });
+
+        let conn = g
+            .connections()
+            .iter()
+            .find(|c| c.origin == 1 && c.dir == Direction::S && c.dest == 2)
+            .expect("the S edge exists");
+        assert!(!conn.distorted, "the bearing is honoured at the final position, so it must draw plain");
+    }
+
+    /// The reverse of the case above: a bearing marked SATISFIED mid-pipeline that a later stage
+    /// then knocks off-axis must draw distorted, not plain.
+    #[test]
+    fn a_bearing_marked_satisfied_then_broken_by_a_later_move_draws_distorted() {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::S, 2);
+        let layer = g.layer_of(1);
+
+        run_layer_ops_silent(&mut g, layer, |sub| {
+            // Snapshot mid-solve: room 2 sits directly south of room 1 — the bearing holds.
+            sub.set_pos(1, (0, 0));
+            sub.set_pos(2, (0, 1));
+            let idx = sub
+                .connections()
+                .iter()
+                .position(|c| c.origin == 1 && c.dir == Direction::S && c.dest == 2)
+                .expect("the S edge exists");
+            sub.set_conn_distorted(idx, false);
+
+            // A later cleanup nudge knocks room 2 off room 1's column.
+            sub.set_pos(2, (3, 1));
+        });
+
+        let conn = g
+            .connections()
+            .iter()
+            .find(|c| c.origin == 1 && c.dir == Direction::S && c.dest == 2)
+            .expect("the S edge exists");
+        assert!(conn.distorted, "the bearing is violated at the final position, so it must draw distorted");
     }
 
     #[test]
@@ -634,7 +724,7 @@ mod tests {
         let _ = run_tidy_pipeline(&mut animated.graph, layer, None);
         tidy_layer_silent(&mut silent.graph, layer);
 
-        for id in [1u16, 2, 3, 4] {
+        for id in [1u32, 2, 3, 4] {
             assert_eq!(
                 animated.graph.room(id).unwrap().pos,
                 silent.graph.room(id).unwrap().pos,
@@ -690,7 +780,7 @@ mod tests {
         use mapper::graph::MapGraph;
 
         let mut sub = MapGraph::new();
-        for id in [1u16, 2, 3, 4] {
+        for id in [1u32, 2, 3, 4] {
             sub.upsert_room(id, format!("R{id}"));
         }
         sub.add_edge(1, N, 2); // places room 2 from the anchor

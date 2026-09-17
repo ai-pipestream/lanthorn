@@ -53,7 +53,7 @@ pub(crate) fn dispatch_slash_outcome(
                 let entries = combined_saves(game_dir);
                 apply_action(Action::OpenSaves, state, mapper);
                 state.overlays.saves = Some(SavesState { entries, scroll: Default::default() });
-            } else if handle_map_export(&a, game_dir, mapper, state) {
+            } else if handle_map_export(&a, game_dir, mapper, state, &*session, story_bytes, story_path) {
                 // handled
             } else if matches!(a, Action::ToggleWatch) {
                 toggle_style_watch(state, style_watcher);
@@ -87,6 +87,29 @@ pub(crate) fn dispatch_slash_outcome(
                 &format!("terminal defaults (OSC 10/11 probe): fg {} · bg {}", fmt(td.fg), fmt(td.bg)),
                 TranscriptKind::Meta,
             );
+        }
+        SlashOutcome::SetTranscript(on) => {
+            // ZMSD §7.4 gives a story two ways to start a transcript — the
+            // `output_stream 2` opcode and `Flags 2` bit 0 — and both are the
+            // GAME's. Most modern stories offer no SCRIPT verb at all, so this
+            // throws the same switch on the player's behalf; the engine writes
+            // the header bit with it, so a story that DOES have the verb still
+            // agrees about the state.
+            //
+            // Styled as a Meta line, the register every other host announcement
+            // uses (`transcript.meta` in style.toml) — a notice about a file,
+            // not story prose.
+            let was = session.transcript_on();
+            let path = session.set_transcript(on);
+            let msg = match (on, was, path) {
+                (true, false, Some(p)) => format!("Transcript started — writing to {}", p.display()),
+                (true, false, None) => "Transcript started.".to_string(),
+                (true, true, _) => "Transcript is already running.".to_string(),
+                (false, true, _) => "Transcript stopped.".to_string(),
+                (false, false, _) => "No transcript is running.".to_string(),
+            };
+            state.push_transcript_internal(&msg, TranscriptKind::Meta);
+            state.set_status(msg);
         }
         SlashOutcome::DumpWindows => {
             // A v6 story reports one block per window, merging the game's window
@@ -291,9 +314,12 @@ pub(crate) fn dispatch_slash_outcome(
                 report.from_medium = from_medium;
                 if let Some(fmt) = app::state::sound_kind_to_format(kind) {
                     report.format = Some(fmt);
-                    if let Some(backend) = state.audio.as_mut() {
-                        report.sound_id = backend.play_sample(&bytes, fmt, 8, 1);
-                    }
+                    // `/play-sound` is an explicit request to play something, so
+                    // it opens the (otherwise lazy, SQ-1423) device itself rather
+                    // than silently doing nothing the first time it's run.
+                    let volume = state.config.volume;
+                    let backend = state.audio.get_or_insert_with(|| audio::AudioBackend::new(volume));
+                    report.sound_id = backend.play_sample(&bytes, fmt, 8, 1);
                 }
             }
             for line in app::state::format_play_sound_report(&report) {
@@ -328,6 +354,11 @@ pub(crate) fn dispatch_slash_outcome(
                 // SQ-0588: the display list travels with this save too — this is
                 // the interactive Save State path, and an archive written
                 // without it restores art that can never be recoloured.
+                // Land any in-flight background per-turn auto-save first (SQ-1184):
+                // this writes the same default slot, so an explicit /save that
+                // reports "saved" must not race a background write for an
+                // earlier turn onto the same file.
+                state.archive_worker.flush();
                 let (v6_pics, v6_display, v6_ground, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
                 for d in &v6_diags { state.note_v6_save(d); }
                 let (location, score) = crate::engine_helpers::save_summary(&*session, state);
@@ -425,10 +456,12 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::Quit => {
-            // A plain quit resolves the loop to Exit. Set it explicitly so a
-            // prior `/quit-to-library` that opened (then was superseded by) this
-            // path can't leave the target pointing at the library. (SQ-0435)
-            state.exit_target = ExitTarget::Exit;
+            // A plain quit resolves like every other way the run can end: back
+            // to the library when the story was launched from one, Exit
+            // otherwise (SQ-1258). Set it explicitly so a prior
+            // `/quit-to-library` that opened (then was superseded by) this path
+            // can't leave a stale target behind. (SQ-0435)
+            state.exit_target = ExitTarget::for_launch(state.launched_from_library);
             if should_prompt_save_on_quit(state) {
                 state.overlays.quit_dialog = true;
                 state.overlays.dialog_focus = 0;
@@ -597,11 +630,14 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::RunFontCheck => {
-            // SQ-1104: open the same modal the first run raises. Focus starts on
-            // the second button — the answer that changes nothing — matching the
-            // dialog's declared default, so Enter without reading is not a
-            // decision to install glyphs the font may not have.
+            // SQ-1104/SQ-1245: open the same modal the first run raises, on
+            // stage one. Focus starts on the second button — the answer that
+            // changes nothing — matching the dialog's declared default, so
+            // Enter without reading is not a decision to install glyphs the
+            // font may not have. `font_check_icon_answer` is reset defensively
+            // in case a previous run somehow left it set.
             state.overlays.dialog_focus = 1;
+            state.overlays.font_check_icon_answer = None;
             state.overlays.font_check = true;
         }
         SlashOutcome::SetGuidance(arg) => {
@@ -701,14 +737,15 @@ pub(crate) fn dispatch_slash_outcome(
             // touching it.
             use app::reveal::Armed;
             match app::reveal::arm(state, &*session) {
-                Armed::Lit { .. } => {
-                    // Every reveal is a vocabulary reveal now (SQ-1135), so the
-                    // legend is unconditional: these are words the story KNOWS,
-                    // which is a weaker thing than a promise that they are here,
-                    // and the player should be told which of the two they are
-                    // looking at.
-                    state.set_status(format!("[{}]", app::reveal::CAVEAT));
-                }
+                // A lit reveal says nothing at all (user decision, SQ-1214): the
+                // words lighting up IS the answer, and the caveat legend that used
+                // to ride the status line on every press was one more thing to
+                // read over the thing being read. The claim it stated — words the
+                // story KNOWS, not necessarily things that are here — lives in
+                // the control's own description now, said once where the feature
+                // is discovered instead of on every use. The arms below still
+                // speak, because each names the reason nothing lit.
+                Armed::Lit { .. } => {}
                 Armed::Nothing => {
                     state.set_status("[nothing on screen is a word this story takes]")
                 }
@@ -910,6 +947,10 @@ fn terminal_snapshot(
             Capability::KittyCompression => {
                 "KittyCompression — the terminal can inflate an o=z transmission".to_string()
             }
+            Capability::KittySharedMemory => {
+                "KittySharedMemory — the terminal can open a t=s shared memory object we write"
+                    .to_string()
+            }
             Capability::CellSize(Some((w, h))) => format!("CellSize({w}x{h} px, from CSI 16 t)"),
             Capability::CellSize(None) => "CellSize (answered, but named no size)".to_string(),
             Capability::TextSizingProtocol => "TextSizingProtocol".to_string(),
@@ -917,6 +958,7 @@ fn terminal_snapshot(
         })
         .collect();
     let kitty_compression = caps.contains(&Capability::KittyCompression);
+    let kitty_shared_memory = caps.contains(&Capability::KittySharedMemory);
 
     let cell = picker.map(|p| {
         let f = p.font_size();
@@ -927,10 +969,12 @@ fn terminal_snapshot(
         Capability::CellSize(Some((w, h))) => Some((*w, *h)),
         _ => None,
     });
-    // …and what the tty says right NOW. Asked live rather than remembered,
-    // because `refresh_cell_size` re-derives from exactly this on every resize
-    // (SQ-0988) — so a remembered boot-time answer could be stale in a way the
-    // live one cannot.
+    // …and what the tty says right NOW. Asked live rather than remembered — a
+    // remembered boot-time answer could be stale in a way the live one cannot
+    // (both the in-game picker (SQ-1511) and the story-picker's cover preview
+    // (SQ-1520) have since moved their own resize-time cell derivation off
+    // this ioctl to a settled stdio requery; this diagnostic still reads it
+    // directly as one more data point, not as a refresh loop).
     let ioctl_cell = crate::picker_ui::terminal_cell_size().map(|f| (f.width, f.height));
     // Ordered by directness: the CSI answer if it is still the value in force,
     // then the ioctl, then the crate's hardcoded 10x20 — which is the one that
@@ -1011,6 +1055,7 @@ fn terminal_snapshot(
         ioctl_cell,
         capabilities,
         kitty_compression,
+        kitty_shared_memory,
         pane_cells: (story_rect.width, story_rect.height),
         render,
         traffic: state.term_traffic.as_ref().map(|t| TrafficStats {
@@ -1019,6 +1064,7 @@ fn terminal_snapshot(
             last_flush_bytes: t.last_flush_bytes(),
         }),
         band_encodes: gr.band_encodes,
+        encode_timings: gr.encode_timings,
         uploads: gr.uploads,
         ops,
     }
@@ -1102,7 +1148,7 @@ fn toggle_debug(state: &mut AppState, session: &mut dyn Engine) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-input"))]
 mod debug_dispatch_tests {
     use super::*;
     use app::engine::{Debugger, EngineError, EngineSave, KeyInput, LocationInfo, ScreenModel};
@@ -1402,10 +1448,26 @@ mod debug_dispatch_tests {
     }
 
     #[test]
-    fn quit_sets_exit_target_to_exit() {
+    fn quit_from_a_library_launch_resolves_to_library() {
+        // SQ-1258: a story reached through the picker returns to it on every way
+        // the run ends, including the player's own `quit` command — not only
+        // `/quit-to-library`.
         let mut state = AppState::default();
-        // Even after a prior quit-to-library set the target, a plain Quit resets it.
         state.launched_from_library = true;
+        state.exit_target = ExitTarget::Exit; // whatever the boot default left behind
+        state.unsaved_progress = false;
+        let should_break = dispatch_quit_like(&mut state, SlashOutcome::Quit);
+        assert!(should_break, "no unsaved progress → quit breaks immediately");
+        assert_eq!(state.exit_target, ExitTarget::Library, "quit must resolve to Library");
+    }
+
+    #[test]
+    fn quit_from_a_command_line_launch_resolves_to_exit() {
+        // No picker to return to → quit still leaves lanthorn entirely (SQ-1258).
+        let mut state = AppState::default();
+        state.launched_from_library = false;
+        // A stale Library target (left behind by a since-superseded intent) must
+        // not survive a plain Quit either.
         state.exit_target = ExitTarget::Library;
         state.unsaved_progress = false;
         let should_break = dispatch_quit_like(&mut state, SlashOutcome::Quit);

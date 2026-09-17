@@ -1,16 +1,70 @@
 [package]
-name = "zvm"
+name = "lanthorn-zvm"
+description = "A from-scratch, zero-dependency Z-machine virtual machine (versions 3-8, including graphical Version 6) for interactive fiction"
 version.workspace = true
 edition = "2021"
 license.workspace = true
-
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["z-machine", "interactive-fiction", "infocom", "zcode", "emulator"]
+categories = ["emulators", "parser-implementations"]
+include = ["src/**", "examples/**", "Cargo.toml", "README.md"]
 
 [lib]
-# No doctests here; skip the rustdoc doctest pass (seconds of harness
-# compilation for zero tests). Remove if real doctests are added.
-doctest = false
+# Package renamed for crates.io (SQ-1250); the crate name every `use zvm::…`
+# in the workspace resolves to stays "zvm", and every `-p zvm` in CI/docs
+# became `-p lanthorn-zvm` instead (cargo's `-p` matches package name, not
+# this field).
+name = "zvm"
+
 [dependencies]
 # The grammar value types both VM crates return (SQ-1103) — an internal,
 # zero-dependency workspace crate, so this stays a zero-EXTERNAL-dependency
-# crate exactly as before.
-grammar-model = { path = "../grammar-model" }
+# crate exactly as before. Optional so an embedder who wants no grammar
+# tables takes no dependency at all (see the `grammar` feature below).
+grammar-model = { package = "lanthorn-grammar-model", path = "../grammar-model", version = "0.7.0", optional = true }
+
+[features]
+default = ["grammar"]
+# Gates `pub mod grammar` and its `grammar-model` dependency. On by default so
+# downstream crates using default features see no change; an embedder who
+# does not want grammar tables can `--no-default-features` and take no
+# dependency at all.
+grammar = ["dep:grammar-model"]
+# Gates `pub mod fixtures` (SQ-1394): that module bakes the build machine's
+# absolute CARGO_MANIFEST_DIR into every downstream binary that links it, so
+# it must not be reachable from a normal dependent. Enabled below as a
+# dev-dependency-only feature so this crate's own integration tests (which
+# link it like any other dependent) still see it.
+fixtures = []
+
+[dev-dependencies]
+# Self-dependency purely to turn on the `fixtures` feature for this crate's
+# own `tests/*.rs` integration binaries, which build against the library the
+# same way an external dependent would and so cannot see a bare `#[cfg(test)]`
+# item — see `header::tests_support` for the item-level precedent this
+# mirrors at the module/feature level.
+lanthorn-zvm = { path = ".", features = ["fixtures"] }
+
+[[example]]
+name = "grammar_dump"
+required-features = ["grammar"]
+
+# The graphical half of the example pair (SQ-1406): boots a Version 6 story,
+# drains paint events through `Resources` and `V6Metric`, writes a PPM, and
+# proves the screen-snapshot pair round-trips. `test = true` so the gate
+# COMPILES and RUNS it — its `#[test]` skips vacuously when the gitignored
+# story fixture is absent, which is every CI checkout.
+[[example]]
+name = "v6_host"
+test = true
+
+# The timing harness (SQ-1428). `test = true` so `cargo test`/`cargo nextest`
+# compile it and run its `#[cfg(test)]` smoke — a benchmark nobody builds is a
+# benchmark that stops compiling. The smoke asserts turns played, never
+# elapsed time; real numbers are taken by hand per `docs/internals/performance.md`.
+[[example]]
+name = "bench"
+test = true

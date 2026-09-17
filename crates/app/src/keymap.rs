@@ -296,19 +296,19 @@ impl Default for KeyMap {
 
         // NO F-KEY HAS A DEFAULT BINDING, and that is the whole rule (SQ-1142).
         //
-        // F2 opened the command band (SQ-0664), F3 entered pane-resize mode
+        // F2 opened the command panel (SQ-0664), F3 entered pane-resize mode
         // (SQ-0669) and F4 lit the word reveal (SQ-1107). All three are gone as
         // DEFAULTS because they were never ours to claim: a v4+ story may
         // declare a terminating-characters table at header $2E, and Infocom's
         // V6 titles use it — Arthur lists F1-F6, so pressing F2 for its map is
         // a read the STORY handles. A host that intercepts the key eats input
-        // the game explicitly asked for, and the player sees a command band
+        // the game explicitly asked for, and the player sees a command panel
         // instead of the map they asked their game for.
         //
         // What this does NOT do: `KeySpec` still parses "f1".."f12", so a player
         // who wants one of these keys may bind it in their own config and
         // accept the trade knowingly. The three commands are untouched in
-        // `slash::COMMANDS` — `open-command-band`, `resize-panes` and
+        // `slash::COMMANDS` — `toggle-command-panel`, `resize-panes` and
         // `reveal-words` are all still reachable by name, by the Ctrl+P leader
         // panel where one has a letter, and by the pane-border controls that
         // click them (SQ-1123). Only the default keymap gave them up.
@@ -382,19 +382,33 @@ impl Default for KeyMap {
         bind!(plain(Char('l')), "move-selection 1 0", Context::Browser);
         bind!(plain(PageUp), "page-selection -1", Context::Browser);
         bind!(plain(PageDown), "page-selection 1", Context::Browser);
+        // Half-page paging, the vim Ctrl-U/Ctrl-D convention (SQ-1228).
+        bind!(ctrl(Char('u')), "half-page-selection -1", Context::Browser);
+        bind!(ctrl(Char('d')), "half-page-selection 1", Context::Browser);
         bind!(plain(Home), "select-edge first", Context::Browser);
         bind!(plain(End), "select-edge last", Context::Browser);
 
         // Enter plays; Shift modifies the default action rather than introducing
         // a mode (SQ-0789), and `o` is the same command on a key every terminal
         // can deliver — Shift-Enter needs the kitty keyboard protocol to be
-        // distinguishable from Enter at all.
+        // distinguishable from Enter at all. `o` LEADS since SQ-1227: it is the
+        // key the story menu's own row advertises, and a menu that names a
+        // gesture half its readers' terminals cannot produce is worse than one
+        // that names the plain letter.
         bind!(plain(Enter), "play-story", Context::Browser);
-        bind!(g(Enter, false, true), "open-launch-options", Context::Browser);
         bind!(plain(Char('o')), "open-launch-options", Context::Browser);
+        bind!(g(Enter, false, true), "open-launch-options", Context::Browser);
+        // Space opens the per-story menu — everything that acts on ONE story,
+        // in one place, instead of five separate footer hints (SQ-1227).
+        bind!(plain(Char(' ')), "open-story-menu", Context::Browser);
+        // `?` shows the browser's own key reference, which is what lets the
+        // footer stop advertising the keys it no longer has room for.
+        bind!(plain(Char('?')), "show-browser-keys", Context::Browser);
 
-        bind!(plain(Char('i')), "toggle-info-panel", Context::Browser);
+        // Tab LEADS (SQ-1227): the footer names one key per hint, and `Tab` is
+        // the one every other pane in lanthorn already uses to swap a panel in.
         bind!(plain(Tab), "toggle-info-panel", Context::Browser);
+        bind!(plain(Char('i')), "toggle-info-panel", Context::Browser);
         bind!(plain(Char('g')), "toggle-gallery", Context::Browser);
         bind!(plain(Char('f')), "fetch-story", Context::Browser);
         bind!(plain(Char('r')), "refresh-library", Context::Browser);
@@ -404,7 +418,16 @@ impl Default for KeyMap {
         bind!(g(Char('H'), false, true), "download-hints", Context::Browser);
         bind!(plain(Char('s')), "sort-library", Context::Browser);
         bind!(plain(Char('d')), "reverse-sort", Context::Browser);
+        // Ctrl+F filters the library's in-memory index; Backspace climbs out of
+        // a sub-folder. Both are inert with nothing to act on (a flat library,
+        // the root), and neither collides with a letter the picker already uses.
+        bind!(g(Char('f'), true, false), "find-story", Context::Browser);
+        bind!(plain(Backspace), "parent-folder", Context::Browser);
+        // `q` LEADS so the footer hint keeps naming the plain letter; Ctrl-Q is
+        // the same key that quits mid-game (`Action::Quit`, `input.rs`'s hardwired
+        // step 1), bound here too so it works the same in the list (SQ-1258).
         bind!(plain(Char('q')), "quit-browser", Context::Browser);
+        bind!(ctrl(Char('q')), "quit-browser", Context::Browser);
         bind!(plain(Esc), "cancel-browser", Context::Browser);
 
         KeyMap { bindings: b }
@@ -458,6 +481,19 @@ impl KeyMap {
         self.bindings.iter()
             .filter(move |(_, _, c)| *c == ctx)
             .map(|(s, cmd, _)| (s, cmd.as_str()))
+    }
+
+    /// The FIRST key bound to exactly `command` in `ctx`.
+    ///
+    /// "First" is binding order, authored in this file precisely so that the
+    /// key a hint or a menu row names is the one worth telling somebody about
+    /// — and a `[keymap.*]` line that reuses a default's key displaces it
+    /// there, so a genuine rebinding moves the label with it. `browser::first_key`
+    /// is this fixed to `Context::Browser`; the popup-menu widget
+    /// (`crate::menu`) takes `ctx` so its second caller (`room_menu`, reading
+    /// `Context::Map`) shares the lookup rather than re-deriving it.
+    pub fn first_key(&self, ctx: Context, command: &str) -> Option<KeySpec> {
+        self.for_context(ctx).find(|(_, cmd)| *cmd == command).map(|(s, _)| *s)
     }
 
     /// The registry command `token` names, if it names one (SQ-0759).
@@ -634,7 +670,7 @@ const DEFAULT_GROUPS: &[DefaultGroup] = &[
     ("Map", &[('+', "zoom-map in", "zoom in"), ('-', "zoom-map out", "zoom out"), ('0', "center-map", "centre on selection")]),
     ("Map · Layers", &[('p', "move-region new", "region into a new layer"), ('m', "move-region parent", "region into the parent layer"), ('c', "cycle-layer next", "next map layer"), ('z', "mark-maze-layer", "flag layer as a maze")]),
     ("Map · Edit", &[('r', "rename-room", "rename room"), ('n', "edit-notes", "edit room notes"), ('d', "delete-connection", "delete connection"), ('e', "relabel-edge", "relabel edge")]),
-    ("Map · View", &[('i', "toggle-inventory", "inventory strip"), ('l', "toggle-portal-labels", "portal labels"), ('v', "open-command-band", "command band"), ('u', "view-map", "drawn / matrix view"), ('k', "toggle-room-dock", "room dock")]),
+    ("Map · View", &[('i', "toggle-inventory-panel", "inventory panel"), ('l', "toggle-portal-labels", "portal labels"), ('v', "toggle-command-panel", "command panel"), ('u', "view-map", "drawn / matrix view"), ('k', "toggle-room-panel", "room panel")]),
 ];
 
 /// One leader-panel entry: `(leader letter, command-string, optional label)`.
@@ -796,7 +832,7 @@ impl HotkeyLayout {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-input"))]
 mod tests {
     use super::*;
     use crate::input::Action;
@@ -932,6 +968,30 @@ mod tests {
         // …and `g` opens the cover gallery only there.
         assert_eq!(km.lookup(&g(Char('g'), false, false), Context::Global), None);
         assert_eq!(km.lookup(&g(Char('g'), false, false), Context::Map), None);
+    }
+
+    /// SQ-1228: Ctrl-U/Ctrl-D are the vim half-page convention, bound by default
+    /// in the story picker's list view (Browser context) only — the picker has
+    /// no readline prompt to conflict with, unlike the story transcript's
+    /// Ctrl-D (hardwired in `input.rs`; see `ctrl_d_half_pages_the_transcript_in_game_focus`).
+    #[test]
+    fn ctrl_u_and_ctrl_d_half_page_the_browser_list() {
+        let km = KeyMap::default();
+        let g = |code, ctrl, shift| KeySpec { code, ctrl, shift, alt: false };
+        use KeyCode::*;
+        assert_eq!(
+            km.lookup(&g(Char('u'), true, false), Context::Browser),
+            Some("half-page-selection -1")
+        );
+        assert_eq!(
+            km.lookup(&g(Char('d'), true, false), Context::Browser),
+            Some("half-page-selection 1")
+        );
+        // Not bound in any other context.
+        assert_eq!(km.lookup(&g(Char('u'), true, false), Context::Global), None);
+        assert_eq!(km.lookup(&g(Char('d'), true, false), Context::Global), None);
+        assert_eq!(km.lookup(&g(Char('u'), true, false), Context::Map), None);
+        assert_eq!(km.lookup(&g(Char('d'), true, false), Context::Map), None);
     }
 
     /// SQ-0796: binding across the two worlds is refused with a warning rather
@@ -1140,10 +1200,10 @@ mod tests {
         let view_group = layout.groups.iter().find(|(title, _)| title == "Map \u{b7} View");
         assert!(view_group.is_some(), "View group should exist");
         let (_, cmds) = view_group.unwrap();
-        assert!(cmds.iter().any(|c| c.1 == "toggle-inventory"), "toggle-inventory should be in View group");
-        // SQ-0692: the room dock is a View-group toggle too — the popups it replaced
+        assert!(cmds.iter().any(|c| c.1 == "toggle-inventory-panel"), "toggle-inventory-panel should be in View group");
+        // SQ-0692: the room panel is a View-group toggle too — the popups it replaced
         // were mouse-only, which is why nobody found the diagnostics view.
-        assert!(cmds.iter().any(|c| c.1 == "toggle-room-dock"), "toggle-room-dock should be in View group");
+        assert!(cmds.iter().any(|c| c.1 == "toggle-room-panel"), "toggle-room-panel should be in View group");
     }
 
     #[test]
@@ -1338,9 +1398,9 @@ mod tests {
         assert_eq!(layout.leader_command('c'), Some("cycle-layer next"));
         // SQ-0446 Proposal B mnemonics:
         assert_eq!(layout.leader_command('n'), Some("edit-notes"));
-        assert_eq!(layout.leader_command('i'), Some("toggle-inventory"));
+        assert_eq!(layout.leader_command('i'), Some("toggle-inventory-panel"));
         assert_eq!(layout.leader_command('l'), Some("toggle-portal-labels"));
-        assert_eq!(layout.leader_command('v'), Some("open-command-band"));
+        assert_eq!(layout.leader_command('v'), Some("toggle-command-panel"));
         assert_eq!(layout.leader_command('s'), Some("open-settings"));
         assert_eq!(layout.leader_command('g'), Some("reset-game"));
         // 'q' is deliberately unassigned (bare q closes the dialog):
@@ -1348,8 +1408,8 @@ mod tests {
         // moved to the '/' palette — no longer leader letters:
         // ('z' was resize-panes' letter; SQ-0666 reclaimed the free slot for maZe.)
         assert_eq!(layout.leader_command('z'), Some("mark-maze-layer"));
-        // 'k' was free after reset-pane-size left; SQ-0692 gave it the room dock.
-        assert_eq!(layout.leader_command('k'), Some("toggle-room-dock"));
+        // 'k' was free after reset-pane-size left; SQ-0692 gave it the room panel.
+        assert_eq!(layout.leader_command('k'), Some("toggle-room-panel"));
         assert_eq!(layout.leader_command('x'), None); // reset-game moved to 'g'
         assert_eq!(layout.leader_command('1'), None);
     }
@@ -1359,7 +1419,7 @@ mod tests {
     /// A v4+ story may declare a terminating-characters table at header $2E and
     /// Infocom's V6 titles do — Arthur lists F1-F6 — so a default binding on an
     /// F-key eats a read the story explicitly asked for. F2/F3/F4 carried
-    /// `open-command-band`/`resize-panes`/`reveal-words` until this; they are
+    /// `toggle-command-panel`/`resize-panes`/`reveal-words` until this; they are
     /// leader-, palette- and border-control-reachable now, and only the default
     /// keymap gave them up.
     ///

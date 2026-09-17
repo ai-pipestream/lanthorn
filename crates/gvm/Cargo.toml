@@ -1,19 +1,71 @@
 [package]
-name = "gvm"
+name = "lanthorn-gvm"
+description = "A zero-dependency Glulx virtual machine (with Glk I/O) for modern Inform 7 interactive fiction, with accelerated-function support"
 version.workspace = true
 edition = "2021"
 license.workspace = true
-
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["glulx", "interactive-fiction", "inform", "glk", "emulator"]
+categories = ["emulators", "parser-implementations"]
+include = ["src/**", "examples/**", "Cargo.toml", "README.md"]
 
 [lib]
-# No doctests here; skip the rustdoc doctest pass (seconds of harness
-# compilation for zero tests). Remove if real doctests are added.
-doctest = false
+# Package renamed for crates.io (SQ-1250); the crate name every `use gvm::…`
+# in the workspace resolves to stays "gvm", and every `-p gvm` in CI/docs
+# became `-p lanthorn-gvm` instead (cargo's `-p` matches package name, not
+# this field).
+name = "gvm"
+
 [dependencies]
 # The grammar value types both VM crates return (SQ-1103) — an internal,
 # zero-dependency workspace crate, so this stays a zero-EXTERNAL-dependency
-# crate exactly as before.
-grammar-model = { path = "../grammar-model" }
+# crate exactly as before. Optional so an embedder who wants no grammar
+# tables takes no dependency at all (see the `grammar` feature below).
+grammar-model = { package = "lanthorn-grammar-model", path = "../grammar-model", version = "0.7.0", optional = true }
+
+[features]
+default = ["grammar"]
+# Gates `pub mod grammar` and its `grammar-model` dependency. On by default so
+# downstream crates using default features see no change; an embedder who
+# does not want grammar tables can `--no-default-features` and take no
+# dependency at all.
+grammar = ["dep:grammar-model"]
 
 [dev-dependencies]
-blorb = { path = "../blorb" }
+blorb = { package = "lanthorn-blorb", path = "../blorb", version = "0.7.0" }
+
+[[example]]
+name = "grammar_dump"
+required-features = ["grammar"]
+
+[[example]]
+name = "i7map_report"
+required-features = ["grammar"]
+
+# These three integration suites read the grammar/object/room-detection
+# surface directly (`gvm::grammar`, `gvm::objects`, `gvm::world`, `gvm::i7map`
+# — all gated behind the `grammar` feature above), so `--no-default-features`
+# must not try to build them.
+[[test]]
+name = "grammar_tables"
+required-features = ["grammar"]
+
+[[test]]
+name = "i7_map"
+required-features = ["grammar"]
+
+[[test]]
+name = "object_words"
+required-features = ["grammar"]
+
+# The timing harness (SQ-1428). `test = true` so `cargo test`/`cargo nextest`
+# compile it and run its `#[cfg(test)]` smoke — a benchmark nobody builds is a
+# benchmark that stops compiling. The smoke asserts turns played and opcodes
+# dispatched, never elapsed time; real numbers are taken by hand per
+# `docs/internals/performance.md`.
+[[example]]
+name = "bench"
+test = true

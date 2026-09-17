@@ -24,6 +24,13 @@ fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
 
+/// The fetched-fixtures fallback `app`'s tests populate (`scripts/fixtures.manifest`),
+/// reached by relative path since `gvm` takes zero dependencies and cannot import
+/// `app`'s `fixture_paths` module across the crate boundary.
+fn fetched_stories_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../app/tests/fixtures/stories")
+}
+
 /// Pull the `GLUL` chunk out of a Blorb, or pass a bare Glulx image through.
 /// Hand-rolled so this suite adds no dependency to a zero-dependency crate.
 fn glulx_image(bytes: Vec<u8>) -> Option<Vec<u8>> {
@@ -47,9 +54,11 @@ fn glulx_image(bytes: Vec<u8>) -> Option<Vec<u8>> {
     None
 }
 
-/// Load a gitignored commercial story, or `None` so the case can skip.
+/// Load a gitignored commercial story, or `None` so the case can skip. Falls
+/// back to the fetched fixtures directory for names the manifest promises.
 fn story(name: &str) -> Option<Memory> {
-    let path = stories_dir().join(name);
+    let local = stories_dir().join(name);
+    let path = if local.is_file() { local } else { fetched_stories_dir().join(name) };
     if !path.exists() {
         eprintln!("SKIP: {} absent", path.display());
         return None;
@@ -77,6 +86,10 @@ fn glulxercise_has_a_dictionary_and_no_grammar_and_is_refused() {
 
 // ── Real commercial media (skips vacuously without `stories/`) ──────────────
 
+/// Pinned to release 11 (`stories/CounterfeitMonkey-11.gblorb`) on purpose: the exact
+/// table address and counts are properties of that specific compile (SQ-1454's
+/// disposition table — the IF Archive's current copy is release 10, whose grammar
+/// table lands at a different address). `stories/`-only, skips vacuously on CI.
 #[test]
 fn counterfeit_monkey_locates_and_reads() {
     let Some(mem) = story("CounterfeitMonkey-11.gblorb") else { return };
@@ -171,6 +184,48 @@ fn pre_6_32_glulx_stories_number_their_verbs_from_ff() {
 }
 
 #[test]
+fn city_of_secrets_opens_its_dictionary_with_the_empty_word() {
+    // SQ-1231. CoS is Inform 6.21, serial 030624, and the only story in the
+    // 41-Glulx corpus whose dictionary holds an empty word — a meta-verb its
+    // menu system defines, flagged `VERB|META|TRUNC` and sorting first. The
+    // Unicode test was "any of the first eight records has a zero after the
+    // tag", so that one record read an entirely ordinary byte-valued
+    // dictionary as `$DICT_CHAR_SIZE=4` and refused the story outright. In the
+    // app that is `story_vocabulary() == None`: no Guiding Light offer, no word
+    // reveal, no verb column, for the whole game — the only story of thirty
+    // where the feature failed rather than degraded.
+    let Some(mem) = story("CoS.blb") else { return };
+    let g = Grammar::load(&mem).expect("City of Secrets has a grammar table");
+    let t = g.tables();
+    // Byte-valued, and ordinary in every measurement: Inform's default word
+    // size, its default stride, and the tables abutting with no alignment slack.
+    assert_eq!(t.dict_char_size, 1);
+    assert_eq!(t.dict_stride, 16);
+    assert_eq!(t.dict_word_size, 9);
+    assert_eq!(t.word_count, 3551);
+    assert_eq!(t.verb_count, 256);
+    assert_eq!(t.action_count, 250);
+    assert_eq!(t.actions + 4 + 4 * t.action_count, t.dictionary);
+    // Pre-6.32, like the four stories above.
+    assert_eq!(g.verb_number_base(), 0xFF);
+
+    // The empty word itself: present, flagged a verb, and reaching one — this
+    // is the record the old test tripped over.
+    assert!(g.roles("").is_some_and(|r| r.verb && r.meta));
+    assert!(g.is_verb(""));
+
+    // And the vocabulary the app was denied. `examine` is the one the quest
+    // names; the rest are the I7 standard verbs a player would type first.
+    for w in ["examine", "take", "look", "inventory", "drop", "open", "put", "ask"] {
+        assert!(g.is_verb(w), "CoS does not know '{w}'");
+    }
+    // CoS's own: the beeping robot and the demonstration debug verb.
+    assert!(g.is_verb("beep") && g.is_verb("demonstra"));
+    let x = g.verb_for_word("x").expect("knows 'x'");
+    assert!(x.words.iter().any(|w| w == "examine"));
+}
+
+#[test]
 fn cragne_manor_is_the_largest_table_in_the_corpus() {
     let Some(mem) = story("cragne.gblorb") else { return };
     let g = Grammar::load(&mem).expect("Cragne Manor has a grammar table");
@@ -211,6 +266,10 @@ fn dictionary_word_size_varies_between_games() {
         let Some(mem) = story(name) else { continue };
         let g = Grammar::load(&mem).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(g.tables().dict_stride, stride, "{name}");
+        // `7 + DICT_WORD_SIZE`, the byte-valued record length: every story in
+        // the corpus is `$DICT_CHAR_SIZE=1`, and a Unicode one would be
+        // `12 + 4*DICT_WORD_SIZE` instead (SQ-1231).
+        assert_eq!(g.tables().dict_char_size, 1, "{name}");
         assert_eq!(g.tables().dict_word_size, stride - 7, "{name}");
         assert!(g.is_verb("take") || g.is_verb("get"), "{name}");
     }

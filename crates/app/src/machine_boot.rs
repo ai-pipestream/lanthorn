@@ -81,6 +81,25 @@ pub struct MachineBoot {
     pub art_scale: Option<(u32, u32)>,
     /// §8.3.3's pair, where the machine or the card states one.
     pub default_colours: Option<(u8, u8)>,
+    /// The table a standard colour NUMBER resolves through on this machine
+    /// (SQ-1393) — [`crate::config::Config::machine_text_palette`]'s answer,
+    /// refined to [`zvm::screen::Palette::IbmCga`] where the archive names a
+    /// two-colour card.
+    ///
+    /// It rides here for the reason this whole module exists. It used to be a
+    /// process-wide atomic in `zvm`, set once in `startup.rs` and once more in
+    /// `reset.rs`, and every renderer and every test harness read it from there;
+    /// making it a per-machine fact means the compiler asks each boot site for it
+    /// rather than each site remembering. `Palette::Standard` — §8.3.1's own
+    /// table — is what a launch with no machine to name presents.
+    pub palette: zvm::screen::Palette,
+    /// Header `$1F`, or `None` for zvm's own `b'A'` default (SQ-0885's debugging
+    /// knob, `--interpreter-version`).
+    ///
+    /// Beside the palette because it is the same kind of fact — a property of the
+    /// machine this launch presents — and because it latches at `init_caps`, so a
+    /// boot site is the only place that can state it in time.
+    pub interpreter_version: Option<u8>,
     /// May this launch present its machine's per-machine SCREEN RULES?
     /// [`crate::config::Config::machine_colours_licensed`] (SQ-1154).
     ///
@@ -143,12 +162,16 @@ impl MachineBoot {
         default_colours: Option<(u8, u8)>,
         machine_colours_licensed: bool,
         faces: crate::native_font::FaceSet,
+        palette: zvm::screen::Palette,
+        interpreter_version: Option<u8>,
     ) -> MachineBoot {
         let art_scale = picts.art_scale();
         MachineBoot {
             profile,
             interpreter_number,
             machine_colours_licensed,
+            palette,
+            interpreter_version,
             wrap_regime: profile.v6_wrap_regime(),
             screen_px: picts
                 .std_window()
@@ -166,6 +189,71 @@ impl MachineBoot {
             ),
             faces,
         }
+    }
+
+    /// This machine's facts as [`zvm`]'s own boot recipe (SQ-1396).
+    ///
+    /// Two layers, both wanted, and neither doing the other's job: `MachineBoot`
+    /// answers "what does this MEDIUM say the machine is", and
+    /// [`zvm::cpu::exec::BootConfig`] answers "in what ORDER must a `Machine` be
+    /// told things". This is the one crossing between them, so a boot site does
+    /// not restate a machine fact and cannot get the order wrong.
+    ///
+    /// The parameters are the facts a machine does not own — the ones a LAUNCH
+    /// decides:
+    ///
+    /// * `honor_game_colours` and `sound_available`: the player's configuration;
+    /// * `picture_dims`, the `Pict` table, resolved app-side from a
+    ///   self-blorb/sidecar Blorb (empty for a non-v6 story). It arrives ART-NATIVE:
+    ///   `BootConfig` scales it into unit space by [`Self::art_scale`], which is
+    ///   the crossing `session.rs` used to perform by hand;
+    /// * `host_screen`, the real `(rows, cols)` of the pane about to be rendered
+    ///   into, for a v1–5/7/8 story. Ignored for Version 6, whose screen is the
+    ///   archive's pixels (SQ-0680);
+    /// * `random_seed`, the launcher's entropy (SQ-0811).
+    ///
+    /// The Version 6 face is reduced HERE, and to one thing: only
+    /// [`crate::native_font::TextFace::metric`] — the declared cell and the pen —
+    /// is a fact the engine has any use for. The bitmaps behind it are the
+    /// renderer's and never cross into `zvm`.
+    pub fn boot_config(
+        &self,
+        honor_game_colours: bool,
+        sound_available: bool,
+        picture_dims: Vec<(u16, u16, u16)>,
+        host_screen: Option<(u16, u16)>,
+        random_seed: Option<u32>,
+    ) -> zvm::cpu::exec::BootConfig {
+        let mut cfg = zvm::cpu::exec::BootConfig::new()
+            .with_honor_game_colours(honor_game_colours)
+            .with_sound_available(sound_available)
+            .with_palette(self.palette)
+            .with_interpreter_number(self.interpreter_number)
+            .with_interpreter_version(self.interpreter_version)
+            .with_picture_dims(picture_dims)
+            .with_v6_text(self.text_face().metric().clone());
+        // Pinned (SQ-1419): a seed the launcher hands the machine at all is
+        // one it wants reproduced, and `@restart` honours that across the
+        // reboot too — see `zvm::cpu::exec::BootConfig::with_rng_seed_pinned`.
+        // Unstated (no seed passed here at all) keeps `Machine`'s own bare
+        // deterministic default, and a restart of THAT draws fresh entropy
+        // per ZMSD §2.4.
+        if let Some(seed) = random_seed {
+            cfg = cfg.with_rng_seed_pinned(seed);
+        }
+        if let Some((bg, fg)) = self.default_colours {
+            cfg = cfg.with_default_colours(bg, fg);
+        }
+        if let Some(px) = self.screen_px {
+            cfg = cfg.with_v6_screen_px(px);
+        }
+        if let Some(scale) = self.art_scale {
+            cfg = cfg.with_v6_art_scale(scale);
+        }
+        if let Some((r, c)) = host_screen {
+            cfg = cfg.with_screen_grid(r.clamp(1, 255) as u8, c.clamp(1, 255) as u8);
+        }
+        cfg
     }
 
     /// The cell, the face and the pen as ONE value, for the renderer (SQ-1009).
@@ -195,6 +283,11 @@ impl MachineBoot {
             // (6 for Version 6) and no rule claims that number; stated rather than
             // left to that coincidence.
             machine_colours_licensed: false,
+            // §8.3.1's own table and zvm's own `$1F`: no medium named a machine,
+            // so there is none to resolve a colour number or a version byte
+            // through (SQ-1393).
+            palette: zvm::screen::Palette::Standard,
+            interpreter_version: None,
             cell: InterpreterProfile::IbmPc.v6_font_cell(),
             wrap_regime: InterpreterProfile::IbmPc.v6_wrap_regime(),
             faces: crate::native_font::FaceSet::none(),
@@ -202,7 +295,7 @@ impl MachineBoot {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-session"))]
 mod tests {
     use super::*;
 
@@ -223,6 +316,8 @@ mod tests {
                 None,
                 true,
                 crate::native_font::FaceSet::none(),
+                zvm::screen::Palette::Standard,
+                None,
             );
             assert_eq!(
                 boot.cell,
@@ -240,6 +335,8 @@ mod tests {
                 None,
                 true,
                 crate::native_font::FaceSet::none(),
+                zvm::screen::Palette::Standard,
+                None,
             )
             .cell,
             zvm::interpreter::MACINTOSH_V6_CELL,
@@ -260,6 +357,8 @@ mod tests {
             None,
             true,
             crate::native_font::FaceSet::none(),
+            zvm::screen::Palette::Standard,
+            None,
         );
         assert_eq!(
             machine.screen_px,
@@ -274,6 +373,8 @@ mod tests {
             None,
             true,
             crate::native_font::FaceSet::none(),
+            zvm::screen::Palette::Standard,
+            None,
         );
         assert_eq!(
             named.screen_px,

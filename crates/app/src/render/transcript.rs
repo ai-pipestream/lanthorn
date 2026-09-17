@@ -10,11 +10,11 @@ use ratatui::style::{Modifier, Style};
 // Only test code refers to `Color` bare; production code always spells the
 // fully-qualified `ratatui::style::Color` (SQ-0643 removed the last bare
 // production usage — the hardcoded search-highlight style).
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 use ratatui::style::Color;
 
 use crate::engine::{Introspect, StatusField, StatusModel};
-use crate::state::{AppState, Focus, ParaFmt, StyleRun, TranscriptFilter, TranscriptKind};
+use crate::state::{transcript_filter_matches, AppState, Focus, ParaFmt, StyleRun, TranscriptFilter, TranscriptKind};
 use crate::render::wrap_cache::{CellWrapCache, WrapKey, WrapPlan};
 use crate::render::paneframe::{draw_framed, BorderStyle};
 use super::draw_str_clipped;
@@ -52,6 +52,95 @@ pub(crate) struct ImageBand {
     pub rows: u16,
     pub row: u16,
     pub x_off: u16,
+}
+
+/// Record cell→link for the picture cells one image strip is drawn into, so a
+/// click anywhere on the picture resolves to the game's `glk_set_hyperlink`
+/// value (SQ-1503). No-op for an unlinked picture or a row with no strip.
+///
+/// One function, called from BOTH arms of the draw loop, because the same
+/// picture reaches the screen by two routes and the cells it occupies must not
+/// depend on which: a band row (`WrappedRow::band`, consumed whole by
+/// `try_blit_band_row`) and a margin float strip (`WrappedRow::float`, laid over
+/// a row that also carries prose). Recording it in only one of them is precisely
+/// what left the reopened SQ-1503 standing — the first fix covered the band and
+/// every real Glulx thumbnail is a float.
+///
+/// The cells are the ones `inline_image::blit_band` computes for its `dest`:
+/// `area.x + x_off.min(area.width)` for `cols.min(area.width - x_off)` columns,
+/// so the recorded rect and the drawn rect cannot drift apart.
+pub(crate) fn record_band_links(
+    links: &mut Vec<((u16, u16), u32)>,
+    band: Option<&ImageBand>,
+    area: ratatui::layout::Rect,
+    row_y: u16,
+) {
+    let Some(band) = band else { return };
+    if band.image.link == 0 {
+        return;
+    }
+    let x0 = area.x + band.x_off.min(area.width);
+    let w = band.cols.min(area.width.saturating_sub(band.x_off));
+    for j in 0..w {
+        links.push(((x0 + j, row_y), band.image.link));
+    }
+}
+
+/// Record cell→link for every linked span of ONE drawn text row, so a click on
+/// the link's glyphs resolves to the game's `glk_set_hyperlink` value. No-op for
+/// a row with no linked run.
+///
+/// `run.start`/`end` are CHAR offsets within `text` (as `rebase_runs` leaves
+/// them), while the cells they were drawn in are DISPLAY columns — a wide glyph
+/// or a multibyte prefix moves a link's columns right of its char indices
+/// (SQ-0662). So the offsets are converted through the same width table
+/// `draw_str_runs` advanced by, and clipped to `area`'s right edge, which makes
+/// the recorded cells the ones actually painted. `text_x` is where the row's
+/// text starts (the transcript's gutter pushes it right of `area.x`); one pass
+/// builds char index → start column for the whole row, so N linked runs cost one
+/// scan rather than N.
+///
+/// One function, called from EVERY path that draws a Glk window's styled text,
+/// for the same reason [`record_band_links`] is: the primary transcript
+/// (`render_middle`) and every non-primary buffer window
+/// (`screen::render_inline_buffer`) both put linked text on screen, and which
+/// window a link happens to live in must not decide whether it is clickable.
+/// Recording it in the transcript alone is what left Kerkerkruip's whole
+/// side-panel UI — its "[detailed status report]" link and its menu choices,
+/// all of them in non-primary buffers — dead to the mouse (SQ-1514).
+pub(crate) fn record_run_links(
+    links: &mut Vec<((u16, u16), u32)>,
+    runs: &[StyleRun],
+    text: &str,
+    text_x: u16,
+    area: ratatui::layout::Rect,
+    row_y: u16,
+) {
+    if !runs.iter().any(|r| r.link != 0) {
+        return;
+    }
+    let mut link_cols: Vec<usize> = Vec::with_capacity(text.chars().count() + 1);
+    let mut c = 0usize;
+    for ch in text.chars() {
+        link_cols.push(c);
+        c += crate::textwidth::char_cells(ch);
+    }
+    link_cols.push(c);
+    let col_of =
+        |i: usize| -> usize { link_cols.get(i).copied().unwrap_or_else(|| link_cols.last().copied().unwrap_or(0)) };
+    for run in runs {
+        if run.link == 0 {
+            continue;
+        }
+        let (c0, c1) = (col_of(run.start), col_of(run.end));
+        for j in c0..c1 {
+            let col = text_x.saturating_add(j as u16);
+            if col >= area.right() {
+                break;
+            }
+            links.push(((col, row_y), run.link));
+        }
+    }
 }
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
@@ -270,7 +359,7 @@ pub(crate) fn pack_status_clusters(
 ///
 /// Note: the renderer now uses `visible_wrapped_lines` which handles word-wrap.
 /// This function is retained for unit testing the slice logic in isolation.
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 pub(crate) fn visible_lines(
     transcript: &[String],
     rows: usize,
@@ -642,7 +731,7 @@ pub(crate) fn text_origin_col(kind: TranscriptKind) -> u16 {
 ///
 /// Test-facing convenience over [`wrap_lines_kinded_indexed`]; the render paths
 /// take the indexed form, whose line index the clear anchor rides on (SQ-0640).
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 pub(crate) fn wrap_lines_kinded(
     transcript: &[String],
     kinds: &[TranscriptKind],
@@ -688,9 +777,12 @@ pub(crate) fn wrap_lines_kinded_indexed(
     // non-prose line flushes it first (so the whole picture always renders, even
     // when the text beside it is shorter than the image — or absent). (SQ-0454)
     let mut float: Option<FloatState> = None;
+    // Test/measurement callers don't need the pretail carry (SQ-1179's tail
+    // repair); a throwaway sink keeps the extend function's one signature.
+    let mut pretail: Option<FloatState> = None;
     wrap_lines_kinded_extend(
         &mut out, &mut starts, &mut float, transcript, kinds, styles, runs, para, images, char_px, images_enabled,
-        left_float, width,
+        left_float, width, &mut pretail,
     );
     // Finish any float whose picture outran (or had no) text beside it.
     flush_float(&mut out, &mut float);
@@ -714,6 +806,12 @@ pub(crate) fn wrap_lines_kinded_indexed(
 ///
 /// `starts` indices are absolute rows in `out` and stay valid across an append,
 /// because every one of them precedes the flush.
+///
+/// `pretail` is written on every line processed to the `float` carry ENTERING
+/// that line (SQ-1179) — so once the loop finishes it holds the carry entering
+/// whichever line was LAST in `transcript`, which is exactly the carry a tail
+/// repair needs to resume wrapping from that same point. Left untouched when
+/// `transcript` is empty (nothing changed, so nothing to report).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn wrap_lines_kinded_extend(
     out: &mut Vec<WrappedRow>,
@@ -729,8 +827,10 @@ pub(crate) fn wrap_lines_kinded_extend(
     images_enabled: bool,
     left_float: bool,
     width: u16,
+    pretail: &mut Option<FloatState>,
 ) {
     for (i, line) in transcript.iter().enumerate() {
+        *pretail = float.clone();
         starts.push(out.len());
         // An image unit either starts a left-margin float or expands into an
         // N-row band (or zero rows when images are disabled). `images.get(i)`
@@ -1043,7 +1143,7 @@ fn wrap_line_ranges_var(line: &str, nowrap_from: Option<usize>, width_for: impl 
 ///
 /// The render paths wrap once and call [`anchor_row_at`] on that wrap's line index
 /// instead of paying for a second wrap here.
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 pub(crate) fn anchor_wrapped_rows(
     transcript: &[String],
     kinds: &[TranscriptKind],
@@ -1183,7 +1283,7 @@ pub(crate) fn visible_wrapped_lines_kinded(
 /// Retained as the reference renderer for the search-highlight path: production
 /// drawing now goes through `draw_str_runs` (which `highlight_mask` keeps
 /// consistent with this function), and the tests assert the two stay identical.
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 fn draw_str_highlighted(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
@@ -1399,6 +1499,17 @@ pub(crate) fn draw_str_runs(
         return;
     }
     let (scheme, honor) = (ink.colors(), ink.honor());
+    // SQ-1462: an uncoloured Glk run (no per-run colour, no themed
+    // `glk_styles` slot) falls through to `base_style` below — which for the
+    // generic `text` role is white-on-nothing, a dark-terminal guess with no
+    // idea the game repainted its page. `game_input` is the game's own known
+    // page/ink pair when the game HAS one (`None` leaves `base_style`
+    // untouched, so a game — or a `--game-colours off` launch — that never
+    // named a page renders byte-identically to before). See `TextInk::game_input`.
+    let base_style = match (honor, ink.game_input()) {
+        (true, Some(gi)) => base_style.patch(gi),
+        _ => base_style,
+    };
     let hi: Vec<bool> = match search {
         Some((q, _)) if !q.is_empty() => highlight_mask(text, q),
         _ => Vec::new(),
@@ -1435,7 +1546,11 @@ pub(crate) fn draw_str_runs(
                 let game_fg = run.and_then(|r| game(r.fg));
                 let game_bg = run.and_then(|r| game(r.bg));
                 if let Some(c) = resolve_glk_channel(game_fg, slot.fg, base_style.fg, honor) {
-                    s = s.fg(c);
+                    // SQ-1354: and on the IBM PC's v1-v5 text screen a bold run is
+                    // that same ink with the EGA intensity bit lit. Applied to the
+                    // RESOLVED colour, because the machine's attribute byte has one
+                    // foreground nibble however it was filled.
+                    s = s.fg(crate::render::ibm_bold_fg(c, bits, honor, scheme));
                 }
                 if let Some(c) = resolve_glk_channel(game_bg, slot.bg, base_style.bg, honor) {
                     s = s.bg(c);
@@ -1628,6 +1743,39 @@ pub fn inventory_items(
     }
 }
 
+/// The word a click on each [`inventory_items`] row composes into the
+/// prompt, in the SAME order and over the SAME filter (SQ-1244) — so the two
+/// lists always line up index-for-index and a click can never grab the wrong
+/// row's word.
+///
+/// This is the command band's WHAT column's own derivation
+/// ([`crate::vocab::typeable_name`]), not the display name `inventory_items`
+/// shows: the dock may read "brass lantern" while Zork I's parser answers
+/// only to `lamp`, `lanter` and `light` (see `typeable_name`'s doc). Falls
+/// back to the display name itself when `typeable_name` cannot derive
+/// anything, and to the raw fallback text when the engine has no object tree
+/// — both exactly mirroring `inventory_items`'s own fallbacks, so a row is
+/// never drawn without a word to click.
+pub fn inventory_click_words(
+    player_obj: Option<u16>,
+    inventory_fallback: &[String],
+    introspect: Option<&dyn Introspect>,
+    vocab: Option<&crate::vocab::StoryVocabulary>,
+) -> Vec<String> {
+    let player = player_obj.or_else(|| introspect.and_then(|i| i.player_object()));
+    match (player, introspect) {
+        (Some(obj), Some(intro)) => intro
+            .contents(obj)
+            .iter()
+            .filter_map(|o| {
+                let display = o.display_name()?;
+                Some(crate::vocab::typeable_name(o, vocab).unwrap_or(display))
+            })
+            .collect(),
+        _ => inventory_fallback.to_vec(),
+    }
+}
+
 // ── Main render function ───────────────────────────────────────────────────────
 
 /// What a rendered transcript pass reports back to the story pane.
@@ -1798,6 +1946,31 @@ pub fn notification_anchor_rect(transcript: Option<Rect>, story_area: Rect, full
     }
 }
 
+/// Cap on the text rows a single notification box will grow to before its
+/// last visible row is ellipsised (SQ-1253) — otherwise the box grows freely
+/// with the message.
+const NOTIFY_TEXT_ROW_CAP: usize = 5;
+
+/// Word-wrap `text` to `width` columns for a notification box, capped at
+/// [`NOTIFY_TEXT_ROW_CAP`] rows.
+///
+/// A message that wraps within the cap is returned in full — nothing is
+/// lost. A message with text left over past the cap has its last visible row
+/// rebuilt from where that row starts in the original text and re-truncated
+/// at a word boundary with a trailing `…` (never a middle row, so every row
+/// before the cut stays untouched).
+fn wrap_notification_text(text: &str, width: u16) -> Vec<String> {
+    let ranges = wrap_line_ranges(text, width);
+    if ranges.len() <= NOTIFY_TEXT_ROW_CAP {
+        return ranges.into_iter().map(|(s, _, _)| s).collect();
+    }
+    let last_start = ranges[NOTIFY_TEXT_ROW_CAP - 1].1;
+    let remainder: String = text.chars().skip(last_start).collect();
+    let mut rows: Vec<String> = ranges.into_iter().take(NOTIFY_TEXT_ROW_CAP).map(|(s, _, _)| s).collect();
+    rows[NOTIFY_TEXT_ROW_CAP - 1] = truncate_status_text(&remainder, width as usize);
+    rows
+}
+
 /// Draw the top-right notification toasts over `area` — normally the story
 /// pane's content rect, or the full frame as a fallback (see
 /// [`notification_anchor_rect`]).
@@ -1808,6 +1981,11 @@ pub fn notification_anchor_rect(transcript: Option<Rect>, story_area: Rect, full
 /// pane's own content (and anything else drawn under `area`). When animations
 /// are disabled the toast simply appears and disappears on the same clock,
 /// without sliding. (SQ-0176, SQ-0415)
+///
+/// A message too wide for one row wraps at word boundaries instead of being
+/// cut off: the box grows downward to fit, up to [`NOTIFY_TEXT_ROW_CAP`] rows,
+/// past which the last row ends in `…` (SQ-1253). A message that fits in one
+/// row draws exactly as it did before wrapping existed.
 pub fn render_notifications(buf: &mut Buffer, area: Rect, state: &AppState) {
     let notes = state.notifications.active();
     if notes.is_empty() || area.width < 6 || area.height == 0 {
@@ -1816,48 +1994,58 @@ pub fn render_notifications(buf: &mut Buffer, area: Rect, state: &AppState) {
     let style = state.colors.theme.get("notification").style;
     let animate = state.config.animation.enabled;
     let easing = state.config.animation.easing;
-    // A single-bordered box by default (SQ-0176); collapses to a 1-row strip only
-    // if the border is themed off or there's no vertical room for a frame.
+    // A single-bordered box by default (SQ-0176); collapses to a border-less
+    // strip only if the border is themed off or there's no vertical room for a
+    // frame.
     let boxed = (state.colors.notification_style != BorderStyle::None
         || state.colors.notification_sides.any_on())
         && area.height >= 3;
-    let box_h: u16 = if boxed { 3 } else { 1 };
+    let border_rows: u16 = if boxed { 2 } else { 0 };
     // Cap the inner text width (leave room for a space of padding each side).
     let max_inner = (area.width as usize).min(48).saturating_sub(if boxed { 2 } else { 0 });
+    let text_w = max_inner.saturating_sub(2) as u16;
     let right = area.right();
 
-    // `active()` is oldest-first; draw the newest (last) in the top box.
-    for (i, note) in notes.iter().rev().enumerate() {
-        let top = area.y + i as u16 * box_h;
+    // `active()` is oldest-first; draw the newest (last) in the top box, then
+    // stack older ones below it — each box's own (now possibly multi-row)
+    // height decides where the next one starts.
+    let mut top = area.y;
+    for note in notes.iter().rev() {
+        let rows = wrap_notification_text(&note.text, text_w);
+        let box_h = border_rows + rows.len() as u16;
         if top + box_h > area.bottom() {
             break;
         }
         let reveal = note.reveal(animate, easing);
-        let text = truncate_line(&note.text, max_inner.saturating_sub(2));
-        let inner = format!(" {text} ");
-        let inner_w = inner.chars().count() as u16;
-        let box_w = inner_w + if boxed { 2 } else { 0 };
+        let content_w = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as u16;
+        let box_w = content_w + 2 + if boxed { 2 } else { 0 };
         // Slide in from the right: the box translates leftward from off the right
         // edge; columns past `right` clip naturally against the buffer bounds.
         let shown = (reveal * box_w as f64).round().clamp(0.0, box_w as f64) as u16;
-        if shown == 0 {
-            continue;
+        if shown != 0 {
+            let box_left = right - shown;
+            let box_region = Rect::new(box_left, top, box_w, box_h);
+            if boxed {
+                let frame = draw_framed(
+                    buf,
+                    box_region,
+                    state.colors.notification_sides,
+                    &state.colors.notification_glyphs,
+                    style,
+                    false,
+                );
+                for (r, line) in rows.iter().enumerate() {
+                    let inner = format!(" {line:<content_w$} ", content_w = content_w as usize);
+                    draw_str_clipped(buf, frame.content.x, frame.content.y + r as u16, &inner, style, frame.content);
+                }
+            } else {
+                for (r, line) in rows.iter().enumerate() {
+                    let inner = format!(" {line:<content_w$} ", content_w = content_w as usize);
+                    draw_str_clipped(buf, box_left, top + r as u16, &inner, style, box_region);
+                }
+            }
         }
-        let box_left = right - shown;
-        let box_region = Rect::new(box_left, top, box_w, box_h);
-        if boxed {
-            let frame = draw_framed(
-                buf,
-                box_region,
-                state.colors.notification_sides,
-                &state.colors.notification_glyphs,
-                style,
-                false,
-            );
-            draw_str_clipped(buf, frame.content.x, frame.content.y, &inner, style, frame.content);
-        } else {
-            draw_str_clipped(buf, box_left, top, &inner, style, box_region);
-        }
+        top += box_h;
     }
 }
 
@@ -2020,6 +2208,46 @@ fn render_input_content(
     }
 }
 
+/// Is the ink on this frame's Story lines the MACHINE's rather than the theme's?
+///
+/// This is [`ColorScheme::resolve_story_style`](crate::colors::ColorScheme::resolve_story_style)'s
+/// `machine_owns_ink`, and what it withdraws is both built-in rules — "a whole
+/// line in brackets came from the interpreter" (SQ-0822: the rule's payload is a
+/// MUTE chosen to recede against the theme's page, and on a machine with one pair
+/// for the whole screen there is no third colour to recede into) and the
+/// room-heading accent (SQ-1357: a theme accent is a colour the machine never
+/// had) — see that function for the detail on each.
+///
+/// **Two frames answer yes, and the second is why this is a function** (SQ-1354).
+///
+/// - A **v6 machine page**: `render::screen::v6_machine_page` has already laid
+///   §8.3's pair under `normal_style`, so an inherited channel is the machine's.
+///   This was the whole of the answer, and it is a v6-only fact — `v6_page_pair`
+///   is set nowhere else.
+/// - A **period look**: `state.period_look` is the same claim on v1–v5, laid under
+///   the theme by `period::apply_to_theme` instead of into `normal_style`, and
+///   already carrying the gate — `period::resolve` answers `Some` only when the
+///   look is enabled, `honor_game_colours` is on, and the medium or the flags
+///   LICENSE the machine.
+///
+/// *Bureaucracy* release 116 is the specimen the second clause exists for. It is
+/// Version 4, so it has no page pair and never will, and it prints both of the
+/// lines an empty command earns inside brackets:
+///
+/// ```text
+/// [What?]                              ; plain TELL      — the body grey
+/// [Your blood pressure just went up.]  ; inside HLIGHT   — that grey, LIT
+/// ```
+///
+/// `machine-screenshots/dos-bureaucracy.png` measures `#A0A0A0` and `#FFFFFF`.
+/// With the rule still firing, both took `transcript_system`'s muted theme colour
+/// — which is not a colour this palette painted, so `render::ibm_bold_fg`'s
+/// round-trip guard then correctly declined to light it, and the brightening
+/// SQ-1354 added could never reach the one game it was reported on.
+fn machine_owns_ink(state: &AppState) -> bool {
+    state.v6_page_pair.get().is_some() || state.period_look.is_some()
+}
+
 /// Render the middle section: suggestion line (or search hint), transcript body.
 /// Returns this pass's [`TranscriptRender`] — the scrollbar gutter flag, the
 /// scroll clamps, the rows this frame really gave to prose, and the per-frame
@@ -2152,20 +2380,29 @@ fn render_middle(
     // dominant per-frame cost. What this frame owes is
     // `wrap_cache::WrapKey::plan`'s to say — the ONE owner of that decision, and
     // the same one the raster path asks. An idle redraw or a scroll reuses the
-    // rows; a turn that only printed extends them; a resize, a filter, a theme or
-    // a moved screen-clear anchor rebuilds them.
+    // rows; a turn that only printed extends them; an insert-above-the-prompt or
+    // a moved screen-clear anchor REPAIRS the disturbed tail instead of
+    // rebuilding whole (SQ-1179); a resize, a filter or a theme still rebuilds.
     //
     // The key is built ONCE here and compared without cloning, so the hot path
     // never pays for the colour scheme or the room name.
-    let plan = match state.transcript_wrap.borrow().as_ref() {
-        Some(c) => c.key.plan(state, body_area.width),
-        None => WrapPlan::Rebuild,
+    // `old_anchor`/`old_anchor_filtered` are this cache's OWN synced anchor and
+    // its filtered position, from before this frame touched anything — the
+    // baseline `clear_anchor_filtered` below needs to tell "the anchor is
+    // exactly where it was last frame" (carry the old filtered position
+    // unchanged) apart from "the anchor moved into this frame's new tail"
+    // (recompute it), which `plan` alone does not carry (SQ-1223).
+    let (plan, old_anchor, old_anchor_filtered) = match state.transcript_wrap.borrow().as_ref() {
+        Some(c) => (c.key.plan(state, body_area.width), c.key.shape.clear_anchor, c.clear_anchor_filtered),
+        None => (WrapPlan::Rebuild, None, None),
     };
     if plan != WrapPlan::Reuse {
-        // The source lines this frame has to wrap: all of them on a rebuild, only
-        // the ones that just arrived on an append.
+        // The source lines this frame has to wrap: all of them on a rebuild;
+        // only the ones that just arrived on an append; from the old cached
+        // tail's own raw index on a repair, which re-collects it too — SQ-1179
+        // needs it wrapped fresh, since new content now precedes it there.
         let wrap_from = match plan {
-            WrapPlan::Append { from } => from,
+            WrapPlan::Append { from } | WrapPlan::Repair { at: from } => from,
             _ => 0,
         };
         let visible_indices = state.visible_transcript_indices_from(wrap_from);
@@ -2176,14 +2413,10 @@ fn render_middle(
         // kinds use their fixed per-category style. Resolving here (not per wrapped
         // fragment) keeps whole-line matching correct when a line wraps.
         let room_name = state.current_room_name.as_deref();
-        // SQ-0822: `normal_style` already carries §8.3's Amiga machine pair when
-        // there is one (`v6_machine_page`, above), so a Story line whose channels
-        // are inherited resolves them from the MACHINE rather than from the theme —
-        // and the built-in "bracketed line came from the interpreter" rule stands
-        // down, because on that machine the line is the game's prose in the game's
-        // pens. Off the Amiga `normal_style` IS `colors.transcript` and the flag is
-        // false, so every other frame resolves exactly as before.
-        let machine_owns_ink = state.v6_page_pair.get().is_some();
+        // SQ-0822/SQ-1354: whether this frame's inherited ink is the MACHINE's,
+        // which withdraws the built-in bracketed-line rule. Both frames that
+        // answer yes, and why, are on `machine_owns_ink` itself.
+        let machine_owns_ink = machine_owns_ink(state);
         // SQ-0954: AND THE STORY WINDOW'S OWN PAGE OVER THAT, for lanthorn's own
         // annotations.
         //
@@ -2360,15 +2593,15 @@ fn render_middle(
                 starts: Vec::new(),
                 stable_rows: 0,
                 carry: None,
-                // Map the screen-clear boundary (a full-transcript index) to a
-                // position in the filtered line list, so top-anchoring works under
-                // any transcript filter. Only a rebuild can compute this: an
-                // append sees only the suffix. It does not need to — the anchor is
-                // in the key, and every appended line sits at or past it, so the
-                // count cannot change without a rebuild.
-                clear_anchor_filtered: state
-                    .clear_anchor
-                    .map(|a| visible_indices.iter().filter(|&&i| i < a).count()),
+                tail_entry_carry: None,
+                // Set below, uniformly for every plan (SQ-1179) — computed
+                // fresh from `state` after the sync either way, so the
+                // placeholder here is never read.
+                tail_visible: false,
+                // Set below, uniformly for every plan (SQ-1179) — a fresh
+                // cache's `starts` is empty, so the shared formula degenerates
+                // to exactly the old rebuild-only computation.
+                clear_anchor_filtered: None,
                 anchor_row: None,
                 live_bands: std::collections::HashSet::new(),
             });
@@ -2378,6 +2611,31 @@ fn render_middle(
         // final, and the prose that just arrived claims them (SQ-1034).
         cache.rows.truncate(cache.stable_rows);
         let mut carry = cache.carry.clone();
+        // A repair discards the cache's OWN last consumed line before
+        // re-wrapping the tail fresh (SQ-1179): whatever now sits at its raw
+        // index has moved (an insert landed before it), so the cached entry
+        // for it no longer describes anything real. `tail_visible` — captured
+        // at the PREVIOUS sync, before this frame's edits — is what makes that
+        // decision correctly: reading the CURRENT kind at that raw index would
+        // describe whatever moved there instead of what the cache wrapped.
+        if let WrapPlan::Repair { .. } = plan {
+            if cache.tail_visible {
+                let popped = cache.starts.pop().expect(
+                    "repair: tail_visible said the cache's last entry is the old tail line, so one must exist",
+                );
+                cache.rows.truncate(popped);
+                carry = cache.tail_entry_carry.clone();
+            }
+            // else: the old tail line never made it into the filtered product
+            // (it didn't pass the filter), so there is nothing to undo and
+            // `carry` is already correct as the state after the last VISIBLE
+            // line, unaffected by an invisible one.
+        }
+        // Filtered lines with raw index < `wrap_from` are untouched by this
+        // frame (SQ-1179) — every one of `cache.starts`'s entries up to here
+        // describes them, so this is the base the anchor formula below adds
+        // the newly-wrapped suffix's own count onto.
+        let starts_before = cache.starts.len();
         wrap_lines_kinded_extend(
             &mut cache.rows,
             &mut cache.starts,
@@ -2392,12 +2650,35 @@ fn render_middle(
             images_enabled,
             true, // main transcript: left-margin images float, text wraps beside (SQ-0454)
             body_area.width,
+            &mut cache.tail_entry_carry,
         );
         cache.stable_rows = cache.rows.len();
         cache.carry = carry.clone();
         // Finish any float whose picture outran (or had no) text beside it.
         flush_float(&mut cache.rows, &mut carry);
         cache.live_bands.extend(live_bands);
+        // Map the screen-clear boundary (a full-transcript index) into the
+        // filtered line list, so top-anchoring works under any transcript
+        // filter. Recomputing this every frame from `starts_before` is only
+        // sound when the anchor itself moved INTO this frame's new tail —
+        // that is the one case `WrapKey::plan` has proven sits at or after
+        // this cache's synced length, which is what makes every filtered line
+        // up to `starts_before` unconditionally precede it. An anchor that
+        // did NOT move this frame carries no such proof: `starts_before` is
+        // "how much is already wrapped", not "how much precedes the anchor",
+        // and on a long-lived anchor those are wildly different — recomputing
+        // anyway made `clear_anchor_filtered` chase the transcript's growing
+        // length every frame, which force-pinned every frame's display to
+        // just its own new tail and dropped a still-open margin float's
+        // earlier strips out of the rendered window (SQ-1223). So an
+        // unmoved anchor keeps the filtered position it already had; only a
+        // genuine move (or a Rebuild, where `starts_before` is 0 and
+        // `visible_indices` is the whole transcript) recomputes it.
+        cache.clear_anchor_filtered = if !matches!(plan, WrapPlan::Rebuild) && old_anchor == state.clear_anchor {
+            old_anchor_filtered
+        } else {
+            state.clear_anchor.map(|a| starts_before + visible_indices.iter().filter(|&&i| i < a).count())
+        };
         // The anchor is where that line STARTS in the wrap just built (SQ-0640) — a
         // separate wrap of the prefix would count a margin float's strips twice
         // over. Recomputed on every append and not merely on a rebuild: an anchor
@@ -2405,11 +2686,43 @@ fn render_middle(
         // line printed is what gives it a real row.
         cache.anchor_row = anchor_row_at(&cache.starts, cache.rows.len(), cache.clear_anchor_filtered);
         cache.key = WrapKey::of(state, body_area.width);
+        // This cache is now synced to `cache.key`'s edits value, so any run of
+        // tail-inserts it reflects is spent — the NEXT insert starts a fresh
+        // run anchored at that new baseline (SQ-1179's `WrapKey::plan`).
+        cache.tail_visible = cache.key.content.len > 0
+            && state
+                .transcript_kinds
+                .get(cache.key.content.len - 1)
+                .is_some_and(|&k| transcript_filter_matches(state.transcript_filter, k));
+        state.transcript_tail_insert.set(None);
     }
     let cache = state.transcript_wrap.borrow();
     let entry = cache.as_ref().expect("wrap cache populated above");
-    // Per-frame eviction: bound the inline-image protocol cache to present images.
-    state.inline_image_render.borrow_mut().retain_live(&entry.live_bands);
+    // Per-frame eviction: bound the inline-image protocol cache to present images,
+    // AND to the current cell size / page — a still-live image's variant from
+    // BEFORE the last theme flip, font-size change, or page change is otherwise
+    // never looked up again but stays cached for as long as the image is on
+    // screen (SQ-1195). `current_cell` matches what `render_row` will key any
+    // fresh entry with below; a missing picker (nothing can be drawn this frame)
+    // falls back to `(0, 0)`, which no real cell size ever is, so a live image's
+    // stale entries are dropped rather than kept on a guess.
+    let current_cell = state
+        .game_picker
+        .as_ref()
+        .map(|p| {
+            let fs = p.font_size();
+            (fs.width.max(1), fs.height.max(1))
+        })
+        .unwrap_or((0, 0));
+    // Every evicted band's kitty upload must be freed in the terminal, not
+    // merely forgotten (SQ-1190) — `InlineImageRender` has no `GraphicsRender`
+    // of its own, so route the ids it hands back into the sibling field's queue.
+    let evicted_bands = state.inline_image_render.borrow_mut().retain_live(
+        &entry.live_bands,
+        current_cell,
+        crate::render::inline_image::float_page(state),
+    );
+    state.graphics_render.borrow_mut().queue_external_deletes(evicted_bands);
     // Window the cached rows to the visible viewport (cheap; no re-wrap). The
     // top-anchor only applies at the bottom, handled inside `window_wrapped_rows`.
     let (lines, total_rows, first_abs_row) =
@@ -2437,6 +2750,19 @@ fn render_middle(
         }
         // Inline-image band row: blit the strip for this row instead of text.
         if crate::render::inline_image::try_blit_band_row(state, wr, body_area.x, body_area.width, row_y, buf) {
+            // SQ-1503: a picture carries a hyperlink exactly the way linked text
+            // does (`glk_set_hyperlink` before `glk_image_draw`) — Anchorhead:
+            // the Illustrated Edition's inline "click this thumbnail to view the
+            // full-size illustration" pictures are drawn this way. The link-cell
+            // recording below the `continue` (for `wr.runs`) never runs for a
+            // band row, because an image line carries no styled runs at all
+            // (`glk_backend::log_to_lines` starts a fresh, empty run vec before
+            // and after every image) — so a click anywhere on the visible
+            // picture found no recorded link and the hyperlink click path below
+            // never fired, even though typing VIEW (driven by game logic, not by
+            // any click) worked. Record the SAME cells `blit_band` drew into,
+            // so a click anywhere on the picture resolves.
+            record_band_links(&mut links, wr.band.as_ref(), body_area, row_y);
             continue;
         }
         // Meta/Warning reserve the 2-col gutter and draw their marker glyph;
@@ -2456,49 +2782,22 @@ fn render_middle(
         }
         let text_x = body_area.x + text_origin_col(wr.kind);
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
-        draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, crate::render::TextInk::of(state));
-        // …and, while a reveal is lit, re-style the words on this row that the
-        // parser would accept (SQ-1107). A pass OVER the drawn cells, after the
-        // text and its runs: the reveal is a property of the moment, not of the
-        // text, and folding it into `wr.runs` would write a decoration into the
-        // game's own output — which is what gets persisted in the archive.
+        draw_str_runs(
+            buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area,
+            crate::render::TextInk::of_with_game_input(state, game_input),
+        );
+        // …and, while a reveal is lit, re-style the words on this row that name
+        // one of the story's own things (SQ-1107, SQ-1207). A pass OVER the
+        // drawn cells, after the text and its runs: the reveal is a property of
+        // the moment, not of the text, and folding it into `wr.runs` would write
+        // a decoration into the game's own output — which is what gets
+        // persisted in the archive.
         crate::reveal::paint_row(buf, text_x, row_y, &wr.text, body_area, state);
 
-        // Record cell→link for every linked span on this row. `run.start/end` are
-        // CHAR offsets within `wr.text` (re-based by `rebase_runs`), while the
-        // cells they were drawn in are DISPLAY columns — a wide glyph or a
-        // multibyte prefix moves the link's columns right of its char indices
-        // (SQ-0662). Convert through the same width table `draw_str_runs` advanced
-        // by, so the click lands on the link's actual glyphs. Clip to the body.
-        // One pass builds char index → start column for the whole row, so N linked
-        // runs cost one scan rather than N (wrapping and drawing are per-frame work
-        // over the whole window; nothing here may go quadratic in the row length).
-        let link_cols: Vec<usize> = if wr.runs.iter().any(|r| r.link != 0) {
-            let mut v = Vec::with_capacity(wr.text.chars().count() + 1);
-            let mut c = 0usize;
-            for ch in wr.text.chars() {
-                v.push(c);
-                c += crate::textwidth::char_cells(ch);
-            }
-            v.push(c);
-            v
-        } else {
-            Vec::new()
-        };
-        let col_of = |i: usize| -> usize { link_cols.get(i).copied().unwrap_or_else(|| link_cols.last().copied().unwrap_or(0)) };
-        for run in &wr.runs {
-            if run.link == 0 {
-                continue;
-            }
-            let (c0, c1) = (col_of(run.start), col_of(run.end));
-            for j in c0..c1 {
-                let col = text_x.saturating_add(j as u16);
-                if col >= body_area.right() {
-                    break;
-                }
-                links.push(((col, row_y), run.link));
-            }
-        }
+        // Record cell→link for every linked span on this row — the same function
+        // every other window's text goes through, so a link is as clickable in a
+        // side panel as it is here (SQ-1514).
+        record_run_links(&mut links, &wr.runs, &wr.text, text_x, body_area, row_y);
 
         // Extend a game-set background so a coloured paragraph reads as a solid
         // band, not a ragged block that stops at the text (when the pane's own
@@ -2542,12 +2841,27 @@ fn render_middle(
             }
         }
 
-        // Left-margin float (SQ-0454): blit the picture strip over the left
+        // Margin float (SQ-0454): blit the picture strip over the float's own
         // `cols` columns AFTER the row's (indented) text and any background fill,
-        // so the image always wins. The prose already started past `indent`, so
-        // it never collides with the picture.
+        // so the image always wins. The prose already started past `indent` (left
+        // float) or stops short of the reserve (right float), so it never
+        // collides with the picture.
         if let Some(float) = &wr.float {
             crate::render::inline_image::blit_float_row(state, float, body_area.x, body_area.width, row_y, buf);
+            // …and the float's picture is as clickable as the band's (SQ-1503,
+            // reopened). A MARGIN picture never reaches the band arm above: the
+            // main transcript wraps with `left_float = true`, so `FloatState`
+            // takes every `MarginLeft`/`MarginRight` image that leaves a usable
+            // prose column and emits `float` rows with `band: None`, which
+            // `try_blit_band_row` declines. Anchorhead: the Illustrated Edition
+            // draws its clickable thumbnail `MarginRight` — "alongside the
+            // text", as its own ILLUSTRATIONS text says — so the link the first
+            // SQ-1503 fix recorded for band rows was never recorded for the
+            // picture the player actually sees, and the click still did nothing.
+            // Same cells, same rule as the band arm; the row's own text runs
+            // (recorded above) never occupy these columns, since a float either
+            // pads the prose past the picture or narrows it short of the reserve.
+            record_band_links(&mut links, Some(float), body_area, row_y);
         }
     }
 
@@ -2765,7 +3079,7 @@ fn render_middle(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
     use super::*;
     use zvm::cpu::exec::Machine;
@@ -2798,46 +3112,42 @@ mod tests {
             .collect()
     }
 
-    /// **What a late insert-above-prompt costs the wrap cache** (SQ-1124).
+    /// **What a late insert-above-prompt costs the wrap cache** (SQ-1124,
+    /// SQ-1179).
     ///
-    /// `touch_transcript(TranscriptEdit::Rewrote)` is the difference between the
-    /// cache extending its rows and throwing them away (SQ-1034), and an
-    /// insert-above-prompt is not an append: it moves a line the cache has
-    /// already wrapped, so the next frame rebuilds from line zero.
+    /// An insert-above-prompt is not an append: it moves a line the cache has
+    /// already wrapped (the trailing prompt itself). Before SQ-1179 that meant
+    /// `TranscriptEdit::Rewrote` and a full rebuild from line zero, on EVERY
+    /// `push_transcript_internal` call in inline-prompt mode — every `/help`,
+    /// every save banner, every assist. SQ-1179 gave the edit its own
+    /// `TranscriptEdit::Inserted { at, count }`, which the cache can REPAIR
+    /// through instead: everything before `at` provably did not move, so only
+    /// the (here, one-line) tail is re-wrapped.
     ///
-    /// That cost has always been paid — every `push_transcript_internal` in
-    /// inline-prompt mode does it, which is every `/help`, every save banner and
-    /// every assist. What SQ-1124 changed is WHEN: a vocabulary offer that used
-    /// to land inside the turn the player was waiting on can now land a beat
-    /// later, while they are typing.
+    /// # The measurement this replaced, and why it is a comment and not an
+    /// assertion
     ///
-    /// # The measurement, and why it is a comment and not an assertion
-    ///
-    /// Taken at 40 columns — a narrow pane, where wrapping is worst — on a
-    /// 12-core machine in a **debug** build: 200 lines rebuilt in 0.8 ms, 1,000
-    /// in 3.7 ms, 5,000 in 18.1 ms and 20,000 in 71.8 ms. Linear in scrollback,
-    /// and it does not need deferring: the event loop coalesces an input burst,
-    /// so the rebuild is paid once per FRAME rather than once per keystroke, and
-    /// the shipped release binary is several times quicker than any of those.
-    ///
-    /// That conclusion is worth keeping. The ceiling that used to enforce it was
-    /// not: a wall-clock bound in a debug build is a flake by construction, and
-    /// it failed on all three CI platforms — 3-4 shared cores against the twelve
-    /// it was measured on — while passing locally every time. Raising the number
-    /// only moves the flake further away. So the case keeps its subject and
-    /// asserts what is true on any hardware instead.
+    /// Before this fix, at 40 columns — a narrow pane, where wrapping is
+    /// worst — on a 12-core machine in a **debug** build: 200 lines rebuilt in
+    /// 0.8 ms, 1,000 in 3.7 ms, 5,000 in 18.1 ms and 20,000 in 71.8 ms — linear
+    /// in scrollback. A wall-clock ceiling on that number is a flake by
+    /// construction (it failed on all three CI platforms' 3-4 shared cores
+    /// while passing locally every time), which is why this case asserts the
+    /// SHAPE of the work — which `WrapPlan` this frame owes — rather than its
+    /// duration.
     ///
     /// # What is asserted
     ///
-    /// The shape of the work rather than its duration: the insert lands ABOVE the
-    /// prompt (which is what makes it a rewrite), the frame after it owes exactly
-    /// ONE rebuild, the frame after THAT owes nothing at all, and the wrap it
-    /// produced is correct — the assist is in the rows, the prompt is still last,
-    /// and no source line was disturbed. A regression that rebuilt per line, or
-    /// per frame forever, fails on the plan; a regression that wrapped the wrong
-    /// thing fails on the rows.
+    /// The insert lands ABOVE the prompt (which is what makes it a tail edit
+    /// rather than a plain append), the frame after it owes exactly one
+    /// REPAIR (not a `Rebuild` — that is the regression this case exists to
+    /// catch), the frame after THAT owes nothing at all, and the wrap it
+    /// produced is correct — the assist is in the rows, the prompt is still
+    /// last, and no earlier source line was disturbed. A regression that
+    /// rebuilt per line, or per frame forever, fails on the plan; a
+    /// regression that wrapped the wrong thing fails on the rows.
     #[test]
-    fn a_late_insert_above_the_prompt_rebuilds_the_wrap_exactly_once() {
+    fn a_late_insert_above_the_prompt_repairs_the_wrap_exactly_once() {
         use crate::render::wrap_cache::WrapPlan;
 
         let cols = 40u16;
@@ -2876,7 +3186,7 @@ mod tests {
         assert_eq!(plan(&state), WrapPlan::Reuse, "a warm cache on an unchanged transcript");
 
         // The late arrival: exactly what `push_assist` does in inline-prompt mode
-        // — an insert ABOVE the trailing story prompt, hence a Rewrote.
+        // — an insert ABOVE the trailing story prompt, hence `Inserted`.
         let style = state.colors.theme.get("assist_help").style;
         state.push_transcript_internal_styled("try instead — light", TranscriptKind::Assist, style);
         assert_eq!(
@@ -2885,12 +3195,16 @@ mod tests {
             "the assist went above the prompt, not after it — otherwise this is an append \
              and the case is measuring nothing",
         );
-        assert_eq!(plan(&state), WrapPlan::Rebuild, "a line already wrapped moved");
+        assert_eq!(
+            plan(&state),
+            WrapPlan::Repair { at: 199 },
+            "a line already wrapped moved, but only the tail — a REPAIR, not a whole rebuild",
+        );
 
         render_middle(&state, &mut buf, area, normal, None);
-        assert_eq!(plan(&state), WrapPlan::Reuse, "the rebuild is paid ONCE, not every frame");
+        assert_eq!(plan(&state), WrapPlan::Reuse, "the repair is paid ONCE, not every frame");
 
-        // …and the wrap it rebuilt is the right one.
+        // …and the wrap it repaired is the right one.
         let cache = state.transcript_wrap.borrow();
         let rows = &cache.as_ref().expect("cache").rows;
         assert!(
@@ -2933,9 +3247,9 @@ mod tests {
         // is clipped to the pane, not the wider frame.
         assert_eq!(read_row(&buf, 1, 40, 60).trim(), "", "toast is clipped to the story pane, not the map");
         // The notification style — the registry's `notification` selector, which
-        // derives from the `accent` role reversed (cyan reverse-video) — is
-        // applied to the content cells. (SQ-0309: was a baked black-on-cyan
-        // Style; now REVERSED cyan fg, same visual result.)
+        // derives from the `accent` role reversed (blue reverse-video since
+        // SQ-1531, cyan before it) — is applied to the content cells. (SQ-0309:
+        // was a baked black-on-cyan Style; now REVERSED accent fg, same idiom.)
         let cell = buf.cell((30, 1)).expect("content cell exists");
         let themed = state.colors.theme.get("notification").style;
         assert_eq!(Some(cell.fg), themed.fg, "toast uses the themed notification fg");
@@ -2963,6 +3277,139 @@ mod tests {
         // Nothing spills past the pane into the map columns on either box.
         let map_cols = (0..6).map(|r| read_row(&buf, r, 40, 60)).collect::<String>();
         assert_eq!(map_cols.trim(), "", "toasts stay within the story pane's width");
+    }
+
+    /// SQ-1253: a message that fits in one row draws exactly as it did before
+    /// wrapping existed — same box height (3), same content row, same width.
+    /// This pins the pre-change cells (captured from the code as it stood
+    /// before this fix, which drew a single `" {text} "` row with no wrap
+    /// path at all) so a future change to the wrap/cap logic can't creep into
+    /// the common, non-wrapping case.
+    #[test]
+    fn notification_short_message_renders_identically_to_before_wrapping() {
+        let mut state = AppState::default();
+        state.config.animation.enabled = false;
+        state.notifications.push("[Saved as: foo]");
+
+        let full = Rect::new(0, 0, 60, 10);
+        let story_area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(full);
+        render_notifications(&mut buf, story_area, &state);
+
+        // Still exactly a 3-row box (border, content, border) — no extra rows
+        // were added for a message that never needed to wrap.
+        let content = read_row(&buf, 1, 24, 39);
+        assert_eq!(content, " Saved as: foo ", "content row unchanged: {content:?}");
+        assert!(!read_row(&buf, 0, 23, 40).trim().is_empty(), "top border drawn");
+        assert!(!read_row(&buf, 2, 23, 40).trim().is_empty(), "bottom border drawn");
+        // Row 3 (what would be a 4th row if the box had grown) stays blank.
+        assert_eq!(read_row(&buf, 3, 0, 40).trim(), "", "no extra row for a one-row message");
+    }
+
+    /// SQ-1253: a message wider than the box wraps at word boundaries onto
+    /// extra rows instead of being cut off, and no word is lost.
+    #[test]
+    fn notification_long_message_wraps_at_word_boundaries_without_losing_words() {
+        let words: Vec<String> = (0..12).map(|i| format!("word{i}")).collect();
+        let text = words.join(" ");
+
+        let mut state = AppState::default();
+        state.config.animation.enabled = false;
+        state.notifications.push(text.clone());
+
+        let full = Rect::new(0, 0, 60, 20);
+        let story_area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(full);
+        render_notifications(&mut buf, story_area, &state);
+
+        // Same wrap width the renderer computed for this pane: boxed, 40-wide
+        // pane → max_inner 38, text budget 36.
+        let text_w: u16 = 36;
+        let rows = wrap_notification_text(&text, text_w);
+        assert!(rows.len() > 1, "text longer than the width must wrap onto more than one row");
+
+        // Box grew past the old fixed 3 rows: border + N content rows + border.
+        let box_h = 2 + rows.len() as u16;
+        assert!(box_h > 3, "box grew past the old 3-row height");
+        assert!(!read_row(&buf, box_h - 1, 0, 40).trim().is_empty(), "bottom border sits past the old row 2");
+
+        // Falsify: the pre-fix behaviour (`truncate_line` at this width) really
+        // did drop text rather than wrap it — confirms this fixture would have
+        // caught the SQ-1253 symptom.
+        assert!(
+            truncate_line(&text, text_w as usize).chars().count() < text.chars().count(),
+            "sanity: the old one-row truncation would have lost text at this width"
+        );
+
+        // The box's interior columns (inside the border, excluding the ` … `
+        // padding), same geometry the renderer used: right-anchored, snug to
+        // the widest wrapped row.
+        let content_w = rows.iter().map(|r| r.chars().count() as u16).max().unwrap();
+        let box_w = content_w + 2 + 2; // padding + border
+        let box_left = story_area.right() - box_w;
+        let (cx0, cx1) = (box_left + 2, box_left + box_w - 2); // inside border + the 1-space pad
+
+        // Reassemble every rendered content row (trimmed of the row's own
+        // right-padding) and confirm every word survives, in order.
+        let rendered_words: Vec<String> = (0..rows.len() as u16)
+            .flat_map(|i| {
+                read_row(&buf, 1 + i, cx0, cx1)
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(rendered_words, words, "every word survives the wrap, in order");
+    }
+
+    /// SQ-1253: a message that would need more than the row cap wraps up to
+    /// the cap and ends with a single trailing `…` on the last row — nothing
+    /// drawn after it, and no row above it is touched.
+    #[test]
+    fn notification_message_beyond_row_cap_ellipsises_last_row_only() {
+        let words: Vec<String> = (0..60).map(|i| format!("word{i}")).collect();
+        let text = words.join(" ");
+
+        let mut state = AppState::default();
+        state.config.animation.enabled = false;
+        state.notifications.push(text.clone());
+
+        let full = Rect::new(0, 0, 60, 20);
+        let story_area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(full);
+        render_notifications(&mut buf, story_area, &state);
+
+        // The same wrap the renderer used for this pane, capped at
+        // NOTIFY_TEXT_ROW_CAP rows.
+        let text_w: u16 = 36;
+        let rows = wrap_notification_text(&text, text_w);
+        assert_eq!(rows.len(), NOTIFY_TEXT_ROW_CAP, "wrap itself is capped at the row limit");
+        let content_w = rows.iter().map(|r| r.chars().count() as u16).max().unwrap();
+        let box_w = content_w + 2 + 2;
+        let box_left = story_area.right() - box_w;
+        let (cx0, cx1) = (box_left + 2, box_left + box_w - 2);
+
+        // Boxed height is border(1) + NOTIFY_TEXT_ROW_CAP + border(1); content
+        // rows are 1..=NOTIFY_TEXT_ROW_CAP, and the row right after them is
+        // the bottom border, not a 6th text row.
+        let content_rows: Vec<String> = (1..=NOTIFY_TEXT_ROW_CAP as u16)
+            .map(|r| read_row(&buf, r, cx0, cx1).trim().to_string())
+            .collect();
+        for (i, row) in content_rows.iter().enumerate() {
+            assert!(!row.is_empty(), "content row {i} should hold text");
+        }
+        let bottom_border_row = read_row(&buf, NOTIFY_TEXT_ROW_CAP as u16 + 1, 0, 40);
+        assert!(!bottom_border_row.trim().is_empty(), "bottom border sits right after the capped rows");
+        let past_box_row = read_row(&buf, NOTIFY_TEXT_ROW_CAP as u16 + 2, 0, 40);
+        assert_eq!(past_box_row.trim(), "", "nothing drawn past the box — not a 6th text row");
+
+        let last = content_rows.last().unwrap();
+        assert!(last.ends_with('…'), "last visible row ends with an ellipsis: {last:?}");
+        assert_eq!(last.matches('…').count(), 1, "exactly one ellipsis, nothing drawn after it");
+        // No row before the last one is ellipsised — only the tail is cut.
+        for row in &content_rows[..content_rows.len() - 1] {
+            assert!(!row.contains('…'), "only the last row may be ellipsised: {row:?}");
+        }
     }
 
     #[test]
@@ -3044,7 +3491,7 @@ mod tests {
     // ── Inline-image band wrapping ────────────────────────────────────────────
 
     fn dummy_img(w: u32, h: u32, align: crate::inline_image::ImageAlign) -> crate::inline_image::InlineImage {
-        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None, margin_px: None }
+        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None, margin_px: None, rule: None, link: 0 }
     }
 
     #[test]
@@ -3132,6 +3579,8 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginLeft,
             scaled: None,
             margin_px,
+            rule: None,
+            link: 0,
         }
     }
 
@@ -3644,6 +4093,78 @@ mod tests {
         assert_ne!(buf[(5, 0)].fg, Color::Magenta);
     }
 
+    /// SQ-1354: on the IBM PC a bold run is the machine's ink with the EGA
+    /// intensity bit lit, so a room name comes out white where the prose beside it
+    /// is `#AAAAAA`.
+    ///
+    /// The `#ADADAD` here is not a typo for `#AAAAAA`: `rgb15_to_888` expands the
+    /// palette's 5-bit `21` as `(c << 3) | (c >> 2)`, which is what every other
+    /// path in lanthorn already draws EGA entry 7 as.
+    ///
+    /// Both `honor_game_colours` modes are pinned. The false mode is the player
+    /// saying "keep my terminal's colours", and it takes the machine's screen with
+    /// it — the period look does not apply, and neither does this.
+    #[test]
+    fn ibm_bold_runs_light_the_intensity_bit_in_both_gate_states() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Color, Style}};
+        // The scheme states the machine's table outright, so its palette slots
+        // and the bold rule resolve through the same one (SQ-0958, SQ-1393).
+        let cs = crate::colors::ColorScheme::terminal_default_in(zvm::screen::Palette::IbmXzip);
+
+        // EGA entry 7 and entry 15, as this palette resolves standard white 9
+        // plain and lit.
+        let grey = Color::Rgb(0xAD, 0xAD, 0xAD);
+        let white = Color::Rgb(0xFF, 0xFF, 0xFF);
+        assert_eq!(
+            crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(9), &cs),
+            grey,
+            "XZIP resolves white 9 to EGA 7",
+        );
+
+        let area = Rect::new(0, 0, 6, 1);
+        // The machine's own ink under the prose, which is what the period look
+        // lays there for a Version 4 story that never names a colour.
+        let machine_ink = Style::new().fg(grey);
+        let draw = |base: Style, bits: u8, fg: u32, honor: bool| {
+            let mut b = Buffer::empty(area);
+            let runs = vec![StyleRun { start: 0, end: 3, bits, fg, bg: 0, link: 0, glk_style: 0 }];
+            draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, crate::render::TextInk::new(honor, &cs));
+            b[(0, 0)].fg
+        };
+
+        // The reported case: Version 4, no `set_colour`, the machine's default ink.
+        assert_eq!(draw(machine_ink, 0x00, 0, true), grey, "plain prose stays EGA 7");
+        assert_eq!(draw(machine_ink, 0x02, 0, true), white, "a bold room name lights to EGA 15");
+        // …and the game's own `set_colour(9)` lights the same way, because the
+        // attribute byte has one foreground nibble however it was filled.
+        let std_white = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(9));
+        assert_eq!(draw(Style::new(), 0x00, std_white, true), grey, "set_colour(9) plain");
+        assert_eq!(draw(Style::new(), 0x02, std_white, true), white, "set_colour(9) bold");
+
+        // honor off: the machine's screen is off with it, so a bold run keeps
+        // whatever the theme put there.
+        assert_eq!(draw(machine_ink, 0x02, 0, false), grey, "honor off: no brightening");
+        let themed = Style::new().fg(Color::Rgb(0x33, 0x77, 0xBB));
+        assert_eq!(draw(themed, 0x02, 0, true), Color::Rgb(0x33, 0x77, 0xBB), "a themed ink is not an EGA colour");
+        assert_eq!(draw(themed, 0x02, 0, false), Color::Rgb(0x33, 0x77, 0xBB), "…in either gate state");
+    }
+
+    /// …and no other display does it — the Amiga and the §8.3.1 table have no
+    /// intensity bit, so their bold runs are the terminal's BOLD and nothing else.
+    #[test]
+    fn bold_does_not_brighten_off_the_ibm_text_screen() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let area = Rect::new(0, 0, 6, 1);
+        for p in [zvm::screen::Palette::Standard, zvm::screen::Palette::Amiga, zvm::screen::Palette::IbmYzip] {
+            let cs = crate::colors::ColorScheme::terminal_default_in(p);
+            let ink = crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(9), &cs);
+            let mut b = Buffer::empty(area);
+            let runs = vec![StyleRun { start: 0, end: 3, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }];
+            draw_str_runs(&mut b, 0, 0, "abc", Style::new().fg(ink), &runs, None, area, crate::render::TextInk::new(true, &cs));
+            assert_eq!(b[(0, 0)].fg, ink, "{p:?}: bold is the terminal's, not a second colour");
+        }
+    }
+
     #[test]
     fn draw_str_runs_glk_style_slots_seed_and_gate() {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Color, Style}};
@@ -3676,6 +4197,66 @@ mod tests {
         let red = crate::state::pack_zcolour(zvm::screen::ZColour::True24(0x00FF_0000));
         assert_eq!(draw(8, red, true), Color::Rgb(255, 0, 0), "honor ON: game colour wins over slot");
         assert_eq!(draw(8, red, false), Color::Cyan, "honor OFF: game ignored, slot wins");
+    }
+
+    /// SQ-1462: Counterfeit Monkey honours a white-on-white Normal style
+    /// (`glulx_game_colours.rs`'s `cm_intro_pane_adopts_the_games_black_on_white`)
+    /// and, like every Glk game, echoes the player's own typed command with style
+    /// `Input` (glk_style 8) and NO colour of its own — Glk leaves "how the
+    /// player's input looks" to the interpreter. With no `glk_styles` slot themed
+    /// either, that run fell through to the generic `text` role: white, a
+    /// dark-terminal guess with no idea the game's page is white too. Every
+    /// keystroke the player typed while navigating Counterfeit Monkey's in-game
+    /// HINT menu ("hint", "n", "1", …) rendered invisibly.
+    ///
+    /// Falsified: reverting `TextInk::game_input`/`draw_str_runs`'s `base_style`
+    /// patch (SQ-1462) restores the `Color::White` this test would otherwise
+    /// assert, on the SAME white ground.
+    #[test]
+    fn glk_input_run_with_no_colour_floors_on_the_games_own_page_not_white() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Color, Style}};
+        let area = Rect::new(0, 0, 6, 1);
+        // The generic `text` role: white, no background (`ColorScheme::terminal_default`).
+        let base = Style::new().fg(Color::White);
+        let cs = crate::colors::ColorScheme::terminal_default();
+        // Counterfeit Monkey's own page: black ink on a white ground.
+        let cm_page = Style::new().fg(Color::Rgb(0, 0, 0)).bg(Color::Rgb(255, 255, 255));
+
+        let draw = |ink: crate::render::TextInk| {
+            let mut b = Buffer::empty(area);
+            // The exact run Counterfeit Monkey's echo captures: glk_style 8
+            // (Input), no game colour on either channel.
+            let runs = vec![StyleRun { start: 0, end: 4, bits: 0, fg: 0, bg: 0, link: 0, glk_style: 8 }];
+            draw_str_runs(&mut b, 0, 0, "hint", base, &runs, None, area, ink);
+            (b[(0, 0)].fg, b[(0, 0)].bg)
+        };
+
+        // honor ON, game_input Some(the page) → floors on the page: black on white,
+        // not the generic white-on-nothing that (on a white pane) was invisible.
+        assert_eq!(
+            draw(crate::render::TextInk::new_with_game_input(true, &cs, Some(cm_page))),
+            (Color::Rgb(0, 0, 0), Color::Rgb(255, 255, 255)),
+            "an uncoloured Input run reads the game's own page, not the generic theme"
+        );
+        // honor ON, game_input None (a game that never named a page, or a v1-v5
+        // Z-machine story like minizork) → unchanged: the generic base, byte-
+        // identical to before SQ-1462.
+        assert_eq!(
+            draw(crate::render::TextInk::new_with_game_input(true, &cs, None)),
+            (Color::White, Color::Reset),
+            "no game page declared → the generic theme base, unchanged"
+        );
+        // honor OFF: `--game-colours off` declares the interpreter colourless —
+        // production never builds this combination (`game_input_style` gates on
+        // `honor_game_colours` first, so `game_input` is `None` whenever honor is
+        // off), but `draw_str_runs` gates on `honor` itself too (belt and braces,
+        // matching `Engine::submit`'s own doc precedent), so a colourless launch
+        // renders the same whether or not a page happens to be present.
+        assert_eq!(
+            draw(crate::render::TextInk::new_with_game_input(false, &cs, Some(cm_page))),
+            (Color::White, Color::Reset),
+            "honor OFF must not float the game's page in either channel"
+        );
     }
 
     #[test]
@@ -3739,6 +4320,90 @@ mod tests {
             assert_ne!(cell.symbol(), " ", "linked cell holds a glyph");
             assert!(cell.modifier.contains(Modifier::UNDERLINED), "linked cell underlined");
         }
+    }
+
+    /// SQ-1503: a picture drawn under a Glk hyperlink must contribute cells to
+    /// the same click map [`render_transcript_builds_cell_link_map`] pins for
+    /// linked TEXT — the render loop's inline-image branch used to `continue`
+    /// straight past the link-recording code below it (an image line carries no
+    /// styled runs at all, so that code had nothing to read even if it DID run),
+    /// so a picture like Anchorhead: the Illustrated Edition's "click this
+    /// thumbnail to view the full-size illustration" recorded NO link no matter
+    /// where on it the player clicked, while a linked *caption* right next to it
+    /// worked fine. Falsified by reverting the band-row link recording in
+    /// `render_middle`: the assertion below then finds an empty `links`.
+    #[test]
+    fn render_transcript_builds_cell_link_map_for_an_inline_image_band() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        // A picker is required for a band to be emitted at all (`images_enabled`) —
+        // without one an inline image renders as nothing, per `script_state`'s doc.
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.push_transcript_kind("before", TranscriptKind::Story);
+        state.push_transcript_image(crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(16, 16, image::Rgba([9, 9, 9, 255]))),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+            margin_px: None,
+            rule: None,
+            link: 42,
+        });
+        state.push_transcript("after");
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        let m = render_transcript(
+            &crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None,
+        );
+
+        assert!(!m.links.is_empty(), "the picture's own cells must be in the click map");
+        assert!(m.links.iter().all(|(_, v)| *v == 42), "every recorded cell carries the picture's link");
+        // "before" is row 0 (unlinked, plain text) — a link cell there would mean
+        // the map bled onto text the picture was never drawn under.
+        assert!(m.links.iter().all(|((_, y), _)| *y != 0), "row 0 (\"before\") carries no link cells");
+    }
+
+    /// The band case above's twin for the route every real Glulx thumbnail
+    /// actually takes (SQ-1503, reopened). A `MarginRight` picture is not a band
+    /// at all: the main transcript wraps with `left_float = true`, so
+    /// `FloatState::start` claims it and the rows carry `float: Some(..)` with
+    /// `band: None` — a row `try_blit_band_row` declines, so the band arm's
+    /// link recording never sees it. Anchorhead: the Illustrated Edition draws
+    /// its clickable thumbnail exactly this way, which is why the first SQ-1503
+    /// fix left the click still doing nothing.
+    #[test]
+    fn render_transcript_builds_cell_link_map_for_a_margin_float_picture() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.push_transcript_kind("before", TranscriptKind::Story);
+        state.push_transcript_image(crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(8, 8, image::Rgba([9, 9, 9, 255]))),
+            align: crate::inline_image::ImageAlign::MarginRight,
+            scaled: None,
+            margin_px: None,
+            rule: None,
+            link: 42,
+        });
+        state.push_transcript("prose that wraps beside the thumbnail in the right margin");
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        let m = render_transcript(
+            &crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None,
+        );
+
+        assert!(!m.links.is_empty(), "the floated picture's own cells must be in the click map");
+        assert!(m.links.iter().all(|(_, v)| *v == 42), "every recorded cell carries the picture's link");
+        // A right float sits at the body's right edge and the prose stays flush
+        // left of it, so no link cell may land in the leftmost columns.
+        assert!(
+            m.links.iter().all(|((x, _), _)| *x > 0),
+            "a right-margin float records no link over the prose column; got {:?}",
+            m.links
+        );
     }
 
     #[test]
@@ -3906,6 +4571,8 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginLeft,
             scaled: None,
             margin_px: Some(4),
+            rule: None,
+            link: 0,
         };
         let lines = vec![String::new(), "AAAA".to_string()];
         let kinds = vec![TranscriptKind::Story; 2];
@@ -4785,10 +5452,10 @@ mod tests {
             .expect("meta gutter '▏' must appear in column 0");
         assert_eq!(buf.cell((2, meta_y)).unwrap().style().fg, Some(Color::DarkGray)); // transcript_meta
 
-        // Input row: no gutter (text at column 0), cyan fg.
+        // Input row: no gutter (text at column 0), blue fg (accent, SQ-1531).
         let input_y = (1u16..9).find(|&y| row_text(y).starts_with("> go north"))
             .expect("input line must render at column 0");
-        assert_eq!(buf.cell((0, input_y)).unwrap().style().fg, Some(Color::Cyan)); // transcript_input
+        assert_eq!(buf.cell((0, input_y)).unwrap().style().fg, Some(Color::Blue)); // transcript_input
     }
 
     /// SQ-1045: on screen an assist is identified by its MARK and by nothing
@@ -4909,7 +5576,7 @@ mod tests {
         }).expect("location line must render");
         assert_eq!(
             buf.cell((0, y)).unwrap().style().fg,
-            Some(Color::Cyan),
+            Some(Color::Blue),
             "location header must carry the accent colour"
         );
     }
@@ -5281,7 +5948,7 @@ mod tests {
             state.input.set("hi", true);
             state.room_dock.toggle_to(true, true);
             state.room_dock_view = mode;
-            assert!(!state.any_overlay_open(), "the room dock is not an overlay at all…");
+            assert!(!state.any_overlay_open(), "the room panel is not an overlay at all…");
             assert!(!state.any_modal_overlay_open(), "…and certainly not a MODAL one");
 
             let area = Rect::new(0, 0, 40, 5);
@@ -5889,6 +6556,21 @@ mod tests {
         assert_eq!(inventory_items(None, &items, None), items);
         assert_eq!(inventory_items(Some(7), &items, None), items);
         assert!(inventory_items(None, &[], None).is_empty());
+    }
+
+    /// SQ-1244: with no introspection, `inventory_click_words` falls back to
+    /// the same fallback text as `inventory_items` — the two must always be
+    /// the same length so a click index resolves against the right row. The
+    /// object-tree path (where the two diverge, e.g. "brass lantern" shown
+    /// but `lamp` clicked) is covered against a real story in
+    /// `tests/suites/zork1_inventory.rs`, which has no fake `Introspect` here
+    /// to drive it with.
+    #[test]
+    fn inventory_click_words_matches_inventory_items_length_with_no_introspection() {
+        let items = vec!["brass lamp".to_string(), "sword".to_string()];
+        assert_eq!(inventory_click_words(None, &items, None, None), items);
+        assert_eq!(inventory_click_words(Some(7), &items, None, None), items);
+        assert!(inventory_click_words(None, &[], None, None).is_empty());
     }
 
     // ── Task 8: status-header + input-line boxing + opt-out ───────────────────
@@ -6591,6 +7273,300 @@ mod tests {
         assert!(
             wrap_bookkeeping(&incremental).0.is_some_and(|a| a < wrap_product(&incremental).len()),
             "non-vacuity: printing into the cleared screen must give the anchor a real row"
+        );
+    }
+
+    #[test]
+    fn a_pure_screen_clear_does_not_rewrap_anything_already_wrapped() {
+        // SQ-1179 (B): before this fix, `clear_anchor` moving in `WrapShape`
+        // meant a screen clear ALONE — nothing printed, nothing else moved —
+        // still forced a whole rebuild. It no longer does, because
+        // `mark_screen_clear` always sets the new anchor to the CURRENT
+        // transcript length, and every already-cached filtered line then
+        // unconditionally precedes it (`WrapKey::plan`'s anchor-safety guard).
+        // Proven the way SQ-1034's own tests prove an append doesn't rewrap:
+        // poison the cached rows with a sentinel a re-wrap can never produce,
+        // then check it survives.
+        let area = Rect::new(0, 0, 34, 12);
+        let mut state = script_state();
+        drive_script(&mut state, area, true);
+        wrap_render(&state, area);
+        poison_wrap_cache(&state);
+
+        state.mark_screen_clear();
+        wrap_render(&state, area);
+        assert_eq!(
+            cached_first_text(&state),
+            "SENTINEL",
+            "a screen clear alone must not re-wrap what was already wrapped"
+        );
+        // …and the anchor bookkeeping it exists to move is nevertheless correct:
+        // an anchor with nothing printed since it anchors past the last row.
+        assert_eq!(
+            wrap_bookkeeping(&state).0,
+            Some(cached_row_texts(&state).len()),
+            "non-vacuity: the anchor row must still track the (poisoned) product's own length"
+        );
+
+        // Printing after the clear is an ordinary append on top — the sentinel
+        // must survive THAT too, extended rather than rebuilt away.
+        state.push_transcript_kind("after the clear", TranscriptKind::Story);
+        wrap_render(&state, area);
+        assert_eq!(
+            cached_row_texts(&state).first().map(String::as_str),
+            Some("SENTINEL"),
+            "printing after the clear must EXTEND the poisoned rows, not rebuild them"
+        );
+        assert_eq!(
+            cached_row_texts(&state).last().map(String::as_str),
+            Some("after the clear"),
+            "the new line must actually be there"
+        );
+    }
+
+    /// **The equivalence matrix (SQ-1179): a repaired cache must be
+    /// indistinguishable from a rebuilt one.**
+    ///
+    /// `wrap_lines_kinded_extend`'s wrap is a left-to-right scan that carries
+    /// exactly one thing ACROSS lines — the open margin float (`FloatState`,
+    /// this file's own doc comment on it) — and reads only its own line's
+    /// text/kind/style/runs/paragraph-format/image plus that carried float
+    /// otherwise (verified by reading the function body above: every other
+    /// input it touches — `styles`, `runs`, `para`, `images` — is indexed by
+    /// the CURRENT line alone). So a line's wrap can only ever depend on
+    /// itself and what came before it, never on what comes after — which is
+    /// the property a tail repair rests on: everything before the disturbed
+    /// tail is provably unreachable from the edit and can be left exactly as
+    /// cached.
+    ///
+    /// The matrix, for every combination of:
+    ///   * width 40 and 80 (the repair's own wrap width, and whether the
+    ///     baseline's float/hanging-indent/style-run content wraps
+    ///     differently at each);
+    ///   * transcript filter `Both`/`Story`/`Meta` — `Meta` hides the
+    ///     trailing prompt the insert lands above, so the cache never held an
+    ///     entry for it (`tail_visible == false`) — the OTHER branch of the
+    ///     repair's pop-or-not decision from the other two filters;
+    ///   * the screen cleared in the SAME edit batch as the insert or not —
+    ///     (A) and (B) firing together, the realistic "erase_window then
+    ///     print" shape;
+    ///   * a single-line vs a multi-line insert (one `push_transcript_internal`
+    ///     call whose text carries an embedded `\n`, one `Inserted { count: 2 }`);
+    ///   * one insert vs an unbroken RUN of two — what `push_assist`'s
+    ///     per-line loop actually does (a preamble line then an offer line,
+    ///     each its own `Inserted`, chaining `TailInsertRun::min_at`).
+    ///
+    /// performs the SAME final edit two ways — INCREMENTAL (synced to a warm
+    /// pre-insert cache, so the insert is a REPAIR) and REBUILT (the identical
+    /// final content, rendered for the first time, so it is a Rebuild from
+    /// line zero) — and asserts the two caches' entire comparable surface
+    /// (every wrapped row, and the anchor/starts/live-band bookkeeping the
+    /// draw path reads) is IDENTICAL. `insert-at-end`/`several-lines-up`
+    /// are not in the matrix: every real caller (`push_transcript_internal`,
+    /// `_styled`) inserts EXACTLY one place — immediately above the current
+    /// last line — so that is the only shape a repair ever has to prove
+    /// itself against; `wrap_key_plan_falls_back_to_rebuild_when_the_insert_is_not_at_the_cached_tail`
+    /// below covers the "several lines up" guard directly instead.
+    ///
+    /// This is the falsification too. Shifting the popped-row/offset
+    /// arithmetic in the render path's repair branch by one — truncating to
+    /// `popped + 1` instead of `popped`, or seeding `carry` from `cache.carry`
+    /// instead of `cache.tail_entry_carry` — was tried by hand while writing
+    /// this case: both broke `wrap_product` equality on every filter/width
+    /// combination that actually exercises the pop (i.e. every `filter` other
+    /// than `Meta`), confirming the case can see the offset it exists to
+    /// guard. Restored before committing.
+    #[test]
+    fn a_tail_insert_repair_lands_on_exactly_what_a_rebuild_would_have_produced() {
+        use crate::render::wrap_cache::WrapPlan;
+
+        // The baseline every variant starts from is SQ-1034's own equivalence
+        // script (style runs, a hanging-indent Meta line, a left-margin image
+        // float outrunning its text) plus a trailing Story prompt line, so the
+        // repair's carried float/style state and its pop-the-old-tail branch
+        // are both exercised for real rather than vacuously.
+        let build_baseline = |state: &mut AppState, filter: TranscriptFilter, area: Rect| {
+            state.transcript_filter = filter;
+            drive_script(state, area, false);
+            state.push_transcript_kind(">", TranscriptKind::Story);
+        };
+
+        for &width in &[40u16, 80u16] {
+            for &filter in &[TranscriptFilter::Both, TranscriptFilter::Story, TranscriptFilter::Meta] {
+                for &clear in &[false, true] {
+                    for &multi in &[false, true] {
+                        for &two in &[false, true] {
+                            let area = Rect::new(0, 0, width, 16);
+                            let insert_text = if multi { "one\ntwo" } else { "single" };
+                            let label = format!(
+                                "width={width} filter={filter:?} clear={clear} multi={multi} two={two}"
+                            );
+
+                            // INCREMENTAL: sync the cache to the pre-insert baseline
+                            // first, so the insert below lands on a WARM cache and
+                            // is a repair rather than this frame's first ever wrap.
+                            let mut incremental = script_state();
+                            build_baseline(&mut incremental, filter, area);
+                            wrap_render(&incremental, area);
+                            if clear {
+                                incremental.mark_screen_clear();
+                            }
+                            incremental.push_transcript_internal(insert_text, TranscriptKind::Assist);
+                            if two {
+                                incremental.push_transcript_internal("second", TranscriptKind::Assist);
+                            }
+                            // Non-vacuity: this frame must actually take the
+                            // REPAIR branch, or the comparison below proves
+                            // nothing about it.
+                            let plan = {
+                                let cache = incremental.transcript_wrap.borrow();
+                                let key = &cache.as_ref().expect("cache populated by the sync render").key;
+                                key.plan(&incremental, key.shape.width)
+                            };
+                            assert!(
+                                matches!(plan, WrapPlan::Repair { .. }),
+                                "{label}: expected a Repair, got {plan:?}"
+                            );
+                            wrap_render(&incremental, area);
+
+                            // REBUILT: push the IDENTICAL final content with no
+                            // intermediate render at all, so the only render sees
+                            // an empty cache and rebuilds from line zero.
+                            let mut rebuilt = script_state();
+                            build_baseline(&mut rebuilt, filter, area);
+                            if clear {
+                                rebuilt.mark_screen_clear();
+                            }
+                            rebuilt.push_transcript_internal(insert_text, TranscriptKind::Assist);
+                            if two {
+                                rebuilt.push_transcript_internal("second", TranscriptKind::Assist);
+                            }
+                            wrap_render(&rebuilt, area);
+
+                            assert_eq!(
+                                wrap_product(&incremental),
+                                wrap_product(&rebuilt),
+                                "{label}: rows diverged between repair and rebuild"
+                            );
+                            assert_eq!(
+                                wrap_bookkeeping(&incremental),
+                                wrap_bookkeeping(&rebuilt),
+                                "{label}: bookkeeping diverged between repair and rebuild"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A gap the matrix above cannot see: `drive_script`'s picture always
+    /// fully closes two lines before the trailing prompt, so `cache.carry`
+    /// (the float state AFTER the cache's last consumed line) and
+    /// `cache.tail_entry_carry` (the float state BEFORE it, what a repair
+    /// must actually seed the re-wrap with) are always both `None` there —
+    /// indistinguishable, so a repair that read the wrong one would still
+    /// pass every case in that matrix. This one leaves the float OPEN across
+    /// the prompt line itself (one strip claimed, three left), so the two
+    /// carries hold different `next_strip` values and a wrong read is a
+    /// picture-strip mismatch, not silence. Reading `cache.carry` instead of
+    /// `cache.tail_entry_carry` in the repair branch was tried by hand while
+    /// writing this case (this test was what finally caught it — the main
+    /// matrix above did not); restored before committing.
+    #[test]
+    fn a_tail_insert_repair_with_an_open_float_entering_the_prompt_lands_on_exactly_what_a_rebuild_would_have_produced() {
+        use crate::render::wrap_cache::WrapPlan;
+
+        let area = Rect::new(0, 0, 40, 16);
+
+        let build = |state: &mut AppState| {
+            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.push_transcript_kind("west of house", TranscriptKind::Story);
+            state.push_transcript_image(script_image()); // 4 strips tall
+            state.push_transcript_kind("beside one", TranscriptKind::Story); // claims 1 strip
+            // No more prose before the prompt: the float still has strips left
+            // when the trailing line is wrapped.
+            state.push_transcript_kind(">", TranscriptKind::Story);
+        };
+
+        let mut incremental = script_state();
+        build(&mut incremental);
+        wrap_render(&incremental, area);
+        // Non-vacuity: the prompt itself must actually be riding the float —
+        // and the carry entering it must actually differ from the carry after
+        // it — or this proves nothing about which one a repair reads.
+        {
+            let cache = incremental.transcript_wrap.borrow();
+            let entry = cache.as_ref().expect("cache populated by the sync render");
+            assert!(
+                entry.tail_entry_carry.is_some() && entry.carry.is_some(),
+                "the float must still be open both entering AND after the prompt line"
+            );
+            let last = entry.rows.last().expect("rows");
+            assert!(last.float.is_some(), "the prompt must be riding the float's strip, not a plain row");
+        }
+
+        incremental.push_transcript_internal("an assist", TranscriptKind::Assist);
+        let plan = {
+            let cache = incremental.transcript_wrap.borrow();
+            let key = &cache.as_ref().expect("cache").key;
+            key.plan(&incremental, key.shape.width)
+        };
+        assert!(matches!(plan, WrapPlan::Repair { .. }), "expected a Repair, got {plan:?}");
+        wrap_render(&incremental, area);
+
+        let mut rebuilt = script_state();
+        build(&mut rebuilt);
+        rebuilt.push_transcript_internal("an assist", TranscriptKind::Assist);
+        wrap_render(&rebuilt, area);
+
+        assert_eq!(
+            wrap_product(&incremental),
+            wrap_product(&rebuilt),
+            "rows diverged between repair and rebuild with an open float entering the prompt"
+        );
+        assert_eq!(wrap_bookkeeping(&incremental), wrap_bookkeeping(&rebuilt));
+    }
+
+    /// The guard `a_tail_insert_repair_lands_on_exactly_what_a_rebuild_would_have_produced`
+    /// leaves untested because no real caller can reach it: an `Inserted` run
+    /// whose earliest `at` sits BEFORE this cache's own synced tail — the
+    /// "several lines up" case CLAUDE.md's own review named — must never be
+    /// offered a `Repair`, because the cache cannot prove content before its
+    /// own tail is untouched. Built the way
+    /// `an_in_place_edit_of_the_last_line_is_caught_even_when_it_is_misclassified`
+    /// (`render::wrap_cache`'s own test) builds its misclassification: reach
+    /// past the mutator and set the state directly, since no mutator in this
+    /// codebase produces the shape being guarded against.
+    ///
+    /// Asserted as "not a `Repair`" rather than "a `Rebuild`": with
+    /// `transcript_edits` left untouched (as it genuinely would be by a plain
+    /// append), the honest answer once a repair is correctly declined is
+    /// `Append` — nothing else claims the cache's own prefix moved. What this
+    /// case exists to catch is the min-at guard silently offering a `Repair`
+    /// it cannot back up, not which of the other two safe answers follows.
+    #[test]
+    fn wrap_key_plan_never_offers_a_repair_when_the_insert_predates_the_cached_tail() {
+        use crate::render::wrap_cache::{WrapKey, WrapPlan};
+
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.push_transcript_kind("first\nsecond\nthird", TranscriptKind::Story);
+        let key = WrapKey::of(&state, 40);
+        assert_eq!(key.plan(&state, 40), WrapPlan::Reuse, "nothing moved yet");
+
+        // A plain append (so `transcript_edits`/the tail fingerprint stay
+        // exactly what a legitimate append leaves them), plus a FABRICATED
+        // run claiming an insert at raw index 0 — well before
+        // `key.content.len - 1 == 2` — which `push_transcript_internal` can
+        // never produce (it always targets exactly the cache's own tail).
+        state.push_transcript_kind("fourth", TranscriptKind::Story);
+        state.transcript_tail_insert.set(Some(crate::state::TailInsertRun { since_edits: state.transcript_edits, min_at: 0 }));
+
+        assert!(
+            !matches!(key.plan(&state, 40), WrapPlan::Repair { .. }),
+            "an insert claiming a position before the cached tail must never be repaired through: {:?}",
+            key.plan(&state, 40),
         );
     }
 

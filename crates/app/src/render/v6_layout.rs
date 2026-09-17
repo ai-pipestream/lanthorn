@@ -29,11 +29,11 @@ pub(crate) fn packed_explicit(packed: u32) -> bool {
 /// ANSI palette, which a user theme may remap arbitrarily (SQ-0506). Greys
 /// (10..=12) still go through `resolve_zcolour`/`grey_rgb`, which already carry
 /// their own fixed RGB.
-fn standard_pixel_rgb(n: u8) -> Option<Rgba<u8>> {
+fn standard_pixel_rgb(palette: zvm::screen::Palette, n: u8) -> Option<Rgba<u8>> {
     // SQ-0532/A-F5: the table itself now lives in `colors::STANDARD_COLOUR_RGB15`
     // so the terminal cell palette resolves Standard colours to the SAME §8.3.1
     // RGBs this pixel path uses (they used to disagree — e.g. white).
-    let (r, g, b) = crate::colors::standard_colour_rgb(n)?;
+    let (r, g, b) = crate::colors::standard_colour_rgb(palette, n)?;
     Some(Rgba([r, g, b, 255]))
 }
 
@@ -50,7 +50,7 @@ fn standard_pixel_rgb(n: u8) -> Option<Rgba<u8>> {
 /// This is what lets `GameSession` rasterize `erase_window` fills into a bounded
 /// surface as they arrive, instead of hoarding an unbounded list of rects to
 /// resolve later against a theme it cannot see.
-pub(crate) fn explicit_pixel_rgba(packed: u32) -> Option<Rgba<u8>> {
+pub(crate) fn explicit_pixel_rgba(palette: zvm::screen::Palette, packed: u32) -> Option<Rgba<u8>> {
     match packed >> 24 {
         3 => {
             let v = packed & 0x00FF_FFFF;
@@ -62,7 +62,7 @@ pub(crate) fn explicit_pixel_rgba(packed: u32) -> Option<Rgba<u8>> {
             // 5 bits per channel → 8, replicating the high bits (0x1F → 0xFF).
             Some(Rgba([(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), 255]))
         }
-        1 => standard_pixel_rgb((packed & 0xFF) as u8),
+        1 => standard_pixel_rgb(palette, (packed & 0xFF) as u8),
         _ => None,
     }
 }
@@ -86,7 +86,7 @@ pub(crate) fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorSche
     // Pixel path: Standard 2..=9 resolve to their ZMSD §8.3.1 true-colour RGB,
     // bypassing the theme ANSI palette so white is real white, not VGA grey.
     if let zvm::screen::ZColour::Standard(n) = z {
-        if let Some(rgb) = standard_pixel_rgb(n) {
+        if let Some(rgb) = standard_pixel_rgb(colors.machine_palette, n) {
             return rgb;
         }
     }
@@ -184,9 +184,9 @@ pub(crate) fn blit_clipped_src(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy
 /// would disagree the moment a profile declares its own. The cases keep them
 /// because a test that builds a `10 * FONT_W` canvas is describing its own
 /// fixture, not asserting the machine's cell.
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 pub(crate) const FONT_W: u32 = 8;
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 pub(crate) const FONT_H: u32 = 16;
 
 /// A window-0 inline picture floated beside the story text: anchored to a
@@ -2043,6 +2043,7 @@ fn buffer_line_rects(it: &PositionedWindow, tf: &crate::native_font::TextFace) -
 
 /// A uniform (aspect-preserving) letterbox scale from native game pixels to
 /// pane device pixels, plus the device-pixel offset of the letterboxed area.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Scale {
     pub s: f32,
     pub off_x: u32,
@@ -2245,17 +2246,23 @@ impl RasterFrame {
         RasterFrame { native, canvas_h: u32::from(native.1), lock: None }
     }
 
-    /// The extension this pane can afford: the largest WHOLE magnification that
-    /// fits the game's screen in `pane_dev` device pixels, and as many whole text
-    /// rows of surplus height as that scale leaves under it.
+    /// The extension this pane can afford: the largest magnification that fits
+    /// the game's screen in `pane_dev` device pixels — whole, or fractional to
+    /// match what `Raster`/`Hybrid` draw at the same pane, per `lock` — and as
+    /// many whole text rows of surplus height as that scale leaves under it.
     ///
-    /// **Whole device pixels per NATIVE pixel**, which is stricter than
-    /// `v6_pixel_lock`'s whole-device-per-ART rung wherever `art_scale` is 2 — and
-    /// stricter is what this mode needs, because its text is the thing being sized:
-    /// raster text is drawn on the machine's cell in native pixels, so a
-    /// half-native rung gives a 7-wide Macintosh glyph 10.5 device pixels and its
-    /// strokes alternate one and two (SQ-1012, SQ-1024). A whole native rung cannot
-    /// produce that on any cell.
+    /// `lock` is `v6_pixel_lock`, threaded through rather than defaulted: SQ-1239
+    /// found Extended always taking the whole-magnification branch below,
+    /// ignoring the toggle raster and hybrid both obey (`FrameGeometry::fitted_scale`).
+    /// **Whole device pixels per NATIVE pixel** when `lock` is set, which is
+    /// stricter than `v6_pixel_lock`'s whole-device-per-ART rung wherever
+    /// `art_scale` is 2 — and stricter is what a locked extension needs, because
+    /// its text is the thing being sized: raster text is drawn on the machine's
+    /// cell in native pixels, so a half-native rung gives a 7-wide Macintosh glyph
+    /// 10.5 device pixels and its strokes alternate one and two (SQ-1012, SQ-1024).
+    /// A whole native rung cannot produce that on any cell. With `lock` clear the
+    /// player has accepted that risk already in raster/hybrid, so Extended takes
+    /// the same fractional scale rather than pretending the lock is always on.
     ///
     /// The surplus is measured in whole `cell.h` rows so the extension is a whole
     /// number of text rows of the game's own face — the raster prose box already
@@ -2270,6 +2277,7 @@ impl RasterFrame {
         pane_dev: (u32, u32),
         cell: zvm::screen::V6Cell,
         cap: Option<f64>,
+        lock: bool,
     ) -> RasterFrame {
         let plain = RasterFrame::native(native);
         if native.0 == 0 || native.1 == 0 || cell.h() == 0 {
@@ -2277,7 +2285,8 @@ impl RasterFrame {
         }
         let fit = (f64::from(pane_dev.0) / f64::from(native.0))
             .min(f64::from(pane_dev.1) / f64::from(native.1));
-        let s = cap.map_or(fit, |c| fit.min(c)).floor();
+        let capped = cap.map_or(fit, |c| fit.min(c));
+        let s = if lock { capped.floor() } else { capped };
         // NaN is impossible above (both divisors are guarded non-zero) but is stated
         // rather than assumed, because "not at least 1" and "less than 1" differ on it
         // and only one of them is safe to build a canvas from.
@@ -2731,8 +2740,8 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
         // that was never wrapped still cannot run past its box — without discarding
         // glyphs the wrap correctly fitted.
 
-        // While a reveal is lit, where on THIS row the story printed each of the
-        // words the parser would accept (SQ-1138). Char ranges into `line`, which
+        // While a reveal is lit, where on THIS row the story printed each of its
+        // own things (SQ-1138, SQ-1207). Char ranges into `line`, which
         // is exactly what `line.chars().enumerate()` below counts in — the same
         // `lit_spans` the cell path calls on the same wrapped row, so the two
         // surfaces cannot disagree about which words light.
@@ -2797,7 +2806,7 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "t-render"))]
 mod tests {
 
     // ── the text layer the ring claims (SQ-0902 → SQ-0903) ───────────────────
@@ -2859,6 +2868,7 @@ mod tests {
             x: 0, y: 0, w: 74, h: 2, x_px: ART_END as u16, y_px: 0, w_px: 592, h_px: 32,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None,
                 cols: 74, rows: 2, cells: vec![], active_rows: 2, cursor: (0, 0),
                 cursor_active: false, border: BorderPref::Unspecified,
@@ -2913,6 +2923,7 @@ mod tests {
             x: 0, y: 0, w: 12, h: 2, x_px: 0, y_px: 0, w_px: 640, h_px: 32,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None,
                 cols: 12, rows: 2, active_rows: 2, cursor: (0, 0),
                 cursor_active: false, border: BorderPref::Unspecified,
@@ -2983,6 +2994,7 @@ mod tests {
             x: 0, y: 0, w: 80, h: 1, x_px: 0, y_px: 0, w_px: 640, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None,
                 cols: 80, rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0),
                 cursor_active: false, border: BorderPref::Unspecified,
@@ -3324,6 +3336,7 @@ mod tests {
         PositionedWindow {
             x: 0, y: 0, w: 1, h: 1, x_px, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None,
                 cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
@@ -3610,6 +3623,7 @@ mod tests {
             x: 0, y: 0, w: 1, h: 1, x_px: x, y_px: y, w_px: w, h_px: h,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None, cols: 1, rows: 1, cells: vec![], active_rows: 1,
                 cursor: (0, 0), cursor_active: false, border: BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false, px_texts,
@@ -4020,6 +4034,7 @@ mod tests {
         let win = PositionedWindow {
             x: 0, y: 0, w: 3, h: 2, x_px: 10, y_px: 4, w_px: 24, h_px: 32, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None,
                 cols: 3, rows: 2, cells, active_rows: 2, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
@@ -4051,6 +4066,7 @@ mod tests {
         PositionedWindow {
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None,
                 cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
@@ -4119,6 +4135,7 @@ mod tests {
             let win = PositionedWindow {
                 x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 16, left_margin: 0, right_margin: 0,
                 node: WinNode::Grid(GridWindow {
+                    win: 0,
                     fill: None,
                     cols: 1, rows: 1, cells: cells(style), active_rows: 1, cursor: (0, 0), cursor_active: false,
                     border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
@@ -4315,6 +4332,7 @@ mod tests {
         PositionedWindow {
             x: 0, y: 0, w: (w_px / 8).max(1), h: 1, x_px: 0, y_px: 0, w_px, h_px: 16, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None,
                 cols: (w_px / 8).max(1), rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false, px_texts: runs,
@@ -4370,6 +4388,7 @@ mod tests {
             x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None,
                 cols: 80, rows: 25, cells: vec![], active_rows: 25, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
@@ -4423,6 +4442,7 @@ mod tests {
             x: 0, y: 0, w: (w / 8).max(1), h: (h / 16).max(1), x_px: 0, y_px: 0, w_px: w, h_px: h,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                win: 0,
                 fill: None,
                 cols: (w / 8).max(1), rows: (h / 16).max(1), cells: vec![], active_rows: 1,
                 cursor: (0, 0), cursor_active: false, border: BorderPref::Unspecified,

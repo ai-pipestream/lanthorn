@@ -1,13 +1,13 @@
-// Glulx execution engine — GLULX_NOTES.md §4 (stack, call frames, calling
-// convention). Instruction decode/dispatch and the run loop are layered on in
-// later tasks.
-//
-// The stack is a single byte-addressed buffer (`stack`) sized to the header's
-// stack size, with a stack pointer `sp` (bytes used) and a frame pointer `fp`.
-// A call frame is laid out exactly as the spec's diagram: FrameLen, LocalsPos,
-// the locals-format list, the locals (each at natural alignment), then the
-// value-stack region. A four-word "call stub" sits just below each non-start
-// frame so a return can restore the caller.
+//! Glulx execution engine — GLULX_NOTES.md §4 (stack, call frames, calling
+//! convention). Instruction decode/dispatch and the run loop are layered on in
+//! later tasks.
+//!
+//! The stack is a single byte-addressed buffer (`stack`) sized to the header's
+//! stack size, with a stack pointer `sp` (bytes used) and a frame pointer `fp`.
+//! A call frame is laid out exactly as the spec's diagram: FrameLen, LocalsPos,
+//! the locals-format list, the locals (each at natural alignment), then the
+//! value-stack region. A four-word "call stub" sits just below each non-start
+//! frame so a return can restore the caller.
 
 use crate::error::GError;
 use crate::glk::{self, GlkBackend, GlkEvent, GlkStyle, Model, StreamKind, WinType};
@@ -20,11 +20,20 @@ pub(crate) type R<T> = Result<T, String>;
 
 /// The outcome of a single [`Machine::step`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StepResult {
     /// Execution should continue with the next instruction.
     Continue,
-    /// Execution has ended (`quit`, an outer return, or a recorded fault).
+    /// Execution has ended cleanly (`quit`/`glk_exit`, or a return from the
+    /// start frame) — the story is over, not broken.
     Quit,
+    /// A runtime fault halted the machine (SQ-1395): a bad Glk argument, an
+    /// out-of-range memory access, or a host-issued [`Machine::abort_with_fault`]
+    /// (a runaway-turn cutoff, which is fault-shaped by design). Distinct from
+    /// [`StepResult::Quit`] so an embedder who never reads
+    /// [`Machine::diagnostics`] can still tell a crashed story from a clean
+    /// exit. The host reads [`Machine::take_fault_trace`] for detail.
+    Fault,
     /// A `glk_select` is pending a **line**-input event on window `win`. The host
     /// supplies the typed line via [`Machine::supply_line`], then resumes.
     NeedLine {
@@ -88,6 +97,42 @@ pub(crate) enum Dest {
     Local(u32),
 }
 
+/// The widest operand shape any Glulx opcode decodes: the search family
+/// (`linearsearch`/`binarysearch` at 7 loads + 1 store) tops the ISA, and every
+/// `read_operands` call site names its counts statically — so 8 is a bound, not
+/// a guess. Decoding runs once per instruction; giving it a fixed ceiling is
+/// what lets [`Operands`] live on the stack instead of the heap (SQ-1208).
+const MAX_OPERANDS: usize = 8;
+
+/// A decoded operand list with a fixed capacity of [`MAX_OPERANDS`] — the
+/// zero-allocation replacement for the per-instruction `Vec`s that put the
+/// allocator at half of VM time (SQ-1208). Derefs to a slice, so call sites
+/// index and subslice it exactly as they did the `Vec`.
+pub(crate) struct Operands<T: Copy> {
+    buf: [T; MAX_OPERANDS],
+    len: usize,
+}
+
+impl<T: Copy> Operands<T> {
+    fn new(fill: T) -> Self {
+        Self { buf: [fill; MAX_OPERANDS], len: 0 }
+    }
+
+    /// Append one operand. Indexing panics past [`MAX_OPERANDS`] — that is a
+    /// new opcode outgrowing the bound above, which must be raised with it.
+    fn push(&mut self, v: T) {
+        self.buf[self.len] = v;
+        self.len += 1;
+    }
+}
+
+impl<T: Copy> std::ops::Deref for Operands<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.buf[..self.len]
+    }
+}
+
 /// Which case fold a `glk_buffer_to_*_case_uni` selector performs.
 #[derive(Clone, Copy)]
 enum CaseOp {
@@ -121,6 +166,15 @@ struct PendingInput {
     line: bool,
     /// Whether the request was the Unicode (`_uni`) variant.
     unicode: bool,
+    /// Where this `glk_select`'s S1 (always 0; `glk_select` has no return
+    /// value) is stored — filled in by `op_glk` right after this suspends,
+    /// mirroring `PendingFileref::dest`. Deferred, not stored immediately: per
+    /// Glulx spec §2.18, "Stack output references are pushed after the Glk
+    /// call, but before the S1 result value is stored" (SQ-1416 item 3) — the
+    /// four event words (pushed by `write_event` on resume, possibly to the
+    /// stack if `event_addr` is `-1`) must land BEFORE S1, and resume happens
+    /// long after this opcode's own `op_glk` frame has returned.
+    dest: Dest,
 }
 
 /// A suspended `glk_select` awaiting a host-supplied **non-input** event: the
@@ -136,6 +190,9 @@ struct PendingEvent {
     mouse: bool,
     /// Whether any window had a pending hyperlink request at suspend time.
     hyperlink: bool,
+    /// Where this `glk_select`'s S1 is stored on resume (see
+    /// [`PendingInput::dest`]; SQ-1416 item 3).
+    dest: Dest,
 }
 
 /// A suspended game-initiated `@save`/`@restore` awaiting the host's file I/O.
@@ -171,9 +228,10 @@ struct PendingSaveLoad {
 }
 
 /// What the host needs to service a suspended `@save`/`@restore`
-/// ([`StepResult::SaveRequest`]/[`RestoreRequest`]): the game's target file
+/// ([`StepResult::SaveRequest`]/[`StepResult::RestoreRequest`]): the game's target file
 /// `name` and whether it is the player's prompted SAVE/RESTORE verb.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct SaveLoadRequest {
     /// The (sanitized) fixed file name for a game-managed save (empty if unknown).
     pub name: String,
@@ -220,26 +278,28 @@ pub struct Machine {
     pub(crate) iosys_mode: u32,
     /// Current I/O system rock.
     pub(crate) iosys_rock: u32,
-    /// Recursion depth of filter-iosys (mode 1) callbacks, guarding against a
-    /// filter function whose own output recurses back into `emit`.
-    filter_depth: u32,
-    /// A fault raised inside a filter-iosys callback, latched because `emit`
-    /// has no error channel (printing is fire-and-forget for the opcodes). The
-    /// aborted callee's frame was abandoned mid-flight, so execution must not
-    /// continue: `step`/`run_call_to_return` drain this and surface it as the
-    /// current instruction's fault (SQ-0625).
-    pending_fault: Option<String>,
     /// Recursion depth of echo-stream forwarding in `glk_stream_put`, bounding a
     /// pathological echo loop (windows echoing to each other's streams, which the
     /// Glk spec calls illegal) so output can never infinite-loop.
     echo_depth: u32,
-    /// When `Some`, `emit` diverts all output into this buffer instead of routing
-    /// it through the I/O system. Used to decode a compressed (E1) string object
-    /// handed to `glk_put_string` into a `String` (capturing embedded string- and
-    /// function-node output too) so it can then be written straight to the Glk
-    /// stream, bypassing the iosys — a direct Glk call must ignore it. Transient
-    /// (set and cleared within one `decode_glk_string`); never live across a save.
+    /// When `Some`, the printing engine diverts all output into this buffer
+    /// instead of routing it through the I/O system. Used to decode a compressed
+    /// (E1) string object handed to `glk_put_string` into a `String` (capturing
+    /// embedded string- and function-node output too) so it can then be written
+    /// straight to the Glk stream, bypassing the iosys — a direct Glk call must
+    /// ignore it. Transient (set and cleared within one `decode_glk_string`);
+    /// never live across a save.
+    ///
+    /// This is the ONE place printing still nests natively (see
+    /// [`Machine::stream_string`]): a Glk dispatch call has to hand back a
+    /// finished `String`, so it cannot suspend into the interpreter loop the way
+    /// the stream opcodes do. Bounded by `capture_depth` below.
     emit_capture: Option<String>,
+    /// Native recursion depth of the capture-mode decoder (`emit_capture`), so a
+    /// cyclic string table or a function node that re-prints its own string
+    /// faults instead of overflowing the Rust stack. Transient, like
+    /// `emit_capture`; never live across a save.
+    capture_depth: u32,
     /// Current string-decoding-table address (0 = none). Initialized from the
     /// header's decode_table; overridable by `setstringtbl`.
     pub(crate) cur_stringtbl: u32,
@@ -268,16 +328,18 @@ pub struct Machine {
     pending_fileref: Option<PendingFileref>,
     /// The display backend the Glk model drives.
     pub(crate) backend: Box<dyn GlkBackend>,
-    /// Recorded runtime faults / deferred-feature notices.
-    pub diagnostics: Vec<String>,
+    /// Recorded runtime faults / deferred-feature notices. Read with
+    /// [`Machine::diagnostics`], drain with [`Machine::take_diagnostics`].
+    diagnostics: Vec<String>,
     /// When true, every structural Glk call (windows, styles, streams, colours,
     /// garglk extensions — but not the high-volume put/get text I/O) is recorded
     /// to `screen_trace`. A debug aid for seeing exactly what a story instructs
-    /// the interpreter to do.
-    pub trace_screen: bool,
+    /// the interpreter to do. Set with [`Machine::set_trace_screen`].
+    trace_screen: bool,
     /// Structural Glk/garglk call lines recorded while `trace_screen` is set,
-    /// drained by the host each turn. Separate from `diagnostics`.
-    pub screen_trace: Vec<String>,
+    /// drained by the host each turn ([`Machine::take_screen_trace`]). Separate
+    /// from `diagnostics`.
+    screen_trace: Vec<String>,
     /// Pending coalesced story-text run for the `screen` trace: `(window, window
     /// type, text)`. Flushed as a `win N [buf|grid] <- "…"` line before the next
     /// structural call, so the trace shows WHERE story text is printed (which
@@ -297,6 +359,13 @@ pub struct Machine {
     line_seed: Option<String>,
     /// Set once execution has ended (outer return or quit/fault).
     pub(crate) halted: bool,
+    /// Set alongside `halted` when the halt was a FAULT (a real runtime error,
+    /// or [`Machine::abort_with_fault`]) rather than a clean `quit`/`glk_exit`/
+    /// outer return — so `step()` can keep answering [`StepResult::Fault`]
+    /// on every call after the one that recorded it, even once the host has
+    /// drained `fault_trace` via [`Machine::take_fault_trace`] (SQ-1395).
+    /// Cleared by `@restart` alongside `halted`.
+    pub(crate) faulted: bool,
     /// Protected RAM range `(addr, len)` preserved across restore/restoreundo;
     /// `len == 0` means no protection (set by the `protect` opcode).
     protect: (u32, u32),
@@ -309,6 +378,13 @@ pub struct Machine {
     accel_params: std::collections::HashMap<u32, u32>,
     /// Whether accelerated-function interception is active (default true).
     pub(crate) acceleration: bool,
+    /// What bytecode fingerprinting concluded about this story's Inform 6
+    /// veneer (`crate::veneer`), for the hosts' diagnostics.
+    veneer: crate::veneer::VeneerReport,
+    /// Whether the story has run `@accelfunc`/`@accelparam` for itself. Games
+    /// built by Inform 7 6E59 and later do; older ones never do, which is what
+    /// fingerprinting is for.
+    declared_accel: bool,
     /// Whether Glk graphics windows are enabled (default false; hosts opt in).
     pub(crate) graphics_enabled: bool,
     /// Whether Glk sound channels are enabled (default false; hosts opt in).
@@ -325,28 +401,37 @@ pub struct Machine {
     /// PC at the start of the instruction currently executing (captured before
     /// operand reads); used as the fault site if this instruction faults.
     instr_start_pc: u32,
-    /// Stack trace captured when a fault converted to Quit. Host drains it.
-    pub fault_trace: Option<crate::trace::StackTrace>,
+    /// Stack trace captured when a fault converted to Quit. The host drains it
+    /// with [`Machine::take_fault_trace`].
+    fault_trace: Option<crate::trace::StackTrace>,
 
     // Cached layout of the current frame (recomputed whenever `fp` changes).
     cur_frame_len: u32,
     cur_localspos: u32,
     /// `(offset_within_locals, size_bytes)` for each local of the current frame.
     cur_locals: Vec<(u32, u8)>,
+    /// Reused argument buffer for `call`/`tailcall`'s popped args (argc is
+    /// dynamic, so this can't be a fixed array like [`Operands`]). Taken with
+    /// `mem::take` for the duration of one call setup and put back after, so a
+    /// re-entrant user would merely allocate afresh, never alias (SQ-1208).
+    call_args_scratch: Vec<u32>,
 
     /// When true, `step_once` records each instruction's start PC into
     /// `executed_pcs`/`ever_executed` (the debug inspector's execution coverage).
     /// Default false; guarded so it is a single predictable branch — and zero
-    /// set-touching / allocation — on the hot path when off (SQ-0465).
-    pub trace_exec: bool,
+    /// set-touching / allocation — on the hot path when off (SQ-0465). Set with
+    /// [`Machine::set_trace_exec`].
+    trace_exec: bool,
     /// Instruction-start PCs executed since the host last cleared them (per-turn
-    /// coverage). The host drains/clears this each turn via `clear_executed_pcs`.
-    pub executed_pcs: std::collections::HashSet<u32>,
+    /// coverage). Read with [`Machine::executed_pcs`]; the host clears it each
+    /// turn via [`Machine::clear_executed_pcs`].
+    executed_pcs: std::collections::HashSet<u32>,
     /// Cumulative instruction-start PCs ever executed while tracing was on —
     /// NEVER cleared per turn. Feeds the disassembler as dynamic discovery
     /// (executed bytes are ground-truth code) and can be pre-seeded from
-    /// host-persisted coverage via [`Machine::seed_ever_executed`].
-    pub ever_executed: std::collections::HashSet<u32>,
+    /// host-persisted coverage via [`Machine::seed_ever_executed`]. Read with
+    /// [`Machine::ever_executed`].
+    ever_executed: std::collections::HashSet<u32>,
 }
 
 fn align_up(v: u32, to: u32) -> u32 {
@@ -491,6 +576,7 @@ pub(crate) fn glk_selector_name(sel: u32) -> String {
         0x00E9 => "glk_window_erase_rect",
         0x00EA => "glk_window_fill_rect",
         0x00EB => "glk_window_set_background_color",
+        0x00EC => "glk_image_draw_scaled_ext",
         0x00F0 => "glk_schannel_iterate",
         0x00F1 => "glk_schannel_get_rock",
         0x00F2 => "glk_schannel_create",
@@ -623,7 +709,7 @@ fn glk_trace_ret(sel: u32, ret: u32) -> Option<String> {
         0x0067 => (if ret != 0 { "exists" } else { "absent" }).to_string(), // fileref_does_file_exist
         0x0004 | 0x0005 => ret.to_string(),                                 // gestalt value
         0x00F2 | 0x00F4 => format!("channel {ret}"),                        // schannel_create[_ext]
-        0x00E1 | 0x00E2 => (if ret != 0 { "drawn" } else { "no" }).to_string(), // image_draw[_scaled]
+        0x00E1 | 0x00E2 | 0x00EC => (if ret != 0 { "drawn" } else { "no" }).to_string(), // image_draw[_scaled[_ext]]
         _ => return None,
     };
     Some(s)
@@ -754,7 +840,7 @@ impl Machine {
     /// wants a fresh game per launch calls [`Machine::set_rng_seed`] before the
     /// boot drive — lanthorn seeds from the `random_seed` config key, or from
     /// entropy when that key is unset (SQ-0811). Also the nonzero fallback for
-    /// [`Machine::entropy_seed`] and for a state that reached 0.
+    /// `Machine::entropy_seed` and for a state that reached 0.
     pub const DEFAULT_SEED: u32 = 0x2BAD_C0DE;
 
     /// Build a machine over `mem`, entering the start function (no arguments).
@@ -771,10 +857,9 @@ impl Machine {
             pc: 0,
             iosys_mode: 0,
             iosys_rock: 0,
-            filter_depth: 0,
-            pending_fault: None,
             echo_depth: 0,
             emit_capture: None,
+            capture_depth: 0,
             cur_stringtbl: decode_table,
             heap_start: 0,
             heap_blocks: Vec::new(),
@@ -790,11 +875,14 @@ impl Machine {
             text_run: None,
             line_seed: None,
             halted: false,
+            faulted: false,
             protect: (0, 0),
             undo_stack: Vec::new(),
             accel_funcs: std::collections::HashMap::new(),
             accel_params: std::collections::HashMap::new(),
             acceleration: true,
+            veneer: crate::veneer::VeneerReport::default(),
+            declared_accel: false,
             graphics_enabled: false,
             sound_enabled: false,
             timer_interval_ms: None,
@@ -805,14 +893,22 @@ impl Machine {
             cur_frame_len: 0,
             cur_localspos: 0,
             cur_locals: Vec::new(),
+            call_args_scratch: Vec::new(),
             trace_exec: false,
             executed_pcs: std::collections::HashSet::new(),
             ever_executed: std::collections::HashSet::new(),
         };
+        // Fingerprint the Inform 6 veneer before the first opcode runs, so a
+        // story that never calls `@accelfunc` is accelerated from its very
+        // first turn (SQ-1209). A story that DOES call it overwrites these
+        // assignments with its own, which name the same routines.
+        m.install_fingerprinted_accel();
         // Enter the start function directly (no call stub beneath it; its fp is 0).
         if let Err(msg) = m.build_frame_and_enter(start, &[]) {
+            m.fault_trace = Some(m.build_trace(msg.clone()));
             m.diagnostics.push(msg);
             m.halted = true;
+            m.faulted = true;
         }
         m
     }
@@ -860,22 +956,28 @@ impl Machine {
     }
 
     /// Decode `n_load` load values then `n_store` store destinations from the
-    /// packed mode nibbles + operand data following `pc`.
-    pub(crate) fn read_operands(&mut self, n_load: usize, n_store: usize) -> R<(Vec<u32>, Vec<Dest>)> {
+    /// packed mode nibbles + operand data following `pc`. Everything decoded
+    /// lives on the stack — this runs once per instruction, and heap-allocating
+    /// here made the allocator the single largest line in a VM profile
+    /// (SQ-1208).
+    pub(crate) fn read_operands(&mut self, n_load: usize, n_store: usize) -> R<(Operands<u32>, Operands<Dest>)> {
         let total = n_load + n_store;
+        debug_assert!(total <= MAX_OPERANDS, "operand count {total} outgrew MAX_OPERANDS");
         let mode_bytes = total.div_ceil(2);
         // Slurp the mode nibbles first; operand data follows them, in order.
-        let mut modes = Vec::with_capacity(total);
+        // (+1: an odd total still unpacks its final byte's padding high nibble,
+        // which `take(total)` below then ignores, exactly as the spec allows.)
+        let mut modes = [0u8; MAX_OPERANDS + 1];
         let start = self.pc;
         for i in 0..mode_bytes {
             let byte = self.m8(start + i as u32)?;
-            modes.push((byte & 0x0F) as u8);
-            modes.push((byte >> 4) as u8);
+            modes[2 * i] = (byte & 0x0F) as u8;
+            modes[2 * i + 1] = (byte >> 4) as u8;
         }
         self.pc += mode_bytes as u32;
 
-        let mut loads = Vec::with_capacity(n_load);
-        let mut stores = Vec::with_capacity(n_store);
+        let mut loads = Operands::new(0u32);
+        let mut stores = Operands::new(Dest::Discard);
         for (i, &mode) in modes.iter().enumerate().take(total) {
             if i < n_load {
                 loads.push(self.resolve_load(mode)?);
@@ -985,17 +1087,104 @@ impl Machine {
         self.execute(opcode)
     }
 
-    /// Clear the per-turn `executed_pcs` set (call at the start/end of each turn).
-    /// Leaves the cumulative `ever_executed` intact.
+    /// A host debug affordance (SQ-1402), not part of running a story: clears
+    /// the per-turn `executed_pcs` set (call at the start/end of each turn) for
+    /// a coverage view like lanthorn's debug panel, which shades disassembly by
+    /// what has executed this turn vs. ever. Leaves the cumulative
+    /// `ever_executed` intact. A host that never enables [`Self::set_trace_exec`]
+    /// never needs this.
     pub fn clear_executed_pcs(&mut self) {
         self.executed_pcs.clear();
     }
 
-    /// Pre-seed the cumulative `ever_executed` set from host-persisted coverage
-    /// (the debug PC-set sidecar) so prior runs' disassembly tiers light up
-    /// immediately. Independent of `trace_exec`.
+    /// A host debug affordance (SQ-1402), not part of running a story:
+    /// pre-seeds the cumulative `ever_executed` set from host-persisted
+    /// coverage (a debug PC-set sidecar a host may keep between sessions) so a
+    /// coverage view like lanthorn's debug panel has prior runs' disassembly
+    /// tiers lit up immediately, before this session has executed anything of
+    /// its own. Independent of `trace_exec` — seeding the set does not turn
+    /// tracing on.
     pub fn seed_ever_executed(&mut self, pcs: &std::collections::HashSet<u32>) {
         self.ever_executed.extend(pcs.iter().copied());
+    }
+
+    // ── host-facing diagnostics and traces (SQ-1396) ────────────────────────
+    //
+    // These were `pub` fields, which made every one of them part of the crate's
+    // promise in a shape no host could use safely: a queue whose only drain was
+    // `std::mem::take` on a bare `Vec`, with nothing to enumerate and nothing to
+    // call. They are spelled exactly as `zvm`'s equivalents, so a host driving
+    // both engines learns one vocabulary.
+
+    /// Whether instruction-start PCs are being recorded (a host debug
+    /// affordance — the debug inspector's execution coverage, see
+    /// [`Self::set_trace_exec`]).
+    pub fn trace_exec(&self) -> bool {
+        self.trace_exec
+    }
+
+    /// A host debug affordance (SQ-1402), not part of running a story: record
+    /// each instruction's start PC into [`Self::executed_pcs`] and
+    /// [`Self::ever_executed`] for a coverage view like lanthorn's debug
+    /// panel. Off by default, and every real host should leave it off: on, it
+    /// is a single predictable branch on the hot path (SQ-0465), paid on every
+    /// instruction the story runs.
+    pub fn set_trace_exec(&mut self, on: bool) {
+        self.trace_exec = on;
+    }
+
+    /// Instruction-start PCs executed since the host last cleared them.
+    pub fn executed_pcs(&self) -> &std::collections::HashSet<u32> {
+        &self.executed_pcs
+    }
+
+    /// Cumulative instruction-start PCs ever executed while tracing was on —
+    /// never cleared per turn, and pre-seedable via [`Self::seed_ever_executed`].
+    pub fn ever_executed(&self) -> &std::collections::HashSet<u32> {
+        &self.ever_executed
+    }
+
+    /// Whether structural Glk calls are being recorded to the screen trace.
+    pub fn trace_screen(&self) -> bool {
+        self.trace_screen
+    }
+
+    /// Record every structural Glk call (windows, styles, streams, colours,
+    /// garglk extensions — but not the high-volume put/get text I/O) into
+    /// [`Self::screen_trace`].
+    pub fn set_trace_screen(&mut self, on: bool) {
+        self.trace_screen = on;
+    }
+
+    /// Structural Glk/garglk call lines recorded since the last drain, without
+    /// taking them.
+    pub fn screen_trace(&self) -> &[String] {
+        &self.screen_trace
+    }
+
+    /// Take and clear the structural Glk/garglk call lines recorded since the
+    /// host last drained them.
+    pub fn take_screen_trace(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.screen_trace)
+    }
+
+    /// Host-facing diagnostic lines — runtime faults and deferred-feature
+    /// notices — recorded since the last drain, without taking them.
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
+    }
+
+    /// Take and clear the host-facing diagnostic lines recorded since the host
+    /// last drained them.
+    pub fn take_diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.diagnostics)
+    }
+
+    /// Push one line onto the diagnostics log, as the interpreter itself would.
+    /// For a host that drains the log around a speculative run and then puts
+    /// back what it took (`app`'s naming probe does exactly this).
+    pub fn push_diagnostic(&mut self, line: String) {
+        self.diagnostics.push(line);
     }
 
     /// Dispatch a decoded opcode to its handler.
@@ -1014,9 +1203,22 @@ impl Machine {
                 self.store(s[1], rock)
             }
             0x149 => {
+                // setiosys L1(mode) L2(rock). Spec §2.11: "If the system L1
+                // is not supported by the interpreter, it will default to
+                // the null system (0)." glulxe's own `stream_set_iosys`
+                // (string.c) additionally zeroes the rock for modes 0 (null)
+                // and 2 (Glk) — only mode 1 (filter) keeps the caller's rock,
+                // since there it names the filter routine. SQ-1415 audit
+                // item 5.
                 let (l, _) = self.read_operands(2, 0)?;
-                self.iosys_mode = l[0];
-                self.iosys_rock = l[1];
+                let (mode, rock) = match l[0] {
+                    0 => (0, 0),
+                    1 => (1, l[1]),
+                    2 => (2, 0),
+                    _ => (0, 0), // unsupported mode → null, rock 0
+                };
+                self.iosys_mode = mode;
+                self.iosys_rock = rock;
                 Ok(())
             }
             // Stream output.
@@ -1118,6 +1320,7 @@ impl Machine {
             0x180 => {
                 let (l, _) = self.read_operands(2, 0)?;
                 let (funcnum, addr) = (l[0], l[1]);
+                self.declared_accel = true;
                 if funcnum == 0 {
                     self.accel_funcs.remove(&addr);
                 } else {
@@ -1127,6 +1330,7 @@ impl Machine {
             }
             0x181 => {
                 let (l, _) = self.read_operands(2, 0)?;
+                self.declared_accel = true;
                 self.accel_params.insert(l[0], l[1]);
                 Ok(())
             }
@@ -1145,6 +1349,11 @@ impl Machine {
                 Ok(())
             }
             // Protect a RAM range across restore/restoreundo (L2 == 0 clears).
+            // Stored as (start, len), not (start, end) — glulxe's op_protect
+            // (exec.c) computes `end = start + len` and validates nothing, so
+            // a hostile range is ordinary input there too; every reader of
+            // `self.protect` (decompress_ram/load_umem/reset_ram) computes
+            // its end with `saturating_add` rather than trusting one.
             0x127 => {
                 let (l, _) = self.read_operands(2, 0)?;
                 self.protect = (l[0], l[1]);
@@ -1230,6 +1439,22 @@ impl Machine {
                 self.push32(daddr)?;
                 self.push32(ret_pc)?;
                 self.push32(cur_fp)?;
+                // A memory stream's bytes stay inside the VM — spec §1.8.2 hands
+                // @save whatever writable Glk stream it is given, and glulxe's
+                // perform_save() just glk_put_buffer_stream()s the Quetzal into
+                // it (serial.c); a memory stream is exactly such a
+                // self-contained stream, no host round trip needed (SQ-1427).
+                // Only the fileref/SavedGame path below genuinely needs the
+                // host, because its bytes live outside us. The call stub above
+                // is already pushed, so the just-built Quetzal's Stks chunk
+                // carries it — a later restore pops that stub to resume here —
+                // then this writes it straight into the stream and pops the
+                // stub itself, storing success.
+                if self.glk.memory_stream_read_info(l[0]).is_some() {
+                    let blob = self.save_quetzal();
+                    self.write_bytes_to_memory_stream(l[0], &blob);
+                    return self.pop_save_stub_and_store(0);
+                }
                 // Carry the target fileref's name + prompt-ness (L1 is the save
                 // stream) so the host can service a game-managed save silently or
                 // surface the player's SAVE-verb UI (see SaveLoadRequest).
@@ -1294,6 +1519,33 @@ impl Machine {
                     }
                     return Ok(());
                 }
+                // A memory stream's bytes are inside the VM too, for the same
+                // reason as the resource-stream branch above: no host round trip,
+                // and no fileref name for the host path below to key on anyway
+                // (SQ-1427).
+                if self.glk.memory_stream_read_info(l[0]).is_some() {
+                    let bytes = self.read_bytes_from_memory_stream(l[0]);
+                    self.pending_saveload = Some(PendingSaveLoad {
+                        dest: s[0],
+                        restore: true,
+                        name: String::new(),
+                        by_prompt: false,
+                        save_stream: 0,
+                        save_bytes: 0,
+                        fresh: false,
+                    });
+                    match self.restore_quetzal(&bytes) {
+                        Ok(()) => {
+                            self.pending_saveload = None;
+                            self.undo_stack.clear();
+                        }
+                        Err(e) => {
+                            self.diagnostics.push(format!("@restore from memory stream failed: {e:?}"));
+                            self.complete_restore_failure();
+                        }
+                    }
+                    return Ok(());
+                }
                 // L1 is the restore stream; carry its fileref name + prompt-ness so
                 // the host reads the game's fixed file silently (failing cleanly if
                 // absent) or surfaces the player's RESTORE-verb picker.
@@ -1312,15 +1564,13 @@ impl Machine {
                 // ftonumz L1 S1 — float -> int, truncating toward zero.
                 let (l, s) = self.read_operands(1, 1)?;
                 let v = Self::dec(l[0]);
-                let r = if v.is_nan() { 0x7FFF_FFFF } else { v as i32 as u32 };
-                self.store(s[0], r)
+                self.store(s[0], Self::f32_to_i32(v, false))
             }
             0x192 => {
                 // ftonumn L1 S1 — float -> int, rounding to nearest (half away from zero).
                 let (l, s) = self.read_operands(1, 1)?;
                 let v = Self::dec(l[0]);
-                let r = if v.is_nan() { 0x7FFF_FFFF } else { v.round() as i32 as u32 };
-                self.store(s[0], r)
+                self.store(s[0], Self::f32_to_i32(v, true))
             }
             0x198 => self.funop(f32::ceil),
             0x199 => self.funop(f32::floor),
@@ -1329,19 +1579,32 @@ impl Machine {
             0x1A2 => self.fbinop(|a, b| a * b),
             0x1A3 => self.fbinop(|a, b| a / b),
             0x1A4 => {
-                // fmod L1 L2 S1 S2 — S1 = remainder (sign of L1), S2 = quotient
-                // truncated toward zero (as a float).
+                // fmod L1 L2 S1 S2 — S1 = remainder, S2 = quotient. Ported
+                // from glulxe's op_fmod (exec.c) under MIT licence (Andrew
+                // Plotkin, 1999–2023), read 2026-09-09. Not re-derived: `r =
+                // fmodf(a, b)` (Rust's f32 `%` is fmodf — same NaN/Infinity
+                // rules: mod(x,0) and mod(±Inf,y) are both NaN, mod(x,±Inf)
+                // has rem == x, and −0 is preserved), then the quotient is
+                // `(a - r) / b` with **no separate truncation** — `a - r` is
+                // already an exact multiple of `b`. When that quotient
+                // encodes ±0.0, the sign bit is recovered from the XOR of
+                // the two operands' raw sign bits, exactly as glulxe's own
+                // comment says: "the sign has been lost in the shuffle."
+                // (SQ-1415 audit item 4; glulxercise `floatmod`.)
                 let (l, s) = self.read_operands(2, 2)?;
                 let (a, b) = (Self::dec(l[0]), Self::dec(l[1]));
-                let q = (a / b).trunc();
-                let r = a - q * b;
+                let r = a % b;
+                let mut q = (a - r) / b;
+                if q.to_bits() == 0 || q.to_bits() == 0x8000_0000 {
+                    q = f32::from_bits((l[0] ^ l[1]) & 0x8000_0000);
+                }
                 self.store(s[0], r.to_bits())?;
                 self.store(s[1], q.to_bits())
             }
             0x1A8 => self.funop(f32::sqrt),
             0x1A9 => self.funop(f32::exp),
             0x1AA => self.funop(f32::ln),
-            0x1AB => self.fbinop(f32::powf),
+            0x1AB => self.fbinop(Self::glulx_powf),
             0x1B0 => self.funop(f32::sin),
             0x1B1 => self.funop(f32::cos),
             0x1B2 => self.funop(f32::tan),
@@ -1379,15 +1642,13 @@ impl Machine {
                 // dtonumz L1:L2 -> S1 — double to int, truncating toward zero.
                 let (l, s) = self.read_operands(2, 1)?;
                 let v = Self::dec64(l[0], l[1]);
-                let r = if v.is_nan() { 0x7FFF_FFFF } else { v as i32 as u32 };
-                self.store(s[0], r)
+                self.store(s[0], Self::f64_to_i32(v, false))
             }
             0x202 => {
                 // dtonumn L1:L2 -> S1 — double to int, rounding to nearest.
                 let (l, s) = self.read_operands(2, 1)?;
                 let v = Self::dec64(l[0], l[1]);
-                let r = if v.is_nan() { 0x7FFF_FFFF } else { v.round() as i32 as u32 };
-                self.store(s[0], r)
+                self.store(s[0], Self::f64_to_i32(v, true))
             }
             0x203 => {
                 // ftod L1 (float) -> S1:S2 (double) — exact widening.
@@ -1406,21 +1667,35 @@ impl Machine {
             0x212 => self.dbinop(|a, b| a * b),
             0x213 => self.dbinop(|a, b| a / b),
             0x214 => {
-                // dmodr L1:L2 L3:L4 -> S1:S2 — remainder (sign of the dividend).
+                // dmodr L1:L2 L3:L4 -> S1:S2 — remainder. Ported from glulxe's
+                // op_dmodr (exec.c) under MIT licence (Andrew Plotkin,
+                // 1999–2023), read 2026-09-09: `fmod(a, b)` — Rust's f64 `%`
+                // is fmod, same NaN/Infinity rules as fmod's f32 case above
+                // (SQ-1415 audit item 4; glulxercise `doublemod`).
                 let (l, s) = self.read_operands(4, 2)?;
                 let (a, b) = (Self::dec64(l[0], l[1]), Self::dec64(l[2], l[3]));
-                self.store64(&s, a - (a / b).trunc() * b)
+                self.store64(&s, a % b)
             }
             0x215 => {
-                // dmodq L1:L2 L3:L4 -> S1:S2 — quotient truncated toward zero.
+                // dmodq L1:L2 L3:L4 -> S1:S2 — quotient. Ported from glulxe's
+                // op_dmodq (exec.c) under MIT licence (Andrew Plotkin,
+                // 1999–2023), read 2026-09-09: `r = fmod(a, b)`, then `(a -
+                // r) / b` with **no separate truncation**, and the same ±0.0
+                // sign-recovery fixup as fmod (using the two operands' HIGH
+                // words, which carry the double's sign bit).
                 let (l, s) = self.read_operands(4, 2)?;
                 let (a, b) = (Self::dec64(l[0], l[1]), Self::dec64(l[2], l[3]));
-                self.store64(&s, (a / b).trunc())
+                let r = a % b;
+                let mut q = (a - r) / b;
+                if q.to_bits() == 0 || q.to_bits() == 0x8000_0000_0000_0000 {
+                    q = f64::from_bits((u64::from(l[0] ^ l[2]) & 0x8000_0000) << 32);
+                }
+                self.store64(&s, q)
             }
             0x218 => self.dunop(f64::sqrt),
             0x219 => self.dunop(f64::exp),
             0x21A => self.dunop(f64::ln),
-            0x21B => self.dbinop(f64::powf),
+            0x21B => self.dbinop(Self::glulx_pow),
             0x220 => self.dunop(f64::sin),
             0x221 => self.dunop(f64::cos),
             0x222 => self.dunop(f64::tan),
@@ -1493,11 +1768,86 @@ impl Machine {
         f32::from_bits(v)
     }
 
+    /// `ftonumz`/`ftonumn`'s float → signed-int32 conversion, ported from
+    /// glulxe's `op_ftonumz`/`op_ftonumn` (exec.c) under MIT licence (Andrew
+    /// Plotkin, 1999–2023), read 2026-09-09: the sign bit is checked FIRST,
+    /// before classifying NaN/Infinity/overflow, so a negative NaN (or
+    /// −Infinity, or a finite value < −2147483647.0) saturates to
+    /// `0x80000000` (INT32_MIN) and a positive one to `0x7FFFFFFF`
+    /// (INT32_MAX). Rust's own `as i32` cast already saturates a finite
+    /// out-of-range float, but turns EVERY NaN into 0 regardless of sign —
+    /// wrong here, which is why NaN/Infinity/overflow are classified by hand
+    /// rather than left to the cast (SQ-1415 audit item 4; glulxercise
+    /// `floatconv`). `round` selects `ftonumn`'s round-to-nearest (half away
+    /// from zero) over `ftonumz`'s truncation; a finite in-range value is
+    /// never pushed out of range by rounding first.
+    fn f32_to_i32(v: f32, round: bool) -> u32 {
+        let apply = |v: f32| if round { v.round() } else { v.trunc() } as i32 as u32;
+        if v.is_sign_negative() {
+            if v.is_nan() || v.is_infinite() || v < -2_147_483_647.0 {
+                0x8000_0000
+            } else {
+                apply(v)
+            }
+        } else if v.is_nan() || v.is_infinite() || v > 2_147_483_647.0 {
+            0x7FFF_FFFF
+        } else {
+            apply(v)
+        }
+    }
+
+    /// `dtonumz`/`dtonumn`'s double → signed-int32 conversion — the `f64`
+    /// twin of [`Self::f32_to_i32`]; see its doc for the full rationale
+    /// (glulxe's `op_dtonumz`/`op_dtonumn` under MIT licence, Andrew Plotkin
+    /// 1999–2023, read 2026-09-09; glulxercise `doubleconv`).
+    fn f64_to_i32(v: f64, round: bool) -> u32 {
+        let apply = |v: f64| if round { v.round() } else { v.trunc() } as i32 as u32;
+        if v.is_sign_negative() {
+            if v.is_nan() || v.is_infinite() || v < -2_147_483_647.0 {
+                0x8000_0000
+            } else {
+                apply(v)
+            }
+        } else if v.is_nan() || v.is_infinite() || v > 2_147_483_647.0 {
+            0x7FFF_FFFF
+        } else {
+            apply(v)
+        }
+    }
+
     /// A 1-value float op (ceil, sqrt, sin, …): decode, apply, re-encode.
     fn funop(&mut self, f: impl Fn(f32) -> f32) -> R<()> {
         let (l, s) = self.read_operands(1, 1)?;
         let v = f(Self::dec(l[0]));
         self.store(s[0], v.to_bits())
+    }
+
+    /// `pow`'s float power, special-cased ahead of the platform `powf` per
+    /// the Glulx spec's float section ("Floating-Point Values And Special
+    /// Cases", the `pow` opcode entry): "pow(1, y) returns 1 for any y, even
+    /// a NaN. pow(x, ±0) returns 1 for any x, even a NaN. pow(−1, ±Inf)
+    /// returns 1." — C99 Annex F rules that Apple's libm applies inside
+    /// `powf` itself (so macOS never needed this) but glibc's and Windows'
+    /// do not, which is why glulxercise's `floatexp` group failed only on
+    /// ubuntu/windows CI (SQ-1433). Ported from glulxe's own wrapper
+    /// (`osdepend.c`, `glulx_powf`) under MIT licence (Andrew Plotkin,
+    /// 1999–2023), read 2026-09-09, which exists for exactly this reason
+    /// ("This wrapper handles all special cases, even if the underlying
+    /// powf() function doesn't"): the three comparisons are false for any
+    /// NaN operand, so `val1 == 1.0` alone catches `pow(1, NaN)` and
+    /// `pow(1, -NaN)`, and `val2 == 0.0` alone catches `pow(NaN, 0)` and
+    /// `pow(-NaN, 0)` — the four floatexp failures — without checking
+    /// `is_nan()` explicitly. Every other input falls through to `powf`
+    /// unchanged.
+    fn glulx_powf(val1: f32, val2: f32) -> f32 {
+        // `val2 == 0.0` catches both +0.0 and -0.0 (IEEE `==` treats them
+        // equal); all three conditions collapse to the same `1.0` result,
+        // so they're one branch rather than an if/else-if chain repeating it.
+        if val1 == 1.0 || val2 == 0.0 || (val1 == -1.0 && val2.is_infinite()) {
+            1.0
+        } else {
+            val1.powf(val2)
+        }
     }
 
     /// A 2-value float op (fadd…fdiv, pow, atan2): decode, apply, re-encode.
@@ -1549,6 +1899,17 @@ impl Machine {
         self.store64(&s, v)
     }
 
+    /// `dpow`'s double power — the `f64` twin of [`Self::glulx_powf`]; see
+    /// its doc for the spec citation and rationale (glulxe's `osdepend.c`
+    /// `glulx_pow`; SQ-1433).
+    fn glulx_pow(val1: f64, val2: f64) -> f64 {
+        if val1 == 1.0 || val2 == 0.0 || (val1 == -1.0 && val2.is_infinite()) {
+            1.0
+        } else {
+            val1.powf(val2)
+        }
+    }
+
     /// A 2-double op (dadd…ddiv, dpow, datan2): read (4,2), decode both, store lo:hi.
     fn dbinop(&mut self, f: impl Fn(f64, f64) -> f64) -> R<()> {
         let (l, s) = self.read_operands(4, 2)?;
@@ -1569,6 +1930,15 @@ impl Machine {
 
     /// `div` (false) / `mod` (true): signed, truncating toward zero, faulting on
     /// a zero divisor.
+    ///
+    /// DECIDED (SQ-1415 audit item 6, no behavior change): `i32::MIN / -1` is
+    /// the one signed division that overflows a 32-bit result (the
+    /// mathematical quotient, 2147483648, does not fit `i32`). glulxe's
+    /// `exec.c` calls this a fatal error ("Division overflow"); gvm already
+    /// tolerates it via `wrapping_div`/`wrapping_rem`, which wrap back to
+    /// `i32::MIN` (`0x80000000`) rather than aborting the interpreter over
+    /// one story-controlled instruction. Kept as-is rather than matched to
+    /// glulxe's fatal.
     fn divop(&mut self, is_mod: bool) -> R<()> {
         let (l, s) = self.read_operands(2, 1)?;
         let (a, b) = (l[0] as i32, l[1] as i32);
@@ -1730,7 +2100,12 @@ impl Machine {
         }
         // Parse the locals-format pairs that begin at fp+8; a valid frame's
         // terminator sits before LocalsPos (LocalsPos = align4(8 + format)).
-        let mut locals = Vec::new();
+        // Reuse `cur_locals`' allocation — this runs on every function return,
+        // and a fresh Vec per return fed the allocator hot spot (SQ-1208). An
+        // error path leaves it empty, which is fine: every caller's error
+        // channel halts the machine.
+        let mut locals = std::mem::take(&mut self.cur_locals);
+        locals.clear();
         let mut p = fp + 8;
         let fmt_end = fp + localspos;
         let mut off = 0u32;
@@ -1771,10 +2146,17 @@ impl Machine {
             return Err(format!("not a function: type byte {func_type:#x} @{func_addr:#x}"));
         }
 
-        // Parse the locals format; compute the format byte length and the
-        // per-local (offset, size) layout.
-        let mut pairs: Vec<(u8, u8)> = Vec::new();
+        // Parse the locals format in one pass: count the (type, count) pairs
+        // and lay out the locals (each at its natural alignment). The layout
+        // builds directly into `cur_locals`' reused allocation — this runs on
+        // every call, and a fresh Vec (plus a scratch pairs Vec) per call fed
+        // the allocator hot spot (SQ-1208). An error path leaves it empty,
+        // which is fine: every caller's error channel halts the machine.
+        let mut locals_layout = std::mem::take(&mut self.cur_locals);
+        locals_layout.clear();
         let mut addr = func_addr + 1;
+        let mut n_pairs = 0usize;
+        let mut off = 0u32;
         loop {
             let t = self.m8(addr)? as u8;
             let c = self.m8(addr + 1)? as u8;
@@ -1785,21 +2167,15 @@ impl Machine {
             if t != 1 && t != 2 && t != 4 {
                 return Err(format!("bad local type {t} @{func_addr:#x}"));
             }
-            pairs.push((t, c));
-        }
-        let format_len = (pairs.len() + 1) * 2; // includes the (0,0) terminator
-        let localspos = align_up(8 + format_len as u32, 4);
-
-        // Lay out the locals (each at its natural alignment).
-        let mut locals_layout: Vec<(u32, u8)> = Vec::new();
-        let mut off = 0u32;
-        for &(t, c) in &pairs {
+            n_pairs += 1;
             for _ in 0..c {
                 off = align_up(off, t as u32);
                 locals_layout.push((off, t));
                 off += t as u32;
             }
         }
+        let format_len = (n_pairs + 1) * 2; // includes the (0,0) terminator
+        let localspos = align_up(8 + format_len as u32, 4);
         let locals_size = off;
         let frame_len = align_up(localspos + locals_size, 4);
 
@@ -1814,9 +2190,12 @@ impl Machine {
         }
         self.st_w32(frameptr, frame_len);
         self.st_w32(frameptr + 4, localspos);
-        for (i, &(t, c)) in pairs.iter().enumerate() {
-            self.stack[frameptr + 8 + 2 * i] = t;
-            self.stack[frameptr + 8 + 2 * i + 1] = c;
+        // Copy the format pairs into the frame, re-reading the bytes the parse
+        // above already validated (cannot fault: same addresses, same memory).
+        for i in 0..n_pairs {
+            let a = func_addr + 1 + 2 * i as u32;
+            self.stack[frameptr + 8 + 2 * i] = self.m8(a)? as u8;
+            self.stack[frameptr + 8 + 2 * i + 1] = self.m8(a + 1)? as u8;
         }
         // (terminator pair already zero from the wipe above)
 
@@ -1830,12 +2209,11 @@ impl Machine {
         // Pass the arguments.
         if func_type == 0xC1 {
             // Copy args into locals in order, truncated to each local's size.
-            let layout = self.cur_locals.clone();
-            for (i, &(loff, _sz)) in layout.iter().enumerate() {
-                if i >= args.len() {
-                    break;
-                }
-                self.local_store(loff, args[i])?;
+            // (Looked up per index so `local_store` can borrow `self` — no
+            // layout clone.)
+            for (i, &arg) in args.iter().enumerate() {
+                let Some(&(loff, _sz)) = self.cur_locals.get(i) else { break };
+                self.local_store(loff, arg)?;
             }
         } else {
             // C0: push args (last first → first on top), then the count.
@@ -1888,6 +2266,12 @@ impl Machine {
     /// (which first discards the current frame via `sp = fp`) and `@save`'s
     /// `complete_save` (which must NOT discard a frame — `@save` pushed only a
     /// stub, not a new one).
+    ///
+    /// DestTypes 10-14 are not destinations at all but PRINT resume states
+    /// (spec §1.3.2): the returning function was a filter callback or a
+    /// string-embedded routine, and what happens next is that the interrupted
+    /// print carries on. That is what makes the printing engine iterative — see
+    /// [`Machine::stream_string`].
     fn pop_save_stub_and_store(&mut self, v: u32) -> R<()> {
         if self.sp < 16 {
             return Err("corrupt call stub on return".to_string());
@@ -1910,9 +2294,47 @@ impl Machine {
             1 => self.store_mem(daddr, v)?,
             2 => self.local_store(daddr, v)?,
             3 => self.push32(v)?,
+            // DestTypes 10-14 (spec §1.3.2): this stub was pushed by the
+            // printing engine, not by a call — the function that just returned
+            // was a filter callback or a string-embedded routine, its return
+            // value is discarded, and what resumes is the PRINT. `ret_pc` is the
+            // resume position the stub recorded (for 0x12, the integer itself),
+            // `daddr` the bit number / digit position. Mirrors glulxe's
+            // `pop_callstub` (funcs.c).
+            0x10 => self.stream_string(ret_pc, 0xE1, daddr)?,
+            0x11 => return Err("string-terminator call stub at the end of a function call".to_string()),
+            0x12 => self.stream_num(ret_pc as i32, true, daddr)?,
+            0x13 => self.stream_string(ret_pc, 0xE0, daddr)?,
+            0x14 => self.stream_string(ret_pc, 0xE2, daddr)?,
             other => return Err(format!("bad call-stub DestType {other}")),
         }
         Ok(())
+    }
+
+    /// Pop a call stub as a STRING resume state (spec §1.3.2 DestTypes 0x10 /
+    /// 0x11, glulxe's `pop_callstub_string`): restore the PC and report where
+    /// the interrupted print continues. `Ok(None)` is the 0x11 terminator —
+    /// the whole print is finished and the PC is now the instruction after the
+    /// stream opcode that began it. `Ok(Some(bitnum))` resumes a compressed
+    /// (E1) string at the restored PC. FramePtr is deliberately not restored:
+    /// a string never leaves the frame that printed it.
+    fn pop_callstub_string(&mut self) -> R<Option<u32>> {
+        if self.sp < 16 {
+            return Err("corrupt string call stub".to_string());
+        }
+        self.sp -= 4; // FramePtr, unchanged across a string
+        self.sp -= 4;
+        let ret_pc = self.st_r32(self.sp);
+        self.sp -= 4;
+        let daddr = self.st_r32(self.sp);
+        self.sp -= 4;
+        let dtype = self.st_r32(self.sp);
+        self.pc = ret_pc;
+        match dtype {
+            0x11 => Ok(None),
+            0x10 => Ok(Some(daddr)),
+            other => Err(format!("function-terminator call stub (DestType {other}) at the end of a string")),
+        }
     }
 
     /// `catch S L`: push a catch stub (so `@throw` can unwind here), store the
@@ -1981,6 +2403,14 @@ impl Machine {
 
     /// Write the low `width` bytes of `v` to main memory at `addr`, mapping
     /// ROM/out-of-range faults to a diagnostic (ROM) or a fault (out of range).
+    ///
+    /// DECIDED (SQ-1415 audit item 6, no behavior change): glulxe's `exec.c`
+    /// treats a write below RAMSTART as `fatal_error("Write to read-only
+    /// memory")`. gvm has always tolerated it instead — push a diagnostic and
+    /// silently no-op the write, milder even than this crate's own runtime
+    /// faults (which record a diagnostic and Quit; see `crate::error`'s
+    /// module doc). Kept as-is: one story instruction writing to ROM is not
+    /// worth aborting the interpreter over.
     fn store_mem_sized(&mut self, addr: u32, v: u32, width: u32) -> R<()> {
         use crate::memory::WriteFault;
         let res = match width {
@@ -2135,19 +2565,24 @@ impl Machine {
     }
 
     /// `mcopy count from to`: copy `count` bytes, choosing the copy direction so
-    /// overlapping ranges move correctly (spec §2.6).
+    /// overlapping ranges move correctly (spec §2.6). `from`/`to`/`count` are
+    /// arbitrary story-controlled `u32`s, so the offset arithmetic uses
+    /// `wrapping_add` — the house style (`m8`/`store_mem_sized` are bounds-
+    /// checked and fault on the wrapped address rather than reading/writing
+    /// out of range) — instead of overflowing on iteration one of the
+    /// descending branch, the common `to >= from` case (SQ-1415 audit item 3).
     fn op_mcopy(&mut self) -> R<()> {
         let (l, _) = self.read_operands(3, 0)?;
         let (count, from, to) = (l[0], l[1], l[2]);
         if to < from {
             for i in 0..count {
-                let b = self.m8(from + i)?;
-                self.store_mem_sized(to + i, b, 1)?;
+                let b = self.m8(from.wrapping_add(i))?;
+                self.store_mem_sized(to.wrapping_add(i), b, 1)?;
             }
         } else {
             for i in (0..count).rev() {
-                let b = self.m8(from + i)?;
-                self.store_mem_sized(to + i, b, 1)?;
+                let b = self.m8(from.wrapping_add(i))?;
+                self.store_mem_sized(to.wrapping_add(i), b, 1)?;
             }
         }
         Ok(())
@@ -2293,28 +2728,42 @@ impl Machine {
     /// 1..=256 zero bytes is `0x00` followed by `(count-1)`; non-zero diff bytes
     /// are literal (spec §1.8 / Quetzal).
     fn compress_ram(&self) -> Vec<u8> {
-        let ramstart = self.mem.ramstart();
-        let memsize = self.mem.mem_size();
-        let mut diff = Vec::with_capacity((memsize - ramstart) as usize);
-        for a in ramstart..memsize {
-            let cur = self.mem.read8(a).unwrap_or(0) as u8;
-            diff.push(cur ^ self.mem.orig_byte(a));
+        // Slices, not a bounds-checked `read8` per byte: this runs on the
+        // player's thread for every host snapshot (a probe question, the
+        // per-turn auto-save), and the per-byte `Option` call was the whole
+        // cost (SQ-1177). Same diff, same RLE, byte-identical output —
+        // `compress_ram_matches_the_per_byte_reference` holds the two side
+        // by side.
+        let ramstart = self.mem.ramstart() as usize;
+        let memsize = self.mem.mem_size() as usize;
+        let cur = &self.mem.raw_bytes()[ramstart..memsize];
+        let orig = self.mem.orig_bytes();
+        let mut diff = vec![0u8; memsize - ramstart];
+        // `orig` covers [0, EXTSTART) and is zero by definition above it, so
+        // the diff is an XOR over the overlap and the current bytes verbatim
+        // past it. `ramstart <= EXTSTART <= memsize` always; the clamps keep
+        // this correct rather than panicking if that ever moved.
+        let overlap = orig.len().clamp(ramstart, memsize) - ramstart;
+        diff.copy_from_slice(cur);
+        for (d, o) in diff[..overlap].iter_mut().zip(&orig[ramstart..]) {
+            *d ^= *o;
         }
         let mut out = Vec::new();
-        out.extend_from_slice(&memsize.to_be_bytes());
+        out.extend_from_slice(&(memsize as u32).to_be_bytes());
         let mut i = 0;
         while i < diff.len() {
             if diff[i] == 0 {
-                let mut run = 1usize;
-                while i + run < diff.len() && diff[i + run] == 0 && run < 256 {
-                    run += 1;
-                }
+                // A zero run: up to 256 zeros become `00 (run-1)`.
+                let cap = (i + 256).min(diff.len());
+                let run = diff[i..cap].iter().take_while(|&&b| b == 0).count();
                 out.push(0);
                 out.push((run - 1) as u8);
                 i += run;
             } else {
-                out.push(diff[i]);
-                i += 1;
+                // A literal stretch: copy whole, up to the next zero.
+                let end = i + diff[i..].iter().take_while(|&&b| b != 0).count();
+                out.extend_from_slice(&diff[i..end]);
+                i = end;
             }
         }
         out
@@ -2356,16 +2805,40 @@ impl Machine {
         // Glk model: reinstall the window/stream tree from the "Glk " chunk so a
         // restore into a fresh Machine has live windows. An older snapshot with
         // no such chunk restores with an empty model (back-compat, no panic).
-        // The per-game borderless mode is a HOST/runtime setting, not game
-        // state: it is deliberately absent from the snapshot, and the live
-        // value survives the model swap — @restoreundo runs through here with
-        // no host callback to re-apply it (SQ-0627).
-        let borderless = self.glk.borderless();
+        // The per-game borderless mode is the BACKEND's now (SQ-1402), asked
+        // fresh at the next relayout, so there is nothing here to preserve
+        // across the model swap the way SQ-0627 once had to.
+        //
+        // The backend is never told about this swap by construction — the
+        // restored ids didn't arrive through `glk_window_open` — so a
+        // backend keyed by window id (AppGlk's grids/buffers/graphics maps)
+        // would otherwise answer for the incoming run's window with whatever
+        // the LEAVING run last held at that id (empty for an id the leaving
+        // run never used, stale for one it did). Same duty `@restart`
+        // already pays for the reset case (`op_restart`, above): close every
+        // OLD id, swap, open every NEW id, in ascending (= original
+        // open-time) order so a text-buffer window's PRIMARY status — the
+        // first `TextBuffer` a backend is told about — comes out identical
+        // to what the archived run actually had (SQ-1515).
+        for id in self.glk.all_window_ids() {
+            self.backend.window_close(id);
+        }
         self.glk = match find(b"Glk ") {
             Some(d) => Model::deserialize(d).map_err(GError::BadSave)?,
             None => Model::new(),
         };
-        self.glk.set_borderless(borderless);
+        for id in self.glk.all_window_ids() {
+            if let Some(ty) = self.glk.window_type(id) {
+                self.backend.window_open(id, ty);
+            }
+        }
+        // The backend now knows the windows exist, but not their sizes —
+        // relayout so it has real geometry (graphics canvases resized, grid
+        // dimensions set) before anything asks. `deliver_arrange` is the
+        // caller's job (`GlulxSession::restore_state`, mirroring a resize):
+        // this only readies the backend, it does not tell the GAME to
+        // repaint.
+        self.relayout_glk();
         // A snapshot never carries a suspended `@save`/`@restore`: §1.8.5 keeps
         // the interpreter's own suspensions out of the file, and the host guards
         // its snapshot trigger on `is_saveload_pending` precisely so an un-popped
@@ -2391,9 +2864,9 @@ impl Machine {
         // can still resolve it rather than being stranded.
         if let Some(pi) = self.pending_input.as_mut() {
             if let Some((win, unicode)) = self.glk.first_line_request() {
-                *pi = PendingInput { event_addr: pi.event_addr, win, line: true, unicode };
+                *pi = PendingInput { event_addr: pi.event_addr, win, line: true, unicode, dest: pi.dest };
             } else if let Some((win, unicode)) = self.glk.first_char_request() {
-                *pi = PendingInput { event_addr: pi.event_addr, win, line: false, unicode };
+                *pi = PendingInput { event_addr: pi.event_addr, win, line: false, unicode, dest: pi.dest };
             }
         }
         Ok(())
@@ -2487,32 +2960,23 @@ impl Machine {
         let find = |id: &[u8; 4]| chunks.iter().find(|(cid, _)| cid == id).map(|(_, d)| *d);
         let stks = find(b"Stks").ok_or_else(|| GError::BadSave("missing Stks chunk".into()))?;
 
-        // Snapshot the currently-protected bytes (preserved across restore).
-        // Capture 0 for any address currently out of bounds (memory was shrunk
-        // below the protected range): the restore re-extends memory and would
-        // otherwise leak the saved diff into the protected range, so the
-        // re-impose loop must zero it back out.
-        let (cur_paddr, cur_plen) = self.protect;
-        let mut protected: Vec<(u32, u8)> = Vec::new();
-        for a in cur_paddr..cur_paddr.saturating_add(cur_plen) {
-            protected.push((a, self.mem.read8(a).unwrap_or(0) as u8));
-        }
-
         // Reset RAM to the original image and apply the saved memory chunk —
-        // CMem (RLE diff) or UMem (literal), whichever is present.
+        // CMem (RLE diff) or UMem (literal), whichever is present — skipping
+        // any byte inside the *live* protect range so it keeps its
+        // pre-restore value (spec §2.9/§1.8: the protect range survives a
+        // restore). This is a live skip, not a snapshot-then-reimpose: a
+        // hostile `@protect` range up to 4 GiB long must never be
+        // materialised into a `Vec` (SQ-1415 audit item 3 — glulxe's own
+        // `op_protect` (`exec.c`) performs no validation either and simply
+        // stores whatever `start`/`start+len` the story gave it, so a
+        // malicious range is ordinary input, not a bug to reproduce).
+        let protect = self.protect;
         if let Some(cmem) = find(b"CMem") {
-            self.decompress_ram(cmem)?;
+            self.decompress_ram(cmem, protect)?;
         } else if let Some(umem) = find(b"UMem") {
-            self.load_umem(umem)?;
+            self.load_umem(umem, protect)?;
         } else {
             return Err(GError::BadSave("missing CMem/UMem chunk".into()));
-        }
-
-        // Re-impose the protected bytes' pre-restore values.
-        for (a, b) in protected {
-            if a >= self.mem.ramstart() && a < self.mem.mem_size() {
-                self.mem.write_byte_raw(a, b);
-            }
         }
 
         // Stack: the Stks bytes must fit the buffer and (for restore_state)
@@ -2539,9 +3003,29 @@ impl Machine {
     }
 
     /// Decompress a `CMem` body into RAM: read the saved memsize, resize memory,
-    /// and rebuild `[RAMSTART, memsize)` as `original XOR diff`. Faults on a
-    /// truncated/over-long stream.
-    fn decompress_ram(&mut self, cmem: &[u8]) -> Result<(), GError> {
+    /// and rebuild `[RAMSTART, memsize)` as `original XOR diff` — except any
+    /// byte inside `protect` (`(start, len)`), which is left at its live,
+    /// pre-restore value (spec §2.9: the protect range survives a restore).
+    /// The stream is still walked byte-for-byte across a protected address
+    /// (glulxe's `read_memstate` does the same: `if (pos >= protectstart &&
+    /// pos < protectend) continue;` sits AFTER decoding, right before the
+    /// write) — only the write is skipped, so the encoding stays in sync and
+    /// no protected-range snapshot is ever materialised (SQ-1415 audit item 3:
+    /// a hostile multi-GiB `@protect` range must not become a `Vec`).
+    ///
+    /// A stream that runs out before `memsize` is NOT a truncated/malformed
+    /// save: glulxe's writer (`serial.c` `write_memstate`) deliberately omits
+    /// the trailing zero run once every remaining byte is unchanged from the
+    /// original image ("It's possible we've got a run left over, but we don't
+    /// write it"), and its reader (`read_memstate`) treats running out of
+    /// stream as "we're into the final, unstored run" — applying zero diff
+    /// (unchanged) for the rest. This reader does the same: exhausting `cmem`
+    /// while `addr < memsize` fills `[addr, memsize)` from the original image
+    /// rather than erroring (Glulx spec §1.8 / Quetzal `CMem`). A `BadSave`
+    /// is still returned for the genuinely malformed case — a *decoded* run
+    /// whose length would write past `memsize` (glulxe's writer can never
+    /// produce one; only a corrupted or hostile file can).
+    fn decompress_ram(&mut self, cmem: &[u8], protect: (u32, u32)) -> Result<(), GError> {
         if cmem.len() < 4 {
             return Err(GError::BadSave("CMem chunk too short".into()));
         }
@@ -2550,18 +3034,24 @@ impl Machine {
         if memsize < ramstart || memsize > Self::MAX_MEMSIZE {
             return Err(GError::BadSave("CMem memsize out of range".into()));
         }
+        if memsize < self.mem.endmem() {
+            return Err(GError::BadSave("CMem memsize below ENDMEM floor".into()));
+        }
         self.mem.set_raw_size(memsize);
+        let (pstart, plen) = protect;
+        let pend = pstart.saturating_add(plen);
+        let protected = |a: u32| a >= pstart && a < pend;
         let mut addr = ramstart;
         let mut i = 4;
         while addr < memsize {
             if i >= cmem.len() {
-                return Err(GError::BadSave("CMem data truncated".into()));
+                break; // omitted trailing run — filled below
             }
             let b = cmem[i];
             i += 1;
             if b == 0 {
                 if i >= cmem.len() {
-                    return Err(GError::BadSave("CMem zero-run truncated".into()));
+                    break; // a run token with no length byte — same as above
                 }
                 let run = cmem[i] as u32 + 1;
                 i += 1;
@@ -2569,24 +3059,38 @@ impl Machine {
                     if addr >= memsize {
                         return Err(GError::BadSave("CMem data overruns memory".into()));
                     }
-                    let base = self.mem.orig_byte(addr);
-                    self.mem.write_byte_raw(addr, base);
+                    if !protected(addr) {
+                        let base = self.mem.orig_byte(addr);
+                        self.mem.write_byte_raw(addr, base);
+                    }
                     addr += 1;
                 }
             } else {
-                let base = self.mem.orig_byte(addr);
-                self.mem.write_byte_raw(addr, base ^ b);
+                if !protected(addr) {
+                    let base = self.mem.orig_byte(addr);
+                    self.mem.write_byte_raw(addr, base ^ b);
+                }
                 addr += 1;
             }
+        }
+        // The stream ended before covering [RAMSTART, memsize) — every
+        // remaining byte is an implicit zero diff (unchanged from original).
+        while addr < memsize {
+            if !protected(addr) {
+                let base = self.mem.orig_byte(addr);
+                self.mem.write_byte_raw(addr, base);
+            }
+            addr += 1;
         }
         Ok(())
     }
 
     /// Load a `UMem` (uncompressed) body into RAM: read the saved memsize,
     /// resize memory, and copy `[RAMSTART, memsize)` literally — no XOR diff,
-    /// no RLE (spec §1.8, the `CMem` alternative). Faults on a
+    /// no RLE (spec §1.8, the `CMem` alternative), skipping any byte inside
+    /// `protect` the same way [`Self::decompress_ram`] does. Faults on a
     /// truncated/mismatched stream.
-    fn load_umem(&mut self, umem: &[u8]) -> Result<(), GError> {
+    fn load_umem(&mut self, umem: &[u8], protect: (u32, u32)) -> Result<(), GError> {
         if umem.len() < 4 {
             return Err(GError::BadSave("UMem chunk too short".into()));
         }
@@ -2595,12 +3099,19 @@ impl Machine {
         if memsize < ramstart || memsize > Self::MAX_MEMSIZE {
             return Err(GError::BadSave("UMem memsize out of range".into()));
         }
+        if memsize < self.mem.endmem() {
+            return Err(GError::BadSave("UMem memsize below ENDMEM floor".into()));
+        }
         if umem.len() != 4 + (memsize - ramstart) as usize {
             return Err(GError::BadSave("UMem data length disagrees with memsize".into()));
         }
         self.mem.set_raw_size(memsize);
+        let (pstart, plen) = protect;
+        let pend = pstart.saturating_add(plen);
         for (i, addr) in (ramstart..memsize).enumerate() {
-            self.mem.write_byte_raw(addr, umem[4 + i]);
+            if addr < pstart || addr >= pend {
+                self.mem.write_byte_raw(addr, umem[4 + i]);
+            }
         }
         Ok(())
     }
@@ -2685,7 +3196,16 @@ impl Machine {
             None => return self.store(s[0], 1), // failure
             Some(snap) => snap,
         };
+        // `restore_state` also restores `self.protect` from the snapshot's
+        // `GReg` chunk — correct for a host Save-State restore (a full VM
+        // snapshot), but ExtUndo (spec §2.16) is explicit that the protect
+        // range is "not part of the saved state" for `saveundo`/`restoreundo`.
+        // Put the LIVE range back after the shared restore does its usual
+        // thing, rather than teaching `restore_state` two different
+        // behaviors (SQ-1415 audit item 5).
+        let live_protect = self.protect;
         self.restore_state(&snap).map_err(|e| format!("restoreundo: {e:?}"))?;
+        self.protect = live_protect;
         // Consume the four-value call stub the snapshot left on top.
         if self.sp < self.value_base() + 16 {
             return Err("restoreundo: snapshot is missing its call stub".to_string());
@@ -2719,7 +3239,7 @@ impl Machine {
     fn op_restart(&mut self) -> R<()> {
         let start = self.mem.start_func();
         let decode_table = self.mem.decode_table();
-        self.mem.reset_ram();
+        self.mem.reset_ram(self.protect);
         self.stack.fill(0);
         self.sp = 0;
         self.fp = 0;
@@ -2733,22 +3253,36 @@ impl Machine {
         // model will hand out the SAME ids again — tell the backend each old
         // window closed first, so a backend keyed by id cannot splice
         // pre-restart window state (grid cells, buffer logs) into the
-        // restarted game's windows. The borderless mode is a host/runtime
-        // setting, not game state: it survives the reset (SQ-0627).
+        // restarted game's windows. The borderless mode is the BACKEND's
+        // (SQ-1402): it is untouched by this reset, and the next relayout
+        // asks it fresh — nothing to re-apply here any more (was SQ-0627).
         for id in self.glk.all_window_ids() {
             self.backend.window_close(id);
         }
-        let borderless = self.glk.borderless();
-        self.glk = Model::new();
-        self.glk.set_borderless(borderless);
+        // Model::reset_for_restart, not `Model::new()`: the file VFS models the
+        // game's DISK, and a real disk survives an interpreter restart — see its
+        // doc comment (Glk spec §1.8.5, glulxe's `vm_restart`) for the exact
+        // survive/reset split (SQ-1439).
+        self.glk.reset_for_restart();
         self.pending_input = None;
         self.pending_event = None;
         self.pending_fileref = None;
         self.halted = false;
-        self.protect = (0, 0);
-        self.undo_stack.clear();
+        self.faulted = false;
+        // Neither the protect range nor the undo chain is reset by `@restart`
+        // (Glulx spec §2.9; glulxe `vm.c` `vm_restart`'s comment: "we do not
+        // reset the protection range" — and it never touches the undo stack
+        // at all). `self.mem.reset_ram` above already used `self.protect` to
+        // skip these bytes while reloading, so leaving it here keeps the same
+        // range live for the restarted game.
         self.accel_funcs.clear();
         self.accel_params.clear();
+        self.declared_accel = false;
+        // ROM is immutable, so the fingerprint is the same one `with_glk` found;
+        // reinstall it so `@restart` does not silently drop back to
+        // interpretation (the story's own `@accelfunc` calls, if it makes any,
+        // re-run from its start function exactly as they did the first time).
+        self.install_fingerprinted_accel();
         // The PRNG is NOT reset. Snapping back to `DEFAULT_SEED` would throw away
         // the seed the host installed at launch and hand every `@restart` of a
         // randomised game the same opening it gave the last one — the SQ-0811
@@ -2782,6 +3316,40 @@ impl Machine {
         &self.accel_funcs
     }
 
+    /// What bytecode fingerprinting concluded about this story's Inform 6
+    /// veneer — which routines matched, the parameters derived from them, the
+    /// cross-checks they passed, and why nothing was installed when nothing
+    /// was. See [`crate::veneer`].
+    pub fn veneer_accel(&self) -> &crate::veneer::VeneerReport {
+        &self.veneer
+    }
+
+    /// Whether the story has announced its own accelerated functions with
+    /// `@accelfunc`/`@accelparam`. False for every Inform 6 build and every
+    /// Inform 7 build before 6E59 — the games [`Self::veneer_accel`] serves.
+    pub fn declares_own_accel(&self) -> bool {
+        self.declared_accel
+    }
+
+    /// Match the Inform 6 veneer against the committed templates and, if every
+    /// check passes, install the assignments and parameters the story never
+    /// declared. Games that declare their own overwrite these when they run.
+    fn install_fingerprinted_accel(&mut self) {
+        let (report, install) = crate::veneer::fingerprint(&self.mem);
+        if let Some((funcs, params)) = install {
+            for (addr, num) in funcs {
+                self.accel_funcs.insert(addr, num);
+            }
+            for (i, v) in params.iter().enumerate() {
+                self.accel_params.insert(i as u32, *v);
+            }
+        }
+        // Deliberately NOT pushed to `diagnostics`: the app turns every line
+        // there into a Warning in the player's transcript. This is a debug fact,
+        // reachable through `veneer_accel()`.
+        self.veneer = report;
+    }
+
     /// Borrow the loaded image memory (for the debug disassembler / inspector).
     pub fn mem(&self) -> &Memory {
         &self.mem
@@ -2798,7 +3366,7 @@ impl Machine {
 
     /// The live call stack, innermost (current) frame first — each frame's return
     /// PC, locals, and working value-stack operands. Read-only (never mutates the
-    /// machine); the debug inspector renders it, and [`Machine::build_trace`] wraps
+    /// machine); the debug inspector renders it, and `Machine::build_trace` wraps
     /// it into a crash [`StackTrace`](crate::trace::StackTrace).
     pub fn call_frames(&self) -> Vec<crate::trace::TraceFrame> {
         use crate::trace::TraceFrame;
@@ -2873,12 +3441,6 @@ impl Machine {
     /// Whether Glk graphics windows are currently enabled.
     pub fn graphics_enabled(&self) -> bool {
         self.graphics_enabled
-    }
-
-    /// Set the per-game borderless-windows mode: `true` makes all window splits
-    /// abut with no reserved gutter cell and no reported border (SQ-0341).
-    pub fn set_borderless(&mut self, on: bool) {
-        self.glk.set_borderless(on);
     }
 
     /// Enable/disable Glk sound (gestalt + schannel opcodes).
@@ -3064,11 +3626,14 @@ impl Machine {
         }
     }
 
-    /// Read `n` bytes from main memory into a vector (bounds-checked).
+    /// Read `n` bytes from main memory into a vector (bounds-checked). `addr`
+    /// is story-controlled and can sit near `u32::MAX`, so the per-byte
+    /// offset uses `wrapping_add` rather than overflowing (`m8` bounds-checks
+    /// and faults on the wrapped address; SQ-1415 audit item 3).
     fn read_bytes(&self, addr: u32, n: u32) -> R<Vec<u8>> {
         let mut v = Vec::with_capacity(cap_hint(n));
         for i in 0..n {
-            v.push(self.m8(addr + i)? as u8);
+            v.push(self.m8(addr.wrapping_add(i))? as u8);
         }
         Ok(v)
     }
@@ -3085,7 +3650,7 @@ impl Machine {
                 break;
             }
             let saddr = start.wrapping_add(index.wrapping_mul(struct_size));
-            let have = self.read_bytes(saddr + key_off, key_size)?;
+            let have = self.read_bytes(saddr.wrapping_add(key_off), key_size)?;
             if have == want {
                 found = Some((saddr, index));
                 break;
@@ -3109,7 +3674,7 @@ impl Machine {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let saddr = start.wrapping_add(mid.wrapping_mul(struct_size));
-            let have = self.read_bytes(saddr + key_off, key_size)?;
+            let have = self.read_bytes(saddr.wrapping_add(key_off), key_size)?;
             match have.cmp(&want) {
                 std::cmp::Ordering::Equal => {
                     found = Some((saddr, mid));
@@ -3131,7 +3696,7 @@ impl Machine {
         let mut node = start;
         let mut result = 0u32;
         while node != 0 {
-            let have = self.read_bytes(node + key_off, key_size)?;
+            let have = self.read_bytes(node.wrapping_add(key_off), key_size)?;
             if have == want {
                 result = node;
                 break;
@@ -3139,7 +3704,7 @@ impl Machine {
             if opts & Self::ZERO_KEY_TERMINATES != 0 && have.iter().all(|&b| b == 0) {
                 break;
             }
-            node = self.m32(node + next_off)?;
+            node = self.m32(node.wrapping_add(next_off))?;
         }
         self.store(s[0], result)
     }
@@ -3218,33 +3783,57 @@ impl Machine {
 
     // ── call variants ─────────────────────────────────────────────────────────
 
+    /// Pop `argc` call arguments (first arg topmost) into the reused
+    /// `call_args_scratch` buffer, returning it for the caller to hand back
+    /// via [`Machine::return_args_scratch`] once the call setup is done.
+    fn pop_args_scratch(&mut self, argc: u32) -> R<Vec<u32>> {
+        let mut args = std::mem::take(&mut self.call_args_scratch);
+        args.clear();
+        for _ in 0..argc {
+            match self.pop32() {
+                Ok(v) => args.push(v),
+                Err(e) => {
+                    self.call_args_scratch = args;
+                    return Err(e);
+                }
+            }
+        }
+        Ok(args)
+    }
+
+    /// Put the buffer from [`Machine::pop_args_scratch`] back for reuse.
+    fn return_args_scratch(&mut self, args: Vec<u32>) {
+        self.call_args_scratch = args;
+    }
+
     fn op_call(&mut self) -> R<()> {
         let (l, s) = self.read_operands(2, 1)?;
         let (func, argc) = (l[0], l[1]);
-        let mut args = Vec::with_capacity(cap_hint(argc));
-        for _ in 0..argc {
-            args.push(self.pop32()?); // first arg is topmost
-        }
-        self.call_function(func, &args, s[0])
+        let args = self.pop_args_scratch(argc)?;
+        let res = self.call_function(func, &args, s[0]);
+        self.return_args_scratch(args);
+        res
     }
 
     fn op_callf(&mut self, nargs: usize) -> R<()> {
         let (l, s) = self.read_operands(1 + nargs, 1)?;
-        let args = l[1..].to_vec();
-        self.call_function(l[0], &args, s[0])
+        self.call_function(l[0], &l[1..], s[0])
     }
 
     fn op_tailcall(&mut self) -> R<()> {
         let (l, _) = self.read_operands(2, 0)?;
         let (func, argc) = (l[0], l[1]);
-        let mut args = Vec::with_capacity(cap_hint(argc));
-        for _ in 0..argc {
-            args.push(self.pop32()?);
-        }
+        let args = self.pop_args_scratch(argc)?;
+        let res = self.tailcall_with(func, &args);
+        self.return_args_scratch(args);
+        res
+    }
+
+    fn tailcall_with(&mut self, func: u32, args: &[u32]) -> R<()> {
         if self.acceleration {
             if let Some(num) = self.accel_func_for(func) {
                 if crate::accel::accel_impl_supported(num) {
-                    let result = self.accel_dispatch(num, &args)?;
+                    let result = self.accel_dispatch(num, args)?;
                     return self.return_value(result);
                 }
             }
@@ -3252,70 +3841,84 @@ impl Machine {
         // Destroy the current frame but keep the call stub beneath it, so the new
         // function returns to the current function's caller.
         self.sp = self.fp;
-        self.build_frame_and_enter(func, &args)
+        self.build_frame_and_enter(func, args)
     }
 
     // ── stream output (GLULX_NOTES §7) ────────────────────────────────────────
 
-    /// Route `streamchar`/`streamnum`/`streamstr` output, honoring the current
-    /// I/O system: the Glk system (mode 2) prints to the current Glk stream;
-    /// the filter system (mode 1) calls `iosys_rock` once per character, with
-    /// that character's code point as the sole argument (GLULX_NOTES §7.2);
-    /// the null system (mode 0, and any unrecognized mode) discards.
-    fn emit(&mut self, s: &str) {
-        // Capturing (decoding an E1 object for glk_put_string): divert output into
-        // the buffer instead of routing it through the I/O system.
+    /// True when output must be routed through the filter FUNCTION (spec
+    /// §1.3.5 "Calling and Returning During Output Filtering"): I/O system 1,
+    /// with no capture buffer diverting output past the iosys.
+    fn filtering(&self) -> bool {
+        self.iosys_mode == 1 && self.emit_capture.is_none()
+    }
+
+    /// Write `s` to the current output target: the capture buffer if one is
+    /// open (decoding an E1 object for `glk_put_string`), otherwise the current
+    /// Glk stream under I/O system 2. The null system (0) and any unrecognized
+    /// mode discard. Never called while [`Machine::filtering`] holds — the
+    /// filter system routes a character at a time, through the VM.
+    fn put_direct(&mut self, s: &str) {
         if let Some(buf) = self.emit_capture.as_mut() {
             buf.push_str(s);
             return;
         }
-        match self.iosys_mode {
-            2 => {
-                let sid = self.glk.current_stream();
-                self.glk_stream_put(sid, s);
-            }
-            1 => {
-                // Guard against a filter function whose own output recurses
-                // back into `emit` (e.g. via streamchar): each nested level
-                // costs several native frames (this call chain runs a full
-                // nested opcode-dispatch loop), so the bound is much lower
-                // than the lighter-weight string-decode recursion guard.
-                const FILTER_MAX_DEPTH: u32 = 32;
-                if self.filter_depth > FILTER_MAX_DEPTH {
-                    return;
-                }
-                self.filter_depth += 1;
-                let mut chars = s.chars();
-                while let Some(ch) = chars.next() {
-                    if self.iosys_mode != 1 {
-                        // The filter switched the I/O system mid-string (e.g.
-                        // via @setiosys): hand the remaining characters off
-                        // under the now-current mode instead of continuing to
-                        // call the stale filter rock.
-                        self.filter_depth -= 1;
-                        let rest: String = std::iter::once(ch).chain(chars).collect();
-                        return self.emit(&rest);
-                    }
-                    if let Err(e) = self.run_call_to_return(self.iosys_rock, &[ch as u32]) {
-                        // The filter function faulted: its frame was abandoned
-                        // mid-flight, so the machine must not keep printing or
-                        // executing. Latch the fault (first one wins) —
-                        // `step`/`run_call_to_return` surface it as this
-                        // instruction's fault (SQ-0625).
-                        self.pending_fault.get_or_insert(e);
-                        self.filter_depth -= 1;
-                        return;
-                    }
-                    if self.pending_fault.is_some() {
-                        // A nested emit latched a fault below us: stop too.
-                        self.filter_depth -= 1;
-                        return;
-                    }
-                }
-                self.filter_depth -= 1;
-            }
-            _ => {} // null system (mode 0) and unrecognized modes: discard
+        if self.iosys_mode == 2 {
+            let sid = self.glk.current_stream();
+            self.glk_stream_put(sid, s);
         }
+    }
+
+    /// Push a four-word call stub — `DestType, DestAddr, PC, FramePtr`, FramePtr
+    /// on top — recording the CURRENT pc and fp (spec §1.3.2).
+    fn push_callstub(&mut self, dtype: u32, daddr: u32) -> R<()> {
+        let ret_pc = self.pc;
+        let cur_fp = self.fp as u32;
+        self.push32(dtype)?;
+        self.push32(daddr)?;
+        self.push32(ret_pc)?;
+        self.push32(cur_fp)
+    }
+
+    /// Push the DestType 0x11 stub that marks where the interpreter resumes once
+    /// the whole print finishes (spec §1.3.2: "resume executing function code
+    /// after a string completes"). Pushed exactly once per print — the first
+    /// time that print has to leave the interpreter loop — which is what
+    /// `substring` tracks.
+    fn begin_substring(&mut self, substring: &mut bool) -> R<()> {
+        if !*substring {
+            self.push_callstub(0x11, 0)?;
+            *substring = true;
+        }
+        Ok(())
+    }
+
+    /// Push a call stub of `dtype`/`daddr` and enter `func` from inside the
+    /// printing engine, so an ordinary `return` resumes the print (spec §1.3.5).
+    /// The caller must then return to the interpreter loop at once: what
+    /// continues the print is [`Machine::pop_save_stub_and_store`] meeting this
+    /// stub again.
+    ///
+    /// Unlike [`Machine::call_function`] this never substitutes an accelerated
+    /// implementation. A call stub needs a frame to return from and an
+    /// accelerated function has none; running the story's own code at that
+    /// address is always legal — that is exactly what `@accelfunc` promises —
+    /// and costs nothing here, because no accelerated veneer routine is ever a
+    /// filter rock or a string-embedded print routine.
+    fn enter_print_call(&mut self, dtype: u32, daddr: u32, func: u32, args: &[u32]) -> R<()> {
+        self.push_callstub(dtype, daddr)?;
+        self.build_frame_and_enter(func, args)
+    }
+
+    /// The CURRENT stream's hyperlink value (`glk_set_hyperlink` sets it on
+    /// whatever `glk_stream_set_current` last named; 0 = no link), for
+    /// `glk_image_draw`/`_scaled`/`_scaled_ext` to stamp onto the picture they
+    /// draw (SQ-1503) — the same value text output already carries via
+    /// [`Self::glk_stream_put`]'s `link`. Glk spec: "you can also set a
+    /// hyperlink for a picture, by calling glk_set_hyperlink() and then
+    /// glk_image_draw()." 0 when there is no current stream.
+    fn current_hyperlink(&self) -> u32 {
+        self.glk.stream_kind_style(self.glk.current_stream()).map(|(_, _, link)| link).unwrap_or(0)
     }
 
     /// Write `s` to Glk stream `sid` (its current style). A window stream routes
@@ -3396,6 +3999,60 @@ impl Machine {
         }
     }
 
+    /// Write raw `bytes` into memory stream `sid` at its current cursor, bounded
+    /// by its declared length exactly like [`Machine::glk_stream_put`]'s `Memory`
+    /// arm — but for raw bytes rather than a `&str`, since a Quetzal blob is not
+    /// valid UTF-8. Used by the in-process `@save` memory-stream path (SQ-1427):
+    /// one byte-stream element per byte, or one 32-bit unicode element (value =
+    /// the byte) per byte, matching how glulxe's `glk_put_buffer_stream` widens
+    /// 8-bit content into a unicode memory stream. A `len == 0` stream (Glk's
+    /// "null" memory stream) already falls out of this correctly: every byte is
+    /// past the bound, so nothing is stored, but the cursor/write-count still
+    /// advance via `memory_stream_advance` — exactly the Glk null-stream write
+    /// contract ("bytes vanish").
+    fn write_bytes_to_memory_stream(&mut self, sid: u32, bytes: &[u8]) {
+        let Some((addr, len, pos, unicode)) = self.glk.memory_stream_read_info(sid) else { return };
+        let elsize = if unicode { 4 } else { 1 };
+        let mut p = pos;
+        for &b in bytes {
+            if p < len {
+                let ea = addr + p * elsize;
+                let _ = self.store_mem_sized(ea, b as u32, elsize);
+            }
+            p = p.saturating_add(1);
+        }
+        self.glk.memory_stream_advance(sid, bytes.len() as u32);
+    }
+
+    /// Read the bytes memory stream `sid` holds from its current cursor up to
+    /// its declared length, undoing [`Machine::write_bytes_to_memory_stream`]'s
+    /// element width exactly (one byte per byte-stream element, the low byte of
+    /// each 32-bit element for a unicode stream). Used by the in-process
+    /// `@restore` memory-stream path (SQ-1427). Reads to the declared length
+    /// rather than the write high-water mark, so a restore over a
+    /// shorter-than-declared write picks up trailing zero padding too — harmless,
+    /// because `restore_quetzal` bounds itself by the Quetzal FORM's own length
+    /// field (`parse_ifzs`) and ignores whatever follows it. Deliberately does
+    /// NOT pre-size the returned `Vec` by `len`: `len` is the story's own
+    /// declared buffer capacity, unbounded and untrusted, and reading it a byte
+    /// at a time already fails fast once `addr` runs off real VM memory —
+    /// eagerly reserving `len` bytes up front would not (SQ-1415 audit item 3
+    /// is the same hazard for a hostile `@protect` range).
+    fn read_bytes_from_memory_stream(&mut self, sid: u32) -> Vec<u8> {
+        let Some((addr, len, pos, unicode)) = self.glk.memory_stream_read_info(sid) else { return Vec::new() };
+        let elsize = if unicode { 4 } else { 1 };
+        let mut out = Vec::new();
+        let mut p = pos;
+        while p < len {
+            let ea = addr + p * elsize;
+            let v = self.read_width(ea, elsize).unwrap_or(0);
+            out.push((v & 0xFF) as u8);
+            p += 1;
+        }
+        self.glk.memory_stream_read_advance(sid, out.len() as u32);
+        out
+    }
+
     /// Write `s` to a text-grid window starting at its cursor, advancing the
     /// cursor and wrapping at the window edge (output past the bottom is
     /// discarded). `\n` moves to the next row, column 0.
@@ -3423,126 +4080,278 @@ impl Machine {
 
     fn op_streamchar(&mut self) -> R<()> {
         let (l, _) = self.read_operands(1, 0)?;
-        let s = ((l[0] & 0xFF) as u8 as char).to_string();
-        self.emit(&s);
-        Ok(())
+        self.stream_char(l[0] & 0xFF)
     }
 
     fn op_streamunichar(&mut self) -> R<()> {
         let (l, _) = self.read_operands(1, 0)?;
-        let s = char::from_u32(l[0]).unwrap_or('\u{FFFD}').to_string();
-        self.emit(&s);
-        Ok(())
+        self.stream_char(l[0])
     }
 
     fn op_streamnum(&mut self) -> R<()> {
         let (l, _) = self.read_operands(1, 0)?;
-        let s = (l[0] as i32).to_string();
-        self.emit(&s);
-        Ok(())
+        self.stream_num(l[0] as i32, false, 0)
     }
 
     fn op_streamstr(&mut self) -> R<()> {
         let (l, _) = self.read_operands(1, 0)?;
-        self.print_object(l[0], &[], 0)
+        self.stream_string(l[0], 0, 0)
     }
 
-    /// Print a "typable object" at `addr`: a string (E0/E1/E2) is decoded and
-    /// streamed; a function (C0/C1) is called with `args` and its output
-    /// streamed in its place. `depth` bounds indirect/recursive references.
-    fn print_object(&mut self, addr: u32, args: &[u32], depth: u32) -> R<()> {
-        if depth > 256 {
+    /// One character through the current I/O system. Under the filter system
+    /// this pushes a plain DestType-0 stub and enters the filter function: there
+    /// is no string to resume, so the ordinary return path lands on the next
+    /// instruction all by itself (glulxe's `filio_char_han`).
+    fn stream_char(&mut self, ch: u32) -> R<()> {
+        if self.filtering() {
+            return self.enter_print_call(0, 0, self.iosys_rock, &[ch]);
+        }
+        let s = char::from_u32(ch).unwrap_or('\u{FFFD}').to_string();
+        self.put_direct(&s);
+        Ok(())
+    }
+
+    /// Print `val` as a signed decimal (spec §2.6 `streamnum`). `inmiddle` is
+    /// set when this is a RESUMPTION — a DestType 0x12 stub was just popped —
+    /// with `charnum` the number of digits already printed.
+    ///
+    /// Under the filter system each digit costs one VM call, so the position is
+    /// carried in the stub (PC = the integer itself, DestAddr = the next
+    /// digit's index, spec §1.3.2) and this returns to the interpreter loop
+    /// rather than looping natively.
+    fn stream_num(&mut self, val: i32, inmiddle: bool, charnum: u32) -> R<()> {
+        let mut inmiddle = inmiddle;
+        let text = val.to_string();
+        let bytes = text.as_bytes();
+        if self.filtering() {
+            self.begin_substring(&mut inmiddle)?;
+            if (charnum as usize) < bytes.len() {
+                let ch = bytes[charnum as usize] as u32;
+                self.pc = val as u32; // the 0x12 stub's PC field carries the value
+                return self.enter_print_call(0x12, charnum + 1, self.iosys_rock, &[ch]);
+            }
+        } else {
+            // The filter may have switched the I/O system mid-number (or this
+            // is a plain unfiltered print): the rest goes out in one piece,
+            // under whatever system is current now.
+            let rest = &text[(charnum as usize).min(bytes.len())..];
+            self.put_direct(rest);
+        }
+        if inmiddle {
+            // The number is finished; unwind the 0x11 stub that began it.
+            if self.pop_callstub_string()?.is_some() {
+                return Err("string-on-string call stub while printing a number".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// Print a string object (spec §1.6.1). `inmiddle` is 0 to begin a fresh
+    /// object — its type byte is read from `addr` — or the type of a string
+    /// being RESUMED (0xE0 / 0xE1 / 0xE2), with `bitnum` the bit position
+    /// within a compressed one.
+    ///
+    /// Nothing here recurses into the interpreter. A character that has to go
+    /// through the filter function, and an embedded object reference in ANY I/O
+    /// system, push a call stub (DestType 0x10/0x11/0x13/0x14, spec §1.3.2) and
+    /// return: the print continues when [`Machine::pop_save_stub_and_store`]
+    /// meets that stub. So the print state lives entirely on the Glulx stack —
+    /// which is what makes a deep filter unbounded rather than truncated, a
+    /// `@throw` past a print an ordinary unwind, and a `@save` mid-print a blob
+    /// any interpreter can resume. Shaped after glulxe's `stream_string`.
+    ///
+    /// The one exception is capture mode ([`Machine::emit_capture`]), which owes
+    /// a Glk dispatch call a finished `String` and so walks embedded references
+    /// natively, bounded by `capture_depth`.
+    fn stream_string(&mut self, addr: u32, inmiddle: u32, bitnum: u32) -> R<()> {
+        let (mut addr, mut inmiddle, mut bitnum) = (addr, inmiddle, bitnum);
+        let mut substring = inmiddle != 0;
+        'outer: loop {
+            let ty = if inmiddle == 0 { self.m8(addr)? } else { inmiddle };
+            if inmiddle == 0 {
+                if ty == 0xC0 || ty == 0xC1 {
+                    // Tolerated where glulxe faults ("Attempt to print
+                    // non-string"): gvm has always let `@streamstr` name a
+                    // function and streamed its output in its place. A
+                    // DestType-0 stub resumes at the next instruction, which is
+                    // exactly what the old nested run-to-return loop did.
+                    if self.emit_capture.is_some() {
+                        return self.capture_nested_call(addr, &[]);
+                    }
+                    return self.enter_print_call(0, 0, addr, &[]);
+                }
+                addr += if ty == 0xE2 { 4 } else { 1 };
+                bitnum = 0;
+            }
+
+            match ty {
+                0xE1 => {
+                    let table = self.cur_stringtbl;
+                    if table == 0 {
+                        return Err("compressed string (E1) with no string-decoding table set".to_string());
+                    }
+                    let root = self.m32(table + 8)?;
+                    let mut node = root;
+                    loop {
+                        let nodetype = self.m8(node)?;
+                        match nodetype {
+                            0x00 => {
+                                // Branch: read one bit, go left (0) or right (1).
+                                let byte = self.m8(addr)?;
+                                let b = (byte >> bitnum) & 1;
+                                bitnum += 1;
+                                if bitnum == 8 {
+                                    bitnum = 0;
+                                    addr += 1;
+                                }
+                                node = if b == 0 { self.m32(node + 1)? } else { self.m32(node + 5)? };
+                            }
+                            0x01 => break, // string terminator
+                            0x02 | 0x04 => {
+                                let ch = if nodetype == 0x02 {
+                                    self.m8(node + 1)?
+                                } else {
+                                    self.m32(node + 1)?
+                                };
+                                if self.filtering() {
+                                    self.begin_substring(&mut substring)?;
+                                    self.pc = addr;
+                                    return self.enter_print_call(0x10, bitnum, self.iosys_rock, &[ch]);
+                                }
+                                let s = char::from_u32(ch).unwrap_or('\u{FFFD}').to_string();
+                                self.put_direct(&s);
+                                node = root;
+                            }
+                            0x03 | 0x05 => {
+                                // A C-style Latin-1 (0x03) / Unicode (0x05)
+                                // string embedded in the node itself.
+                                if self.filtering() {
+                                    self.begin_substring(&mut substring)?;
+                                    self.pc = addr;
+                                    self.push_callstub(0x10, bitnum)?;
+                                    inmiddle = if nodetype == 0x03 { 0xE0 } else { 0xE2 };
+                                    addr = node + 1;
+                                    continue 'outer;
+                                }
+                                let s = if nodetype == 0x03 {
+                                    self.read_cstring(node + 1)?
+                                } else {
+                                    self.read_ustring(node + 1)?
+                                };
+                                self.put_direct(&s);
+                                node = root;
+                            }
+                            0x08..=0x0B => {
+                                // A reference to another object: a string to
+                                // splice in, or a function to call. 0x09/0x0B
+                                // are indirect; 0x0A/0x0B carry an argument
+                                // list.
+                                let mut oaddr = self.m32(node + 1)?;
+                                if nodetype == 0x09 || nodetype == 0x0B {
+                                    oaddr = self.m32(oaddr)?;
+                                }
+                                let args = if nodetype == 0x0A || nodetype == 0x0B {
+                                    self.read_node_args(node + 5)?
+                                } else {
+                                    Vec::new()
+                                };
+                                match self.m8(oaddr)? {
+                                    0xE0..=0xFF => {
+                                        if self.emit_capture.is_some() {
+                                            self.capture_nested_string(oaddr)?;
+                                            node = root;
+                                            continue;
+                                        }
+                                        self.begin_substring(&mut substring)?;
+                                        self.pc = addr;
+                                        self.push_callstub(0x10, bitnum)?;
+                                        inmiddle = 0;
+                                        addr = oaddr;
+                                        continue 'outer;
+                                    }
+                                    0xC0..=0xDF => {
+                                        if self.emit_capture.is_some() {
+                                            self.capture_nested_call(oaddr, &args)?;
+                                            node = root;
+                                            continue;
+                                        }
+                                        self.begin_substring(&mut substring)?;
+                                        self.pc = addr;
+                                        return self.enter_print_call(0x10, bitnum, oaddr, &args);
+                                    }
+                                    other => {
+                                        return Err(format!(
+                                            "bad object type {other:#x} behind a string indirect reference @{oaddr:#010x}"
+                                        ));
+                                    }
+                                }
+                            }
+                            other => return Err(format!("bad string node type {other:#x} @{node:#010x}")),
+                        }
+                    }
+                }
+                0xE0 | 0xE2 => {
+                    // Unencoded Latin-1 (E0) / Unicode (E2) character data,
+                    // running to a zero terminator.
+                    let wide = ty == 0xE2;
+                    if self.filtering() {
+                        self.begin_substring(&mut substring)?;
+                        let ch = if wide { self.m32(addr)? } else { self.m8(addr)? };
+                        addr += if wide { 4 } else { 1 };
+                        if ch != 0 {
+                            self.pc = addr;
+                            let dtype = if wide { 0x14 } else { 0x13 };
+                            return self.enter_print_call(dtype, 0, self.iosys_rock, &[ch]);
+                        }
+                    } else {
+                        let s = if wide { self.read_ustring(addr)? } else { self.read_cstring(addr)? };
+                        self.put_direct(&s);
+                    }
+                }
+                other => return Err(format!("bad string/function type {other:#x} @{addr:#010x}")),
+            }
+
+            // This object is finished.
+            if !substring {
+                return Ok(()); // a plain top-level print: straight out
+            }
+            match self.pop_callstub_string()? {
+                None => return Ok(()), // the 0x11 terminator: the whole print is done
+                Some(bit) => {
+                    addr = self.pc;
+                    bitnum = bit;
+                    inmiddle = 0xE1;
+                }
+            }
+        }
+    }
+
+    /// Native recursion bound for the capture-mode decoder. Only reached by a
+    /// compressed string handed to `glk_put_string` (see
+    /// [`Machine::emit_capture`]); a cyclic table or a self-printing function
+    /// node faults here instead of overflowing the Rust stack.
+    const CAPTURE_MAX_DEPTH: u32 = 32;
+
+    /// Splice a nested string object into the capture buffer, synchronously.
+    fn capture_nested_string(&mut self, addr: u32) -> R<()> {
+        self.capture_depth += 1;
+        if self.capture_depth > Self::CAPTURE_MAX_DEPTH {
             return Err(format!("string decode recursion too deep @{addr:#010x}"));
         }
-        match self.m8(addr)? {
-            0xE0 => {
-                let s = self.read_cstring(addr + 1)?;
-                self.emit(&s);
-                Ok(())
-            }
-            0xE2 => {
-                let s = self.read_ustring(addr + 4)?;
-                self.emit(&s);
-                Ok(())
-            }
-            0xE1 => self.decode_compressed(addr + 1, depth),
-            0xC0 | 0xC1 => self.run_call_to_return(addr, args),
-            other => Err(format!("bad string/function type {other:#x} @{addr:#010x}")),
-        }
+        let r = self.stream_string(addr, 0, 0);
+        self.capture_depth -= 1;
+        r
     }
 
-    /// Decode a compressed (E1) bit stream beginning at `start`, walking the
-    /// current string-decoding table. Bits are read low-bit-first (GLULX_NOTES
-    /// §9). Never panics: bad addresses/node types fault.
-    fn decode_compressed(&mut self, start: u32, depth: u32) -> R<()> {
-        let table = self.cur_stringtbl;
-        if table == 0 {
-            return Err("compressed string (E1) with no string-decoding table set".to_string());
+    /// Run a string-embedded function into the capture buffer, synchronously.
+    fn capture_nested_call(&mut self, func: u32, args: &[u32]) -> R<()> {
+        self.capture_depth += 1;
+        if self.capture_depth > Self::CAPTURE_MAX_DEPTH {
+            return Err(format!("string decode recursion too deep @{func:#010x}"));
         }
-        let root = self.m32(table + 8)?;
-        let mut node = root;
-        let mut addr = start;
-        let mut bit = 0u32;
-        loop {
-            match self.m8(node)? {
-                0x00 => {
-                    // Branch: read one bit, go left (0) or right (1).
-                    let byte = self.m8(addr)?;
-                    let b = (byte >> bit) & 1;
-                    bit += 1;
-                    if bit == 8 {
-                        bit = 0;
-                        addr += 1;
-                    }
-                    node = if b == 0 { self.m32(node + 1)? } else { self.m32(node + 5)? };
-                }
-                0x01 => return Ok(()), // string terminator
-                0x02 => {
-                    let c = self.m8(node + 1)?;
-                    self.emit_latin1(c);
-                    node = root;
-                }
-                0x03 => {
-                    let s = self.read_cstring(node + 1)?;
-                    self.emit(&s);
-                    node = root;
-                }
-                0x04 => {
-                    let cp = self.m32(node + 1)?;
-                    self.emit_uni(cp);
-                    node = root;
-                }
-                0x05 => {
-                    // C-style Unicode string: 32-bit chars until a zero word.
-                    let s = self.read_ustring(node + 1)?;
-                    self.emit(&s);
-                    node = root;
-                }
-                0x08 => {
-                    let a = self.m32(node + 1)?;
-                    self.print_object(a, &[], depth + 1)?;
-                    node = root;
-                }
-                0x09 => {
-                    let a = self.m32(self.m32(node + 1)?)?;
-                    self.print_object(a, &[], depth + 1)?;
-                    node = root;
-                }
-                0x0A => {
-                    let a = self.m32(node + 1)?;
-                    let args = self.read_node_args(node + 5)?;
-                    self.print_object(a, &args, depth + 1)?;
-                    node = root;
-                }
-                0x0B => {
-                    let a = self.m32(self.m32(node + 1)?)?;
-                    let args = self.read_node_args(node + 5)?;
-                    self.print_object(a, &args, depth + 1)?;
-                    node = root;
-                }
-                other => return Err(format!("bad string node type {other:#x} @{node:#010x}")),
-            }
-        }
+        let r = self.run_call_to_return(func, args);
+        self.capture_depth -= 1;
+        r
     }
 
     /// Read an argument list for a 0x0A/0x0B node: a 32-bit count then that many
@@ -3556,35 +4365,29 @@ impl Machine {
         Ok(args)
     }
 
-    /// Call the function at `func` with `args`, running the VM run-loop until
-    /// that frame returns, then resume the caller. Used for string-embedded
-    /// function nodes (GLULX_NOTES §9); the return value is discarded.
+    /// Call `func` with `args` and run the interpreter loop until that frame
+    /// returns, then resume the caller; the return value is discarded.
+    ///
+    /// This is the ONLY place printing still nests natively, and it exists for
+    /// one reason: capture mode ([`Machine::emit_capture`]) owes a Glk dispatch
+    /// call a finished `String`, so it cannot suspend into the interpreter loop
+    /// the way the stream opcodes do. Depth is bounded by
+    /// [`Machine::CAPTURE_MAX_DEPTH`], and an unwind past `resume_fp` — a
+    /// `@throw` out of a captured function — is refused rather than spun on.
     fn run_call_to_return(&mut self, func: u32, args: &[u32]) -> R<()> {
         let resume_fp = self.fp;
         self.call_function(func, args, Dest::Discard)?;
         // call_function installed a deeper callee frame; run until it returns.
         while self.fp != resume_fp {
+            if self.fp < resume_fp {
+                return Err("a @throw unwound past a string-embedded call inside glk_put_string".to_string());
+            }
             if self.halted {
                 return Err("function called within a string halted the machine".to_string());
             }
             self.step_once()?;
-            if let Some(fault) = self.pending_fault.take() {
-                // A filter callback nested under this frame faulted (latched
-                // by `emit`, which has no error channel): stop running in the
-                // abandoned state and propagate (SQ-0625).
-                return Err(fault);
-            }
         }
         Ok(())
-    }
-
-    fn emit_latin1(&mut self, v: u32) {
-        let s = ((v & 0xFF) as u8 as char).to_string();
-        self.emit(&s);
-    }
-    fn emit_uni(&mut self, v: u32) {
-        let s = char::from_u32(v).unwrap_or('\u{FFFD}').to_string();
-        self.emit(&s);
     }
 
     /// Decode a Glulx string OBJECT at `addr` into a String for the Glk
@@ -3612,9 +4415,14 @@ impl Machine {
                 // (e.g. no string table set, or a bad node) records a diagnostic
                 // and skips rather than faulting the VM.
                 let prev = self.emit_capture.replace(String::new());
-                let decoded = self.decode_compressed(addr + 1, 0);
+                let prev_depth = self.capture_depth;
+                let decoded = self.stream_string(addr, 0, 0);
                 let captured = self.emit_capture.take().unwrap_or_default();
                 self.emit_capture = prev;
+                // A decode that bailed out mid-recursion left the counter high;
+                // this boundary is where it is unwound (the error path below
+                // does not fault the VM, so nothing else would).
+                self.capture_depth = prev_depth;
                 match decoded {
                     Ok(()) => Some(captured),
                     Err(e) => {
@@ -3679,6 +4487,21 @@ impl Machine {
             pf.dest = s[0];
             return Ok(());
         }
+        // `glk_select` suspends the same way (SQ-1416 item 3): its S1 is
+        // always 0, but per Glulx spec §2.18 a stack output reference (the
+        // event_t at -1) is pushed AFTER the Glk call and BEFORE S1 is
+        // stored — and here the "Glk call" doesn't finish until the host
+        // supplies the event, long after this `op_glk` frame is gone. Defer
+        // the store to `write_event`'s caller on resume (`supply_line`,
+        // `deliver_timer`, …), exactly like `pending_fileref` above.
+        if let Some(pi) = self.pending_input.as_mut() {
+            pi.dest = s[0];
+            return Ok(());
+        }
+        if let Some(pe) = self.pending_event.as_mut() {
+            pe.dest = s[0];
+            return Ok(());
+        }
         self.store(s[0], result)
     }
 
@@ -3725,7 +4548,11 @@ impl Machine {
     /// Dispatch one `@glk` selector against the Glk model + backend. Output-side
     /// selectors only (input/events are phase 3a-2). Unknown selectors record a
     /// diagnostic and return 0; nothing here panics on bad ids.
-    fn glk_dispatch(&mut self, selector: u32, args: &[u32]) -> R<u32> {
+    // pub(crate), not pub: SQ-1407's fuzz harness (crate::fuzz_harness, a
+    // sibling module — see its docs) calls this directly to hammer the Glk
+    // selector surface with random arguments. Still crate-private; this is
+    // not an embedder-facing API.
+    pub(crate) fn glk_dispatch(&mut self, selector: u32, args: &[u32]) -> R<u32> {
         let a = |i: usize| args.get(i).copied().unwrap_or(0);
         // Debug trace: record structural Glk/garglk calls so a story's
         // window/style/colour instructions are visible. The high-volume text I/O
@@ -4339,8 +5166,11 @@ impl Machine {
                 0
             }
             0x00C1 => {
-                // glk_select_poll(event) — internal events only, never suspends
-                let ev = self.glk.pop_event().unwrap_or_else(GlkEvent::none);
+                // glk_select_poll(event) — internal events only, never
+                // suspends (SQ-1416 item 4): only Timer/Arrange/Redraw/
+                // SoundNotify/VolumeNotify are eligible; Char/Line/Mouse/
+                // Hyperlink are skipped and stay queued for glk_select.
+                let ev = self.glk.pop_pollable_event().unwrap_or_else(GlkEvent::none);
                 self.write_event(a(0), ev)?;
                 0
             }
@@ -4397,13 +5227,14 @@ impl Machine {
             }
             0x0004 => self.glk_gestalt(a(0), a(1)), // glk_gestalt(sel, val)
             0x0005 => {
-                // glk_gestalt_ext(sel, val, arr, arrlen). Only gestalt_CharOutput (3)
-                // writes the output array — arr[0] = glyphs printed for the char. We
-                // report ExactPrint for every char, so that is exactly one glyph. A
-                // null or zero-length array is skipped, per spec.
+                // glk_gestalt_ext(sel, val, arr, arrlen). Only gestalt_CharOutput
+                // (3) writes the output array — arr[0] = the glyph count the
+                // backend reports for `val` (SQ-1416 item 8). A null or
+                // zero-length array is skipped, per spec.
                 let (sel, val, arr, arrlen) = (a(0), a(1), a(2), a(3));
                 if sel == 3 && arr != 0 && arrlen >= 1 {
-                    self.store_mem(arr, 1)?;
+                    let (_, count) = self.backend.char_output_gestalt(val);
+                    self.store_mem(arr, count)?;
                 }
                 self.glk_gestalt(sel, val)
             }
@@ -4473,7 +5304,8 @@ impl Machine {
             0x00E1 => {
                 // glk_image_draw(win, image, val1=x, val2=y) -> 1 if actually drawn
                 if self.graphics_enabled {
-                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, None) as u32
+                    let link = self.current_hyperlink();
+                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, None, link) as u32
                 } else {
                     0
                 }
@@ -4482,9 +5314,52 @@ impl Machine {
                 // glk_image_draw_scaled(win, image, val1=x, val2=y, width, height)
                 // -> 1 if actually drawn
                 if self.graphics_enabled {
-                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, Some((a(4), a(5)))) as u32
+                    let link = self.current_hyperlink();
+                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, Some((a(4), a(5))), link) as u32
                 } else {
                     0
+                }
+            }
+            0x00EC => {
+                // glk_image_draw_scaled_ext(win, image, val1, val2, width,
+                // height, imagerule, maxwidth) -> 1 if actually drawn.
+                // Glk 0.7.6 §7.2; selector 0x00EC per cheapglk `gi_dispa.c`
+                // (`{ 0x00EC, glk_image_draw_scaled_ext, "image_draw_scaled_ext" }`)
+                // and the spec's own dispatch-selector list. SQ-1424.
+                if !self.graphics_enabled {
+                    0
+                } else {
+                    let rule = glk::ImageRule { rule: a(6), width: a(4), height: a(5), maxwidth: a(7) };
+                    let cp = self.backend.char_pixels();
+                    let link = self.current_hyperlink();
+                    match self.glk.window_type(a(0)) {
+                        // Graphics window: ONE-SHOT. Resolve against the
+                        // window's pixel width now (maxwidth ignored) and hand
+                        // the result to the same seam `glk_image_draw_scaled`
+                        // uses, so a host needs no change to support it.
+                        Some(glk::WinType::Graphics) => {
+                            let win_w = self.glk.window_pixel_size(a(0), cp).map(|(w, _)| w).unwrap_or(0);
+                            match self.backend.image_info(a(1)).and_then(|nat| rule.resolve_in_graphics(nat, win_w)) {
+                                Some(size) => {
+                                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, Some(size), link)
+                                        as u32
+                                }
+                                // No such image, or a rule word naming no width
+                                // or no height rule — both are "not drawn".
+                                None => 0,
+                            }
+                        }
+                        // Text buffer: the rule is STANDING (§"Graphics in Text
+                        // Buffer Windows"). Hand the RULE to the host, not a
+                        // size, so it can re-resolve on every relayout. `val1`
+                        // is the imagealign; `val2` is unused and must be zero.
+                        Some(glk::WinType::TextBuffer) => {
+                            let win_w = self.glk.window_size(a(0)).map(|(w, _)| w * cp.0).unwrap_or(0);
+                            self.backend.buffer_draw_image_ext(a(0), a(1), a(2), rule, win_w, link) as u32
+                        }
+                        // Grid/pair/blank/absent windows do not display images.
+                        _ => 0,
+                    }
                 }
             }
             0x00E8 => {
@@ -4696,8 +5571,11 @@ impl Machine {
     }
 
     /// Write `s` to the current Glk stream (used by the put-to-current
-    /// selectors). Glk output is independent of the VM's I/O system.
-    fn glk_put_current(&mut self, s: &str) {
+    /// selectors). Glk output is independent of the VM's I/O system. `pub(crate)`
+    /// so `accel::accel_error` (SQ-1416 item 7) can reach it too — accel.c's
+    /// `accel_error` writes through `glk_put_char`/`glk_put_string`, i.e. the
+    /// current Glk stream, exactly like this.
+    pub(crate) fn glk_put_current(&mut self, s: &str) {
         let sid = self.glk.current_stream();
         self.glk_stream_put(sid, s);
     }
@@ -4751,7 +5629,7 @@ impl Machine {
     fn relayout_glk(&mut self) {
         let (w, h) = self.backend.screen_size();
         let cp = self.backend.char_pixels();
-        let layout = self.glk.relayout(w, h, cp);
+        let layout = self.glk.relayout(w, h, cp, self.backend.borderless());
         self.backend.window_layout(&layout);
         let tree = self.glk.window_tree();
         self.backend.window_tree(tree);
@@ -4825,8 +5703,23 @@ impl Machine {
         }
     }
 
-    /// Read a Glk `glktimeval_t` (3 words: high_sec, low_sec, microsec) at `addr`.
-    fn read_timeval(&self, addr: u32) -> R<glk::datetime::GlkTimeVal> {
+    /// Read a Glk `glktimeval_t` (3 words: high_sec, low_sec, microsec) at
+    /// `addr`, honoring the `-1` (0xFFFFFFFF) input-structure convention
+    /// (SQ-1416 item 2; Glulx spec §2.18: "a reference to a Glk structure …
+    /// -1 means that all the values are written to the stack … an input
+    /// structure is popped off first-topmost" — i.e. field 0 is popped first,
+    /// matching glkop.c's `ReadStructField` macro, which does one
+    /// `stackptr -= 4; return Stk4(stackptr)` per field in increasing
+    /// field-index order; the mirror image of [`Machine::glk_out_ref`]'s
+    /// OUTPUT convention, where the LAST field ends up topmost). This makes
+    /// `read_timeval` an input struct, so it must run `&mut self` to pop.
+    fn read_timeval(&mut self, addr: u32) -> R<glk::datetime::GlkTimeVal> {
+        if addr == 0xFFFF_FFFF {
+            let high_sec = self.pop32()? as i32;
+            let low_sec = self.pop32()?;
+            let microsec = self.pop32()? as i32;
+            return Ok(glk::datetime::GlkTimeVal { high_sec, low_sec, microsec });
+        }
         Ok(glk::datetime::GlkTimeVal {
             high_sec: self.m32(addr)? as i32,
             low_sec: self.m32(addr + 4)?,
@@ -4839,8 +5732,20 @@ impl Machine {
         self.glk_out_ref(addr, &[tv.high_sec as u32, tv.low_sec, tv.microsec as u32])
     }
 
-    /// Read a Glk `glkdate_t` (8 words) at `addr`.
-    fn read_glkdate(&self, addr: u32) -> R<glk::datetime::GlkDate> {
+    /// Read a Glk `glkdate_t` (8 words) at `addr`, honoring the `-1` input-
+    /// structure convention (see [`Machine::read_timeval`]; SQ-1416 item 2).
+    fn read_glkdate(&mut self, addr: u32) -> R<glk::datetime::GlkDate> {
+        if addr == 0xFFFF_FFFF {
+            let year = self.pop32()? as i32;
+            let month = self.pop32()? as i32;
+            let day = self.pop32()? as i32;
+            let weekday = self.pop32()? as i32;
+            let hour = self.pop32()? as i32;
+            let minute = self.pop32()? as i32;
+            let second = self.pop32()? as i32;
+            let microsec = self.pop32()? as i32;
+            return Ok(glk::datetime::GlkDate { year, month, day, weekday, hour, minute, second, microsec });
+        }
         Ok(glk::datetime::GlkDate {
             year: self.m32(addr)? as i32,
             month: self.m32(addr + 4)? as i32,
@@ -4972,7 +5877,7 @@ impl Machine {
     /// Take what the host's input line should hold for the newest line-input
     /// request, if one has appeared since the last call. One-shot per request, so
     /// re-polling never re-inserts it. `Some("")` means "start empty" — see
-    /// [`Self::line_seed`].
+    /// `Self::line_seed`.
     pub fn take_line_seed(&mut self) -> Option<String> {
         self.line_seed.take()
     }
@@ -5054,9 +5959,12 @@ impl Machine {
             return self.write_event(event_addr, ev); // arrange/redraw, no suspend
         }
         if let Some((win, unicode)) = self.glk.first_line_request() {
-            self.pending_input = Some(PendingInput { event_addr, win, line: true, unicode });
+            // `dest` is a placeholder here (`op_glk` fills it right after this
+            // call returns, the same handshake `pending_fileref` uses) —
+            // SQ-1416 item 3.
+            self.pending_input = Some(PendingInput { event_addr, win, line: true, unicode, dest: Dest::Discard });
         } else if let Some((win, unicode)) = self.glk.first_char_request() {
-            self.pending_input = Some(PendingInput { event_addr, win, line: false, unicode });
+            self.pending_input = Some(PendingInput { event_addr, win, line: false, unicode, dest: Dest::Discard });
         } else {
             // No line/char request. If a timer/mouse/hyperlink is armed, this is a
             // legal blocking select on a non-input event (Glk §4.4): suspend and
@@ -5065,7 +5973,7 @@ impl Machine {
             let mouse = self.glk.any_mouse_requested();
             let hyperlink = self.glk.any_hyperlink_requested();
             if timer_ms.is_some() || mouse || hyperlink {
-                self.pending_event = Some(PendingEvent { event_addr, timer_ms, mouse, hyperlink });
+                self.pending_event = Some(PendingEvent { event_addr, timer_ms, mouse, hyperlink, dest: Dest::Discard });
             } else {
                 // Nothing at all is armed: a malformed program that would otherwise
                 // deadlock. Preserve the diagnostic + evtype_None escape hatch.
@@ -5356,6 +6264,9 @@ impl Machine {
         if let Err(e) = self.write_event(pi.event_addr, ev) {
             self.diagnostics.push(e);
         }
+        // S1 (always 0) stored AFTER the event words, per Glulx spec §2.18
+        // (SQ-1416 item 3).
+        let _ = self.store(pi.dest, 0);
     }
 
     /// Complete a suspended char-input `glk_select`: fill the `event_t` with
@@ -5390,6 +6301,8 @@ impl Machine {
         if let Err(e) = self.write_event(pi.event_addr, ev) {
             self.diagnostics.push(e);
         }
+        // S1 (always 0) stored AFTER the event words (SQ-1416 item 3).
+        let _ = self.store(pi.dest, 0);
     }
 
     /// Deliver an `evtype_Arrange` into a suspended `glk_select`, if one is
@@ -5405,12 +6318,20 @@ impl Machine {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pi.dest, 0); // SQ-1416 item 3: after the event words
         } else if let Some(pe) = self.pending_event.take() {
             if let Err(e) = self.write_event(pe.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pe.dest, 0);
+        } else {
+            // SQ-1416 item 8: queue like the sound/timer/mouse/hyperlink
+            // siblings below, instead of silently dropping the event when
+            // nothing is currently blocked on a `glk_select`. The NEXT select
+            // (input or non-input) then delivers it via `glk_select`'s own
+            // `pop_event` check.
+            self.glk.push_event(ev);
         }
-        // else: no-op — an Arrange is only meaningful at a blocked `glk_select`.
     }
 
     /// Deliver a Glk `Evtype_SoundNotify` for a finished sound: `sound` is the
@@ -5425,10 +6346,12 @@ impl Machine {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pi.dest, 0); // SQ-1416 item 3: after the event words
         } else if let Some(pe) = self.pending_event.take() {
             if let Err(e) = self.write_event(pe.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pe.dest, 0);
         } else {
             self.glk.push_event(ev);
         }
@@ -5445,10 +6368,12 @@ impl Machine {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pi.dest, 0); // SQ-1416 item 3: after the event words
         } else if let Some(pe) = self.pending_event.take() {
             if let Err(e) = self.write_event(pe.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pe.dest, 0);
         } else {
             self.glk.push_event(ev);
         }
@@ -5474,10 +6399,12 @@ impl Machine {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pi.dest, 0); // SQ-1416 item 3: after the event words
         } else if let Some(pe) = self.pending_event.take() {
             if let Err(e) = self.write_event(pe.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pe.dest, 0);
         } else {
             self.glk.push_event(ev);
         }
@@ -5498,10 +6425,12 @@ impl Machine {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pi.dest, 0); // SQ-1416 item 3: after the event words
         } else if let Some(pe) = self.pending_event.take() {
             if let Err(e) = self.write_event(pe.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pe.dest, 0);
         } else {
             self.glk.push_event(ev);
         }
@@ -5529,10 +6458,12 @@ impl Machine {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pi.dest, 0); // SQ-1416 item 3: after the event words
         } else if let Some(pe) = self.pending_event.take() {
             if let Err(e) = self.write_event(pe.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+            let _ = self.store(pe.dest, 0);
         } else {
             self.glk.push_event(ev);
         }
@@ -5572,8 +6503,32 @@ impl Machine {
         self.deliver_arrange();
     }
 
-    /// The Glk version this layer implements (0.7.6), reported by
-    /// `glk_gestalt(gestalt_Version)`.
+    /// The Glk version this layer implements, reported by
+    /// `glk_gestalt(gestalt_Version)` (encoding per Glk spec §1.8: major<<16
+    /// | minor<<8 | sub-minor, so 0.7.6 is `0x0000_0706` — the spec states the
+    /// number outright: "The current Glk specification version is 0.7.6, so
+    /// this selector will return 0x00000706").
+    ///
+    /// SQ-1416 item 1 dropped this to 0.7.5, because the version claimed 0.7.6
+    /// without implementing `0x00EC glk_image_draw_scaled_ext` — the one call
+    /// 0.7.6 added. The blocker it recorded was real and is the reason the
+    /// feature took its own quest: for a `wintype_Graphics` window the
+    /// resolution is a one-shot "compute final (width, height) from
+    /// `imagerule`, then draw", which reuses the existing
+    /// `graphics_draw_image` seam unchanged — but §"Graphics in Text Buffer
+    /// Windows" makes `imagerule_WidthRatio` in a `wintype_TextBuffer` window
+    /// NOT one-shot: "the image width will always be relative to the *current*
+    /// window width. If the text buffer window is resized … the image will
+    /// resize too", a standing per-image relationship that must be re-resolved
+    /// on every relayout.
+    ///
+    /// SQ-1424 built exactly that: [`glk::ImageRule`] is the standing value,
+    /// [`glk::GlkBackend::buffer_draw_image_ext`] is the seam that hands it to
+    /// a host rather than a frozen size, and the host re-resolves it against
+    /// the band's CURRENT width every time it lays the transcript out — so a
+    /// terminal resize re-sizes the picture with the text. With `0x00EC`
+    /// handled and `gestalt_DrawImageScale` (24) answered below, 0.7.6 is now
+    /// the honest number.
     const GLK_VERSION: u32 = 0x0000_0706;
 
     /// Answer a `glk_gestalt` query. Truthful for what 3a-1 implements: output +
@@ -5586,7 +6541,9 @@ impl Machine {
             0 => Self::GLK_VERSION, // gestalt_Version
             1 => 1,                 // gestalt_CharInput → supported
             2 => 1,                 // gestalt_LineInput → supported
-            3 => 2,                 // gestalt_CharOutput → ExactPrint for any char
+            // gestalt_CharOutput(ch) — answered by the backend (SQ-1416 item 8),
+            // not hardcoded to ExactPrint for every code point.
+            3 => self.backend.char_output_gestalt(val).0,
             15 => 1,                // gestalt_Unicode
             16 => 1,                // gestalt_UnicodeNorm → canon_decompose/normalize supported
             17 => 1,                // gestalt_LineInputEcho → set_echo_line_event supported
@@ -5598,6 +6555,11 @@ impl Machine {
             5 => 1,                 // gestalt_Timer → supported
             6 => self.graphics_enabled as u32,                // gestalt_Graphics
             7 => (self.graphics_enabled && (val == 5 || val == 3)) as u32, // gestalt_DrawImage(wintype): Graphics + TextBuffer (inline images)
+            // gestalt_DrawImageScale(wintype) — "The same, but for the
+            // glk_image_draw_scaled_ext() call" (Glk 0.7.6 §7.2), so it mirrors
+            // gestalt_DrawImage exactly: `0x00EC` is implemented for both the
+            // window types that display images at all. SQ-1424.
+            24 => (self.graphics_enabled && (val == 5 || val == 3)) as u32,
             14 => self.graphics_enabled as u32,               // gestalt_GraphicsTransparency
             8 => self.sound_enabled as u32,  // gestalt_Sound
             9 => self.sound_enabled as u32,  // gestalt_SoundVolume
@@ -5617,12 +6579,13 @@ impl Machine {
 
     // ── the run loop ──────────────────────────────────────────────────────────
 
-    /// Execute one instruction. Returns [`StepResult::Quit`] on `quit`, an outer
-    /// return, or any fault (which is recorded in `diagnostics`); otherwise
+    /// Execute one instruction. Returns [`StepResult::Quit`] on a clean `quit`
+    /// or outer return, [`StepResult::Fault`] on any recorded runtime fault
+    /// (SQ-1395; also recorded in `diagnostics`), otherwise
     /// [`StepResult::Continue`]. Never panics.
     pub fn step(&mut self) -> StepResult {
         if self.halted {
-            return StepResult::Quit;
+            return self.halted_result();
         }
         // Still suspended on a prior glk_select: re-report until the host supplies.
         if let Some(sr) = self.suspend_result() {
@@ -5636,15 +6599,8 @@ impl Machine {
         if let Some(sr) = self.fileref_prompt_result() {
             return sr;
         }
-        // A fault latched inside a filter-iosys callback (see `pending_fault`)
-        // counts as this instruction's fault — the machine abandoned a frame
-        // mid-flight and must record-the-fault-and-quit (SQ-0625).
-        let stepped = self.step_once().and_then(|()| match self.pending_fault.take() {
-            Some(fault) => Err(fault),
-            None => Ok(()),
-        });
-        match stepped {
-            Ok(()) if self.halted => StepResult::Quit,
+        match self.step_once() {
+            Ok(()) if self.halted => self.halted_result(),
             // A glk_select this step may have suspended for input, or an
             // @save/@restore this step may have suspended for host file I/O.
             Ok(()) => self
@@ -5656,8 +6612,22 @@ impl Machine {
                 self.fault_trace = Some(self.build_trace(msg.clone()));
                 self.diagnostics.push(msg);
                 self.halted = true;
-                StepResult::Quit
+                self.faulted = true;
+                StepResult::Fault
             }
+        }
+    }
+
+    /// The `StepResult` for an already-`halted` machine: `Fault` if the halt
+    /// was a fault, `Quit` if it was clean. Kept a separate flag from
+    /// `fault_trace` (SQ-1395) because `take_fault_trace` drains that Option —
+    /// a host that reads the trace once and calls `step()` again must still
+    /// see `Fault`, not have it read back as a clean `Quit`.
+    fn halted_result(&self) -> StepResult {
+        if self.faulted {
+            StepResult::Fault
+        } else {
+            StepResult::Quit
         }
     }
 
@@ -5670,7 +6640,7 @@ impl Machine {
     /// had occurred. Used by the host to abort a runaway turn (an unbounded game
     /// loop) so the app can survive instead of hard-hanging. Records the same
     /// fault trace + diagnostic a real fault would, and halts; the next `step`
-    /// returns `Quit`.
+    /// returns [`StepResult::Fault`].
     pub fn abort_with_fault(&mut self, msg: String) {
         if self.halted {
             return;
@@ -5678,6 +6648,7 @@ impl Machine {
         self.fault_trace = Some(self.build_trace(msg.clone()));
         self.diagnostics.push(msg);
         self.halted = true;
+        self.faulted = true;
     }
 
     /// Build a [`crate::trace::StackTrace`] by walking the frame-pointer chain
@@ -5789,6 +6760,37 @@ mod tests {
     use super::*;
     use crate::asm;
     use crate::glk::TestBackend;
+
+    /// Nibble-order + padding edges of `read_operands` (Glulx spec §1.4 /
+    /// GLULX_NOTES §3): modes pack two per byte with the LOW nibble naming the
+    /// EARLIER operand, and an odd operand count leaves a final high nibble
+    /// whose value decode must ignore. Hand-laid bytes, so a decoder that reads
+    /// the nibbles high-first (or honours the padding) fails here rather than
+    /// three opcodes into a story (SQ-1208's zero-allocation rewrite).
+    #[test]
+    fn read_operands_nibble_order_and_odd_padding() {
+        // Body: raw operand block for a (2 load, 1 store) shape — never
+        // executed, only decoded. 3 operands → 2 mode bytes.
+        //   byte 0 = 0x21: op0 mode 0x1 (low nibble), op1 mode 0x2 (high)
+        //   byte 1 = 0x78: op2 mode 0x8 (low), padding nibble 0x7 (ignored —
+        //            0x7 would otherwise decode as a 4-byte memory operand)
+        // Data: op0 = 0xFF (sign-extends), op1 = 0x1234; mode 0x8 has none.
+        let body = [0x21, 0x78, 0xFF, 0x12, 0x34];
+        let start = asm::func(0xC0, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = Machine::with_glk(Memory::new(built.image).unwrap(), Box::new(TestBackend::new()));
+        let pc0 = m.pc; // frame entry left pc at the body's first byte
+
+        let (l, s) = m.read_operands(2, 1).expect("decodes");
+        assert_eq!(&l[..], &[0xFFFF_FFFF, 0x1234], "low nibble is the earlier operand");
+        assert_eq!(&s[..], &[Dest::Push]);
+        assert_eq!(m.pc, pc0 + 5, "2 mode bytes + 1 + 2 data bytes consumed");
+
+        // Zero operands: no mode bytes, nothing consumed.
+        let (l, s) = m.read_operands(0, 0).expect("decodes");
+        assert!(l.is_empty() && s.is_empty());
+        assert_eq!(m.pc, pc0 + 5);
+    }
 
     /// Release-mode hot-loop micro-benchmark (SQ-0465 perf guard). Executes a
     /// tight decrement/branch loop of ~20M instructions and prints throughput.
@@ -5995,6 +6997,18 @@ mod tests {
         m
     }
 
+    /// Like `machine_with_body`, but with `ram_bytes` of RAM instead of the
+    /// hardcoded 0x100 — for the memory-stream `@save`/`@restore` tests
+    /// (SQ-1427), which need somewhere sizeable inside RAM to hold the
+    /// round-tripped Quetzal blob.
+    fn machine_with_body_and_ram(locals: &[(u8, u8)], body: Vec<u8>, ram_bytes: u32) -> Machine {
+        let start = asm::func(0xC1, locals, &body);
+        let built = asm::assemble(&[start], 0, ram_bytes);
+        let m = machine(built);
+        assert_eq!(m.mem.ramstart(), 0x100, "test assumes RAMSTART == 0x100");
+        m
+    }
+
 
     // ── SQ-0229: Glulx-Quetzal structural conformance ────────────────────────
     //
@@ -6179,11 +7193,17 @@ mod tests {
         let (memsize, diff) = decompress_cmem(cmem);
 
         assert_eq!(memsize, m.mem.mem_size(), "CMem's memsize prefix is the live memory size");
+        // This pins gvm's OWN writer (`compress_ram`, which never omits its trailing zero run) —
+        // NOT a general property of the CMem format. glulxe's writer (serial.c `write_memstate`)
+        // deliberately omits a trailing run ("it's possible we've got a run left over, but we
+        // don't write it"), so a foreign save's diff can legitimately decompress shorter than
+        // `memsize - RAMSTART`; `decompress_ram` (the production reader) tolerates that by filling
+        // the remainder from the original image — see `cmem_reader_fills_omitted_trailing_run`.
         assert_eq!(
             diff.len() as u32,
             memsize - m.mem.ramstart(),
-            "the RLE must decompress to precisely [RAMSTART, memsize) — a length mismatch is the \
-             classic silent corruption: a foreign terp restores a truncated or over-long RAM image",
+            "gvm's own writer always emits the full run, unlike a foreign terp's — a length \
+             mismatch HERE is a corruption in gvm's writer itself",
         );
 
         // The diff is XOR-against-original, so it must reconstruct live RAM exactly.
@@ -6193,6 +7213,63 @@ mod tests {
             assert_eq!(d ^ m.mem.orig_byte(a), want, "RAM byte {a:#x} must round-trip through the diff");
         }
         assert!(diff.iter().any(|&b| b != 0), "the fixture actually dirtied RAM, so the test is not vacuous");
+    }
+
+    /// The slice-based `compress_ram` (SQ-1177) must be byte-identical to the
+    /// per-byte original it replaced — the CMem body is an on-disk format, and
+    /// "faster" is only allowed to mean faster. The reference below IS the old
+    /// implementation, verbatim: `read8`/`orig_byte` a byte at a time, then the
+    /// one-zero-at-a-time RLE.
+    #[test]
+    fn compress_ram_matches_the_per_byte_reference() {
+        fn reference(m: &Machine) -> Vec<u8> {
+            let ramstart = m.mem.ramstart();
+            let memsize = m.mem.mem_size();
+            let mut diff = Vec::with_capacity((memsize - ramstart) as usize);
+            for a in ramstart..memsize {
+                let cur = m.mem.read8(a).unwrap_or(0) as u8;
+                diff.push(cur ^ m.mem.orig_byte(a));
+            }
+            let mut out = Vec::new();
+            out.extend_from_slice(&memsize.to_be_bytes());
+            let mut i = 0;
+            while i < diff.len() {
+                if diff[i] == 0 {
+                    let mut run = 1usize;
+                    while i + run < diff.len() && diff[i + run] == 0 && run < 256 {
+                        run += 1;
+                    }
+                    out.push(0);
+                    out.push((run - 1) as u8);
+                    i += run;
+                } else {
+                    out.push(diff[i]);
+                    i += 1;
+                }
+            }
+            out
+        }
+
+        // A machine that has run, so the diff holds real dirt…
+        let mut m = conformance_machine();
+        assert_eq!(m.compress_ram(), reference(&m), "the fixture's own dirt");
+
+        // …then every shape the encoder can meet: a literal stretch, a zero run
+        // longer than one marker can carry (>256), single zeros between
+        // literals, RAM grown past the original ENDMEM (where the diff base is
+        // zeros rather than image bytes), and a literal on the very last byte.
+        let ramstart = m.mem.ramstart();
+        for (i, b) in [0xAA, 0xBB, 0xCC, 0x00, 0xDD].into_iter().enumerate() {
+            m.mem.write_byte_raw(ramstart + 0x40 + i as u32, b);
+        }
+        assert!(m.mem.set_mem_size(m.mem.mem_size() + 512), "growable");
+        m.mem.write_byte_raw(m.mem.mem_size() - 300, 0x11); // zero run > 256 after it
+        m.mem.write_byte_raw(m.mem.mem_size() - 1, 0x22); // run ends on a literal
+        assert_eq!(m.compress_ram(), reference(&m), "adversarial run shapes");
+
+        // And the trailing-zero-run shape, which the loop above just removed.
+        m.mem.write_byte_raw(m.mem.mem_size() - 1, 0x00);
+        assert_eq!(m.compress_ram(), reference(&m), "a zero run to the very end");
     }
 
     #[test]
@@ -6304,7 +7381,7 @@ mod tests {
                     steps += 1;
                     assert!(steps < 1000, "runaway");
                 }
-                StepResult::Quit => break,
+                StepResult::Fault => break,
                 other => panic!("unexpected {other:?}"),
             }
         }
@@ -6327,6 +7404,35 @@ mod tests {
             }
         }
         assert!(m.take_fault_trace().is_none());
+    }
+
+    /// SQ-1395: `StepResult::Fault` is distinct from `StepResult::Quit`, and
+    /// stays `Fault` on every later `step()` call — even after the host has
+    /// drained `take_fault_trace()` — so an embedder who checks only the
+    /// `StepResult` (never `diagnostics`) can still tell a crashed story
+    /// from a clean exit at any point, not just the one step that faulted.
+    #[test]
+    fn fault_step_result_persists_after_the_trace_is_drained() {
+        use asm::Op::{Mem32, Stack};
+        let body = asm::ins(0x40, &[Mem32(0x7FFF_FFFF), Stack]); // OOB load -> fault
+        let mut m = machine_with_body(&[], body);
+        let mut steps = 0;
+        loop {
+            match m.step() {
+                StepResult::Continue => {
+                    steps += 1;
+                    assert!(steps < 1000, "runaway");
+                }
+                StepResult::Fault => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(m.take_fault_trace().is_some(), "trace present right after the fault");
+        // Drained now — a naive `fault_trace.is_some()` check would read this
+        // as a clean quit from here on. `step()` must not.
+        assert!(m.take_fault_trace().is_none(), "trace is one-shot");
+        assert_eq!(m.step(), StepResult::Fault, "still Fault after the trace is drained");
+        assert_eq!(m.step(), StepResult::Fault, "and stays Fault on every later call");
     }
 
     #[test]
@@ -6386,6 +7492,146 @@ mod tests {
         m.complete_restore_failure();
         assert_eq!(m.mem.read32(0x110), Some(1), "complete_restore_failure stores 1 into S1");
         assert_eq!(m.step(), StepResult::Quit);
+    }
+
+    // ── SQ-1427: `@save`/`@restore` on a memory stream (Glulx spec §1.8.2, not
+    // just a fileref-backed one) ─────────────────────────────────────────────
+    //
+    // glulxe's own `perform_save`/`perform_restore` (serial.c) do exactly
+    // `glk_put_buffer_stream`/`glk_get_buffer_stream` against whatever Glk
+    // stream the opcode was handed — a memory stream (`glk_stream_open_memory`)
+    // is a legal, self-contained target with no host file I/O, so `@save`/
+    // `@restore` to one must resolve in process rather than suspending with
+    // `SaveRequest`/`RestoreRequest`.
+
+    #[test]
+    fn save_and_restore_via_memory_stream_do_not_suspend_and_round_trip() {
+        use asm::Op::Mem32;
+        const SID_ADDR: u32 = 0x110;
+        const DEST_SAVE: u32 = 0x118;
+        const DEST_RESTORE: u32 = 0x11C;
+        const WITNESS: u32 = 0x120;
+        const MEMBUF: u32 = 0x200;
+        const MEMBUF_LEN: u32 = 0x400; // bytes; plenty for this tiny image's Quetzal
+
+        let body = [
+            asm::ins(0x0123, &[Mem32(SID_ADDR), Mem32(DEST_SAVE)]), // @save
+            asm::ins(0x0124, &[Mem32(SID_ADDR), Mem32(DEST_RESTORE)]), // @restore
+            asm::ins(0x120, &[]),                                   // quit
+        ]
+        .concat();
+        let mut m = machine_with_body_and_ram(&[], body, 0x600);
+        let sid = m.glk.stream_open_memory(MEMBUF, MEMBUF_LEN, false, 3 /* ReadWrite */, 0);
+        m.mem.write32(SID_ADDR, sid).unwrap();
+
+        // @save to a memory stream must not suspend: it saves in process.
+        assert_eq!(m.step(), StepResult::Continue, "memory-stream @save resolves without a SaveRequest");
+        assert_eq!(m.mem.read32(DEST_SAVE), Some(0), "stores the success code 0 directly");
+        assert!(m.pending_saveload.is_none(), "never suspended, so nothing is pending");
+
+        // The bytes actually landed in the memory stream's buffer, and it's a
+        // well-formed, spec-conformant Quetzal container — the same structural
+        // check `save_quetzal_is_a_wellformed_ifzs_container` applies to the
+        // fileref path's bytes.
+        let blob_len = m.glk.stream_position(sid).expect("memory stream exists") as usize;
+        assert!(blob_len > 0 && blob_len <= MEMBUF_LEN as usize, "blob fit inside the declared buffer");
+        let blob: Vec<u8> = (0..blob_len as u32).map(|i| m.mem.read8(MEMBUF + i).unwrap() as u8).collect();
+        let chunks = iff_chunks(&blob);
+        assert_eq!(
+            chunk_ids(&chunks),
+            vec!["IFhd", "CMem", "Stks", "MAll"],
+            "the memory-stream save is the same standard four chunks as save_quetzal()"
+        );
+
+        // Perturb a witness word, then restore from the SAME stream — rewound
+        // to its start, since @save left its cursor at the end of the blob.
+        m.mem.write32(WITNESS, 0xABCD_1234).unwrap();
+        assert_eq!(m.mem.read32(WITNESS), Some(0xABCD_1234));
+        m.glk.stream_set_position(sid, 0, 0);
+
+        assert_eq!(m.step(), StepResult::Continue, "memory-stream @restore resolves without a RestoreRequest");
+        assert!(m.pending_saveload.is_none());
+        assert_eq!(m.mem.read32(WITNESS), Some(0), "restore reverted the witness word");
+        assert_eq!(
+            m.mem.read32(DEST_SAVE),
+            Some(u32::MAX),
+            "restore pops the original @save's stub and stores -1, the just-restored sentinel"
+        );
+    }
+
+    #[test]
+    fn restore_from_garbage_memory_stream_stores_one_and_leaves_state_intact() {
+        use asm::Op::Mem32;
+        const SID_ADDR: u32 = 0x110;
+        const DEST: u32 = 0x118;
+        const WITNESS: u32 = 0x120;
+        const MEMBUF: u32 = 0x140;
+        const MEMBUF_LEN: u32 = 64;
+
+        let body = [
+            asm::ins(0x0124, &[Mem32(SID_ADDR), Mem32(DEST)]), // @restore
+            asm::ins(0x120, &[]),                              // quit
+        ]
+        .concat();
+        let mut m = machine_with_body_and_ram(&[], body, 0x200);
+        let sid = m.glk.stream_open_memory(MEMBUF, MEMBUF_LEN, false, 2 /* Read */, 0);
+        m.mem.write32(SID_ADDR, sid).unwrap();
+        for (i, b) in b"not a save".iter().enumerate() {
+            m.mem.write8(MEMBUF + i as u32, *b as u32).unwrap();
+        }
+        m.mem.write32(WITNESS, 0x1122_3344).unwrap();
+
+        assert_eq!(m.step(), StepResult::Continue, "resolves without a RestoreRequest even on failure");
+        assert_eq!(m.mem.read32(DEST), Some(1), "a garbage blob stores the failure code 1");
+        assert_eq!(m.mem.read32(WITNESS), Some(0x1122_3344), "a failed restore leaves state untouched");
+        assert!(m.pending_saveload.is_none());
+        assert_eq!(m.step(), StepResult::Quit);
+    }
+
+    #[test]
+    fn save_and_restore_via_unicode_memory_stream_round_trip() {
+        use asm::Op::Mem32;
+        const SID_ADDR: u32 = 0x110;
+        const DEST_SAVE: u32 = 0x118;
+        const DEST_RESTORE: u32 = 0x11C;
+        const WITNESS: u32 = 0x120;
+        const MEMBUF: u32 = 0x300;
+        const MEMBUF_LEN_ELEMS: u32 = 512; // 32-bit elements: one byte of Quetzal per element
+
+        let body = [
+            asm::ins(0x0123, &[Mem32(SID_ADDR), Mem32(DEST_SAVE)]), // @save
+            asm::ins(0x0124, &[Mem32(SID_ADDR), Mem32(DEST_RESTORE)]), // @restore
+            asm::ins(0x120, &[]),                                   // quit
+        ]
+        .concat();
+        let mut m = machine_with_body_and_ram(&[], body, 0x1000);
+        let sid = m.glk.stream_open_memory(MEMBUF, MEMBUF_LEN_ELEMS, true, 3 /* ReadWrite */, 0);
+        m.mem.write32(SID_ADDR, sid).unwrap();
+
+        assert_eq!(m.step(), StepResult::Continue);
+        assert_eq!(m.mem.read32(DEST_SAVE), Some(0));
+        let blob_len = m.glk.stream_position(sid).expect("memory stream exists") as usize;
+        assert!(blob_len > 0 && blob_len <= MEMBUF_LEN_ELEMS as usize, "blob fit inside the declared buffer");
+        // Each Quetzal byte occupies one 32-bit element (matching glulxe's
+        // glk_put_buffer_stream widening 8-bit content into a unicode memory
+        // stream): the low 3 bytes of every element must be zero, and the high
+        // byte carries the Quetzal byte.
+        let blob: Vec<u8> = (0..blob_len as u32)
+            .map(|i| {
+                let ea = MEMBUF + i * 4;
+                assert_eq!(m.mem.read32(ea).unwrap() & !0xFF, 0, "unicode element {i} carries only a byte value");
+                m.mem.read8(ea + 3).unwrap() as u8
+            })
+            .collect();
+        let chunks = iff_chunks(&blob);
+        assert_eq!(chunk_ids(&chunks), vec!["IFhd", "CMem", "Stks", "MAll"]);
+
+        m.mem.write32(WITNESS, 0xDEAD_BEEF).unwrap();
+        m.glk.stream_set_position(sid, 0, 0);
+
+        assert_eq!(m.step(), StepResult::Continue);
+        assert_eq!(m.mem.read32(WITNESS), Some(0), "restore reverted the witness word");
+        assert_eq!(m.mem.read32(DEST_SAVE), Some(u32::MAX), "restore stores the -1 sentinel");
     }
 
     #[test]
@@ -7180,9 +8426,13 @@ mod tests {
         const COUNTER_ADDR: u32 = 0x100;
         const FILT_ADDR: u32 = 0x24;
 
-        // A filter function whose own output (streamchar) recurses back into
-        // `emit`/the filter. Left unguarded, this would overflow the native
-        // stack; the depth guard must bound it instead.
+        // A filter function whose own output (streamchar) feeds straight back
+        // into the filter: unterminated recursion by construction. Each level
+        // is a call stub plus a frame on the GLULX stack, so what bounds it is
+        // the story's own declared stack size — the machine faults with a stack
+        // overflow, exactly as glulxe's "Stack overflow in callstub" does. It is
+        // NOT silently capped: a native-recursion guard used to stop it dead at
+        // 33 calls and carry on as if the rest had printed (SQ-1418).
         let mut filt_body = asm::ins(0x10, &[Mem32(COUNTER_ADDR), C8(1), Mem32(COUNTER_ADDR)]); // counter += 1
         filt_body.extend(asm::ins(0x70, &[C8(b'X' as i8)])); // streamchar 'X' → recurses
         filt_body.extend(asm::ins(0x31, &[C8(0)])); // return 0
@@ -7196,15 +8446,16 @@ mod tests {
         let built = asm::assemble(&[filt, start], 1, 0x200);
         assert_eq!(built.addrs[0], FILT_ADDR, "test assumes filt is assembled first");
         let mut m = machine(built);
-        // Grow the VM's own byte stack well past what 256+ nested call frames
-        // need, so the depth guard (not a VM stack overflow) is what bounds
-        // the recursion here.
-        m.stack.resize(1 << 20, 0);
-        m.run(); // must terminate rather than stack-overflow or hang
+        m.run(); // must terminate rather than hang or overflow the Rust stack
 
-        // Bounded by the depth guard: the initial call plus 32 further
-        // recursive calls before deeper output is discarded.
-        assert_eq!(m.mem.read32(COUNTER_ADDR), Some(33));
+        assert!(m.faulted, "runaway filter recursion is a fault, not a silent truncation");
+        assert!(
+            m.diagnostics.iter().any(|d| d.contains("stack overflow")),
+            "the VM stack is what bounds it: {:?}",
+            m.diagnostics
+        );
+        let calls = m.mem.read32(COUNTER_ADDR).expect("counter in RAM");
+        assert!(calls > 33, "the old native-recursion cap stopped at 33; got {calls}");
     }
 
     #[test]
@@ -7247,6 +8498,305 @@ mod tests {
         let bytes: Vec<u8> = (0..5).map(|i| m.mem.read8(MEMBUF + i).unwrap() as u8).collect();
         assert_eq!(bytes, b"<1>23", "remainder routed under the switched-to mode, not dropped");
         assert_eq!(m.mem.read32((CLOSE_ADDR + 4) as u32), Some(5), "write count");
+    }
+
+    // ── SQ-1418: printing runs on the Glulx stack, not a native nested loop ──
+    //
+    // Glulx spec §1.3.2 gives DestTypes 10-14 for resuming an interrupted print
+    // and §1.3.5 ("Calling and Returning During Output Filtering") requires the
+    // filter system to push one and RETURN to the interpreter loop rather than
+    // recursing natively. Reference implementation: glulxe 0.6.1
+    // (`string.c` stream_string/stream_num, `funcs.c` pop_callstub /
+    // pop_callstub_string), MIT-licensed, Andrew Plotkin.
+
+    #[test]
+    fn deep_filter_recursion_prints_every_character() {
+        use asm::Op::{C32, C8, Local32, Mem32};
+        const COUNTER: u32 = 0x100;
+        const LOG: u32 = 0x110;
+        const FILT: u32 = 0x24;
+        const DEPTH: u32 = 100;
+
+        // filter(ch): if ch != 0, streamchar(ch - 1) FIRST — which re-enters the
+        // filter one level deeper — then append ch to the log. Kicked off with
+        // DEPTH, that is DEPTH+1 nested filter invocations logging 0..=DEPTH in
+        // completion order (deepest first).
+        let recurse = [
+            asm::ins(0x11, &[Local32(0), C8(1), Local32(4)]), // L1 = ch - 1
+            asm::ins(0x70, &[Local32(4)]),                    // streamchar L1
+        ]
+        .concat();
+        let mut filt_body = asm::ins(0x22, &[Local32(0), C8(recurse.len() as i8 + 2)]); // jz ch → skip
+        filt_body.extend(recurse);
+        filt_body.extend(asm::ins(0x4C, &[C32(LOG), Mem32(COUNTER), Local32(0)])); // log[n] = ch
+        filt_body.extend(asm::ins(0x10, &[Mem32(COUNTER), C8(1), Mem32(COUNTER)])); // n += 1
+        filt_body.extend(asm::ins(0x31, &[C8(0)])); // return 0
+        let filt = asm::func(0xC1, &[(4, 2)], &filt_body);
+
+        let mut body = asm::ins(0x149, &[C8(1), C32(FILT)]); // setiosys filter, rock = filt
+        body.extend(asm::ins(0x70, &[C32(DEPTH)])); // streamchar DEPTH
+        body.extend(asm::ins(0x120, &[])); // quit
+        let start = asm::func(0xC1, &[], &body);
+
+        let built = asm::assemble(&[filt, start], 1, 0x400);
+        assert_eq!(built.addrs[0], FILT, "test assumes filt is assembled first");
+        let mut m = machine(built);
+        // Room for DEPTH+1 frames, so the VM's own stack is not what bounds this.
+        m.stack.resize(1 << 20, 0);
+        m.run();
+
+        assert!(!m.faulted, "diagnostics: {:?}", m.diagnostics);
+        assert_eq!(
+            m.mem.read32(COUNTER),
+            Some(DEPTH + 1),
+            "every nested filter call must run — a native-recursion cap truncated this at 33"
+        );
+        let logged: Vec<u32> = (0..=DEPTH).map(|i| m.mem.read32(LOG + i * 4).unwrap()).collect();
+        assert_eq!(logged, (0..=DEPTH).collect::<Vec<_>>(), "logged deepest-first, nothing dropped");
+    }
+
+    #[test]
+    fn compressed_string_function_node_under_filter_iosys() {
+        use asm::Op::{C16, C32, C8, Local32, Mem32, Zero};
+        const COUNTER: u32 = 0x100;
+        const LOG: u32 = 0x110;
+        const FILT: u32 = 0x24;
+
+        // filter(ch): append ch to the log.
+        let mut filt_body = asm::ins(0x4C, &[C32(LOG), Mem32(COUNTER), Local32(0)]);
+        filt_body.extend(asm::ins(0x10, &[Mem32(COUNTER), C8(1), Mem32(COUNTER)]));
+        filt_body.extend(asm::ins(0x31, &[C8(0)]));
+        let filt = asm::func(0xC1, &[(4, 1)], &filt_body);
+
+        // printer(): streams 'Y' then 'Z'. Both must reach the filter, and the
+        // string must carry on decoding once the function returns.
+        let mut pr_body = asm::ins(0x70, &[C8(b'Y' as i8)]);
+        pr_body.extend(asm::ins(0x70, &[C8(b'Z' as i8)]));
+        pr_body.extend(asm::ins(0x31, &[Zero]));
+        let printer = asm::func(0xC1, &[], &pr_body);
+
+        let mut body = asm::ins(0x149, &[C8(1), C32(FILT)]); // setiosys filter
+        body.extend(asm::ins(0x141, &[C16(0x0200)])); // setstringtbl 0x200
+        body.extend(asm::ins(0x72, &[C16(0x0280)])); // streamstr 0x280
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+
+        let built = asm::assemble(&[filt, printer, start], 2, 0x400);
+        assert_eq!(built.addrs[0], FILT, "test assumes filt is assembled first");
+        let printer_addr = built.addrs[1];
+        let mut m = machine(built);
+        assert!(m.mem.ramstart() <= 0x200, "test pokes its table into RAM at 0x200");
+        // Table at 0x200: root → left 'X' / right inner; inner → left function
+        // node / right terminator.
+        let t = 0x200u32;
+        let root = t + 12;
+        let xnode = root + 9;
+        let inner = xnode + 2;
+        let fnode = inner + 9;
+        let term = fnode + 5;
+        let len = (term + 1) - t;
+        poke(&mut m, t, &len.to_be_bytes());
+        poke(&mut m, t + 4, &4u32.to_be_bytes());
+        poke(&mut m, t + 8, &root.to_be_bytes());
+        poke(&mut m, root, &[0x00]);
+        poke(&mut m, root + 1, &xnode.to_be_bytes());
+        poke(&mut m, root + 5, &inner.to_be_bytes());
+        poke(&mut m, xnode, &[0x02, b'X']);
+        poke(&mut m, inner, &[0x00]);
+        poke(&mut m, inner + 1, &fnode.to_be_bytes());
+        poke(&mut m, inner + 5, &term.to_be_bytes());
+        poke(&mut m, fnode, &[0x08]);
+        poke(&mut m, fnode + 1, &printer_addr.to_be_bytes());
+        poke(&mut m, term, &[0x01]);
+        // Bits, low bit first: 0 → 'X'; 1,0 → the function node; 1,1 → terminator.
+        poke(&mut m, 0x280, &[0xE1, 0b0001_1010]);
+        m.run();
+
+        assert!(!m.faulted, "diagnostics: {:?}", m.diagnostics);
+        assert_eq!(m.mem.read32(COUNTER), Some(3));
+        let logged: Vec<u32> = (0..3).map(|i| m.mem.read32(LOG + i * 4).unwrap()).collect();
+        assert_eq!(logged, vec![b'X' as u32, b'Y' as u32, b'Z' as u32]);
+        assert_eq!(out_str(&m), "", "filter mode prints nothing to Glk");
+    }
+
+    #[test]
+    fn throw_from_inside_a_filter_unwinds_to_a_catch_outside_it() {
+        use asm::Op::{C32, C8, Mem32, Zero};
+        const RES: u32 = 0x100; // the catch token, then the thrown value
+        const WITNESS: u32 = 0x104;
+        const FILT: u32 = 0x24;
+
+        // filter(ch): throw 55 to the token the start function caught with. The
+        // catch frame is TWO frames out (start → inner → filter), so the throw
+        // lands somewhere a native "run until this frame returns" loop can never
+        // notice — it waits for a frame pointer the unwind has already passed.
+        let mut filt_body = asm::ins(0x33, &[C8(55), Mem32(RES)]); // throw 55, token
+        filt_body.extend(asm::ins(0x31, &[C8(0)])); // unreachable
+        let filt = asm::func(0xC1, &[(4, 1)], &filt_body);
+
+        // inner(): streamchar 'A' — the filter call throws out of this frame.
+        let mut inner_body = asm::ins(0x70, &[C8(b'A' as i8)]);
+        inner_body.extend(asm::ins(0x31, &[Zero]));
+        let inner = asm::func(0xC1, &[], &inner_body);
+
+        // The throw handler: witness 7, then quit.
+        let handler = [
+            asm::ins(0x40, &[C8(7), Mem32(WITNESS)]), // copy 7 → WITNESS
+            asm::ins(0x120, &[]),                     // quit
+        ]
+        .concat();
+        let mut body = asm::ins(0x149, &[C8(1), C32(FILT)]); // setiosys filter
+        body.extend(asm::ins(0x32, &[Mem32(RES), C8(handler.len() as i8 + 2)])); // catch RES → past handler
+        body.extend(handler);
+        body.extend(asm::ins(0x30, &[C32(0xDEAD_0000), C8(0), Zero])); // call inner (patched below)
+        body.extend(asm::ins(0x40, &[C8(9), Mem32(WITNESS)])); // only reached if nothing threw
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+
+        let built = asm::assemble(&[filt, inner, start], 2, 0x200);
+        assert_eq!(built.addrs[0], FILT, "test assumes filt is assembled first");
+        // Patch the placeholder call target now that inner's address is known.
+        let inner_addr = built.addrs[1];
+        let mut image = built.image;
+        let at = image
+            .windows(4)
+            .position(|w| w == 0xDEAD_0000u32.to_be_bytes())
+            .expect("call placeholder present");
+        image[at..at + 4].copy_from_slice(&inner_addr.to_be_bytes());
+        let cksum = asm::checksum(&image);
+        image[0x20..0x24].copy_from_slice(&cksum.to_be_bytes());
+        let mut m = machine(asm::Built { image, addrs: built.addrs });
+        m.run();
+
+        assert!(!m.faulted, "the throw is legal control flow: {:?}", m.diagnostics);
+        assert_eq!(m.mem.read32(WITNESS), Some(7), "the catch's no-branch resume ran, not the fall-through");
+        assert_eq!(m.mem.read32(RES), Some(55), "the thrown value replaced the token in the catch's destination");
+        assert_eq!(
+            m.sp,
+            m.fp + m.cur_frame_len as usize,
+            "the unwind left exactly the catch frame: no orphaned string or call stubs"
+        );
+    }
+
+    /// The two shared pieces of the "@save/@saveundo inside a filter" cases: a
+    /// filter that logs every character and, on the FIRST one only, performs the
+    /// two-operand suspend-free opcode `op` (`@save` or `@saveundo`) — the flag
+    /// is set before the snapshot, so a resumed run does not take the branch
+    /// again. `extra` is the opcode's first (load) operand, or none for saveundo.
+    fn logging_filter_that_snapshots_once(
+        log: u32,
+        counter: u32,
+        flag: u32,
+        op: u32,
+        extra: Option<asm::Op>,
+        res: u32,
+    ) -> Vec<u8> {
+        use asm::Op::{C32, C8, Local32, Mem32};
+        let mut snapshot = asm::ins(0x40, &[C8(1), Mem32(flag)]); // copy 1 → flag
+        snapshot.extend(match extra {
+            Some(load) => asm::ins(op, &[load, Mem32(res)]),
+            None => asm::ins(op, &[Mem32(res)]),
+        });
+
+        let mut body = asm::ins(0x4C, &[C32(log), Mem32(counter), Local32(0)]); // log[n] = ch
+        body.extend(asm::ins(0x10, &[Mem32(counter), C8(1), Mem32(counter)])); // n += 1
+        body.extend(asm::ins(0x23, &[Mem32(flag), C8(snapshot.len() as i8 + 2)])); // jnz flag → skip
+        body.extend(snapshot);
+        body.extend(asm::ins(0x31, &[C8(0)])); // return 0
+        asm::func(0xC1, &[(4, 1)], &body)
+    }
+
+    #[test]
+    fn save_inside_a_filter_restores_into_the_interrupted_print() {
+        use asm::Op::{C32, C8, Mem32};
+        const COUNTER: u32 = 0x100;
+        const LOG: u32 = 0x110;
+        const FLAG: u32 = 0x140;
+        const SID: u32 = 0x144;
+        const SAVERES: u32 = 0x148;
+        const MEMBUF: u32 = 0x400;
+        const MEMBUF_LEN: u32 = 0x1000;
+        const FILT: u32 = 0x24;
+
+        let filt = logging_filter_that_snapshots_once(LOG, COUNTER, FLAG, 0x123, Some(Mem32(SID)), SAVERES);
+        let mut body = asm::ins(0x149, &[C8(1), C32(FILT)]); // setiosys filter
+        body.extend(asm::ins(0x71, &[C8(42)])); // streamnum 42 → '4', '2'
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+
+        let built = asm::assemble(&[filt, start], 1, 0x1400);
+        assert_eq!(built.addrs[0], FILT);
+        let mut m = machine(built);
+        let sid = m.glk.stream_open_memory(MEMBUF, MEMBUF_LEN, false, 3 /* ReadWrite */, 0);
+        m.mem.write32(SID, sid).unwrap();
+        m.run();
+
+        assert!(!m.faulted, "diagnostics: {:?}", m.diagnostics);
+        assert_eq!(m.mem.read32(COUNTER), Some(2), "both digits reached the filter");
+        assert_eq!(m.mem.read32(SAVERES), Some(0), "the in-filter @save succeeded");
+        let blob_len = m.glk.stream_position(sid).expect("memory stream exists") as usize;
+        let blob: Vec<u8> = (0..blob_len as u32).map(|i| m.mem.read8(MEMBUF + i).unwrap() as u8).collect();
+
+        // The Stks chunk is the raw stack, so the interrupted print's own stubs
+        // are in it: DestType 0x11 (resume function code after the string) and
+        // DestType 0x12 (resume printing the decimal at digit 1). Any
+        // interpreter reading this save resumes the number the same way.
+        let chunks = iff_chunks(&blob);
+        let (_, stks) = chunks.iter().find(|(id, _)| id == b"Stks").expect("Stks present");
+        let words: Vec<u32> = stks.as_chunks::<4>().0.iter().map(|w| u32::from_be_bytes(*w)).collect();
+        assert!(words.contains(&0x11), "Stks carries the DestType 0x11 string-terminator stub: {words:#x?}");
+        assert!(words.contains(&0x12), "Stks carries the DestType 0x12 decimal-resume stub: {words:#x?}");
+
+        // Restore the blob: the machine lands back inside the filter's first
+        // call, mid-number, with COUNTER/LOG reverted to one entry. Running on
+        // must finish the number — which only happens if the DestType 0x12 stub
+        // resumed the print.
+        m.halted = false;
+        m.restore_quetzal(&blob).expect("our own save reloads");
+        assert_eq!(m.mem.read32(COUNTER), Some(1), "state reverted to the mid-print snapshot");
+        assert_eq!(m.mem.read32(SAVERES), Some(u32::MAX), "the restored @save stores the -1 sentinel");
+        m.run();
+
+        assert!(!m.faulted, "diagnostics: {:?}", m.diagnostics);
+        assert_eq!(m.mem.read32(COUNTER), Some(2), "the restore resumed the interrupted print");
+        let logged: Vec<u32> = (0..2).map(|i| m.mem.read32(LOG + i * 4).unwrap()).collect();
+        assert_eq!(logged, vec![b'4' as u32, b'2' as u32]);
+    }
+
+    #[test]
+    fn saveundo_inside_a_filter_restores_into_the_interrupted_print() {
+        use asm::Op::{C32, C8, Mem32};
+        const COUNTER: u32 = 0x100;
+        const LOG: u32 = 0x110;
+        const FLAG: u32 = 0x140;
+        const SU: u32 = 0x144;
+        const RU: u32 = 0x148;
+        const FILT: u32 = 0x24;
+
+        let filt = logging_filter_that_snapshots_once(LOG, COUNTER, FLAG, 0x125, None, SU);
+        let mut body = asm::ins(0x149, &[C8(1), C32(FILT)]); // setiosys filter
+        body.extend(asm::ins(0x71, &[C8(42)])); // streamnum 42 → '4', '2'
+        // @restoreundo: the first one rewinds into the filter's first call and
+        // the print replays; the second finds an empty undo stack and stores 1.
+        body.extend(asm::ins(0x126, &[Mem32(RU)]));
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+
+        let built = asm::assemble(&[filt, start], 1, 0x400);
+        assert_eq!(built.addrs[0], FILT);
+        let mut m = machine(built);
+        m.run();
+
+        assert!(!m.faulted, "diagnostics: {:?}", m.diagnostics);
+        assert_eq!(
+            m.mem.read32(COUNTER),
+            Some(2),
+            "after @restoreundo the number print resumed and re-fed the second digit to the filter"
+        );
+        let logged: Vec<u32> = (0..2).map(|i| m.mem.read32(LOG + i * 4).unwrap()).collect();
+        assert_eq!(logged, vec![b'4' as u32, b'2' as u32]);
+        assert_eq!(m.mem.read32(SU), Some(u32::MAX), "the resumed @saveundo returns -1");
+        assert_eq!(m.mem.read32(RU), Some(1), "the second @restoreundo has no snapshot left");
     }
 
     #[test]
@@ -8529,7 +10079,7 @@ mod tests {
         // grid stream, and a positioned grid cursor.
         let buf = m.glk.window_open(0, 0, 0, 3, 0xB0).unwrap(); // root TextBuffer
         let grid = m.glk.window_open(buf, 0x12, 3, 4, 0x61).unwrap(); // grid above, fixed 3
-        m.glk.relayout(80, 24, (1, 1));
+        m.glk.relayout(80, 24, (1, 1), false);
         let mem_stream = m.glk.stream_open_memory(0x180, 16, false, 3, 0x5E); // ReadWrite: seekable
         m.glk.stream_set_position(mem_stream, 5, 0);
         let grid_stream = m.glk.window_stream(grid).unwrap();
@@ -8568,13 +10118,68 @@ mod tests {
         // Routing after a cross-session restore: a put on the current (grid)
         // stream lands in the grid window at its restored cursor (row 1, col 2+).
         // (The host re-lays the restored tree out to its fresh backend first.)
-        let layout = m2.glk.relayout(80, 24, (1, 1));
+        let layout = m2.glk.relayout(80, 24, (1, 1), false);
         m2.backend.window_layout(&layout);
         m2.glk_stream_put(grid_stream, "Hi");
         assert_eq!(backend_of(&m2).grid_line(grid, 1), "  Hi");
         // And a put on the buffer window's stream routes to the buffer window.
         m2.glk_stream_put(buf_stream, "Z");
         assert_eq!(backend_of(&m2).text(buf), "Z");
+    }
+
+    /// SQ-1515: `restore_state` tells the backend every OLD window closed and
+    /// every NEW one opened, in ascending (= original open-time) id order — a
+    /// window-id-keyed backend (AppGlk's grid/buffer/graphics maps) must not
+    /// answer for the wrong run's content, and a host that infers "primary is
+    /// the first `TextBuffer` opened" (AppGlk does) needs the ids in the
+    /// right order to get that right after the swap. Exercises the SAME-id
+    /// case too (both machines' first two windows land on ids 1 and 2,
+    /// independently, since gvm's window-id counter is deterministic from a
+    /// fresh boot) — the close/open pair for id 1 is what stops a backend
+    /// leaving the LEAVING run's content under an id the incoming run reuses.
+    #[test]
+    fn restore_state_closes_old_windows_then_opens_new_ones_in_id_order() {
+        let start = asm::func(0xC1, &[], &asm::ins(0x120, &[]));
+        let built = asm::assemble(&[start], 0, 0x100);
+        let image = built.image.clone();
+
+        // Source session: buffer (id 1, root), split by a grid (id 2) — the
+        // split also allocates an implicit Pair window (id 3, the new root).
+        let mut m = Machine::with_glk(Memory::new(built.image).unwrap(), Box::new(TestBackend::new()));
+        let buf = m.glk.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m.glk.window_open(buf, 0x12, 3, 4, 0).unwrap();
+        assert_eq!((buf, grid, m.glk.root()), (1, 2, 3));
+        let snap = m.save_state();
+
+        // Target session: its OWN buffer/grid/pair (ids 1, 2, 3) already open
+        // and told to the backend — same ids as the archive purely because
+        // both machines' counters start fresh, standing in for a long-lived
+        // session whose OWN windows the restore must not leave stale.
+        let mut m2 = Machine::with_glk(Memory::new(image).unwrap(), Box::new(TestBackend::new()));
+        let own_buf = m2.glk.window_open(0, 0, 0, 3, 0).unwrap();
+        let own_grid = m2.glk.window_open(own_buf, 0x12, 3, 4, 0).unwrap();
+        let own_root = m2.glk.root();
+        assert_eq!((own_buf, own_grid, own_root), (buf, grid, m.glk.root()), "both sessions land on the same ids from a fresh boot");
+        m2.backend.window_open(own_buf, WinType::TextBuffer);
+        m2.backend.window_open(own_grid, WinType::TextGrid);
+        m2.backend.window_open(own_root, WinType::Pair);
+        m2.backend.as_any_mut().downcast_mut::<TestBackend>().unwrap().clear_window_log();
+
+        m2.restore_state(&snap).unwrap();
+
+        assert_eq!(
+            backend_of(&m2).window_log(),
+            [
+                format!("close {own_buf}"),
+                format!("close {own_grid}"),
+                format!("close {own_root}"),
+                format!("open {buf} TextBuffer"),
+                format!("open {grid} TextGrid"),
+                format!("open {} Pair", m.glk.root()),
+            ]
+            .as_slice(),
+            "old ids close, then new ids open, in ascending (= original open-time) id order"
+        );
     }
 
     /// A snapshot WITHOUT a `Glk ` chunk (an older gvm save) restores with an
@@ -8701,33 +10306,64 @@ mod tests {
         assert_eq!(m.protect, (0x110, 0));
     }
 
+    /// `restore_state` (the host Save State/Restore State path — a full VM
+    /// snapshot, not spec `@restore`) DOES restore the protect range from the
+    /// snapshot: change it between save and restore and the SAVED range wins,
+    /// not whatever was live when `restore_state` was called — distinguishing
+    /// this from "the range just never changed" is the whole point of moving
+    /// it between snapshot and restore (SQ-1415 audit item 5).
     #[test]
-    fn protect_preserves_range_across_restore() {
+    fn protect_restores_the_saved_range_across_restore_state() {
         let mut m = machine_with_body(&[], vec![]);
         m.protect = (0x110, 4);
         m.mem.write32(0x110, 0xAAAA).unwrap();
         let snap = m.save_state();
-        m.mem.write32(0x110, 0xBEEF).unwrap(); // change the protected word
+        m.mem.write32(0x110, 0xBEEF).unwrap(); // change the (still-)protected word
+        m.protect = (0x180, 8); // change the LIVE range after the snapshot
+        m.mem.write32(0x180, 0xCAFE).unwrap();
         m.restore_state(&snap).unwrap();
-        assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF); // kept current, not restored 0xAAAA
-        assert_eq!(m.protect, (0x110, 4)); // range survives
+        assert_eq!(m.protect, (0x110, 4), "restore_state restores the SAVED range, not the live one");
+        // The byte-level skip during the copy honors the LIVE range as it was
+        // when restore_state was called (0x180,8) — restore_vm_core reads
+        // self.protect before restore_state overwrites it with the saved
+        // value below — so 0x180 keeps its pre-restore value...
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0xCAFE);
+        // ...while 0x110, no longer covered by that live range, IS
+        // overwritten from the snapshot's diff back to 0xAAAA.
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0xAAAA);
     }
 
+    /// ExtUndo (spec §2.16): the protect range is "not part of the saved
+    /// state" for `saveundo`/`restoreundo` — unlike `restore_state` above.
+    /// Changing the range between `saveundo` and `restoreundo` must leave the
+    /// LIVE (post-`saveundo`) range in force, not the one `saveundo` snapshot,
+    /// which is the only way this test can tell "restoreundo left it alone"
+    /// apart from "the range never changed" (SQ-1415 audit item 5).
     #[test]
-    fn protect_survives_restoreundo() {
-        let mut body = asm::ins(0x127, &[asm::Op::C16(0x0110), asm::Op::C8(4)]); // protect
-        body.extend(asm::ins(0x125, &[asm::Op::Zero])); // saveundo
-        body.extend(asm::ins(0x40, &[asm::Op::C32(0xBEEF), asm::Op::Mem16(0x0110)])); // change
+    fn protect_survives_restoreundo_as_the_live_range_not_the_saved_one() {
+        let mut body = asm::ins(0x127, &[asm::Op::C16(0x0110), asm::Op::C8(4)]); // protect(0x110,4)
+        body.extend(asm::ins(0x40, &[asm::Op::C32(0x1111), asm::Op::Mem16(0x0110)])); // 0x110 = 0x1111
+        body.extend(asm::ins(0x125, &[asm::Op::Zero])); // saveundo (snapshot: protect=(0x110,4), 0x110=0x1111)
+        body.extend(asm::ins(0x40, &[asm::Op::C32(0xBEEF), asm::Op::Mem16(0x0110)])); // 0x110 = 0xBEEF
+        body.extend(asm::ins(0x127, &[asm::Op::C16(0x0180), asm::Op::C8(8)])); // protect(0x180,8) — live range moves
+        body.extend(asm::ins(0x40, &[asm::Op::C32(0xCAFE), asm::Op::Mem16(0x0180)])); // 0x180 = 0xCAFE
         body.extend(asm::ins(0x126, &[asm::Op::Mem16(0x0104)])); // restoreundo
         body.extend(asm::ins(0x120, &[]));
         let mut m = machine_with_body(&[], body);
-        m.step_once().unwrap(); // protect
+        m.step_once().unwrap(); // protect(0x110,4)
+        m.step_once().unwrap(); // 0x110 = 0x1111
         m.step_once().unwrap(); // saveundo
-        m.step_once().unwrap(); // change → 0xBEEF
-        assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF);
+        m.step_once().unwrap(); // 0x110 = 0xBEEF
+        m.step_once().unwrap(); // protect(0x180,8) — now live, not what saveundo saw
+        m.step_once().unwrap(); // 0x180 = 0xCAFE
         m.step_once().unwrap(); // restoreundo, resumes just after saveundo
-        assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF); // protected → kept current value
-        assert_eq!(m.protect, (0x110, 4));
+        assert_eq!(m.protect, (0x180, 8), "restoreundo keeps the LIVE range, not the saved (0x110,4) one");
+        // 0x110 is no longer protected (the live range moved to 0x180 before the
+        // undo), so it's genuinely restored to the snapshot's value.
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0x1111);
+        // 0x180 IS the live-protected range at undo time, so it keeps 0xCAFE
+        // rather than reverting to the snapshot's (unwritten, zero) diff.
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0xCAFE);
     }
 
     /// SQ-0320: `@protect` + a restore that re-extends memory. When the protected
@@ -9335,11 +10971,43 @@ mod tests {
         body.extend(glk_call(0x05, &[C8(0), C8(0), Zero, C8(0)], Mem16(0x0110))); // gestalt_ext Version
         body.extend(asm::ins(0x120, &[]));
         let m = run_with_ram(body, 0x200, |_| {});
+        // SQ-1416 item 1 dropped this to 0.7.5 because
+        // glk_image_draw_scaled_ext (the one thing 0.7.6 added) was missing;
+        // SQ-1424 implemented it, standing text-buffer ratio and all, so the
+        // number goes back up. The spec fixes the encoding outright: "The
+        // current Glk specification version is 0.7.6, so this selector will
+        // return 0x00000706."
         assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0706, "glk version 0.7.6");
         assert_eq!(m.mem.read32(0x104).unwrap(), 2, "CharOutput = ExactPrint");
         assert_eq!(m.mem.read32(0x108).unwrap(), 1, "Unicode supported");
         assert_eq!(m.mem.read32(0x10C).unwrap(), 1, "LineInput supported (3a-2)");
         assert_eq!(m.mem.read32(0x110).unwrap(), 0x0000_0706, "gestalt_ext mirrors gestalt");
+    }
+
+    /// SQ-1416 item 8: `gestalt_CharOutput` is answered from
+    /// `GlkBackend::char_output_gestalt`, not hardcoded to ExactPrint for
+    /// every code point — the default backend answer (Glk spec §2.3):
+    /// CannotPrint for the named eight-bit control ranges, ExactPrint for the
+    /// rest of Latin-1, ApproxPrint beyond that. `glk_gestalt_ext`'s output
+    /// array carries the matching glyph count.
+    #[test]
+    fn glk_gestalt_char_output_is_not_hardcoded_exact_print() {
+        use asm::Op::{C16, C32, C8, Mem16};
+        let mut body = glk_call(0x04, &[C8(3), C8(7)], Mem16(0x0100)); // CharOutput(BEL=7, control)
+        body.extend(glk_call(0x04, &[C8(3), C16(0x0100)], Mem16(0x0104))); // CharOutput(U+0100, beyond Latin-1)
+        body.extend(glk_call(0x04, &[C8(3), C8(b'Z' as i8)], Mem16(0x0108))); // CharOutput('Z')
+        // gestalt_ext(CharOutput, BEL, &len, 1) -> len is the glyph count.
+        body.extend(glk_call(0x05, &[C8(3), C8(7), C16(0x0120), C8(1)], Mem16(0x010C)));
+        body.extend(glk_call(0x05, &[C8(3), C32(0x0100), C16(0x0124), C8(1)], Mem16(0x0110)));
+        body.extend(glk_call(0x05, &[C8(3), C8(b'Z' as i8), C16(0x0128), C8(1)], Mem16(0x0114)));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "control char (BEL) -> CannotPrint");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1, "beyond Latin-1 -> ApproxPrint");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 2, "'Z' -> ExactPrint");
+        assert_eq!(m.mem.read32(0x120).unwrap(), 0, "CannotPrint's glyph count");
+        assert_eq!(m.mem.read32(0x124).unwrap(), 1, "ApproxPrint's glyph count");
+        assert_eq!(m.mem.read32(0x128).unwrap(), 1, "ExactPrint's glyph count");
     }
 
     #[test]
@@ -9622,7 +11290,7 @@ mod tests {
         assert_eq!(m.mem.read32(0x0110).unwrap(), 1, "one glyph written to arr[0]");
         // A non-CharOutput selector still returns its scalar but leaves the array alone.
         m.mem.write32(0x0110, 0x0000_DEAD).unwrap();
-        assert_eq!(m.glk_dispatch(0x0005, &[0, 0, 0x0110, 1]).unwrap(), 0x0000_0706); // Version
+        assert_eq!(m.glk_dispatch(0x0005, &[0, 0, 0x0110, 1]).unwrap(), 0x0000_0706); // Version (0.7.6, SQ-1424)
         assert_eq!(m.mem.read32(0x0110).unwrap(), 0x0000_DEAD, "version query leaves the array untouched");
     }
 
@@ -10184,11 +11852,12 @@ mod tests {
     #[test]
     fn abort_with_fault_halts_and_records_a_recoverable_fault() {
         // The host watchdog calls this to end a runaway turn. It must halt the VM
-        // (next step → Quit) and record a fault trace + diagnostic, exactly like a
-        // real runtime fault, so the app's survival path keeps it interactive.
+        // (next step → Fault, SQ-1395) and record a fault trace + diagnostic,
+        // exactly like a real runtime fault, so the app's survival path keeps it
+        // interactive.
         let mut m = machine_ram(asm::ins(0x00, &[]), 0x200); // a nop program, not run
         m.abort_with_fault("runaway game loop (test)".to_string());
-        assert_eq!(m.step(), StepResult::Quit, "halted after abort");
+        assert_eq!(m.step(), StepResult::Fault, "halted after abort");
         assert!(m.take_fault_trace().is_some(), "fault trace recorded");
         assert!(
             m.diagnostics.iter().any(|d| d.contains("runaway")),
@@ -10838,6 +12507,140 @@ mod tests {
     }
 
     #[test]
+    fn restart_keeps_the_file_vfs_but_resets_windows_and_streams() {
+        // SQ-1439: the Glulx spec (§1.8.5, "State Not Saved") lists Glk library
+        // state -- "Glk opaque objects (windows, filerefs, streams)... contents
+        // of windows" -- as untouched by restart, and glulxe's own vm_restart
+        // (vm.c) never calls into Glk at all: it resets memory, stack and
+        // registers only. `gvm` still tears the window/stream/fileref layer
+        // down on @restart (SQ-0627's separate, deliberate design, unchanged
+        // here) -- but the file VFS models the game's DISK, not a Glk runtime
+        // object, and a real disk survives an interpreter restart. Write a
+        // file, restart, and confirm a fresh fileref of the same name still
+        // reads it back, and that the host-visible dirty flag survives too --
+        // the exact reported symptom: a host that dirty-gates its sidecar
+        // flush would otherwise never see the write after an in-game RESTART.
+        let mut m = machine_with_glk(&[]);
+        let win = m.glk_open_window(0, 0, 0, 3, 0); // wintype_TextBuffer
+        assert_ne!(win, 0, "sanity: a window is open before restart");
+
+        let f = m.glk.fileref_create(0x00, "save".to_string(), 0);
+        let sid = m.glk.stream_open_file(f, 0x01, false, 0); // filemode_Write
+        m.glk.file_stream_write(sid, "Hi");
+        m.glk.stream_close(sid);
+        assert!(m.vfs_dirty(), "sanity: the write marked the VFS dirty");
+        let before = m.vfs_bytes();
+
+        m.op_restart().unwrap();
+
+        // (b) windows/streams ARE reset -- pinned so the split does not drift.
+        assert_eq!(m.glk.root(), 0, "windows are reset, same as before this fix (SQ-0627)");
+        assert_eq!(m.glk.stream_iterate(0), (0, 0), "streams are reset too");
+
+        // The dirty-flag symptom this quest fixes.
+        assert!(m.vfs_dirty(), "the dirty flag must survive so a host's sidecar flush still fires");
+
+        // (c) vfs_bytes() round-trips the file store across restart.
+        assert_eq!(m.vfs_bytes(), before, "vfs_bytes() round-trips the file store across restart");
+
+        // (a) A fresh fileref of the same name -- the game's stack and old
+        // fileref id are both gone, so it must re-create one, exactly as the
+        // spec requires ("you must do an iteration... to find objects created
+        // in an earlier incarnation") -- still reads the bytes written before
+        // the restart.
+        let f2 = m.glk.fileref_create(0x00, "save".to_string(), 0);
+        assert!(m.glk.fileref_exists(f2), "the file itself survives an in-game RESTART");
+        let rsid = m.glk.stream_open_file(f2, 0x02, false, 0); // filemode_Read
+        assert_eq!(m.glk.file_stream_read_char(rsid), Some(b'H' as u32), "byte 0 survives restart");
+        assert_eq!(m.glk.file_stream_read_char(rsid), Some(b'i' as u32), "byte 1 survives restart");
+        assert_eq!(m.glk.file_stream_read_char(rsid), None, "EOF");
+    }
+
+    /// Real-game smoke for SQ-1439: Counterfeit Monkey writes a Data-usage Glk
+    /// file (`àCounterfeit Monkey-startup-data.glkdata`) during its very first
+    /// boot, before it ever prints a line (see `accel_story_equivalence.rs`'s
+    /// comment on the same file). Confirm the exact function `@restart`
+    /// dispatches to (`op_restart`) leaves that real, story-produced VFS entry
+    /// and its dirty flag intact.
+    ///
+    /// This calls `op_restart()` directly rather than driving CM's own
+    /// in-fiction `> restart` command: CM's opening is a scripted Q&A ("Can you
+    /// hear me?", "Do you remember our name?", ...) built on its own
+    /// `@saveundo`/`@restoreundo` dialogue engine, and an unrecognized answer
+    /// there (including a bare "restart") is swallowed as a wrong answer rather
+    /// than reaching the standard library parser — confirmed empirically while
+    /// developing this test (instrumenting `op_restart` showed it never fired
+    /// when "restart" was typed at that prompt). Reaching a genuine `> restart`
+    /// prompt needs several more turns of narrative-specific dialogue, which is
+    /// a separate, fiddly exercise this quest does not need: `op_restart` is a
+    /// private fn with exactly one caller (the `0x0122` dispatch arm above), so
+    /// calling it directly here still exercises the real code path against a
+    /// real story's real boot-time state — only the in-fiction command that
+    /// triggers it is skipped. `restart_keeps_the_file_vfs_but_resets_windows_and_streams`
+    /// above is the one that drives real bytes through a write-then-read round
+    /// trip; this one confirms the same function against CM's own VFS content.
+    #[test]
+    fn counterfeit_monkey_restart_keeps_its_own_startup_data_file() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/CounterfeitMonkey-11.gblorb");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("SKIP: stories/CounterfeitMonkey-11.gblorb missing");
+            return;
+        };
+        let b = blorb::Blorb::parse(bytes).expect("valid Blorb");
+        let (kind, data) = b.executable().expect("Blorb has an executable chunk");
+        assert!(matches!(kind, blorb::ExecKind::Glulx), "expected a Glulx Blorb");
+        let mem = Memory::new(data.to_vec()).expect("valid Glulx image");
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        m.set_acceleration(true); // debug-build CM is minutes without it
+
+        // Drive to the story's first real input stop, servicing its own startup
+        // `@save` the way a working host does (SQ-0595).
+        let mut steps = 0u64;
+        loop {
+            match m.step() {
+                StepResult::Continue => {
+                    steps += 1;
+                    assert!(steps < 300_000_000, "runaway: never reached an input prompt");
+                }
+                StepResult::NeedEvent { timer_ms: Some(_), .. } => m.deliver_timer(),
+                StepResult::SaveRequest => m.complete_save(true),
+                StepResult::RestoreRequest => m.complete_restore_failure(),
+                StepResult::NeedLine { .. } | StepResult::NeedChar { .. } => break,
+                other => panic!("unexpected stop reaching the first prompt: {other:?}"),
+            }
+        }
+
+        let text = backend_of(&m).all_text();
+        assert!(
+            text.contains("Can you hear me?"),
+            "the harness must actually reach CM's own opening line, or this test is vacuous; got {text:?}"
+        );
+
+        // The real defect's precondition: CM's own boot already wrote into the VFS.
+        let names_before = m.file_names();
+        assert!(
+            !names_before.is_empty(),
+            "sanity: CounterfeitMonkey's boot is expected to touch its own startup-data file"
+        );
+        assert!(m.vfs_dirty(), "sanity: that write left the VFS dirty");
+        let bytes_before = m.vfs_bytes();
+
+        m.op_restart().expect("op_restart must not fault on a real story");
+
+        assert_eq!(
+            m.file_names(),
+            names_before,
+            "CounterfeitMonkey's own startup-data file must survive @restart (SQ-1439)"
+        );
+        assert!(
+            m.vfs_dirty(),
+            "the dirty flag must survive @restart so a host's sidecar flush still fires (SQ-1439)"
+        );
+        assert_eq!(m.vfs_bytes(), bytes_before, "vfs_bytes() round-trips across @restart on a real story");
+    }
+
+    #[test]
     fn save_suspends_and_failure_stores_one() {
         use asm::Op::{Mem16, Zero};
         // @save L1 S1: suspends with SaveRequest (does not halt); the host reports
@@ -10928,7 +12731,9 @@ mod tests {
         let req = m.pending_saveload_request().expect("a save is pending");
         assert_eq!(
             req,
-            SaveLoadRequest { name: "startup-data".to_string(), by_prompt: false, restore: false },
+            // SQ-1416 item 6: create_by_name sanitizes + appends the usage's
+            // suffix (SavedGame -> ".glksave").
+            SaveLoadRequest { name: "startup-data.glksave".to_string(), by_prompt: false, restore: false },
             "a create_by_name @save carries its fixed name and is NOT by_prompt (host writes it silently)"
         );
     }
@@ -10946,7 +12751,8 @@ mod tests {
         assert_eq!(m.step(), StepResult::SaveRequest);
         let req = m.pending_saveload_request().expect("a save is pending");
         assert!(req.by_prompt, "a create_by_prompt @save is by_prompt (host surfaces the save UI)");
-        assert_eq!(req.name, "myslot");
+        // SQ-1416 item 6: sanitize + append ".glksave" (SavedGame usage).
+        assert_eq!(req.name, "myslot.glksave");
         assert!(!req.restore);
     }
 
@@ -10988,12 +12794,14 @@ mod tests {
         // read-write open, which preserves the prior size.)
         let body = asm::ins(0x123, &[C8(2), Mem16(0x0100)]); // @save 2 -> mem[0x100]
         let mut m = machine_with_body(&[], body);
-        // A previous launch's save already occupies the slot.
-        m.glk.seed_saved_game_file("startup-data".to_string(), 4321);
+        // A previous launch's save already occupies the slot. Seeded under the
+        // SANITIZED name (SQ-1416 item 6: create_by_name appends ".glksave" for
+        // SavedGame usage) — a host reseeding from disk keys by that same name.
+        m.glk.seed_saved_game_file("startup-data.glksave".to_string(), 4321);
         let fref = m.glk.fileref_create(0x01, "startup-data".to_string(), 0);
         let sid = m.glk.stream_open_file(fref, 0x05, false, 0); // ReadWrite -> keeps size
         assert_eq!(sid, 2);
-        assert_eq!(m.glk.saved_game_size("startup-data"), Some(4321), "the open kept the prior size");
+        assert_eq!(m.glk.saved_game_size("startup-data.glksave"), Some(4321), "the open kept the prior size");
         assert_eq!(m.step(), StepResult::SaveRequest);
 
         // The player cancels the overwrite.
@@ -11002,7 +12810,7 @@ mod tests {
         assert_eq!(m.mem.read32(0x100).unwrap(), 1, "cancelled @save stores 1 into S1");
         assert!(m.glk.fileref_exists(fref), "the pre-existing save survives a cancelled re-save");
         assert_eq!(
-            m.glk.saved_game_size("startup-data"),
+            m.glk.saved_game_size("startup-data.glksave"),
             Some(4321),
             "and keeps its original byte count — not reverted to absent like a fresh save",
         );
@@ -11047,7 +12855,8 @@ mod tests {
         let req = m.pending_saveload_request().expect("a restore is pending");
         assert_eq!(
             req,
-            SaveLoadRequest { name: "startup-data".to_string(), by_prompt: false, restore: true },
+            // SQ-1416 item 6: sanitize + append ".glksave" (SavedGame usage).
+            SaveLoadRequest { name: "startup-data.glksave".to_string(), by_prompt: false, restore: true },
             "a create_by_name @restore is silent + game-managed (host reads its fixed file, clean-fails if absent)"
         );
     }
@@ -11468,7 +13277,7 @@ mod tests {
         body.extend(glk_call(0x04, &[C8(22), C8(0)], Mem16(0x0128)));   // ResourceStream
         body.extend(asm::ins(0x120, &[]));
         let m = run_with_ram(body, 0x200, |_| {});
-        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0706, "Version 0.7.6");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0706, "Version 0.7.6 (SQ-1424)");
         assert_eq!(m.mem.read32(0x104).unwrap(), 1, "CharInput supported");
         assert_eq!(m.mem.read32(0x108).unwrap(), 1, "LineInput supported");
         assert_eq!(m.mem.read32(0x10C).unwrap(), 2, "CharOutput = ExactPrint");
@@ -11535,7 +13344,40 @@ mod tests {
         let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
         assert_eq!(tb.fills(win), vec![(0x00FF_0000, 1, 2, 3, 4)]);
         assert_eq!(tb.background(win), Some(0x0000_00FF));
-        assert_eq!(tb.draws(win), vec![(7, 5, 6, None)]);
+        assert_eq!(tb.draws(win), vec![(7, 5, 6, None, 0)], "no glk_set_hyperlink: link 0");
+    }
+
+    /// SQ-1503: a picture drawn while a hyperlink is set on the current stream
+    /// must carry that link to the backend, exactly as printed text does
+    /// (`glk_set_hyperlink_tags_subsequent_output`, just above) — Glk spec:
+    /// "you can also set a hyperlink for a picture, by calling
+    /// glk_set_hyperlink() and then glk_image_draw()." Anchorhead: the
+    /// Illustrated Edition uses exactly this to make its inline "click this
+    /// thumbnail to view the full-size illustration" images clickable; gvm
+    /// never threaded the stream's link through `glk_image_draw`/`_scaled`, so
+    /// every such picture drew with link 0 and no click could ever reach it.
+    #[test]
+    fn glk_set_hyperlink_tags_a_subsequently_drawn_image() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        m.graphics_enabled = true;
+        m.backend = Box::new(glk::TestBackend::with_screen(40, 10).with_image_info(7, 20, 10));
+        let win = m.glk_open_window(0, 0, 0, 3, 0); // wintype_TextBuffer
+        let sid = m.glk_dispatch(0x002C, &[win]).unwrap(); // glk_window_get_stream(win)
+        m.glk_dispatch(0x0047, &[sid]).unwrap(); // glk_stream_set_current(sid)
+
+        m.glk_dispatch(0x0100, &[42]).unwrap(); // glk_set_hyperlink(42)
+        let drew = m.glk_dispatch(0x00E1, &[win, 7, 1, 0]).unwrap(); // image_draw(win, resnum=7, align=InlineUp)
+        assert_eq!(drew, 1, "drawn");
+        m.glk_dispatch(0x0100, &[0]).unwrap(); // glk_set_hyperlink(0) → clear
+        let drew2 = m.glk_dispatch(0x00E2, &[win, 7, 2, 0, 5, 5]).unwrap(); // image_draw_scaled, no link
+        assert_eq!(drew2, 1, "drawn");
+
+        let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
+        assert_eq!(
+            tb.draws(win),
+            vec![(7, 1, 0, None, 42), (7, 2, 0, Some((5, 5)), 0)],
+            "the first draw carries the set link; clearing it before the second leaves that one at 0"
+        );
     }
 
     #[test]
@@ -11608,6 +13450,140 @@ mod tests {
         assert_eq!(drew_ok, 1);
     }
 
+    /// SQ-1424 — `0x00EC glk_image_draw_scaled_ext` in a GRAPHICS window is
+    /// one-shot: the rule is resolved against the window's pixel width at call
+    /// time and handed to the same `graphics_draw_image` seam
+    /// `glk_image_draw_scaled` uses, so what the host receives is a resolved
+    /// size and nothing else (Glk 0.7.6, §"Graphics in Graphics Windows").
+    #[test]
+    fn draw_scaled_ext_resolves_once_in_a_graphics_window() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        m.graphics_enabled = true;
+        // The backend goes in BEFORE the window opens, so the window is laid
+        // out on the 40-col screen this test is talking about rather than the
+        // default one: a 40-col × 10-row graphics root at 8×16 px → 320 px wide.
+        m.backend = Box::new(
+            glk::TestBackend::with_screen(40, 10).with_char_pixels(8, 16).with_image_info(7, 200, 100),
+        );
+        let win = m.glk_open_window(0, 0, 0, 5, 0);
+        // WidthRatio 50% of a 320px window = 160; AspectRatio 1.0 keeps 2:1 → 80.
+        // maxwidth $8000 would cap at 160 too, but graphics windows ignore it —
+        // set it to something that WOULD bite (25% = 80) to prove it does not.
+        let rule = glk::imagerule::WIDTH_RATIO | glk::imagerule::ASPECT_RATIO;
+        let drew = m
+            .glk_dispatch(0x00EC, &[win, 7, 5, 6, 0x8000, 0x1_0000, rule, 0x4000])
+            .unwrap();
+        assert_eq!(drew, 1, "drawn");
+        let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
+        assert_eq!(
+            tb.draws(win),
+            vec![(7, 5, 6, Some((160, 80)), 0)],
+            "resolved to half the 320px window width, aspect kept, maxwidth ignored"
+        );
+        assert!(tb.buffer_draws_ext(win).is_empty(), "a graphics window keeps no standing rule");
+    }
+
+    /// SQ-1424 — the same call in a TEXT BUFFER window is STANDING: gvm hands
+    /// the host the RULE, not a size, because §"Graphics in Text Buffer
+    /// Windows" says "the image width will always be relative to the *current*
+    /// window width. If the text buffer window is resized … the image will
+    /// resize too". A host that received a resolved size could not honour that.
+    #[test]
+    fn draw_scaled_ext_hands_a_text_buffer_the_standing_rule() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        m.graphics_enabled = true;
+        m.backend = Box::new(
+            glk::TestBackend::with_screen(40, 10).with_char_pixels(8, 16).with_image_info(7, 200, 100),
+        );
+        let win = m.glk_open_window(0, 0, 0, 3, 0); // wintype_TextBuffer
+        let rule = glk::imagerule::WIDTH_RATIO | glk::imagerule::ASPECT_RATIO;
+        // val1 is the imagealign (1 = InlineUp), val2 unused/zero.
+        let drew = m
+            .glk_dispatch(0x00EC, &[win, 7, 1, 0, 0x8000, 0x1_0000, rule, 0x1_0000])
+            .unwrap();
+        assert_eq!(drew, 1, "drawn");
+        let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
+        assert!(tb.draws(win).is_empty(), "no resolved-size draw: the size is not settled yet");
+        let recs = tb.buffer_draws_ext(win);
+        assert_eq!(recs.len(), 1, "one standing rule recorded");
+        let (resnum, align, got, win_w, link) = recs[0];
+        assert_eq!((resnum, align), (7, 1), "resnum and imagealign");
+        assert_eq!(
+            got,
+            glk::ImageRule { rule, width: 0x8000, height: 0x1_0000, maxwidth: 0x1_0000 },
+            "the rule reaches the host verbatim"
+        );
+        assert_eq!(win_w, 320, "40 cols × 8 px — the CURRENT width, for a host with no layout of its own");
+        assert_eq!(link, 0, "no glk_set_hyperlink in this test: link 0");
+        // And the standing rule answers differently at two widths, which is the
+        // whole behaviour: this is what the host re-runs on every relayout.
+        assert_eq!(got.resolve_in_buffer((200, 100), 320), Some((160, 80)));
+        assert_eq!(got.resolve_in_buffer((200, 100), 640), Some((320, 160)));
+    }
+
+    /// A missing image, an unsupported window type, and a rule word naming no
+    /// width or height rule are all "not drawn" (0), never a diagnostic.
+    #[test]
+    fn draw_scaled_ext_reports_failure_rather_than_faulting() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        m.graphics_enabled = true;
+        let gfx = m.glk_open_window(0, 0, 0, 5, 0);
+        m.backend = Box::new(
+            glk::TestBackend::with_screen(40, 10).with_char_pixels(8, 16).with_image_info(7, 200, 100),
+        );
+        let both = glk::imagerule::WIDTH_ORIG | glk::imagerule::HEIGHT_ORIG;
+        // Unknown resnum → image_info says None.
+        assert_eq!(m.glk_dispatch(0x00EC, &[gfx, 99, 0, 0, 0, 0, both, 0]).unwrap(), 0, "missing image");
+        // A rule word with no HEIGHT rule (the spec: "You must supply one of each").
+        let no_height = glk::imagerule::WIDTH_ORIG;
+        assert_eq!(m.glk_dispatch(0x00EC, &[gfx, 7, 0, 0, 0, 0, no_height, 0]).unwrap(), 0, "no height rule");
+        // A window that does not display images at all.
+        assert_eq!(m.glk_dispatch(0x00EC, &[999, 7, 0, 0, 0, 0, both, 0]).unwrap(), 0, "no such window");
+        assert!(m.diagnostics.is_empty(), "0x00EC must be a HANDLED selector: {:?}", m.diagnostics);
+    }
+
+    /// With graphics off, `0x00EC` no-ops to 0 like every other graphics
+    /// selector — and reaches no backend.
+    #[test]
+    fn draw_scaled_ext_noops_when_graphics_disabled() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        let both = glk::imagerule::WIDTH_ORIG | glk::imagerule::HEIGHT_ORIG;
+        assert_eq!(m.glk_dispatch(0x00EC, &[1, 7, 0, 0, 0, 0, both, 0]).unwrap(), 0);
+        let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
+        assert_eq!(tb.draws(1), Vec::new());
+        assert!(tb.buffer_draws_ext(1).is_empty());
+    }
+
+    /// SQ-1424 — `gestalt_DrawImageScale` (24) is "The same, but for the
+    /// glk_image_draw_scaled_ext() call", so it answers exactly as
+    /// `gestalt_DrawImage` (7) does: the two window types that display images,
+    /// and only while graphics are enabled.
+    #[test]
+    fn gestalt_draw_image_scale_mirrors_draw_image() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        for wintype in [0u32, 1, 2, 3, 4, 5] {
+            assert_eq!(m.glk_gestalt(24, wintype), 0, "graphics off → unsupported for wintype {wintype}");
+        }
+        m.graphics_enabled = true;
+        for wintype in [3u32, 5] {
+            assert_eq!(m.glk_gestalt(24, wintype), 1, "TextBuffer/Graphics support it (wintype {wintype})");
+        }
+        for wintype in [0u32, 1, 2, 4] {
+            assert_eq!(m.glk_gestalt(24, wintype), 0, "wintype {wintype} displays no images");
+        }
+        // The mirror itself: 24 and 7 agree for every wintype, in both states.
+        for enabled in [false, true] {
+            m.graphics_enabled = enabled;
+            for wintype in 0u32..=5 {
+                assert_eq!(
+                    m.glk_gestalt(24, wintype),
+                    m.glk_gestalt(7, wintype),
+                    "DrawImageScale must mirror DrawImage (wintype {wintype}, graphics {enabled})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn glk_window_flow_break_is_silent_noop() {
         // glk_window_flow_break(win) — selector 0x00E8 per the Glk spec's
@@ -11675,7 +13651,7 @@ mod tests {
 
         let tb = backend_of(&m);
         assert_eq!(tb.fills(win), vec![(0x0011_2233, 1, 2, 3, 4)]);
-        assert_eq!(tb.draws(win), vec![(1, 5, 6, None)]);
+        assert_eq!(tb.draws(win), vec![(1, 5, 6, None, 0)]);
         assert!(m.diagnostics.is_empty(), "no noise: {:?}", m.diagnostics);
     }
 
@@ -11985,6 +13961,50 @@ mod tests {
         assert!((ln_e - 1.0).abs() < 1e-5);
         let p = f32::from_bits(farith2(0x1AB, 2.0, 10.0));
         assert!((p - 1024.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn pow_dpow_special_cases_per_glulx_spec() {
+        // Glulx spec, "Floating-Point Values And Special Cases", the `pow`
+        // opcode: "pow(1, y) returns 1 for any y, even a NaN. pow(x, ±0)
+        // returns 1 for any x, even a NaN. pow(−1, ±Inf) returns 1." — these
+        // are C99 Annex F rules; Apple's libm applies them inside `powf`
+        // itself, but glibc's and Windows' do not, which is why
+        // glulxercise's `floatexp` group failed on ubuntu/windows CI and
+        // passed on macOS (SQ-1433). Ported from glulxe's `osdepend.c`
+        // `glulx_powf`/`glulx_pow` wrappers, added there for the identical
+        // reason ("This wrapper handles all special cases, even if the
+        // underlying powf() function doesn't"). Assertions are on raw bit
+        // patterns so this test's result doesn't depend on the host libm.
+        const ONE_F32: u32 = 0x3F80_0000;
+        const ONE_F64: u64 = 0x3FF0_0000_0000_0000;
+
+        // pow(1, NaN) / pow(1, -NaN) — base exactly 1.0, any exponent.
+        assert_eq!(farith2(0x1AB, 1.0, f32::NAN), ONE_F32, "pow(1, NaN)");
+        assert_eq!(farith2(0x1AB, 1.0, -f32::NAN), ONE_F32, "pow(1, -NaN)");
+        // pow(NaN, 0) / pow(-NaN, 0) — exponent exactly ±0, any base.
+        assert_eq!(farith2(0x1AB, f32::NAN, 0.0), ONE_F32, "pow(NaN, 0)");
+        assert_eq!(farith2(0x1AB, -f32::NAN, 0.0), ONE_F32, "pow(-NaN, 0)");
+        assert_eq!(farith2(0x1AB, f32::NAN, -0.0), ONE_F32, "pow(NaN, -0)");
+        // pow(-1, ±Inf) — glulxe's third special case.
+        assert_eq!(farith2(0x1AB, -1.0, f32::INFINITY), ONE_F32, "pow(-1, Inf)");
+        assert_eq!(farith2(0x1AB, -1.0, f32::NEG_INFINITY), ONE_F32, "pow(-1, -Inf)");
+        // Ordinary cases still fall through to powf.
+        assert_eq!(farith2(0x1AB, 2.0, 3.0), 8.0f32.to_bits(), "pow(2,3)");
+        assert_eq!(farith2(0x1AB, -2.0, 3.0), (-8.0f32).to_bits(), "pow(-2,3)");
+        assert_eq!(farith2(0x1AB, 0.0, -1.0), f32::INFINITY.to_bits(), "pow(0,-1) = Inf");
+
+        // The f64 twin (dpow, 0x21B) follows the same rules.
+        assert_eq!(deval(0x21B, &[1.0, f64::NAN]).to_bits(), ONE_F64, "dpow(1, NaN)");
+        assert_eq!(deval(0x21B, &[1.0, -f64::NAN]).to_bits(), ONE_F64, "dpow(1, -NaN)");
+        assert_eq!(deval(0x21B, &[f64::NAN, 0.0]).to_bits(), ONE_F64, "dpow(NaN, 0)");
+        assert_eq!(deval(0x21B, &[-f64::NAN, 0.0]).to_bits(), ONE_F64, "dpow(-NaN, 0)");
+        assert_eq!(deval(0x21B, &[f64::NAN, -0.0]).to_bits(), ONE_F64, "dpow(NaN, -0)");
+        assert_eq!(deval(0x21B, &[-1.0, f64::INFINITY]), 1.0, "dpow(-1, Inf)");
+        assert_eq!(deval(0x21B, &[-1.0, f64::NEG_INFINITY]), 1.0, "dpow(-1, -Inf)");
+        assert_eq!(deval(0x21B, &[2.0, 3.0]), 8.0, "dpow(2,3)");
+        assert_eq!(deval(0x21B, &[-2.0, 3.0]), -8.0, "dpow(-2,3)");
+        assert_eq!(deval(0x21B, &[0.0, -1.0]), f64::INFINITY, "dpow(0,-1) = Inf");
     }
 
     #[test]
@@ -12415,7 +14435,7 @@ mod tests {
         .concat();
         let mut m = machine_with_body(&[], body);
         assert_eq!(m.step(), StepResult::Continue, "setiosys");
-        assert_eq!(m.step(), StepResult::Quit, "the filter fault surfaces as this instruction's fault");
+        assert_eq!(m.step(), StepResult::Fault, "the filter fault surfaces as this instruction's fault");
         assert!(m.halted);
         assert!(
             m.diagnostics.iter().any(|d| d.contains("not a function")),
@@ -12454,14 +14474,23 @@ mod tests {
         assert_eq!(glk_selector_name(0x016F), "glk_date_to_simple_time_local");
     }
 
+    /// A bare machine over a minimal image with a [`TestBackend`] reporting the
+    /// borderless-windows preference — the SQ-1402 twin of `machine_with_glk`.
+    fn machine_with_glk_borderless(body: &[u8]) -> Machine {
+        let start = asm::func(0xC1, &[], body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mem = Memory::new(built.image).expect("valid image");
+        Machine::with_glk(mem, Box::new(TestBackend::new().with_borderless(true)))
+    }
+
     #[test]
-    fn restart_preserves_borderless_and_closes_backend_windows() {
-        // SQ-0627: @restart swapped in a fresh Model with no backend
-        // window_close notifications (per-id backend state would splice into
-        // the restarted game's colliding fresh ids) and silently dropped the
-        // per-game borderless mode (a host/runtime setting, not game state).
-        let mut m = machine_with_glk(&[]);
-        m.set_borderless(true);
+    fn restart_asks_the_backend_fresh_for_borderless_and_closes_backend_windows() {
+        // SQ-0627 gave the model its own copy of the borderless mode and had
+        // @restart re-apply it by hand. SQ-1402 moved the source of truth onto
+        // the BACKEND, which restart never touches — so there is nothing left
+        // to preserve, only the window-close notifications (a backend keyed by
+        // id cannot splice pre-restart state into the restarted game's ids).
+        let mut m = machine_with_glk_borderless(&[]);
         let win = m.glk_open_window(0, 0, 0, 3, 0);
         assert_ne!(win, 0);
         m.glk_dispatch(0x002F, &[win]).unwrap(); // set_window
@@ -12469,22 +14498,68 @@ mod tests {
         assert_eq!(backend_of(&m).runs(win).len(), 1, "backend holds the old window's text");
 
         m.op_restart().unwrap();
-        assert!(m.glk.borderless(), "borderless survives @restart");
         assert_eq!(m.glk.root(), 0, "the model itself is fresh");
         assert!(backend_of(&m).runs(win).is_empty(), "the backend was told the old window closed");
+
+        // The proof this is wired end to end, not merely unbroken because
+        // nothing touched it: a fresh, DEFAULT-bordered split opened after
+        // restart still abuts, because `glk_open_window`'s own relayout asks
+        // the (untouched) backend again.
+        let buf = m.glk_open_window(0, 0, 0, 3, 0);
+        let grid = m.glk_open_window(buf, glk::WINMETHOD_LEFT | glk::WINMETHOD_FIXED, 20, 4, 0);
+        assert_eq!(m.glk.window_size(grid).unwrap().0, 20, "fixed key keeps its 20 cols");
+        assert_eq!(m.glk.window_size(buf).unwrap().0, 60, "borderless → sibling gets 80 − 20, no gutter");
     }
 
     #[test]
-    fn restore_state_preserves_borderless() {
-        // SQ-0627: restore_state replaces the Glk model with the deserialized
-        // snapshot, which deliberately never carries the host's borderless
-        // mode — the LIVE value must survive the swap. @restoreundo runs
-        // through this path with no host callback to re-apply it.
-        let mut m = machine_with_glk(&[]);
-        m.set_borderless(true);
+    fn restore_state_still_asks_the_backend_for_borderless_at_the_next_relayout() {
+        // SQ-1402: `restore_state` swaps in a deserialized (or fresh) Model and,
+        // unlike `op_restart`, does not itself force a relayout — so the model's
+        // CACHED copy of the backend's preference can be momentarily stale right
+        // after a restore, exactly as `char_px` (the sibling fact `relayout`
+        // hands the model the same way) already is. The backend — untouched by
+        // the swap — is still the single source of truth the moment anything
+        // relayouts: this pins that the caller's own next `rearrange()` (what
+        // the app does after a Restore State, e.g. from a queued resize) sees it.
+        let mut m = machine_with_glk_borderless(&[]);
         let blob = m.save_state();
         m.restore_state(&blob).unwrap();
-        assert!(m.glk.borderless(), "borderless survives restore_state/@restoreundo");
+        let buf = m.glk_open_window(0, 0, 0, 3, 0);
+        let grid = m.glk_open_window(buf, glk::WINMETHOD_LEFT | glk::WINMETHOD_FIXED, 20, 4, 0);
+        assert_eq!(m.glk.window_size(grid).unwrap().0, 20, "fixed key keeps its 20 cols");
+        assert_eq!(m.glk.window_size(buf).unwrap().0, 60, "borderless → sibling gets 80 − 20, no gutter");
+    }
+
+    #[test]
+    fn restore_state_keeps_the_accelerated_functions_installed() {
+        // SQ-1249: a host Save State restored into a Machine must NOT cost it
+        // its acceleration. The shadow the Guiding Light vets in is booted once
+        // and then answers every later question by restoring the live snapshot
+        // over itself — so if `restore_state` dropped the table the way
+        // `restart` deliberately does, every vetted turn after the first would
+        // run the Inform 7 veneer interpreted, and the seam would be an order of
+        // magnitude slower for no visible reason.
+        //
+        // The `@accelfunc` calls that built this table ran during the story's
+        // startup, which a restore does not re-run: nothing would reinstall it.
+        let mut m = machine_with_glk(&[]);
+        m.accel_funcs.insert(0x1234, 7);
+        m.accel_params.insert(1, 0x2000);
+        m.declared_accel = true;
+        let blob = m.save_state();
+        m.restore_state(&blob).unwrap();
+        assert_eq!(m.accel_func_for(0x1234), Some(7), "the story's own @accelfunc survives");
+        assert_eq!(m.accel_param(1), Some(0x2000), "and so does its @accelparam");
+        assert!(m.declares_own_accel(), "and the fact that it declared them at all");
+
+        // And the fingerprinted table `with_glk` installs for a story that never
+        // calls `@accelfunc` (SQ-1209) survives on the same route.
+        let mut n = machine_with_glk(&[]);
+        n.accel_funcs.insert(0x99, 2);
+        let veneer = n.accel_funcs.clone();
+        let blob = n.save_state();
+        n.restore_state(&blob).unwrap();
+        assert_eq!(*n.accel_funcs(), veneer, "the whole table, not just the declared half");
     }
 
     #[test]
@@ -12571,5 +14646,143 @@ mod tests {
             }
         }
         assert!(m.halted, "the program must fault or quit cleanly, never panic");
+    }
+
+    // ── SQ-1416 item 2: -1 input structs (glk_time_to_date_utc etc.) ──────────
+
+    /// `glk_time_to_date_utc(timeval*, date*)` (selector 0x0168) with the
+    /// timeval argument at `-1` (0xFFFFFFFF): per Glulx spec §2.18, an input
+    /// structure is popped off the stack, field 0 topmost — so the CALLER
+    /// (this test, standing in for compiled game code) pushes the fields in
+    /// REVERSE field order (microsec, then low_sec, then high_sec) so that
+    /// high_sec (field 0) ends up topmost, ready to be popped first. The date*
+    /// output (a real memory address, not -1) is then checked against
+    /// `glk::datetime::time_to_date` computed directly from the same
+    /// (high_sec, low_sec, microsec) — which only matches if the three popped
+    /// values landed in the right fields.
+    #[test]
+    fn glk_time_to_date_utc_honors_stack_input_timeval() {
+        use asm::Op::{C32, Zero};
+        const DATE_ADDR: u32 = 0x0100;
+        const HIGH_SEC: u32 = 0;
+        const LOW_SEC: u32 = 1_700_000_000;
+        const MICROSEC: u32 = 500_000;
+
+        // Push the timeval's fields in REVERSE field order (2, 1, 0) so field 0
+        // (high_sec) ends up topmost — the stack layout a real compiled
+        // `glk(0x168, sp, ...)` call with an inline timeval literal produces.
+        let mut body = asm::ins(0x40, &[C32(MICROSEC), asm::Op::Stack]); // field 2 (deepest)
+        body.extend(asm::ins(0x40, &[C32(LOW_SEC), asm::Op::Stack])); // field 1
+        body.extend(asm::ins(0x40, &[C32(HIGH_SEC), asm::Op::Stack])); // field 0 (topmost)
+        body.extend(glk_call(0x0168, &[C32(0xFFFF_FFFF), C32(DATE_ADDR)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert!(m.diagnostics.is_empty(), "no diagnostic: {:?}", m.diagnostics);
+
+        let tv = glk::datetime::GlkTimeVal { high_sec: HIGH_SEC as i32, low_sec: LOW_SEC, microsec: MICROSEC as i32 };
+        let want = glk::datetime::time_to_date(glk::datetime::timeval_to_timestamp(tv), tv.microsec);
+
+        let got_year = m.mem.read32(DATE_ADDR).unwrap() as i32;
+        let got_month = m.mem.read32(DATE_ADDR + 4).unwrap() as i32;
+        let got_day = m.mem.read32(DATE_ADDR + 8).unwrap() as i32;
+        let got_weekday = m.mem.read32(DATE_ADDR + 12).unwrap() as i32;
+        let got_hour = m.mem.read32(DATE_ADDR + 16).unwrap() as i32;
+        let got_minute = m.mem.read32(DATE_ADDR + 20).unwrap() as i32;
+        let got_second = m.mem.read32(DATE_ADDR + 24).unwrap() as i32;
+        let got_microsec = m.mem.read32(DATE_ADDR + 28).unwrap() as i32;
+        assert_eq!(
+            (got_year, got_month, got_day, got_weekday, got_hour, got_minute, got_second, got_microsec),
+            (want.year, want.month, want.day, want.weekday, want.hour, want.minute, want.second, want.microsec),
+            "the -1 timeval's fields did not land in (high_sec, low_sec, microsec) order"
+        );
+    }
+
+    /// `glk_date_to_time_utc(date*, timeval*)` (selector 0x016C) with the date
+    /// argument at `-1`: same convention as above but 8 fields, and this time
+    /// the OUTPUT (timeval*) is a real address so the round trip is checked
+    /// end to end — an input date whose stack fields were popped into the
+    /// wrong slots would produce a wrong or garbage timeval.
+    #[test]
+    fn glk_date_to_time_utc_honors_stack_input_date() {
+        use asm::Op::{C32, Zero};
+        const TV_ADDR: u32 = 0x0100;
+        let want_date = glk::datetime::GlkDate {
+            year: 2024,
+            month: 3,
+            day: 14,
+            weekday: 4,
+            hour: 9,
+            minute: 26,
+            second: 53,
+            microsec: 0,
+        };
+        let want_tv = {
+            let (secs, micro) = glk::datetime::date_to_time(want_date);
+            glk::datetime::timestamp_to_timeval(secs, micro)
+        };
+
+        // Push the date's 8 fields in REVERSE field order (7..=0) so field 0
+        // (year) ends up topmost.
+        let mut body = asm::ins(0x40, &[C32(want_date.microsec as u32), asm::Op::Stack]);
+        body.extend(asm::ins(0x40, &[C32(want_date.second as u32), asm::Op::Stack]));
+        body.extend(asm::ins(0x40, &[C32(want_date.minute as u32), asm::Op::Stack]));
+        body.extend(asm::ins(0x40, &[C32(want_date.hour as u32), asm::Op::Stack]));
+        body.extend(asm::ins(0x40, &[C32(want_date.weekday as u32), asm::Op::Stack]));
+        body.extend(asm::ins(0x40, &[C32(want_date.day as u32), asm::Op::Stack]));
+        body.extend(asm::ins(0x40, &[C32(want_date.month as u32), asm::Op::Stack]));
+        body.extend(asm::ins(0x40, &[C32(want_date.year as u32), asm::Op::Stack]));
+        body.extend(glk_call(0x016C, &[C32(0xFFFF_FFFF), C32(TV_ADDR)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert!(m.diagnostics.is_empty(), "no diagnostic: {:?}", m.diagnostics);
+
+        let got_high = m.mem.read32(TV_ADDR).unwrap() as i32;
+        let got_low = m.mem.read32(TV_ADDR + 4).unwrap();
+        let got_micro = m.mem.read32(TV_ADDR + 8).unwrap() as i32;
+        assert_eq!(
+            (got_high, got_low, got_micro),
+            (want_tv.high_sec, want_tv.low_sec, want_tv.microsec),
+            "the -1 date's 8 fields did not land in declared field order"
+        );
+    }
+
+    // ── SQ-1416 item 4: glk_select_poll's Char/Line/Mouse/Hyperlink ban ───────
+
+    /// `glk_select_poll` (selector 0x00C1) must skip a queued Mouse event —
+    /// forbidden by Glk spec §4.2 ("does not check for or return
+    /// evtype_CharInput, evtype_LineInput, or evtype_MouseInput") — and
+    /// deliver the Timer event queued behind it instead, leaving the Mouse
+    /// event still queued for a real `glk_select` to pick up later.
+    #[test]
+    fn glk_select_poll_skips_mouse_and_hyperlink_but_delivers_timer() {
+        use asm::Op::{C16, Zero};
+        let mut body = glk_call(0x00C1, &[C16(0x0100)], Zero); // glk_select_poll(&event @0x100)
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        // Queue Mouse and Hyperlink FIRST (both forbidden to glk_select_poll,
+        // Glk spec §4.2), then a Timer behind them.
+        m.glk.push_event(GlkEvent { etype: glk::evtype::MOUSE_INPUT, win: 1, val1: 3, val2: 4 });
+        m.glk.push_event(GlkEvent { etype: glk::evtype::HYPERLINK, win: 1, val1: 9, val2: 0 });
+        m.glk.push_event(GlkEvent { etype: glk::evtype::TIMER, win: 0, val1: 0, val2: 0 });
+
+        assert_eq!(step_to_event(&mut m), StepResult::Quit);
+        assert_eq!(
+            read_event(&m, 0x100),
+            (glk::evtype::TIMER, 0, 0, 0),
+            "poll delivers the Timer event, skipping the queued Mouse/Hyperlink ones"
+        );
+        // Both forbidden events are still queued, in their original order —
+        // "unavailable events remain pending for glk_select() to retrieve".
+        assert_eq!(
+            m.glk.pop_event(),
+            Some(GlkEvent { etype: glk::evtype::MOUSE_INPUT, win: 1, val1: 3, val2: 4 }),
+            "the Mouse event was left queued, not discarded"
+        );
+        assert_eq!(
+            m.glk.pop_event(),
+            Some(GlkEvent { etype: glk::evtype::HYPERLINK, win: 1, val1: 9, val2: 0 }),
+            "the Hyperlink event was left queued too"
+        );
     }
 }
