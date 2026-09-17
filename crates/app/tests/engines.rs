@@ -124,6 +124,8 @@ mod scott_saga_atari_lineart_pictures;
 
 #[path = "suites/scott_c64_picture_colours.rs"]
 mod scott_c64_picture_colours;
+#[path = "suites/scott_saga_atari_colours.rs"]
+mod scott_saga_atari_colours;
 
 #[path = "suites/scott_c64_baton_colours.rs"]
 mod scott_c64_baton_colours;

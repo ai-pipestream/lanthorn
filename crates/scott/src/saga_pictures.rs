@@ -694,10 +694,11 @@ pub fn decode_family_c(bytes: &[u8], platform: SagaPlatform) -> Result<Picture, 
 /// settles that rather than the absence of an Atari palette. Run the obvious
 /// rule — resolve the byte through [`atari_colour`] and take the nearest
 /// VIC-II colour by squared RGB distance — over the eleven measured pairs
-/// below and it matches **five** (three with §8.3's sixteen substitutions
-/// applied). The hue bands land where they should, but the boundaries do not:
-/// 101 and 103 come out light blue rather than purple, 196 brown rather than
-/// green, 232 green rather than gold. That is what one would expect of a
+/// below and it matches **six** (five before SQ-1528 refitted the Atari
+/// constants to captures, three with §8.3's sixteen substitutions applied).
+/// The hue bands land where they should, but the boundaries do not: 103
+/// comes out light blue rather than purple, 196 brown rather than green, 232
+/// green rather than gold. That is what one would expect of a
 /// conversion made by eye against a chip in 1984, checked against a
 /// phase-model reconstruction of a *different* chip forty years later — so
 /// this stays a table.
@@ -820,32 +821,42 @@ pub const ATARI_LUMINANCE: [u8; 16] = [
 ///   orange-green, light orange for hues 1 to 15.
 /// - **Chroma to RGB** is the standard NTSC YIQ matrix (FCC / SMPTE 170M).
 ///
-/// [`PHASE_DEGREES`] is the burst offset that puts hue 1 on the manual's
-/// "gold"; it is the one number here fixed by reading the sequence back rather
-/// than quoted, and every other hue then lands on its documented name.
+/// [`PHASE_DEGREES`] and [`SATURATION`] are the two numbers here not quoted
+/// from a document. Both are **fitted to the real machine** (SQ-1528): fifteen
+/// distinct colour bytes, each measured as the median of a solid region in a
+/// capture of the retail disk running under emulation —
+/// `machine-screenshots/atari-sorcerer-{title,game}.png`,
+/// `atari-scott-adventurland-title-flicker{1,2}.png`, and both releases' own
+/// "Adjust TV" colour-bar cards — laid over the record the production reader
+/// decodes at the same place. `atari_colour_lands_on_the_fifteen_measured_bytes`
+/// is that table, and `scott_saga_atari_colours` in lanthorn's test suites
+/// re-derives it from the frames on every run.
 ///
-/// § 8.3's sixteen hand-substituted entries override the result wherever they
-/// collide with it, so a release that relies on one still gets it.
+/// # §8.3's sixteen hand-substituted entries are NOT applied (SQ-1528)
+///
+/// §8.3 lists sixteen bytes whose colour "must be overridden" — 18, 37, 50,
+/// 54, 58 and 247 all to one dusty rose `#AD5F64`, and so on — and says itself
+/// that they "match no standard Atari palette". Three of them are on the
+/// captures, and all three are wrong on the machine: byte 50 (`0x32`, hue 3
+/// luminance 2 — *Adventureland*'s whole line-art palette A entry 1, and the
+/// RED bar of *Claymorgue*'s own colour-bar card) is a dark red-brown
+/// `#5B1105`, 95 units from the rose; byte 228 (`0xE4`, hue 14 luminance 4,
+/// palette B entry 3) is an olive `#3A530B`, 90 units from the orange-brown
+/// `#944C02` §8.3 gives it; byte 198 (`0xC6`, hue 12 luminance 6, the GREEN
+/// screen of *Claymorgue*'s colour-bar card) is `#2B861D`, 46 units brighter
+/// in green than §8.3's `#2B5800`. The first two are what made
+/// *Adventureland*'s globe pink and its banner purple. The other thirteen are
+/// unmeasured, but every one contradicts the encoding it sits in — a
+/// luminance-2 byte at brightness 120, a luminance-15 byte at 134 — in the
+/// same way the three falsified ones did, and entry 14 is the grey row's own
+/// value anyway. They are a 1984 by-eye table from an interpreter, and the
+/// fitted hardware model is the better estimate for every byte it has not
+/// measured.
 ///
 /// **Total, unlike [`c64_colour`].** A Commodore 64 stored colour byte is not
 /// a palette index at all and §8.3's lookup genuinely has holes; an Atari one
 /// indexes hardware, and every one of the 256 has a colour.
 pub fn atari_colour(stored: u8) -> Rgb {
-    // §8.3's sixteen hand-substituted entries, which override the hardware
-    // table wherever they collide with it.
-    match stored {
-        14 => return (0xE0, 0xE0, 0xE0),
-        18 | 37 | 50 | 54 | 58 | 247 => return (0xAD, 0x5F, 0x64),
-        86 => return (0x4B, 0x1E, 0xAD),
-        133 => return (0x34, 0x68, 0xEE),
-        198 => return (0x2B, 0x58, 0x00),
-        199 => return (0x3A, 0x67, 0x00),
-        216 => return (0x63, 0x70, 0x00),
-        228 => return (0x94, 0x4C, 0x02),
-        248 => return (0x8D, 0x59, 0x00),
-        255 => return (0xBA, 0x86, 0x00),
-        _ => {}
-    }
     let hue = stored >> 4;
     let y = f64::from(ATARI_LUMINANCE[usize::from(stored & 0x0F)]) / 255.0;
     if hue == 0 {
@@ -865,16 +876,27 @@ pub fn atari_colour(stored: u8) -> Rgb {
 
 /// The colour-burst phase, in degrees, at which GTIA hue 1 sits.
 ///
-/// The one number in [`atari_colour`] that is not quoted from a document.
-/// Published derivations of this palette disagree about the burst offset by
-/// tens of degrees, and the offset is what decides which *name* each hue gets;
-/// -30 is the value at which the fifteen hues read back as the *Atari 400/800
-/// Hardware Manual*'s own sequence, hue 1 gold through hue 15 light orange,
-/// and `hue_names_read_back_in_the_manuals_order` is that check written down.
-pub const PHASE_DEGREES: f64 = -30.0;
+/// Not quoted from a document — published derivations of this palette
+/// disagree about the burst offset by tens of degrees. It was -30 at first,
+/// picked only so that the fifteen hues read back as the *Atari 400/800
+/// Hardware Manual*'s own sequence (hue 1 gold through hue 15 light orange —
+/// `hue_names_read_back_in_the_manuals_order` is that check, and it still
+/// holds). **-20 is the least-squares fit** of this and [`SATURATION`]
+/// together against the fifteen real-machine measurements
+/// [`atari_colour`]'s doc names (SQ-1528): the hue-angle residual has no
+/// consistent drift across the fifteen, so the manual's 24-degree spacing is
+/// kept and only the offset moves.
+pub const PHASE_DEGREES: f64 = -20.0;
 
 /// Chroma amplitude relative to full luminance, for [`atari_colour`].
-pub const SATURATION: f64 = 0.30;
+///
+/// Fitted together with [`PHASE_DEGREES`] (SQ-1528): the measured chroma
+/// amplitude is close to constant across luminance rather than scaling with
+/// it — 0.11 to 0.24 in I/Q units over the fifteen bytes — which is why the
+/// model adds a fixed chroma to the luminance rather than multiplying, and
+/// 0.225 is its least-squares value. The previous 0.30 was the source of the
+/// "hue-correct but too saturated" miss on every text colour.
+pub const SATURATION: f64 = 0.225;
 
 #[cfg(test)]
 mod tests {
@@ -1118,17 +1140,68 @@ mod tests {
     }
 
     #[test]
-    fn atari_colour_keeps_8_3s_grey_row_and_substitutions() {
+    fn atari_colour_keeps_8_3s_grey_row_and_drops_its_substitutions() {
         assert_eq!(atari_colour(0), (0, 0, 0), "luminance 0");
         assert_eq!(atari_colour(2), (0x1D, 0x1D, 0x1D), "luminance 2");
         assert_eq!(atari_colour(0x0C), (0xB3, 0xB3, 0xB3), "luminance 12, hue 0 is grey");
-        assert_eq!(atari_colour(14), (0xE0, 0xE0, 0xE0), "the substituted entry");
-        assert_eq!(atari_colour(86), (0x4B, 0x1E, 0xAD), "a substituted entry above the row");
-        assert_eq!(atari_colour(255), (0xBA, 0x86, 0x00), "the last substituted entry");
+        assert_eq!(atari_colour(14), (0xE0, 0xE0, 0xE0), "the grey row's own value, substitution or not");
+        // The three substitutions the captures falsified (SQ-1528) resolve
+        // through the hardware model like every other byte.
+        assert_ne!(atari_colour(50), (0xAD, 0x5F, 0x64), "0x32 is not §8.3's rose");
+        assert_ne!(atari_colour(228), (0x94, 0x4C, 0x02), "0xE4 is not §8.3's orange-brown");
+        assert_ne!(atari_colour(198), (0x2B, 0x58, 0x00), "0xC6 is not §8.3's dark green");
+        assert_ne!(atari_colour(255), (0xBA, 0x86, 0x00), "0xFF is luminance 15, not a dark gold");
+    }
+
+    /// The fifteen colour bytes a real machine has been measured on, and what
+    /// it showed (SQ-1528) — the table [`PHASE_DEGREES`] and [`SATURATION`]
+    /// were fitted to. Each RGB is the per-channel median of a solid region
+    /// of a capture in `machine-screenshots/`, sampled at the centre of every
+    /// canvas pixel whose 3x3 neighbourhood the production decoder resolves to
+    /// one value; `scott_saga_atari_colours` in lanthorn's suites re-derives
+    /// them from the frames, this case pins the derived numbers so the crate's
+    /// own gate holds them without a fixture.
+    ///
+    /// **Tolerance: 48 summed over the three channels**, sixteen per channel.
+    /// The captures are an emulator's rendering through its own decoder
+    /// matrix, not ours, so bit-exactness is not on offer; the fit's worst
+    /// residual over the fifteen is 39. The constants this replaced missed the
+    /// three regions the quest reported by 60 (the castle, olive for gold),
+    /// 255 (the globe, rose for red-brown) and 106 (the banner, orange for
+    /// olive), and their smallest miss on any of the fifteen was 42.
+    #[test]
+    fn atari_colour_lands_on_the_fifteen_measured_bytes() {
+        const MEASURED: [(u8, Rgb, &str); 15] = [
+            (0x32, (91, 17, 5), "Adventureland palette A[1]; Claymorgue colour bars RED"),
+            (0x42, (93, 19, 52), "Adventureland palette B[1]"),
+            (0x84, (43, 57, 176), "Adventureland palette A[2]"),
+            (0xB4, (21, 97, 40), "Adventureland palette B[2]"),
+            (0xD4, (34, 95, 13), "Adventureland palette A[3]"),
+            (0xE4, (58, 83, 11), "Adventureland palette B[3]"),
+            (0xC4, (23, 100, 14), "Claymorgue room 1 grass"),
+            (0x97, (50, 104, 176), "Claymorgue room 1 sky"),
+            (0xF6, (119, 99, 17), "Claymorgue room 1 castle"),
+            (0x98, (78, 138, 213), "Claymorgue title 'Adventure International'"),
+            (0xBB, (93, 203, 136), "Claymorgue title 'Proudly Presents'"),
+            (0xDE, (198, 253, 116), "Claymorgue title 'SORCERER OF CLAYMORGUE CASTLE'"),
+            (0x87, (70, 87, 213), "Claymorgue colour bars BLUE"),
+            (0xE8, (122, 151, 24), "Claymorgue colour bars YELLOW"),
+            (0xC6, (43, 134, 29), "Claymorgue colour bars background GREEN (the fourth byte)"),
+        ];
+        for (byte, (mr, mg, mb), what) in MEASURED {
+            let (r, g, b) = atari_colour(byte);
+            let miss = r.abs_diff(mr) as u32 + g.abs_diff(mg) as u32 + b.abs_diff(mb) as u32;
+            assert!(
+                miss <= 48,
+                "0x{byte:02X} ({what}): machine shows ({mr}, {mg}, {mb}), we resolve ({r}, {g}, {b}), \
+                 {miss} summed over the channels"
+            );
+        }
     }
 
     /// The hue names the *Atari 400/800 Hardware Manual* gives, read back off
-    /// [`atari_colour`] — the check that fixes [`PHASE_DEGREES`].
+    /// [`atari_colour`] — the check that first fixed [`PHASE_DEGREES`], and
+    /// that the capture-fitted value (SQ-1528) still has to satisfy.
     ///
     /// Each hue is classified only coarsely (which channel dominates, and by
     /// how much), because a name like "turquoise" is not a triple; what the

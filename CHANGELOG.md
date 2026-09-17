@@ -38,6 +38,10 @@ Absolute URLs or no link.
 
 ### Fixed
 
+- **Atari 8-bit S.A.G.A. artwork now uses more accurate colours, verified
+  against captures of the real machine** — Claymorgue Castle's castle is
+  gold-brown rather than olive, Adventureland's globe a dark red rather than
+  pink, and text and line colours are no longer over-saturated.
 - **The story list's info panel now shows Atari 8-bit S.A.G.A. games' artwork
   instead of reporting none**, and the launch-options dialog now offers the
   resolution choice for the titles that support it.

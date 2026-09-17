@@ -2909,6 +2909,16 @@ hand-substituted and must be overridden to match: index 14 to 0xE0E0E0; indices
 0x3468EE; index 198 to 0x2B5800; index 199 to 0x3A6700; index 216 to 0x637000;
 index 228 to 0x944C02; index 248 to 0x8D5900; index 255 to 0xBA8600.
 
+> **Three of those sixteen have been checked against a real machine, and all
+> three are wrong.** Index 50 (`0x32`, hue 3 luminance 2) is a dark red-brown
+> `#5B1105` on the machine, not the rose above; index 228 (`0xE4`, hue 14
+> luminance 4) is an olive `#3A530B`, not an orange-brown; index 198 (`0xC6`,
+> hue 12 luminance 6) is `#2B861D`, a full luminance step brighter than the
+> `#2B5800` above. The other thirteen contradict the encoding they sit in the
+> same way (a luminance-2 byte at brightness 120, a luminance-15 byte at 134).
+> lanthorn applies none of them; see Appendix A item 47 for the captures and
+> the fitted hardware model that replaces them.
+
 **Commodore 64 colour bytes are not palette indices at all.** Their meaning was
 recovered empirically and the mapping is a bare lookup with no arithmetic
 structure, onto thirteen colours: black 0,0,0; white 255,255,255; red 191,97,72;
@@ -5868,6 +5878,39 @@ together with it.
     pixels** of genuine line placement across all three frames, 0.05% of the
     canvas. That last is the only part still open, and three frames of line
     art may not be enough to close it (SQ-1491).
+47. **Item 37's Atari palette has now been checked against the machine, and
+    its two fitted numbers moved; §8.3's sixteen substitutions are dropped.**
+    Seven captures of the retail disks under emulation
+    (`machine-screenshots/atari-sorcerer-{title,game}.png`,
+    `atari-scott-adventurland-title-flicker{1,2}.png`,
+    `atari-scott-colorbars-flicker-{1,2}.png`, `atari-scott-colorbars.png`)
+    laid over the records the production readers decode at the same place
+    measure **fifteen distinct colour bytes** — six of them twice, on
+    independent frames, to the same triple. The byte-to-slot mapping was
+    the first suspect and is right: every stored value resolves to one
+    colour on every frame, bitmap and line-art alike, and the reported hue
+    errors were all in the conversion. Least squares over the fifteen puts
+    the burst offset at **-20 degrees** (was -30) and the chroma amplitude at
+    **0.225** (was 0.30), on §8.3's own luminance row unchanged; the manual's
+    24-degree hue spacing is kept because the angular residual has no
+    consistent drift across the fifteen. Worst miss after the fit is 39
+    summed over three channels, against 60, 255 and 106 before it on the
+    three regions that raised the question — *Claymorgue*'s castle (`0xF6`,
+    olive for gold-brown), *Adventureland*'s globe (`0x32`, rose for
+    red-brown) and its banner (`0xE4`, orange for olive). The globe and the
+    banner were §8.3's substitutions, which is what settles those: three of
+    the sixteen measured (`0x32`, `0xE4`, and the colour-bar card's green
+    `0xC6`), all three wrong by 75 or more, and the rest contradicting the
+    encoding the same way. Both releases' "Adjust TV" colour-bar cards were
+    located by scanning the side for a record that decodes to vertical bars
+    — neither is in its picture table — and *Claymorgue*'s
+    (`32 87 E8 C6`, 29 columns x 64 pairs at canvas x 16, the *Hulk*'s
+    `B01250R` exactly) shows its GREEN as the record's FOURTH colour byte:
+    the background register §8.3 calls "never used" is live on that card, a
+    known deviation left as it is.
+    `scott_saga_atari_colours` re-derives all fifteen from the frames on every
+    run, and `atari_colour_lands_on_the_fifteen_measured_bytes` pins the
+    numbers in the crate (SQ-1528).
 
 The in-memory model this document's dialects decode *to*, in that crate, is a
 database of rooms (six exits and a description, plus a flag for the leading-`*`

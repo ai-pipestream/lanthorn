@@ -1060,7 +1060,7 @@ mod tests {
         // The palette resolves through the hardware table and nothing is left
         // unnamed, which is the Atari half of §8.3's colour rule.
         assert_eq!(pic.palette[0], (0, 0, 0), "entry 0 is black however the record reads");
-        assert_eq!(pic.palette[3], (0xE0, 0xE0, 0xE0), "0x0E is §8.3's substituted white");
+        assert_eq!(pic.palette[3], (0xE0, 0xE0, 0xE0), "0x0E is the grey row's luminance 14");
         assert!(pic.unrecognised_colours.is_empty(), "every Atari byte has a colour");
     }
 
