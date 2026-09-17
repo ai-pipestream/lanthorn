@@ -1192,7 +1192,7 @@ pub(crate) fn boot_story(
     // wins). Capture the base before garglk mutates `cfg` so `reload_style` can
     // recompute the precedence and `auto` can fall back to it.
     let honor_game_colours_base = cfg.honor_game_colours;
-    let garglk_overlay = app::garglk_ini::discover(&story_path);
+    let garglk_overlay = app::garglk_ini::discover_with_entry(&story_path, disk_entry);
     let garglk_line = garglk_overlay.as_ref().map(|ov| {
         let summary = ov.apply(&mut cs);
         // …unless `--game-colours` was typed on this launch, which outranks both

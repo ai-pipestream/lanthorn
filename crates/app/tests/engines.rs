@@ -43,6 +43,8 @@ mod glulx_boot_room_id;
 mod glulx_game_colours;
 #[path = "suites/glulx_garglk_style_sentinel.rs"]
 mod glulx_garglk_style_sentinel;
+#[path = "suites/sq1530_garglk_ini_zip.rs"]
+mod sq1530_garglk_ini_zip;
 #[path = "suites/glulx_ingame_save_host_restore.rs"]
 mod glulx_ingame_save_host_restore;
 #[path = "suites/glulx_inventory.rs"]

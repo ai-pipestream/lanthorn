@@ -261,7 +261,33 @@ impl GarglkOverlay {
 /// first: `<storystem>.ini`, then `garglk.ini`. Parse the first that exists and
 /// resolve the section set matching this story. Returns `None` if neither file
 /// exists (or the match yields nothing to apply).
+///
+/// Exactly [`discover_with_entry`] with no zip entry name — every loose file,
+/// which is the whole of what this covered before SQ-1530.
 pub fn discover(story_path: &Path) -> Option<GarglkOverlay> {
+    discover_with_entry(story_path, None)
+}
+
+/// As [`discover`], but for a story that may have been launched out of a
+/// `.zip` (SQ-1530). `disk_entry` is the specific entry's name the story was
+/// mounted from inside a multi-story zip — `boot_story`'s own parameter of the
+/// same name (SQ-1098) — and `None` for every loose file and every
+/// single-story zip, exactly as `discover` always took it.
+///
+/// **Why a zip needs its own branch at all**: a story loaded from inside a zip
+/// never touches disk as a separate file — `hints::load_story_bytes` reads the
+/// entry's bytes straight into memory — so `story_path` is the ZIP's own path,
+/// and the old filesystem-only `discover` went looking for `<stem>.ini` beside
+/// the zip on disk, where the sidecar the game itself ships never is: it is an
+/// entry INSIDE the archive, beside the story entry, not a file beside the
+/// download. That is exactly the reported bug — a Kerkerkruip zip bundling
+/// both `Kerkerkruip.gblorb` and `Kerkerkruip.ini` rendered its hyperlinks in
+/// plain ANSI cyan instead of the ini's dark teal, while the very same pair as
+/// loose files worked.
+pub fn discover_with_entry(story_path: &Path, disk_entry: Option<&str>) -> Option<GarglkOverlay> {
+    if crate::hints::is_zip(story_path) {
+        return discover_in_zip(story_path, disk_entry);
+    }
     let dir = story_path.parent().filter(|p| !p.as_os_str().is_empty());
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let stem = story_path.file_stem()?.to_string_lossy().to_string();
@@ -272,6 +298,53 @@ pub fn discover(story_path: &Path) -> Option<GarglkOverlay> {
             let text = std::fs::read_to_string(&cand).ok()?;
             return Some(parse_for_story(&text, story_path, cand));
         }
+    }
+    None
+}
+
+/// The zip half of [`discover_with_entry`]: read the sidecar out of the
+/// archive's own entries rather than off a directory, mirroring the
+/// filesystem priority (`<stem>.ini` before `garglk.ini`) against entry
+/// BASENAMES, matched case-insensitively (a zip's stored separator is always
+/// `/`).
+///
+/// The stem to match — and the filename garglk section selectors like
+/// `[Kerkerkruip.gblorb]` are checked against — is the STORY's own name, not
+/// the zip's: `disk_entry` gives it directly for a multi-story zip (SQ-1098);
+/// for a single-story zip (`disk_entry: None`) it is instead read off
+/// [`crate::hints::zipped_stories`]'s own answer — the same content-classified
+/// entry `resolve_entry`/`load_mounted_story_from(path, None)` mounts — rather
+/// than guessed from the zip's filename, which is very often a download's own
+/// name (`Kerkerkruip.zip`) and shares neither stem nor extension with the game
+/// inside it.
+fn discover_in_zip(zip_path: &Path, disk_entry: Option<&str>) -> Option<GarglkOverlay> {
+    let story_name: String = match disk_entry {
+        Some(e) => e.to_string(),
+        None => {
+            let stories = crate::hints::zipped_stories(zip_path)?;
+            stories.into_iter().next()?.0
+        }
+    };
+    let base = story_name.rsplit('/').next().unwrap_or(&story_name);
+    let stem = Path::new(base).file_stem()?.to_string_lossy().into_owned();
+
+    let stem_ini = format!("{stem}.ini");
+    let candidates = [stem_ini.as_str(), "garglk.ini"];
+    for cand in candidates {
+        let bytes = crate::hints::read_zip_entry(zip_path, |name| {
+            let base = name.rsplit('/').next().unwrap_or(name);
+            base.eq_ignore_ascii_case(cand)
+        })
+        .ok()
+        .flatten();
+        let Some(bytes) = bytes else { continue };
+        let Ok(text) = String::from_utf8(bytes) else { continue };
+        let synth = PathBuf::from(&story_name);
+        // A synthetic display path: there is no real file at this location on
+        // disk, but the startup summary and `GarglkOverlay::path` want
+        // *something* that names where the config came from.
+        let display_path = zip_path.join(cand);
+        return Some(parse_for_story(&text, &synth, display_path));
     }
     None
 }
