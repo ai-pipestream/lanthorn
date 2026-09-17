@@ -38,6 +38,9 @@ Absolute URLs or no link.
 
 ### Fixed
 
+- **The story list's info panel now shows Atari 8-bit S.A.G.A. games' artwork
+  instead of reporting none**, and the launch-options dialog now offers the
+  resolution choice for the titles that support it.
 - **Restoring a Save State in a Glulx game with side panels (Kerkerkruip and
   similar) no longer leaves the panels blank.** The game now repaints them the
   same way it would after you resize the terminal.

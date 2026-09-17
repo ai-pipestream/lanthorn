@@ -122,6 +122,29 @@ pub enum ScottPictures {
         /// pictures and `B…` object overlays together — §8.6's three usages).
         pictures: usize,
     },
+    /// An Atari 8-bit US S.A.G.A. release whose artwork lives on a paired
+    /// companion side rather than in named files, so [`Self::SagaUsStrips`]'s
+    /// filesystem walk finds nothing for it (§12.10) — counted instead
+    /// straight off that side's own table
+    /// (`scott::saga_atari::read_picture_table`/`read_line_art_table`), the
+    /// SAME production readers a real launch draws through
+    /// (`crate::graphics::PictSource::from_scott_saga_atari`/`_lineart`,
+    /// SQ-1496/SQ-1524/SQ-1525).
+    SagaAtari {
+        /// Which drawing format the companion side carries — *Voodoo
+        /// Castle*, *The Count* and *Claymorgue Castle* carry family-C
+        /// bitmaps; the other four carry a line-art token stream. Decides,
+        /// through [`Self::offers_resolution_choice`], whether the
+        /// launch-options panel offers a resolution toggle: line-art draws
+        /// at a caller-chosen supersample the way family B does; the bitmap
+        /// format is a fixed 280x160 canvas like [`Self::SagaUsStrips`] and
+        /// has no second resolution to offer.
+        format: scott::AtariPictureFormat,
+        /// How many table entries the companion side holds — room pictures
+        /// and object overlays together, the same fact `pictures` counts for
+        /// [`Self::SagaUsStrips`].
+        pictures: usize,
+    },
 }
 
 impl ScottPictures {
@@ -136,9 +159,16 @@ impl ScottPictures {
     /// than one resolution, so the only kinds the launch-options dialog
     /// offers a resolution choice for (SQ-1473, SQ-1480)? A Blorb's or a
     /// S.A.G.A. release's pictures are pre-rendered bitmaps with no second
-    /// resolution to offer.
+    /// resolution to offer. SQ-1524/SQ-1525: the Atari's line-art format
+    /// draws at a caller-chosen supersample the same way, so it gets the row
+    /// too — but the Atari's OTHER format, family-C bitmaps, is a fixed
+    /// canvas like [`Self::SagaUsStrips`] and stays excluded.
     pub fn offers_resolution_choice(self) -> bool {
         matches!(self, ScottPictures::NativeC64 { .. } | ScottPictures::NativeZx { .. })
+            || matches!(
+                self,
+                ScottPictures::SagaAtari { format: scott::AtariPictureFormat::LineArt, .. }
+            )
     }
 }
 
@@ -1095,6 +1125,20 @@ fn scott_pictures(
         return Some(ScottPictures::NativeZx { pictures: lists.len() });
     }
     if let Some(platform) = scott::detect_saga_us(bytes) {
+        // SQ-1496/SQ-1524/SQ-1525: the Atari has no filesystem on its
+        // companion side for `saga_picture_files`' by-name walk to find
+        // anything on (§12.10) — its pictures are counted off that side's
+        // own table instead, through `scott_pictures_atari`.
+        if matches!(platform, scott::SagaPlatform::Atari8Bit) {
+            return Some(scott_pictures_atari(bytes, path).unwrap_or(
+                // Not the same thing as a text-only game (`None`) — this
+                // release HAS artwork; there is a database to read, a
+                // companion side is missing/unpaired, or the release
+                // identity/table cannot be read off what is here. Atari
+                // never reaches the Apple-only `scrambled` case.
+                ScottPictures::SagaUsNoPictures { platform, scrambled: false },
+            ));
+        }
         let pictures = crate::hints::saga_picture_files(path, Some(platform)).len();
         return Some(if pictures == 0 {
             // SQ-1476: only worth asking when there is nothing to draw, and
@@ -1119,6 +1163,53 @@ fn scott_pictures(
         }
     }
     None
+}
+
+/// How many pictures an Atari 8-bit S.A.G.A. release's own companion side
+/// holds (SQ-1496/SQ-1524/SQ-1525), read the same way a real launch reads
+/// them — off the (usage, index) table on side A (family-C bitmap titles) or
+/// the token-stream table on side B itself (line-art titles), through the
+/// SAME production readers `crate::graphics::PictSource::from_scott_saga_atari`
+/// / `from_scott_saga_atari_lineart` use to build the session that actually
+/// draws them — never a second, invented mechanism.
+///
+/// `bytes` is side A, already in hand; `path` is side A's own path, needed
+/// only to find its companion (`crate::hints::saga_atari_companion_side`,
+/// the same pairing `crate::graphics::ScottPictureSources::resolve` uses at
+/// boot).
+///
+/// `None` when any step refuses: the release identity can't be read off
+/// `bytes` (`scott::Database::parse`'s `saga_us` is `None`), the companion
+/// side is missing or ambiguously paired, or the table's own marker does not
+/// match this release (a differently-mastered disk) — the caller falls back
+/// to [`ScottPictures::SagaUsNoPictures`] for all of these, the same
+/// honest-empty shape [`scott_pictures`] answers every other unreadable
+/// picture source with.
+fn scott_pictures_atari(bytes: &[u8], path: &Path) -> Option<ScottPictures> {
+    let release = scott::Database::parse(bytes).ok()?.saga_us?;
+    let format = release.atari_picture_format()?;
+    let side_b = crate::hints::saga_atari_companion_side(path)?;
+    let side_b_spliced = scott::saga_atari::splice_vtoc(&side_b);
+    let pictures = match format {
+        scott::AtariPictureFormat::FamilyCBitmap => scott::saga_atari::read_picture_table(
+            bytes,
+            &side_b_spliced,
+            release.picture_scheme(),
+            release.adventure,
+        )?
+        .entries()
+        .len(),
+        scott::AtariPictureFormat::LineArt => {
+            scott::saga_atari::read_line_art_table(&side_b_spliced, release.adventure)?
+                .entries()
+                .len()
+        }
+        // `AtariPictureFormat` is `#[non_exhaustive]`: a format this crate
+        // does not know how to count yet is refused rather than guessed at,
+        // the same rule every table entry in it is individually held to.
+        _ => return None,
+    };
+    Some(ScottPictures::SagaAtari { format, pictures })
 }
 
 /// The bundled author for a Scott-format game (filename stem, case-insensitive),
@@ -4295,14 +4386,17 @@ mod tests {
         let atari = stories.join("scott-dialects/atari/SAGA #1 - Adventureland [side A].atr");
         if atari.is_file() {
             let row = resolve_entry(&atari, &base).expect("the Atari side A opens");
-            assert_eq!(
-                row.meta.scott_pictures,
-                Some(ScottPictures::SagaUsNoPictures {
-                    platform: scott::SagaPlatform::Atari8Bit,
-                    scrambled: false,
-                }),
-                "the pictures are on the companion side, which nothing pairs yet (§8.3)"
-            );
+            // The pictures are on the companion side — paired and counted
+            // off its own table now (SQ-1496/SQ-1524/SQ-1525/SQ-1526);
+            // `every_atari_saga_title_reports_its_companion_sides_real_picture_count`
+            // below cross-checks the exact count against the production
+            // reader for every title.
+            match row.meta.scott_pictures {
+                Some(ScottPictures::SagaAtari { format: scott::AtariPictureFormat::LineArt, pictures }) => {
+                    assert!(pictures > 0, "Adventureland's companion side must report real pictures");
+                }
+                other => panic!("Adventureland's side A must report a line-art SagaAtari row, got {other:?}"),
+            }
             assert_eq!(type_container(&row.meta, false), Some("Atari DOS"));
         }
 
@@ -4321,6 +4415,111 @@ mod tests {
             );
             assert_eq!(type_container(&row.meta, false), None, "no container, no parenthetical");
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// End to end on real media (skips vacuously — `stories/` is gitignored):
+    /// every readable Atari 8-bit S.A.G.A. title's side A now reports its own
+    /// companion side's REAL picture count, cross-checked against
+    /// [`crate::graphics::PictSource::scott_saga_count`] — the SAME fact a
+    /// real launch reads through the SAME production table readers
+    /// (`scott::saga_atari::read_picture_table`/`read_line_art_table`), so
+    /// the picker cannot drift from what the game actually draws
+    /// (SQ-1496/SQ-1524/SQ-1525/SQ-1526).
+    ///
+    /// **Mission Impossible is excluded**, not skipped by accident: its side
+    /// A is a pre-existing damaged specimen `parse_saga_us` refuses outright
+    /// (§12.13's ~50 corrupt bytes, "the two item-location tables disagree")
+    /// — `saga_us_disks::mission_impossible_atari_side_a_yields_no_rows_and_no_panic`
+    /// already pins that it never reaches the picker as a row at all, and
+    /// `scott_saga_atari_lineart_pictures::mission_impossibles_line_art_table_still_reads_off_side_b`
+    /// covers its picture wiring straight off side B. Nothing this fix
+    /// touches changes either fact, so this test only checks that opening its
+    /// side A still yields no row (the same non-panic this fix must not
+    /// regress) rather than a picture count that was never reachable.
+    ///
+    /// Before this fix every OTHER title reported
+    /// [`ScottPictures::SagaUsNoPictures`] — `scott_pictures` reached these
+    /// releases only through `detect_saga_us` + `saga_picture_files`'s
+    /// by-name walk, which finds nothing on this platform (§12.10: no
+    /// filesystem on the companion side at all). Falsified by temporarily
+    /// reverting `scott_pictures`'s Atari branch to the old
+    /// `saga_picture_files`-only path and confirming every title in this loop
+    /// fails back to `SagaUsNoPictures` with a zero-length picture walk.
+    #[test]
+    fn every_atari_saga_title_reports_its_companion_sides_real_picture_count() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stories/scott-dialects/atari");
+        if !dir.is_dir() {
+            eprintln!("SKIP: {} absent (gitignored commercial fixture)", dir.display());
+            return;
+        }
+        let mission_impossible = dir.join("SAGA #3 - Mission Impossible [side A].atr");
+        if mission_impossible.is_file() {
+            let base = temp_dir("atari-mission-impossible-row");
+            assert!(
+                resolve_entry(&mission_impossible, &base).is_none(),
+                "Mission Impossible's damaged side A must still yield no row at all"
+            );
+            let _ = std::fs::remove_dir_all(&base);
+        }
+        const TITLES: [(&str, &str); 6] = [
+            ("SAGA #1 - Adventureland [side A].atr", "SAGA #1 - Adventureland [side B].atr"),
+            ("SAGA #2 - Pirate Adventure [side A].atr", "SAGA #2 - Pirate Adventure [side B].atr"),
+            ("SAGA #4 - Voodoo Castle [side A].atr", "SAGA #4 - Voodoo Castle [side B].atr"),
+            ("SAGA #5 - The Count [side A].atr", "SAGA #5 - The Count [side B].atr"),
+            ("SAGA #6 - Strange Odyssey [side A].atr", "SAGA #6 - Strange Odyssey [side B].atr"),
+            (
+                "SAGA No. 13 - The Sorcerer of Claymorgue Castle _ side A.atr",
+                "SAGA No. 13 - The Sorcerer of Claymorgue Castle _ side B.atr",
+            ),
+        ];
+        let base = temp_dir("atari-saga-pictures-row");
+        let mut checked = 0;
+        for (side_a_name, side_b_name) in TITLES {
+            let side_a_path = dir.join(side_a_name);
+            let side_b_path = dir.join(side_b_name);
+            if !side_a_path.is_file() || !side_b_path.is_file() {
+                eprintln!("SKIP: {side_a_name} or its companion side absent");
+                continue;
+            }
+            let bytes_a = std::fs::read(&side_a_path).expect("side A reads");
+            let bytes_b = std::fs::read(&side_b_path).expect("side B reads");
+            let release = scott::Database::parse(&bytes_a)
+                .ok()
+                .and_then(|db| db.saga_us)
+                .unwrap_or_else(|| panic!("{side_a_name}: must identify as a S.A.G.A. release"));
+            let format = release
+                .atari_picture_format()
+                .unwrap_or_else(|| panic!("{side_a_name}: must be an Atari release"));
+            let want_pictures = match format {
+                scott::AtariPictureFormat::FamilyCBitmap => {
+                    crate::graphics::PictSource::from_scott_saga_atari(&bytes_a, &bytes_b, release)
+                        .unwrap_or_else(|| panic!("{side_a_name}: family-C table should read"))
+                        .scott_saga_count()
+                        .unwrap_or_else(|| panic!("{side_a_name}: a family-C source must count"))
+                }
+                scott::AtariPictureFormat::LineArt => crate::graphics::PictSource::from_scott_saga_atari_lineart(
+                    &bytes_b,
+                    release,
+                    128,
+                    crate::graphics::ScottPictureResolution::Original,
+                )
+                .unwrap_or_else(|| panic!("{side_a_name}: line-art table should read"))
+                .scott_saga_count()
+                .unwrap_or_else(|| panic!("{side_a_name}: a line-art source must count")),
+                other => panic!("{side_a_name}: unhandled Atari picture format {other:?}"),
+            };
+            assert!(want_pictures > 0, "{side_a_name}: a real release reports a nonzero count");
+
+            let row = resolve_entry(&side_a_path, &base).expect("side A opens");
+            assert_eq!(
+                row.meta.scott_pictures,
+                Some(ScottPictures::SagaAtari { format, pictures: want_pictures }),
+                "{side_a_name}: the picker's count must match the production reader's own count"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no Atari specimen was found to check — the skip above swallowed everything");
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -3766,7 +3766,7 @@ fn draw_info_panel(
         lines.push((format!("IFDB search: {url}"), story_info_link));
     }
     // features line (present badges only).
-    let feats = feature_words(&meta.features, aux);
+    let feats = feature_words(&meta.features, aux, meta.scott_pictures);
     if !feats.is_empty() {
         lines.push((format!("Features: {}", feats.join(" ")), story_info_value));
     }
@@ -4334,11 +4334,20 @@ fn human_size(bytes: u64) -> String {
 }
 
 /// Present-only feature badge words, folding in aux-derived signals (an
-/// associated blorb's sound/picture chunks, or a resolved hint index).
-fn feature_words(f: &app::picker::Features, aux: Option<&app::picker::StoryAux>) -> Vec<&'static str> {
+/// associated blorb's sound/picture chunks, or a resolved hint index) and a
+/// Scott entry's own graphics (`scott_pictures`, SQ-1473) — `f.graphics` is
+/// always `false` for the Scott engine (no header flag to read it off, see
+/// `picker::entry_from_loaded`'s `Features::default()` for that engine), so
+/// this is the only thing that lights the badge for a Scott story's native
+/// pictures, its S.A.G.A. artwork or its Atari companion side alike.
+fn feature_words(
+    f: &app::picker::Features,
+    aux: Option<&app::picker::StoryAux>,
+    scott_pictures: Option<app::picker::ScottPictures>,
+) -> Vec<&'static str> {
     let mut v = Vec::new();
     let mut sound = f.sound;
-    let mut graphics = f.graphics;
+    let mut graphics = f.graphics || scott_pictures.is_some();
     if let Some((_, chunks)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
         if chunks.iter().any(|c| c.usage == "Snd ") {
             sound = true;
@@ -4402,6 +4411,19 @@ fn scott_pictures_label(sp: app::picker::ScottPictures) -> String {
         app::picker::ScottPictures::SagaDosCga { pictures } => {
             format!("S.A.G.A. (MS-DOS CGA, {pictures} pictures)")
         }
+        // SQ-1496/SQ-1524/SQ-1525: the Atari's own companion side, counted
+        // off its table rather than a filesystem walk (`SagaUsStrips`'s
+        // doc) — named the same way that row names Apple II's line art vs.
+        // C64's strips, since a player sees the difference either way.
+        app::picker::ScottPictures::SagaAtari { format, pictures } => format!(
+            "S.A.G.A. (Atari {}, {pictures} pictures)",
+            match format {
+                scott::AtariPictureFormat::FamilyCBitmap => "strips",
+                scott::AtariPictureFormat::LineArt => "line art",
+                // `AtariPictureFormat` is `#[non_exhaustive]`.
+                _ => "pictures",
+            }
+        ),
     }
 }
 
@@ -6325,6 +6347,31 @@ mod tests {
         let st = super::open_launch_options(&saga, &cfg, &dir);
         assert!(!st.scott_native_pictures, "family C is bitmaps — one resolution only");
 
+        // SQ-1524/SQ-1525/SQ-1526: the Atari's line-art format draws at a
+        // caller-chosen supersample exactly like the native vector formats
+        // above, so it must offer the row too — but its OTHER format,
+        // family-C bitmaps, is a fixed canvas like `SagaUsStrips` above and
+        // must stay hidden.
+        let atari_bitmap = scott_entry_with_pictures(
+            &story,
+            Some(app::picker::ScottPictures::SagaAtari {
+                format: scott::AtariPictureFormat::FamilyCBitmap,
+                pictures: 12,
+            }),
+        );
+        let st = super::open_launch_options(&atari_bitmap, &cfg, &dir);
+        assert!(!st.scott_native_pictures, "Atari family-C is bitmaps too — one resolution only");
+
+        let atari_line_art = scott_entry_with_pictures(
+            &story,
+            Some(app::picker::ScottPictures::SagaAtari {
+                format: scott::AtariPictureFormat::LineArt,
+                pictures: 92,
+            }),
+        );
+        let st = super::open_launch_options(&atari_line_art, &cfg, &dir);
+        assert!(st.scott_native_pictures, "Atari line art must offer the resolution row");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6396,6 +6443,60 @@ mod tests {
             super::scott_pictures_label(ScottPictures::SagaDosCga { pictures: 68 }),
             "S.A.G.A. (MS-DOS CGA, 68 pictures)"
         );
+        // SQ-1496/SQ-1524/SQ-1525: the Atari's own companion-side count,
+        // named for the format the way the Apple II row above names line art
+        // vs. strips — a player sees the difference either way.
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::SagaAtari {
+                format: scott::AtariPictureFormat::FamilyCBitmap,
+                pictures: 12,
+            }),
+            "S.A.G.A. (Atari strips, 12 pictures)"
+        );
+        assert_eq!(
+            super::scott_pictures_label(ScottPictures::SagaAtari {
+                format: scott::AtariPictureFormat::LineArt,
+                pictures: 92,
+            }),
+            "S.A.G.A. (Atari line art, 92 pictures)"
+        );
+    }
+
+    /// `f.graphics` is always `false` for the Scott engine (`Features::default()`,
+    /// `picker::entry_from_loaded`'s `Engine::Scott` arm — no header flag to
+    /// read it off) — so the "graphics" badge for a Scott entry has to come
+    /// from `scott_pictures` instead, exactly as the "Pictures:" row does.
+    /// Covers a native decode, a S.A.G.A. release AND the Atari companion
+    /// side (the kind this change added), and confirms a text-only story —
+    /// `scott_pictures: None` — still shows no badge.
+    #[test]
+    fn feature_words_derives_the_graphics_badge_from_scott_pictures() {
+        use app::picker::{Features, ScottPictures};
+        let f = Features::default();
+        assert!(
+            !super::feature_words(&f, None, None).contains(&"graphics"),
+            "a text-only Scott story must not show the graphics badge"
+        );
+        assert!(super::feature_words(
+            &f,
+            None,
+            Some(ScottPictures::NativeC64 { pictures: 11 })
+        )
+        .contains(&"graphics"));
+        assert!(super::feature_words(
+            &f,
+            None,
+            Some(ScottPictures::SagaUsStrips { platform: scott::SagaPlatform::Commodore64, pictures: 70 })
+        )
+        .contains(&"graphics"));
+        // SQ-1496/SQ-1524/SQ-1525: the Atari fix this test was added for —
+        // its companion-side artwork must light the same badge.
+        assert!(super::feature_words(
+            &f,
+            None,
+            Some(ScottPictures::SagaAtari { format: scott::AtariPictureFormat::LineArt, pictures: 92 })
+        )
+        .contains(&"graphics"));
     }
 
     /// SQ-1477: the MS-DOS *Questprobe* releases come in a zip, so the zip is
