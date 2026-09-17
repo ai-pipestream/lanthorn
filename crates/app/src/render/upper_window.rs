@@ -17,7 +17,15 @@ use crate::render::paneframe::{draw_framed, BorderStyle, PaneSides};
 /// modifier so the terminal performs exactly one swap. fg/bg are applied in
 /// logical order (pre-reverse) for non-Default channels when
 /// `honor_game_colours` is true; Default channels inherit from the theme base.
-fn cell_style(cell: zvm::screen::Cell, glk_style: u8, scheme: &ColorScheme, honor_game_colours: bool, bg_override: Option<u32>, is_glk_grid: bool) -> Style {
+fn cell_style(
+    cell: zvm::screen::Cell,
+    glk_style: u8,
+    scheme: &ColorScheme,
+    honor_game_colours: bool,
+    bg_override: Option<u32>,
+    fg_override: Option<u32>,
+    is_glk_grid: bool,
+) -> Style {
     use zvm::screen::ZColour;
     // Use the theme's grid content style as the base (consistent with the
     // blank-fill path in draw_grid, and with how transcript.rs draws styled runs).
@@ -25,11 +33,14 @@ fn cell_style(cell: zvm::screen::Cell, glk_style: u8, scheme: &ColorScheme, hono
     // the status bar's own spelling (SQ-1212) — so an unwritten cell and a
     // written Default-colour cell agree; a Z-machine/Scott grid (win == 0) keeps
     // `upper_window`, which follows the terminal page (SQ-0510) untouched.
-    // A per-window background override (Glulx window colour, SQ-0328) replaces the
-    // theme bg here so a Default-bg game cell shows the window's own colour.
+    // A per-window background/foreground override (Glulx window colour,
+    // SQ-0328 for bg, SQ-1529 for fg) replaces the theme's channel here so a
+    // Default-colour game cell that nobody has written since the window was
+    // (re)built — blank padding, an unfilled row — still shows the window's
+    // own colour instead of falling through to the theme default.
     let mut base = scheme.theme.get(if is_glk_grid { "glk.grid.background" } else { "upper_window" }).style;
-    if let Some(rgb) = bg_override {
-        base = window_ground(base, rgb, scheme);
+    if bg_override.is_some() || fg_override.is_some() {
+        base = window_ground(base, bg_override, fg_override, scheme);
     }
     // Per-channel colour resolution (SQ-0331): game-set cell colour (gated by
     // honor_game_colours), then the theme's per-Glk-style slot (grid = row 1),
@@ -98,15 +109,26 @@ fn concretize_reversed(style: Style) -> Style {
     Style { fg: style.bg, bg: style.fg, ..style }.remove_modifier(Modifier::REVERSED)
 }
 
-/// The ground of a grid whose game gave it a window background of its own
-/// (SQ-0328): the theme's ground with `rgb` behind it. A Glk grid's ground is
-/// reversed chrome (SQ-1212), and `.bg()` laid on a REVERSED style is what the
-/// terminal swaps into the FOREGROUND — the window's colour became the ink and
-/// the chrome's ink the visible background, so every unwritten cell of
-/// Kerkerkruip's light-grey status window was black. Resolve the reversal
-/// first, so the colour lands where the game put it.
-fn window_ground(ground: Style, rgb: u32, scheme: &ColorScheme) -> Style {
-    concretize_reversed(ground).bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), scheme))
+/// The ground of a grid whose game gave it a window background and/or
+/// foreground of its own (SQ-0328 for bg; SQ-1529 for fg — a Glulx window's
+/// declared Normal-style colours, `GridWindow::bg`/`fg`). A Glk grid's ground
+/// is reversed chrome (SQ-1212), and `.bg()`/`.fg()` laid on a REVERSED style
+/// is what the terminal swaps to the OTHER channel — the window's colour
+/// became the ink (or vice versa) and the chrome's own ink took the other
+/// side, so every unwritten cell of Kerkerkruip's light-grey status window
+/// was black, and later its unwritten link text read theme-default-fg on the
+/// game's own bg instead of the game's own ink. Resolve the reversal once,
+/// before either channel is overridden, so each colour lands where the game
+/// put it.
+fn window_ground(ground: Style, bg: Option<u32>, fg: Option<u32>, scheme: &ColorScheme) -> Style {
+    let mut s = concretize_reversed(ground);
+    if let Some(rgb) = bg {
+        s = s.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), scheme));
+    }
+    if let Some(rgb) = fg {
+        s = s.fg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), scheme));
+    }
+    s
 }
 
 /// Convert a neutral [`GridCell`] (packed colour) into a `zvm::screen::Cell`
@@ -216,14 +238,16 @@ pub fn draw_grid(
     let is_glk_grid = upper.win != 0;
     let ground_selector = if is_glk_grid { "glk.grid.background" } else { "upper_window" };
 
-    // Per-window background override (Glulx window colour, SQ-0328): when the grid
-    // carries its own `bg`, the content fill and each cell's default background use
-    // it instead of the theme's ground bg. `None` (Z-machine simple path,
-    // default) leaves the behaviour byte-identical.
+    // Per-window background/foreground override (Glulx window colour, SQ-0328
+    // for bg, SQ-1529 for fg): when the grid carries its own `bg`/`fg`, the
+    // content fill and each cell's default colour use them instead of the
+    // theme's ground. `None` (Z-machine simple path, default) leaves the
+    // behaviour byte-identical.
     let uw = colors.theme.get(ground_selector).style;
-    let mut content_style = match upper.bg {
-        Some(rgb) => window_ground(uw, rgb, colors),
-        None => uw,
+    let mut content_style = if upper.bg.is_some() || upper.fg.is_some() {
+        window_ground(uw, upper.bg, upper.fg, colors)
+    } else {
+        uw
     };
     // If the game reversed the grid's Normal style with no explicit colours
     // (Counterfeit Monkey's menu sets ReverseColor on every grid style), the empty
@@ -328,7 +352,7 @@ pub fn draw_grid(
             let bx = content.x + dx;
             let by = content.y + dy;
             if let Some(buf_cell) = buf.cell_mut((bx, by)) {
-                let mut style = cell_style(grid_cell_to_zvm(cell), cell.glk_style, colors, honor_game_colours, upper.bg, is_glk_grid);
+                let mut style = cell_style(grid_cell_to_zvm(cell), cell.glk_style, colors, honor_game_colours, upper.bg, upper.fg, is_glk_grid);
                 // Glk hyperlink affordance: layer the themeable `hyperlink` colour
                 // and an underline on top, and record the cell for click hit-testing.
                 // Mirrors the transcript path in `draw_str_runs`. (SQ-0258)
@@ -374,7 +398,7 @@ pub fn draw_grid(
             let cur_cell = upper.cell(grid_row, grid_col);
             let mut cur_zvm = grid_cell_to_zvm(cur_cell);
             cur_zvm.style ^= 0x01; // toggle reverse bit
-            let style = cell_style(cur_zvm, cur_cell.glk_style, colors, honor_game_colours, upper.bg, is_glk_grid);
+            let style = cell_style(cur_zvm, cur_cell.glk_style, colors, honor_game_colours, upper.bg, upper.fg, is_glk_grid);
             if let Some(c) = buf.cell_mut((content.x + cur_dx, content.y + cur_dy)) {
                 c.modifier = ratatui::style::Modifier::empty(); // clear before re-apply
                 c.set_style(style);
@@ -432,7 +456,7 @@ pub fn draw_grid_transparent(
             let by = area.y + dy;
             if let Some(buf_cell) = buf.cell_mut((bx, by)) {
                 let is_glk_grid = grid.win != 0;
-                let mut style = cell_style(grid_cell_to_zvm(cell), cell.glk_style, colors, honor_game_colours, grid.bg, is_glk_grid);
+                let mut style = cell_style(grid_cell_to_zvm(cell), cell.glk_style, colors, honor_game_colours, grid.bg, grid.fg, is_glk_grid);
                 if cell.link != 0 {
                     if honor_game_colours {
                         // SQ-1219: see the identical comment in `draw_grid`.
@@ -460,7 +484,7 @@ pub fn draw_grid_transparent(
             let cur = grid.cell(crow + 1, ccol + 1);
             let mut z = grid_cell_to_zvm(cur);
             z.style ^= 0x01;
-            let style = cell_style(z, cur.glk_style, colors, honor_game_colours, grid.bg, grid.win != 0);
+            let style = cell_style(z, cur.glk_style, colors, honor_game_colours, grid.bg, grid.fg, grid.win != 0);
             if let Some(c) = buf.cell_mut((area.x + ccol, area.y + crow)) {
                 c.modifier = ratatui::style::Modifier::empty();
                 c.set_style(style);
@@ -522,6 +546,7 @@ mod tests {
             &scheme,
             true,
             None,
+            None,
             false,
         );
         assert_eq!(s.fg, Some(Color::Rgb(200, 0, 0)));
@@ -534,6 +559,7 @@ mod tests {
             0,
             &scheme,
             true,
+            None,
             None,
             false,
         );
@@ -553,13 +579,13 @@ mod tests {
         // Subheader (glk_style 4) grid cell, no game colour → slot green, honor OFF.
         let s = cell_style(
             Cell::new('x', 0, ZColour::Default, ZColour::Default),
-            4, &scheme, false, None, false,
+            4, &scheme, false, None, None, false,
         );
         assert_eq!(s.fg, Some(Color::Green), "grid Subheader → row-1 slot");
         // Normal (glk_style 0) cell → element base (upper_window fg, None by default).
         let n = cell_style(
             Cell::new('x', 0, ZColour::Default, ZColour::Default),
-            0, &scheme, false, None, false,
+            0, &scheme, false, None, None, false,
         );
         assert_eq!(n.fg, scheme.theme.get("upper_window").style.fg, "grid Normal → upper_window element base");
     }
@@ -572,7 +598,7 @@ mod tests {
         let scheme = ColorScheme::default();
         let s = cell_style(
             Cell::new('x', 0, ZColour::Default, ZColour::Default),
-            5, &scheme, false, None, false,
+            5, &scheme, false, None, None, false,
         );
         assert!(s.add_modifier.contains(ratatui::style::Modifier::BOLD), "Alert grid cell renders bold");
     }
@@ -587,7 +613,7 @@ mod tests {
         let scheme = ColorScheme::default();
         let s = cell_style(
             Cell::new('x', 0, ZColour::Default, ZColour::Default),
-            0, &scheme, true, None, true,
+            0, &scheme, true, None, None, true,
         );
         let ground = scheme.theme.get("glk.grid.background").style;
         assert_eq!(s.fg, ground.fg, "glk grid Normal → glk.grid.background fg");
@@ -600,9 +626,72 @@ mod tests {
         // And a Z-machine grid cell with the identical colours stays on `upper_window`.
         let z = cell_style(
             Cell::new('x', 0, ZColour::Default, ZColour::Default),
-            0, &scheme, true, None, false,
+            0, &scheme, true, None, None, false,
         );
         assert_eq!(z.bg, scheme.theme.get("upper_window").style.bg, "Z-machine grid Normal → upper_window bg, untouched");
+    }
+
+    /// SQ-1529: a Glulx window that declared its OWN Normal-style foreground
+    /// (`GridWindow::fg`, from `glk_stylehint_set(wintype_TextGrid, style_Normal,
+    /// stylehint_TextColor, rgb)`) must ground an unwritten cell's fg exactly the
+    /// way `bg_override` already grounds its bg (SQ-0328) — the mechanism was
+    /// asymmetric: `.bg` was read by every `cell_style` call site, `.fg` never
+    /// was, so a cell nobody has (re)printed since the window was rebuilt fell
+    /// through to the THEME's default foreground instead of the game's own ink.
+    /// A real restore (SQ-1515) rebuilds each window's per-cell map from scratch
+    /// and reaches exactly this gap for any row the game doesn't happen to
+    /// reprint — reported as Kerkerkruip's panel text reading washed-out/illegible
+    /// after a host Save State restore.
+    #[test]
+    fn cell_style_glk_grid_grounds_fg_on_window_declared_colour() {
+        use zvm::screen::{Cell, ZColour};
+        let scheme = ColorScheme::default();
+        // Unwritten cell (Default/Default), window declared both its own bg and fg.
+        let s = cell_style(
+            Cell::new(' ', 0, ZColour::Default, ZColour::Default),
+            0, &scheme, true, Some(0x00eeeeee), Some(0x00111111), true,
+        );
+        assert_eq!(s.bg, Some(Color::Rgb(0xee, 0xee, 0xee)), "unwritten cell grounds on the window's own bg");
+        assert_eq!(s.fg, Some(Color::Rgb(0x11, 0x11, 0x11)), "unwritten cell grounds on the window's own fg (SQ-1529)");
+        // fg alone (no bg override): fg grounds, bg stays on the theme ground.
+        let fg_only = cell_style(
+            Cell::new(' ', 0, ZColour::Default, ZColour::Default),
+            0, &scheme, true, None, Some(0x00111111), true,
+        );
+        assert_eq!(fg_only.fg, Some(Color::Rgb(0x11, 0x11, 0x11)), "fg grounds even with no bg override");
+        let theme_ground = scheme.theme.get("glk.grid.background").style;
+        let theme_ground_concrete = if theme_ground.add_modifier.contains(Modifier::REVERSED) {
+            Style { fg: theme_ground.bg, bg: theme_ground.fg, ..theme_ground }
+        } else {
+            theme_ground
+        };
+        assert_eq!(fg_only.bg, theme_ground_concrete.bg, "with no bg override, bg stays the theme ground's");
+    }
+
+    /// SQ-1529: the fg override must interact with `Modifier::REVERSED`
+    /// concretization exactly as the existing bg override does (see
+    /// `window_ground`'s doc comment) — the ground's REVERSED bit is resolved to
+    /// concrete fg/bg ONCE, before either override is applied, so a window fg
+    /// lands as the visible INK and never gets caught by the terminal's single
+    /// swap and rendered as a background patch instead. `glk.grid.background`'s
+    /// registry default already carries `Modifier::REVERSED` (SQ-1212,
+    /// `theme::registry`'s `mods(false, false, false, true)` row), so the default
+    /// scheme alone exercises the concretize step — no theme mutation needed.
+    #[test]
+    fn cell_style_glk_grid_fg_override_survives_reversed_ground_concretization() {
+        use zvm::screen::{Cell, ZColour};
+        let scheme = ColorScheme::default();
+        assert!(
+            scheme.theme.get("glk.grid.background").style.add_modifier.contains(Modifier::REVERSED),
+            "precondition: glk.grid.background's registry default is reversed chrome"
+        );
+        let s = cell_style(
+            Cell::new(' ', 0, ZColour::Default, ZColour::Default),
+            0, &scheme, true, Some(0x00eeeeee), Some(0x00111111), true,
+        );
+        assert!(!s.add_modifier.contains(Modifier::REVERSED), "reversal was concretized, not left for the terminal to re-swap");
+        assert_eq!(s.fg, Some(Color::Rgb(0x11, 0x11, 0x11)), "window fg lands as the concrete foreground, unswapped");
+        assert_eq!(s.bg, Some(Color::Rgb(0xee, 0xee, 0xee)), "window bg lands as the concrete background, unswapped");
     }
 
     /// C1 regression guard: a reverse cell with DEFAULT colours (fg==bg==ZColour::Default)
@@ -618,6 +707,7 @@ mod tests {
             0,
             &scheme,
             true,
+            None,
             None,
             false,
         );

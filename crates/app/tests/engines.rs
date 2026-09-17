@@ -169,4 +169,6 @@ mod lost_treasures_iso_dedupe;
 
 #[path = "suites/sq1515_kerkerkruip_restore_arrange.rs"]
 mod sq1515_kerkerkruip_restore_arrange;
+#[path = "suites/sq1529_kerkerkruip_grid_fg_ground.rs"]
+mod sq1529_kerkerkruip_grid_fg_ground;
 
