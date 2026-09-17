@@ -340,7 +340,8 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.background", Section::Map, Kind::Style, None, Delta::EMPTY),
     // Room fill + cardinal/portal connectors derive from roles so a base scheme
     // recolours them (old from_ghostty: room=foreground, connector=palette[6]).
-    // `text`/`accent` give white/cyan for the terminal default AND follow the scheme.
+    // `text`/`accent` give white/blue for the terminal default (SQ-1531: accent
+    // moved from the cyan slot to the blue one) AND follow the scheme.
     row("map.room", Section::Map, Kind::Style, Some("text"), Delta::EMPTY),
     row("map.room_current", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.room_selected", Section::Map, Kind::Style, Some("accent"), mods(false, false, false, true)),
@@ -440,10 +441,11 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // floated over and was invisible except for its text (SQ-1139). It reported as
     // "blends into the background" because it *was* the background.
     //
-    // `accent` is not one either, and that is the trap worth naming: the cyan a
-    // tooltip wants IS accent's cyan, but accent is `fg(Cyan)` with NO background
-    // (`slot(6, ..)` in resolve.rs), so deriving from it reproduces SQ-1139 exactly
-    // — cyan ink on whatever the tip floats over. A surface needs the PAIR.
+    // `accent` is not one either, and that is the trap worth naming: the highlight
+    // colour a tooltip wants IS accent's own ink, but accent is `fg(..)` with NO
+    // background (`slot(4, ..)` in resolve.rs — SQ-1531 moved this from the cyan
+    // slot to the blue one), so deriving from it reproduces SQ-1139 exactly — ink
+    // with no fill on whatever the tip floats over. A surface needs the PAIR.
     //
     // `dialog.list_selected` is that pair: it is the Black-on-Cyan row highlight
     // every modal list already uses (Saves, Replay, browser, Config, verb dock), so
@@ -978,9 +980,12 @@ mod tests {
         assert_eq!(hint.fg, Some(Color::Yellow));
         assert!(hint.add_modifier.contains(Modifier::DIM));
 
-        // file_browser_cwd / file_browser_dir: old `.fg(Yellow)` / `.fg(Cyan)`.
+        // file_browser_cwd: old `.fg(Yellow)`.
         assert_eq!(theme.get("file_browser_cwd").style.fg, Some(Color::Yellow));
-        assert_eq!(theme.get("file_browser_dir").style.fg, Some(Color::Cyan));
+        // file_browser_dir: old `.fg(Cyan)` — SQ-1531 deliberately moved the
+        // `accent` role's default from cyan to blue, so this one no longer
+        // reproduces the pre-registry hardcoded style.
+        assert_eq!(theme.get("file_browser_dir").style.fg, Some(Color::Blue));
 
         // inspector_edge_ok / inspector_edge_distorted: old `.fg(Green)` / `.fg(Red)`.
         assert_eq!(theme.get("inspector_edge_ok").style.fg, Some(Color::Green));

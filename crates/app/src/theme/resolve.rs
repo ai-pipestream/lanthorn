@@ -37,14 +37,16 @@ pub struct Roles {
 
 impl Roles {
     /// The spec's default (dark) role palette (design §1 / the `[roles]` example):
-    /// text = white on terminal bg, chrome = white on black, line/accent = cyan,
-    /// muted = dark-gray, alert = yellow, heading = white + bold.
+    /// text = white on terminal bg, chrome = white on black, line = cyan,
+    /// accent = blue (SQ-1531: matches the Glk spec's hyperlink convention,
+    /// §9.1 "blue underlined text is most likely"), muted = dark-gray, alert =
+    /// yellow, heading = white + bold.
     pub fn terminal_default() -> Roles {
         Roles {
             text: Style::default().fg(Color::White),
             chrome: Style::default().fg(Color::White).bg(Color::Black),
             line: Style::default().fg(Color::Cyan),
-            accent: Style::default().fg(Color::Cyan),
+            accent: Style::default().fg(Color::Blue),
             muted: Style::default().fg(Color::DarkGray),
             alert: Style::default().fg(Color::Yellow),
             heading: Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -112,7 +114,12 @@ impl Roles {
             text: Style::default().fg(fg),               // transcript = foreground
             chrome: Style::default().fg(fg).bg(bg),       // ink on a UI surface
             line: slot(6, fallback.line),   // cyan slot (focused_border/connector)
-            accent: slot(6, fallback.accent), // highlight = cyan slot
+            // highlight: SQ-1531 moved this to the blue slot (matching the
+            // template's `palette:4` suggestion and the Glk spec's hyperlink
+            // convention) — must stay index 4 so a configured scheme's own
+            // blue reaches it the same way `palette:4` would, and so
+            // `uncommented_template_resolves_to_registry_defaults` holds.
+            accent: slot(4, fallback.accent),
             muted: slot(8, fallback.muted),   // suggestion = bright-black slot
             alert: slot(3, fallback.alert),   // yellow slot (room_selected)
             heading: Style::default().fg(fg).add_modifier(Modifier::BOLD),
@@ -1088,7 +1095,7 @@ mod tests {
         let roles = Roles::from_scheme(&gs);
         assert_eq!(roles.text.fg, Some(Color::Rgb(0xc5, 0xc8, 0xc6)), "fg-derived roles keep the scheme");
         assert_eq!(roles.line.fg, Some(Color::Cyan), "empty cyan slot → terminal-default line role");
-        assert_eq!(roles.accent.fg, Some(Color::Cyan));
+        assert_eq!(roles.accent.fg, Some(Color::Blue), "empty cyan slot → terminal-default accent role");
         assert_eq!(roles.muted.fg, Some(Color::DarkGray));
         assert_eq!(roles.alert.fg, Some(Color::Yellow));
 
@@ -1099,14 +1106,15 @@ mod tests {
 
     #[test]
     fn partially_filled_palette_uses_set_slots_and_falls_back_for_the_rest() {
-        // palette[6] (cyan slot) is set; 3 and 8 are not.
+        // palette[4] (blue/accent slot, SQ-1531) and palette[6] (cyan/line
+        // slot) are set; 3 and 8 are not.
         let gs = GhosttyScheme::parse(
-            "background = 1d1f21\nforeground = c5c8c6\npalette = 6=#70c0ba\n",
+            "background = 1d1f21\nforeground = c5c8c6\npalette = 4=#5566ee\npalette = 6=#70c0ba\n",
         )
         .unwrap();
         let roles = Roles::from_scheme(&gs);
         assert_eq!(roles.line.fg, Some(Color::Rgb(0x70, 0xc0, 0xba)), "set slot is used");
-        assert_eq!(roles.accent.fg, Some(Color::Rgb(0x70, 0xc0, 0xba)));
+        assert_eq!(roles.accent.fg, Some(Color::Rgb(0x55, 0x66, 0xee)), "accent's own slot is used");
         assert_eq!(roles.muted.fg, Some(Color::DarkGray), "unset slot falls back per-role");
         assert_eq!(roles.alert.fg, Some(Color::Yellow));
     }
@@ -1267,7 +1275,7 @@ mod tests {
 
     /// The tooltip's default IS the menu highlight, not a look of its own.
     ///
-    /// `accent` cannot serve here however cyan it is: it is `fg(Cyan)` with no
+    /// `accent` cannot serve here however good its ink is: it is `fg(..)` with no
     /// background, so deriving a borderless card from it repaints SQ-1139. The
     /// pair comes from `dialog.list_selected`, which every modal list already
     /// uses — so retuning that highlight moves the tooltip with it.
@@ -1415,7 +1423,8 @@ mod tests {
     fn terminal_default_scheme() -> GhosttyScheme {
         let mut scheme = GhosttyScheme { foreground: Color::White, ..GhosttyScheme::default() };
         scheme.palette[3] = Color::Yellow; // alert slot (room_selected)
-        scheme.palette[6] = Color::Cyan; // border/accent slot (focused_border/connector)
+        scheme.palette[4] = Color::Blue; // accent slot (highlight/hyperlink, SQ-1531)
+        scheme.palette[6] = Color::Cyan; // line slot (border/focused_border/connector)
         scheme.palette[8] = Color::DarkGray; // muted slot (suggestion)
         scheme
     }
@@ -1430,9 +1439,26 @@ mod tests {
         assert_eq!(gs.foreground, Color::Reset, "no-scheme base is all-Reset");
         assert_eq!(Roles::from_scheme(&gs), Roles::terminal_default());
         let theme = resolve_theme(&gs, &ParsedStyle::default());
-        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Cyan));
-        assert_eq!(theme.get("panel.border").style.fg, Some(Color::Cyan));
+        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Blue), "map.connector parents accent");
+        assert_eq!(theme.get("panel.border").style.fg, Some(Color::Cyan), "panel.border parents line, untouched");
         assert_eq!(theme.get("transcript").style.fg, Some(Color::White));
+    }
+
+    /// SQ-1531 Part A, through the real `[roles]` override pipeline: with no
+    /// `scheme =` configured (`GhosttyScheme::default()`, exactly what
+    /// `resolve_base(None)` hands back — the common case, since the shipped
+    /// `style.toml` template ships `scheme =` commented out), writing
+    /// `accent = { fg = "palette:4" }` used to resolve to `Color::Reset`
+    /// (invisible) because `palette:N` handed the scheme's raw unset slot
+    /// straight back. Falsified by reverting Part A's fallback: this then
+    /// asserts `Some(Color::Reset)` and passes on the old code.
+    #[test]
+    fn palette_role_override_resolves_with_no_scheme_configured() {
+        let gs = crate::colors::GhosttyScheme::default();
+        let parsed = super::super::toml_schema::parse("[roles]\naccent = { fg = \"palette:4\" }\n")
+            .expect("valid style.toml");
+        let theme = resolve_theme(&gs, &parsed);
+        assert_eq!(theme.get("accent").style.fg, Some(Color::Blue));
     }
 
     // ── SQ-0510: a probe-seeded scheme takes `from_scheme`'s real branch ──────
@@ -1457,7 +1483,7 @@ mod tests {
         // The accents still come from the per-slot fallback — an all-Reset palette
         // must not drag the UI monochrome (SQ-0642's rule still holds here).
         assert_eq!(roles.line.fg, Some(Color::Cyan));
-        assert_eq!(roles.accent.fg, Some(Color::Cyan));
+        assert_eq!(roles.accent.fg, Some(Color::Blue));
         assert_eq!(roles.muted.fg, Some(Color::DarkGray));
         assert_eq!(roles.alert.fg, Some(Color::Yellow));
         // `text` keeps NO background, so the transcript still shows the terminal
@@ -1494,7 +1520,7 @@ mod tests {
         let theme = resolve_theme(&scheme, &ParsedStyle::default());
 
         assert_eq!(theme.get("transcript").style.fg, Some(Color::White));
-        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Cyan));
+        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Blue), "map.connector parents accent");
         assert_eq!(theme.get("map.connector_distorted").style.fg, Some(Color::Magenta));
         assert_eq!(theme.get("map.shared_path").style.fg, Some(Color::LightCyan));
         assert_eq!(theme.get("panel.border").style.fg, Some(Color::Cyan));

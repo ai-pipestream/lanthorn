@@ -168,7 +168,7 @@ fn role_line(name: &str) -> String {
         "text" => ("{ fg = \"foreground\" }", "body ink on the page (scheme foreground)"),
         "chrome" => ("{ fg = \"foreground\", bg = \"background\" }", "ink on a UI surface: bars, panels, upper window"),
         "line" => ("{ fg = \"palette:6\" }", "lines, frames, rules, dividers (scheme cyan slot)"),
-        "accent" => ("{ fg = \"palette:6\" }", "highlights: links, selection, current room, badges"),
+        "accent" => ("{ fg = \"palette:4\" }", "highlights: links, selection, current room, badges (scheme blue slot)"),
         "muted" => ("{ fg = \"palette:8\" }", "dim / secondary text (scheme bright-black slot)"),
         "alert" => ("{ fg = \"palette:3\" }", "warnings and errors (scheme yellow slot)"),
         "heading" => ("{ fg = \"foreground\", bold = true }", "titles and headers (bold)"),
@@ -407,6 +407,7 @@ mod tests {
     fn terminal_default_scheme() -> GhosttyScheme {
         let mut scheme = GhosttyScheme { foreground: Color::White, ..GhosttyScheme::default() };
         scheme.palette[3] = Color::Yellow;
+        scheme.palette[4] = Color::Blue; // accent slot, SQ-1531
         scheme.palette[6] = Color::Cyan;
         scheme.palette[8] = Color::DarkGray;
         scheme

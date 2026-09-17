@@ -199,7 +199,7 @@ pub fn host_default_colours(
 /// Applies ONLY when the scheme is the unconfigured all-`Reset` one: a real
 /// configured scheme (built-in name or file) is the user's explicit choice and
 /// is never second-guessed. The palette is left untouched, so `from_scheme`'s
-/// per-slot fallback still supplies the cyan/yellow/grey accents.
+/// per-slot fallback still supplies the cyan/blue/yellow/grey accents.
 ///
 /// A PARTIAL probe answer (fg without bg, or bg without fg) is skipped whole
 /// rather than mixed, matching the house rule [`host_default_colour_pair`]
@@ -892,7 +892,9 @@ pub fn parse_hex_color(s: &str) -> Option<Color> {
 /// Parse a color value from a `[colors.elements]` entry.
 ///
 /// Accepted formats:
-/// - `palette:N`  — index 0-15 into the scheme's palette (requires a scheme)
+/// - `palette:N`  — index 0-15 into the scheme's palette; an unset slot (no
+///   `scheme =` configured, or a valid scheme missing this slot) falls back to
+///   the index's standard ANSI colour rather than vanishing (SQ-1531)
 /// - `background` / `foreground` — the scheme's bg/fg (requires a scheme)
 /// - A named ratatui color (`cyan`, `yellow`, …) — case-insensitive
 /// - A decimal 256-index (`"17"`)
@@ -906,7 +908,20 @@ pub fn parse_color_value(value: &str, scheme: &GhosttyScheme) -> Option<Color> {
     if let Some(rest) = v.strip_prefix("palette:") {
         if let Ok(idx) = rest.trim().parse::<usize>() {
             if idx < 16 {
-                return Some(scheme.palette[idx]);
+                let c = scheme.palette[idx];
+                if c == Color::Reset {
+                    // SQ-1531: an unconfigured scheme (`GhosttyScheme::default()`)
+                    // or a valid scheme missing this slot (SQ-0642: a Ghostty theme
+                    // only needs background+foreground) leaves every palette slot
+                    // `Color::Reset` — this used to hand that straight back, so
+                    // `palette:N` silently resolved to nothing. Fall back to the
+                    // slot's standard ANSI name, matching `Roles::from_scheme`'s own
+                    // per-role fallback for the equivalent index (line/accent → 6
+                    // cyan, alert → 3 yellow, muted → 8 bright-black) so a value
+                    // never just vanishes.
+                    return parse_named_color(ansi_palette_name(idx));
+                }
+                return Some(c);
             }
         }
         return None;
@@ -939,6 +954,19 @@ pub fn parse_color_value(value: &str, scheme: &GhosttyScheme) -> Option<Color> {
 
     // hex (documented: #rrggbb or rrggbb — a 6-char all-digit string lands here)
     parse_hex_color(v)
+}
+
+/// The standard ANSI name for palette index 0-15 (0=black … 7=white,
+/// 8=bright-black … 15=bright-white). `palette:N`'s [`Color::Reset`] fallback
+/// (SQ-1531) feeds this straight into [`parse_named_color`] so the two tables
+/// can't drift apart.
+fn ansi_palette_name(idx: usize) -> &'static str {
+    const NAMES: [&str; 16] = [
+        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "bright-black",
+        "bright-red", "bright-green", "bright-yellow", "bright-blue", "bright-magenta",
+        "bright-cyan", "bright-white",
+    ];
+    NAMES[idx]
 }
 
 /// Parse a ratatui named color (case-insensitive).
@@ -1063,12 +1091,12 @@ mod tests {
         // ride the theme (registry defaults per docs/design/2026-07-14-styling-
         // role-redesign.md §2's element table).
         let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.theme.get("transcript_input").style.fg, Some(Color::Cyan));
+        assert_eq!(cs.theme.get("transcript_input").style.fg, Some(Color::Blue));
         assert_eq!(cs.theme.get("transcript_meta").style.fg, Some(Color::DarkGray));
         assert_eq!(cs.theme.get("transcript_warning").style.fg, Some(Color::Yellow));
         // transcript_location = accent (no bold) — a deliberate SQ-0309 redesign
         // change from the old bold-only-white location header.
-        assert_eq!(cs.theme.get("transcript_location").style.fg, Some(Color::Cyan));
+        assert_eq!(cs.theme.get("transcript_location").style.fg, Some(Color::Blue));
         assert!(!cs.theme.get("transcript_location").style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(cs.theme.get("transcript_system").style.fg, Some(Color::DarkGray));
         assert_eq!(cs.theme.get("warning_marker").style.fg, Some(Color::Yellow));
@@ -1096,7 +1124,7 @@ mod tests {
         // 2. Built-in location: line equals room name → transcript_location's
         // accent colour patched over the base (SQ-0309: accent, not bold).
         let loc = cs.resolve_story_style(base, "West of House", Some("West of House"), false);
-        assert_eq!(loc.fg, Some(Color::Cyan));
+        assert_eq!(loc.fg, Some(Color::Blue));
         assert!(!loc.add_modifier.contains(Modifier::BOLD));
 
         // 2b. Boundary guard: "Hall" line vs room "Hallway" must NOT match location.
@@ -1226,6 +1254,31 @@ mod tests {
         let gs = GhosttyScheme::default();
         assert_eq!(parse_color_value("default", &gs), Some(Color::Reset));
         assert_eq!(parse_color_value("reset", &gs), Some(Color::Reset));
+    }
+
+    /// SQ-1531: `palette:N` used to hand back a `GhosttyScheme`'s raw (unset)
+    /// slot verbatim, so with no `scheme =` configured — the shipped
+    /// `style.toml` template ships that line commented out, i.e. the common
+    /// case — every `palette:N` value silently resolved to `Color::Reset`
+    /// (invisible/no-op) instead of a real colour. Falsified by reverting the
+    /// fallback: this then asserts `Some(Color::Reset)` and passes on the old
+    /// code.
+    #[test]
+    fn palette_index_falls_back_to_its_ansi_name_when_the_slot_is_unset() {
+        let gs = GhosttyScheme::default();
+        assert_eq!(gs.palette[4], Color::Reset, "sanity: no scheme configured");
+        assert_eq!(parse_color_value("palette:4", &gs), Some(Color::Blue));
+        assert_eq!(parse_color_value("palette:6", &gs), Some(Color::Cyan));
+        assert_eq!(parse_color_value("palette:3", &gs), Some(Color::Yellow));
+        assert_eq!(parse_color_value("palette:8", &gs), Some(Color::DarkGray));
+    }
+
+    /// A slot the scheme DOES set still wins over the ANSI fallback.
+    #[test]
+    fn palette_index_prefers_a_set_slot_over_its_ansi_fallback() {
+        let mut gs = GhosttyScheme::default();
+        gs.palette[4] = Color::Rgb(0x11, 0x22, 0x33);
+        assert_eq!(parse_color_value("palette:4", &gs), Some(Color::Rgb(0x11, 0x22, 0x33)));
     }
 
     // ── GhosttyScheme::parse ──────────────────────────────────────────────────
@@ -1496,7 +1549,7 @@ unknown-key = ignored
         assert_eq!(seeded.foreground, Color::Rgb(0xc5, 0xc8, 0xc6));
         assert_eq!(seeded.background, Color::Rgb(0xfd, 0xf6, 0xe3));
         // The palette is deliberately untouched: `from_scheme`'s per-slot
-        // fallback still supplies the cyan/yellow/grey accents (SQ-0642).
+        // fallback still supplies the cyan/blue/yellow/grey accents (SQ-0642).
         assert_eq!(seeded.palette, [Color::Reset; 16], "accents keep their per-slot fallback");
     }
 

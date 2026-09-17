@@ -193,10 +193,12 @@ fn headless_e2e_smoke() {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
-/// Back-compat: a frame rendered with default (no-scheme) config uses today's exact ANSI
-/// colors.  The connector arrowhead's fg must be Cyan, matching the pre-refactor constant.
+/// A frame rendered with default (no-scheme) config uses today's default ANSI
+/// colors. The connector arrowhead's fg must be Blue (SQ-1531: the `accent`
+/// role's default moved from cyan to blue, matching the Glk spec's hyperlink
+/// convention), not the pre-SQ-1531 Cyan constant.
 #[test]
-fn colors_default_config_connector_is_cyan() {
+fn colors_default_config_connector_is_blue() {
     use mapper::graph::MapGraph;
     use mapper::direction::Direction;
 
@@ -215,17 +217,18 @@ fn colors_default_config_connector_is_cyan() {
     let mut buf = Buffer::empty(area);
     render_map(&rm, &state, area, &mut buf);
 
-    // The arrowhead embedded in room1's right border (col 10, row 2) must be Cyan.
+    // The arrowhead embedded in room1's right border (col 10, row 2) must be Blue.
     let cell = buf.cell((10, 2)).expect("arrow cell must exist");
     assert_eq!(
-        cell.fg, Color::Cyan,
-        "with terminal_default colors, arrowhead fg must be Cyan (back-compat); got {:?}",
+        cell.fg, Color::Blue,
+        "with terminal_default colors, arrowhead fg must be Blue (SQ-1531 accent default); got {:?}",
         cell.fg
     );
 }
 
 /// Scheme-swap: resolving a built-in scheme (tomorrow-night) changes the connector color
-/// to the scheme's palette[6] (0x70c0ba), not Cyan.
+/// to the scheme's palette[4] (0x81a2be — SQ-1531: `map.connector` parents `accent`,
+/// which reads the blue slot, not the cyan one), not the terminal-default Blue.
 #[test]
 fn colors_scheme_swap_changes_connector_color() {
     use app::style::{StyleDoc, StyleColors};
@@ -253,15 +256,15 @@ fn colors_scheme_swap_changes_connector_color() {
     let mut buf = Buffer::empty(area);
     render_map(&rm, &state, area, &mut buf);
 
-    // Tomorrow Night palette[6] = #70c0ba.
-    let expected = Color::Rgb(0x70, 0xc0, 0xba);
+    // Tomorrow Night palette[4] = #81a2be (accent's slot since SQ-1531).
+    let expected = Color::Rgb(0x81, 0xa2, 0xbe);
 
     let cell = buf.cell((10, 2)).expect("arrow cell must exist");
     assert_eq!(
         cell.fg, expected,
-        "with tomorrow-night scheme, arrowhead fg must be Rgb(0x70,0xc0,0xba); got {:?}",
+        "with tomorrow-night scheme, arrowhead fg must be Rgb(0x81,0xa2,0xbe); got {:?}",
         cell.fg
     );
-    // Confirm it is different from the default Cyan (sanity check the test is meaningful).
-    assert_ne!(cell.fg, Color::Cyan, "scheme color should differ from default Cyan");
+    // Confirm it is different from the default Blue (sanity check the test is meaningful).
+    assert_ne!(cell.fg, Color::Blue, "scheme color should differ from default Blue");
 }

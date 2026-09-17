@@ -3247,9 +3247,9 @@ mod tests {
         // is clipped to the pane, not the wider frame.
         assert_eq!(read_row(&buf, 1, 40, 60).trim(), "", "toast is clipped to the story pane, not the map");
         // The notification style — the registry's `notification` selector, which
-        // derives from the `accent` role reversed (cyan reverse-video) — is
-        // applied to the content cells. (SQ-0309: was a baked black-on-cyan
-        // Style; now REVERSED cyan fg, same visual result.)
+        // derives from the `accent` role reversed (blue reverse-video since
+        // SQ-1531, cyan before it) — is applied to the content cells. (SQ-0309:
+        // was a baked black-on-cyan Style; now REVERSED accent fg, same idiom.)
         let cell = buf.cell((30, 1)).expect("content cell exists");
         let themed = state.colors.theme.get("notification").style;
         assert_eq!(Some(cell.fg), themed.fg, "toast uses the themed notification fg");
@@ -5452,10 +5452,10 @@ mod tests {
             .expect("meta gutter '▏' must appear in column 0");
         assert_eq!(buf.cell((2, meta_y)).unwrap().style().fg, Some(Color::DarkGray)); // transcript_meta
 
-        // Input row: no gutter (text at column 0), cyan fg.
+        // Input row: no gutter (text at column 0), blue fg (accent, SQ-1531).
         let input_y = (1u16..9).find(|&y| row_text(y).starts_with("> go north"))
             .expect("input line must render at column 0");
-        assert_eq!(buf.cell((0, input_y)).unwrap().style().fg, Some(Color::Cyan)); // transcript_input
+        assert_eq!(buf.cell((0, input_y)).unwrap().style().fg, Some(Color::Blue)); // transcript_input
     }
 
     /// SQ-1045: on screen an assist is identified by its MARK and by nothing
@@ -5576,7 +5576,7 @@ mod tests {
         }).expect("location line must render");
         assert_eq!(
             buf.cell((0, y)).unwrap().style().fg,
-            Some(Color::Cyan),
+            Some(Color::Blue),
             "location header must carry the accent colour"
         );
     }

@@ -241,7 +241,7 @@ scheme = "tomorrow-night"     # optional base: built-in name or a Ghostty theme 
 text    = { fg = "white",     bg = "background" }  # body ink on the page
 chrome  = { fg = "white",     bg = "black" }       # ink on a UI surface (bars/panels/upper window)
 line    = { fg = "cyan" }                          # lines, frames, rules, dividers
-accent  = { fg = "cyan" }                          # highlight: links, selection, current room, badges
+accent  = { fg = "blue" }                          # highlight: links, selection, current room, badges
 muted   = { fg = "dark-gray" }                     # dim / secondary
 alert   = { fg = "yellow" }                        # warning / error
 heading = { fg = "white",     bold = true }        # titles / headers
@@ -389,7 +389,7 @@ align = "right"
         let p = parse(FIXTURE).expect("fixture should parse");
 
         assert_eq!(p.scheme, Some("tomorrow-night".to_string()));
-        assert_eq!(p.roles["accent"].fg, Some("cyan".to_string()));
+        assert_eq!(p.roles["accent"].fg, Some("blue".to_string()));
 
         assert_eq!(p.decls["panel.border:active"].bold, Some(true));
         assert_eq!(p.decls["panel.border:active"].style, Some("single".to_string()));

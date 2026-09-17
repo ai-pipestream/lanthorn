@@ -6088,7 +6088,8 @@ mod tests {
         // room1(0,0) →E→ room2(1,0): a filled ▶ arrowhead marks the outgoing east departure
         // EMBEDDED IN room1's right border. The box is 11 wide at x=0, so the right border is
         // column 10; the vertical-centre row is 2. The arrow replaces that border │ at (10,2),
-        // drawn fg Cyan (no bg ribbon). The line then continues perpendicular out (col 11+).
+        // drawn fg Blue — the accent role's default (SQ-1531; was Cyan) — with no bg ribbon.
+        // The line then continues perpendicular out (col 11+).
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -6104,8 +6105,8 @@ mod tests {
 
         let cell = buf.cell((10, 2)).expect("arrow cell must exist");
         assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ embedded in room1's right border");
-        assert_eq!(cell.fg, Color::Cyan, "arrowhead fg should be Cyan; got {:?}", cell.fg);
-        assert_ne!(cell.bg, Color::Cyan, "arrowhead must not sit on a solid ribbon");
+        assert_eq!(cell.fg, Color::Blue, "arrowhead fg should be Blue (accent); got {:?}", cell.fg);
+        assert_ne!(cell.bg, Color::Blue, "arrowhead must not sit on a solid ribbon");
         // No hollow arrowhead is ever drawn.
         let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
         assert!(!has_hollow, "hollow arrowheads must not appear");

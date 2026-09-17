@@ -479,7 +479,7 @@ fn the_banner_lights_and_the_room_name_heading_lights_with_it() {
          the banner: {heading:?}"
     );
     assert!(
-        heading.iter().all(|&c| c != Color::Cyan),
-        "…and never the theme's accent, which is the rule this quest withdrew"
+        heading.iter().all(|&c| c != Color::Blue),
+        "…and never the theme's accent (SQ-1531: blue, was cyan), which is the rule this quest withdrew"
     );
 }

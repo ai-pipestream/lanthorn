@@ -198,7 +198,7 @@ still reach in and override any single selector by name.
   only `chrome` carries a background at all, and `chrome` *is* the page — deriving
   the tip from it painted the card in exactly the colours it floats over, which is
   the same thing as not drawing it. `accent` fails the same way one level down,
-  cyan ink with no fill behind it. So the tip borrows `dialog.list_selected`, the
+  blue ink (SQ-1531; was cyan) with no fill behind it. So the tip borrows `dialog.list_selected`, the
   Black-on-Cyan highlight every menu already uses for the row you're on: a real
   surface, and one you've seen before. It takes that highlight's **colours but not
   its weight** — bold reads as "this one" on a single selected row and as a bold
