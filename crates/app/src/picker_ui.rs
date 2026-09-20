@@ -885,9 +885,29 @@ fn cover_query_options(
     let probe_shm = shm == app::config::KittySharedMemory::Auto;
     ratatui_image::picker::cap_parser::QueryStdioOptions {
         kitty_compression: true,
-        kitty_shared_memory_object: probe_shm.then(std::process::id),
+        kitty_shared_memory_object: kitty_shm_probe_name(probe_shm),
         ..Default::default()
     }
+}
+
+/// The crate names its own probe object now (SQ-1510:
+/// `QueryStdioOptions::probe_kitty_smo`, a random 128-bit filename under
+/// macOS's 31-byte limit) — this used to hand over `std::process::id()`
+/// (the fork's shape) but there is no longer a pid to build a name from.
+/// `probe_kitty_smo` is `cfg(not(windows))` upstream, since POSIX shared
+/// memory has no Windows leg at all, so `probe_shm` is unconditionally
+/// declined there — matching what `Parser::query`'s own
+/// `#[cfg(not(windows))]` gate already does with the field.
+#[cfg(not(windows))]
+fn kitty_shm_probe_name(probe_shm: bool) -> Option<String> {
+    probe_shm
+        .then(ratatui_image::picker::cap_parser::QueryStdioOptions::probe_kitty_smo)
+        .flatten()
+}
+
+#[cfg(windows)]
+fn kitty_shm_probe_name(_probe_shm: bool) -> Option<String> {
+    None
 }
 
 /// Build the ratatui-image picker for cover art per the CLI mode. `Auto`
@@ -1106,6 +1126,28 @@ fn open_launch_options(
         .scott_picture_resolution_override
         .or_else(|| app::styles::read_per_game_scott_picture_resolution(&game_dir))
         .unwrap_or_default();
+    // SQ-1532: the colour-source and game-colours rows. `cfg` here is the
+    // pristine launch config (`ctx.cfg` in `main.rs`), never mutated by a
+    // per-story boot — so `cfg.one_run.holds(...)` can only be true when the
+    // matching flag was actually typed on THIS process's command line, which
+    // is exactly the CLI-lock signal these two rows need. When locked, the row
+    // shows the CLI's own value (there is nothing else it could honestly show);
+    // when not, `colour_source` reads the sidecar verbatim (`None` = "Default",
+    // matching the dialog's own "no per-game override" meaning) and
+    // `honor_game_colours` reads the sidecar override or else the inherited
+    // global default.
+    let colour_source_cli_locked = cfg.one_run.holds(app::config::keys::COLOUR_SOURCE);
+    let inherited_colour_source = if colour_source_cli_locked {
+        Some(cfg.colour_source)
+    } else {
+        app::styles::read_per_game_colour_source(&game_dir)
+    };
+    let honor_game_colours_cli_locked = cfg.one_run.holds(app::config::keys::HONOR_GAME_COLOURS);
+    let inherited_honor_game_colours = if honor_game_colours_cli_locked {
+        cfg.honor_game_colours
+    } else {
+        app::styles::read_per_game_honor(&game_dir).unwrap_or(cfg.honor_game_colours)
+    };
     app::launch_options::LaunchOptionsState::new(
         &entry.title,
         &entry.path,
@@ -1116,6 +1158,12 @@ fn open_launch_options(
     )
     .on_disk_entry(entry.meta.disk_entry.as_deref())
     .with_scott_resolution(scott_native_pictures, inherited_resolution)
+    .with_colours(
+        inherited_colour_source,
+        colour_source_cli_locked,
+        inherited_honor_game_colours,
+        honor_game_colours_cli_locked,
+    )
 }
 
 /// Where one wheel notch over the picker goes.
@@ -4489,10 +4537,19 @@ mod tests {
         use app::config::KittySharedMemory as K;
 
         let auto = super::cover_query_options(K::Auto);
-        assert_eq!(
-            auto.kitty_shared_memory_object,
-            Some(std::process::id()),
+        // SQ-1510: the object's name is minted by `ratatui-image` itself now
+        // (`QueryStdioOptions::probe_kitty_smo`, a random filename), not built
+        // from our pid, and that constructor has no Windows leg upstream —
+        // POSIX shared memory doesn't exist there — so `auto` declines too.
+        #[cfg(not(windows))]
+        assert!(
+            auto.kitty_shared_memory_object.is_some(),
             "auto asks, and names the object it would hand over"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            auto.kitty_shared_memory_object, None,
+            "shared memory has no Windows leg upstream, so auto declines too"
         );
 
         let off = super::cover_query_options(K::Off);

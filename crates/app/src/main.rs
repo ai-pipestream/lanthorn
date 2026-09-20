@@ -20,7 +20,9 @@ use ratatui::Terminal;
 use app::export_dot::export_dot;
 use app::map_dump::render_dump;
 use app::archive::load_archive;
-use app::input::{apply_action, apply_text_entry, key_to_command, mouse_to_action, Action, KeyResolve};
+use app::input::{
+    apply_action, apply_text_entry, key_to_command, live_slash_context, mouse_to_action, Action, KeyResolve,
+};
 use app::tidy::should_bg_tidy;
 use app::persist_files::{list_saves, restore_game};
 use app::render::dialog::{DialogRects, DialogStyle};
@@ -2069,6 +2071,12 @@ fn cli_overrides(ctx: &startup::LaunchCtx) -> app::launch_options::LaunchOverrid
         // No CLI flag for this (SQ-1473 added no `--scott-picture-resolution`);
         // a command-line launch inherits the sidecar/default exactly as before.
         scott_picture_resolution: None,
+        // No launch-options dialog on this path (a bare file or `--story` pick
+        // never shows it), so there is no session-only choice to carry — the
+        // per-game sidecar and `--colour`/`--game-colours` decide exactly as
+        // they did before SQ-1532.
+        colour_source: None,
+        honor_game_colours: None,
     }
 }
 
@@ -3702,8 +3710,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                     .map(|p| p.command_line(spec.name))
                                     .unwrap_or_else(|| spec.name.to_string());
                                 state.overlays.palette = None;
-                                let outcome =
-                                    slash::parse_in_context(&cmd, state.config.command_prefix, spec.context);
+                                let outcome = slash::parse_in_context(
+                                    &cmd, state.config.command_prefix, live_slash_context(&state),
+                                );
                                 let should_break = dispatch_slash_outcome(
                                     outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
                                     &game_dir, &ifid, &arc_file, &story_bytes, &story_path,

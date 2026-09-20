@@ -6,7 +6,7 @@ All notable changes to lanthorn are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.7.0`) versions every crate and every
+version in `Cargo.toml` (currently `0.7.2`) versions every crate and every
 binary's `--version` at once, and carries any pre-release suffix so a build
 identifies itself without reading its git hash.
 
@@ -19,13 +19,47 @@ Absolute URLs or no link.
 
 ---
 
-## Unreleased
+## v0.7.2 — 2026-09-18
 
-*This section is drained when a version is cut. README.md describes the
-RELEASED build; prose for a feature that is in `main` but not yet released
-goes into the README in place, at its normal destination, marked with the
-visible tag `*Next release:*`. `release.yml` refuses to cut a release
-while any such tag, or this Unreleased section, still exists.*
+### Added
+
+- **The launch-options dialog (Shift-Enter, or double right-click, on a story
+  in the picker) now has two more rows: a colour-source picker (Default,
+  Terminal, Theme, Machine) and a "game colours" checkbox for whether to
+  honor the story's own requested colours.** Both save per game, the same
+  way the picture archive and interpreter number already do. When you
+  launched with `--colour` or `--game-colours`, the matching row is shown
+  fixed, with a note saying so, instead of letting the dialog quietly
+  disagree with what you just typed.
+
+### Changed
+
+- **Kitty terminal images now transfer over shared memory instead of being
+  encoded into the terminal's input stream**, cutting a chunky v6 composite
+  frame's transfer cost by roughly a megabyte. Terminals that can't use
+  shared memory (an SSH session, for one) are detected automatically and
+  fall back to the previous method.
+
+### Fixed
+
+- **`lanthorn-mapgen` now says *why* a room's name is missing instead of
+  leaving it blank.** Some Inform 7 games compute a room's name at
+  runtime (a rule, or text like "the \[colour\] door") rather than writing
+  it as fixed text — mapgen can't know what that resolves to without
+  playing the game, and now labels the room `(computed name)` instead of
+  showing nothing. Large multi-author games (Cragne Manor, for one) hit
+  this far more often than most.
+
+---
+
+## v0.7.1 — 2026-09-17
+
+### Changed
+
+- **The default hyperlink/highlight colour is now blue instead of cyan**,
+  matching the convention most other interactive fiction players use.
+  Customize it in `style.toml`'s `accent` role if you'd rather have the old
+  look back.
 
 ### Fixed
 
@@ -35,6 +69,13 @@ while any such tag, or this Unreleased section, still exists.*
   back to the theme's default — most visible right after restoring a Save
   State, but reachable any time a panel has blank space nobody has
   (re)printed since it was last redrawn.
+- **A game's own colour settings are now found when the game is bundled in a
+  `.zip`**, not just when it's a loose file beside them. Kerkerkruip's
+  hyperlinks (and any other game that ships its own colour file) now look
+  right however you downloaded it.
+- **`style.toml`'s `palette:N` colour syntax now actually shows a colour**
+  instead of silently doing nothing when no base terminal scheme is
+  configured — the common case, since that's off by default.
 
 ---
 
