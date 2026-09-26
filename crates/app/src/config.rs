@@ -872,10 +872,31 @@ impl CommandBandConfig {
         warnings: &mut Vec<String>,
     ) -> crate::render::command_band::VerbTable {
         for extra in &self.extra_verbs {
-            if let Some(e) = lower_verb(extra, warnings) {
+            if let Some(mut e) = lower_verb(extra, warnings) {
                 match table.entries.iter_mut().find(|t| t.word == e.word) {
-                    Some(slot) => *slot = e,
-                    None => table.entries.push(e),
+                    // Replacing a row keeps where it ranks and the story's other
+                    // spellings of it (SQ-1554).
+                    Some(slot) => {
+                        e.tier = slot.tier;
+                        e.synonyms = std::mem::take(&mut slot.synonyms);
+                        *slot = e;
+                    }
+                    None => {
+                        // A folded synonym this row now overrides is its own row
+                        // again, as it was before folding.
+                        for t in &mut table.entries {
+                            t.synonyms.retain(|s| *s != e.word);
+                        }
+                        // The player's own word leads the ranked column with the
+                        // core verbs — a list of built-ins or a configured list is
+                        // all `Core`, so there this is still the end.
+                        let at = table
+                            .entries
+                            .iter()
+                            .rposition(|t| t.tier == crate::render::command_band::VerbTier::Core)
+                            .map_or(0, |i| i + 1);
+                        table.entries.insert(at, e);
+                    }
                 }
             }
         }
@@ -888,6 +909,19 @@ impl CommandBandConfig {
             crate::render::command_band::default_quick()
         } else {
             self.quick.clone()
+        }
+    }
+
+    /// [`Self::resolve_quick`], but letting this ONE story's own override
+    /// (SQ-1552) win over the global list when it set a non-empty one —
+    /// exactly the precedence every other per-game setting follows: per-game,
+    /// else global, else the built-in default. The TUI has no UI for setting
+    /// the override; this is the read side of the data path a headless host
+    /// uses to give a player per-game quick words that actually persist.
+    pub fn resolve_quick_for(&self, game_dir: &std::path::Path) -> Vec<String> {
+        match crate::styles::read_per_game_quick(game_dir) {
+            Some(q) if !q.is_empty() => q,
+            _ => self.resolve_quick(),
         }
     }
 }
@@ -1013,6 +1047,32 @@ pub enum BackgroundTidy {
     OnOverlap,
     /// Re-tidy once every K new rooms (`BG_TIDY_DEBOUNCE`).
     Debounced,
+}
+
+impl BackgroundTidy {
+    /// The `background_tidy` token for a mode — what the file holds, so that
+    /// [`write_config_at`] writes back exactly what it read (the reason
+    /// [`v6_render_key`] exists).
+    pub fn key(self) -> &'static str {
+        match self {
+            BackgroundTidy::Off => "off",
+            BackgroundTidy::EveryRoom => "every_room",
+            BackgroundTidy::OnOverlap => "on_overlap",
+            BackgroundTidy::Debounced => "debounced",
+        }
+    }
+
+    /// Parse a `background_tidy` token, or `None` for anything else — the
+    /// inverse of [`Self::key`].
+    pub fn from_key(s: &str) -> Option<BackgroundTidy> {
+        match s {
+            "off" => Some(BackgroundTidy::Off),
+            "every_room" => Some(BackgroundTidy::EveryRoom),
+            "on_overlap" => Some(BackgroundTidy::OnOverlap),
+            "debounced" => Some(BackgroundTidy::Debounced),
+            _ => None,
+        }
+    }
 }
 
 /// Number of new rooms that must accumulate before a `Debounced` background tidy fires.
@@ -1246,6 +1306,7 @@ where
 // ── Animation config ──────────────────────────────────────────────────────────
 
 fn default_scroll_ms() -> u64 { 120 }
+fn default_follow_ms() -> u64 { 200 }
 fn default_scrollbar_hide_ms() -> u64 { 1500 }
 fn default_scrollbar_fade_ms() -> u64 { 300 }
 fn default_easing() -> Easing { Easing::EaseOut }
@@ -1274,6 +1335,21 @@ pub struct AnimationConfig {
     /// Smooth-scroll duration in milliseconds (default 120). Zero = instant.
     #[serde(default = "default_scroll_ms")]
     pub scroll_ms: u64,
+    /// SQ-1595: how long the story pane eases toward NEW output arriving at the
+    /// bottom, in milliseconds (default 200). Zero — or `enabled = false` —
+    /// makes it the pre-SQ-1595 instant jump.
+    ///
+    /// This applies only when the reader was already at (or following) the
+    /// bottom the moment a turn's output arrived — scrolling into history and
+    /// leaving it there is never dragged back down by this or by anything
+    /// else. When the new output overflows the pane and the `[more]` pager
+    /// engages, the ease runs only up to wherever the pager parks; paging
+    /// further with a keypress is a reader action and always uses `scroll_ms`,
+    /// not this. Any key press or mouse event ends an in-flight follow-ease
+    /// immediately (the player outranks paced output, same principle as the
+    /// v6 picture pacer) rather than fighting the reader's own scroll.
+    #[serde(default = "default_follow_ms")]
+    pub follow_ms: u64,
     /// SQ-0782: how long the STORY PANE's scrollbar stays up after a scroll,
     /// in milliseconds (default 1500). Zero keeps it up permanently — the
     /// pre-auto-hide behaviour. Only the story pane auto-hides: a modal's bar
@@ -1293,6 +1369,7 @@ impl Default for AnimationConfig {
             enabled: true,
             easing: Easing::EaseOut,
             scroll_ms: 120,
+            follow_ms: default_follow_ms(),
             scrollbar_hide_ms: default_scrollbar_hide_ms(),
             scrollbar_fade_ms: default_scrollbar_fade_ms(),
         }
@@ -2361,91 +2438,7 @@ pub fn resolve(cli: &Cli) -> Config {
     // Determine which config file to read.
     let config_path = config_path(cli);
 
-    // Start from defaults.
-    let mut cfg = Config { config_file: config_path.clone(), ..Config::default() };
-
-    // Layer in the config file if it exists.
-    if let Ok(text) = std::fs::read_to_string(&config_path) {
-        let parsed = toml::from_str::<Config>(&text);
-        // A file that exists but doesn't load used to be dropped in silence, so one
-        // stray character reverted every setting to its default with nothing said —
-        // and the next settings save then overwrote the user's file (SQ-0580). Keep
-        // the error for startup to show; `write_config_at` refuses to clobber.
-        //
-        // This fires for a TYPE error (`volume = 300`, `auto_load = "yes"`) exactly as
-        // it does for a syntax error: `from_str` fails either way, so either way the
-        // whole file is lost to memory. That distinction used to matter, because the
-        // write side re-parsed with toml_edit — which accepts a type error happily —
-        // and then stamped in-memory defaults over every key the file already had
-        // (SQ-0645). The write side now gates on THIS field instead.
-        if let Err(e) = &parsed {
-            cfg.config_error = Some(e.to_string());
-        }
-        if let Ok(from_file) = parsed {
-            // NOTE: this is a field-by-field merge — every persisted field must
-            // be copied here or the file's value is ignored on load. See the
-            // checklist on `struct Config`. (Also mirror it in `write_config`.)
-            // Carry the file's own version stamp (0 if the file predates
-            // versioning) so a future check can flag an out-of-date config.
-            cfg.version = from_file.version;
-            cfg.user_dir = from_file.user_dir;
-            cfg.default_story_dir = from_file.default_story_dir;
-            cfg.auto_load = from_file.auto_load;
-            cfg.auto_save = from_file.auto_save;
-            cfg.mouse_wheel_invert = from_file.mouse_wheel_invert;
-            cfg.mouse = from_file.mouse;
-            cfg.command_bar = from_file.command_bar;
-            cfg.prompt_save_on_quit = from_file.prompt_save_on_quit;
-            cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
-            cfg.record_turn_history = from_file.record_turn_history;
-            cfg.history_turns = from_file.history_turns;
-            cfg.hint_skip_screen_warning = from_file.hint_skip_screen_warning;
-            cfg.guidance = from_file.guidance;
-            cfg.guidance_probe = from_file.guidance_probe;
-            cfg.return_probe = from_file.return_probe;
-            cfg.hide_adult_words = from_file.hide_adult_words;
-            cfg.adult_words = from_file.adult_words;
-            cfg.background_tidy = from_file.background_tidy;
-            cfg.aux_storage = from_file.aux_storage;
-            cfg.v6_render = from_file.v6_render;
-            cfg.kitty_shared_memory = from_file.kitty_shared_memory;
-            cfg.fuse_art_dither = from_file.fuse_art_dither;
-            cfg.glk_pixel_scale = from_file.glk_pixel_scale;
-            cfg.v6_arrow_keys = from_file.v6_arrow_keys;
-            cfg.v6_pixel_lock = from_file.v6_pixel_lock;
-            cfg.system_font_disk = from_file.system_font_disk;
-            cfg.keymap = from_file.keymap;
-            cfg.hotkeys = from_file.hotkeys;
-            cfg.style = from_file.style;
-            cfg.watch_style = from_file.watch_style;
-            cfg.font_check_pending = from_file.font_check_pending;
-            cfg.undo_levels = from_file.undo_levels;
-            cfg.command_prefix = from_file.command_prefix;
-            cfg.show_room_numbers = from_file.show_room_numbers;
-            cfg.show_status_bar = from_file.show_status_bar;
-            cfg.honor_game_colours = from_file.honor_game_colours;
-            cfg.period_look = from_file.period_look;
-            cfg.system_colours = from_file.system_colours;
-            cfg.honor_timed_input = from_file.honor_timed_input;
-            cfg.interpreter_number = from_file.interpreter_number;
-            cfg.random_seed = from_file.random_seed;
-            cfg.enable_sound = from_file.enable_sound;
-            cfg.volume = from_file.volume;
-            cfg.search = from_file.search;
-            cfg.virtual_screen_cols = from_file.virtual_screen_cols;
-            cfg.virtual_screen_rows = from_file.virtual_screen_rows;
-            cfg.split_ratio = from_file.split_ratio;
-            cfg.command_band = from_file.command_band;
-            cfg.inv_dock_pct = from_file.inv_dock_pct;
-            cfg.room_dock_pct = from_file.room_dock_pct;
-            cfg.grab_zone_cells = from_file.grab_zone_cells;
-            cfg.text_margin_x = from_file.text_margin_x;
-            cfg.text_margin_y = from_file.text_margin_y;
-            cfg.animation = from_file.animation;
-        }
-        // A malformed file leaves every field at its default — TOML is parsed as one
-        // document, so there is no half-loaded config to salvage.
-    }
+    let mut cfg = resolve_config_file(config_path, cli.user_dir.clone());
 
     // CLI overrides beat the file — and every one of them that lands on a key
     // `write_config_at` persists is PINNED as it lands, so a later settings save
@@ -2453,15 +2446,10 @@ pub fn resolve(cli: &Cli) -> Config {
     // `OneRunOverrides`). `--accel`, `--image-protocol`, `--images`,
     // `--trace` and `--pictures` need no pin: their fields are `#[serde(skip)]`
     // and never written at all.
-    if let Some(dir) = &cli.user_dir {
-        cfg.user_dir = dir.clone();
-        // `--user-dir` relocates BOTH the file and the data root for one run,
-        // which is not the same thing as the `user_dir` key (that moves the data
-        // only). With `--config` naming a different file, writing it back would
-        // pin this run's temporary root into the user's real config.
-        cfg.one_run.pin(keys::USER_DIR, dir.to_string_lossy().into_owned());
-    }
-
+    //
+    // (The `--user-dir` override itself is handled inside `resolve_config_file`,
+    // shared with `resolve_at` — see its doc comment.)
+    //
     // SQ-1082: every switch below is `Option<OnOff>`, and the `Option` is the
     // point. These were negative-only — `--no-sound`, `--no-images` — which made
     // them ONE-WAY: they could force a setting off for a run and nothing on the
@@ -2565,6 +2553,127 @@ pub fn resolve(cli: &Cli) -> Config {
     }
 
     cfg
+}
+
+/// The shared resolution body behind both [`resolve`] and [`resolve_at`]:
+/// defaults, layered under whatever `config_path` holds, with `user_dir_override`
+/// (when given) pinned over the top exactly as `--user-dir` pins it for a CLI
+/// launch (SQ-0574 — see [`config_path`]'s doc comment for why the override
+/// moves both the file read AND the data root).
+///
+/// This is "read the config file for this directory and merge it over
+/// defaults" — the one thing a host that never builds a [`Cli`] needs. Every
+/// other CLI flag (`--sound`, `--v6-render`, `--colour`, …) is layered on top
+/// by `resolve` itself, after this returns, because those have no meaning
+/// outside an actual command-line launch.
+fn resolve_config_file(config_path: PathBuf, user_dir_override: Option<PathBuf>) -> Config {
+    // Start from defaults.
+    let mut cfg = Config { config_file: config_path.clone(), ..Config::default() };
+
+    // Layer in the config file if it exists.
+    if let Ok(text) = std::fs::read_to_string(&config_path) {
+        let parsed = toml::from_str::<Config>(&text);
+        // A file that exists but doesn't load used to be dropped in silence, so one
+        // stray character reverted every setting to its default with nothing said —
+        // and the next settings save then overwrote the user's file (SQ-0580). Keep
+        // the error for startup to show; `write_config_at` refuses to clobber.
+        //
+        // This fires for a TYPE error (`volume = 300`, `auto_load = "yes"`) exactly as
+        // it does for a syntax error: `from_str` fails either way, so either way the
+        // whole file is lost to memory. That distinction used to matter, because the
+        // write side re-parsed with toml_edit — which accepts a type error happily —
+        // and then stamped in-memory defaults over every key the file already had
+        // (SQ-0645). The write side now gates on THIS field instead.
+        if let Err(e) = &parsed {
+            cfg.config_error = Some(e.to_string());
+        }
+        if let Ok(from_file) = parsed {
+            // NOTE: this is a field-by-field merge — every persisted field must
+            // be copied here or the file's value is ignored on load. See the
+            // checklist on `struct Config`. (Also mirror it in `write_config`.)
+            // Carry the file's own version stamp (0 if the file predates
+            // versioning) so a future check can flag an out-of-date config.
+            cfg.version = from_file.version;
+            cfg.user_dir = from_file.user_dir;
+            cfg.default_story_dir = from_file.default_story_dir;
+            cfg.auto_load = from_file.auto_load;
+            cfg.auto_save = from_file.auto_save;
+            cfg.mouse_wheel_invert = from_file.mouse_wheel_invert;
+            cfg.mouse = from_file.mouse;
+            cfg.command_bar = from_file.command_bar;
+            cfg.prompt_save_on_quit = from_file.prompt_save_on_quit;
+            cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
+            cfg.record_turn_history = from_file.record_turn_history;
+            cfg.history_turns = from_file.history_turns;
+            cfg.hint_skip_screen_warning = from_file.hint_skip_screen_warning;
+            cfg.guidance = from_file.guidance;
+            cfg.guidance_probe = from_file.guidance_probe;
+            cfg.return_probe = from_file.return_probe;
+            cfg.hide_adult_words = from_file.hide_adult_words;
+            cfg.adult_words = from_file.adult_words;
+            cfg.background_tidy = from_file.background_tidy;
+            cfg.aux_storage = from_file.aux_storage;
+            cfg.v6_render = from_file.v6_render;
+            cfg.kitty_shared_memory = from_file.kitty_shared_memory;
+            cfg.fuse_art_dither = from_file.fuse_art_dither;
+            cfg.glk_pixel_scale = from_file.glk_pixel_scale;
+            cfg.v6_arrow_keys = from_file.v6_arrow_keys;
+            cfg.v6_pixel_lock = from_file.v6_pixel_lock;
+            cfg.system_font_disk = from_file.system_font_disk;
+            cfg.keymap = from_file.keymap;
+            cfg.hotkeys = from_file.hotkeys;
+            cfg.style = from_file.style;
+            cfg.watch_style = from_file.watch_style;
+            cfg.font_check_pending = from_file.font_check_pending;
+            cfg.undo_levels = from_file.undo_levels;
+            cfg.command_prefix = from_file.command_prefix;
+            cfg.show_room_numbers = from_file.show_room_numbers;
+            cfg.show_status_bar = from_file.show_status_bar;
+            cfg.honor_game_colours = from_file.honor_game_colours;
+            cfg.period_look = from_file.period_look;
+            cfg.system_colours = from_file.system_colours;
+            cfg.honor_timed_input = from_file.honor_timed_input;
+            cfg.interpreter_number = from_file.interpreter_number;
+            cfg.random_seed = from_file.random_seed;
+            cfg.enable_sound = from_file.enable_sound;
+            cfg.volume = from_file.volume;
+            cfg.search = from_file.search;
+            cfg.virtual_screen_cols = from_file.virtual_screen_cols;
+            cfg.virtual_screen_rows = from_file.virtual_screen_rows;
+            cfg.split_ratio = from_file.split_ratio;
+            cfg.command_band = from_file.command_band;
+            cfg.inv_dock_pct = from_file.inv_dock_pct;
+            cfg.room_dock_pct = from_file.room_dock_pct;
+            cfg.grab_zone_cells = from_file.grab_zone_cells;
+            cfg.text_margin_x = from_file.text_margin_x;
+            cfg.text_margin_y = from_file.text_margin_y;
+            cfg.animation = from_file.animation;
+        }
+        // A malformed file leaves every field at its default — TOML is parsed as one
+        // document, so there is no half-loaded config to salvage.
+    }
+
+    // `--user-dir` (or, from `resolve_at`, the directory a non-CLI host named
+    // directly) relocates BOTH the file and the data root for one run, which is
+    // not the same thing as the `user_dir` key (that moves the data only). With
+    // `--config` naming a different file, writing it back would pin this run's
+    // temporary root into the user's real config.
+    if let Some(dir) = user_dir_override {
+        cfg.user_dir = dir.clone();
+        cfg.one_run.pin(keys::USER_DIR, dir.to_string_lossy().into_owned());
+    }
+
+    cfg
+}
+
+/// [`resolve`] for a host that has no [`Cli`] to build — a directory to read
+/// `config.toml` from and nothing else. Equivalent to `resolve` given a `Cli`
+/// whose only flag is `--user-dir user_dir`: same file (`user_dir/config.toml`),
+/// same defaults-under-file merge, same `user_dir` pin. A caller that also wants
+/// CLI-flag-shaped overrides (sound, v6-render, colour, …) applies them the way
+/// `resolve` does, on top of what this returns.
+pub fn resolve_at(user_dir: &std::path::Path) -> Config {
+    resolve_config_file(user_dir.join("config.toml"), Some(user_dir.to_path_buf()))
 }
 
 // ── Write helpers ─────────────────────────────────────────────────────────────
@@ -2729,13 +2838,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     doc.put("command_bar", cfg.command_bar.into(), cfg.command_bar == def.command_bar);
     doc.put("prompt_save_on_quit", cfg.prompt_save_on_quit.into(), cfg.prompt_save_on_quit == def.prompt_save_on_quit);
     doc.put("prompt_load_on_launch", cfg.prompt_load_on_launch.into(), cfg.prompt_load_on_launch == def.prompt_load_on_launch);
-    let bg_str = match cfg.background_tidy {
-        BackgroundTidy::Off => "off",
-        BackgroundTidy::EveryRoom => "every_room",
-        BackgroundTidy::OnOverlap => "on_overlap",
-        BackgroundTidy::Debounced => "debounced",
-    };
-    doc.put("background_tidy", bg_str.into(), cfg.background_tidy == def.background_tidy);
+    doc.put("background_tidy", cfg.background_tidy.key().into(), cfg.background_tidy == def.background_tidy);
     let aux_str = match cfg.aux_storage {
         AuxStorage::Ask => "ask",
         AuxStorage::Archive => "archive",
@@ -2855,6 +2958,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         || cfg.animation.enabled != def.animation.enabled
         || cfg.animation.easing != def.animation.easing
         || cfg.animation.scroll_ms != def.animation.scroll_ms
+        || cfg.animation.follow_ms != def.animation.follow_ms
         || cfg.animation.scrollbar_hide_ms != def.animation.scrollbar_hide_ms
         || cfg.animation.scrollbar_fade_ms != def.animation.scrollbar_fade_ms
     {
@@ -2862,6 +2966,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         put_in(tbl, "enabled", cfg.animation.enabled.into(), cfg.animation.enabled == def.animation.enabled);
         put_in(tbl, "easing", crate::anim::easing_token(cfg.animation.easing).into(), cfg.animation.easing == def.animation.easing);
         put_in(tbl, "scroll_ms", (cfg.animation.scroll_ms as i64).into(), cfg.animation.scroll_ms == def.animation.scroll_ms);
+        put_in(tbl, "follow_ms", (cfg.animation.follow_ms as i64).into(), cfg.animation.follow_ms == def.animation.follow_ms);
         put_in(tbl, "scrollbar_hide_ms", (cfg.animation.scrollbar_hide_ms as i64).into(), cfg.animation.scrollbar_hide_ms == def.animation.scrollbar_hide_ms);
         put_in(tbl, "scrollbar_fade_ms", (cfg.animation.scrollbar_fade_ms as i64).into(), cfg.animation.scrollbar_fade_ms == def.animation.scrollbar_fade_ms);
     }
@@ -3063,6 +3168,38 @@ mod tests {
         assert_eq!(cfg.command_band.height, 10);
         assert!(cfg.command_band.auto_open);
         assert_eq!(cfg.command_band.resolve_quick(), vec!["n".to_string(), "s".to_string()]);
+    }
+
+    /// A per-game `quick` override wins over the global list for the game that
+    /// set it, and only that game — a story with no sidecar of its own still
+    /// gets the global/built-in list (SQ-1552).
+    #[test]
+    fn resolve_quick_for_prefers_the_per_game_override_for_that_game_only() {
+        let dir = crate::scratch_dir("cmdband-quick-for");
+        let other = crate::scratch_dir("cmdband-quick-for-other");
+        let mut cfg = CommandBandConfig::default();
+        cfg.quick = vec!["n".to_string(), "s".to_string()];
+
+        // No sidecar for either dir yet: both fall back to the global list.
+        assert_eq!(cfg.resolve_quick_for(&dir), vec!["n".to_string(), "s".to_string()]);
+        assert_eq!(cfg.resolve_quick_for(&other), vec!["n".to_string(), "s".to_string()]);
+
+        // Set an override for `dir` only.
+        crate::styles::write_per_game_quick(&dir, Some(vec!["xyzzy".to_string()])).unwrap();
+        assert_eq!(cfg.resolve_quick_for(&dir), vec!["xyzzy".to_string()], "this game's override wins");
+        assert_eq!(
+            cfg.resolve_quick_for(&other),
+            vec!["n".to_string(), "s".to_string()],
+            "a different game is unaffected"
+        );
+
+        // An explicit empty override reads the same as no override.
+        crate::styles::write_per_game_quick(&dir, Some(Vec::new())).unwrap();
+        assert_eq!(cfg.resolve_quick_for(&dir), vec!["n".to_string(), "s".to_string()]);
+
+        crate::styles::write_per_game_quick(&dir, None).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     /// `verbs` REPLACES the whole column; `extra_verbs` is additive. Both keep
@@ -3454,6 +3591,66 @@ mod tests {
         let _ = std::fs::remove_file(&cfg_path);
     }
 
+    /// A `Cli` whose only flag is `--user-dir dir` — everything else absent/default,
+    /// same shape [`resolve_at`] is documented as being equivalent to.
+    fn cli_with_only_user_dir(dir: &std::path::Path) -> Cli {
+        Cli {
+            story: Some(PathBuf::from("foo.z5")),
+            user_dir: Some(dir.to_path_buf()),
+            data_dir: None,
+            config: None,
+            accel: None,
+            sound: None,
+            auto_save: None,
+            image_protocol: ImageProtocol::Auto,
+            images: None,
+            game_colours: None,
+            colour: None,
+            interpreter_number: None,
+            interpreter_version: None,
+            pictures: None,
+            story_pick: None,
+            fetch: None,
+            import_metadata: None,
+            v6_render: None,
+            v6_pixel_lock: None,
+            machines: false,
+            trace: None,
+            debug: false,
+            guidance: None,
+            transcript_file: None,
+            font_check: None,
+        }
+    }
+
+    #[test]
+    fn resolve_at_matches_resolve_with_user_dir_only() {
+        let dir = crate::scratch_dir("resolve-at-with-file");
+        std::fs::write(dir.join("config.toml"), "auto_load = false\nvolume = 42\n").unwrap();
+
+        let via_cli = resolve(&cli_with_only_user_dir(&dir));
+        let via_resolve_at = resolve_at(&dir);
+        assert_eq!(format!("{via_resolve_at:?}"), format!("{via_cli:?}"));
+        // Non-vacuity: the file's own values actually landed, so the comparison
+        // above isn't just two default configs agreeing with each other.
+        assert!(!via_resolve_at.auto_load);
+        assert_eq!(via_resolve_at.volume, 42);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_at_matches_resolve_with_user_dir_only_no_config_file() {
+        let dir = crate::scratch_dir("resolve-at-no-file");
+        // Deliberately not created — no config.toml exists under it.
+
+        let via_cli = resolve(&cli_with_only_user_dir(&dir));
+        let via_resolve_at = resolve_at(&dir);
+        assert_eq!(format!("{via_resolve_at:?}"), format!("{via_cli:?}"));
+        assert_eq!(via_resolve_at.user_dir, dir);
+        assert!(via_resolve_at.auto_load, "no file means defaults, and auto_load defaults true");
+    }
+
     #[test]
     fn stale_use_default_map_key_is_ignored() {
         let cfg: crate::config::Config = toml::from_str("use_default_map = true").unwrap();
@@ -3524,6 +3721,19 @@ use_defaults = false
     fn background_tidy_parses_debounced_from_toml() {
         let cfg: Config = toml::from_str("background_tidy = \"debounced\"").unwrap();
         assert_eq!(cfg.background_tidy, BackgroundTidy::Debounced);
+    }
+
+    #[test]
+    fn background_tidy_round_trips_through_key_and_from_key() {
+        for mode in [
+            BackgroundTidy::Off,
+            BackgroundTidy::EveryRoom,
+            BackgroundTidy::OnOverlap,
+            BackgroundTidy::Debounced,
+        ] {
+            assert_eq!(BackgroundTidy::from_key(mode.key()), Some(mode));
+        }
+        assert_eq!(BackgroundTidy::from_key("bogus"), None);
     }
 
     #[test]
@@ -4028,6 +4238,7 @@ use_defaults = false
         assert!(c.animation.enabled);
         assert_eq!(c.animation.easing, Easing::EaseOut);
         assert_eq!(c.animation.scroll_ms, 120);
+        assert_eq!(c.animation.follow_ms, 200);
     }
 
     #[test]
@@ -4036,8 +4247,28 @@ use_defaults = false
         assert!(cfg.animation.enabled);
         assert_eq!(cfg.animation.easing, Easing::EaseOut);
         assert_eq!(cfg.animation.scroll_ms, 120);
+        assert_eq!(cfg.animation.follow_ms, 200);
         assert_eq!(cfg.animation.scrollbar_hide_ms, 1500);
         assert_eq!(cfg.animation.scrollbar_fade_ms, 300);
+    }
+
+    /// SQ-1595: `follow_ms` parses on its own, independent of `scroll_ms`.
+    #[test]
+    fn follow_ms_parses_and_round_trips() {
+        let cfg: Config = toml::from_str("[animation]\nfollow_ms = 350\n").unwrap();
+        assert_eq!(cfg.animation.follow_ms, 350);
+        assert_eq!(cfg.animation.scroll_ms, 120, "unrelated to scroll_ms");
+
+        let dir = std::env::temp_dir().join(format!("lanthorn_follow_ms_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut written = Config::default();
+        written.animation.follow_ms = 350;
+        write_config(&dir, &written).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["animation"]["follow_ms"].as_integer(), Some(350));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// SQ-0782: the story-pane scrollbar's hide delay and fade are config keys,

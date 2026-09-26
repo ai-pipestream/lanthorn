@@ -274,12 +274,9 @@ fn render_story_pane_frame(
     // back out of the header — and only while colours are honoured, since a pair
     // the interpreter paints with is still a game colour. Cleared first, so a frame
     // that declares none can never inherit the last one's.
-    state.v6_page_pair.set(
-        (state.config.honor_game_colours
-            && matches!(model.root, WinNode::Layered(_))
-            && !matches!(crate::state::unpack_zcolour(model.bg), zvm::screen::ZColour::Default))
-        .then_some((model.fg, model.bg)),
-    );
+    // The rule itself is `v6_machine_pair`, so a host composing without this render
+    // derives the same pair (SQ-1566).
+    state.v6_page_pair.set(v6_machine_pair(model, state.config.honor_game_colours));
     // Paint the story-pane background with the game's current background
     // (theme-safe: only the story pane, never the map/chrome; only a concrete,
     // honoured background — Default keeps the theme).
@@ -929,17 +926,17 @@ fn render_node(
                         // cost 3-8 ms per redraw on a 640x400 press and was paid per
                         // keystroke and per frame of any animation.
                         let hkey = v6_hybrid_gen(items, state, area, picker, story);
+                        let fs = picker.font_size();
+                        let cell_px = (fs.width, fs.height);
                         let cached = state.graphics_render.borrow_mut().hybrid.take().filter(|f| f.key == hkey);
                         let replayed = cached.is_some();
                         let frame = match cached {
                             Some(f) => f,
                             None => {
                                 state.graphics_render.borrow_mut().hybrid_builds += 1;
-                                build_hybrid_frame(hkey, &layout, story, native, area, picker, default_fg, default_bg, state)
+                                build_hybrid_frame(hkey, &layout, story, native, area, cell_px, picker, default_fg, default_bg, state)
                             }
                         };
-                        let fs = picker.font_size();
-                        let cell_px = (fs.width, fs.height);
                         let canvas = &frame.canvas;
                         let gfx = &frame.gfx;
                         let scale = frame.scale;
@@ -1644,15 +1641,7 @@ fn render_node(
                     // whenever colours are declined or the profile publishes no pair, so
                     // every other frame keeps the bare theme exactly as before.
                     let status_style = v6_machine_page(state, state.colors.theme.get("upper_window").style);
-                    let runs: Vec<&crate::engine::PxText> = layout
-                        .chrome
-                        .iter()
-                        .filter_map(|it| match &it.node {
-                            WinNode::Grid(g) => Some(g.px_texts.iter()),
-                            _ => None,
-                        })
-                        .flatten()
-                        .collect();
+                    let runs: Vec<&crate::engine::PxText> = paint_runs(&layout.chrome).collect();
                     // SQ-0711: this path draws the RUNS and nothing else — every
                     // pixel on the screen is discarded. That is right for a screen
                     // that is only text (Zork Zero's InvisiClues, Shogun's boot
@@ -1665,8 +1654,17 @@ fn render_node(
                     // A painted ground means there are pixels that only the raster
                     // composite can show, and it draws the runs over them anyway,
                     // so fall through to it.
+                    //
+                    // SQ-1584: routed through `hybrid_raster_fallback_reason`, the
+                    // same predicate `hybrid_bottom_plan_for` asks for a host's
+                    // benefit — this is the one place that decides it, so the two
+                    // cannot disagree. `story_present && takeover.is_none()` is
+                    // always false here (that frame already returned above), so
+                    // this call is exactly the `!painted_ground && runs_have_text`
+                    // check it replaces.
                     let painted_ground = state.v6_paint.borrow().is_some();
-                    if !painted_ground && runs.iter().any(|t| !t.text.trim().is_empty()) {
+                    let runs_have_text = runs.iter().any(|t| !t.text.trim().is_empty());
+                    if hybrid_raster_fallback_reason(layout.story.is_some(), takeover, runs_have_text, painted_ground).is_none() {
                         {
                             // Stamp this path like every other exit (SQ-0637): the
                             // painted menu drops the ring, so the next ring frame is a
@@ -2654,7 +2652,30 @@ fn v6_default_pair(
 /// other profile and whenever colours are declined, so the three layers below are
 /// unchanged for everything else.
 pub fn v6_host_pair(state: &AppState) -> (image::Rgba<u8>, image::Rgba<u8>) {
-    if let Some((fg, bg)) = state.v6_page_pair.get() {
+    v6_host_pair_with(state, state.v6_page_pair.get())
+}
+
+/// The MACHINE's own packed `(fg, bg)` screen pair for a frame, read off the screen
+/// model alone — or `None` when the frame has none to publish (SQ-1566).
+///
+/// This is the rule `render_story_pane` publishes into `AppState::v6_page_pair` on
+/// every terminal frame, stated once so that a host composing through
+/// [`V6FrameInputs::for_model`] without ever rendering to the terminal derives the
+/// same pair. `Some` only for a Version 6 (Layered) frame whose model carries a
+/// concrete page — which only §8.3's Amiga and the Macintosh publish
+/// (`session::machine_screen_pair`) — and only while game colours are honoured, since
+/// a pair the interpreter paints with is still a game colour.
+pub fn v6_machine_pair(model: &ScreenModel, honor_game_colours: bool) -> Option<(u32, u32)> {
+    (honor_game_colours
+        && matches!(model.root, WinNode::Layered(_))
+        && !matches!(crate::state::unpack_zcolour(model.bg), zvm::screen::ZColour::Default))
+    .then_some((model.fg, model.bg))
+}
+
+/// [`v6_host_pair`] with the machine pair stated rather than read from the
+/// render-time cell.
+fn v6_host_pair_with(state: &AppState, machine: Option<(u32, u32)>) -> (image::Rgba<u8>, image::Rgba<u8>) {
+    if let Some((fg, bg)) = machine {
         return (
             crate::render::v6_layout::packed_to_rgba(fg, RASTER_FALLBACK_INK, &state.colors),
             crate::render::v6_layout::packed_to_rgba(bg, RASTER_FALLBACK_PAGE, &state.colors),
@@ -2693,11 +2714,17 @@ pub(crate) fn v6_game_page(
     story: Option<&crate::engine::PositionedWindow>,
     state: &AppState,
 ) -> Option<image::Rgba<u8>> {
-    state
-        .config
-        .honor_game_colours
-        .then(|| crate::render::v6_layout::story_bg_rgba(story, &state.colors))
-        .flatten()
+    game_page(story, state.config.honor_game_colours, &state.colors)
+}
+
+/// [`v6_game_page`] from the two facts it reads, for a caller that holds them
+/// without an `AppState` — [`compose_v6_frame`] (SQ-1543).
+fn game_page(
+    story: Option<&crate::engine::PositionedWindow>,
+    honor: bool,
+    colors: &crate::colors::ColorScheme,
+) -> Option<image::Rgba<u8>> {
+    honor.then(|| crate::render::v6_layout::story_bg_rgba(story, colors)).flatten()
 }
 
 /// The MACHINE's own page alone, as an opaque colour, or `None` when this frame
@@ -2767,12 +2794,299 @@ pub fn build_v6_raster_frame(
     want: crate::render::v6_layout::RasterFrame,
     state: &AppState,
 ) -> (image::RgbaImage, Option<RasterMetrics>, crate::render::v6_layout::RasterFrame) {
+    let paint = state.v6_paint.borrow();
+    let prose = |cols: u16, rows: u16| build_main_text(state, cols, rows);
+    let inputs = V6FrameInputs::from_state(state, paint.as_deref(), &prose);
+    let built = compose_v6_frame(layout, want, &inputs);
+    (built.canvas, built.metrics, built.frame)
+}
+
+/// Everything a v6 RASTER composite reads besides the window layout, as one value
+/// (SQ-1543).
+///
+/// [`build_v6_raster_frame`] used to take `&AppState` and reach into it for these,
+/// so composing a v6 frame anywhere but the TUI meant building a whole `AppState`.
+/// The TUI now builds this from its state ([`Self::from_state`]) and composes
+/// through [`compose_v6_frame`] exactly like any other host, so there is one copy
+/// of the rules.
+///
+/// Deliberately absent: the text CELL and the native screen size. The cell is
+/// `face.cell()` and the screen is the frame the caller asks for, and carrying a
+/// second copy of either is how a harness comes to lay a Macintosh frame out on
+/// 8x16 (SQ-1020, SQ-1021). The game's own text runs, with their native pixel
+/// positions, are already in the [`V6Layout`](crate::render::v6_layout::V6Layout)'s
+/// windows.
+pub struct V6FrameInputs<'a> {
+    /// The HOST's default `(ink, page)` — what an inherited channel resolves to.
+    /// The TUI's is [`v6_host_pair`]: the machine's own pair, else the transcript
+    /// theme, else the terminal's, else the fallback.
+    pub host_pair: (image::Rgba<u8>, image::Rgba<u8>),
+    /// Whether the game's own colours are honoured (`honor_game_colours`).
+    pub honor_game_colours: bool,
+    /// The colour scheme a packed Z-machine colour resolves through, carrying the
+    /// machine's palette (SQ-1393).
+    pub colors: &'a crate::colors::ColorScheme,
+    /// The one text face every glyph on the frame is drawn in — cell, bitmap
+    /// face and pen (SQ-1009).
+    pub face: &'a crate::native_font::TextFace,
+    /// The game's painted ground (`erase_window` fills, SQ-0706), if any.
+    pub paint: Option<&'a image::RgbaImage>,
+    /// The live input line to echo into a secondary prose window the game is
+    /// reading through (SQ-0746), or `None` while the view is scrolled back —
+    /// or because [`Self::input`] overrides it away (SQ-1567 addendum).
+    pub panel_input: Option<&'a str>,
+    /// The live input line's TEXT, overriding whatever [`Self::prose`]'s
+    /// `MainText::input` and [`Self::panel_input`] would otherwise show.
+    /// `Some(text)` draws exactly `text` — in both the story prose box and a
+    /// reading panel — with the caret placed right after it; `None` draws no
+    /// live input text or caret in either place, because the host owns the
+    /// draft and is drawing it itself, the same idea as
+    /// [`V6TextMode::RecordOnly`](crate::render::v6_layout::V6TextMode::RecordOnly)'s
+    /// caret suppression (SQ-1567 addendum: a host with its own input line had
+    /// no way to keep its draft out of the composite without blanking
+    /// `state.input.value` around every call). `from_state` defaults this to
+    /// `Some(&state.input.value)`, so the TUI is unaffected; `for_model` takes
+    /// it explicitly, since a host composing without a render has no
+    /// `AppState::input` of its own.
+    pub input: Option<&'a str>,
+    /// The story transcript, windowed to a prose box of `(cols, rows)` text cells
+    /// — [`build_main_text`] in the TUI. A callback because the box is only known
+    /// once the composite has measured the art around it. Called at most once.
+    pub prose: &'a dyn Fn(u16, u16) -> (crate::render::v6_layout::MainText, RasterMetrics),
+    /// The lit word reveal, if one is lit (SQ-1138).
+    pub reveal: Option<crate::reveal::RevealLight<'a>>,
+    /// Whether the `[more]` pager is holding output (SQ-0455).
+    pub pager_active: bool,
+    /// The `[more]` block's `(block, ink)` when the game set no story pair — the
+    /// TUI's is the themed `more_prompt` selector resolved like [`v6_host_pair`].
+    pub more_prompt_pair: (image::Rgba<u8>, image::Rgba<u8>),
+    /// What happens to each glyph — see
+    /// [`V6TextMode`](crate::render::v6_layout::V6TextMode).
+    pub text: crate::render::v6_layout::V6TextMode,
+    /// Bottom-anchor a text-only command strip under the story window — Hybrid's
+    /// `BottomPlan::Menu` (Journey), published for a host that draws its own
+    /// chrome under [`V6TextMode::RecordOnly`](crate::render::v6_layout::V6TextMode::RecordOnly)
+    /// and so cannot reach that private plan itself (SQ-1574). `false` (every
+    /// constructor's default) reproduces today's `Raster`/`Extended` behaviour
+    /// exactly — [`compose_v6_frame`] declines the extension on such a frame, as
+    /// it always has, because the composite is one image in the game's own
+    /// coordinates and moving the game's chrome inside it is a composition
+    /// change, not a layout one. Set this to take that composition change: the
+    /// canvas grows, the band's own runs move down with it
+    /// ([`bottom_anchor_menu_runs`]), the side flanks fill the gap that opens
+    /// beside it, and the story's prose box fills the gap above. No effect on a
+    /// frame that is not Journey's shape ([`menu_strip_below_story`]).
+    pub bottom_anchor_menu: bool,
+}
+
+impl<'a> V6FrameInputs<'a> {
+    /// The TUI's inputs: every field read off `state`, text rasterised.
+    ///
+    /// `paint` and `prose` come in from outside because neither can be borrowed
+    /// out of `state` as a plain reference — the painted ground sits behind a
+    /// `RefCell` and the transcript window is built on demand.
+    pub fn from_state(
+        state: &'a AppState,
+        paint: Option<&'a image::RgbaImage>,
+        prose: &'a dyn Fn(u16, u16) -> (crate::render::v6_layout::MainText, RasterMetrics),
+    ) -> V6FrameInputs<'a> {
+        Self::with_host_pair(state, v6_host_pair(state), paint, prose, Some(state.input.value.as_str()))
+    }
+
+    /// [`Self::from_state`] for a host that composes `model`'s frame WITHOUT having
+    /// rendered it to the terminal (SQ-1566).
+    ///
+    /// `from_state` takes the machine's screen pair from `AppState::v6_page_pair`,
+    /// a cell only `render_story_pane` writes — so a host that never ran the
+    /// terminal render composed an Amiga frame on its own default pair instead of
+    /// the machine's white on medium grey. This derives the pair from the model
+    /// itself ([`v6_machine_pair`]), the same rule the render publishes.
+    /// `input` is the host's own draft — see [`Self::input`] — since a host
+    /// composing without a render has no `AppState::input` of its own to read.
+    pub fn for_model(
+        state: &'a AppState,
+        model: &ScreenModel,
+        paint: Option<&'a image::RgbaImage>,
+        prose: &'a dyn Fn(u16, u16) -> (crate::render::v6_layout::MainText, RasterMetrics),
+        input: Option<&'a str>,
+    ) -> V6FrameInputs<'a> {
+        let machine = v6_machine_pair(model, state.config.honor_game_colours);
+        Self::with_host_pair(state, v6_host_pair_with(state, machine), paint, prose, input)
+    }
+
+    fn with_host_pair(
+        state: &'a AppState,
+        host_pair: (image::Rgba<u8>, image::Rgba<u8>),
+        paint: Option<&'a image::RgbaImage>,
+        prose: &'a dyn Fn(u16, u16) -> (crate::render::v6_layout::MainText, RasterMetrics),
+        input: Option<&'a str>,
+    ) -> V6FrameInputs<'a> {
+        let mp = state.colors.theme.get("more_prompt").style;
+        V6FrameInputs {
+            host_pair,
+            honor_game_colours: state.config.honor_game_colours,
+            colors: &state.colors,
+            face: &state.v6_text,
+            paint,
+            panel_input: (state.effective_transcript_scroll() == 0).then_some(input).flatten(),
+            input,
+            prose,
+            reveal: crate::reveal::reveal_light(state),
+            pager_active: state.pager.active,
+            more_prompt_pair: v6_default_pair(mp, state.term_default_colors.fg, state.term_default_colors.bg),
+            text: crate::render::v6_layout::V6TextMode::Rasterise,
+            bottom_anchor_menu: false,
+        }
+    }
+}
+
+/// One composed v6 raster frame (SQ-1543).
+pub struct V6Frame {
+    /// The composite, flattened opaque onto the story page.
+    pub canvas: image::RgbaImage,
+    /// The story scroll/pager metrics, `None` when the frame has no transcript.
+    pub metrics: Option<RasterMetrics>,
+    /// The frame actually built — see [`build_v6_raster_frame`].
+    pub frame: crate::render::v6_layout::RasterFrame,
+    /// Every glyph the frame imaged, as runs in native pixels — empty under
+    /// [`V6TextMode::Rasterise`](crate::render::v6_layout::V6TextMode::Rasterise).
+    pub text: Vec<crate::render::v6_layout::V6TextRun>,
+    /// The story prose box — exactly the box [`V6FrameInputs::prose`] was asked to
+    /// fill, extension rows included — or `None` when this frame asked for no prose
+    /// (no story window, a picture or plate owns the screen, a canvas or `Grid` in
+    /// the story slot) (SQ-1567).
+    pub story: Option<V6StoryBox>,
+    /// The page the composite was flattened onto: every pixel no layer painted is
+    /// this colour, including the story box of a frame with no prose (SQ-1567).
+    pub page: image::Rgba<u8>,
+    /// The story ink the composite drew (or would draw) its prose in — the same
+    /// resolved value [`compose_v6_frame_into`] paints with, game-set colour first,
+    /// [`V6FrameInputs::host_pair`]'s ink otherwise (SQ-1573). A host drawing its
+    /// own prose under [`V6TextMode::RecordOnly`](crate::render::v6_layout::V6TextMode::RecordOnly)
+    /// used to have to restate that fallback rule itself (`v6::story_fg_rgba` plus
+    /// the same default) to match; this is that one answer, so the two cannot
+    /// drift apart.
+    pub ink: image::Rgba<u8>,
+    /// The input caret, where one was drawn. Painted into `canvas` in every mode
+    /// but [`V6TextMode::RecordOnly`](crate::render::v6_layout::V6TextMode::RecordOnly),
+    /// which leaves it to the host (SQ-1567).
+    pub caret: Option<crate::render::v6_layout::V6Caret>,
+    /// `Some((story_bottom, extension))` when THIS frame actually relocated
+    /// Journey's command band via [`bottom_anchor_menu_runs`] — the story window's
+    /// own bottom edge, native pixels, and how far down the band's runs moved —
+    /// `None` on every other frame, including a Menu-shaped one composed with
+    /// [`V6FrameInputs::bottom_anchor_menu`] left off or a pane with no slack to
+    /// give it (SQ-1588). Captured at the exact call site that builds `moved`, so
+    /// it cannot drift from whether the band actually moved the way a value
+    /// re-derived by a caller from a separately-computed [`V6HybridPlan`] could —
+    /// see [`Self::menu_band_game_px`], the reason this exists.
+    pub menu_band_shift: Option<(u32, u32)>,
+}
+
+impl V6Frame {
+    /// The canvas→game-pixel inverse for THIS frame, accounting for a relocated
+    /// Journey command band (SQ-1588, extending [`RasterFrame::game_px`]'s rule,
+    /// SQ-1568, to `V6FrameInputs::bottom_anchor_menu`'s composition change).
+    ///
+    /// `RasterFrame::game_px` alone is wrong on such a frame: it treats every
+    /// canvas row at or beyond `frame.native.1` as lanthorn's own scrollback and
+    /// drops it — right for a plain extended frame (SQ-1032), but Journey's Menu
+    /// plan physically MOVES its command band's own runs DOWN by the extension
+    /// (`bottom_anchor_menu_runs`), so the band is drawn INTO exactly the rows
+    /// that rule rejects. Without this, a click on "Start"/"Cast"/a character
+    /// name/"[cancel]" is silently dropped on every pane with spare height.
+    ///
+    /// Three canvas regions (0-based `canvas_px`), read off `self.menu_band_shift`
+    /// — `Some((story_bottom, extension))` only when THIS frame actually
+    /// relocated the band (see that field's doc: every other plan, or a Menu
+    /// frame composed with `bottom_anchor_menu` left off or with no slack to
+    /// extend into, leaves it `None`, and this falls straight through to
+    /// `self.frame.game_px` unchanged — Zork Zero, Shogun and Arthur's
+    /// Frame/Extend/Letterbox frames never set it):
+    ///
+    /// - `0..story_bottom`: the game's own screen above the band, unshifted.
+    /// - `story_bottom..story_bottom+extension`: the gap the extension opened.
+    ///   The story's OWN prose grew into it (`self.story`'s `h` includes the
+    ///   extension), so these rows are lanthorn's grown scrollback, not the
+    ///   game's — `None`, the same rule `game_px` already applies past a plain
+    ///   extended frame's screen.
+    /// - `story_bottom+extension..canvas_h`: where the band's runs actually
+    ///   landed; map back UP by the extension.
+    ///
+    /// Ported, not shared, from the TUI's own inverse for the SAME band —
+    /// [`crate::render::graphics::V6ClickMap::map_click`]'s
+    /// [`PackedText`](crate::render::graphics::PackedText) handling under
+    /// `frame.plan_is_menu` — because the two answer in different coordinate
+    /// systems (this one native raster pixels physically moved within one fixed
+    /// image; that one letterboxed terminal cells, where the band is drawn at a
+    /// SEPARATE "menu" scale rather than moved at all) and cannot literally call
+    /// one function. Both invert the same fact — a click is resolved the way the
+    /// pixel under it was actually drawn, and the pixel under Journey's menu band
+    /// was drawn somewhere other than the plain per-axis rule states — so a
+    /// change to the real mover (`bottom_anchor_menu_runs`) must be carried here
+    /// by hand; this doc comment is that cross-link.
+    pub fn menu_band_game_px(&self, canvas_px: (u32, u32)) -> Option<(u16, u16)> {
+        let Some((story_bottom, extension)) = self.menu_band_shift else {
+            return self.frame.game_px(canvas_px);
+        };
+        let gx = crate::render::v6_layout::canvas_to_game_axis(canvas_px.0, self.frame.native.0)?;
+        let cy = canvas_px.1;
+        let gy = if cy < story_bottom {
+            crate::render::v6_layout::canvas_to_game_axis(cy, self.frame.native.1)?
+        } else if cy < story_bottom + extension {
+            return None;
+        } else {
+            crate::render::v6_layout::canvas_to_game_axis(cy - extension, self.frame.native.1)?
+        };
+        Some((gx, gy))
+    }
+}
+
+/// The story prose box a v6 composite laid the transcript into (SQ-1567), in the
+/// canvas's native pixels.
+///
+/// `(x, y)` is the top-left of the prose region and `(w, h)` its extent, `h`
+/// including any [`RasterFrame`](crate::render::v6_layout::RasterFrame) extension
+/// rows; `cols` x `rows` is the text-cell grid the prose callback was called with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V6StoryBox {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// [`build_v6_raster_frame`] from a [`V6FrameInputs`] rather than an `AppState` —
+/// the one implementation both call (SQ-1543).
+pub fn compose_v6_frame(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    want: crate::render::v6_layout::RasterFrame,
+    inputs: &V6FrameInputs<'_>,
+) -> V6Frame {
+    use crate::render::v6_layout as v6;
+    let mut glyphs = v6::GlyphSink::new(inputs.text);
+    let mut built = compose_v6_frame_into(layout, want, inputs, &mut glyphs);
+    built.caret = glyphs.caret_at();
+    built.text = glyphs.into_runs();
+    built
+}
+
+/// The composite itself. Returns a [`V6Frame`] whose `text` and `caret` are left
+/// empty — both are the glyph sink's, which [`compose_v6_frame`] owns.
+fn compose_v6_frame_into(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    want: crate::render::v6_layout::RasterFrame,
+    inputs: &V6FrameInputs<'_>,
+    glyphs: &mut crate::render::v6_layout::GlyphSink,
+) -> V6Frame {
     use crate::render::v6_layout as v6;
     // The game's own screen. Everything between here and the flank extension is
     // stated in it and is unchanged by SQ-1032: the extension only ever adds rows
     // BELOW, and the game laid its windows out on this.
     let native = want.native;
-    let (default_fg, default_bg) = v6_host_pair(state);
+    let (default_fg, default_bg) = inputs.host_pair;
     // The story PAIR (SQ-0510, extended in SQ-0532 wave-5): a game-set
     // story-window colour (`set_colour`) wins per channel, else the paired
     // host default. Zork Zero boots `set_colour(fg=2, bg=9)`, so taking its
@@ -2782,9 +3096,9 @@ pub fn build_v6_raster_frame(
     // the LIVE honor config: a mid-game `/set-game-colours off` leaves the
     // recorded pair in the model, and the composite must fall back to the host
     // pair rather than keep painting the game's page/ink.
-    let honor = state.config.honor_game_colours;
-    let game_ink = if honor { v6::story_fg_rgba(layout.story, &state.colors) } else { None };
-    let game_page = v6_game_page(layout.story, state);
+    let honor = inputs.honor_game_colours;
+    let game_ink = if honor { v6::story_fg_rgba(layout.story, inputs.colors) } else { None };
+    let game_page = game_page(layout.story, honor, inputs.colors);
     let page = game_page.unwrap_or(default_bg);
     let ink = game_ink.unwrap_or(default_fg);
     // What the story box is measured against (SQ-0728): the same layers, MINUS the
@@ -2843,7 +3157,7 @@ pub fn build_v6_raster_frame(
     // below, because the frame's HEIGHT is decided from it. It reads `obstruction`
     // and nothing else, and nothing between the two positions touches that canvas,
     // so `Raster` builds the identical composite either way.
-    let cell = state.v6_text.cell();
+    let cell = inputs.face.cell();
     let story_clear =
         v6::story_clear_native(layout.story, &obstruction).filter(|&(_, _, w, h)| w >= 8 && h >= 16);
     // SQ-1032: does this frame extend, and by how many native rows?
@@ -2859,6 +3173,14 @@ pub fn build_v6_raster_frame(
     // by `want.extension()` and names the chrome windows that travel down with the
     // frame's bottom edge — usually none. The two are one decision, because a band
     // that cannot be moved is a frame that cannot grow.
+    //
+    // SQ-1574: whether this IS Journey's shape — a text-only command strip under
+    // the story window — decided once, outside the block, because both the
+    // decision below and `moved`'s construction further down need the same
+    // answer and must not disagree about it.
+    let menu_case = layout
+        .story
+        .is_some_and(|s| menu_strip_below_story(s, &obstruction, &layout.chrome, native, cell));
     let anchored = 'ext: {
         if want.extension() == 0 {
             break 'ext None;
@@ -2872,7 +3194,12 @@ pub fn build_v6_raster_frame(
         // declines the identical frame for the identical reason (SQ-0819), so
         // extending here would strand the menu mid-canvas over an unextended flank.
         // Declining leaves Journey exactly as `Raster` draws it.
-        if menu_strip_below_story(story, &obstruction, &layout.chrome, native, cell) {
+        //
+        // SQ-1574: `inputs.bottom_anchor_menu` is a host's opt-in to take that
+        // composition change anyway — see `V6FrameInputs::bottom_anchor_menu`. It
+        // is `false` on every existing caller (`from_state`/`for_model` both
+        // default it), so `Raster`/`Extended` keep declining exactly as before.
+        if menu_case && !inputs.bottom_anchor_menu {
             break 'ext None;
         }
         // …and ANY chrome the game put below its story window, which the test above
@@ -2913,7 +3240,18 @@ pub fn build_v6_raster_frame(
             // together — and the canvas it moves onto has to be expressible as a
             // screen height. Anything else is unrecognised, and unrecognised declines
             // exactly as it did before (CLAUDE.md: skip rather than guess).
-            match bottom_anchored_chrome(&layout.chrome, story, native) {
+            //
+            // SQ-1574: Journey's band shares ONE chrome window with runs the story
+            // sits ABOVE (the picture surround, the side rules — see
+            // `bottom_anchored_menu_band`'s doc), so `bottom_anchored_chrome`'s
+            // whole-window unit never qualifies it; a host that opted in takes the
+            // run-level version instead.
+            let found = if menu_case && inputs.bottom_anchor_menu {
+                bottom_anchored_menu_band(&layout.chrome, story)
+            } else {
+                bottom_anchored_chrome(&layout.chrome, story, native)
+            };
+            match found {
                 Some(ws) if u16::try_from(want.canvas_h).is_ok() => ws,
                 _ => break 'ext None,
             }
@@ -2956,7 +3294,25 @@ pub fn build_v6_raster_frame(
     // `screen` and drops anything below it — will not report a click on it. Arthur's
     // parser error is output and nothing else; a CLICKABLE band under a story window
     // is Journey's, and Journey declines the extension one test earlier.
+    // SQ-1588: `menu_band_shift` is `(story_bottom, extension)` exactly when the
+    // FIRST arm below actually runs — the run-level mover, not the plain
+    // whole-window `bottom_anchor` the second arm uses for every other title's
+    // band. Computed at this same site, from the same `story`, rather than left
+    // for a caller to re-derive from a separately-fetched `V6HybridPlan`: two
+    // facts stated once cannot drift the way two facts stated twice can (the
+    // refactoring policy in CLAUDE.md). See `V6Frame::menu_band_game_px`.
+    let mut menu_band_shift: Option<(u32, u32)> = None;
     let moved: Vec<crate::engine::PositionedWindow> = match &anchored {
+        // SQ-1574: Journey's band moves as RUNS (`bottom_anchor_menu_runs`), not as
+        // a whole window — see `bottom_anchored_menu_band`'s doc. Every other title
+        // still moves as the whole window `bottom_anchor` always has.
+        Some(ws) if extension > 0 && menu_case && inputs.bottom_anchor_menu => match layout.story {
+            Some(story) => {
+                menu_band_shift = Some((story.y_px as u32 + story.h_px as u32, extension));
+                ws.iter().map(|&i| bottom_anchor_menu_runs(layout.chrome[i], story, extension, cell)).collect()
+            }
+            None => Vec::new(),
+        },
         Some(ws) if extension > 0 => {
             ws.iter().map(|&i| bottom_anchor(layout.chrome[i], extension, cell)).collect()
         }
@@ -2976,16 +3332,22 @@ pub fn build_v6_raster_frame(
         if moved.is_empty() { native } else { (native.0, frame.canvas_h as u16) };
     // Raster has no cells to draw text with, so it needs every run imaged: the
     // empty set is not a default here, it is this path's answer (SQ-0903).
-    let mut canvas =
-        v6::build_chrome_canvas(&chrome, canvas_native, default_fg, default_bg, &state.colors, v6::TextLayer::All, &state.v6_text);
+    let mut canvas = v6::build_chrome_canvas_into(
+        &chrome,
+        canvas_native,
+        default_fg,
+        default_bg,
+        inputs.colors,
+        v6::TextLayer::All,
+        inputs.face,
+        glyphs,
+    );
     // …and the lines of any SECONDARY prose window (SQ-0729), which the chrome
     // canvas does not draw. The story page below spares them like any chrome text.
     // …and the live input line into whichever of them the player is typing into
     // (SQ-0746), on the same "only when the view is at the bottom" rule
     // `build_main_text` applies to the transcript's own live line.
-    let panel_input =
-        (state.effective_transcript_scroll() == 0).then_some(state.input.value.as_str());
-    v6::draw_secondary_prose(&mut canvas, &chrome, ink, honor, &state.colors, panel_input, &state.v6_text);
+    v6::draw_secondary_prose_into(&mut canvas, &chrome, ink, honor, inputs.colors, inputs.panel_input, inputs.face, glyphs);
     // SQ-0704: each chrome window's own page (ZMSD §8.8.3.2) fills its unpainted
     // pixels before the story is stamped — the story box itself is skipped (see
     // `fill_window_pages`). This runs on the COMPOSITE only: the clear-interior
@@ -2995,15 +3357,15 @@ pub fn build_v6_raster_frame(
     // what is left, because a fill is the oldest thing on the screen: the game
     // filled its rectangle, then printed the label on top of it.
     let grounds = |c: &mut image::RgbaImage| {
-        v6::blit_paint_ground(c, state.v6_paint.borrow().as_deref(), v6::TextLayer::All, state.v6_text.cell());
+        v6::blit_paint_ground(c, inputs.paint, v6::TextLayer::All, inputs.face.cell());
         if honor {
             v6::fill_window_pages(
                 c,
                 &chrome,
                 layout.story,
-                &state.colors,
+                inputs.colors,
                 v6::TextLayer::All,
-                state.v6_text.cell(),
+                inputs.face.cell(),
             );
         } else {
             // SQ-0716: colours declined, but a window the game has PAINTED INTO still
@@ -3016,9 +3378,9 @@ pub fn build_v6_raster_frame(
                 c,
                 &chrome,
                 layout.story,
-                &state.colors,
-                state.v6_paint.borrow().as_deref(),
-                state.v6_text.cell(),
+                inputs.colors,
+                inputs.paint,
+                inputs.face.cell(),
             );
         }
     };
@@ -3029,7 +3391,33 @@ pub fn build_v6_raster_frame(
         canvas = grow_canvas_rows(canvas, frame.canvas_h);
     }
     extend_raster_flanks(&mut canvas, &obstruction, layout.story, &layout.chrome, frame, cell);
+    // SQ-1574: `extend_raster_flanks` above is a no-op on Journey's shape by its
+    // own design (it declines on the same `menu_strip_below_story` test, SQ-0819
+    // — its tiling recipe is for a REPEATING border, and Journey's flank is one
+    // picture in a panel). A host that opted into the Menu-anchor extension still
+    // needs its flanks filled, so this fills the gap the extension opened beside
+    // the relocated band with the game's own panel colour instead.
+    if menu_case && inputs.bottom_anchor_menu && extension > 0 {
+        if let Some(story) = layout.story {
+            fill_menu_flank_extension(
+                &mut canvas,
+                &obstruction,
+                story,
+                native,
+                frame.canvas_h,
+                inputs.face,
+                &chrome_runs,
+                default_fg,
+                default_bg,
+                inputs.colors,
+                glyphs,
+            );
+        }
+    }
     let mut raster_metrics: Option<RasterMetrics> = None;
+    // The box the prose callback is asked to fill, reported as it was asked
+    // (SQ-1567). Set only where the callback runs.
+    let mut story_box: Option<V6StoryBox> = None;
     if let Some((sx, sy, sw, sh)) = story_clear {
         // Paint the story page opaque (SQ-0510, reopened). Leaving it
         // transparent let whoever composites the image pick the colour
@@ -3045,8 +3433,8 @@ pub fn build_v6_raster_frame(
             (sx, sy, sw, sh),
             page,
             &chrome,
-            state.v6_paint.borrow().as_deref(),
-            &state.v6_text,
+            inputs.paint,
+            inputs.face,
         );
         // …then the story window's OWN absolutely-placed artwork, before any
         // prose: Arthur's intro centres a 584×392 plate in window 0, so the plate
@@ -3063,8 +3451,8 @@ pub fn build_v6_raster_frame(
         // prose box, and no scroll metrics, exactly as when a plate owns the
         // screen. See `story_window_is_a_canvas`: fmvpoker alone.
         if story_window_is_a_canvas(layout, native) {
-            v6::draw_story_canvas_runs(&mut canvas, layout.story, ink, page, honor, &state.colors, &state.v6_text);
-            return finish_v6_raster_canvas(canvas, page, raster_metrics, frame);
+            v6::draw_story_canvas_runs_into(&mut canvas, layout.story, ink, page, honor, inputs.colors, inputs.face, glyphs);
+            return finish_v6_raster_canvas(canvas, page, ink, raster_metrics, None, frame, None);
         }
         // **A `Grid` in the story slot contributes its RECT and nothing else**
         // (SQ-1026). With no primary `Buffer` on the frame, `classify_windows`
@@ -3085,7 +3473,7 @@ pub fn build_v6_raster_frame(
         // No prose box and no scroll metrics, exactly as when a plate owns the
         // screen — there is no transcript on this frame.
         if !matches!(layout.story.map(|s| &s.node), Some(WinNode::Buffer(_))) {
-            return finish_v6_raster_canvas(canvas, page, raster_metrics, frame);
+            return finish_v6_raster_canvas(canvas, page, ink, raster_metrics, None, frame, None);
         }
         // Whether any prose belongs on THIS frame, and where (SQ-0707). An
         // absolutely-placed plate is drawn INSTEAD of prose, not under it: the
@@ -3093,7 +3481,7 @@ pub fn build_v6_raster_frame(
         // screen. `None` = the plate owns the screen, and rasterizing scrollback
         // onto it would paint the PREVIOUS screen's text across the art.
         let Some((tx, ty, tw, th)) = v6::story_prose_box((sx, sy, sw, sh), layout.story_gfx, cell) else {
-            return finish_v6_raster_canvas(canvas, page, raster_metrics, frame);
+            return finish_v6_raster_canvas(canvas, page, ink, raster_metrics, None, frame, None);
         };
         // Window-0 inline pictures (drop-caps, room icons) arrive as
         // transcript-anchored floats (`transcript_images` sidecar):
@@ -3117,7 +3505,20 @@ pub fn build_v6_raster_frame(
         let th = th + extension;
         let cols = (tw / u32::from(cell.w())).max(1) as u16;
         let rows = (th / u32::from(cell.h())).max(1) as u16;
-        let (main, rm) = build_main_text(state, cols, rows);
+        let (mut main, rm) = (inputs.prose)(cols, rows);
+        // `inputs.input` overrides whatever the callback computed for the live
+        // input line — the single override `panel_input` above is already built
+        // from, so the story box and a reading panel cannot disagree about the
+        // host's draft (SQ-1567 addendum). `None` also silences the caret: it
+        // sits behind the same `main.awaiting` gate `draw_story_text_into` reads.
+        match inputs.input {
+            Some(text) => {
+                main.input = text.to_string();
+                main.cursor_col = text.chars().count().min(cols.saturating_sub(1) as usize) as u16;
+            }
+            None => main.awaiting = false,
+        }
+        story_box = Some(V6StoryBox { x: sx, y: sy, w: tw, h: th, cols, rows });
         // …sparing the cells another window's own text already holds (SQ-0729).
         // The page fill above spares them; the GLYPHS did not, so the transcript
         // was drawn straight through them. fmvpoker's dealt hand is the report:
@@ -3137,8 +3538,8 @@ pub fn build_v6_raster_frame(
         // The fallback ink is the story's own, which makes a theme that cannot
         // resolve to concrete bytes draw the prose exactly as it already was
         // rather than in some colour nobody chose.
-        let reveal = crate::reveal::raster_reveal(state, ink);
-        v6::draw_story_text(
+        let reveal = inputs.reveal.map(|l| l.at(ink));
+        v6::draw_story_text_into(
             &mut canvas,
             &main,
             sx,
@@ -3146,9 +3547,10 @@ pub fn build_v6_raster_frame(
             cols,
             rows,
             ink,
-            &v6::chrome_text_rects(&chrome, &state.v6_text),
-            &state.v6_text,
+            &v6::chrome_text_rects(&chrome, inputs.face),
+            inputs.face,
             reveal.as_ref(),
+            glyphs,
         );
         // [more] pager indicator (SQ-0455): when a single turn's output
         // overflowed the story box the shared pager (SQ-0404) parks the
@@ -3156,8 +3558,7 @@ pub fn build_v6_raster_frame(
         // a terminal row, so draw the prompt as a text run bottom-right of
         // the story box, themed via the `more_prompt` selector (drawn as a
         // reverse-video block, matching the terminal bar).
-        if state.pager.active {
-            let mp = state.colors.theme.get("more_prompt").style;
+        if inputs.pager_active {
             // Reverse-video against whatever the story page/ink actually ARE.
             // When the game set its own pair (Zork Zero's black on white) the
             // prompt must reverse THAT pair, or a themed block resolved from an
@@ -3167,10 +3568,10 @@ pub fn build_v6_raster_frame(
             // fallback) so the block and its ink never mix sources.
             let (block, prompt_ink) = match (game_page, game_ink) {
                 (Some(p), Some(i)) => (i, p),
-                _ => v6_default_pair(mp, state.term_default_colors.fg, state.term_default_colors.bg),
+                _ => inputs.more_prompt_pair,
             };
             let label = "[more]";
-            let cell = state.v6_text.cell();
+            let cell = inputs.face.cell();
             let last_row = rows.saturating_sub(1) as u32;
             // SQ-1009: flush RIGHT by the PEN's width, and stepped by the pen. Sized
             // by a character count against the cell it drew a reverse block the
@@ -3178,12 +3579,13 @@ pub fn build_v6_raster_frame(
             // 8-px slots, which is what "compressed and unreadable" looks like from
             // the other side. Both numbers come from the same pen, so they cannot
             // disagree.
-            let width = state.v6_text.run_px(label);
+            let width = inputs.face.run_px(label);
             let mut pen = sx + (cols as u32 * u32::from(cell.w())).saturating_sub(width);
             for ch in label.chars() {
-                let adv = state.v6_text.advance(ch);
-                crate::render::bitfont::blit_glyph(
-                    &mut canvas, ch, pen, sy + last_row * u32::from(cell.h()), adv, u32::from(cell.h()), prompt_ink, Some(block), Some(&state.v6_text),
+                let adv = inputs.face.advance(ch);
+                glyphs.blit(
+                    &mut canvas, ch, pen, sy + last_row * u32::from(cell.h()), adv, u32::from(cell.h()), prompt_ink, Some(block), 0, inputs.face,
+                    v6::V6RunSource::Pager, false, false,
                 );
                 pen += adv;
             }
@@ -3205,7 +3607,7 @@ pub fn build_v6_raster_frame(
     // identical on every protocol/terminal. Touches alpha==0 pixels
     // ONLY — art, status bands, glyphs and drop-caps are all opaque and
     // are left byte-for-byte alone. (SQ-0510)
-    finish_v6_raster_canvas(canvas, page, raster_metrics, frame)
+    finish_v6_raster_canvas(canvas, page, ink, raster_metrics, story_box, frame, menu_band_shift)
 }
 
 /// Seal a v6 raster composite: resolve every still-transparent pixel to the story
@@ -3214,11 +3616,14 @@ pub fn build_v6_raster_frame(
 fn finish_v6_raster_canvas(
     mut canvas: image::RgbaImage,
     page: image::Rgba<u8>,
+    ink: image::Rgba<u8>,
     raster_metrics: Option<RasterMetrics>,
+    story: Option<V6StoryBox>,
     frame: crate::render::v6_layout::RasterFrame,
-) -> (image::RgbaImage, Option<RasterMetrics>, crate::render::v6_layout::RasterFrame) {
+    menu_band_shift: Option<(u32, u32)>,
+) -> V6Frame {
     crate::render::v6_layout::flatten_onto_page(&mut canvas, page);
-    (canvas, raster_metrics, frame)
+    V6Frame { canvas, metrics: raster_metrics, frame, text: Vec::new(), story, page, ink, caret: None, menu_band_shift }
 }
 
 /// SQ-1032: the same composite with more transparent native rows below it.
@@ -3439,17 +3844,67 @@ fn build_hybrid_frame(
     story: &crate::engine::PositionedWindow,
     native: (u16, u16),
     area: Rect,
+    cell_px: (u16, u16),
     picker: &ratatui_image::picker::Picker,
     default_fg: image::Rgba<u8>,
     default_bg: image::Rgba<u8>,
     state: &AppState,
 ) -> HybridFrame {
+    // SQ-0818: how finely a FULL-WIDTH art strip's upload is cut — see
+    // `build_hybrid_frame_with`'s own doc for the reasoning; only this side of
+    // the split knows a real `Picker`.
+    let tile_cols = match picker.protocol_type() {
+        ratatui_image::picker::ProtocolType::Kitty
+        | ratatui_image::picker::ProtocolType::Iterm2 => BAND_TILE_COLS,
+        ratatui_image::picker::ProtocolType::Sixel
+        | ratatui_image::picker::ProtocolType::Halfblocks => 0,
+    };
+    build_hybrid_frame_with(
+        hkey,
+        layout,
+        story,
+        native,
+        area,
+        cell_px,
+        crate::render::graphics::v6_pixel_lock_applies(picker),
+        backend_layers_glyphs_over_art(picker),
+        tile_cols,
+        default_fg,
+        default_bg,
+        state,
+    )
+}
+
+/// [`build_hybrid_frame`]'s picker-free core (SQ-1591): everything a v6 HYBRID
+/// chrome ring computes, split out from the three picker-derived facts a real
+/// `Picker` answers (its font cell size, whether the v6 pixel lock applies to
+/// its protocol, whether it can layer a glyph over an art placement) so a host
+/// with no terminal `Picker` at all — one drawing this chrome with its own fonts
+/// — can ask the SAME classification at ITS OWN cell size. `build_hybrid_frame`
+/// is now a thin wrapper answering those three from a real `Picker`;
+/// `hybrid_chrome_layout` is the other caller, answering them for a host (see
+/// that function's own doc for what it decides and why). Everything below this
+/// point is unchanged from before the split — a pure signature widening, no
+/// behaviour change for the TUI's own call.
+#[allow(clippy::too_many_arguments)]
+fn build_hybrid_frame_with(
+    hkey: u64,
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    story: &crate::engine::PositionedWindow,
+    native: (u16, u16),
+    area: Rect,
+    cell_px: (u16, u16),
+    lock_applies: bool,
+    layer_glyphs_over_art: bool,
+    tile_cols: u16,
+    default_fg: image::Rgba<u8>,
+    default_bg: image::Rgba<u8>,
+    state: &AppState,
+) -> HybridFrame {
     use crate::render::v6_layout as v6;
-    let fs = picker.font_size();
-    let cell_px = (fs.width, fs.height);
     let pane_dev = (
-        area.width as u32 * fs.width.max(1) as u32,
-        area.height as u32 * fs.height.max(1) as u32,
+        area.width as u32 * cell_px.0.max(1) as u32,
+        area.height as u32 * cell_px.1.max(1) as u32,
     );
     // SQ-0936: one global letterbox factor for the whole native
     // screen, quantized to the artwork's own ladder when the
@@ -3466,7 +3921,6 @@ fn build_hybrid_frame(
     // `crate::render::graphics::v6_pixel_lock_applies` for the
     // measurement. The lock is inert on that backend, reported as
     // inert, and never dressed up as a snap that happened.
-    let lock_applies = crate::render::graphics::v6_pixel_lock_applies(picker);
     let lock_inapplicable = state.config.v6_pixel_lock && !lock_applies;
     let (scale_center, lock_fallback) =
         v6::FrameGeometry::new(native, state.v6_art_scale, state.v6_text.cell())
@@ -3535,7 +3989,17 @@ fn build_hybrid_frame(
     // native height — nothing to reclaim, degrade to centred).
     let scaled_h = (native.1 as f32 * scale_center.s).round() as u32;
     let slack = pane_dev.1.saturating_sub(scaled_h);
-    let plan = hybrid_bottom_plan(story, &gfx, &layout.chrome, native, slack, state.v6_text.cell());
+    // SQ-1574: through the PUBLISHED decision (`hybrid_bottom_plan_for`) rather
+    // than `hybrid_bottom_plan` directly, so a host reading the public plan and
+    // this render cannot disagree — converted straight back to the private enum
+    // this function's own body still matches on below, so nothing past this line
+    // changes.
+    let plan = match hybrid_bottom_plan_for(layout, native, state.v6_text.cell(), slack, state.v6_paint.borrow().is_some()).kind {
+        V6BottomPlan::Letterbox => BottomPlan::Letterbox,
+        V6BottomPlan::Extend => BottomPlan::Extend,
+        V6BottomPlan::Frame => BottomPlan::Frame,
+        V6BottomPlan::Menu => BottomPlan::Menu,
+    };
     let reclaim = !matches!(plan, BottomPlan::Letterbox);
     // Resolve the story scale, the story viewport, and an
     // optional bottom-anchored menu scale.
@@ -3936,7 +4400,7 @@ fn build_hybrid_frame(
     // is the whole gate: everywhere else these runs stay pixels and
     // every line below this one behaves exactly as it did.
     let (mut strips, over_art_runs) = decompose_chrome_strips(&ring_bands, &row_oracle);
-    let over_art_runs: Vec<crate::engine::PxText> = if backend_layers_glyphs_over_art(picker) {
+    let over_art_runs: Vec<crate::engine::PxText> = if layer_glyphs_over_art {
         over_art_runs.into_iter().cloned().collect()
     } else {
         Vec::new()
@@ -4556,22 +5020,17 @@ fn build_hybrid_frame(
             })
             .collect()
     };
-    // SQ-0818: how finely a FULL-WIDTH art strip's upload is cut.
+    // SQ-0818: how finely a FULL-WIDTH art strip's upload is cut — `tile_cols`,
+    // a parameter since SQ-1591's picker-free split (see `build_hybrid_frame`,
+    // the only caller that answers it from a real `Picker`).
     //
-    // Granularity is backend-conditional, and only this side of the
-    // renderer knows the picker. Kitty and iterm2 tile: the extra cost
+    // Granularity is backend-conditional. Kitty and iterm2 tile: the extra cost
     // is one control block and a rounded-up last chunk per tile, and
     // the payload is byte for byte the same pixels. SIXEL DOES NOT —
     // every sixel image carries its own palette definition, so N tiles
     // would mean N palettes where the strip had one, a real first-frame
     // regression for no gain. Halfblocks does not care either way:
     // ratatui's own cell diff already sends it only the dirty cells.
-    let tile_cols = match picker.protocol_type() {
-        ratatui_image::picker::ProtocolType::Kitty
-        | ratatui_image::picker::ProtocolType::Iterm2 => BAND_TILE_COLS,
-        ratatui_image::picker::ProtocolType::Sixel
-        | ratatui_image::picker::ProtocolType::Halfblocks => 0,
-    };
     // …and only a strip that is NOT a flank, which is asked by role
     // rather than inferred from the draw: `flank_panels` and
     // `tiled_flanks` each compose their own source image from geometry
@@ -4785,6 +5244,238 @@ fn build_hybrid_frame(
         packed_text,
         over_art_runs,
     }
+}
+
+/// One chrome run inside a [`V6HybridChromeLayout`] (SQ-1591) — the CELL/hybrid
+/// path's sibling of
+/// [`V6TextRun`](crate::render::v6_layout::V6TextRun)'s `over_art`/`bar`
+/// (SQ-1592, the raster path). `over_art` reuses that field's exact name for the
+/// SAME question, "is this run over art?" — deliberately: the two types are
+/// built by entirely separate pipelines and share no code, but a host reading
+/// both should not have to learn two spellings of one idea. `bar` has no
+/// analogue here: it names a ROW property internal to this pipeline's own flank-
+/// ownership decision (`ChromeRowOracle`'s `bar_rows`, SQ-0515) that a host never
+/// needs to reproduce a chrome run's position or classification, so nothing
+/// carries that name across.
+#[derive(Debug, Clone)]
+pub struct V6HybridChromeRun {
+    /// The run as the game painted it — text, style, packed colours.
+    pub run: crate::engine::PxText,
+    /// Where the ring places this run's own glyph origin, in the HOST's terminal
+    /// cells — [`run_cell`]'s answer, or the SQ-0892 block-placement override, or
+    /// the SQ-0783 lone-edge-glyph alignment: whichever one the real terminal
+    /// draw would use for this exact run. May be negative or past the pane's
+    /// edge for a run that starts outside it (`draw_chrome_text_strip` clips
+    /// those at draw time; this reports the unclipped origin).
+    pub col: i32,
+    pub row: i32,
+    /// Whether this run stands over opaque frame art rather than a plain chrome
+    /// ground ([`ChromeRowOracle::over_art`]'s own predicate) — mirrors
+    /// [`V6TextRun::over_art`](crate::render::v6_layout::V6TextRun::over_art)'s
+    /// name. `true` means the run is legitimately part of the game's ARTWORK
+    /// (Zork Zero's banner labels): a host may draw it as a glyph layered over
+    /// its own picture (what kitty/iTerm2 virtual placements do today) or bake
+    /// it into the picture instead — this field says only which ground the run
+    /// stands on, not how to composite it. Always `false` for a run inside
+    /// [`V6HybridChromeLayout::menu_band`], which is never art.
+    pub over_art: bool,
+    /// Whether this run belongs to the bottom-anchored command strip (Journey's
+    /// menu, [`V6HybridChromeLayout::menu_band`]) rather than the main chrome
+    /// ring.
+    pub in_menu_band: bool,
+}
+
+/// The SAME cell layout the terminal Hybrid renderer uses for a v6 frame's
+/// chrome, published for a host that draws that chrome with its OWN fonts
+/// rather than the game's bitmap faces (SQ-1591) — the CELL/hybrid-path sibling
+/// of [`compose_v6_frame`]'s raster answer. Chrome text not on a picture is laid
+/// out in terminal cells at the host's own `cell_px`; only the picture scales.
+///
+/// Built through [`hybrid_chrome_layout`] from the exact classification and
+/// positioning machinery the real Hybrid draw uses
+/// ([`decompose_chrome_strips`], [`menu_band_strips`], [`ChromeRowOracle`],
+/// [`run_cell`], via [`build_hybrid_frame_with`] — the same core
+/// [`build_hybrid_frame`] itself calls for the terminal render) — so a host's
+/// answer cannot drift from what actually gets drawn for the SAME frame.
+///
+/// Deliberately scoped to a run's own ORIGIN, not `draw_chrome_text_strip`'s
+/// later neighbour-relative span adjustments (SQ-0747's rule-stretch, its
+/// claimed-word overwrite guard): both only ever move where a RULE fragment's
+/// edge sits relative to whatever else is on its row, which is a draw-time
+/// refinement of where a strip's own ground is painted, never of where a run's
+/// own first character lands — and it is that origin a host asks a `PxText`'s
+/// position for.
+pub struct V6HybridChromeLayout {
+    /// The story viewport — the region a host should leave to prose (its own or
+    /// the game's) rather than chrome — in the HOST's terminal cells.
+    pub viewport: Rect,
+    /// The same viewport in native v6 pixels (`vp_native`): the rect the story
+    /// text box was actually cut from, which is what a host's own picture
+    /// scaling must agree with.
+    pub viewport_native: (u32, u32, u32, u32),
+    /// The bottom-anchored command strip's own terminal-cell rect(s) — Journey's
+    /// menu band. Empty on every frame with no such band (most).
+    pub menu_band: Vec<Rect>,
+    /// Every chrome run the ring carries — the main ring's and the menu band's
+    /// alike — classified and positioned.
+    pub runs: Vec<V6HybridChromeRun>,
+    /// The click inverse for THIS SAME frame (SQ-1588's raster-path precedent,
+    /// [`V6Frame::menu_band_game_px`]): [`V6ClickMap::map_click`] maps a
+    /// terminal-cell click on whatever a host drew from `runs`/`viewport` back
+    /// to the game pixel the terminal renderer would resolve it to. Built
+    /// through [`crate::render::graphics::build_hybrid_click_map`] — the exact
+    /// mapping [`GraphicsRender::record_hybrid_click_map`] itself calls for the
+    /// TUI's own click handling, so the two cannot disagree.
+    pub click_map: crate::render::graphics::V6ClickMap,
+}
+
+/// A chrome run's terminal-cell origin within a hybrid TEXT strip, laid out the
+/// same way [`draw_chrome_text_strip`] positions it (SQ-1591): SQ-0543's
+/// consecutive-row packing (one game text row per terminal row, from the
+/// strip's own top), SQ-0509/SQ-0742's rule collapsing (reused via
+/// [`collapse_row_rules`] rather than restated — see that call's own doc for why
+/// a raw, uncollapsed run count would answer the SQ-0892 block-placement
+/// question wrong on exactly the screens that need it, Arthur's and Shogun's
+/// glyph-at-a-time status bars), SQ-0892's block placement
+/// ([`strip_native_origin`]), and SQ-1009/SQ-0783's lone box-glyph edge
+/// alignment ([`edge_glyph_col`]).
+fn strip_run_positions(
+    runs: &[crate::engine::PxText],
+    rect: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    native: (u16, u16),
+    cell: zvm::screen::V6Cell,
+) -> Vec<(crate::engine::PxText, i32, i32)> {
+    use std::collections::BTreeMap;
+    let font_h = i32::from(cell.h());
+    let game_row = |t: &crate::engine::PxText| (t.y.max(1) as i32 - 1) / font_h;
+    let first_row = runs.iter().map(game_row).min().unwrap_or(0);
+    let mut raw: BTreeMap<i32, Vec<&crate::engine::PxText>> = BTreeMap::new();
+    for t in runs {
+        raw.entry(rect.y as i32 + game_row(t) - first_row).or_default().push(t);
+    }
+    let mut by_row: BTreeMap<i32, Vec<(crate::engine::PxText, bool)>> = BTreeMap::new();
+    for (row, mut rr) in raw {
+        rr.sort_by_key(|t| t.x);
+        by_row.insert(row, collapse_row_rules(&rr, scale, cell_px, pane, cell));
+    }
+    let drawn: Vec<&crate::engine::PxText> = by_row.values().flat_map(|r| r.iter().map(|(t, _)| t)).collect();
+    let native_origin = strip_native_origin(&drawn, scale, cell_px, pane, cell);
+    let native_x0 = drawn.iter().map(|t| t.x.max(1) as i32 - 1).min().unwrap_or(0);
+    let mut out = Vec::new();
+    for (row, row_runs) in &by_row {
+        for (t, _rule) in row_runs {
+            let c = match native_origin {
+                Some(o) => o + ((t.x.max(1) as i32 - 1 - native_x0) as f32 / f32::from(cell.w())).round() as i32,
+                None => run_cell(t, scale, cell_px, pane, cell).0,
+            };
+            let c = match t.text.chars().next() {
+                Some(g) if t.text.chars().count() == 1 && is_box_glyph(g) => {
+                    edge_glyph_col(t.x.max(1) as u32 - 1, native.0 as u32, scale, cell_px, pane, cell).unwrap_or(c)
+                }
+                _ => c,
+            };
+            out.push((t.clone(), c, *row));
+        }
+    }
+    out
+}
+
+impl V6HybridChromeLayout {
+    fn from_frame(frame: &HybridFrame, pane: Rect, native: (u16, u16), cell_px: (u16, u16), cell: zvm::screen::V6Cell) -> Self {
+        let mut runs = Vec::new();
+        for s in &frame.strips {
+            if let ChromeStrip::Text(rect, text_runs) = s {
+                for (run, col, row) in strip_run_positions(text_runs, *rect, &frame.scale, cell_px, pane, native, cell) {
+                    runs.push(V6HybridChromeRun { run, col, row, over_art: false, in_menu_band: false });
+                }
+            }
+        }
+        let menu_band: Vec<Rect> = frame
+            .menu_strips
+            .iter()
+            .map(|s| match s {
+                ChromeStrip::Text(r, _) | ChromeStrip::Art(_, r) => *r,
+            })
+            .collect();
+        let menu_scale = frame.menu.as_ref().unwrap_or(&frame.scale);
+        for s in &frame.menu_strips {
+            if let ChromeStrip::Text(rect, text_runs) = s {
+                for (run, col, row) in strip_run_positions(text_runs, *rect, menu_scale, cell_px, pane, native, cell) {
+                    runs.push(V6HybridChromeRun { run, col, row, over_art: false, in_menu_band: true });
+                }
+            }
+        }
+        // SQ-0944: text the game printed ON its own artwork, positioned exactly
+        // like `stamp_runs_over_art` positions it — one `run_cell` per run, no
+        // strip bucketing (over-art runs are never grouped into a strip's own
+        // row layout, since the art strip they sit on carries no text band).
+        for t in &frame.over_art_runs {
+            let (col, row) = run_cell(t, &frame.scale, cell_px, pane, cell);
+            runs.push(V6HybridChromeRun { run: t.clone(), col, row, over_art: true, in_menu_band: false });
+        }
+        let click_scale = if frame.plan_is_menu { frame.menu.as_ref().unwrap_or(&frame.scale) } else { &frame.scale };
+        let click_map = crate::render::graphics::build_hybrid_click_map(pane, click_scale, native, cell_px, frame.packed_text.clone());
+        V6HybridChromeLayout { viewport: frame.viewport, viewport_native: frame.vp_native, menu_band, runs, click_map }
+    }
+}
+
+/// The Hybrid chrome layout for this frame, at the HOST's own text size
+/// (SQ-1591) — see [`V6HybridChromeLayout`] for the full shape and the raster
+/// sibling this answers for the hybrid path.
+///
+/// `cell_px` is the HOST's own font metrics, not lanthorn's picker's — that is
+/// the whole point of this function: a host drawing this chrome with its own
+/// font asks the ring to lay out at ITS cell size, and only the picture beneath
+/// it scales. `native` and `pane` match [`build_hybrid_frame`]'s own `native`
+/// and `area` — the v6 screen's native pixel extent and the story pane's cell
+/// rect (`render_story_pane`'s `area`).
+///
+/// `None` wherever the terminal Hybrid renderer itself would draw no chrome
+/// ring for this frame at all: no story window [`V6Layout::classify_windows`]
+/// could find, or a full-picture takeover
+/// ([`picture_takeover_reason`] — a host should fall back to its raster answer,
+/// [`compose_v6_frame`], on either).
+///
+/// Two picker-derived decisions [`build_hybrid_frame`] would otherwise ask a
+/// real `Picker` about have no host equivalent, so this decides them outright
+/// rather than asking one:
+/// - The v6 pixel lock is treated as APPLICABLE — `state.config.v6_pixel_lock`
+///   still gates whether it actually fires, but [`v6_pixel_lock_applies`]'s own
+///   `false` answer exists only for half-blocks, whose backend has no sub-cell
+///   resolution to snap. A host with its own scalable image renderer is never
+///   that backend, so it is never right to tell it the lock is inert.
+/// - Glyphs are treated as ALWAYS layerable over art, so every run gets a real
+///   `over_art` classification rather than [`backend_layers_glyphs_over_art`]'s
+///   gate silently emptying it (today's answer for kitty, sixel and iTerm2
+///   alike, because lanthorn's own placements are virtual and a glyph would
+///   erase one). A host composes its own text and its own picture in whatever
+///   order and however it likes — it is never virtual-placement-constrained the
+///   way a real terminal graphics protocol is — so the choice of whether to
+///   draw an over-art run as a glyph or bake it into the picture is the host's
+///   to make, not this function's to make for it by omission.
+///
+/// [`v6_pixel_lock_applies`]: crate::render::graphics::v6_pixel_lock_applies
+pub fn hybrid_chrome_layout(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    native: (u16, u16),
+    pane: Rect,
+    cell_px: (u16, u16),
+    state: &AppState,
+) -> Option<V6HybridChromeLayout> {
+    let story = layout.story?;
+    if picture_takeover_reason(story, &layout.chrome, layout.story_gfx, native).is_some() {
+        return None;
+    }
+    let (default_fg, default_bg) = v6_host_pair(state);
+    // `hkey` is a cache key for the TUI's per-frame replay (`v6_hybrid_gen`) and
+    // plays no part in the computation itself — this call is pure and always
+    // recomputes, exactly like `compose_v6_frame` does for the raster path, so
+    // any value here is fine; 0 is simplest.
+    let frame = build_hybrid_frame_with(0, layout, story, native, pane, cell_px, true, true, 0, default_fg, default_bg, state);
+    Some(V6HybridChromeLayout::from_frame(&frame, pane, native, cell_px, state.v6_text.cell()))
 }
 
 /// A cheap change key for the whole v6 raster composite (SQ-0469). It folds
@@ -5435,6 +6126,151 @@ enum BottomPlan {
     Extend,
     Menu,
     Frame,
+}
+
+/// [`BottomPlan`], published (SQ-1574): the four shapes a v6 title's Hybrid
+/// vertical extension can take. Identical to `BottomPlan` case for case — this
+/// exists only because that one is private, and a host that draws its own v6
+/// chrome under [`V6TextMode::RecordOnly`](crate::render::v6_layout::V6TextMode::RecordOnly)
+/// has no path to the TUI's `build_hybrid_frame` to read it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum V6BottomPlan {
+    /// No slack to reclaim, or the frame already encloses the story with
+    /// nothing below it to stretch — keep the centred letterbox.
+    Letterbox,
+    /// Top-anchor the story and grow it to the pane bottom; nothing below the
+    /// side art to stretch (Arthur).
+    Extend,
+    /// Top-anchor the story and grow it to the pane bottom, AND stretch the
+    /// side art flanking it to the pane bottom too (Zork Zero, Shogun).
+    Frame,
+    /// Top-anchor the story and chrome; bottom-anchor a text-only command
+    /// strip to the pane's own bottom edge, with the story filling the gap
+    /// between the two (Journey).
+    Menu,
+}
+
+/// [`V6BottomPlan`] plus what a host needs to lay a `Menu` band out without
+/// re-deriving [`menu_band_runs`]/[`menu_band_rows`] itself (SQ-1574).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V6HybridPlan {
+    pub kind: V6BottomPlan,
+    /// Whether this plan stretches the side art flanking the story down to
+    /// the pane's own bottom edge — `Frame` and `Menu` both do (SQ-0511), by
+    /// two different treatments (a plain stretch for `Frame`'s repeating
+    /// border art, a panel fill around Journey's picture for `Menu` — see
+    /// [`V6FrameInputs::bottom_anchor_menu`]); `Extend` and `Letterbox` leave
+    /// the flanks exactly as the game drew them.
+    pub stretch_flanks: bool,
+    /// `Menu` only: the game's own native-pixel row the band's top sits at —
+    /// the story window's own bottom edge. `None` for every other plan.
+    pub band_top_native: Option<u32>,
+    /// `Menu` only: the band's own height in GAME TEXT ROWS —
+    /// [`menu_band_rows`]'s answer, and what Hybrid draws chrome text at one
+    /// row per terminal row with (SQ-0543). `0` for every other plan.
+    pub band_rows: u16,
+    /// `Some(reason)` when Hybrid does not draw this frame as a chrome ring
+    /// or a coherent all-text painted screen at all, and instead falls all
+    /// the way through to the full RASTER composite (SQ-1584) — a picture
+    /// takeover with no ring to draw (`reason` is
+    /// [`picture_takeover_reason`]'s own string, e.g. `"art_paints_anything"`
+    /// for a full-screen canvas story window like FMV Poker's table), or no
+    /// story window at all over a painted ground (`"no_story_window"`, SQ-0711
+    /// — Scopa's card table, drawn entirely with `erase_window` fills). `None`
+    /// means Hybrid draws its own ring or all-text screen for this frame, and
+    /// `kind`/`stretch_flanks`/`band_top_native`/`band_rows` describe it as
+    /// before — this field only ADDS a signal, it never changes what those
+    /// report. See [`hybrid_raster_fallback_reason`], the one place both this
+    /// function and the TUI's own Hybrid render ask the question.
+    pub raster_fallback: Option<&'static str>,
+}
+
+/// [`hybrid_bottom_plan`], published for an embedding host (SQ-1574).
+///
+/// Builds the identical art-only obstruction canvas [`compose_v6_frame`]'s own
+/// raster composite already asks these same questions of
+/// (`build_graphics_canvas(&layout.chrome, native)`) and hands it to the same
+/// private decision, so this and the TUI's own Hybrid renderer — which calls
+/// this too, rather than `hybrid_bottom_plan` directly — cannot disagree.
+///
+/// `slack_native_rows` only ever gates one branch of the private decision —
+/// `Letterbox` when it is zero, every other plan otherwise — so a host with no
+/// pane to letterbox against may pass any nonzero placeholder to ask "if there
+/// were room to grow, which plan would this title take?".
+///
+/// `painted_ground` is the host's equivalent of `state.v6_paint` — whether the
+/// engine's own paint-mode fills (as opposed to picture placements) have laid
+/// down pixels only a raster composite can show. It only ever matters when
+/// `raster_fallback` on the result is what the caller is asking about
+/// (SQ-1584); a host that only reads `kind`/`stretch_flanks`/`band_top_native`/
+/// `band_rows` may pass any placeholder, because those never depended on it.
+pub fn hybrid_bottom_plan_for(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    native: (u16, u16),
+    cell: zvm::screen::V6Cell,
+    slack_native_rows: u32,
+    painted_ground: bool,
+) -> V6HybridPlan {
+    use crate::render::v6_layout as v6;
+    let takeover = layout.story.and_then(|s| picture_takeover_reason(s, &layout.chrome, layout.story_gfx, native));
+    let runs_have_text = paint_runs(&layout.chrome).any(|t| !t.text.trim().is_empty());
+    let raster_fallback = hybrid_raster_fallback_reason(layout.story.is_some(), takeover, runs_have_text, painted_ground);
+    let none = V6HybridPlan { kind: V6BottomPlan::Letterbox, stretch_flanks: false, band_top_native: None, band_rows: 0, raster_fallback };
+    let Some(story) = layout.story else { return none };
+    let gfx = v6::build_graphics_canvas(&layout.chrome, native);
+    let plan = hybrid_bottom_plan(story, &gfx, &layout.chrome, native, slack_native_rows, cell);
+    let kind = match plan {
+        BottomPlan::Letterbox => V6BottomPlan::Letterbox,
+        BottomPlan::Extend => V6BottomPlan::Extend,
+        BottomPlan::Frame => V6BottomPlan::Frame,
+        BottomPlan::Menu => V6BottomPlan::Menu,
+    };
+    let stretch_flanks = matches!(plan, BottomPlan::Frame | BottomPlan::Menu);
+    let (band_top_native, band_rows) = if matches!(plan, BottomPlan::Menu) {
+        let chrome_runs: Vec<&crate::engine::PxText> = paint_runs(&layout.chrome).collect();
+        let band = menu_band_runs(&chrome_runs, story);
+        (Some(story.y_px as u32 + story.h_px as u32), menu_band_rows(&band, cell))
+    } else {
+        (None, 0)
+    };
+    V6HybridPlan { kind, stretch_flanks, band_top_native, band_rows, raster_fallback }
+}
+
+/// Does Hybrid draw a chrome ring or its coherent all-text painted-screen path
+/// (SQ-0478) for this frame at all, or does it fall all the way through to the
+/// full RASTER composite? `render_story_pane_frame`'s own Hybrid arm is the ONE
+/// place this is decided, in two steps — no ring to draw at all (no story
+/// window, or [`picture_takeover_reason`] names one) is the first fall-through,
+/// and SQ-0711's painted-ground check decides whether the second stop (the
+/// chrome's own text runs, drawn as a coherent all-text screen) is even
+/// available — and this function is that same decision, shared rather than
+/// restated (SQ-1584), so [`hybrid_bottom_plan_for`] and that render cannot
+/// disagree.
+///
+/// `takeover` is [`picture_takeover_reason`]'s own answer for this frame
+/// (`None` when there is no story window at all too, mirroring
+/// `layout.story.and_then(...)`). `runs_have_text` is whether the CHROME's own
+/// text runs ([`paint_runs`]) have anything to paint — the SQ-0711 check looks
+/// at chrome only, never the story window's own content. `painted_ground` is
+/// whether the engine's paint-mode fills have laid down pixels only the raster
+/// composite can show.
+///
+/// `Some(reason)` names the arm that decided it — `takeover`'s own string, or
+/// `"no_story_window"` when there was none to take over. `None` means a ring or
+/// an all-text screen draws this frame, not the composite.
+fn hybrid_raster_fallback_reason(
+    story_present: bool,
+    takeover: Option<&'static str>,
+    runs_have_text: bool,
+    painted_ground: bool,
+) -> Option<&'static str> {
+    if story_present && takeover.is_none() {
+        return None; // the chrome ring draws this frame
+    }
+    if !painted_ground && runs_have_text {
+        return None; // the coherent all-text painted-screen path draws it
+    }
+    Some(takeover.unwrap_or("no_story_window"))
 }
 
 /// SQ-0570: is this frame a full-screen PICTURE takeover — a picture painted
@@ -7021,6 +7857,461 @@ fn bottom_anchor(
         }
     }
     out
+}
+
+/// SQ-1574: [`bottom_anchored_chrome`] for Journey's shape — which chrome windows
+/// carry ANY of the menu band's own runs, as indices into `chrome`.
+///
+/// `bottom_anchored_chrome` requires a window to lie WHOLLY below the story
+/// window — every run it carries has to be down there with it, which is what
+/// makes moving the window as a unit safe. Journey's shape breaks that premise:
+/// its whole frame (the picture surround, the side rules, the command menu) is
+/// one chrome grid spanning the full native screen, so the band's own runs share
+/// a window with runs that belong ABOVE the story window and must NOT move.
+/// [`bottom_anchor_menu_runs`] is what a qualifying window gets instead: only
+/// the runs at or below the story's bottom edge travel down, everything else —
+/// the window's own rect included — stays exactly where the game put it.
+///
+/// `None` when nothing qualifies — nothing for a caller to move.
+fn bottom_anchored_menu_band(
+    chrome: &[&crate::engine::PositionedWindow],
+    story: &crate::engine::PositionedWindow,
+) -> Option<Vec<usize>> {
+    let story_bottom = i32::from(story.y_px) + i32::from(story.h_px);
+    let out: Vec<usize> = chrome
+        .iter()
+        .enumerate()
+        .filter_map(|(i, w)| match &w.node {
+            WinNode::Grid(g) => g
+                .px_texts
+                .iter()
+                .any(|t| i32::from(t.y.max(1)) > story_bottom)
+                .then_some(i),
+            _ => None,
+        })
+        .collect();
+    (!out.is_empty()).then_some(out)
+}
+
+/// SQ-1574: [`bottom_anchor`] for one window found by [`bottom_anchored_menu_band`]
+/// — only the runs AT OR BELOW the story window's bottom edge move; every run
+/// above it, and the window's own rect, stay exactly where the game put them, so
+/// the picture surround and side rules above the story window are untouched.
+fn bottom_anchor_menu_runs(
+    w: &crate::engine::PositionedWindow,
+    story: &crate::engine::PositionedWindow,
+    rows: u32,
+    cell: zvm::screen::V6Cell,
+) -> crate::engine::PositionedWindow {
+    let story_bottom = i32::from(story.y_px) + i32::from(story.h_px);
+    let px = u16::try_from(rows).unwrap_or(u16::MAX);
+    let cells = u16::try_from(rows / u32::from(cell.h().max(1))).unwrap_or(u16::MAX);
+    let mut out = w.clone();
+    if let WinNode::Grid(g) = &mut out.node {
+        for t in &mut g.px_texts {
+            if i32::from(t.y.max(1)) > story_bottom {
+                t.y = t.y.saturating_add(px);
+                t.grow = t.grow.saturating_add(cells);
+            }
+        }
+    }
+    out
+}
+
+/// The tight opaque bounding box of a flank's own artwork within `gfx` — the
+/// GRAPHICS-only canvas, never the composited one (SQ-1577, this is
+/// [`menu_flank_panel`]'s oracle for the hybrid ring, ported to native pixel
+/// space) — over native columns `[nx0, nx1)`, plus the panel colour sampled
+/// from its own outer edge (the first opaque pixel on its top row, same rule
+/// `menu_flank_panel` uses). `None` when the flank carries no art at all —
+/// Journey's right-hand column, which is eight native pixels of border and
+/// nothing else.
+fn menu_flank_art(gfx: &image::RgbaImage, nx0: u32, nx1: u32) -> Option<(u32, u32, u32, u32, image::Rgba<u8>)> {
+    let nx1 = nx1.min(gfx.width());
+    if nx1 <= nx0 {
+        return None;
+    }
+    let mut top: Option<(u32, image::Rgba<u8>)> = None;
+    let (mut ax0, mut ax1, mut ay1) = (u32::MAX, 0u32, 0u32);
+    for y in 0..gfx.height() {
+        let mut row_first: Option<u32> = None;
+        for x in nx0..nx1 {
+            if gfx.get_pixel(x, y)[3] >= 128 {
+                row_first.get_or_insert(x);
+                ax0 = ax0.min(x);
+                ax1 = ax1.max(x);
+            }
+        }
+        if let Some(x) = row_first {
+            if top.is_none() {
+                top = Some((y, *gfx.get_pixel(x, y)));
+            }
+            ay1 = y;
+        }
+    }
+    let (ay0, panel) = top?;
+    if ax1 < ax0 {
+        return None;
+    }
+    Some((ax0, ay0, ax1 - ax0 + 1, ay1 - ay0 + 1, panel))
+}
+
+/// The native x-columns, within one text cell, a chrome run's own character
+/// actually paints — [`crate::native_font::TextFace::glyph_image`], the same
+/// table [`crate::render::bitfont::blit_glyph_styled`] draws the composite's
+/// real glyph pixels from, so a box-drawing character's one-pixel stroke
+/// answers as one pixel here too, never the cell's whole width (SQ-1578,
+/// [`fill_menu_flank_extension`]'s divider-fallback branch, ported from this
+/// same table rather than probed off the canvas — the canvas carries no
+/// glyph ink at all under [`V6TextMode::RecordOnly`], so a canvas probe could
+/// never agree between modes the way this table-based answer does).
+/// `None` when the glyph paints nothing (a bare space).
+fn glyph_ink_columns(face: &crate::native_font::TextFace, ch: char, style: u8) -> Option<(u32, u32)> {
+    let g = face.glyph_image(ch, style)?;
+    let (mut x0, mut x1) = (u32::MAX, 0u32);
+    for y in 0..g.height {
+        for x in 0..g.width {
+            if g.ink(x, y) {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+            }
+        }
+    }
+    (x1 >= x0).then_some((x0, x1 + 1))
+}
+
+/// The Menu plan's side flanks, extended into the rows the bottom-anchored
+/// band opened (SQ-1574) — for a host composing its own [`V6TextMode`] rather
+/// than drawing the TUI's own Hybrid cells and kitty image.
+///
+/// Two different things can share a flank column and need two different
+/// treatments, exactly as the TUI's own ring keeps them apart
+/// ([`menu_flank_panel`] does the picture, `flank_border_extension` the rule)
+/// rather than reaching for one rule for both (SQ-1577):
+///
+///   * **the flank's own ART**, if it carries any (Journey's picture column,
+///     [`menu_flank_art`]) — RECENTRED vertically in the space the extension
+///     opened, with the ground around it reflooded from the art's own panel
+///     colour. Smearing the picture's own bottom-row pixels down the gap,
+///     which is what this used to do, reads as vertical stripes because the
+///     picture's last row is not one flat colour; the TUI never does that —
+///     it re-places the whole picture and floods around it, never asks a
+///     canvas for a colour to extend.
+///   * **everything else** — a divider/rule column beside the art, or the
+///     whole flank on a border-only column (Journey's right-hand flank) —
+///     carries the nearest painted pixel above the gap down through it, same
+///     as before this quest. Under [`V6TextMode::RecordOnly`] a chrome run's
+///     background BLOCK is never actually painted (the host paints its own
+///     text), so the canvas has nothing there to sample; SQ-1576 falls back
+///     to the run's own resolved colour in that case — the block that WOULD
+///     have been painted, read off the model rather than off pixels the mode
+///     declined to draw.
+///
+///     **SQ-1593**: only the sub-case with a `nearest_run` to continue is
+///     text, and only that sub-case is imaged through `glyphs` — one chrome
+///     row at a time, through [`crate::render::v6_layout::GlyphSink::blit`],
+///     exactly like every real border row above the gap — so a host drawing
+///     its own chrome text gets this continuation as a run too, instead of
+///     always-painted pixels at lanthorn's own stroke width. The OTHER
+///     sub-case (no `nearest_run`, the canvas-scan fallback picking up a
+///     window's own uniform page fill) stays a bare, unconditional canvas
+///     paint in every mode — it is a page colour reaching down, not text —
+///     and so does the ink sub-case's own under-the-stroke ground fill.
+#[allow(clippy::too_many_arguments)]
+fn fill_menu_flank_extension(
+    canvas: &mut image::RgbaImage,
+    gfx: &image::RgbaImage,
+    story: &crate::engine::PositionedWindow,
+    native: (u16, u16),
+    canvas_h: u32,
+    face: &crate::native_font::TextFace,
+    chrome_runs: &[&crate::engine::PxText],
+    default_fg: image::Rgba<u8>,
+    default_bg: image::Rgba<u8>,
+    colors: &ColorScheme,
+    glyphs: &mut crate::render::v6_layout::GlyphSink,
+) {
+    use crate::render::v6_layout as v6;
+    let cell = face.cell();
+    let cell_h = u32::from(cell.h().max(1));
+    let story_bottom = story.y_px as u32 + story.h_px as u32;
+    if canvas_h <= story_bottom || story_bottom == 0 {
+        return;
+    }
+    let above = story_bottom.min(canvas.height());
+    let sx0 = (story.x_px as u32).min(native.0 as u32);
+    let sx1 = (story.x_px as u32 + story.w_px as u32).min(native.0 as u32);
+    let cw = u32::from(cell.w().max(1));
+    // The chrome window's own runs printed ABOVE the story bottom — a
+    // flank's divider/rule glyphs. The moved menu band's own runs start AT
+    // story_bottom and are painted back into `canvas` (at their new,
+    // relocated position) before this function ever runs, so they play no
+    // part in this fill.
+    let flank_runs: Vec<&crate::engine::PxText> =
+        chrome_runs.iter().copied().filter(|t| (t.y.max(1) as u32 - 1) < story_bottom).collect();
+
+    for (x0, x1) in [(0, sx0), (sx1, native.0 as u32)] {
+        let x1 = x1.min(canvas.width());
+        if x1 <= x0 {
+            continue;
+        }
+        // `avail_h` is exactly where the relocated menu band's own runs
+        // begin — `sbox.y + sbox.h` in the acceptance test's own terms —
+        // for EITHER flank, art or not: it is a property of the canvas, not
+        // of what this flank carries.
+        let extension = canvas_h.saturating_sub(u32::from(native.1));
+        let avail_h = story_bottom + extension;
+        // SQ-1577: the flank's own art, if it carries any, recentred in the
+        // taller column rather than smeared from its own bottom edge. This
+        // never touches real band pixels below `avail_h`; it only owns the
+        // gap the extension opened plus the rows the art already occupied
+        // above it. `art_cols` is the art's NEW columns, `ax0..ax1` — the
+        // divider loop below must never touch them: the recentred art can
+        // land anywhere in `0..avail_h`, including rows that are still
+        // "original screen" territory above `story_bottom`, and the
+        // divider loop's own canvas-scan fallback (below) does not know
+        // artwork from a real background — it would gladly pick up one of
+        // the art's own pixels there and smear IT across the whole
+        // remaining gap instead (measured: a single sky-blue pixel reaching
+        // every row down to the relocated band).
+        let mut art_cols: Option<(u32, u32)> = None;
+        if let Some((ax0, ay0, art_w, art_h, panel)) = menu_flank_art(gfx, x0, x1) {
+            let new_ay0 = if avail_h > art_h { (avail_h - art_h) / 2 } else { 0 };
+            let ax1 = (ax0 + art_w).min(canvas.width());
+            art_cols = Some((ax0, ax1));
+            // Clear the art's OLD footprint first, so the flood below can
+            // see it as open ground rather than protecting it as if it
+            // were a divider's own ink.
+            for y in ay0..(ay0 + art_h).min(canvas.height()) {
+                for x in ax0..ax1 {
+                    canvas.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+                }
+            }
+            // The panel's own extent is the WHOLE flank width, over BOTH
+            // the original screen rows (replacing the art's old position
+            // and its margin) and the gap the extension opened — but only
+            // where nothing is painted there already. That protects every
+            // divider or border rule this frame draws against whichever
+            // edge (Journey's r30/Amiga press has BOTH an outer rule on the
+            // pane's own left edge and an inner one against the story box;
+            // r83/PC has only the inner one) automatically, with no need to
+            // enumerate which column each one stands in: a divider's own
+            // ink is real, painted content, and this only ever fills a
+            // pixel the composite left transparent.
+            for y in 0..avail_h.min(canvas.height()) {
+                for x in x0..x1.min(canvas.width()) {
+                    if canvas.get_pixel(x, y)[3] == 0 {
+                        canvas.put_pixel(x, y, panel);
+                    }
+                }
+            }
+            for dy in 0..art_h {
+                let y = new_ay0 + dy;
+                if y >= canvas.height() {
+                    break;
+                }
+                for dx in 0..(ax1.saturating_sub(ax0)) {
+                    let p = *gfx.get_pixel(ax0 + dx, ay0 + dy);
+                    if p[3] >= 128 {
+                        canvas.put_pixel(ax0 + dx, y, p);
+                    }
+                }
+            }
+        }
+        let mut bx0 = x0;
+        while bx0 < x1 {
+            let bx1 = (bx0 + cw).min(x1);
+            if art_cols.is_some_and(|(a0, a1)| bx0 < a1 && bx1 > a0) {
+                bx0 = bx1;
+                continue;
+            }
+            // The nearest row above the gap where the WHOLE block is one
+            // uniform opaque colour — a real background (a window's own
+            // page fill, or a divider's reverse block), never a lone glyph
+            // STROKE's own ink: most of a character's cell is transparent
+            // around it, so a bare "any opaque pixel" test (what this used
+            // to be) could catch a single stray letter — or a horizontal
+            // rule character, whose own stroke legitimately fills its
+            // WHOLE cell on the one row it draws — far from any real
+            // background and smear ITS ink down the whole gap. A column
+            // the model actually has a run on (SQ-1576) answers from the
+            // run's own nearest-to-the-gap resolved colour instead — which
+            // can be `None`, a definite "nothing to carry down" rather than
+            // whatever a search happens to land on next — and only a
+            // column the model says NOTHING about at all falls back to
+            // asking the canvas for a genuinely uniform painted row (a
+            // window's own page fill, with no run in the way of it).
+            let nearest_run = flank_runs
+                .iter()
+                .filter(|t| {
+                    let tx0 = t.x.max(1) as u32 - 1;
+                    let tw = face.run_px_styled(&t.text, t.style);
+                    let ty0 = t.y.max(1) as u32 - 1;
+                    // …and touching the gap, with no dead space between —
+                    // a divider's own repeating glyph reaches to within one
+                    // cell of `story_bottom` by construction (SQ-1576). A
+                    // decorative rule far above it (Journey's top edge) is
+                    // not "the nearest thing above the gap" merely because
+                    // nothing else in this column happens to be recorded;
+                    // that column falls through to the ground/page fill
+                    // below instead, same as it always did.
+                    tx0 < bx1 && tx0 + tw > bx0 && ty0 + u32::from(cell.h()) >= story_bottom
+                })
+                .max_by_key(|t| t.y);
+            if let Some(t) = nearest_run {
+                let px0 = t.x.max(1) as u32 - 1;
+                let py = t.y.max(1) as u32 - 1;
+                let tw = face.run_px_styled(&t.text, t.style);
+                let (fg, bg) = v6::chrome_run_ink(t, default_fg, default_bg, colors, || {
+                    v6::region_has_opaque(gfx, px0, py, tw, u32::from(cell.h()))
+                });
+                // A real block (reverse-video, SQ-1576's original report)
+                // wins and keeps the whole cell's width — a reverse fill
+                // genuinely paints all of it. A plain glyph with none —
+                // Journey's Amiga press draws its dividers as `│`/`┐`/`└`
+                // line-drawing characters, not reverse blocks — carries only
+                // its own STROKE down instead (SQ-1578): `glyph_ink_columns`
+                // reads the same table `blit_glyph_styled` paints the
+                // composite's real glyph from, so a `│`'s one native pixel
+                // answers as one pixel here too, never the whole 8px cell
+                // the old fallback thickened it to. Either way this run
+                // reaches within one cell of `story_bottom` by construction
+                // (SQ-1576), so the fill keeps starting exactly there.
+                //
+                // SQ-1593: this continuation is CHROME TEXT, not a page fill,
+                // so it goes through `glyphs.blit` one chrome row (`cell_h`
+                // native pixels) at a time — the exact call every real
+                // border row above the gap already makes. That gates the
+                // paint on `V6TextMode` (nothing reaches the canvas under
+                // `RecordOnly`) and records a `V6TextRun` a host can draw
+                // itself, joining with its neighbours by the same rule any
+                // other chrome run does.
+                match bg {
+                    Some(block) => {
+                        // SQ-1592: `t` is the whole "row" this continuation
+                        // carries down, so its own reverse bit and text are
+                        // `row_is_reverse_bar`'s answer for it — which for a
+                        // lone reversed space (a rule/divider, the documented
+                        // "furniture" case above) is always `false`, matching
+                        // every other divider column. `over_art` is asked fresh
+                        // at each continuation row's own position: rows still
+                        // inside the original native canvas can sit on real
+                        // artwork the gap opened around, rows past it never can
+                        // (`region_has_opaque` reads no pixels past `gfx`'s own
+                        // bounds), so this can't be answered once for the whole
+                        // run the way the ink pair above was.
+                        let bar = row_is_reverse_bar(std::iter::once(*t));
+                        let mut y = story_bottom;
+                        while y < avail_h.min(canvas.height()) {
+                            let h = cell_h.min(avail_h - y).min(canvas.height() - y);
+                            let opaque = v6::region_has_opaque(gfx, bx0, y, bx1 - bx0, h);
+                            glyphs.blit(
+                                canvas,
+                                ' ',
+                                bx0,
+                                y,
+                                bx1 - bx0,
+                                h,
+                                fg,
+                                Some(block),
+                                t.style,
+                                face,
+                                v6::V6RunSource::Chrome,
+                                opaque,
+                                bar,
+                            );
+                            y += cell_h;
+                        }
+                    }
+                    None => {
+                        let idx = ((bx0.max(px0) - px0) / cw.max(1)) as usize;
+                        let glyph = t.text.chars().nth(idx).unwrap_or(' ');
+                        let gnx0 = px0 + idx as u32 * cw;
+                        let ink = glyph_ink_columns(face, glyph, t.style);
+                        // …and the CELL'S OWN GROUND under that stroke also
+                        // carries down, same as the stroke does — the window
+                        // page fill `grounds` painted for this run's cell
+                        // (SQ-0704) reaches every pixel of it in the
+                        // original rows, not merely the glyph's own ink, so
+                        // stopping short of it here would strand a page
+                        // colour at the gap's edge (visible wherever the
+                        // page is not the bare story page). Sampled from a
+                        // neighbour OUTSIDE the glyph's own span so it
+                        // agrees between `RecordOnly` and `Rasterise` — the
+                        // page fill is never gated on [`V6TextMode`], only
+                        // the glyph blit is, so a pixel the glyph cannot
+                        // reach reads the same in both. This part stays a
+                        // bare, unconditional canvas paint in EVERY mode
+                        // (SQ-1593 leaves it untouched): it is a page/ground
+                        // colour reaching down, not a chrome run's own text.
+                        if let Some((ix0, ix1)) = ink {
+                            let (ax0, ax1) = (gnx0 + ix0, gnx0 + ix1);
+                            let probe_y = story_bottom.saturating_sub(1).min(canvas.height().saturating_sub(1));
+                            let page = if bx0 < ax0 {
+                                Some(*canvas.get_pixel(bx0, probe_y))
+                            } else if bx1 > ax1 {
+                                Some(*canvas.get_pixel(bx1 - 1, probe_y))
+                            } else {
+                                None
+                            };
+                            if let Some(page) = page {
+                                for y in story_bottom..avail_h.min(canvas.height()) {
+                                    for x in bx0..bx1.min(canvas.width()) {
+                                        canvas.put_pixel(x, y, page);
+                                    }
+                                }
+                            }
+                            // The stroke itself carries down as a repeat of
+                            // the divider's own glyph, one chrome row at a
+                            // time, through `glyphs` (SQ-1593) — see above.
+                            // SQ-1592: same reasoning as the `Some(block)` arm —
+                            // `bar` is `t`'s own answer (a plain, non-reversed
+                            // rule glyph like `│` fails `row_is_reverse_bar`'s
+                            // reverse-bit check immediately), `over_art` is
+                            // asked fresh per continuation row.
+                            let bar = row_is_reverse_bar(std::iter::once(*t));
+                            let mut y = story_bottom;
+                            while y < avail_h.min(canvas.height()) {
+                                let h = cell_h.min(avail_h - y).min(canvas.height() - y);
+                                let opaque = v6::region_has_opaque(gfx, gnx0, y, cw, h);
+                                glyphs.blit(canvas, glyph, gnx0, y, cw, h, fg, None, t.style, face, v6::V6RunSource::Chrome, opaque, bar);
+                                y += cell_h;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // SQ-1578: capture the row the uniform fill was actually
+                // found at, not merely its colour — a border whose real
+                // content stops short of `story_bottom` (Journey's PC press
+                // draws its right bar as a window page fill that ends
+                // several rows above the story's own foot) used to leave a
+                // NOTCH between there and the gap this loop started filling
+                // from unconditionally.
+                //
+                // SQ-1593 leaves this branch untouched: it is a window's own
+                // PAGE colour reaching down, never a chrome run's text, and
+                // `V6TextMode::RecordOnly`'s own contract says the canvas
+                // still carries the page in every mode. Unconditional, not
+                // gated on transparency: `avail_h` is exactly where the
+                // relocated band's own real pixels begin, so nothing below
+                // this bound is ever real content to protect.
+                let block = (0..above).rev().find_map(|y| {
+                    let mut px = (bx0..bx1).map(|x| *canvas.get_pixel(x, y));
+                    let first = px.next()?;
+                    (first[3] > 0 && px.all(|p| p == first)).then_some((bx0, bx1, first, y))
+                });
+                if let Some((fx0, fx1, block, last_row)) = block {
+                    for y in (last_row + 1)..avail_h.min(canvas.height()) {
+                        for x in fx0..fx1.min(canvas.width()) {
+                            canvas.put_pixel(x, y, block);
+                        }
+                    }
+                }
+            }
+            bx0 = bx1;
+        }
+    }
 }
 
 /// Every paint run the game put BELOW its story window — the content of the
@@ -9601,6 +10892,7 @@ mod tests {
             margin_px: Some(40),
             rule: None,
             link: 0,
+            resource: None,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -9637,6 +10929,7 @@ mod tests {
             margin_px: None,
             rule: None,
             link: 0,
+            resource: None,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -9673,6 +10966,7 @@ mod tests {
             margin_px: None,
             rule: None,
             link: 0,
+            resource: None,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -9808,6 +11102,30 @@ mod tests {
         state.config.text_margin_y = 100;
         let got = reserve_text_margin(area, &state, fill, &mut buf);
         assert!(got.width >= 1 && got.height >= 1, "capped margin keeps >=1 cell: {got:?}");
+    }
+
+    /// SQ-1566: the machine pair is read off the model alone — `Some` only for a
+    /// Layered frame with a concrete page while colours are honoured.
+    #[test]
+    fn v6_machine_pair_reads_the_models_page_only_when_it_is_a_machine_page() {
+        use zvm::screen::ZColour;
+        let pack = crate::state::pack_zcolour;
+        let model = |root: WinNode, fg: ZColour, bg: ZColour| ScreenModel {
+            root,
+            status: StatusModel::HostManaged,
+            bg: pack(bg),
+            fg: pack(fg),
+            content_size: (0, 0),
+        };
+        let layered = || WinNode::Layered(Vec::new());
+        // §8.3.1: 9 is white, 11 medium grey — the Amiga's own pair (SQ-0740).
+        let (white, grey) = (ZColour::Standard(9), ZColour::Standard(11));
+        let amiga = model(layered(), white, grey);
+        assert_eq!(v6_machine_pair(&amiga, true), Some((pack(white), pack(grey))));
+        assert_eq!(v6_machine_pair(&amiga, false), None, "colours declined");
+        assert_eq!(v6_machine_pair(&model(layered(), white, ZColour::Default), true), None, "no page");
+        let buffer = WinNode::Buffer(BufferWindow { primary: true, ..Default::default() });
+        assert_eq!(v6_machine_pair(&model(buffer, white, grey), true), None, "not a v6 frame");
     }
 
     #[test]
@@ -10333,7 +11651,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 },
+                split: Split { fixed: 1 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -10505,7 +11823,7 @@ mod tests {
             WinNode::Grid(g)
         }
         fn pair(vertical: bool, split: u16, first: WinNode, second: WinNode) -> WinNode {
-            WinNode::Pair { vertical, split: Split { fixed: split }, border: true, key_bg: None, key_fg: None, first: Box::new(first), second: Box::new(second) }
+            WinNode::Pair { vertical, split: Split { fixed: split , fixed_px: None }, border: true, key_bg: None, key_fg: None, first: Box::new(first), second: Box::new(second) }
         }
         let root =
             pair(false, 123,
@@ -10602,7 +11920,7 @@ mod tests {
         panel.panel = true;
         let root = WinNode::Pair {
             vertical: true,
-            split: Split { fixed: 1 },
+            split: Split { fixed: 1 , fixed_px: None },
             border: false,
             key_bg: None,
             key_fg: None,
@@ -10635,7 +11953,7 @@ mod tests {
         let zm = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 },
+                split: Split { fixed: 1 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -10661,7 +11979,7 @@ mod tests {
         let two = ScreenModel {
             root: WinNode::Pair {
                 vertical: false,
-                split: Split { fixed: 10 },
+                split: Split { fixed: 10 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -10687,7 +12005,7 @@ mod tests {
         let side = ScreenModel {
             root: WinNode::Pair {
                 vertical: false, // horizontal pair = Left/Right split
-                split: Split { fixed: 20 },
+                split: Split { fixed: 20 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -10710,7 +12028,7 @@ mod tests {
         let below = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 22 },
+                split: Split { fixed: 22 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -10741,7 +12059,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: false,
-                split: Split { fixed: 6 },
+                split: Split { fixed: 6 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -10804,7 +12122,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 },
+                split: Split { fixed: 1 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -10813,7 +12131,7 @@ mod tests {
                 first: Box::new(WinNode::Grid(grid_with("STATUS"))),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
-                    split: Split { fixed: 10 },
+                    split: Split { fixed: 10 , fixed_px: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -10866,13 +12184,13 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: false,
-                split: Split { fixed: 8 },
+                split: Split { fixed: 8 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
                 first: Box::new(WinNode::Pair {
                     vertical: true,
-                    split: Split { fixed: 1 },
+                    split: Split { fixed: 1 , fixed_px: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -10881,7 +12199,7 @@ mod tests {
                 }),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
-                    split: Split { fixed: 1 },
+                    split: Split { fixed: 1 , fixed_px: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -10947,7 +12265,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 },
+                split: Split { fixed: 1 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
@@ -10989,14 +12307,14 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 },
+                split: Split { fixed: 1 , fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,
                 first: Box::new(WinNode::Grid(grid_with("ST"))),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
-                    split: Split { fixed: 4 },
+                    split: Split { fixed: 4 , fixed_px: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -11064,7 +12382,7 @@ mod tests {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
-            rule: None, link: 0,
+            rule: None, link: 0, resource: None,
         };
         let b = BufferWindow {
             win: 0,
@@ -11136,6 +12454,7 @@ mod tests {
             margin_px: None,
             rule: None,
             link: 11,
+            resource: None,
         };
         let b = BufferWindow {
             win: 0,
@@ -11278,7 +12597,7 @@ mod tests {
         // region must be everything right of the graphics — text + map.
         let model = model_with(WinNode::Pair {
             vertical: false,
-            split: Split { fixed: 10 },
+            split: Split { fixed: 10 , fixed_px: None },
             border: false,
             key_bg: None,
             key_fg: None,
@@ -11295,7 +12614,7 @@ mod tests {
         // Graphics banner (rows 0..3) over the text buffer; no map (TranscriptFull).
         let model = model_with(WinNode::Pair {
             vertical: true,
-            split: Split { fixed: 3 },
+            split: Split { fixed: 3 , fixed_px: None },
             border: false,
             key_bg: None,
             key_fg: None,
@@ -11312,7 +12631,7 @@ mod tests {
         // and the dialog centers over the whole frame.
         let model = model_with(WinNode::Pair {
             vertical: false,
-            split: Split { fixed: 10 },
+            split: Split { fixed: 10 , fixed_px: None },
             border: false,
             key_bg: None,
             key_fg: None,
@@ -11517,7 +12836,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 },
+                split: Split { fixed: 1 , fixed_px: None },
                 border: true,
                 key_bg: None,
                 key_fg: None,
@@ -11557,7 +12876,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: false,
-                split: Split { fixed: 6 },
+                split: Split { fixed: 6 , fixed_px: None },
                 border: true,
                 key_bg: None,
                 key_fg: None,
@@ -11597,7 +12916,7 @@ mod tests {
             let model = ScreenModel {
                 root: WinNode::Pair {
                     vertical,
-                    split: Split { fixed: if vertical { 1 } else { 6 } },
+                    split: Split { fixed: if vertical { 1 } else { 6 } , fixed_px: None },
                     border: false,
                     key_bg: None,
                     key_fg: None,
@@ -11641,7 +12960,7 @@ mod tests {
             let model = ScreenModel {
                 root: WinNode::Pair {
                     vertical,
-                    split: Split { fixed: if vertical { 1 } else { 6 } },
+                    split: Split { fixed: if vertical { 1 } else { 6 } , fixed_px: None },
                     // The game asks for a border, the way almost every Glk game does
                     // simply by not asking for `winmethod_NoBorder`.
                     border: true,
@@ -11692,7 +13011,7 @@ mod tests {
         let model = |vertical: bool| ScreenModel {
             root: WinNode::Pair {
                 vertical,
-                split: Split { fixed: if vertical { 1 } else { 6 } },
+                split: Split { fixed: if vertical { 1 } else { 6 } , fixed_px: None },
                 border: true,
                 key_bg: None,
                 key_fg: None,
@@ -11744,7 +13063,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 },
+                split: Split { fixed: 1 , fixed_px: None },
                 border: true,
                 key_bg: Some(0x0000_00FF),
                 key_fg: Some(0x00FF_0000),
@@ -11785,7 +13104,7 @@ mod tests {
         let make = |second: WinNode| ScreenModel {
             root: WinNode::Pair {
                 vertical: false, // left/right split → a │ separator
-                split: Split { fixed: 10 },
+                split: Split { fixed: 10 , fixed_px: None },
                 border: true,
                 key_bg: None,
                 key_fg: None,
@@ -11819,7 +13138,7 @@ mod tests {
         });
         let tree = WinNode::Pair {
             vertical: false,
-            split: Split { fixed: 10 },
+            split: Split { fixed: 10 , fixed_px: None },
             border: false,
             key_bg: None,
             key_fg: None,

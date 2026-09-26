@@ -277,6 +277,42 @@ pub struct MapGraph {
     /// rather than something keyed — there is only one story per graph — but it is the same kind of
     /// thing: a DECISION nothing can recompute, so it is carried in the save alongside them.
     suggestions_disabled: bool,
+    /// Structural generation counter (SQ-1540): bumped by every mutator below that changes what a
+    /// room/connector LAYOUT actually draws — a room or connection minted, a rename, a note, a
+    /// relabel, a delete, a re-key, a position/distortion write (which is what a re-tidy or
+    /// `move_region` applies), a layer's name/maze/view. Also (SQ-1544) a random-exit mark/unmark
+    /// that actually adds or removes the drawn `?` badge ([`MapGraph::mark_random_exit`],
+    /// [`MapGraph::unmark_random_exit`]) and a newly recorded random destination
+    /// ([`MapGraph::note_random_destination`]), since the badge prints that count — but NOT a
+    /// change to `random_inherited` alone, which is bookkeeping for
+    /// [`MapGraph::is_inherited_random_exit`] and never drawn. Never bumped by
+    /// [`MapGraph::set_current`]: that change is reported separately, through
+    /// [`MapGraph::current`] itself, so walking between rooms the map already knows does not look
+    /// like a fresh layout to a memo keyed on this.
+    ///
+    /// **Deliberately NOT bumped by [`MapGraph::mark_tried`]/[`MapGraph::unmark_tried`]** (SQ-1551
+    /// considered it and rejected it): `observe` calls `mark_tried` on every typed direction,
+    /// including one that bounced off a wall, and `state::tests::
+    /// a_foiled_move_shows_up_immediately_without_a_geometry_change` pins that a foiled move must
+    /// NOT invalidate the routed DRAWN-layout memo this counter gates — only the MATRIX view draws
+    /// a tried marker, and re-routing the whole map on every failed compass attempt would be a real
+    /// regression for that one cell. [`MapGraph::tried_gen`] is the separate counter for that.
+    ///
+    /// Not persisted — a fresh load is a fresh generation, and nothing compares this ACROSS a
+    /// save/restore, only within one running session (a render memo, an embedding host's own
+    /// redraw decision).
+    struct_gen: u64,
+    /// Tried-direction generation counter (SQ-1551), the matrix view's own analogue of
+    /// `struct_gen`: bumped by [`MapGraph::mark_tried`]/[`MapGraph::unmark_tried`] when the tried
+    /// set for a room actually changes — the `×`/`·` marker the matrix view draws. Kept separate
+    /// from `struct_gen` on purpose: a typed direction that bounces off a wall happens on every
+    /// foiled move, and folding it into `struct_gen` would make a non-terminal host (or this
+    /// crate's own routed-layout memo) think the DRAWN layout needs re-deriving when nothing about
+    /// room positions or connections changed. A caller that draws the matrix view watches this
+    /// counter instead of (or alongside) `struct_gen`.
+    ///
+    /// Not persisted, for the same reason `struct_gen` is not: fresh per running session.
+    tried_gen: u64,
 }
 
 impl Default for MapGraph {
@@ -293,6 +329,8 @@ impl Default for MapGraph {
             last_visited: BTreeMap::new(),
             seam_decisions: BTreeMap::new(),
             suggestions_disabled: false,
+            struct_gen: 0,
+            tried_gen: 0,
         }
     }
 }
@@ -365,6 +403,9 @@ impl MapGraph {
             // validate against the rooms, but going through the same setter as every other caller
             // keeps this one path the only place the flag is ever written.
             suggestions_disabled: false,
+            // A freshly-loaded graph is a fresh generation — see the field's own doc comment.
+            struct_gen: 0,
+            tried_gen: 0,
         }
     }
 
@@ -413,6 +454,35 @@ impl MapGraph {
         self.suggestions_disabled = disabled;
     }
 
+    /// The structural generation counter (SQ-1540) — see the field's own doc comment for exactly
+    /// which mutations bump it. A caller that memoizes a rendered layout (or a non-terminal host
+    /// deciding whether to re-derive its own view) keys its cache on this rather than re-deriving
+    /// the layout to find out whether anything changed.
+    pub fn struct_gen(&self) -> u64 {
+        self.struct_gen
+    }
+
+    /// Record that a layout-changing mutation just happened. Private: every caller reaches this
+    /// only through one of the mutators below, never directly, so the counter cannot be bumped (or
+    /// left unbumped) anywhere the field's own doc comment does not already account for.
+    fn touch_layout(&mut self) {
+        self.struct_gen = self.struct_gen.wrapping_add(1);
+    }
+
+    /// The tried-direction generation counter (SQ-1551) — see the field's own doc comment for why
+    /// this is separate from [`MapGraph::struct_gen`]. A caller that draws the matrix view's
+    /// `×`/`·` tried markers keys its own redraw decision on this rather than `struct_gen`, which a
+    /// foiled move deliberately does not bump.
+    pub fn tried_gen(&self) -> u64 {
+        self.tried_gen
+    }
+
+    /// Record that a tried-direction mutation just happened. Private for the same reason
+    /// [`MapGraph::touch_layout`] is.
+    fn touch_tried(&mut self) {
+        self.tried_gen = self.tried_gen.wrapping_add(1);
+    }
+
     pub fn room(&self, id: RoomId) -> Option<&Room> {
         self.rooms.get(&id)
     }
@@ -434,7 +504,16 @@ impl MapGraph {
     }
 
     pub fn set_room_layer(&mut self, id: RoomId, layer: LayerId) {
-        if let Some(r) = self.rooms.get_mut(&id) { r.layer = layer; }
+        let mut changed = false;
+        if let Some(r) = self.rooms.get_mut(&id) {
+            if r.layer != layer {
+                r.layer = layer;
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
+        }
     }
 
     pub fn rooms_in_layer(&self, layer: LayerId) -> Vec<RoomId> {
@@ -450,13 +529,23 @@ impl MapGraph {
     }
 
     pub fn set_layer_name(&mut self, layer: LayerId, name: String) {
-        if let Some(m) = self.layers.get_mut(&layer) { m.name = name; }
+        let mut changed = false;
+        if let Some(m) = self.layers.get_mut(&layer) {
+            if m.name != name {
+                m.name = name;
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
+        }
     }
 
     pub fn new_layer(&mut self, parent: Option<LayerId>, name: String) -> LayerId {
         let id = self.next_layer_id;
         self.next_layer_id += 1;
         self.layers.insert(id, LayerMeta::new(name, parent));
+        self.touch_layout();
         id
     }
 
@@ -469,8 +558,15 @@ impl MapGraph {
     /// The flag only decides the DEFAULT view, so a layer whose view the player chose by hand
     /// keeps that choice either way.
     pub fn set_layer_maze(&mut self, layer: LayerId, maze: bool) -> bool {
+        let mut changed = false;
         if let Some(m) = self.layers.get_mut(&layer) {
-            m.maze = maze;
+            if m.maze != maze {
+                m.maze = maze;
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
         }
         self.layer_is_maze(layer)
     }
@@ -487,13 +583,22 @@ impl MapGraph {
 
     /// Set (or clear, with `None`) the player's explicit view choice for `layer`.
     pub fn set_layer_view(&mut self, layer: LayerId, view: Option<MapView>) {
+        let mut changed = false;
         if let Some(m) = self.layers.get_mut(&layer) {
-            m.view = view;
+            if m.view != view {
+                m.view = view;
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
         }
     }
 
     pub fn remove_layer(&mut self, layer: LayerId) {
-        if layer != MAIN_LAYER { self.layers.remove(&layer); }
+        if layer != MAIN_LAYER && self.layers.remove(&layer).is_some() {
+            self.touch_layout();
+        }
     }
 
     pub fn next_layer_id(&self) -> LayerId { self.next_layer_id }
@@ -504,11 +609,13 @@ impl MapGraph {
 
     pub fn upsert_room(&mut self, id: RoomId, name: String) -> &mut Room {
         use std::collections::btree_map::Entry;
+        let mut changed = false;
         match self.rooms.entry(id) {
             Entry::Occupied(e) => {
                 let room = e.into_mut();
                 if room.name != name {
                     room.note_name_change(name);
+                    changed = true;
                 }
             }
             Entry::Vacant(e) => {
@@ -530,7 +637,11 @@ impl MapGraph {
                     aliases: Vec::new(),
                     seq,
                 });
+                changed = true;
             }
+        }
+        if changed {
+            self.touch_layout();
         }
         self.rooms.get_mut(&id).unwrap()
     }
@@ -561,17 +672,29 @@ impl MapGraph {
         // that shares its key nor be erased by one. Keeping both lets the graph hold the
         // contradiction honestly — the matrix view prefers the real destination and falls back
         // to `↩` — rather than silently picking a winner.
-        if dir == Direction::Unknown || origin == dest {
-            if !self.conns.iter().any(|c| c.origin == origin && c.dir == dir && c.dest == dest) {
+        let changed = if dir == Direction::Unknown || origin == dest {
+            if self.conns.iter().any(|c| c.origin == origin && c.dir == dir && c.dest == dest) {
+                false
+            } else {
                 self.conns.push(Connection { origin, dir, dest, distorted: false, weight });
+                true
             }
         } else if let Some(conn) =
             self.conns.iter_mut().find(|c| c.origin == origin && c.dir == dir && c.dest != c.origin)
         {
-            conn.dest = dest;
-            conn.weight = weight;
+            if conn.dest == dest && conn.weight == weight {
+                false
+            } else {
+                conn.dest = dest;
+                conn.weight = weight;
+                true
+            }
         } else {
             self.conns.push(Connection { origin, dir, dest, distorted: false, weight });
+            true
+        };
+        if changed {
+            self.touch_layout();
         }
     }
 
@@ -617,7 +740,11 @@ impl MapGraph {
         let before = self.conns.len();
         self.conns
             .retain(|c| c.dir != Direction::Unknown || !known.contains(&(c.origin, c.dest)));
-        before - self.conns.len()
+        let removed = before - self.conns.len();
+        if removed > 0 {
+            self.touch_layout();
+        }
+        removed
     }
 
     /// Give room `old` the id `new`, rewriting every reference to it (SQ-0526).
@@ -673,6 +800,7 @@ impl MapGraph {
                 (k, v)
             })
             .collect();
+        self.touch_layout();
         true
     }
 
@@ -683,11 +811,26 @@ impl MapGraph {
     /// saying anything new. A no-op for an unknown room.
     /// Record that `dir` was TYPED while standing in `id`, whether or not it moved the player
     /// (SQ-0391). Idempotent — a direction you try twice is still one tried direction.
+    ///
+    /// Bumps [`MapGraph::tried_gen`] (SQ-1551), NOT `struct_gen`, when this actually adds a new
+    /// tried direction: the matrix view draws a tried-direction marker for it, so a caller that
+    /// re-derives its own view only on a generation change would otherwise miss it — but
+    /// `observe` calls this on every typed direction including a foiled move (one that bounced off
+    /// a wall), and folding that into `struct_gen` would make the routed DRAWN-layout memo (and a
+    /// host keyed on the same counter) think room positions/connections need re-deriving on every
+    /// failed compass attempt, which they never do. See `struct_gen`'s own field doc for the test
+    /// that pins this. Re-marking an already-tried direction changes nothing drawn, so it does not
+    /// bump either counter — matching every other mutator here.
     pub fn mark_tried(&mut self, id: RoomId, dir: Direction) {
+        let mut newly_tried = false;
         if let Some(r) = self.rooms.get_mut(&id) {
             if !r.tried.contains(&dir) {
                 r.tried.push(dir);
+                newly_tried = true;
             }
+        }
+        if newly_tried {
+            self.touch_tried();
         }
     }
 
@@ -699,10 +842,17 @@ impl MapGraph {
     ///
     /// Only the TYPED record is dropped. A direction that also carries an edge out of `id` stays
     /// tried by [`MapGraph::is_tried`], because the edge is the stronger evidence and this cannot
-    /// (and must not) unmint it.
+    /// (and must not) unmint it. Bumps `tried_gen` (SQ-1551) when it actually clears a typed
+    /// record — the matrix view's marker for `dir` reverts from `×` to `·` when that happens.
     pub fn unmark_tried(&mut self, id: RoomId, dir: Direction) {
+        let mut changed = false;
         if let Some(r) = self.rooms.get_mut(&id) {
+            let before = r.tried.len();
             r.tried.retain(|d| *d != dir);
+            changed = r.tried.len() != before;
+        }
+        if changed {
+            self.touch_tried();
         }
     }
 
@@ -758,14 +908,22 @@ impl MapGraph {
             return;
         }
         self.mark_tried(id, dir);
+        let mut newly_marked = false;
         if let Some(r) = self.rooms.get_mut(&id) {
             if !r.random_exits.contains(&dir) {
                 r.random_exits.push(dir);
+                newly_marked = true;
             }
             // SQ-1370: this call is evidence about THIS direction — a probe disagreement, a
             // contradicted edge, a rename loop. Whatever the mark used to rest on, it rests on
             // that now, so a provisional inherited mark is promoted rather than left provisional.
             r.random_inherited.retain(|&d| d != dir);
+        }
+        // SQ-1544: the `?` random-stub badge is drawn from `random_exits`, so a mark that
+        // actually adds one changes what the map draws. `random_inherited` alone is not — see
+        // that field's doc comment — so clearing it here never bumps on its own.
+        if newly_marked {
+            self.touch_layout();
         }
     }
 
@@ -816,15 +974,26 @@ impl MapGraph {
     /// if the direction was never marked. Does NOT touch `tried` — the direction was and remains
     /// tried, whichever way this resolves.
     pub fn unmark_random_exit(&mut self, id: RoomId, dir: Direction) {
+        let mut changed = false;
         if let Some(r) = self.rooms.get_mut(&id) {
+            let before = r.random_exits.len();
             r.random_exits.retain(|&d| d != dir);
+            changed |= r.random_exits.len() != before;
             // SQ-1370: an inherited mark is a mark; clearing one clears what it rested on too.
             r.random_inherited.retain(|&d| d != dir);
             // The destinations recorded against this direction were evidence for a fact that no
             // longer holds — the direction is confirmed deterministic now, and re-marking it
             // later (SQ-1257 Phase 2's upgrade can be undone by a subsequent disagreement) starts
             // the list over rather than resuming a stale one from before the confirmation.
+            let before_dest = r.random_destinations.len();
             r.random_destinations.retain(|(d, _)| *d != dir);
+            changed |= r.random_destinations.len() != before_dest;
+        }
+        // SQ-1544: `random_exits` is the drawn `?` badge and `random_destinations` its printed
+        // count, so clearing either changes what the map draws; `random_inherited` alone does not
+        // (see `mark_random_exit`).
+        if changed {
+            self.touch_layout();
         }
     }
 
@@ -838,13 +1007,24 @@ impl MapGraph {
             return;
         }
         let Some(r) = self.rooms.get_mut(&id) else { return };
-        match r.random_destinations.iter_mut().find(|(d, _)| *d == dir) {
+        let added = match r.random_destinations.iter_mut().find(|(d, _)| *d == dir) {
             Some((_, dests)) => {
-                if !dests.contains(&dest) {
+                if dests.contains(&dest) {
+                    false
+                } else {
                     dests.push(dest);
+                    true
                 }
             }
-            None => r.random_destinations.push((dir, vec![dest])),
+            None => {
+                r.random_destinations.push((dir, vec![dest]));
+                true
+            }
+        };
+        // SQ-1544: the badge's printed destination count reads `random_destinations`, so a newly
+        // recorded destination changes what the map draws.
+        if added {
+            self.touch_layout();
         }
     }
 
@@ -968,45 +1148,87 @@ impl MapGraph {
     }
 
     pub fn room_mut_notes(&mut self, id: RoomId, notes: &str) {
+        let mut changed = false;
         if let Some(room) = self.rooms.get_mut(&id) {
-            room.notes = notes.into();
+            if room.notes != notes {
+                room.notes = notes.into();
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
         }
     }
 
     /// Set the grid position of a room. Used by the layout engine.
     pub fn set_pos(&mut self, id: RoomId, pos: (i32, i32)) {
+        let mut changed = false;
         if let Some(room) = self.rooms.get_mut(&id) {
-            room.pos = Some(pos);
+            if room.pos != Some(pos) {
+                room.pos = Some(pos);
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
         }
     }
 
     /// Clear the grid position of a room (set to None). Used by the layout engine
     /// to reset positions before a full re-derivation.
     pub fn clear_pos(&mut self, id: RoomId) {
+        let mut changed = false;
         if let Some(room) = self.rooms.get_mut(&id) {
-            room.pos = None;
+            if room.pos.is_some() {
+                room.pos = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
         }
     }
 
     /// Mark a connection as distorted by index. Used by the layout engine when a room
     /// cannot be placed at its preferred compass offset (collision).
     pub fn set_conn_distorted(&mut self, idx: usize, distorted: bool) {
+        let mut changed = false;
         if let Some(conn) = self.conns.get_mut(idx) {
-            conn.distorted = distorted;
+            if conn.distorted != distorted {
+                conn.distorted = distorted;
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
         }
     }
 
     /// Set or clear the label_override for a room.
     pub fn set_label_override(&mut self, id: RoomId, label: Option<String>) {
+        let mut changed = false;
         if let Some(room) = self.rooms.get_mut(&id) {
-            room.label_override = label;
+            if room.label_override != label {
+                room.label_override = label;
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
         }
     }
 
     /// Set the notes for a room.
     pub fn set_notes(&mut self, id: RoomId, notes: String) {
+        let mut changed = false;
         if let Some(room) = self.rooms.get_mut(&id) {
-            room.notes = notes;
+            if room.notes != notes {
+                room.notes = notes;
+                changed = true;
+            }
+        }
+        if changed {
+            self.touch_layout();
         }
     }
 
@@ -1017,7 +1239,11 @@ impl MapGraph {
     pub fn remove_connection(&mut self, origin: RoomId, dir: Direction) -> bool {
         let before = self.conns.len();
         self.conns.retain(|c| !(c.origin == origin && c.dir == dir));
-        self.conns.len() < before
+        let removed = self.conns.len() < before;
+        if removed {
+            self.touch_layout();
+        }
+        removed
     }
 
     /// A sub-graph containing only `layer`'s rooms and the connections whose BOTH
@@ -1056,6 +1282,8 @@ impl MapGraph {
             // A routing scratch graph never prompts, so it carries no prompt answers either.
             seam_decisions: BTreeMap::new(),
             suggestions_disabled: false,
+            struct_gen: 0,
+            tried_gen: 0,
         }
     }
 
@@ -1067,12 +1295,16 @@ impl MapGraph {
         if self.conns.iter().any(|c| c.origin == origin && c.dir == new) {
             return false;
         }
-        if let Some(conn) = self.conns.iter_mut().find(|c| c.origin == origin && c.dir == old) {
+        let changed = if let Some(conn) = self.conns.iter_mut().find(|c| c.origin == origin && c.dir == old) {
             conn.dir = new;
             true
         } else {
             false
+        };
+        if changed {
+            self.touch_layout();
         }
+        changed
     }
 }
 
@@ -1739,5 +1971,232 @@ mod probe_record_tests {
         assert_eq!(c.len(), 5, "eight compass points minus the three filtered away");
         assert_eq!(c[0], Direction::SE, "the surviving head of the priority order");
         assert!(g.probe_candidates(404, None).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod struct_gen_tests {
+    use super::*;
+
+    // ── SQ-1540: structural generation counter ──────────────────────────────────
+
+    #[test]
+    fn new_room_and_new_connection_bump_struct_gen() {
+        let mut g = MapGraph::new();
+        let gen0 = g.struct_gen();
+        g.upsert_room(1, "Hall".into());
+        assert_ne!(g.struct_gen(), gen0, "a new room must bump");
+        let gen1 = g.struct_gen();
+        g.upsert_room(2, "Cave".into());
+        assert_ne!(g.struct_gen(), gen1, "a second new room must bump");
+        let gen2 = g.struct_gen();
+        g.add_edge(1, Direction::N, 2);
+        assert_ne!(g.struct_gen(), gen2, "a new connection must bump");
+    }
+
+    #[test]
+    fn revisiting_a_room_with_the_same_name_does_not_bump_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        let gen = g.struct_gen();
+        g.upsert_room(1, "Hall".into()); // same name, same room — nothing changed
+        assert_eq!(g.struct_gen(), gen, "an unchanged re-observation must not bump");
+    }
+
+    #[test]
+    fn readding_the_same_edge_does_not_bump_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cave".into());
+        g.add_edge(1, Direction::N, 2);
+        let gen = g.struct_gen();
+        g.add_edge(1, Direction::N, 2); // same dest, same weight
+        assert_eq!(g.struct_gen(), gen, "re-adding an unchanged edge must not bump");
+    }
+
+    #[test]
+    fn set_notes_bumps_struct_gen_only_on_real_change() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        let gen = g.struct_gen();
+        g.set_notes(1, "a loose brick".into());
+        assert_ne!(g.struct_gen(), gen, "setting notes must bump");
+        let gen = g.struct_gen();
+        g.set_notes(1, "a loose brick".into()); // unchanged text
+        assert_eq!(g.struct_gen(), gen, "an unchanged note must not bump");
+    }
+
+    #[test]
+    fn set_label_override_bumps_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        let gen = g.struct_gen();
+        g.set_label_override(1, Some("Great Hall".into()));
+        assert_ne!(g.struct_gen(), gen, "renaming a room must bump");
+    }
+
+    #[test]
+    fn remove_connection_bumps_struct_gen_only_when_something_was_removed() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cave".into());
+        g.add_edge(1, Direction::N, 2);
+        let gen = g.struct_gen();
+        assert!(!g.remove_connection(1, Direction::S), "no such connection");
+        assert_eq!(g.struct_gen(), gen, "a no-op removal must not bump");
+        assert!(g.remove_connection(1, Direction::N));
+        assert_ne!(g.struct_gen(), gen, "deleting a real connection must bump");
+    }
+
+    #[test]
+    fn relabel_connection_bumps_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cave".into());
+        g.add_edge(1, Direction::N, 2);
+        let gen = g.struct_gen();
+        assert!(g.relabel_connection(1, Direction::N, Direction::NE));
+        assert_ne!(g.struct_gen(), gen, "relabelling an edge must bump");
+    }
+
+    #[test]
+    fn rekey_room_bumps_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        let gen = g.struct_gen();
+        assert!(g.rekey_room(1, 99));
+        assert_ne!(g.struct_gen(), gen, "re-keying a room must bump");
+    }
+
+    #[test]
+    fn layer_name_and_view_changes_bump_struct_gen() {
+        let mut g = MapGraph::new();
+        let gen = g.struct_gen();
+        g.set_layer_name(MAIN_LAYER, "Ground Floor".into());
+        assert_ne!(g.struct_gen(), gen, "renaming a layer must bump");
+        let gen = g.struct_gen();
+        g.set_layer_view(MAIN_LAYER, Some(MapView::Matrix));
+        assert_ne!(g.struct_gen(), gen, "changing a layer's view must bump");
+        let gen = g.struct_gen();
+        g.set_layer_view(MAIN_LAYER, Some(MapView::Matrix)); // unchanged
+        assert_eq!(g.struct_gen(), gen, "an unchanged view choice must not bump");
+    }
+
+    #[test]
+    fn set_pos_and_set_conn_distorted_bump_only_on_real_change() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cave".into());
+        g.add_edge(1, Direction::N, 2);
+        g.set_pos(1, (0, 0));
+        let gen = g.struct_gen();
+        g.set_pos(1, (0, 0)); // unchanged
+        assert_eq!(g.struct_gen(), gen, "an unchanged position write must not bump — this is what a re-tidy or move_region relies on to stay quiet when nothing actually moved");
+        g.set_pos(2, (1, 1)); // a real move, as a re-tidy applies
+        assert_ne!(g.struct_gen(), gen, "a real position write must bump");
+        let gen = g.struct_gen();
+        g.set_conn_distorted(0, false); // already false
+        assert_eq!(g.struct_gen(), gen, "an unchanged distortion flag must not bump");
+        g.set_conn_distorted(0, true);
+        assert_ne!(g.struct_gen(), gen, "a real distortion-flag change must bump");
+    }
+
+    #[test]
+    fn set_current_never_bumps_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cave".into());
+        let gen = g.struct_gen();
+        g.set_current(1);
+        g.set_current(2);
+        assert_eq!(g.struct_gen(), gen, "the current room is reported separately (MapGraph::current), never through struct_gen");
+    }
+
+    /// SQ-1544: `mark_random_exit`/`unmark_random_exit`/`note_random_destination` were scoped out
+    /// of SQ-1540 — they change a room's drawn `?` badge and its printed destination count, but
+    /// left `struct_gen` untouched. `random_inherited` alone is never drawn, so it must not bump.
+    #[test]
+    fn random_exit_marks_bump_struct_gen_only_when_the_drawn_badge_changes() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Forest".into());
+
+        let gen = g.struct_gen();
+        g.mark_random_exit(1, Direction::N);
+        assert_ne!(g.struct_gen(), gen, "a new `?` badge must bump");
+
+        let gen = g.struct_gen();
+        g.mark_random_exit(1, Direction::N); // already marked
+        assert_eq!(g.struct_gen(), gen, "re-marking an already-random direction must not bump");
+
+        let gen = g.struct_gen();
+        g.note_random_destination(1, Direction::N, 2);
+        assert_ne!(g.struct_gen(), gen, "a newly recorded destination changes the printed count and must bump");
+
+        let gen = g.struct_gen();
+        g.note_random_destination(1, Direction::N, 2); // same destination again
+        assert_eq!(g.struct_gen(), gen, "re-noting the same destination must not bump");
+
+        let gen = g.struct_gen();
+        g.unmark_random_exit(1, Direction::N);
+        assert_ne!(g.struct_gen(), gen, "clearing the `?` badge must bump");
+
+        let gen = g.struct_gen();
+        g.unmark_random_exit(1, Direction::N); // already unmarked
+        assert_eq!(g.struct_gen(), gen, "unmarking an already-clear direction must not bump");
+
+        // `random_inherited` is bookkeeping for `is_inherited_random_exit`, never drawn — a mark
+        // that only demotes it from provisional to earned must not look like a layout change.
+        g.mark_random_exit_inherited(1, Direction::S);
+        let gen = g.struct_gen();
+        g.mark_random_exit(1, Direction::S); // promotes the inherited mark, badge already drawn
+        assert_eq!(g.struct_gen(), gen, "promoting an inherited mark with no new badge must not bump");
+    }
+
+    /// SQ-1551: `mark_tried`/`unmark_tried` never touch `struct_gen` at all — see the field's own
+    /// doc comment for why (a foiled move must not look like a layout change to the routed DRAWN
+    /// memo). `tried_gen_tests` below covers the counter they DO bump.
+    #[test]
+    fn mark_tried_and_unmark_tried_never_bump_struct_gen() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        let gen = g.struct_gen();
+        g.mark_tried(1, Direction::N);
+        assert_eq!(g.struct_gen(), gen, "a tried mark is not a layout change");
+        g.unmark_tried(1, Direction::N);
+        assert_eq!(g.struct_gen(), gen, "nor is undoing one");
+    }
+}
+
+#[cfg(test)]
+mod tried_gen_tests {
+    use super::*;
+
+    // ── SQ-1551: tried-direction generation counter ──────────────────────────────
+
+    #[test]
+    fn mark_tried_bumps_tried_gen_only_on_a_new_direction() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        let gen = g.tried_gen();
+        g.mark_tried(1, Direction::N);
+        assert_ne!(g.tried_gen(), gen, "a genuinely new tried direction must bump");
+
+        let gen = g.tried_gen();
+        g.mark_tried(1, Direction::N); // same direction again
+        assert_eq!(g.tried_gen(), gen, "re-marking an already-tried direction must not bump");
+    }
+
+    #[test]
+    fn unmark_tried_bumps_tried_gen_only_when_it_clears_a_real_mark() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.mark_tried(1, Direction::N);
+        let gen = g.tried_gen();
+        g.unmark_tried(1, Direction::N);
+        assert_ne!(g.tried_gen(), gen, "clearing a real typed record must bump");
+
+        let gen = g.tried_gen();
+        g.unmark_tried(1, Direction::N); // already cleared
+        assert_eq!(g.tried_gen(), gen, "unmarking an already-clear direction must not bump");
     }
 }

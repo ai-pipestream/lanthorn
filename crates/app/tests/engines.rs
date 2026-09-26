@@ -17,6 +17,19 @@ mod fixture_paths;
 #[path = "suites/sq1462_hint_echo_contrast.rs"]
 mod sq1462_hint_echo_contrast;
 
+#[path = "suites/host_boot.rs"]
+mod host_boot;
+#[path = "suites/host_probe.rs"]
+mod host_probe;
+#[path = "suites/host_session.rs"]
+mod host_session;
+#[path = "suites/sq1564_command_bar_prompt.rs"]
+mod sq1564_command_bar_prompt;
+#[path = "suites/host_turn.rs"]
+mod host_turn;
+#[path = "suites/sq1586_host_hints_open.rs"]
+mod sq1586_host_hints_open;
+
 #[path = "suites/adf_disk_image.rs"]
 mod adf_disk_image;
 #[path = "suites/apple_disk_set_release.rs"]
@@ -162,6 +175,8 @@ mod zip_story_entries;
 mod v6_dump_windows_face;
 #[path = "suites/system_face_cascade.rs"]
 mod system_face_cascade;
+#[path = "suites/v6_glyph_image.rs"]
+mod v6_glyph_image;
 #[path = "suites/native_disk_sound.rs"]
 mod native_disk_sound;
 #[path = "suites/dialog_story_degradation.rs"]
@@ -173,4 +188,6 @@ mod lost_treasures_iso_dedupe;
 mod sq1515_kerkerkruip_restore_arrange;
 #[path = "suites/sq1529_kerkerkruip_grid_fg_ground.rs"]
 mod sq1529_kerkerkruip_grid_fg_ground;
+#[path = "suites/sq1565_kerkerkruip_title_rule_pixel_height.rs"]
+mod sq1565_kerkerkruip_title_rule_pixel_height;
 

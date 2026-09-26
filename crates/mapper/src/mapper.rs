@@ -33,6 +33,17 @@ pub struct Mapper {
     /// read) by whoever resolves it, so a suspicion nobody looked at cannot leak into the next
     /// move's decision.
     pub(crate) pending_random_exit_suspicion: Option<RandomExitSuspicion>,
+    /// Set by a caller that has decided this story should not be mapped at all
+    /// (SQ-1579) — a menu-driven game with no grammar (e.g. Journey), whose
+    /// v6 status band still occasionally paints room-shaped text a detector can
+    /// mistake for a location, with no verb-driven navigation to ever make a
+    /// map of in the first place. `false` by default — the ordinary case for
+    /// every parser game — so `Mapper::default()` and a loaded archive (whose
+    /// `PersistState` never carries this field; see `persist::from_json`) both
+    /// come back with mapping enabled unless a caller explicitly turns it off.
+    /// [`Self::observe`], [`Self::observe_moved`] and [`Self::observe_relocation`]
+    /// become no-ops once set, so the graph simply never gains a first room.
+    pub(crate) mapping_disabled: bool,
 }
 
 /// A move that CONTRADICTS what the map already believed about `(origin, dir)`, left for a caller
@@ -85,7 +96,35 @@ impl Mapper {
     /// CURRENT session — the passage just walked, and what the map made of it — and a restore has
     /// walked nothing yet, so both start empty.
     pub fn restored(graph: MapGraph) -> Self {
-        Mapper { graph, arrived_via: None, pending_suggestion: None, pending_random_exit_suspicion: None }
+        Mapper {
+            graph,
+            arrived_via: None,
+            pending_suggestion: None,
+            pending_random_exit_suspicion: None,
+            mapping_disabled: false,
+        }
+    }
+
+    /// Stop this mapper from ever recording a location (SQ-1579): a caller has
+    /// decided the story should not be mapped at all — see
+    /// [`Self::mapping_disabled`]'s doc comment. Idempotent; there is no
+    /// corresponding `enable`, because nothing here re-derives the decision —
+    /// a caller who wants mapping back constructs a fresh `Mapper` instead.
+    pub fn disable_mapping(&mut self) {
+        self.mapping_disabled = true;
+    }
+
+    /// The graph's structural generation counter (SQ-1540) — see [`MapGraph::struct_gen`]. A
+    /// convenience so a caller holding a `Mapper` (the app-facing type) need not reach into
+    /// `.graph` for a fact this basic.
+    pub fn struct_gen(&self) -> u64 {
+        self.graph.struct_gen()
+    }
+
+    /// The graph's tried-direction generation counter (SQ-1551) — see [`MapGraph::tried_gen`].
+    /// Same convenience as [`Mapper::struct_gen`], for the matrix view's own tried markers.
+    pub fn tried_gen(&self) -> u64 {
+        self.graph.tried_gen()
     }
 
     /// Observe the player's location after a turn. The conservative form: when the location has
@@ -181,6 +220,9 @@ impl Mapper {
     }
 
     fn observe_inner(&mut self, location: RoomId, name: &str, via: Option<Direction>, moved: bool) {
+        if self.mapping_disabled {
+            return;
+        }
         // Asked BEFORE the upsert, because after it every room is a room the map knows. Only this
         // moment can answer it, and the detector needs it: a region that grew by one room is worth
         // mentioning once, while walking back into a room already on the map is not (SQ-0853).
@@ -337,6 +379,9 @@ impl Mapper {
     /// cell (so it is visible but disconnected); an already-known room keeps its
     /// position. (SQ-0259)
     pub fn observe_relocation(&mut self, location: RoomId, name: &str) {
+        if self.mapping_disabled {
+            return;
+        }
         // A death/teleport is not a walked passage, so it leaves no arrival
         // direction for a bare peel to cut at — and nothing for the detector to
         // judge either: there is no crossing here to be on either side of.
@@ -472,6 +517,23 @@ mod tests {
         m.observe(1, "West of House", None);
         assert_eq!(m.graph.current(), Some(1));
         assert_eq!(m.graph.connections().len(), 0);
+    }
+
+    /// SQ-1579: once a caller has decided the story should not be mapped at
+    /// all — a menu-driven v6 story with no grammar, whatever a location
+    /// detector says — `observe`/`observe_moved`/`observe_relocation` must
+    /// stay no-ops for the rest of the session, even for an otherwise
+    /// perfectly ordinary-looking location.
+    #[test]
+    fn disable_mapping_makes_every_observation_a_no_op() {
+        let mut m = Mapper::default();
+        m.disable_mapping();
+        m.observe(1, "West of House", None);
+        m.observe(2, "Forest", Some(Direction::N));
+        m.observe_moved(3, "Up a Tree", Some(Direction::Up));
+        m.observe_relocation(4, "Resurrection Room");
+        assert!(m.graph.rooms().next().is_none(), "no room may ever be added once mapping is disabled");
+        assert_eq!(m.graph.current(), None);
     }
 
     #[test]
@@ -923,5 +985,87 @@ mod probed_passage_tests {
         );
         assert!(g.is_probed(2, Direction::E), "and the search's own progress came back with it");
         assert!(!g.is_probed(2, Direction::W));
+    }
+}
+
+/// SQ-1540: `Mapper::struct_gen` (which just reads [`crate::graph::MapGraph::struct_gen`] — see
+/// that type's own test module for the low-level mutators) through the app-facing wrappers this
+/// file adds over the graph, plus the one behaviour that actually matters for a memoized render:
+/// walking through territory the map already knows must NOT look like a fresh layout.
+#[cfg(test)]
+mod struct_gen_tests {
+    use super::*;
+
+    #[test]
+    fn rename_room_bumps_struct_gen() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        let gen = m.struct_gen();
+        m.rename_room(1, Some("Great Hall".into()));
+        assert_ne!(m.struct_gen(), gen, "renaming a room must bump");
+    }
+
+    #[test]
+    fn set_notes_bumps_struct_gen() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        let gen = m.struct_gen();
+        m.set_notes(1, "watch for the loose brick".into());
+        assert_ne!(m.struct_gen(), gen, "setting notes must bump");
+    }
+
+    #[test]
+    fn delete_connection_bumps_struct_gen() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        let gen = m.struct_gen();
+        assert!(m.delete_connection(1, Direction::N));
+        assert_ne!(m.struct_gen(), gen, "deleting a connection must bump");
+    }
+
+    #[test]
+    fn relabel_edge_bumps_struct_gen() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        let gen = m.struct_gen();
+        assert!(m.relabel_edge(1, Direction::N, Direction::NE));
+        assert_ne!(m.struct_gen(), gen, "relabelling an edge must bump");
+    }
+
+    #[test]
+    fn rekey_room_bumps_struct_gen() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        let gen = m.struct_gen();
+        assert!(m.rekey_room(1, 99));
+        assert_ne!(m.struct_gen(), gen, "re-keying a room must bump");
+    }
+
+    /// The acceptance-critical case (SQ-1540): once a passage is fully mapped both ways, walking
+    /// back and forth across it must not bump the counter — a memo keyed on this must stay warm
+    /// while the player is merely retracing known ground, or every step would force a re-route.
+    #[test]
+    fn walking_between_already_mapped_rooms_does_not_bump_struct_gen() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        m.observe(1, "Hall", Some(Direction::S)); // walk back, completing the reciprocal pair
+        assert_eq!(m.graph.current(), Some(1));
+
+        // Everything the map is ever going to learn about this pair of rooms is now known: both
+        // rooms, both directions, both positions. From here, walking it again and again must be
+        // silent.
+        let gen = m.struct_gen();
+        for _ in 0..5 {
+            m.observe(2, "Cave", Some(Direction::N));
+            m.observe(1, "Hall", Some(Direction::S));
+        }
+        assert_eq!(
+            m.struct_gen(),
+            gen,
+            "retracing an already-mapped passage must not bump struct_gen"
+        );
     }
 }

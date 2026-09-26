@@ -357,6 +357,17 @@ pub enum WinKind {
 pub struct Split {
     /// Size (rows or cols, per `vertical`) given to the first child.
     pub fixed: u16,
+    /// The first child's pixel-exact split size on the split axis, when it is
+    /// a graphics window that requested a specific pixel footprint through
+    /// Glk's window arrangement (fixed or proportional — gvm's
+    /// `window_pixel_size` resolves both) — the same number the game reads
+    /// back via `glk_window_get_size`, which `fixed` above necessarily
+    /// discards by rounding up to a whole cell. `None` when the first child
+    /// is a text window (cell-granular by nature, no sub-cell fact to carry)
+    /// or gvm reports none. The TUI's own cell-based layout still uses
+    /// `fixed` unchanged; this is an additional fact a pixel-aware host (or a
+    /// window's own canvas allocation) can use instead (SQ-1565).
+    pub fixed_px: Option<u32>,
 }
 
 /// A graphics-window leaf: a snapshot of the window's canvas for rendering.
@@ -1296,6 +1307,23 @@ pub trait Engine {
         None
     }
 
+    /// Every word the story's own static text holds — what it CAN print, read
+    /// from the story file once, not what it has printed so far (SQ-1553).
+    ///
+    /// It is what spells a truncated dictionary key out in full
+    /// ([`crate::vocab::StoryVocabulary::spell`]): a Version 3 dictionary stores
+    /// `lanter`, and the story's text says `lantern`. Asked once a session, at
+    /// [`crate::vocab::VocabState::get`].
+    ///
+    /// `None` — the default — for an engine with no reader for its text. The
+    /// Z-machine answers ([`crate::story_text::zmachine_words`]); a Glulx image's
+    /// strings are compressed through a decoding table and a Scott Adams
+    /// database keeps words shorter than any key worth spelling out, so both
+    /// fall back to the lexicon alone.
+    fn story_text_words(&self) -> Option<std::collections::BTreeSet<String>> {
+        None
+    }
+
     /// Split prose the way this story's own parser splits an input line
     /// (SQ-1116).
     ///
@@ -1385,7 +1413,7 @@ mod tests {
         let model = ScreenModel {
             root: WinNode::Pair {
                 vertical: true,
-                split: Split { fixed: 1 },
+                split: Split { fixed: 1, fixed_px: None },
                 border: false,
                 key_bg: None,
                 key_fg: None,

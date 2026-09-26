@@ -14,11 +14,11 @@ use app::state::{AppState, ExitTarget, Focus, SavesState, TranscriptFilter, Tran
 use mapper::mapper::Mapper;
 use ratatui::layout::Rect;
 
-use crate::engine_helpers::{apply_archive_state, restore_from_file, zvm_session_opt, RestoreOutcome};
+use app::engine_helpers::zvm_session_opt;
 use crate::reset::reset_game;
 use crate::{
-    combined_saves, format_rfc3339, handle_map_export, open_hints, reobserve_location,
-    scroll_for_match, should_prompt_save_on_quit, toggle_style_watch,
+    combined_saves, format_rfc3339, handle_map_export, map_view, open_hints, scroll_for_match,
+    should_prompt_save_on_quit, toggle_style_watch,
 };
 
 /// Handle a parsed `SlashOutcome` from either typed input or a key dispatch.
@@ -312,14 +312,22 @@ pub(crate) fn dispatch_slash_outcome(
             if let Some((bytes, kind, from_medium)) = picked {
                 report.resource = Some((kind, bytes.len()));
                 report.from_medium = from_medium;
-                if let Some(fmt) = app::state::sound_kind_to_format(kind) {
-                    report.format = Some(fmt);
+                if let Some(format) = app::state::sound_kind_to_format(kind) {
+                    report.format = Some(format);
                     // `/play-sound` is an explicit request to play something, so
                     // it opens the (otherwise lazy, SQ-1423) device itself rather
                     // than silently doing nothing the first time it's run.
                     let volume = state.config.volume;
-                    let backend = state.audio.get_or_insert_with(|| audio::AudioBackend::new(volume));
-                    report.sound_id = backend.play_sample(&bytes, fmt, 8, 1);
+                    let sink = state
+                        .audio
+                        .get_or_insert_with(|| app::host::sound::default_sound_sink(volume));
+                    report.sound_id = sink.play(app::host::sound::SampleStart {
+                        resource: n,
+                        bytes: &bytes,
+                        format,
+                        level: app::host::sound::SampleLevel::ZVolume(8),
+                        repeats: 1,
+                    });
                 }
             }
             for line in app::state::format_play_sound_report(&report) {
@@ -359,9 +367,9 @@ pub(crate) fn dispatch_slash_outcome(
                 // reports "saved" must not race a background write for an
                 // earlier turn onto the same file.
                 state.archive_worker.flush();
-                let (v6_pics, v6_display, v6_ground, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
+                let (v6_pics, v6_display, v6_ground, v6_diags) = app::engine_helpers::v6_save_payload(&mut *session);
                 for d in &v6_diags { state.note_v6_save(d); }
-                let (location, score) = crate::engine_helpers::save_summary(&*session, state);
+                let (location, score) = app::engine_helpers::save_summary(&*session, state);
                 let meta = app::archive::Meta {
                     format_version: app::archive::CURRENT_FORMAT_VERSION,
                     ifid: Some(ifid.to_string()),
@@ -401,24 +409,13 @@ pub(crate) fn dispatch_slash_outcome(
                     state.set_status("load failed: no save found with that name");
                 }
                 Some(ref path) => {
-                    let restore_outcome = restore_from_file(path, &mut *session);
+                    // The restore and everything the archive carries back is the
+                    // library's (`host::persist::restore_file`, SQ-1539).
+                    let restored = app::host::persist::restore_file(&mut *session, mapper, state, path, map_view(map_rect));
                     app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("restore_state({})", path.display()));
-                    match restore_outcome {
-                        Ok(RestoreOutcome::DescriptorCompleted(ac)) => {
-                            // An in-game @save archive carries the whole session
-                            // alongside its game bytes (SQ-0531); a bare .qzl has
-                            // nothing but the bytes.
-                            if let Some(ac) = ac {
-                                apply_archive_state(*ac, &mut *session, mapper, state);
-                            }
-                            reobserve_location(state, mapper, &*session, map_rect);
-                            state.set_status("restored");
-                        }
-                        Ok(RestoreOutcome::Resumed(ac)) => {
-                            apply_archive_state(*ac, &mut *session, mapper, state);
-                            reobserve_location(state, mapper, &*session, map_rect);
-                            state.set_status("loaded");
-                        }
+                    match restored {
+                        Ok(app::host::persist::Restored::GameSave { .. }) => state.set_status("restored"),
+                        Ok(app::host::persist::Restored::Resumed) => state.set_status("loaded"),
                         Err(e) => state.set_status(format!("load failed: {}", e)),
                     }
                 }
@@ -429,7 +426,10 @@ pub(crate) fn dispatch_slash_outcome(
             match load_map(&full) {
                 Some(m) => {
                     *mapper = m;
-                    state.bump_graph_gen(); // imported map replaced the graph → invalidate memo (SQ-0305)
+                    // A wholesale graph replacement: the new graph's `struct_gen` starts back at
+                    // 0, so a generation-number check alone could coincidentally match the stale
+                    // cache's — drop it outright instead (SQ-0305, SQ-1544).
+                    state.invalidate_map_render();
                     state.set_viewed_layer(None);
                     // A whole new graph switches the active layer to whatever the loaded map's
                     // current room sits on — route it through the same layer-switch recenter as
@@ -647,36 +647,31 @@ pub(crate) fn dispatch_slash_outcome(
             // heart, on for the one you just opened — so it belongs in the
             // per-game sidecar, exactly as `set-v6-pixel-lock` already does. The
             // settings screen still owns the global default new games inherit.
+            //
+            // The persistence itself — write, `state.config.guidance`, the
+            // one-run pin/release — is `app::host::set_guidance` (SQ-1549), so a
+            // non-terminal host gets the same rule without re-implementing it.
             use app::slash::GuidanceArg;
-            let want = match arg {
-                GuidanceArg::On => Some(true),
-                GuidanceArg::Off => Some(false),
-                GuidanceArg::Auto => None,
-                GuidanceArg::Toggle => Some(!state.config.guidance),
-            };
-            match app::styles::write_per_game_guidance(game_dir, want) {
-                Ok(()) => {
-                    // `auto` falls back to the global value captured at boot —
-                    // the one the sidecar overrode, and the only place it survives.
-                    state.config.guidance = want.unwrap_or(state.guidance_base);
-                    // A per-game choice must never reach the user's global
-                    // config.toml: pin it while it is in force, release on `auto`.
-                    match want {
-                        Some(v) => state.config.one_run.pin(app::config::keys::GUIDANCE, v),
-                        None => state.config.one_run.release(app::config::keys::GUIDANCE),
-                    }
-                    let label = match want {
-                        Some(true) => "on",
-                        Some(false) => "off",
-                        None => "auto",
+            match app::host::set_guidance(state, game_dir, arg) {
+                Ok(effective) => {
+                    let label = match arg {
+                        GuidanceArg::On => "on",
+                        GuidanceArg::Off => "off",
+                        GuidanceArg::Auto => "auto",
+                        GuidanceArg::Toggle => {
+                            if effective {
+                                "on"
+                            } else {
+                                "off"
+                            }
+                        }
                     };
                     // Said as META, not as an assist: this is a report of something
                     // lanthorn did, and an assist announcing that assists are now off
                     // would be the one line the switch could not silence.
                     state.push_transcript_internal(
                         &format!(
-                            "Lanthorn's Guiding Light: {label} (for this game — guidance = {})",
-                            state.config.guidance
+                            "Lanthorn's Guiding Light: {label} (for this game — guidance = {effective})"
                         ),
                         TranscriptKind::Meta,
                     );
@@ -1087,9 +1082,9 @@ pub(crate) fn write_named_save(
 ) -> Result<String, String> {
     // SQ-0588: the display list travels with every host save — an archive
     // written without it restores art that can never be recoloured.
-    let (v6_pics, v6_display, v6_ground, v6_diags) = crate::engine_helpers::v6_save_payload(session);
+    let (v6_pics, v6_display, v6_ground, v6_diags) = app::engine_helpers::v6_save_payload(session);
     for d in &v6_diags { state.note_v6_save(d); }
-    let (location, score) = crate::engine_helpers::save_summary(&*session, state);
+    let (location, score) = app::engine_helpers::save_summary(&*session, state);
     save_named(
         game_dir, ifid, name, app::archive::SaveTrigger::HostState, mapper, &session.save_state(),
         zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(),

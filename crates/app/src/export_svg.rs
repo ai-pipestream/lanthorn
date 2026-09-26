@@ -697,13 +697,14 @@ fn note_badge(at: (f64, f64), n: usize) -> String {
     )
 }
 
-/// The marker set for ONE travel of a connector: an `arrowhead_inward` into the room the travel
-/// arrives at, exactly like every other passage — plus, for a vertical (Up/Down) word, a
-/// lettered badge riding just behind the head on the same line, since a flat arrowhead cannot
-/// show "up" or "down" on its own (SQ-1362; before this the badge stood in for the head instead
-/// of beside it, and a portal line carried no arrival marker at all). A horizontal word instead
-/// gets the mismatched-word `tag` when the side the passage is drawn leaving by disagrees with
-/// its own compass word (a diagonal walked round the corner orthogonally, or a distorted edge).
+/// The marker set for ONE travel of a connector: for a real COMPASS word, an `arrowhead_inward`
+/// into the room the travel arrives at, plus the mismatched-word `tag` when the side the passage
+/// is drawn leaving by disagrees with its own compass word (a diagonal walked round the corner
+/// orthogonally, or a distorted edge). For a PORTAL word — Up/Down/In/Out/Unknown, anything
+/// [`direction::portal_kind`] answers `Some` for — a lettered badge ALONE, no arrowhead (SQ-1555):
+/// the badge already names the direction a flat compass head cannot show, and a portal glyph
+/// doubling as a compass arrow read as a claim about geometry the passage never made. (Between
+/// SQ-1362 and SQ-1555 a portal drew both a head and a badge; SQ-1555 dropped the head back out.)
 ///
 /// SQ-1346: every marker describing a travel sits at the end that travel ARRIVES at, beside the
 /// head that points into the room it enters — so `pos`/`u` here are always the ARRIVAL point and
@@ -726,7 +727,7 @@ fn draw_travel_arrival(
     room: RoomId,
     arrow_class: &str,
 ) {
-    if matches!(word, Direction::Up | Direction::Down) {
+    if direction::portal_kind(word).is_some() {
         // SQ-1366: the badge is always ON the line, riding the FINAL STRAIGHT RUN into the head —
         // never off to the side of it. A right angle before the badge is fine (the line can turn
         // wherever the router put its corner); a right angle INTO the head is not, because there
@@ -739,12 +740,14 @@ fn draw_travel_arrival(
         // there and reserved for later placements, never nudged sideways by `settle_badge`. A
         // collision here would mean the channel was not widened enough — the bug to fix, not a
         // reason to slide the badge off its line.
-        over.push_str(&arrowhead_inward(pos, u, arrow_class));
+        //
+        // No `arrowhead_inward` here (SQ-1555): a portal end never gets the compass head, only
+        // ends with a real compass word do — see this function's own doc comment.
         let root = (pos.0 + u.0 * PORTAL_BADGE_GAP, pos.1 + u.1 * PORTAL_BADGE_GAP);
         placer.block(badge_rect(root));
         let at = root;
         portal_ends.insert((room, word));
-        over.push_str(&badge(at, if word == Direction::Up { "U" } else { "D" }));
+        over.push_str(&badge(at, &direction::short_label(word).to_uppercase()));
         ext.add(at.0 - 8.0, at.1 - 8.0);
         ext.add(at.0 + 8.0, at.1 + 8.0);
         return;
@@ -885,25 +888,29 @@ struct CompassConnectorGeom {
     pts: Vec<(f64, f64)>,
 }
 
-fn render_svg_body(
-    rm: &RenderMap,
-    weights: &HashMap<(RoomId, Direction), PassageWeight>,
-    notes: &HashMap<RoomId, String>,
-) -> Option<(String, i32, i32)> {
+/// Every axis fact [`render_svg_body`] draws a layer FROM (SQ-1540): the terminal's own cell
+/// layout (`cols`/`rows`, [`boxes_axes_sized`] — untouched, still cell-domain), this file's own
+/// pixel geometry over it (`px_cols`/`px_rows`, [`PxAxis`], widened for a long name or a portal
+/// badge), each room's cell (`cell_of`), and the wrapped label lines a box was sized to hold
+/// (`labels`, `ghost_subtitles`). [`layer_layout`] (the public data function) computes room
+/// boxes and connector polylines from exactly this, the same value `render_svg_body` builds its
+/// own drawing from — so the two cannot disagree about where anything sits (SQ-1313's own rule,
+/// extended past SVG text to plain data).
+struct LayerAxes {
+    cols: PosTable,
+    rows: PosTable,
+    px_cols: PxAxis,
+    px_rows: PxAxis,
+    cell_of: HashMap<RoomId, (i32, i32)>,
+    labels: HashMap<RoomId, Vec<String>>,
+    ghost_subtitles: HashMap<RoomId, Vec<String>>,
+}
+
+/// Build [`LayerAxes`] for one `RenderMap`. `None` for an empty map — nothing to lay out.
+fn compute_layer_axes(rm: &RenderMap) -> Option<LayerAxes> {
     if rm.rooms.is_empty() {
         return None;
     }
-
-    // SQ-1384: every room THIS map draws that carries a note, numbered in READING ORDER —
-    // top-to-bottom, left-to-right by grid cell, which is the same order pixel position sorts to
-    // since a channel widened for a long name never reorders the cells either side of it. A
-    // ghost never carries its own note (its `id` is the REAL target room's, on another layer's
-    // panel — the note belongs there, not to the placeholder standing in for it here).
-    let mut noted_rooms: Vec<&mapper::render::RenderRoom> =
-        rm.rooms.iter().filter(|r| r.ghost.is_none() && notes.contains_key(&r.id)).collect();
-    noted_rooms.sort_by_key(|r| (r.cell.1, r.cell.0));
-    let note_number: HashMap<RoomId, usize> =
-        noted_rooms.iter().enumerate().map(|(i, r)| (r.id, i + 1)).collect();
 
     // ── Axes: the terminal's own, with each column widened to its widest room name ────────
     let labels: HashMap<RoomId, Vec<String>> =
@@ -930,7 +937,7 @@ fn render_svg_body(
     let (cols, rows) = boxes_axes_sized(&rm.plan, rm.bounds, BOX_W, &col_dims, BOX_H, &no_rows);
 
     let cell_of: HashMap<RoomId, (i32, i32)> = rm.rooms.iter().map(|r| (r.id, r.cell)).collect();
-    // SQ-1362/SQ-1366: which ROW and COLUMN channels carry a portal head+badge, so
+    // SQ-1362/SQ-1366/SQ-1555: which ROW and COLUMN channels carry a portal badge, so
     // `PxAxis::build` can grow only those to `PORTAL_MIN_CHANNEL_PX` rather than bumping every
     // channel on the map (see `PortalChannel`). Only a NON-merge connector's marker counts: a
     // merge stub's own departure badge (see below) stays small and needs no extra room, and only
@@ -939,7 +946,7 @@ fn render_svg_body(
     let mut wide_row_channels: std::collections::HashSet<i32> = std::collections::HashSet::new();
     let mut wide_col_channels: std::collections::HashSet<i32> = std::collections::HashSet::new();
     for conn in &rm.plan.connectors {
-        if conn.merge || !matches!(conn.exit_dir, Direction::Up | Direction::Down) {
+        if conn.merge || direction::portal_kind(conn.exit_dir).is_none() {
             continue;
         }
         match portal_channel(&cell_of, conn.dest, conn.entry) {
@@ -968,6 +975,419 @@ fn render_svg_body(
     // `PxAxis`. `cols`/`rows` themselves are untouched and still the terminal's own cell layout.
     let px_cols = PxAxis::build(&cols, CELL_W, &wide_col_channels);
     let px_rows = PxAxis::build(&rows, CELL_H, &wide_row_channels);
+
+    Some(LayerAxes { cols, rows, px_cols, px_rows, cell_of, labels, ghost_subtitles })
+}
+
+/// The final SVG-pixel polyline for one routed connector (SQ-1540): the box-edge snap, portal-
+/// arrival extension and pure-diagonal straight-line shortcut [`render_svg_body`]'s own connector
+/// pass applies before stroking it — moved here so [`layer_layout`] computes the identical path,
+/// not a second one that could drift from it. Returns `None` exactly where that pass's own
+/// `continue` did: the router produced no usable path, or a box rect is missing.
+///
+/// Returns the polyline plus the departure/arrival outward unit normals (`dep_u`/`arr_u`) — the
+/// box edge's cardinal normal for the ordinary dogleg, or the box corner's diagonal normal for a
+/// pure diagonal (SQ-1365) — that every marker riding this connector's ends is placed from.
+type ConnectorPolyline = (Vec<(f64, f64)>, (f64, f64), (f64, f64));
+
+fn connector_polyline(
+    conn: &mapper::route::RoutedConnector,
+    cols: &PosTable,
+    rows: &PosTable,
+    px_cols: &PxAxis,
+    px_rows: &PxAxis,
+    cell_of: &HashMap<RoomId, (i32, i32)>,
+) -> Option<ConnectorPolyline> {
+    // SQ-1555: the exact predicate `mapper::layer::planar_region` cuts a layer walk on, so this
+    // file's own notion of "portal" can never disagree with the mapper's.
+    let is_portal = direction::portal_kind(conn.exit_dir).is_some();
+    let rect_of = |id: RoomId| -> Option<(f64, f64, f64, f64)> {
+        cell_of.get(&id).map(|&c| box_px_rect(cols, rows, px_cols, px_rows, c))
+    };
+
+    // `None` for the diagonal glyph set: half-diagonal corner stubs are a terminal line-art
+    // affair, and the orthogonal reading is exactly what the router laid out either way — see
+    // `render_svg_body`'s own connector-loop comment for the full reasoning (unchanged, just
+    // moved here so the two passes cannot compute it differently).
+    let pure_diag = !conn.merge
+        && conn.points.len() == 3
+        && conn.entry_corner.is_some()
+        && direction::is_diagonal(conn.exit_dir);
+    let pure_diag_corners = pure_diag
+        .then(|| Some((rect_of(conn.origin)?, rect_of(conn.dest)?, conn.entry_corner?)))
+        .flatten();
+
+    if let Some((ro, rd, entry_corner)) = pure_diag_corners {
+        let op = px_corner(ro, conn.exit_dir);
+        let dp = px_corner(rd, entry_corner);
+        return Some((vec![op, dp], outward_diag(conn.exit_dir), outward_diag(entry_corner)));
+    }
+
+    let plot = plot_connector(conn, cols, rows, None)?;
+    if plot.path.len() < 2 {
+        return None;
+    }
+    let mut pts: Vec<(f64, f64)> = plot.path.iter().map(|&c| cell_px(px_cols, px_rows, c)).collect();
+
+    // Snap the two ends onto their boxes' pixel edges (see `snap_to_edge`).
+    if let Some(r) = rect_of(conn.origin) {
+        pts[0] = snap_to_edge(pts[0], r, conn.exit);
+    }
+    if !conn.merge {
+        if let Some(r) = rect_of(conn.dest) {
+            let last = pts.len() - 1;
+            pts[last] = snap_to_edge(pts[last], r, conn.entry);
+        }
+    }
+    // SQ-1366: every portal arrival's final leg must be a real straight run, long enough for the
+    // badge that rides it — see `extend_portal_arrival`. A merge stub has no arrival end of its
+    // own (its `pts[last]` is a trunk junction, not a room edge) so it is excluded here exactly as
+    // it is from `draw_travel_arrival`. The start end is extended only for a reciprocal.
+    if is_portal && !conn.merge {
+        extend_portal_arrival(&mut pts, false, outward(conn.entry));
+        if conn.reciprocal {
+            extend_portal_arrival(&mut pts, true, outward(conn.exit));
+        }
+    }
+    Some((pts, outward(conn.exit), outward(conn.entry)))
+}
+
+// ── Layer layout as data (SQ-1540) ──────────────────────────────────────────────
+//
+// A non-terminal host (a GUI, a network server, a mobile FFI binding — the embedding series
+// SQ-1540 belongs to) needs the same room boxes and routed connector polylines this file draws
+// as SVG text, but as plain data it can draw with its own toolkit. `layer_layout` builds that
+// from exactly the geometry `render_svg_body` draws its own markup from — [`compute_layer_axes`]
+// for the boxes, [`connector_polyline`] for the routed lines — so a box or polyline read from
+// here can never disagree with the one the SVG export strokes for the same map (this file's own
+// SQ-1313 rule, "there is no second router to drift from the first", extended past SVG text to
+// data). Coordinates are the RAW, un-shifted local SVG-pixel space `box_px_rect`/
+// `connector_polyline` compute — the literal numbers `render_svg_body` writes into its own
+// `<rect>`/`<path d="M …">` attributes, before its `ox`/`oy` shift wraps them in a translated
+// `<g>` (see [`LayerLayout::extent`]'s own doc comment for why this stays un-shifted).
+
+/// What a room box stands for when it is a cross-layer GHOST (SQ-1356): the real room's own
+/// layer, and that layer's display name — see [`mapper::render::GhostRoom`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutGhost {
+    pub layer: mapper::layer::LayerId,
+    pub layer_name: String,
+}
+
+/// One room's drawn box for one layer (SQ-1540) — the same rect, in the same units,
+/// [`render_svg_of`] draws it at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutRoomBox {
+    pub id: RoomId,
+    /// The label as drawn — a ghost's own "to "/"from "/plain reading already baked in (the same
+    /// [`mapper::render::RenderRoom::label`] the SVG wraps onto its box), not the per-line wrap.
+    pub label: String,
+    /// `(x, y, w, h)` in SVG pixel units.
+    pub rect: (f64, f64, f64, f64),
+    pub current: bool,
+    pub has_notes: bool,
+    /// `Some` when this box stands in for a room on ANOTHER layer rather than one of this layer's
+    /// own (SQ-1356) — `id` above is that room's own real id either way.
+    pub ghost: Option<LayoutGhost>,
+}
+
+/// One routed connector's polyline for one layer (SQ-1540) — the exact turning-point path
+/// [`render_svg_of`] strokes: post box-edge snap, post portal-arrival extension, post the pure-
+/// diagonal straight-line shortcut (see [`connector_polyline`], which this and the SVG draw pass
+/// both compute it through) — not the raw cell-domain [`mapper::route::RoutedConnector::points`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutConnector {
+    pub origin: RoomId,
+    pub dest: RoomId,
+    /// Turning points, first to last, in SVG pixel units — the polyline to stroke as-is.
+    pub points: Vec<(f64, f64)>,
+    /// This connector's own outgoing compass/portal direction; the far end's, when a reciprocal
+    /// pairing collapsed two edges into this one line (`None` for a plain one-way).
+    pub exit_dir: Direction,
+    pub entry_dir: Option<Direction>,
+    /// Two-headed: draw an arrow at both ends, not just `points`'s last.
+    pub reciprocal: bool,
+    pub distorted: bool,
+    /// How firm a claim this passage makes about geometry — `Hard` when built with no
+    /// [`MapGraph`] to read it from ([`render_svg`]'s own headless path draws every passage
+    /// plain, same as this does).
+    pub weight: PassageWeight,
+    /// A non-compass connector (SQ-1555) — today only Up/Down actually route to a real line with
+    /// a `U`/`D` badge riding it (In/Out/Unknown never route at all — see [`LayoutPortalMarker`]),
+    /// but this is `exit_kind.is_some()`, the same predicate [`mapper::layer::planar_region`]
+    /// cuts a layer walk on, so it stays correct if that ever changes.
+    pub is_portal: bool,
+    /// This connector's own `exit_dir` reduced to its portal family (SQ-1555) — `None` for an
+    /// ordinary compass exit. A host badges a `Some` end by its kind and, per
+    /// [`mapper::direction::portal_kind`]'s own rule (mirrored by this file's SVG draw pass),
+    /// never draws the normal compass arrowhead there — the portal glyph already carries the
+    /// direction.
+    pub exit_kind: Option<mapper::direction::PortalKind>,
+    /// The far end's own portal family, mirroring `entry_dir` — `None` both when there is no
+    /// far-end marker at all (a plain one-way's bare origin end, `entry_dir` is also `None` then)
+    /// and when the far end's own word is a real compass direction; `Some` when that word is a
+    /// portal one. Read `entry_dir.is_some()` for "does this end carry a marker" and this field
+    /// for "does that marker get an arrowhead" — the same split [`LayoutConnector::exit_kind`]
+    /// makes for the near end.
+    pub entry_kind: Option<mapper::direction::PortalKind>,
+    /// A multi-edge MERGE STUB (see [`mapper::route::RoutedConnector::merge`]): this line ends on
+    /// another connector's trunk, not a room edge — it has a departure marker but no arrival end
+    /// of its own.
+    pub merge: bool,
+    /// Other directions this SAME room pair also connects by, collapsed onto this one line
+    /// instead of drawing their own (SQ-1562, exposing [`mapper::route::RoutedConnector::secondary_exit`]
+    /// — a passage the field report's Canyon View↔Rocky Ledge shape hid completely: an Up/Down
+    /// riding a pair that also has a compass exit used to have no trace anywhere in this struct).
+    /// One entry per direction folded at the EXIT end (`origin`) — `render_svg_body`'s own SQ-1368
+    /// badge pass rides this connector's own `points`'s LAST point to draw each one's marker (a
+    /// lettered badge for a direction [`mapper::direction::portal_kind`] answers `Some` for,
+    /// otherwise a plain compass tag), so a host wanting the same badge reads that same point as
+    /// the anchor rather than re-deriving one. Always empty for a merge stub (`merge` above) —
+    /// its `points`'s ends are trunk junctions, not room edges, so SQ-1368's own pass never badges
+    /// one either.
+    pub secondary_exit: Vec<Direction>,
+    /// Directions folded at the ENTRY end (`dest`) — mirrors `secondary_exit`, anchored at this
+    /// connector's `points`'s FIRST point instead.
+    pub secondary_entry: Vec<Direction>,
+}
+
+/// An Up/Down/In/Out passage with no drawn line of its own — a lettered badge only (SQ-1540).
+/// Excludes any direction a [`LayoutConnector`] already draws a marker for (mirrors
+/// `render_svg_body`'s own `portal_ends` bookkeeping, built by its connector and stacked-exit
+/// passes, closely enough for every case but one rare defensive fallback with no resolved
+/// landing point — see that pass's own comment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutPortalMarker {
+    pub room: RoomId,
+    pub direction: Direction,
+    pub dest: RoomId,
+    /// The destination's display name, when known ([`mapper::router::RoutedEdge::dest_label`]).
+    pub dest_label: Option<String>,
+    /// The destination's own layer, when it is ALSO drawn as a ghost box on this same layer
+    /// (SQ-1356) — a same-layer destination, or one not yet resolved to a ghost, reads `None`.
+    pub dest_layer: Option<mapper::layer::LayerId>,
+}
+
+/// An unexplored `?` random-exit mark (SQ-1540) —
+/// [`mapper::render::RenderRoom::random_stubs`] filtered to the directions
+/// [`mapper::router::side_for`] actually gives a box side to anchor from (mirrors the draw
+/// pass's own `let Some(side) = … else { continue }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutStub {
+    pub room: RoomId,
+    pub direction: Direction,
+    /// Distinct destinations this random exit has been seen to land in.
+    pub count: usize,
+}
+
+/// One layer's full drawn layout as data (SQ-1540): the room boxes and routed connector
+/// polylines [`render_svg_of`] draws, the portal markers and unexplored stubs it badges, and the
+/// bounding box the rooms and connectors occupy. Built by [`layer_layout`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LayerLayout {
+    pub rooms: Vec<LayoutRoomBox>,
+    pub connectors: Vec<LayoutConnector>,
+    pub portals: Vec<LayoutPortalMarker>,
+    pub stubs: Vec<LayoutStub>,
+    /// `(min_x, min_y, max_x, max_y)` over every room box and connector point, in the same RAW
+    /// (un-shifted) space `rooms`/`connectors` are given in — NOT the same extent
+    /// `render_svg_body` normalizes its own markup against, which also includes every badge, tag
+    /// and note this function never draws and so can reach a little further in each direction.
+    /// A host wanting the drawn SVG's own canvas size reads the document's `width`/`height`
+    /// instead; this is room/line geometry only.
+    pub extent: (f64, f64, f64, f64),
+}
+
+/// The room boxes, routed connector polylines, portal markers and unexplored stubs one layer of
+/// `rm` draws, as plain data (SQ-1540) — everything [`render_svg_of`] draws for `rm` reduced to
+/// its geometry and its facts, with no SVG markup, no text placement and no badge-collision
+/// avoidance (those are presentational choices a host free to lay out its own labels does not
+/// need). `graph` supplies passage weight exactly as [`render_svg_of`] reads it — `None` draws
+/// (and reports) every passage as `Hard`, matching [`render_svg`]'s own headless default.
+///
+/// `None` for an empty map — nothing to lay out.
+pub fn layer_layout(rm: &RenderMap, graph: Option<&MapGraph>) -> Option<LayerLayout> {
+    let axes = compute_layer_axes(rm)?;
+    let LayerAxes { cols, rows, px_cols, px_rows, cell_of, .. } = axes;
+    let weights = graph.map(weight_table).unwrap_or_default();
+
+    let mut ext = Extent::default();
+
+    let mut rooms = Vec::with_capacity(rm.rooms.len());
+    for room in &rm.rooms {
+        let rect = box_px_rect(&cols, &rows, &px_cols, &px_rows, room.cell);
+        ext.add_rect(rect.0, rect.1, rect.2, rect.3);
+        let ghost = room
+            .ghost
+            .as_ref()
+            .map(|g| LayoutGhost { layer: g.layer, layer_name: g.layer_name.clone() });
+        rooms.push(LayoutRoomBox {
+            id: room.id,
+            label: room.label.clone(),
+            rect,
+            current: room.is_current,
+            has_notes: room.has_notes,
+            ghost,
+        });
+    }
+
+    // (room, dir) pairs a `LayoutConnector` already carries a marker for — see the struct's own
+    // doc comment. Built alongside the connectors below from the same facts `render_svg_body`'s
+    // `portal_ends` set reads (`RoutedConnector::exit_dir`/`entry_dir`/`secondary_exit`/
+    // `secondary_entry`, and `RenderRoom::stacked_exits`), not by replaying its badge placement.
+    let mut portal_ends: std::collections::HashSet<(RoomId, Direction)> =
+        std::collections::HashSet::new();
+
+    let mut connectors = Vec::with_capacity(rm.plan.connectors.len());
+    for conn in &rm.plan.connectors {
+        let Some((pts, _dep_u, _arr_u)) =
+            connector_polyline(conn, &cols, &rows, &px_cols, &px_rows, &cell_of)
+        else {
+            continue;
+        };
+        for &p in &pts {
+            ext.add(p.0, p.1);
+        }
+        // SQ-1555: the shared predicate — `Some` for every direction `planar_region` cuts a
+        // layer walk on, never just Up/Down — so this can never disagree with the mapper's own
+        // notion of a portal.
+        let exit_kind = direction::portal_kind(conn.exit_dir);
+        let is_portal = exit_kind.is_some();
+        if is_portal {
+            portal_ends.insert((conn.origin, conn.exit_dir));
+            if conn.reciprocal {
+                let arr_dir = conn.entry_dir.unwrap_or(direction::opposite(conn.exit_dir));
+                portal_ends.insert((conn.dest, arr_dir));
+            }
+        }
+        // The far end's own portal family, when it has a marker at all (`entry_dir` mirrors that
+        // — see `LayoutConnector::entry_kind`'s own doc comment).
+        let entry_kind = conn.entry_dir.and_then(direction::portal_kind);
+        if !conn.merge {
+            for &d in &conn.secondary_exit {
+                if direction::portal_kind(d).is_some() {
+                    portal_ends.insert((conn.origin, d));
+                }
+            }
+            for &d in &conn.secondary_entry {
+                if direction::portal_kind(d).is_some() {
+                    portal_ends.insert((conn.dest, d));
+                }
+            }
+        }
+
+        let weight = [
+            weights.get(&(conn.origin, conn.exit_dir)).copied(),
+            conn.entry_dir.and_then(|d| weights.get(&(conn.dest, d)).copied()),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(PassageWeight::Hard);
+
+        // Empty for a merge stub, matching `render_svg_body`'s own `!conn.merge` guard on the
+        // same fields (see that pass's SQ-1368 comment) — a merge stub's `pts` end is a trunk
+        // junction, not a room edge, so there is no valid anchor to badge either fold at.
+        let (secondary_exit, secondary_entry) = if conn.merge {
+            (Vec::new(), Vec::new())
+        } else {
+            (conn.secondary_exit.clone(), conn.secondary_entry.clone())
+        };
+
+        connectors.push(LayoutConnector {
+            origin: conn.origin,
+            dest: conn.dest,
+            points: pts,
+            exit_dir: conn.exit_dir,
+            entry_dir: conn.entry_dir,
+            reciprocal: conn.reciprocal,
+            distorted: conn.distorted,
+            weight,
+            is_portal,
+            exit_kind,
+            entry_kind,
+            merge: conn.merge,
+            secondary_exit,
+            secondary_entry,
+        });
+    }
+    // A `StackedExit`'s own secondary directions ride an already-drawn connector's marker too
+    // (see `render_svg_body`'s own stacked-exit pass) — same exclusion, extended to those.
+    for room in &rm.rooms {
+        for stacked in &room.stacked_exits {
+            for &d in &stacked.secondary {
+                if direction::portal_kind(d).is_some() {
+                    portal_ends.insert((room.id, d));
+                }
+            }
+        }
+    }
+
+    // A stub's destination is drawn as a ghost box on THIS layer when one exists for it
+    // (SQ-1356) — the only source `layer_layout` has for "which layer", since a `RoutedEdge`
+    // carries a room id but not a layer.
+    let ghost_layer_of: HashMap<RoomId, mapper::layer::LayerId> = rm
+        .rooms
+        .iter()
+        .filter_map(|r| r.ghost.as_ref().map(|g| (r.id, g.layer)))
+        .collect();
+
+    let mut portals = Vec::new();
+    for edge in &rm.edges {
+        if !edge.is_stub || edge.dir == Direction::Unknown {
+            continue;
+        }
+        if portal_ends.contains(&(edge.origin, edge.dir)) {
+            continue;
+        }
+        portals.push(LayoutPortalMarker {
+            room: edge.origin,
+            direction: edge.dir,
+            dest: edge.dest,
+            dest_label: edge.dest_label.clone(),
+            dest_layer: ghost_layer_of.get(&edge.dest).copied(),
+        });
+    }
+
+    let mut stubs = Vec::new();
+    for room in &rm.rooms {
+        for &(dir, count) in &room.random_stubs {
+            if mapper::router::side_for(dir).is_none() {
+                continue;
+            }
+            stubs.push(LayoutStub { room: room.id, direction: dir, count });
+        }
+    }
+
+    // Deliberately NOT shifted to `(0, 0)`: `render_svg_body`'s own `ox`/`oy` normalizing shift is
+    // computed from its FULL extent — rooms, connectors, AND every badge/tag/note this function
+    // never draws — so re-deriving a shift from rooms and connectors alone here could disagree
+    // with the real one wherever a badge or tag reaches further than the geometry does. Returning
+    // the raw, un-shifted coordinates instead means a room's `rect` and a connector's `points` are
+    // the literal numbers `render_svg_of` writes into its `<rect>`/`<path d="M …">` attributes —
+    // the exact correspondence SQ-1540's acceptance test checks — with no second shift computation
+    // that could drift from the SVG's own.
+    Some(LayerLayout { rooms, connectors, portals, stubs, extent: ext.get() })
+}
+
+fn render_svg_body(
+    rm: &RenderMap,
+    weights: &HashMap<(RoomId, Direction), PassageWeight>,
+    notes: &HashMap<RoomId, String>,
+) -> Option<(String, i32, i32)> {
+    let axes = compute_layer_axes(rm)?;
+    let LayerAxes { cols, rows, px_cols, px_rows, cell_of, labels, ghost_subtitles } = axes;
+
+    // SQ-1384: every room THIS map draws that carries a note, numbered in READING ORDER —
+    // top-to-bottom, left-to-right by grid cell, which is the same order pixel position sorts to
+    // since a channel widened for a long name never reorders the cells either side of it. A
+    // ghost never carries its own note (its `id` is the REAL target room's, on another layer's
+    // panel — the note belongs there, not to the placeholder standing in for it here).
+    let mut noted_rooms: Vec<&mapper::render::RenderRoom> =
+        rm.rooms.iter().filter(|r| r.ghost.is_none() && notes.contains_key(&r.id)).collect();
+    noted_rooms.sort_by_key(|r| (r.cell.1, r.cell.0));
+    let note_number: HashMap<RoomId, usize> =
+        noted_rooms.iter().enumerate().map(|(i, r)| (r.id, i + 1)).collect();
 
     let rect_of = |id: RoomId| -> Option<(f64, f64, f64, f64)> {
         cell_of.get(&id).map(|&c| box_px_rect(&cols, &rows, &px_cols, &px_rows, c))
@@ -1017,54 +1437,17 @@ fn render_svg_body(
     // so it draws the shape outright: one straight line between the two box corners, instead of
     // the orthogonal dogleg every other connector still gets below.
     for conn in &rm.plan.connectors {
-        let is_portal = matches!(conn.exit_dir, Direction::Up | Direction::Down);
+        // SQ-1555: the same predicate `layer_layout`'s own `is_portal`/`exit_kind` and
+        // `mapper::layer::planar_region` share — every non-compass exit, not just Up/Down.
+        let is_portal = direction::portal_kind(conn.exit_dir).is_some();
 
-        let pure_diag = !conn.merge
-            && conn.points.len() == 3
-            && conn.entry_corner.is_some()
-            && direction::is_diagonal(conn.exit_dir);
-        // Both rects must resolve for the straight-line path to be taken; a missing room is not
-        // expected to happen (`cell_of` is built from `rm.rooms`, the same source `rect_of`
-        // reads), but falling through to the ordinary dogleg is the safe answer if it ever did.
-        let pure_diag_corners = pure_diag
-            .then(|| Some((rect_of(conn.origin)?, rect_of(conn.dest)?, conn.entry_corner?)))
-            .flatten();
-
-        let (pts, dep_u, arr_u) = if let Some((ro, rd, entry_corner)) = pure_diag_corners {
-            let op = px_corner(ro, conn.exit_dir);
-            let dp = px_corner(rd, entry_corner);
-            (vec![op, dp], outward_diag(conn.exit_dir), outward_diag(entry_corner))
-        } else {
-            let Some(plot) = plot_connector(conn, &cols, &rows, None) else { continue };
-            if plot.path.len() < 2 {
-                continue;
-            }
-            let mut pts: Vec<(f64, f64)> =
-                plot.path.iter().map(|&c| cell_px(&px_cols, &px_rows, c)).collect();
-
-            // Snap the two ends onto their boxes' pixel edges (see `snap_to_edge`).
-            if let Some(r) = rect_of(conn.origin) {
-                pts[0] = snap_to_edge(pts[0], r, conn.exit);
-            }
-            if !conn.merge {
-                if let Some(r) = rect_of(conn.dest) {
-                    let last = pts.len() - 1;
-                    pts[last] = snap_to_edge(pts[last], r, conn.entry);
-                }
-            }
-            // SQ-1366: every portal arrival's final leg must be a real straight run, long enough
-            // for the badge that rides it — see `extend_portal_arrival`. A merge stub has no
-            // arrival end of its own (its `pts[last]` is a trunk junction, not a room edge) so it
-            // is excluded here exactly as it is from `draw_travel_arrival` below. The start end is
-            // extended only for a reciprocal, matching the one case `draw_travel_arrival` draws a
-            // second arrival at all.
-            if is_portal && !conn.merge {
-                extend_portal_arrival(&mut pts, false, outward(conn.entry));
-                if conn.reciprocal {
-                    extend_portal_arrival(&mut pts, true, outward(conn.exit));
-                }
-            }
-            (pts, outward(conn.exit), outward(conn.entry))
+        // The box-edge-snapped, portal-extended, pure-diagonal-shortcut polyline — see
+        // `connector_polyline`'s own doc comment for the full reasoning (SQ-1540 moved it there,
+        // unchanged, so `layer_layout` computes the identical path).
+        let Some((pts, dep_u, arr_u)) =
+            connector_polyline(conn, &cols, &rows, &px_cols, &px_rows, &cell_of)
+        else {
+            continue;
         };
         for &p in &pts {
             ext.add(p.0, p.1);
@@ -1233,7 +1616,7 @@ fn render_svg_body(
                 (&conn.secondary_entry, pts[0], dep_u, conn.dest),
             ] {
                 for &dir in dirs {
-                    if matches!(dir, Direction::Up | Direction::Down | Direction::In | Direction::Out) {
+                    if direction::portal_kind(dir).is_some() {
                         let root = (pos.0 + u.0 * PORTAL_BADGE_GAP, pos.1 + u.1 * PORTAL_BADGE_GAP);
                         let at = settle_badge(&mut placer, root, (-u.1, u.0));
                         let letter = direction::short_label(dir).to_uppercase();
@@ -1320,7 +1703,7 @@ fn render_svg_body(
                 continue;
             };
             for &dir in &stacked.secondary {
-                if matches!(dir, Direction::Up | Direction::Down | Direction::In | Direction::Out) {
+                if direction::portal_kind(dir).is_some() {
                     let root = (pos.0 + u.0 * PORTAL_BADGE_GAP, pos.1 + u.1 * PORTAL_BADGE_GAP);
                     let at = settle_badge(&mut placer, root, (-u.1, u.0));
                     let letter = direction::short_label(dir).to_uppercase();
@@ -2665,6 +3048,99 @@ mod tests {
         m
     }
 
+    // ── SQ-1540: layer_layout ───────────────────────────────────────────────────
+
+    /// The acceptance-critical case: every room box and connector polyline `layer_layout`
+    /// returns must correspond EXACTLY to what `render_svg_of` draws for the same map. Both are
+    /// built from the same shared geometry (`compute_layer_axes`, `connector_polyline`), so this
+    /// is a non-regression guard on that sharing holding, not an independent re-derivation —
+    /// falsify by having either helper recompute its own `cols`/`rows`/`pts` instead of sharing
+    /// them, and this must fail.
+    #[test]
+    fn layer_layout_boxes_and_connectors_match_render_svg_of_exactly() {
+        let m = zork_house();
+        let rm = render(&m.graph);
+        let layout = layer_layout(&rm, Some(&m.graph)).expect("a non-empty map has a layout");
+        let svg = render_svg_of(&rm, Some(&m.graph));
+
+        assert_eq!(layout.rooms.len(), rm.rooms.len(), "one box per room, including any ghosts");
+        for room in &layout.rooms {
+            let expected = format!(
+                "x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"",
+                f(room.rect.0),
+                f(room.rect.1),
+                f(room.rect.2),
+                f(room.rect.3)
+            );
+            assert!(
+                svg.contains(&expected),
+                "room {} box {:?} not found verbatim in the SVG (looked for {expected:?})",
+                room.id,
+                room.rect
+            );
+        }
+
+        assert!(!layout.connectors.is_empty(), "the fixture routes at least one connector");
+        for conn in &layout.connectors {
+            let expected = format!("d=\"{}\"", rounded_path(&conn.points));
+            assert!(
+                svg.contains(&expected),
+                "connector {}\u{2192}{} polyline not found verbatim in the SVG",
+                conn.origin,
+                conn.dest
+            );
+        }
+
+        // And the portal connector (room 7, Up, one-way) is flagged as one.
+        assert!(
+            layout.connectors.iter().any(|c| c.dest == 7 && c.is_portal),
+            "the Up connector to the Attic must be flagged is_portal: {:?}",
+            layout.connectors
+        );
+    }
+
+    #[test]
+    fn layer_layout_is_none_for_an_empty_map() {
+        use mapper::graph::MapGraph;
+        let g = MapGraph::new();
+        assert!(layer_layout(&render(&g), Some(&g)).is_none());
+    }
+
+    /// A passage with no planar route at all (In/Out never route — `router::side_for` gives them
+    /// no box side) surfaces as a portal marker, not a connector; an unresolved `?` random exit
+    /// surfaces as a stub. Neither is drawn as a line in the SVG, so neither has a
+    /// `LayoutConnector` — this is the data this file's badge-only passes read instead.
+    #[test]
+    fn layer_layout_reports_unresolved_portals_and_random_stubs() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        // Placed via Cave, not Hall, so Hall's own In edge to it (below) is Hall's ONLY
+        // connection to Cellar — `collapse_stacked_exits` only folds a direction that shares a
+        // destination with another of the SAME origin's edges, and this shares none.
+        m.observe(3, "Cellar", Some(Direction::Down));
+        m.graph.add_edge(1, Direction::In, 3);
+        m.graph.mark_random_exit(1, Direction::E);
+        m.graph.note_random_destination(1, Direction::E, 2);
+
+        let rm = render(&m.graph);
+        let layout = layer_layout(&rm, Some(&m.graph)).expect("non-empty map");
+
+        assert!(
+            layout.portals.iter().any(|p| p.room == 1 && p.direction == Direction::In && p.dest == 3),
+            "the In passage must surface as a portal marker: {:?}",
+            layout.portals
+        );
+        assert!(
+            layout.stubs.iter().any(|s| s.room == 1 && s.direction == Direction::E && s.count == 1),
+            "the random E exit must surface as a stub: {:?}",
+            layout.stubs
+        );
+        // Neither direction routes as its own line.
+        assert!(!layout.connectors.iter().any(|c| c.origin == 1 && c.exit_dir == Direction::In));
+        assert!(!layout.connectors.iter().any(|c| c.origin == 1 && c.exit_dir == Direction::E));
+    }
+
     #[test]
     fn svg_contains_rooms_and_edges() {
         let mut m = Mapper::default();
@@ -3006,33 +3482,21 @@ mod tests {
             );
         }
 
-        // SQ-1362: a ghost is an ordinary passage's arrival room, so the portal into it gets the
-        // same head-plus-trailing-badge marker every other passage's arrival gets — not the badge
-        // alone. Each panel draws a FULL reciprocal (its own real room is drawn beside a ghost
-        // standing in for the other, SQ-1356), so each panel carries two heads: one back into its
-        // own room, one into its ghost — four heads and four badges over the two panels.
-        let tips = arrow_tips(&svg);
-        assert_eq!(tips.len(), 4, "each panel's reciprocal draws a head into its own room AND into its ghost");
+        // SQ-1555: a ghost is an ordinary passage's arrival room, so the portal into it gets a
+        // lettered badge exactly like every other passage's portal arrival — but never the
+        // compass arrowhead: a portal end is never given one (see `draw_travel_arrival`'s own
+        // doc comment). Each panel draws a FULL reciprocal (its own real room is drawn beside a
+        // ghost standing in for the other, SQ-1356), so each panel carries two badges: one back
+        // into its own room, one into its ghost — four badges over the two panels, no heads.
+        assert_eq!(arrow_tips(&svg).len(), 0, "a portal arrival never draws the compass arrowhead");
         let badges = badges_of(&svg);
-        assert_eq!(badges.len(), 4, "and a badge riding behind each of those heads");
+        assert_eq!(badges.len(), 4, "one badge per travel: back into its own room, and into its ghost");
         for gh in &ghosts {
-            let tip = *tips
+            let (letter, _) = badges
                 .iter()
-                .find(|t| near_rect_edge(**t, *gh, 1.5))
-                .unwrap_or_else(|| panic!("a head must land on this ghost: {gh:?} tips={tips:?}"));
-            let (letter, badge_pos) = badges
-                .iter()
-                .min_by(|(_, a), (_, b)| {
-                    dist_from_rect_edge(*a, *gh).partial_cmp(&dist_from_rect_edge(*b, *gh)).unwrap()
-                })
-                .expect("at least one badge on the map");
+                .find(|(_, pos)| near_rect_edge(*pos, *gh, 20.0))
+                .unwrap_or_else(|| panic!("a badge must land near this ghost: {gh:?} badges={badges:?}"));
             assert!(letter == "U" || letter == "D", "a portal badge reads U or D, got {letter:?}");
-            let (tip_dist, badge_dist) = (dist_from_rect_edge(tip, *gh), dist_from_rect_edge(*badge_pos, *gh));
-            assert!(
-                badge_dist > tip_dist,
-                "the {letter} badge must ride behind its own head into the ghost: \
-                 tip={tip:?} ({tip_dist}) badge={badge_pos:?} ({badge_dist})"
-            );
         }
     }
 
@@ -3372,14 +3836,15 @@ mod tests {
         );
     }
 
-    /// SQ-1362: a portal reads exactly like every other passage now — an arrowhead into the room
-    /// the travel arrives at, with the lettered badge riding just behind it on the same line.
-    /// Before this, a portal's arrival end carried the badge and NOTHING else, so a reader could
-    /// not tell "leads down" from "arrived by going down". Unlike the stub cases above, this
-    /// graph gives both rooms real positions (`set_pos`), so `route_lanes` draws a genuine routed
-    /// portal connector — the code path `draw_travel_arrival` actually marks.
+    /// SQ-1555: a portal arrival never draws the compass arrowhead — only the lettered badge, at
+    /// the end the travel arrives at. Between SQ-1362 and SQ-1555 a portal drew a head AND a
+    /// badge; SQ-1555 dropped the head back out (the badge already says "up"/"down", and a flat
+    /// arrowhead there read as a claim about geometry the passage never made). Unlike the stub
+    /// cases above, this graph gives both rooms real positions (`set_pos`), so `route_lanes`
+    /// draws a genuine routed portal connector — the code path `draw_travel_arrival` actually
+    /// marks.
     #[test]
-    fn a_one_way_portal_head_sits_near_destination_with_its_badge_riding_behind() {
+    fn a_one_way_portal_gets_a_badge_and_no_arrowhead() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "Cellar".into());
@@ -3391,34 +3856,25 @@ mod tests {
         let svg = render_svg_of(&render(&g), Some(&g));
         let rooms = room_rects(&svg);
         assert_eq!(rooms.len(), 2, "the case must draw exactly the two rooms");
-        let (cellar, attic) = (rooms[0], rooms[1]);
+        let (_cellar, attic) = (rooms[0], rooms[1]);
 
-        let tips = arrow_tips(&svg);
-        assert_eq!(tips.len(), 1, "a one-way portal carries exactly one arrowhead");
-        let tip = tips[0];
-        assert!(
-            near_rect_edge(tip, attic, 1.5),
-            "the head must sit on Attic's own edge: tip={tip:?} attic={attic:?}"
-        );
-        assert!(!near_rect_edge(tip, cellar, 1.5), "the head must not sit on Cellar's edge: tip={tip:?}");
+        assert_eq!(arrow_tips(&svg).len(), 0, "a one-way portal carries no arrowhead");
 
         let badges = badges_of(&svg);
         assert_eq!(badges.len(), 1, "a one-way portal carries exactly one badge");
         let (letter, badge_pos) = &badges[0];
         assert_eq!(letter, "U", "an Up travel reads U");
-
-        let (tip_dist, badge_dist) = (dist_from_rect_edge(tip, attic), dist_from_rect_edge(*badge_pos, attic));
         assert!(
-            badge_dist > tip_dist,
-            "the badge must sit farther from Attic than the head that points into it: \
-             tip={tip:?} ({tip_dist}) badge={badge_pos:?} ({badge_dist})"
+            near_rect_edge(*badge_pos, attic, 20.0),
+            "the badge must sit near Attic, where the travel arrives: badge={badge_pos:?} attic={attic:?}"
         );
     }
 
-    /// SQ-1362, the two-way case: a reciprocal stairway draws a head AND a badge at each end,
-    /// each badge riding behind its own head — never a bare pair of letters facing each other.
+    /// SQ-1555, the two-way case: a reciprocal stairway draws a badge at each end and no
+    /// arrowhead at either — never a head, and never a bare pair of letters facing each other
+    /// either, since each still rides its own end's line.
     #[test]
-    fn a_two_way_stairway_draws_two_heads_each_with_its_badge_riding_behind() {
+    fn a_two_way_stairway_draws_two_badges_and_no_arrowheads() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "Cellar".into());
@@ -3433,26 +3889,215 @@ mod tests {
         assert_eq!(rooms.len(), 2, "the case must draw exactly the two rooms");
         let (cellar, attic) = (rooms[0], rooms[1]);
 
-        let tips = arrow_tips(&svg);
-        assert_eq!(tips.len(), 2, "a two-way stairway carries a head at each end");
+        assert_eq!(arrow_tips(&svg).len(), 0, "a two-way stairway carries no arrowhead at either end");
         let badges = badges_of(&svg);
-        assert_eq!(badges.len(), 2, "and a badge riding behind each head");
+        assert_eq!(badges.len(), 2, "and a badge at each end");
 
-        for tip in &tips {
-            let (near_attic, near_cellar) = (near_rect_edge(*tip, attic, 1.5), near_rect_edge(*tip, cellar, 1.5));
-            assert!(near_attic != near_cellar, "a head belongs to exactly one box's edge: tip={tip:?}");
-            let (dest, want_letter) = if near_attic { (attic, "U") } else { (cellar, "D") };
-            let (_, badge_pos) = badges
-                .iter()
-                .find(|(l, _)| l == want_letter)
-                .unwrap_or_else(|| panic!("a {want_letter} badge for the head into {dest:?}: {badges:?}"));
-            let (tip_dist, badge_dist) = (dist_from_rect_edge(*tip, dest), dist_from_rect_edge(*badge_pos, dest));
-            assert!(
-                badge_dist > tip_dist,
-                "the {want_letter} badge must sit farther from its own room than its own head: \
-                 tip={tip:?} ({tip_dist}) badge={badge_pos:?} ({badge_dist})"
-            );
+        let (_, up_pos) = badges.iter().find(|(l, _)| l == "U").expect("Up's own badge");
+        let (_, down_pos) = badges.iter().find(|(l, _)| l == "D").expect("Down's own badge");
+        assert!(
+            near_rect_edge(*up_pos, attic, 20.0),
+            "Up travels Cellar→Attic and so arrives at Attic: {up_pos:?} vs attic={attic:?}"
+        );
+        assert!(
+            near_rect_edge(*down_pos, cellar, 20.0),
+            "Down travels Attic→Cellar and so arrives at Cellar: {down_pos:?} vs cellar={cellar:?}"
+        );
+    }
+
+    /// SQ-1555: a room pair reached BOTH by a compass word (A —E→ B) and, separately, by a
+    /// portal word the other way (B —Up→ A) routes as TWO connectors, never one — Up/Down and
+    /// compass edges between the same pair always draw on separate trunks (`route::mod`'s own
+    /// `ch_key`), and a compass connector's own back-edge search explicitly excludes Up/Down
+    /// (`back_edge_idx`), so the two travels can never collapse into a single mixed-end line.
+    /// That is exactly the shape the per-END arrowhead rule has to get right: the compass
+    /// travel's own arrival keeps the ordinary head, the portal travel's does not, even though
+    /// both lines connect the very same two boxes.
+    #[test]
+    fn a_mixed_pair_keeps_the_arrowhead_only_at_its_compass_end() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::Up, 1);
+
+        let svg = render_svg_of(&render(&g), Some(&g));
+        let rooms = room_rects(&svg);
+        assert_eq!(rooms.len(), 2, "the case must draw exactly the two rooms");
+        let (a, b) = (rooms[0], rooms[1]);
+
+        let tips = arrow_tips(&svg);
+        assert_eq!(tips.len(), 1, "only the compass travel (A's own E exit) gets an arrowhead");
+        assert!(
+            near_rect_edge(tips[0], b, 1.5),
+            "the E arrowhead sits on B's own edge: tip={:?} b={b:?}",
+            tips[0]
+        );
+
+        let badges = badges_of(&svg);
+        assert_eq!(badges.len(), 1, "the portal travel (B's own Up exit) gets a badge instead");
+        let (letter, pos) = &badges[0];
+        assert_eq!(letter, "U", "an Up travel reads U");
+        assert!(
+            near_rect_edge(*pos, a, 20.0),
+            "Up travels B→A and so arrives at A: badge={pos:?} a={a:?}"
+        );
+    }
+
+    /// SQ-1555: a portal connector's own `<path>` carries the `portal` class — dotted,
+    /// round-capped dots via the stylesheet's `.edge.portal` rule (inheriting `.edge`'s own
+    /// `stroke-linecap:round`) — while an ordinary compass connector carries neither `portal`
+    /// nor any other dash class, so it strokes solid. The stylesheet's portal dash must also
+    /// differ from the dash already used for a gated (`conditional`) or `distorted` passage, so
+    /// the three read as visually distinct styles rather than colliding.
+    #[test]
+    fn portal_connectors_render_dotted_and_compass_connectors_render_solid() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Cellar".into());
+        g.upsert_room(2, "Attic".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+        g.upsert_room(3, "Hall".into());
+        g.set_pos(3, (1, 0));
+        g.add_edge(1, Direction::E, 3);
+
+        let svg = render_svg_of(&render(&g), Some(&g));
+        let doc = roxmltree::Document::parse(&svg).expect("well-formed SVG");
+        let edge_classes: Vec<String> = doc
+            .descendants()
+            .filter(|n| {
+                n.tag_name().name() == "path"
+                    && n.attribute("class").unwrap_or("").split_whitespace().any(|c| c == "edge")
+                    && !under_class(*n, "legend-block")
+            })
+            .map(|n| n.attribute("class").unwrap_or("").to_string())
+            .collect();
+        assert_eq!(edge_classes.len(), 2, "one line for the portal, one for the compass passage: {edge_classes:?}");
+        assert!(
+            edge_classes.iter().any(|c| c.split_whitespace().any(|w| w == "portal")),
+            "the portal connector must carry the portal class: {edge_classes:?}"
+        );
+        assert!(
+            edge_classes.iter().any(|c| !c.split_whitespace().any(|w| w == "portal")),
+            "the compass connector must not carry the portal class: {edge_classes:?}"
+        );
+
+        fn dasharray_for(css: &str, selector: &str) -> Option<String> {
+            let idx = css.find(selector)?;
+            let rule = &css[idx..];
+            let close = rule.find('}')?;
+            rule[..close].split("stroke-dasharray:").nth(1).map(|s| s.trim().to_string())
         }
+        let css = stylesheet();
+        let portal_dash = dasharray_for(&css, ".edge.portal{").expect("portal rule present");
+        let conditional_dash = dasharray_for(&css, ".edge.conditional{").expect("conditional rule present");
+        let distorted_dash = dasharray_for(&css, ".edge.distorted{").expect("distorted rule present");
+        assert_ne!(portal_dash, conditional_dash, "a portal's dots must not collide with a gated passage's dash");
+        assert_ne!(portal_dash, distorted_dash, "a portal's dots must not collide with a distorted passage's dash");
+    }
+
+    /// SQ-1555: In/Out never route to a real connector LINE (only Up/Down do — see
+    /// [`LayoutPortalMarker`]'s own doc comment), so their portal-ness surfaces as a
+    /// `LayoutPortalMarker` instead of a `LayoutConnector`. `mapper::direction::portal_kind` —
+    /// the same predicate the widened `LayoutConnector::is_portal`/`exit_kind` read — must still
+    /// answer `Some` for both, with the right kind, so a host can badge each correctly.
+    #[test]
+    fn an_in_and_an_out_passage_yield_correctly_kinded_portal_markers() {
+        use mapper::direction::PortalKind;
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Cave".into());
+        g.upsert_room(2, "Tunnel".into());
+        g.upsert_room(3, "Grotto".into());
+        // `route_all` (the stub-badge source) skips an edge unless BOTH ends are placed, so
+        // every room needs a `pos` — but In/Out carry no grid offset, so the real auto-mapper's
+        // own placement (`place_incremental`) would drop Tunnel/Grotto at the nearest free cell
+        // rather than a directional one; any distinct cells reproduce that here.
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.set_pos(3, (-1, 0));
+        g.add_edge(1, Direction::In, 2);
+        g.add_edge(1, Direction::Out, 3);
+
+        let rm = render(&g);
+        let layout = layer_layout(&rm, Some(&g)).expect("a non-empty map lays out");
+        assert!(
+            layout.connectors.iter().all(|c| !matches!(c.exit_dir, Direction::In | Direction::Out)),
+            "In/Out never route to a connector line: {:?}",
+            layout.connectors
+        );
+        let in_marker = layout
+            .portals
+            .iter()
+            .find(|p| p.direction == Direction::In)
+            .expect("an In passage yields a portal marker");
+        let out_marker = layout
+            .portals
+            .iter()
+            .find(|p| p.direction == Direction::Out)
+            .expect("an Out passage yields a portal marker");
+        assert_eq!(mapper::direction::portal_kind(in_marker.direction), Some(PortalKind::In));
+        assert_eq!(mapper::direction::portal_kind(out_marker.direction), Some(PortalKind::Out));
+    }
+
+    /// SQ-1555: `LayoutConnector::exit_kind`/`entry_kind` expose the per-END portal family
+    /// directly — a host applies the same arrowhead-suppression rule this file's own SVG draw
+    /// pass does without re-deriving it. Three reachable shapes: compass-only (both `None`),
+    /// pure portal reciprocal (both `Some`), and a one-way portal (`exit_kind` `Some`, no far
+    /// end at all — `entry_dir`/`entry_kind` both `None`, never conflated with "compass").
+    #[test]
+    fn layer_layout_exposes_per_end_portal_kind() {
+        use mapper::direction::PortalKind;
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        let rm = render(&g);
+        let layout = layer_layout(&rm, Some(&g)).unwrap();
+        assert_eq!(layout.connectors.len(), 1);
+        let c = &layout.connectors[0];
+        assert_eq!(c.exit_kind, None, "a compass exit carries no portal kind");
+        assert_eq!(c.entry_kind, None, "a compass far end carries no portal kind either");
+        assert!(!c.is_portal);
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Cellar".into());
+        g.upsert_room(2, "Attic".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::Down, 1);
+        let rm = render(&g);
+        let layout = layer_layout(&rm, Some(&g)).unwrap();
+        assert_eq!(layout.connectors.len(), 1);
+        let c = &layout.connectors[0];
+        assert_eq!(c.exit_kind, Some(PortalKind::Up));
+        assert_eq!(c.entry_kind, Some(PortalKind::Down));
+        assert!(c.is_portal);
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Cellar".into());
+        g.upsert_room(2, "Attic".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+        let rm = render(&g);
+        let layout = layer_layout(&rm, Some(&g)).unwrap();
+        assert_eq!(layout.connectors.len(), 1);
+        let c = &layout.connectors[0];
+        assert_eq!(c.exit_kind, Some(PortalKind::Up));
+        assert_eq!(c.entry_dir, None, "a one-way carries no far-end marker at all");
+        assert_eq!(c.entry_kind, None, "so its entry_kind is None too, not conflated with compass");
     }
 
     /// SQ-1346, extended to compass tags: each end's mismatched-word `tag` travels with the head

@@ -1539,3 +1539,479 @@ fn no_corpus_title_reads_through_a_panel() {
         }
     }
 }
+
+/// SQ-1581: `draw_secondary_prose_into` walked each PHYSICAL row's characters and
+/// `break`s the moment the pen crosses the window's right edge — dropping the
+/// rest of the LOGICAL line instead of wrapping it onto the next row, the way the
+/// story window's own prose already wraps (`ZWindow::push_prose`'s own doc:
+/// "wrapping is the host's job").
+///
+/// fmvpoker's own deterministic first hand (`Machine::DEFAULT_RNG_SEED` makes
+/// every headless boot draw the identical cards) reaches a 182-character message
+/// — "You draw (a) an Eight, (b) a Three, (c) an Ace, (d) a Deuce, and (e) a
+/// Six.  Use your mouse or press keys a-e to select which cards to hold.  Press
+/// return or click above to continue." — as ONE logical line in the bottom
+/// panel's `b.lines` (`ZWindow::push_prose` only starts a new logical line at a
+/// `\n` the game itself printed). At the panel's 594px width that needs three
+/// 8px-monospace rows; the pre-fix code drew 74 characters of the first row
+/// ("…and (e) a Six") and dropped the other 108 — the whole explanation of how to
+/// select cards to hold — silently.
+///
+/// Asserted through [`app::render::v6_layout::chrome_text_rects`] (the same rects
+/// [`app::render::v6_layout::fill_story_page_under_chrome_text`] spares, per its
+/// own doc: measuring the draw and the spared pixels two different ways is how
+/// Shogun's menu got erased once already) rather than by scanning raw ink, so the
+/// assertion is about how many PHYSICAL rows of text landed and how far each
+/// one's pen travelled — exactly what the bug dropped.
+fn fmvpoker_the_draw_message_wraps_instead_of_truncating(honor: bool) {
+    let Some((session, state)) = fmvpoker_dealt_hand(honor) else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+
+    let panel = layout
+        .chrome
+        .iter()
+        .find(|it| (it.x_px, it.y_px, it.w_px, it.h_px) == PANEL)
+        .expect("fmvpoker publishes its bottom panel as a window of its own");
+    let WinNode::Buffer(b) = &panel.node else { panic!("the panel is a prose Buffer") };
+    let (row, line) = b
+        .lines
+        .iter()
+        .enumerate()
+        .find(|(_, l)| l.starts_with("You draw"))
+        .unwrap_or_else(|| panic!("honor={honor}: the draw announcement never reached the model: {:?}", b.lines));
+
+    // Premise: this is the exact deterministic hand SQ-1581 was filed against,
+    // and it genuinely needs wrapping — a short hand would not exercise the fix.
+    let avail = u32::from(PANEL.2);
+    assert!(
+        line.contains("Use your mouse or press keys a-e to select which cards to hold"),
+        "premise (honor={honor}): the deterministic first hand's draw message changed shape: {line:?}"
+    );
+    assert!(
+        state.v6_text.run_px(line) > avail * 2,
+        "premise (honor={honor}): the draw message ({} px) must need more than two rows at the \
+         panel's {avail}px width, or this test cannot tell wrapping from truncation: {line:?}",
+        state.v6_text.run_px(line)
+    );
+
+    // The physical rows this one logical line produced, in native pixels — the
+    // same rects `fill_story_page_under_chrome_text` spares from the page fill.
+    let text_rects = app::render::v6_layout::chrome_text_rects(&layout.chrome, &state.v6_text);
+    let top = u32::from(PANEL.1) + row as u32 * 16;
+    let mut rows: Vec<(u32, u32, u32, u32)> = text_rects
+        .into_iter()
+        .filter(|&(x0, y0, x1, _)| {
+            x1 > x0 && x0 >= u32::from(PANEL.0) && y0 >= top && y0 < u32::from(PANEL.1) + u32::from(PANEL.3)
+        })
+        .collect();
+    rows.sort_by_key(|&(_, y0, ..)| y0);
+
+    assert!(
+        rows.len() >= 3,
+        "honor={honor}: the draw announcement drew on {} physical row(s), not the three word-wrap \
+         needs to say the whole thing (SQ-1581). Rows: {rows:?}",
+        rows.len()
+    );
+
+    // The row that used to be dropped entirely: "Press return or click above to
+    // continue." — 41 characters, 328px at this fixed-pitch 8px face.
+    let (lx0, ly0, lx1, _) = *rows.last().unwrap();
+    assert!(
+        ly0 > top,
+        "honor={honor}: the last recorded row ({ly0}) is the same row the message started on \
+         ({top}) — nothing wrapped past the first line at all"
+    );
+    assert!(
+        lx1 - lx0 >= 300,
+        "honor={honor}: the last physical row only drew {} px of ink — the closing sentence \
+         telling the player how to continue was dropped, not merely wrapped shorter (SQ-1581)",
+        lx1 - lx0
+    );
+}
+
+#[test]
+fn fmvpoker_the_draw_message_wraps_instead_of_truncating_honoring_game_colours() {
+    fmvpoker_the_draw_message_wraps_instead_of_truncating(true);
+}
+
+#[test]
+fn fmvpoker_the_draw_message_wraps_instead_of_truncating_theme_only() {
+    fmvpoker_the_draw_message_wraps_instead_of_truncating(false);
+}
+
+/// SQ-1581, at a narrow terminal pane. The wrap itself is computed in NATIVE v6
+/// pixels — the panel's width is the game's own declared window, not the
+/// terminal's — so a narrow pane cannot change where the wrap breaks; what it can
+/// do is crash or otherwise disturb `render_story_pane`'s letterboxing of that
+/// same composite down to a small buffer. Driven at 40x15, near the smallest
+/// realistic terminal, on the same deterministic dealt hand as the wide-pane case.
+fn fmvpoker_the_draw_message_survives_a_narrow_pane(honor: bool) {
+    let Some((session, state)) = fmvpoker_dealt_hand(honor) else { return };
+
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+    let panel = layout
+        .chrome
+        .iter()
+        .find(|it| (it.x_px, it.y_px, it.w_px, it.h_px) == PANEL)
+        .expect("fmvpoker publishes its bottom panel as a window of its own");
+    let WinNode::Buffer(b) = &panel.node else { panic!("the panel is a prose Buffer") };
+    let row = b
+        .lines
+        .iter()
+        .position(|l| l.starts_with("You draw"))
+        .expect("honor={honor}: the draw announcement reached the model");
+
+    // The same three-physical-row proof as the wide-pane test — the composite a
+    // narrow pane letterboxes down is the one this recomputes, and the wrap that
+    // produced it does not consult the terminal's size.
+    let text_rects = app::render::v6_layout::chrome_text_rects(&layout.chrome, &state.v6_text);
+    let top = u32::from(PANEL.1) + row as u32 * 16;
+    let rows = text_rects
+        .into_iter()
+        .filter(|&(x0, y0, x1, _)| {
+            x1 > x0 && x0 >= u32::from(PANEL.0) && y0 >= top && y0 < u32::from(PANEL.1) + u32::from(PANEL.3)
+        })
+        .count();
+    assert!(
+        rows >= 3,
+        "honor={honor}: the draw announcement's own composite drew {rows} physical row(s) before \
+         it ever reaches the narrow pane's letterbox (SQ-1581)"
+    );
+
+    // And the real render entry point survives a small pane without dropping the
+    // frame or panicking — the letterbox step, not the wrap, is what a narrow
+    // pane could still disturb.
+    let area = Rect::new(0, 0, 40, 15);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    let path = state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default();
+    assert_eq!(
+        path, "raster",
+        "honor={honor}: fmvpoker's own table art must still route this frame to the composite at \
+         a narrow pane, the same as at 640x400 (SQ-0729)"
+    );
+}
+
+#[test]
+fn fmvpoker_the_draw_message_survives_a_narrow_pane_honoring_game_colours() {
+    fmvpoker_the_draw_message_survives_a_narrow_pane(true);
+}
+
+#[test]
+fn fmvpoker_the_draw_message_survives_a_narrow_pane_theme_only() {
+    fmvpoker_the_draw_message_survives_a_narrow_pane(false);
+}
+
+/// SQ-1580: an in-game `@restore` must not widen the title-banner window
+/// (window 1) fmvpoker sized for itself back to the full screen.
+///
+/// `post_restore_fixups` re-applies the host's pixel screen after every
+/// restore (SQ-1572) by re-declaring header `$22`/`$24` — but reaching for
+/// `set_v6_screen_px` to do it ALSO resets windows 0 and 1 to full-screen
+/// width, which is `@restart`'s semantics (frotz `restart_screen`: nothing
+/// has been sized yet), not a restore's. Quetzal carries no screen state at
+/// all — the window table a restore comes back to is whatever the LIVE
+/// session already had — so the reset was pure damage: fmvpoker parks window
+/// 1 at native (173,7), 289px wide, over the "Double Fanucci" banner it
+/// erases blue and never touches again
+/// (`fmvpoker_erased_banner_keeps_the_colour_the_game_named`, above). A
+/// restore that widens it to 640px repaints that banner's blue fill across
+/// pixels — (600,20) among them — that should still show the poker table's
+/// own frame art.
+///
+/// Per CLAUDE.md, this drives the game's OWN `@save`/`@restore` — typing the
+/// menu's first-letter shortcuts, exactly as a player would — through the
+/// real `resume_save`/`resume_restore` host callbacks (mirroring
+/// `zork0_quetzal_save_restore_smoke`), and compares two sessions dealt a
+/// hand to the SAME point, one that restored along the way and one that
+/// didn't — a same-session round trip alone would not show the difference
+/// this test needs, since the frame right after a restore still looks
+/// correct (CLAUDE.md's restore-testing convention) and the bug is a
+/// geometry fact rather than something a single "look" would perturb.
+fn fmvpoker_restore_does_not_widen_the_banner_window(honor: bool) {
+    let pixel_600_20 = |session: &GameSession, state: &app::state::AppState| -> image::Rgba<u8> {
+        let model = session.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let native = app::render::v6_layout::native_extent(
+            items,
+            &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT),
+        );
+        let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+        let (img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, state);
+        *img.get_pixel(600, 20)
+    };
+    let deal = |session: &mut GameSession, state: &mut app::state::AppState| {
+        let r = session.submit_char(b'p');
+        assert!(r.fault.is_none(), "honor={honor}: fmvpoker faulted dealing: {:?}", r.fault);
+        app::state::apply_transcript_elems(state, &r.transcript_elems);
+        *state.v6_paint.borrow_mut() = Engine::paint_surface(session);
+    };
+
+    // Branch A: no restore at all — deal a hand and read the pixel.
+    let Some((mut plain, mut plain_state)) = fmvpoker_title(honor) else { return };
+    deal(&mut plain, &mut plain_state);
+    let no_restore = pixel_600_20(&plain, &plain_state);
+    // Premise: (600,20) — outside window 1's 289px banner box (172,6)-(461,40)
+    // — is the poker table's own frame art, not the banner's blue.
+    assert_ne!(
+        no_restore.0,
+        [0, 107, 181, 255],
+        "premise (honor={honor}): (600,20) must not already read as the banner's blue"
+    );
+
+    // Branch B: SAVE, then RESTORE, then deal the same hand.
+    let Some((mut session, mut state)) = fmvpoker_title(honor) else { return };
+    let r = session.submit_char(b's');
+    assert!(r.fault.is_none(), "honor={honor}: fmvpoker faulted choosing SAVE: {:?}", r.fault);
+    let Some(app::session::PendingIo::Save) = r.pending_io else {
+        eprintln!("SKIP: honor={honor}: 's' did not reach @save (pending_io={:?})", r.pending_io);
+        return;
+    };
+    let blob = session.machine.save_quetzal();
+    let rs = session.resume_save(true);
+    assert!(rs.fault.is_none(), "honor={honor}: resume_save must not fault: {:?}", rs.fault);
+    app::state::apply_transcript_elems(&mut state, &rs.transcript_elems);
+
+    let r = session.submit_char(b'r');
+    assert!(r.fault.is_none(), "honor={honor}: fmvpoker faulted choosing RESTORE: {:?}", r.fault);
+    let Some(app::session::PendingIo::Restore) = r.pending_io else {
+        eprintln!("SKIP: honor={honor}: 'r' did not reach @restore (pending_io={:?})", r.pending_io);
+        return;
+    };
+    let rr = session.resume_restore(Some(&blob));
+    assert!(rr.fault.is_none(), "honor={honor}: resume_restore must not fault: {:?}", rr.fault);
+    app::state::apply_transcript_elems(&mut state, &rr.transcript_elems);
+    *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+
+    deal(&mut session, &mut state);
+    let restored = pixel_600_20(&session, &state);
+
+    assert_eq!(
+        restored, no_restore,
+        "honor={honor}: pixel (600,20) differs after fmvpoker's own SAVE/RESTORE — window 1's \
+         banner box was widened back to the full screen (SQ-1580), so its blue erase-fill now \
+         paints over pixels that should still show the poker table's own frame art"
+    );
+}
+
+#[test]
+fn fmvpoker_restore_does_not_widen_the_banner_window_honoring_game_colours() {
+    fmvpoker_restore_does_not_widen_the_banner_window(true);
+}
+
+#[test]
+fn fmvpoker_restore_does_not_widen_the_banner_window_theme_only() {
+    fmvpoker_restore_does_not_widen_the_banner_window(false);
+}
+
+/// The published `px_runs` count for fmvpoker's story window, or 0 if it is not
+/// currently publishing one.
+fn fmvpoker_px_run_count(session: &GameSession) -> usize {
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+    let Some(story) = layout.story else { return 0 };
+    let WinNode::Buffer(b) = &story.node else { panic!("window 0 is the primary prose Buffer") };
+    b.px_runs.len()
+}
+
+/// SQ-1583: fmvpoker's HOLD/un-HOLD toggle never goes through an `erase_window`
+/// or `erase_screen_rect` call — it just reprints "HOLD" or a same-width blank at
+/// the card's own `set_cursor` position — so `ZWindow::record_streamed`'s
+/// append-only shadow (see its own doc: it never erases the way `paint_run`
+/// does) piles up a fresh run at the identical pixel rect every single toggle,
+/// forever. `v6_screen_model`'s `prune_covered_px_runs` collapses the run of
+/// EXACT repeats each toggle produces (see its own doc for why it stops at exact
+/// duplicates) down to the newest of each, which bounds card (a)'s column to at
+/// most two runs — its own newest "HOLD" or blank, plus at most one now-stale
+/// run of the OTHER text that has not yet been superseded by a later exact copy
+/// of itself — however many turns pass.
+///
+/// Specimen: `fmvpoker.z6` (a freely-distributed story, but outside SQ-1015's
+/// fetched set — local `stories/` only, so this vacuously skips on CI), dealt
+/// via `fmvpoker_dealt_hand` (24 keys to the draw announcement — see its own
+/// doc), then card (a)'s HOLD label toggled on and off 30 turns running: 30
+/// separate `submit_char(b'a')` calls, each one a real in-game keypress a player
+/// mashing the same key produces.
+fn fmvpoker_stale_hold_labels_are_pruned(honor: bool) {
+    let Some((mut session, mut state)) = fmvpoker_dealt_hand(honor) else { return };
+
+    let mut counts = Vec::new();
+    let mut held = false;
+    for n in 0..30 {
+        let r = session.submit_char(b'a');
+        assert!(r.fault.is_none(), "honor={honor}: fmvpoker faulted toggling hold at turn {n}: {:?}", r.fault);
+        app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+        *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+        held = !held;
+        counts.push(fmvpoker_px_run_count(&session));
+    }
+
+    // Premise: this specimen really does exercise SQ-1583's growth — the raw
+    // shadow must have piled up well past what the published list is allowed to
+    // hold, or the test proves nothing.
+    let raw_streamed = session.machine.screen.v6.as_ref().unwrap().windows[0].streamed.len();
+    assert!(
+        raw_streamed > 20,
+        "premise (honor={honor}): 30 hold toggles must pile up more than 20 runs in the raw \
+         shadow, or this specimen is not exercising SQ-1583's growth at all (raw={raw_streamed})"
+    );
+
+    // The PUBLISHED list must not track the raw shadow's growth — bounded at a
+    // small constant across all 30 turns, not merely at the end of them (a fix
+    // that only prunes on the LAST call and leaves every intermediate frame
+    // unbounded would still flunk a host reading it mid-session).
+    let max_seen = *counts.iter().max().unwrap();
+    assert!(
+        max_seen <= 10,
+        "honor={honor}: px_runs grew to {max_seen} over 30 hold toggles (raw shadow {raw_streamed}) \
+         — pruning is not keeping the published list bounded (SQ-1583). Per-turn counts: {counts:?}"
+    );
+
+    // No two published runs are exact duplicates of each other — pruning's own
+    // invariant, checked on the list it actually produced rather than trusted
+    // from its implementation.
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+    let story = layout.story.expect("fmvpoker publishes a story window");
+    let WinNode::Buffer(b) = &story.node else { panic!("window 0 is the primary prose Buffer") };
+    for (i, a) in b.px_runs.iter().enumerate() {
+        for c in &b.px_runs[i + 1..] {
+            assert!(
+                (a.x, a.y, &a.text, a.style, a.fg, a.bg) != (c.x, c.y, &c.text, c.style, c.fg, c.bg),
+                "honor={honor}: two published runs at ({},{}) {:?} are exact duplicates of each \
+                 other — pruning left a copy it should have dropped (SQ-1583)",
+                a.x, a.y, a.text
+            );
+        }
+    }
+
+    // Card (a)'s column holds at most ONE run of each distinct text that has
+    // ever been printed there ("HOLD" and the blank) — never the whole history
+    // of 15 toggles' worth of either. It is not always down to exactly the
+    // current state (a stale run of the OTHER text can still be the newest copy
+    // of ITSELF, kept because `honor_game_colours` off never lets a later blank
+    // repaint over it — see `prune_covered_px_runs`'s doc), but it can never be
+    // more than one of each.
+    let holds_at_a = b.px_runs.iter().filter(|t| t.x == 70 && t.y == 203 && t.text == "HOLD").count();
+    let blanks_at_a = b.px_runs.iter().filter(|t| t.x == 70 && t.y == 203 && t.text.trim().is_empty()).count();
+    assert!(
+        holds_at_a <= 1 && blanks_at_a <= 1,
+        "honor={honor}: card (a) is currently {} after {} toggles, and its published runs at \
+         (70,203) hold {holds_at_a} \"HOLD\" and {blanks_at_a} blank — 30 toggles' worth of \
+         EITHER surviving as more than one copy is exactly the pile-up SQ-1583 reports: {:?}",
+        if held { "HELD" } else { "not held" },
+        counts.len(),
+        b.px_runs.iter().map(|t| (t.x, t.y, t.text.clone())).collect::<Vec<_>>()
+    );
+    // …and the CURRENT state is always represented among them.
+    assert!(
+        (held && holds_at_a == 1) || (!held && blanks_at_a == 1),
+        "honor={honor}: card (a) is currently {}, but its published runs at (70,203) don't show \
+         it: {:?}",
+        if held { "HELD" } else { "not held" },
+        b.px_runs.iter().map(|t| (t.x, t.y, t.text.clone())).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn fmvpoker_stale_hold_labels_are_pruned_honoring_game_colours() {
+    fmvpoker_stale_hold_labels_are_pruned(true);
+}
+
+#[test]
+fn fmvpoker_stale_hold_labels_are_pruned_theme_only() {
+    fmvpoker_stale_hold_labels_are_pruned(false);
+}
+
+/// SQ-1583, the falsifiable half: pruning `px_runs` must not move a single pixel
+/// of the Rasterise composite. `draw_story_canvas_runs_into` draws this exact
+/// list in this exact order, so a run pruning drops is provably repainted by a
+/// LATER run still in the list — proven directly here, by rebuilding the
+/// composite from the RAW, unpruned shadow (the same per-field mapping
+/// `v6_screen_model` used before SQ-1583, reconstructed from zvm's own
+/// `ZWindow::streamed`) and diffing it against the published, pruned one.
+///
+/// Same specimen and the same 6-toggle setup `fmvpoker_stale_hold_labels_are_pruned`
+/// uses to reach a frame with both covered and still-visible runs in it.
+fn fmvpoker_pruning_does_not_change_the_composite(honor: bool) {
+    let Some((mut session, mut state)) = fmvpoker_dealt_hand(honor) else { return };
+    for n in 0..6 {
+        let r = session.submit_char(b'a');
+        assert!(r.fault.is_none(), "honor={honor}: fmvpoker faulted toggling hold at turn {n}: {:?}", r.fault);
+        app::state::apply_transcript_elems(&mut state, &r.transcript_elems);
+        *state.v6_paint.borrow_mut() = Engine::paint_surface(&session);
+    }
+
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items, &app::native_font::TextFace::cell_only(zvm::screen::V6Cell::DEFAULT));
+    let layout = app::render::v6_layout::classify_windows(items, zvm::screen::V6Cell::DEFAULT);
+    let story = layout.story.expect("fmvpoker publishes a story window");
+    let (pruned_img, _) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+
+    // The raw, unpruned shadow this list would have carried before SQ-1583.
+    let raw: Vec<app::engine::PxText> = session
+        .machine
+        .screen
+        .v6
+        .as_ref()
+        .expect("v6 screen state")
+        .windows[0]
+        .streamed
+        .iter()
+        .map(|t| app::engine::PxText {
+            y: t.y,
+            x: t.x,
+            text: t.text.clone(),
+            style: t.style,
+            fg: app::state::pack_zcolour(t.fg),
+            bg: app::state::pack_zcolour(t.bg),
+            grow: t.grow,
+            gcol: t.gcol,
+        })
+        .collect();
+    let WinNode::Buffer(pruned_b) = &story.node else { panic!("window 0 is the primary prose Buffer") };
+    assert!(
+        raw.len() > pruned_b.px_runs.len(),
+        "premise (honor={honor}): the raw shadow ({} runs) must be larger than the published, \
+         pruned list ({} runs) or this frame exercises no pruning at all",
+        raw.len(),
+        pruned_b.px_runs.len()
+    );
+
+    // Rebuild the SAME layout with the story window's `px_runs` swapped for the
+    // raw, unpruned list, and re-render.
+    let mut items_unpruned = items.clone();
+    let story_i = items
+        .iter()
+        .position(|it| std::ptr::eq(it, story))
+        .expect("the story window's index in its own items slice");
+    let WinNode::Buffer(ub) = &mut items_unpruned[story_i].node else { panic!("window 0 is a Buffer") };
+    ub.px_runs = raw;
+    let layout_unpruned = app::render::v6_layout::classify_windows(&items_unpruned, zvm::screen::V6Cell::DEFAULT);
+    let (raw_img, _) = app::render::screen::build_v6_raster_canvas(&layout_unpruned, native, &state);
+
+    let differing = pruned_img.pixels().zip(raw_img.pixels()).filter(|(a, b)| a != b).count();
+    assert_eq!(
+        differing, 0,
+        "honor={honor}: pruning covered runs out of px_runs changed {differing} pixels of the \
+         Rasterise composite — a run this dropped was NOT provably repainted by a later one \
+         (SQ-1583)"
+    );
+}
+
+#[test]
+fn fmvpoker_pruning_does_not_change_the_composite_honoring_game_colours() {
+    fmvpoker_pruning_does_not_change_the_composite(true);
+}
+
+#[test]
+fn fmvpoker_pruning_does_not_change_the_composite_theme_only() {
+    fmvpoker_pruning_does_not_change_the_composite(false);
+}

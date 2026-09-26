@@ -31,7 +31,7 @@ use gvm::{GError, Machine, Memory, StepResult};
 
 use crate::engine::{Engine, EngineError, EngineSave, Introspect, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
 use crate::glk_backend::AppGlk;
-use crate::session::{clamp_runs, strip_read_prompt, trim_elems_to_len, FilenameReq, InputKind, PendingIo, TranscriptElem, TurnResult};
+use crate::session::{clamp_runs, strip_read_prompt_for, trim_elems_to_len, FilenameReq, InputKind, PendingIo, TranscriptElem, TurnResult};
 use zvm::location::LocationMethod;
 
 /// The engine tag recorded in an `EngineSave` produced by the Glulx adapter.
@@ -853,6 +853,13 @@ impl GlulxSession {
         self.refresh_screen();
     }
 
+    /// The borderless-windows mode currently in force (SQ-1559), so a caller can
+    /// tell whether [`Self::set_borderless`] would change anything before paying
+    /// for its relayout.
+    pub fn borderless(&mut self) -> bool {
+        self.appglk().borderless()
+    }
+
     /// Drive one turn's worth of execution, updating `pending`/`quit`/`pending_io`.
     /// On an in-game `@save`/`@restore` the drive stops with `pending_io` set (and
     /// `pending`/`quit` left unchanged, since the game is mid-turn); the run loop
@@ -1311,7 +1318,7 @@ impl GlulxSession {
         // path. clamp_runs keeps the style chunks aligned with the shortened text,
         // and trim_elems_to_len applies the same shortening to the element list so
         // the ordered elems stay consistent with the flat `transcript`.
-        let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
+        let transcript = if self.strip_prompt { strip_read_prompt_for(&raw, self.pending).to_owned() } else { raw };
         let kept = transcript.chars().count();
         let transcript_runs = clamp_runs(raw_runs, kept);
         trim_elems_to_len(&mut elems, kept);
@@ -2411,7 +2418,7 @@ impl Engine for GlulxSession {
     fn take_transcript(&mut self) -> String {
         self.machine.flush();
         let raw = self.appglk().take_transcript().0;
-        if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw }
+        if self.strip_prompt { strip_read_prompt_for(&raw, self.pending).to_owned() } else { raw }
     }
 
     fn drain_screen_clear(&mut self) -> bool {
@@ -2423,7 +2430,7 @@ impl Engine for GlulxSession {
         // drew before the first turn (title/cover art). Mirrors `finish_turn`'s
         // trailing-read-prompt handling so the returned elements stay consistent
         // with the flat `take_transcript()` string: the concatenation of the
-        // returned `Text` equals `strip_read_prompt(raw)` (or `raw` unchanged
+        // returned `Text` equals `strip_read_prompt_for(raw, pending)` (or `raw` unchanged
         // when `strip_prompt` is false) — same gating as `take_transcript`.
         self.machine.flush();
         let mut elems = self.appglk().take_transcript_elems();
@@ -2433,7 +2440,7 @@ impl Engine for GlulxSession {
                 raw.push_str(text);
             }
         }
-        let kept = if self.strip_prompt { strip_read_prompt(&raw).chars().count() } else { raw.chars().count() };
+        let kept = if self.strip_prompt { strip_read_prompt_for(&raw, self.pending).chars().count() } else { raw.chars().count() };
         trim_elems_to_len(&mut elems, kept);
         elems
     }
@@ -4014,7 +4021,7 @@ mod tests {
             pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
-            rule: None, link: 0,
+            rule: None, link: 0, resource: None,
         };
         sess.appglk().test_push_primary_image(dummy);
 

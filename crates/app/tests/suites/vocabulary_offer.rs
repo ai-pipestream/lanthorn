@@ -167,6 +167,24 @@ fn an_unknown_word_is_answered_with_what_the_story_knows() {
     assert_eq!(assists(&s), vec!["this story knows — lanter"]);
 }
 
+/// SQ-1552: a headless host reads the structured half off `state.assist_offer`
+/// instead of re-deriving the unknown word and the fill command by parsing
+/// the text — the kind, the word, and (per pick) the command a click on it
+/// should put in the input box.
+#[test]
+fn the_dictionary_offer_carries_a_structured_offer_with_the_fill_command() {
+    let mut s = after("I don't know the word \"lanturn\".");
+    app::vocab::offer_vocabulary(&mut s, &PocketStory, "take lanturn", true);
+    let offer = s.assist_offer.clone().expect("a vocabulary offer was pushed");
+    assert_eq!(offer.kind, app::assist::OfferKind::VocabularyOffer);
+    assert_eq!(offer.word.as_deref(), Some("lanturn"));
+    assert_eq!(
+        offer.picks,
+        vec![app::assist::OfferPick { word: "lanter".to_string(), command: "take lanter".to_string() }],
+        "the unknown word in the typed command is replaced by the pick, nothing else"
+    );
+}
+
 /// One line, in lanthorn's own words, and never in the parser's brackets or the
 /// story's second person — the register, checked at the one place that writes it.
 #[test]
@@ -474,6 +492,10 @@ fn zork1_answers_a_word_it_never_heard_with_what_that_word_means() {
 ///
 /// Falsify by dropping the `irregular_bases` loop from `vocab::stems`: all three
 /// lines fall silent.
+///
+/// `destroy` is Zork's own `destro`, spelled out of the story's text (SQ-1553);
+/// before that an aside still sitting at the truncation limit was dropped as a
+/// fragment and `smash` took its slot.
 #[test]
 fn zork1_answers_an_irregular_inflection_with_the_verb_it_knows() {
     let Some(mut s) = zork1() else { return };
@@ -482,7 +504,7 @@ fn zork1_answers_an_irregular_inflection_with_the_verb_it_knows() {
         lines,
         vec![
             "this story knows — take · look · carry",
-            "this story knows — break · block · smash",
+            "this story knows — break · block · destroy",
             "this story knows — catch · carry · get",
         ]
     );
@@ -524,6 +546,9 @@ fn zork1_answers_a_three_letter_irregular_now_that_length_gates_only_the_near_mi
 /// Each is a form no suffix rule can produce and the near miss cannot reach —
 /// `saw` is two keystrokes from `see`, `won` two from `win` — so every line here
 /// is WordNet's exception list and the story's own dictionary, and nothing else.
+///
+/// `consume` is Zork's own `consum`, spelled out of the story's text (SQ-1553),
+/// where the fragment used to be dropped and `taste` took its slot.
 #[test]
 fn zork1_answers_the_rest_of_the_three_letter_irregulars() {
     let Some(mut s) = zork1() else { return };
@@ -531,7 +556,7 @@ fn zork1_answers_the_rest_of_the_three_letter_irregulars() {
     assert_eq!(
         lines,
         vec![
-            "this story knows — eat · bite · taste",
+            "this story knows — eat · bite · consume",
             "this story knows — see · find · seek",
             "this story knows — win",
             "this story knows — get · carry · catch",

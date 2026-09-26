@@ -209,6 +209,24 @@ fn a_suggestion_that_works_here_is_shown_as_a_recommendation() {
     assert_eq!(p.assists(), vec!["try instead — light"]);
 }
 
+/// SQ-1552: the same canonical case, but reading the structured offer off
+/// `state.assist_offer` — the VETTED kind, the unknown word `illuminate`, and
+/// a fill command with `illuminate` replaced by `light` and nothing else
+/// disturbed.
+#[test]
+fn the_vetted_offer_carries_the_word_and_a_correct_fill_command() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.walk(TO_THE_LAMP);
+    p.turn("illuminate lamp");
+    let offer = p.state.assist_offer.clone().expect("a vetted offer was pushed");
+    assert_eq!(offer.kind, app::assist::OfferKind::VettedOffer);
+    assert_eq!(offer.word.as_deref(), Some("illuminate"));
+    assert_eq!(
+        offer.picks,
+        vec![app::assist::OfferPick { word: "light".to_string(), command: "light lamp".to_string() }]
+    );
+}
+
 /// Both halves in one session, which is the shape a player actually meets: the
 /// suggestion is refused at the door, and the SAME word is offered five rooms
 /// later. A dropped offer must therefore not spend the word's one-per-session
@@ -222,6 +240,103 @@ fn a_dropped_offer_does_not_spend_the_words_one_answer() {
     p.turn("illuminate lamp");
     eprintln!("--- Zork I r88, both halves ---\n{}\n", p.screen());
     assert_eq!(p.assists(), vec!["try instead — light"]);
+}
+
+// ── The intro's own line, not `len() - 1` (SQ-1587) ────────────────────────
+
+/// **In inline-prompt mode** (`command_bar = false`, lanthorn's default),
+/// `push_transcript_internal_styled` INSERTS app-internal output above the
+/// trailing game `>` prompt rather than appending it (SQ-0270) — so after the
+/// once-per-session introduction is pushed, the prompt, not the intro, is
+/// `transcript.last()`. `assist_intro_line` must name where the intro actually
+/// landed, not `transcript.len() - 1`.
+///
+/// Zork I's `illuminate lamp` in the Living Room (the canonical vetted offer
+/// above) is this session's first `push_assist` call, so it is what fires the
+/// introduction — exactly the reported shape: the intro arriving unmarked and
+/// the vetted "try instead — light" line misreported as the intro instead.
+///
+/// Falsify by reverting the SQ-1587 fix in `push_assist`: `assist_intro_line`
+/// then names the trailing `>` prompt line's index (a plain, unstyled `>`),
+/// which fails both the "is the preamble" and "is TranscriptKind::Assist"
+/// assertions below.
+#[test]
+fn assist_intro_line_names_the_intro_in_inline_prompt_mode() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.state.assist_preamble_shown = false; // let the introduction fire below
+    assert!(!p.state.config.command_bar, "inline-prompt mode is lanthorn's default");
+
+    p.walk(TO_THE_LAMP);
+    p.turn("illuminate lamp");
+    eprintln!("--- Zork I r88, intro + vetted offer, inline-prompt mode ---\n{}\n", p.screen());
+    assert!(p.state.last_transcript_line_is_story(), "the game's `>` prompt is still last");
+
+    let intro_at =
+        p.state.assist_intro_line.expect("illuminate lamp in the Living Room is this session's first push_assist");
+    assert_eq!(
+        p.state.transcript[intro_at],
+        app::assist::preamble(p.state.symbols.assist_gutter),
+        "assist_intro_line must name the intro's OWN line, not len() - 1 (the game's `>` prompt here)"
+    );
+    assert_eq!(p.state.transcript_kinds[intro_at], TranscriptKind::Assist);
+
+    // The offer line right after the intro keeps its own structure — it must
+    // not be mistaken for the intro's.
+    assert_eq!(
+        p.assists(),
+        vec![app::assist::preamble(p.state.symbols.assist_gutter), "try instead — light".to_string()],
+        "both assist lines print, in order: the intro then the vetted offer"
+    );
+    assert_eq!(
+        p.state.transcript[intro_at + 1],
+        "try instead — light",
+        "the offer is the very next line, not what assist_intro_line names"
+    );
+    let offer = p.state.assist_offer.clone().expect("a vetted offer was pushed");
+    assert_eq!(offer.kind, app::assist::OfferKind::VettedOffer, "the offer line is not misreported as the intro");
+    assert_eq!(
+        p.state.assist_intro_offer().map(|o| o.kind),
+        Some(app::assist::OfferKind::Intro),
+        "the intro's own structured half is exactly OfferKind::Intro"
+    );
+
+    // No second intro on the next assist call in the same session.
+    p.state.push_assist(&app::assist::Assist::caution("second call"));
+    assert_eq!(p.state.assist_intro_line, None, "the introduction only fires once per session");
+}
+
+/// The same shape in command-bar mode (`command_bar = true`), where
+/// `insert_above_prompt_at` always answers `None` and `push_transcript_internal_styled`
+/// appends — the mode SQ-1587 did not break, kept here as the fix's other half.
+#[test]
+fn assist_intro_line_names_the_intro_in_command_bar_mode() {
+    let Some(mut p) = Play::zork1() else { return };
+    p.state.assist_preamble_shown = false;
+    p.state.config.command_bar = true;
+
+    p.walk(TO_THE_LAMP);
+    p.turn("illuminate lamp");
+    eprintln!("--- Zork I r88, intro + vetted offer, command-bar mode ---\n{}\n", p.screen());
+
+    let intro_at =
+        p.state.assist_intro_line.expect("illuminate lamp in the Living Room is this session's first push_assist");
+    assert_eq!(
+        p.state.transcript[intro_at],
+        app::assist::preamble(p.state.symbols.assist_gutter),
+        "assist_intro_line must name the intro's own line"
+    );
+    assert_eq!(p.state.transcript_kinds[intro_at], TranscriptKind::Assist);
+    assert_eq!(
+        p.assists(),
+        vec![app::assist::preamble(p.state.symbols.assist_gutter), "try instead — light".to_string()],
+        "both assist lines print, in order: the intro then the vetted offer"
+    );
+    assert_eq!(p.state.transcript[intro_at + 1], "try instead — light");
+    let offer = p.state.assist_offer.clone().expect("a vetted offer was pushed");
+    assert_eq!(offer.kind, app::assist::OfferKind::VettedOffer);
+
+    p.state.push_assist(&app::assist::Assist::caution("second call"));
+    assert_eq!(p.state.assist_intro_line, None, "the introduction only fires once per session");
 }
 
 // ── A direction object defeats the noun control (SQ-1232) ──────────────────

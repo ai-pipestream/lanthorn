@@ -192,6 +192,12 @@ pub struct StoryVocabulary {
     /// database. `flashlight` is stored as `flashl` in a Version 3 game, and
     /// comparing untruncated forms would report every long word unknown.
     key_len: usize,
+    /// Every word the story's own static text holds ([`Engine::story_text_words`]),
+    /// empty where the engine has no reader for it.
+    text_words: BTreeSet<String>,
+    /// Dictionary key → the whole word it was cut from, for the keys that can be
+    /// spelled out with confidence (SQ-1553). See [`Self::spell`].
+    spellings: BTreeMap<String, String>,
 }
 
 impl StoryVocabulary {
@@ -221,7 +227,45 @@ impl StoryVocabulary {
         for w in words.keys() {
             by_trunc.entry(cut(w)).or_insert_with(|| w.clone());
         }
-        StoryVocabulary { verbs, by_word, words, by_trunc, prepositions, key_len }
+        StoryVocabulary {
+            verbs,
+            by_word,
+            words,
+            by_trunc,
+            prepositions,
+            key_len,
+            text_words: BTreeSet::new(),
+            spellings: BTreeMap::new(),
+        }
+    }
+
+    /// Attach the story's own text and build the spelling table from it and the
+    /// shipped lexicon (SQ-1553). `None` — an engine with no text reader — still
+    /// gets the lexicon.
+    pub fn with_story_text(mut self, text: Option<BTreeSet<String>>) -> StoryVocabulary {
+        self.text_words = text.unwrap_or_default();
+        self.spellings = full_spellings(self.words.keys(), self.key_len, &self.text_words);
+        self
+    }
+
+    /// Every word the story's own static text holds — empty where the engine
+    /// could not read it.
+    pub fn text_words(&self) -> &BTreeSet<String> {
+        &self.text_words
+    }
+
+    /// A dictionary entry as the player should SEE it: the whole word where the
+    /// entry was cut short and exactly one whole word is known to have been
+    /// cut to it, and the entry as stored otherwise (SQ-1553).
+    ///
+    /// **Display only, and safe to type back.** `lanter` shows as `lantern`;
+    /// typing `lantern` reaches the same entry, because the parser truncates the
+    /// player's word exactly as the dictionary truncated its own. Where the
+    /// evidence is ambiguous — Zork I's text says both `machine` and `machinery`
+    /// — the key is shown as stored, because a truncated word is still one that
+    /// works and a guessed one might be a lie.
+    pub fn spell<'a>(&'a self, entry: &'a str) -> &'a str {
+        self.spellings.get(entry).map_or(entry, String::as_str)
     }
 
     /// Drop every dictionary word this story's own tokeniser would never hand
@@ -282,6 +326,8 @@ impl StoryVocabulary {
         if self.words.keys().all(|w| typeable(w)) {
             return self;
         }
+        // Applied before [`Self::with_story_text`] (see `VocabState::get`), so
+        // there is no text or spelling table here yet to carry across.
         let StoryVocabulary { mut verbs, words, prepositions, key_len, .. } = self;
         for v in &mut verbs {
             v.words.retain(|w| typeable(w));
@@ -479,7 +525,11 @@ pub fn typeable_name(
         }
         return Some(tokens[start..=noun].join(" "));
     }
-    obj.words.first().cloned().or_else(|| obj.display_name())
+    // A parse name is a dictionary key, so it may be cut short (SQ-1553).
+    obj.words
+        .first()
+        .map(|w| vocab.map_or(w.as_str(), |v| v.spell(w)).to_string())
+        .or_else(|| obj.display_name())
 }
 
 /// Every word the parser accepts for `obj`, spelled the way the story SPELLS
@@ -530,7 +580,8 @@ pub fn typeable_words(
     }
     for w in obj.words.iter().chain(obj.adjectives.words()) {
         if !out.iter().any(|t| cut(t) == cut(w)) {
-            out.push(w.clone());
+            // A stored key, so spelled out where it can be (SQ-1553).
+            out.push(vocab.map_or(w.as_str(), |v| v.spell(w)).to_string());
         }
     }
     out
@@ -999,7 +1050,9 @@ impl StoryVocabulary {
                 }
             }
         }
-        best
+        // What the player has just read wins; failing that, the spelling the
+        // story's whole text (or the lexicon) settles on (SQ-1553).
+        best.or_else(|| self.spellings.get(stored).cloned())
     }
 
     /// How many noun phrases the player supplied and which prepositions they
@@ -1024,6 +1077,140 @@ impl StoryVocabulary {
         }
         (nouns, preps)
     }
+}
+
+// ── Spelling a truncated key out (SQ-1553) ─────────────────────────────────
+
+/// The shortest key worth spelling out. A Z-machine key is six or nine
+/// characters (ZMSD 1.1 §13.3/§13.4) and a Glulx one `DICT_WORD_SIZE`, nine by
+/// default; a Scott Adams database keeps three to five, and at that length a
+/// prefix names no word in particular — `lam` is `lamp`, `lamb` and `lament` —
+/// so those words are the game's own abbreviations and are shown as they are.
+const MIN_SPELLED_KEY: usize = 6;
+
+/// Dictionary key → the whole word it was cut from, for every key that can be
+/// spelled out with confidence.
+///
+/// A key is a candidate only when it sits exactly at `key_len` and is plain
+/// `a`–`z`: each of those letters costs one Z-character (alphabet A0, §3.5.3),
+/// so its character count IS its Z-character count, and a whole word of plain
+/// letters truncates to it by characters exactly as the story's encoder would.
+/// A key holding anything else is left alone rather than reasoned about.
+///
+/// The whole words come from two places:
+///
+/// 1. **The story's own text** — `text`, what it can print. `lanter` is
+///    `lantern` because the story says so. This is where the nouns come from.
+/// 2. **The shipped lexicon** ([`verb_synonyms::words`]) — mostly verbs, which
+///    a game accepts but never prints: Zork I says `activate` nowhere and
+///    stores `activa`.
+///
+/// **Pooled, not tried in order.** Mini-Zork never prints `describe` but does
+/// print `descriptions`, and its `descri` is the describe-verb: text first
+/// would have labelled a verb `descriptions`. With both sources pooled, a key
+/// the two reach differently is simply ambiguous.
+///
+/// Inflections are folded first — `attacks` and `attacking` are both `attack`,
+/// and a key that one of them folds back onto is already whole — and then the
+/// answer has to be UNIQUE. `machine` and `machinery` both reach `machin`, so
+/// `machin` stays `machin`: it is still a word that works, which a guess might
+/// not be the right name for.
+fn full_spellings<'a>(
+    keys: impl Iterator<Item = &'a String>,
+    key_len: usize,
+    text: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if key_len < MIN_SPELLED_KEY {
+        return out;
+    }
+    let plain = |w: &str| w.bytes().all(|b| b.is_ascii_lowercase());
+    let at_limit: BTreeSet<&str> =
+        keys.map(String::as_str).filter(|k| k.len() == key_len && plain(k)).collect();
+    if at_limit.is_empty() {
+        return out;
+    }
+    // Every whole word of `source` that reaches a key at the limit, by key.
+    let reach = |source: &mut dyn Iterator<Item = &str>| -> BTreeMap<&str, BTreeSet<String>> {
+        let mut by_key: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+        for w in source {
+            if w.len() < key_len || !plain(w) {
+                continue;
+            }
+            if let Some(&k) = at_limit.get(&w[..key_len]) {
+                by_key.entry(k).or_default().insert(w.to_string());
+            }
+        }
+        by_key
+    };
+    let lexicon: std::collections::HashSet<&str> = verb_synonyms::words().collect();
+    let from_text = reach(&mut text.iter().map(String::as_str));
+    let from_lexicon = reach(&mut lexicon.iter().copied());
+
+    for key in &at_limit {
+        let found: BTreeSet<String> = from_text
+            .get(key)
+            .into_iter()
+            .chain(from_lexicon.get(key))
+            .flatten()
+            .cloned()
+            .collect();
+        if found.is_empty() {
+            continue;
+        }
+        // Each candidate folded onto its base form, where the base still
+        // reaches this key and is itself a word the text or the lexicon
+        // vouches for. The key itself counts only on that same evidence:
+        // `matches` does not fold onto `matche`, which is no word.
+        let lemmas: BTreeSet<String> = found
+            .iter()
+            .map(|w| {
+                inflection_bases(w)
+                    .into_iter()
+                    .find(|b| {
+                        b.starts_with(key) && (found.contains(b) || lexicon.contains(b.as_str()))
+                    })
+                    .unwrap_or_else(|| w.clone())
+            })
+            .collect();
+        let mut it = lemmas.into_iter();
+        if let (Some(only), None) = (it.next(), it.next()) {
+            if only != *key {
+                out.insert(key.to_string(), only);
+            }
+        }
+    }
+    out
+}
+
+/// The base forms a regular inflection of `w` might be — `attacks` → `attack`,
+/// `brandishing` → `brandish`/`brandishe`, `stopped` → `stop`, `carried` →
+/// `carry`. Deliberately narrower than [`stems`]: only the endings that inflect
+/// a word without making a different one (`-er`, `-ly` make `adventurer` and
+/// `strangely`, which are other words), and no irregulars, because a spelling
+/// is being recovered here, not a meaning.
+fn inflection_bases(w: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for suffix in ["ing", "ed", "es", "s"] {
+        let Some(base) = w.strip_suffix(suffix) else { continue };
+        let ch: Vec<char> = base.chars().collect();
+        if ch.len() < 2 {
+            continue;
+        }
+        out.push(base.to_string());
+        if suffix != "s" {
+            out.push(format!("{base}e"));
+        }
+        if ch[ch.len() - 1] == ch[ch.len() - 2] && !"aeiou".contains(ch[ch.len() - 1]) {
+            out.push(ch[..ch.len() - 1].iter().collect());
+        }
+        if suffix != "ing" && ch[ch.len() - 1] == 'i' {
+            let mut y: String = ch[..ch.len() - 1].iter().collect();
+            y.push('y');
+            out.push(y);
+        }
+    }
+    out
 }
 
 /// The words `w` might be an inflected form of.
@@ -1145,7 +1332,10 @@ impl VocabState {
             self.story = engine
                 .story_vocabulary()
                 .map(|v| v.without_untypeable_words(engine))
-                .filter(|v| !v.is_empty());
+                .filter(|v| !v.is_empty())
+                // The one-time read of the story's own text (SQ-1553), taken
+                // here so it is paid once a session with the grammar read.
+                .map(|v| v.with_story_text(engine.story_text_words()));
         }
         self.story.as_ref()
     }
@@ -1178,13 +1368,50 @@ impl VocabState {
 
 /// Split a typed command the way a parser would: words, lowercased, with the
 /// punctuation a player sprinkles on stripped off.
-fn words_of(cmd: &str) -> Vec<String> {
+///
+/// `pub` (SQ-1552) so a headless host building a structured offer's fill
+/// commands by hand — rather than reading [`crate::assist::Offer`] off the
+/// assist lanthorn already pushed — does not have to reimplement this
+/// tokenisation to find the word an offer is about.
+pub fn words_of(cmd: &str) -> Vec<String> {
     cmd.split(|c: char| c.is_whitespace() || c == ',' || c == '.' || c == ';')
         .map(|w| {
             w.trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '\'').to_lowercase()
         })
         .filter(|w| !w.is_empty())
         .collect()
+}
+
+/// The command a click on `pick` should put in the input box (SQ-1552):
+/// `words` with the word at `at` — the one this story's dictionary rejected —
+/// replaced by `pick`, rejoined with spaces. The same construction
+/// [`vetting_plan`] uses to build the candidate it sends the shadow probe, so
+/// an offer's fill and what was actually vetted can never say different
+/// things about what "picking this word" means.
+fn substitute_word(words: &[String], at: usize, pick: &str) -> String {
+    let mut w = words.to_vec();
+    w[at] = pick.to_string();
+    w.join(" ")
+}
+
+/// Build the structured half of a vocabulary offer (SQ-1552): the unknown
+/// word, and each candidate paired with the command a click on it should
+/// fill the input with (via [`substitute_word`]).
+fn build_offer(
+    kind: crate::assist::OfferKind,
+    word: &str,
+    words: &[String],
+    at: usize,
+    picks: &[String],
+) -> crate::assist::Offer {
+    crate::assist::Offer {
+        kind,
+        word: Some(word.to_string()),
+        picks: picks
+            .iter()
+            .map(|p| crate::assist::OfferPick { word: p.clone(), command: substitute_word(words, at, p) })
+            .collect(),
+    }
 }
 
 // ── The vetting, and the claim it earns ─────────────────────────────────────
@@ -1400,6 +1627,13 @@ pub struct PendingOffer {
     /// How many commands were sent. A run that came back shorter left the tail
     /// unjudged, and a partly-vetted offer cannot make the vetted claim.
     commands: usize,
+    /// The typed command's words, tokenised the way [`words_of`] left them.
+    /// Kept so the answer, once it arrives, can say what a click on each
+    /// surviving pick should fill the input with ([`build_offer`], SQ-1552) —
+    /// the same words [`vetting_plan`] built the candidates from.
+    words: Vec<String>,
+    /// Which of `words` was the unknown one.
+    at: usize,
 }
 
 /// Lay out the commands that would vet `picks`, and the plan for reading the
@@ -1531,8 +1765,10 @@ fn judge(run: &crate::probe::ProbeRun, offer: &PendingOffer) -> Option<Vec<Strin
 /// What one call to [`offer_vocabulary`] decided.
 enum Outcome {
     /// Say this now: nothing was asked of the shadow, so the claim is the modest
-    /// one the dictionary alone supports.
-    Now(String),
+    /// one the dictionary alone supports. Carries the structured offer
+    /// alongside the text (SQ-1552) — built once, here, from the same
+    /// `words`/`at`/`picks` the text was.
+    Now(String, crate::assist::Offer),
     /// The shadow was asked. Nothing is said until [`poll_vocabulary_offer`]
     /// collects the answer — or drops it, if the player has moved on.
     Asked(PendingOffer),
@@ -1634,13 +1870,17 @@ pub fn offer_vocabulary(state: &mut AppState, engine: &dyn Engine, cmd: &str, pr
                     picks: picks.clone(),
                     plan,
                     commands: cmds.len(),
+                    words: words.clone(),
+                    at,
                 })
             });
         Some(match asked {
             Some(pending) => Outcome::Asked(pending),
             None => {
                 vocab.mark_offered(word);
-                Outcome::Now(format!("{LEAD_DICTIONARY}{}", picks.join(" · ")))
+                let offer =
+                    build_offer(crate::assist::OfferKind::VocabularyOffer, word, &words, at, &picks);
+                Outcome::Now(format!("{LEAD_DICTIONARY}{}", picks.join(" · ")), offer)
             }
         })
     })();
@@ -1649,7 +1889,9 @@ pub fn offer_vocabulary(state: &mut AppState, engine: &dyn Engine, cmd: &str, pr
     state.transcript = prose;
 
     match outcome {
-        Some(Outcome::Now(line)) => state.push_assist(&crate::assist::Assist::help(line)),
+        Some(Outcome::Now(line, offer)) => {
+            state.push_assist(&crate::assist::Assist::help(line).with_offer(offer))
+        }
         Some(Outcome::Asked(pending)) => state.vocab_pending = Some(pending),
         None => {}
     }
@@ -1683,11 +1925,11 @@ pub fn poll_vocabulary_offer(state: &mut AppState) -> bool {
 /// True when `token` answers a question THIS consumer asked.
 ///
 /// The shadow is shared — [`crate::return_probe`] asks it too (SQ-0785) — and it
-/// hands back one answer at a time with no idea who wanted it. So the event
-/// loop's single collector routes by token
-/// (`loop_tick::poll_shadow_answers`) rather than letting each consumer
-/// poll in turn: a consumer that polls and finds an answer it does not own has
-/// already taken it off the channel, and the one that did want it never sees it.
+/// hands back one answer at a time with no idea who wanted it. So a single
+/// collector routes by token ([`crate::host::probe::poll`], SQ-1548) rather than
+/// letting each consumer poll in turn: a consumer that polls and finds an
+/// answer it does not own has already taken it off the channel, and the one
+/// that did want it never sees it.
 pub fn owns(state: &AppState, token: u64) -> bool {
     state.vocab_pending.as_ref().is_some_and(|p| p.token == token)
 }
@@ -1751,9 +1993,9 @@ fn deliver(state: &mut AppState, answer: crate::probe::Answer) -> bool {
         return false; // stale — the player typed again
     }
     let vetted = answer.run.as_ref().and_then(|run| judge(run, &pending));
-    let (picks, lead) = match vetted {
-        Some(kept) => (kept, LEAD_VETTED),
-        None => (pending.picks, LEAD_DICTIONARY),
+    let (picks, lead, kind) = match vetted {
+        Some(kept) => (kept, LEAD_VETTED, crate::assist::OfferKind::VettedOffer),
+        None => (pending.picks, LEAD_DICTIONARY, crate::assist::OfferKind::VocabularyOffer),
     };
     // Vetting can empty the list, and then there is nothing to recommend.
     if picks.is_empty() {
@@ -1761,7 +2003,10 @@ fn deliver(state: &mut AppState, answer: crate::probe::Answer) -> bool {
     }
     state.vocab.mark_offered(&pending.word);
     let before = state.transcript.len();
-    state.push_assist(&crate::assist::Assist::help(format!("{lead}{}", picks.join(" · "))));
+    let offer = build_offer(kind, &pending.word, &pending.words, pending.at, &picks);
+    state.push_assist(
+        &crate::assist::Assist::help(format!("{lead}{}", picks.join(" · "))).with_offer(offer),
+    );
     state.transcript.len() != before
 }
 
@@ -2396,6 +2641,8 @@ mod tests {
             picks: vec!["examine".into(), "describe".into(), "watch".into()],
             plan: vec![(3, Some((1, 2)), None), (6, Some((4, 5)), None), (9, Some((7, 8)), None)],
             commands: 10,
+            words: vec!["inspect".to_string(), "hinged".to_string()],
+            at: 0,
         };
         assert_eq!(
             judge(&run, &offer),
@@ -2403,5 +2650,79 @@ mod tests {
             "the two that described the trapdoor are kept; `watch`, which the story \
              refused in the same words as the controls, is dropped"
         );
+    }
+
+    // ── Spelling a truncated key out (SQ-1553) ──────────────────────────────
+
+    fn text(words: &[&str]) -> Option<BTreeSet<String>> {
+        Some(words.iter().map(|w| w.to_string()).collect())
+    }
+
+    /// The story's own text spells a noun out, and the lexicon a verb the
+    /// story never prints; a key already whole is left exactly as it is.
+    #[test]
+    fn a_truncated_key_is_spelled_from_the_story_text_and_the_lexicon() {
+        let v = pocket_zork().with_story_text(text(&["the", "brass", "lantern", "sword"]));
+        assert_eq!(v.spell("lanter"), "lantern", "the story's own text");
+        assert_eq!(v.spell("examin"), "examine", "the lexicon, for a verb never printed");
+        assert_eq!(v.spell("lamp"), "lamp", "short of the limit: already whole");
+        assert_eq!(v.spell("take"), "take");
+    }
+
+    /// Two whole words reaching one key is no answer: the key stays as stored,
+    /// which is still a word the parser takes.
+    #[test]
+    fn an_ambiguous_key_stays_as_stored() {
+        let v = pocket_zork().with_story_text(text(&["lantern", "lanterns", "lanternfish"]));
+        assert_eq!(
+            v.spell("lanter"),
+            "lanter",
+            "`lanterns` folds onto `lantern`, but `lanternfish` is another word"
+        );
+    }
+
+    /// Inflections fold onto their base: `attacks` and `attacking` say nothing
+    /// new about `attack`, and a key that one folds back onto is whole.
+    #[test]
+    fn inflections_fold_onto_the_word_they_inflect() {
+        let words: BTreeMap<String, WordRoles> = ["attack", "brandi", "matche"]
+            .iter()
+            .map(|w| (w.to_string(), roles(true, false)))
+            .collect();
+        let v = StoryVocabulary::new(Vec::new(), words, BTreeSet::new(), 6)
+            .with_story_text(text(&["attacks", "attacking", "brandishing", "matches"]));
+        assert_eq!(v.spell("attack"), "attack", "the key IS the base form");
+        assert_eq!(v.spell("brandi"), "brandish", "the base the lexicon vouches for");
+        assert_eq!(v.spell("matche"), "matches", "`matche` is no word to fold onto");
+    }
+
+    /// A key the text and the lexicon reach DIFFERENTLY is ambiguous: text
+    /// first would have called Mini-Zork's describe-verb `descriptions`.
+    #[test]
+    fn text_and_lexicon_are_pooled_not_ranked() {
+        let words: BTreeMap<String, WordRoles> =
+            [("descri".to_string(), roles(true, false))].into_iter().collect();
+        let v = StoryVocabulary::new(Vec::new(), words, BTreeSet::new(), 6)
+            .with_story_text(text(&["descriptions"]));
+        assert_eq!(v.spell("descri"), "descri");
+    }
+
+    /// A Scott Adams key of three to five letters is the game's own
+    /// abbreviation, not a fragment of one word — nothing is spelled out.
+    #[test]
+    fn a_short_key_is_never_spelled_out() {
+        let words: BTreeMap<String, WordRoles> =
+            [("lam".to_string(), roles(false, true))].into_iter().collect();
+        let v = StoryVocabulary::new(Vec::new(), words, BTreeSet::new(), 3)
+            .with_story_text(text(&["lamp"]));
+        assert_eq!(v.spell("lam"), "lam");
+    }
+
+    /// The offer spells a key the prose never carried out of the story's text,
+    /// where it used to show the fragment.
+    #[test]
+    fn an_offer_spells_a_key_the_prose_never_carried() {
+        let v = pocket_zork().with_story_text(text(&["lantern"]));
+        assert_eq!(v.offer("lanturn", Position::Inside, &[], &[]), vec!["lantern"]);
     }
 }

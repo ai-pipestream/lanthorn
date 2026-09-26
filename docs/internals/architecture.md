@@ -143,6 +143,91 @@ load-bearing rather than incidental, so the guard comes in two flavours and
 
 [`HostMode`]: ../../crates/cli-host/src/mode.rs
 
+## The session host: the rules without the terminal
+
+Booting a story, applying a turn, firing a game clock and saving a resume point
+are rules about the GAME, not about the terminal — and a host that is not a
+terminal (a GUI, a network server, a mobile binding) needs exactly the same ones.
+They used to live in the binary's own modules (`startup.rs`, `turn.rs`, …),
+written against `ratatui` and `crossterm`, so nothing else could reach them
+without copying them. `app::host` is where they live now, and the TUI is one
+caller of it: there is one copy of each rule.
+
+- **Boot** (`host::boot_story`, SQ-1537) — mount, profile, palette, per-game
+  overrides, engine construction, resume archive, banner and seed turn, returning
+  a `BootedStory` (engine, `Mapper`, seeded `AppState`, paths). What only a
+  terminal can answer — the image-protocol picker, the OSC 10/11 colours, the
+  terminal size — arrives as `TerminalFacts`, which a headless host leaves at its
+  default; the lines the TUI prints before the alternate screen, and its loading
+  spinner, go through `BootHooks`; a failure is a `BootError`, not a process exit.
+  `startup::boot_story` probes the terminal, calls it, and then does the
+  terminal-only half (raw mode, the alternate screen, the `Terminal`, the
+  keep-it prompt for a fetched story, printing a story that quit at boot).
+  `tests/suites/host_boot.rs` boots all three engines with no terminal.
+- **The per-turn apply** (`host::turn`, SQ-1538) — `finish_command_turn`,
+  `apply_game_driven_result` and `finish_resumed_turn`: echo, transcript, map
+  (declared exits, Glulx room re-keying, the death-watch rollback), pager, save
+  bookkeeping. The only terminal fact it ever took was the map pane's `Rect`, used
+  to recenter; it is now `map_view: Option<(cols, rows)>`. Each returns a
+  `TurnOutcome` — `quit`, plus a `Paging` report (would the pager arm, is `[more]`
+  suppressed, which transcript line this turn's output starts on) for a host that
+  paginates by its own viewport; the TUI's pager itself stays render-driven. The
+  in-game SAVE/RESTORE/filename requests a turn can open (`host::ingame_io`)
+  moved with it.
+- **Sound** (`host::sound`, SQ-1538) — which resource plays, on which channel, with
+  which finish routine or Glk notify waiting on it stays in
+  `AppState::play_turn_sounds` / `play_glulx_sound_ops`; only the noise is the
+  host's, through the `SoundSink` on `AppState::audio`. The TUI's sink is
+  `audio::AudioBackend`, opened lazily on the first sound played (SQ-1423); a
+  headless host installs its own before the first turn and reports each finished
+  sound through `sound_finished`, which runs the routine exactly as the TUI does
+  when its device reports one. `tests/suites/host_turn.rs` drives Zork I into the
+  grue and a hand-assembled `@sound_effect` story through a recording sink.
+  The device itself is `app`'s default-on `playback` feature (SQ-1541):
+  `--no-default-features` drops rodio → cpal → ALSA, the default sink becomes
+  `host::sound::Silence`, and the `audio` crate's device-free decoders
+  (`decode_aiff`, `tone`/`bleep`, `render_mod` → `Pcm` → `Pcm::to_wav`) are
+  what such a host's sink works with. CI's `no-playback` job builds that
+  configuration on Linux with no `libasound2-dev` installed.
+- **The rest of a session** (SQ-1539) — `host::clock`: `refresh_input` re-arms the
+  timed-input and Glk-timer deadlines, `next_deadline` says when to wake,
+  `fire_due(now)` fires what is due (interrupt routines, Glk timers, sound
+  finishes, Sound2 ramps); the TUI runs exactly that once per loop pass.
+  `host::screen`: the host names the story pane in cells (`set_story_pane`), and
+  the header write or Glulx re-arrange follows — the TUI keeps only its drag
+  debounce. `host::persist`: the exit save, the clean-quit clear, a Save State on
+  demand, `restore_file` and the saves manager's `load_save`; the TUI's
+  `lifecycle.rs` wraps them with the watchdog guard and its stderr lines.
+  `host::reset::reset_game` takes the host's terminal size and a
+  `ResetOptions { clear_map, delete_data }`. `host::ingame_io`'s
+  `pending_file_prompt` / `answer_file_prompt` answer the game's own
+  SAVE/RESTORE/`create_by_prompt` with a name or a cancel, for a host that draws
+  none of the dialogs. `tests/suites/host_session.rs` covers each.
+- **Shadow-probe answers** (`host::probe::poll`, SQ-1548) — `host::turn` arms the
+  vocabulary offer, return-probe and random-exit probes every turn, but nothing
+  collects their answers on its own; `poll` is the single collector that routes
+  each one by token (see "The second consumer: the return probe" below) and
+  hands the return search its next question. The TUI calls it once per loop
+  pass exactly where its own `loop_tick::poll_shadow_answers` used to; a
+  headless host calls it on its own tick. Not time-driven — `ShadowProbe::poll`
+  is a nonblocking channel read, so there is no deadline to fold into
+  `host::clock::next_deadline`. `tests/suites/host_probe.rs` covers a vetted
+  offer and a return-probe map edge through the host alone.
+- **Applying a changed config** (`host::settings`, SQ-1559) — what the settings
+  screen's Save does to a running session, in two halves. `apply(state, working,
+  per_game)` is the `AppState` half: the config, the `_base` values `/set-… auto`
+  falls back to, the one-run holds on `AppState` (ended only when the edit
+  released the key's pin), the sound sink, the `show_status_bar` /
+  `show_room_numbers` mirrors — and, for a host, this game's `PerGameConfig`
+  layered back over the top with boot's precedence and pins. `commit(state,
+  session, &applied)` must follow it: write `config.toml`, sync the engine
+  (Glulx sound gestalt, prompt stripping, borderless relayout), then
+  `reload_style` — after the write, because the reload re-pins the honour key and
+  a pinned key is skipped by the writer. `working` is the live config with the
+  edits applied and each edited key's pin released, never a bare file off disk,
+  or every one-run choice reads as an edit. The TUI's `Action::ConfigSave` runs
+  both; mouse capture and the style watcher stay its own.
+
 ## Three engines, one renderer — and Glk only for Glulx
 
 All three VMs implement one `Engine` trait whose `screen()` returns an
@@ -489,6 +574,38 @@ than inferred, with the last consumed line's fingerprint in the key as the guard
 that catches a mutator which picked wrong. `cargo run --release -p app --example
 scroll_bench` measures all of it.
 
+### Composing a v6 frame without the TUI
+
+The raster composite reads no `AppState` of its own. `render::screen::compose_v6_frame`
+takes the classified window layout, the frame to build, and a `V6FrameInputs`:
+the host's default pair, whether game colours are honoured, the colour scheme,
+the one `TextFace`, the painted ground, the live input line for a secondary
+panel, the lit reveal, the pager flag, the `[more]` pair — and the transcript as
+a callback, because the prose box is only known once the art around it has been
+measured. The TUI builds that value with `V6FrameInputs::from_state` and goes
+through the same function (`build_v6_raster_frame` is just that pair of calls), so
+a GUI, a server or an FFI binding composes a frame by the same rules without
+building an `AppState` (SQ-1543). The text cell and the screen size are
+deliberately *not* fields: the cell is `face.cell()` and the screen is the frame
+asked for, and a second copy of either is the SQ-1020 trap.
+
+The frame's text also comes back as data. Every glyph the composite draws goes
+through one sink (`v6_layout::GlyphSink`), and under `V6TextMode::RasteriseAndRecord`
+or `RecordOnly` it reports `V6TextRun`s — row, colours, style, one native-pixel
+box per character, and a `V6RunSource` saying which part of the composite drew it
+(chrome run, grid cell, secondary panel, story prose, story canvas, `[more]`
+prompt) — so a host with real text rendering can draw the characters itself
+rather than ship them as pixels, SQ-0750's rule carried off the terminal. The
+`V6Frame` also reports what the composite measured around that text (SQ-1567):
+the story prose box the transcript callback was asked to fill (`story`, extension
+rows included, with its cell grid), the page the canvas was flattened onto
+(`page`), and the input caret (`caret`). `RecordOnly` leaves every glyph (and its
+background block) out of the canvas, and the caret too — it is reported, not
+painted, so a host's art does not change on every keystroke; `Rasterise` still
+paints it. `v6_headless_compose` checks that RecordOnly changes no pixel outside a
+recorded box or the reported caret, that a host's hand-built inputs reproduce the
+TUI's canvas on Zork Zero and Journey, and each of the measured facts above.
+
 ## Input: a suspend/resume handshake
 
 Input is engine-neutral too. A VM's `step()` returns a request —
@@ -624,10 +741,12 @@ follows from that.
   and the layer suggestion. `ProbedPassage` carries the three facts as one value
   and deliberately cannot name the outbound passage, which is how reciprocity is
   made unwriteable rather than merely unwritten.
-- **Two consumers, one channel, one collector.** `ShadowProbe::poll` takes
+- **Three consumers, one channel, one collector.** `ShadowProbe::poll` takes
   whatever has arrived without knowing who wanted it, so a consumer polling for
-  itself would sometimes take the other's answer off the channel and drop it.
-  `loop_tick::poll_shadow_answers` collects once and routes by token.
+  itself would sometimes take another's answer off the channel and drop it.
+  `host::probe::poll` (SQ-1548; the TUI's `loop_tick::poll_shadow_answers`
+  before it) collects once and routes by token, so a headless host gets the
+  vetted vocabulary offer and the return-probe / random-exit map edges too.
 
 Measured per attempt, worker time, debug build: Zork I **0.7 ms**, Coloratura
 **4.3 ms**, Counterfeit Monkey **343 ms**. In play the priority order usually

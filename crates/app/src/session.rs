@@ -1630,7 +1630,7 @@ impl GameSession {
         // Keep the win0 char-offset base in sync with the drained sink, so any
         // later inline-picture interleave measures against the right origin.
         self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
-        if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw }
+        if self.strip_prompt { strip_read_prompt_for(&raw, self.pending).to_owned() } else { raw }
     }
 
     /// Drain the game's pending screen clear: the per-turn `erase_window` flag
@@ -1960,7 +1960,7 @@ impl GameSession {
         let (erase_lower, cleared_at) = self.take_screen_clear();
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
         self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
-        let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
+        let transcript = if self.strip_prompt { strip_read_prompt_for(&raw, self.pending).to_owned() } else { raw };
         let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
         let detected = detect_location_with(&self.machine, self.player_candidates());
         let location = detected.as_ref().map(location_to_snapshot);
@@ -3099,6 +3099,11 @@ impl GameSession {
                     // No Glk hyperlink concept in v6 (SQ-1503; that's a Glulx
                     // `glk_set_hyperlink` mechanism).
                     link: 0,
+                    // SQ-1561 wired `resource` from the two Glk buffer-window draw
+                    // sites only (a v6 picture may come from a disk-native resource
+                    // rather than a Blorb `Pict`, per "disk-native resources win" —
+                    // not the same guarantee).
+                    resource: None,
                 };
                 self.story_pics.push((ev.out_chars, float));
             }
@@ -3624,20 +3629,32 @@ impl GameSession {
                     // `BufferWindow::px_runs`. The transcript is still what renders
                     // it; this is the same text read as pixels, for the one window
                     // shape that is a canvas rather than a page.
-                    px_runs: win
-                        .streamed
-                        .iter()
-                        .map(|t| crate::engine::PxText {
-                            y: t.y,
-                            x: t.x,
-                            text: t.text.clone(),
-                            style: t.style,
-                            fg: crate::state::pack_zcolour(t.fg),
-                            bg: crate::state::pack_zcolour(t.bg),
-                            grow: t.grow,
-                            gcol: t.gcol,
-                        })
-                        .collect(),
+                    //
+                    // Pruned of runs a LATER one in the same list EXACTLY
+                    // duplicates (SQ-1583): `ZWindow::record_streamed` shadows
+                    // every glyph it is ever handed and never erases the way
+                    // `paint_run` does (see that method's own doc) — so fmvpoker's
+                    // HOLD/un-HOLD toggle, which reprints "HOLD" or the same blank
+                    // over and over at the identical pixels, piles up copies of
+                    // both forever instead of leaving just the newest of each. See
+                    // `prune_covered_px_runs`'s own doc for why this stops at exact
+                    // duplicates rather than "any later, bigger rect" — the latter
+                    // looks equivalent and is not, once `honor_game_colours` is off.
+                    px_runs: prune_covered_px_runs(
+                        win.streamed
+                            .iter()
+                            .map(|t| crate::engine::PxText {
+                                y: t.y,
+                                x: t.x,
+                                text: t.text.clone(),
+                                style: t.style,
+                                fg: crate::state::pack_zcolour(t.fg),
+                                bg: crate::state::pack_zcolour(t.bg),
+                                grow: t.grow,
+                                gcol: t.gcol,
+                            })
+                            .collect(),
+                    ),
                     ..Default::default()
                 })
             } else if !win.prose.is_empty() {
@@ -4015,6 +4032,43 @@ fn v6_face_lines(face: Option<&crate::native_font::TextFace>) -> Vec<String> {
         out.push(format!("    pen: steps the cell — {}px for every character", cell.w()));
     }
     out
+}
+
+/// Drop a run that a LATER one in the same list (same paint order) exactly
+/// duplicates — same position, text, style and colours — see the call site in
+/// `v6_screen_model` for why this exists (SQ-1583).
+///
+/// **Exact duplicates only, deliberately** — not "any later run whose rect
+/// contains this one's", which looked like the obvious rule and is unsound: a
+/// later run only REPAINTS a pixel in the composite when it puts opaque ink or
+/// an opaque background there, and `draw_story_canvas_runs_into` makes the
+/// background conditional on `honor_game_colours` — `bg` is forced `None` for
+/// every run when the player is not honouring game colours, so an all-blank run
+/// (fmvpoker's un-HOLD) paints NOTHING in that mode and a glyph run only ever
+/// paints its own ink pixels, never blanks the cell around them. A rect-sized
+/// run genuinely does not erase what is behind it there, so treating "later run,
+/// bigger rect" as coverage changed the Rasterise composite by hundreds of
+/// pixels the moment `honor_game_colours` was off (caught by
+/// `fmvpoker_pruning_does_not_change_the_composite_theme_only`).
+///
+/// An EXACT duplicate has no such mode dependency: whatever pixels the earlier
+/// run would have painted, in EITHER mode, the later one paints identically (same
+/// text ⇒ same glyph ink pattern, same style, same fg/bg ⇒ same resolved colour
+/// in that same mode) — so dropping it is provably invisible to the composite.
+/// It is also, on its own, enough to keep fmvpoker's HOLD/un-HOLD toggle bounded:
+/// each card position alternates between exactly two distinct prints (its own
+/// "HOLD" and its own same-width blank), so every occurrence but the newest of
+/// each collapses onto that newest one — see
+/// `fmvpoker_stale_hold_labels_are_pruned`'s doc for the shape this leaves.
+fn prune_covered_px_runs(runs: Vec<crate::engine::PxText>) -> Vec<crate::engine::PxText> {
+    let has_later_duplicate = |i: usize| {
+        let r = &runs[i];
+        runs[i + 1..].iter().any(|l| {
+            l.x == r.x && l.y == r.y && l.text == r.text && l.style == r.style && l.fg == r.fg && l.bg == r.bg
+        })
+    };
+    let keep: Vec<bool> = (0..runs.len()).map(|i| !has_later_duplicate(i)).collect();
+    runs.into_iter().zip(keep).filter_map(|(run, k)| k.then_some(run)).collect()
 }
 
 /// The MACHINE's own screen pair for a Version 6 frame, `(foreground,
@@ -4716,41 +4770,68 @@ fn run_settled(machine: &mut Machine) -> (InputKind, bool, String) {
     }
 }
 
-/// Strip a trailing interactive read prompt from captured Z-machine output.
+/// Strip the game's trailing read prompt from output that ends at a LINE read,
+/// so the command bar's own `> ` (and the host's `> cmd` echo above it) is the
+/// only prompt the player sees. Only ever called with `strip_prompt` on, which
+/// the host ties to `command_bar` — inline-prompt mode keeps the game's `>`.
 ///
-/// Infocom-style games print a bare ">" (possibly preceded by whitespace or a
-/// newline, possibly followed by a space) as the last thing before issuing a
-/// read/sread opcode.  When that output is captured we want to remove it so the
-/// app's own fixed bottom input line is the only ">" the player sees.
+/// Trailing spaces/tabs are ignored, then the trailing run of `>` (one or more)
+/// is removed when either:
 ///
-/// The rule: trim trailing ASCII whitespace; if the result ends with ">" AND
-/// that ">" is preceded by a newline or is the only character, remove it and
-/// trim trailing whitespace again.  Any ">" that appears mid-sentence (e.g.
-/// inside a score display like "score > 10") is unaffected because it will not
-/// be the last non-whitespace character after a newline.
+/// - **it stands alone on its line** (preceded by a newline, or nothing): the
+///   Infocom `\n>` and *Bureaucracy*'s `\n>>` — and the blank lines before it go
+///   too; or
+/// - **it closes a sentence**: the character before it (allowing ONE space) is
+///   `? . ! : ] )`, and only that run and its space go — *Beyond Zork*'s
+///   `[Please type YES or NO.] >`, *Bronze*'s `…before? >`, *Counterfeit
+///   Monkey*'s `Can you hear me? >>`, *Fairest*'s `…the game?>` (SQ-1564).
+///
+/// Anything else is kept: a `>` with text after it is not trailing at all
+/// (Nameless's `G>amez` menu), and a `>` straight after a word (`go >`) is
+/// ambiguous, so it stays.
+///
+/// See [`strip_read_prompt_for`] for reads that are not line reads.
 pub(crate) fn strip_read_prompt(s: &str) -> &str {
+    strip_read_prompt_for(s, InputKind::Line)
+}
+
+/// [`strip_read_prompt`] for output ending at a read of kind `pending`.
+///
+/// A prompt run alone on its own line is stripped whatever the read (as it
+/// always was); a run that closes a line of text is stripped only before a LINE
+/// read. At a `read_char` the command bar draws no prompt and the host echoes
+/// nothing, so the game's own `>` — *Border Zone*'s `…(R)estore? >`,
+/// *Nameless*'s `Q>>` — is the only cue the player has, and nothing doubles it.
+pub(crate) fn strip_read_prompt_for(s: &str, pending: InputKind) -> &str {
     let trimmed = s.trim_end_matches([' ', '\t']);
-    // After stripping trailing spaces/tabs the string may still end with "\n>"
-    // or just ">".  Check for that and strip.
-    if let Some(without_gt) = trimmed.strip_suffix('>') {
-        // Only strip if the ">" is at the start of a line (preceded by '\n')
-        // or if it's the only character remaining.
-        let preceded_by_newline = without_gt.ends_with('\n') || without_gt.is_empty();
-        if preceded_by_newline {
-            return without_gt.trim_end_matches([' ', '\t', '\n', '\r']);
+    let before = trimmed.trim_end_matches('>');
+    if before.len() == trimmed.len() {
+        return trimmed;
+    }
+    if before.is_empty() || before.ends_with('\n') {
+        return before.trim_end_matches([' ', '\t', '\n', '\r']);
+    }
+    if pending == InputKind::Line {
+        let text = before.strip_suffix(' ').unwrap_or(before);
+        if text.ends_with(['?', '.', '!', ':', ']', ')']) {
+            return text;
         }
     }
     trimmed
 }
 
-/// Whether `s` ends with the read prompt [`strip_read_prompt`] would remove —
-/// i.e. whether the game just handed the player its command prompt.
+/// Whether `s` ends with the game's PARSER prompt — a single `>` alone on its
+/// line — i.e. whether the game just handed the player its command prompt.
 ///
-/// Defined in terms of `strip_read_prompt` rather than beside it so the two can
-/// never drift: lanthorn has exactly one notion of "the game's read prompt", and
-/// a game whose prompt this misses already shows the player a doubled prompt.
+/// Deliberately narrower than [`strip_read_prompt`]: that one also removes a
+/// prompt closing a question (`…the game?>`), which is exactly what this must
+/// NOT match. Glulx's silent `look` relies on this to tell a parser from a
+/// question (SQ-1293), and typing LOOK at a yes/no question would answer it.
 pub(crate) fn ends_with_read_prompt(s: &str) -> bool {
-    strip_read_prompt(s).len() < s.trim_end_matches([' ', '\t']).len()
+    let trimmed = s.trim_end_matches([' ', '\t']);
+    trimmed
+        .strip_suffix('>')
+        .is_some_and(|before| before.is_empty() || before.ends_with('\n'))
 }
 
 /// Downcast `machine.out` to `&mut CaptureSink`.
@@ -5284,7 +5365,7 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
     ScreenModel {
         root: WinNode::Pair {
             vertical: true,
-            split: Split { fixed: screen.upper.rows },
+            split: Split { fixed: screen.upper.rows , fixed_px: None },
             // The Z-machine has no Glk border; its status box is drawn by the simple path.
             border: false,
             key_bg: None,
@@ -5398,7 +5479,7 @@ impl Engine for GameSession {
         let base = self.v6_win0_chars_seen;
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
         self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
-        let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
+        let transcript = if self.strip_prompt { strip_read_prompt_for(&raw, self.pending).to_owned() } else { raw };
         let runs = clamp_runs(raw_runs, transcript.chars().count());
         let marks = std::mem::take(&mut self.story_pics)
             .into_iter()
@@ -5810,6 +5891,10 @@ impl Engine for GameSession {
     fn knows_word(&self, word: &str) -> Option<bool> {
         let mem = &self.machine.mem;
         Some(zvm::dictionary::load(mem).lookup(mem, word) != 0)
+    }
+
+    fn story_text_words(&self) -> Option<std::collections::BTreeSet<String>> {
+        Some(crate::story_text::zmachine_words(&self.machine.mem))
     }
 
     /// The story's OWN tokeniser, run over prose the story itself printed
@@ -6518,6 +6603,7 @@ mod tests {
             margin_px: Some(56),
             rule: None,
             link: 0,
+            resource: None,
         };
         let text = "first line\nsecond line";
         // One style chunk covering everything (bold), to verify run splitting.
@@ -6545,6 +6631,7 @@ mod tests {
             margin_px: None,
             rule: None,
             link: 0,
+            resource: None,
         };
         let elems = interleave_story_elems("story text", &[], vec![(0, TranscriptElem::Image(img))], 0, None);
         assert_eq!(elems.len(), 2, "Image then Text");
@@ -6644,7 +6731,7 @@ mod tests {
             pixels: std::sync::Arc::new(image::RgbaImage::new(2, 2)),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
-            rule: None, link: 0,
+            rule: None, link: 0, resource: None,
         }
     }
 
@@ -9420,6 +9507,91 @@ mod tests {
     fn strip_prompt_no_trailing_prompt_unchanged() {
         let s = "You are in a maze of twisty passages, all alike.";
         assert_eq!(strip_read_prompt(s), s);
+    }
+
+    // SQ-1564: the prompt shapes command-bar mode left behind, each quoted from
+    // the story's own output at a line read.
+
+    #[test]
+    fn strip_prompt_removes_a_run_of_gt_alone_on_its_line() {
+        // Bureaucracy r116's boot: `>>` alone on its line.
+        assert_eq!(
+            strip_read_prompt("…to start the game anew.\n>>"),
+            "…to start the game anew."
+        );
+        assert_eq!(strip_read_prompt("Text.\n\n>>> "), "Text.");
+        assert_eq!(strip_read_prompt(">>"), "");
+    }
+
+    #[test]
+    fn strip_prompt_removes_a_gt_closing_a_sentence_after_a_space() {
+        // Beyond Zork r57, Bronze, Border Zone r9 (the last only at a line read).
+        assert_eq!(
+            strip_read_prompt("Is this a VT220?\n\n[Please type YES or NO.] >"),
+            "Is this a VT220?\n\n[Please type YES or NO.]"
+        );
+        assert_eq!(
+            strip_read_prompt("Have you played interactive fiction before? >"),
+            "Have you played interactive fiction before?"
+        );
+        assert_eq!(
+            strip_read_prompt("Which chapter would you like to play: 1, 2, 3, or (R)estore? >"),
+            "Which chapter would you like to play: 1, 2, 3, or (R)estore?"
+        );
+    }
+
+    #[test]
+    fn strip_prompt_removes_a_gt_run_closing_a_sentence() {
+        // Counterfeit Monkey r11: a run, a space, and a trailing space after it.
+        assert_eq!(strip_read_prompt("\n\nCan you hear me? >> "), "\n\nCan you hear me?");
+    }
+
+    #[test]
+    fn strip_prompt_removes_a_gt_touching_the_sentence() {
+        // Fairest / What Heart Heard of Ghost Guessed: no space before the `>`.
+        assert_eq!(
+            strip_read_prompt("Would you like to read some helpful information before starting the game?>"),
+            "Would you like to read some helpful information before starting the game?"
+        );
+    }
+
+    #[test]
+    fn strip_prompt_keeps_a_gt_run_after_a_word() {
+        // `go >` / Nameless's `Q>>`: a `>` straight after a word is ambiguous, so
+        // it stays — the rule needs a closing punctuation mark or a line of its own.
+        assert_eq!(strip_read_prompt("Go east, then go >>"), "Go east, then go >>");
+        assert_eq!(strip_read_prompt("(10 Std) A N M>> "), "(10 Std) A N M>>");
+        // …and a `>` with text after it is not trailing at all.
+        let menu = "   G>amez    M>ailz\n   W>arez    Q>uitz";
+        assert_eq!(strip_read_prompt(menu), menu);
+    }
+
+    #[test]
+    fn strip_prompt_after_text_is_kept_at_a_char_read() {
+        // At a `read_char` the command bar draws no prompt and the host echoes
+        // nothing, so the game's own `>` is the player's only cue: Border Zone r9
+        // asks for its chapter this way, and Nameless's BBS menus too.
+        let bz = "Which chapter would you like to play: 1, 2, 3, or (R)estore? >";
+        assert_eq!(strip_read_prompt_for(bz, InputKind::Char), bz);
+        let fairest = "…before starting the game?>";
+        assert_eq!(strip_read_prompt_for(fairest, InputKind::Char), fairest);
+        assert_eq!(strip_read_prompt_for(fairest, InputKind::Event), fairest);
+        // A prompt alone on its line is still stripped whatever the read, as it
+        // always was.
+        assert_eq!(strip_read_prompt_for("Text.\n>", InputKind::Char), "Text.");
+        assert_eq!(strip_read_prompt_for("Text.\n>>", InputKind::Char), "Text.");
+    }
+
+    #[test]
+    fn ends_with_read_prompt_is_the_parser_prompt_only() {
+        // The SQ-1293 silent LOOK must not fire at a question, so the widened
+        // strip (a `>` closing a question) is not a parser prompt here.
+        assert!(ends_with_read_prompt("You are in a room.\n\n> "));
+        assert!(ends_with_read_prompt(">"));
+        assert!(!ends_with_read_prompt("…before starting the game?>"));
+        assert!(!ends_with_read_prompt("Can you hear me? >> "));
+        assert!(!ends_with_read_prompt("Text.\n>>"));
+        assert!(!ends_with_read_prompt("Go east, then go >"));
     }
 
     // ── key_input_to_zscii: arrow and function keys (Bug B) ──────────────────

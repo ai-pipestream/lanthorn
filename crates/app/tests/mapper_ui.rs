@@ -24,6 +24,8 @@ mod anchor_box_quote;
 mod anchor_room_detection;
 #[path = "suites/command_band.rs"]
 mod command_band;
+#[path = "suites/verb_tiers.rs"]
+mod verb_tiers;
 #[path = "suites/border_controls.rs"]
 mod border_controls;
 #[path = "suites/return_probe.rs"]
@@ -126,3 +128,7 @@ mod sq1342_quit_clears_resume;
 mod sq1345_zork1_forest_shadow;
 #[path = "suites/sq1351_nguhd_topics.rs"]
 mod sq1351_nguhd_topics;
+#[path = "suites/sq1551_host_map_editing.rs"]
+mod sq1551_host_map_editing;
+#[path = "suites/sq1562_folded_updown_layout.rs"]
+mod sq1562_folded_updown_layout;

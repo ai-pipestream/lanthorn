@@ -1696,6 +1696,10 @@ pub(crate) fn visible_suggestion_line(
 /// text you typed), when focus is elsewhere or an overlay is up, or when the
 /// candidate adds nothing — which is exactly the state right after Tab applied it,
 /// so the hint clears itself without any extra bookkeeping.
+///
+/// The tail itself — "does `candidate` extend `partial`, and by what" — is pure and lives at
+/// [`crate::complete::completion_ghost_tail`] (SQ-1549); everything above is this TUI's own
+/// focus/overlay/caret gating.
 pub(crate) fn ghost_completion(state: &AppState) -> Option<String> {
     if state.focus != Focus::Game || state.any_modal_overlay_open() {
         return None;
@@ -1708,11 +1712,7 @@ pub(crate) fn ghost_completion(state: &AppState) -> Option<String> {
     }
     let candidate = state.suggestions.get(state.suggestion_idx % state.suggestions.len().max(1))?;
     let partial = state.current_partial();
-    if !candidate.to_lowercase().starts_with(&partial.to_lowercase()) {
-        return None;
-    }
-    let hint: String = candidate.chars().skip(partial.chars().count()).collect();
-    (!hint.is_empty()).then_some(hint)
+    crate::complete::completion_ghost_tail(candidate, partial)
 }
 
 /// The current inventory item list: the engine's live object-tree contents for
@@ -3491,7 +3491,7 @@ mod tests {
     // ── Inline-image band wrapping ────────────────────────────────────────────
 
     fn dummy_img(w: u32, h: u32, align: crate::inline_image::ImageAlign) -> crate::inline_image::InlineImage {
-        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None, margin_px: None, rule: None, link: 0 }
+        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None, margin_px: None, rule: None, link: 0, resource: None }
     }
 
     #[test]
@@ -3581,6 +3581,7 @@ mod tests {
             margin_px,
             rule: None,
             link: 0,
+            resource: None,
         }
     }
 
@@ -4347,6 +4348,7 @@ mod tests {
             margin_px: None,
             rule: None,
             link: 42,
+            resource: None,
         });
         state.push_transcript("after");
         state.focus = Focus::Game;
@@ -4385,6 +4387,7 @@ mod tests {
             margin_px: None,
             rule: None,
             link: 42,
+            resource: None,
         });
         state.push_transcript("prose that wraps beside the thumbnail in the right margin");
         state.focus = Focus::Game;
@@ -4573,6 +4576,7 @@ mod tests {
             margin_px: Some(4),
             rule: None,
             link: 0,
+            resource: None,
         };
         let lines = vec![String::new(), "AAAA".to_string()];
         let kinds = vec![TranscriptKind::Story; 2];

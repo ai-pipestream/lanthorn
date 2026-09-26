@@ -383,6 +383,10 @@ pub struct CommandBandState {
     /// there is; without this a story with no readable grammar would re-ask on
     /// every tick forever. (`render::command_band::refresh_verbs`.)
     pub verbs_read: bool,
+    /// The `turn_epoch` the story's column was last RANKED at (SQ-1554). The
+    /// grammar is static, but which verbs the player has typed is not, so a
+    /// story column is re-tiered once per turn — never per tick.
+    pub verbs_epoch: Option<u64>,
     /// The one-click quick-action row.
     pub quick: Vec<String>,
     /// Tokens picked so far, in order.
@@ -493,7 +497,9 @@ impl CommandBandState {
     /// The table entry for `word`, matched case-insensitively (the player types
     /// the prompt now, and `Take` is the same verb as `take`).
     pub fn verb_by_word(&self, word: &str) -> Option<&VerbEntry> {
-        self.verbs.iter().find(|v| v.word.eq_ignore_ascii_case(word))
+        // A row's folded synonyms name it too (SQ-1554): `carry` is the `take`
+        // row's, and typing it must open the same columns.
+        self.verbs.iter().find(|v| v.answers_to(word))
     }
 
     /// The picked verb's table entry (grammar for everything downstream).
@@ -760,8 +766,17 @@ impl CommandBandState {
         let (max_nouns, joiners) = (entry.max_nouns(), entry.joiners());
         // Store the TABLE's spelling, so downstream lookups (`prep`,
         // `max_nouns`) and `phrase_text` are canonical regardless of how it was
-        // typed.
-        let mut picks = vec![BandPick { slot: BandSlot::Verb, text: entry.word.clone() }];
+        // typed — unless the player typed one of the row's folded SYNONYMS
+        // (SQ-1554). That word stays: `phrase_text` must still end the prompt
+        // the player wrote, or a click appends `take` after their `carry`
+        // instead of replacing the phrase, and the synonym resolves to the
+        // same row anyway.
+        let verb_text = if entry.word.eq_ignore_ascii_case(toks[vi]) {
+            entry.word.clone()
+        } else {
+            toks[vi].to_string()
+        };
+        let mut picks = vec![BandPick { slot: BandSlot::Verb, text: verb_text }];
         let rest = &toks[vi + 1..];
         let push = |picks: &mut Vec<BandPick>, slot, text: String| {
             if !text.is_empty() {
@@ -1673,14 +1688,18 @@ impl ScrollAnim {
     /// `scroll_ms == 0` (the caller should jump instantly and clear any anim) —
     /// the byte-for-byte instant path.
     pub fn to(from: usize, to: usize, cfg: &crate::config::AnimationConfig) -> Option<Self> {
-        if !cfg.enabled || cfg.scroll_ms == 0 {
+        Self::over(from, to, cfg.enabled, cfg.scroll_ms, cfg.easing)
+    }
+
+    /// Same as [`Self::to`], but with an explicit duration instead of always
+    /// reading `cfg.scroll_ms` — used by the transcript follow-ease (SQ-1595),
+    /// which times off `cfg.follow_ms` while still honoring the master switch
+    /// and the shared easing curve.
+    pub fn over(from: usize, to: usize, enabled: bool, ms: u64, easing: crate::anim::Easing) -> Option<Self> {
+        if !enabled || ms == 0 {
             return None;
         }
-        Some(Self {
-            from,
-            to,
-            tween: crate::anim::Tween::new(Duration::from_millis(cfg.scroll_ms), cfg.easing),
-        })
+        Some(Self { from, to, tween: crate::anim::Tween::new(Duration::from_millis(ms), easing) })
     }
 
     /// The current displayed offset: `lerp(from, to, tween.progress())`.
@@ -2412,12 +2431,13 @@ pub type LoadedTranscript = Option<(
 /// viewed layer. `render_layer` re-runs chain detection + edge routing every call,
 /// so re-doing it on an animation / transcript / mouse-move redraw of an otherwise
 /// unchanged map is pure waste. The live graph only changes on a turn / tidy apply /
-/// map edit — each bumps `graph_gen` — so an unchanged `(gen, layer)` reuses this.
-/// Only the live map is cached; replay and tidy-animation graphs are not tracked by
-/// `graph_gen` and are rebuilt per frame (see `AppState::cached_map_render`). (SQ-0305)
+/// map edit — each bumps [`mapper::mapper::Mapper::struct_gen`] (SQ-1540) — so an
+/// unchanged `(gen, layer)` reuses this. Only the live map is cached; replay and
+/// tidy-animation graphs are not tracked by `struct_gen` and are rebuilt per frame
+/// (see `AppState::cached_map_render`). (SQ-0305, SQ-1544)
 #[derive(Debug)]
 pub(crate) struct MapRenderCache {
-    /// Graph generation (`AppState::graph_gen`) this model was routed for.
+    /// The live graph's [`mapper::mapper::Mapper::struct_gen`] this model was routed for.
     pub gen: u64,
     /// Viewed layer this model was routed for.
     pub layer: LayerId,
@@ -2599,6 +2619,26 @@ pub struct AppState {
     /// persisted: a restore into a fresh run should introduce the voice again,
     /// because the player of that run may never have seen it.
     pub assist_preamble_shown: bool,
+    /// The structured half of the last assist [`push_assist`](Self::push_assist)
+    /// pushed, if guidance is on (SQ-1552) — what a headless host needs to build
+    /// UI for it (clickable offered words) without re-deriving the shape by
+    /// parsing the transcript text. Reset to `None` at the head of every turn
+    /// ([`Self::begin_turn`]), the same way [`Self::reveal`] is: an answer about
+    /// one moment, stale the moment the next one starts. Session state, never
+    /// persisted, for the same reason.
+    pub assist_offer: Option<crate::assist::Offer>,
+    /// The transcript line [`push_assist`](Self::push_assist) printed the
+    /// once-per-session intro block onto THIS call, if any (SQ-1557) — the
+    /// host-visible signal that identifies the intro structurally instead of
+    /// matching a line's text against [`crate::assist::preamble`], which
+    /// silently breaks the moment the wording or gutter mark changes. `None`
+    /// on a call that didn't print the intro (already shown this session, or
+    /// guidance off) and on every call before the first. Reset at the head of
+    /// every turn ([`Self::begin_turn`]), the same way [`Self::assist_offer`]
+    /// is — an answer about one call, stale the moment the next turn starts.
+    /// See [`Self::assist_intro_offer`] for the structured
+    /// [`crate::assist::OfferKind::Intro`] this line carries.
+    pub assist_intro_line: Option<usize>,
     /// The story's own vocabulary, and which unknown words this session has
     /// already answered (SQ-1041). Read from the engine the first time an offer
     /// is considered and cached — the tables are static — and deliberately not
@@ -2757,7 +2797,7 @@ pub struct AppState {
     pub(crate) map_derived:
         std::cell::RefCell<Option<(u64, LayerId, crate::render::map::MapDerived)>>,
     /// In-flight background map-render job (SQ-0379): rebuilds `map_render` for a
-    /// new `(graph_gen, layer)` off the main thread so a re-route never blocks the
+    /// new `(struct_gen, layer)` off the main thread so a re-route never blocks the
     /// interpreter. `RefCell` so it can be spawned from within the draw closure
     /// (which holds only `&self`); polled/installed from the loop body.
     pub(crate) render_job: std::cell::RefCell<Option<RenderJob>>,
@@ -2837,9 +2877,14 @@ pub struct AppState {
     pub anim_build_job: Option<AnimBuildJob>,
     /// In-flight one-shot story-border flash, if any. Armed by a beep event; expires after SOUND_PULSE_MS.
     pub sound_pulse: Option<SoundPulse>,
-    /// Host audio backend, present when audio was enabled at launch. `None` when
-    /// disabled or when construction was skipped.
-    pub audio: Option<audio::AudioBackend>,
+    /// Where this story's sounds go (SQ-1538): the host's [`SoundSink`]. `None`
+    /// until the first sound actually plays, when the TUI opens its output device
+    /// ([`default_sound_sink`], SQ-1423); a host that delivers sound elsewhere
+    /// installs its own sink here before the first turn, and it is never replaced.
+    ///
+    /// [`SoundSink`]: crate::host::sound::SoundSink
+    /// [`default_sound_sink`]: crate::host::sound::default_sound_sink
+    pub audio: Option<Box<dyn crate::host::sound::SoundSink>>,
     /// The Blorb holding this story's `Snd ` resources, resolved at launch.
     pub sound_blorb: Option<blorb::Blorb>,
     /// Sounds the story's own MEDIUM carries, by effect number (SQ-0907). Populated
@@ -2895,9 +2940,6 @@ pub struct AppState {
     /// payload, so a scroll past it does not re-send hundreds of KB per step.
     /// `None` = never scrolled this session.
     pub sixel_scroll_motion_at: Option<Instant>,
-    /// Monotonically increasing generation counter. Bumped each time the real graph is mutated
-    /// by an applied turn. Used to detect stale tidy results (job's gen vs current gen).
-    pub graph_gen: u64,
     /// Explicit layer override for the map view. `None` means follow the current room's layer.
     pub viewed_layer: Option<LayerId>,
     /// Which body the room dock draws (SQ-0692). Meaningful only while
@@ -3677,7 +3719,7 @@ impl Default for AppState {
         // `TEST_SILENCE` only skips opening the device — so nothing about the
         // production path goes untested. Invisible to the shipped binary,
         // which is built without `cfg(test)`.
-        #[cfg(test)]
+        #[cfg(all(test, feature = "playback"))]
         audio::disable_output_for_tests();
 
         Self {
@@ -3695,6 +3737,8 @@ impl Default for AppState {
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
             assist_preamble_shown: false,
+            assist_offer: None,
+            assist_intro_line: None,
             vocab: crate::vocab::VocabState::default(),
             reveal: None,
             probe: crate::probe::ShadowProbe::default(),
@@ -3761,7 +3805,6 @@ impl Default for AppState {
             scroll_anim: None,
             scrollbar_shown_at: None,
             sixel_scroll_motion_at: None,
-            graph_gen: 0,
             viewed_layer: None,
             room_dock_view: RoomDockView::Info,
             drag: None,
@@ -3995,9 +4038,9 @@ impl AppState {
                 // is empty and there is nothing to stop.
                 0 => {
                     if matches!(ev.effect, 3 | 4) {
-                        if let Some(backend) = self.audio.as_mut() {
+                        if let Some(sink) = self.audio.as_mut() {
                             for (_, id) in self.sound_ids.drain() {
-                                backend.stop(id);
+                                sink.stop(id);
                             }
                         }
                     }
@@ -4009,13 +4052,17 @@ impl AppState {
                 // operand; zvm now defaults a real sound's omitted effect to
                 // 2 = play, so the compensation is gone with it).
                 1 | 2 => {
-                    let freq = if ev.number == 1 { 800.0 } else { 400.0 };
-                    self.audio.get_or_insert_with(|| audio::AudioBackend::new(volume)).play_tone(freq, 150, ev.volume);
+                    let freq = if ev.number == 1 { audio::HIGH_BLEEP_HZ } else { audio::LOW_BLEEP_HZ };
+                    self.audio
+                        .get_or_insert_with(|| crate::host::sound::default_sound_sink(volume))
+                        .tone(freq, audio::BLEEP_MS, ev.volume);
                 }
                 n => match ev.effect {
                     3 => {
                         if let Some(id) = self.sound_ids.remove(&n) {
-                            self.audio.get_or_insert_with(|| audio::AudioBackend::new(volume)).stop(id);
+                            self.audio
+                                .get_or_insert_with(|| crate::host::sound::default_sound_sink(volume))
+                                .stop(id);
                         }
                     }
                     1 => {} // prepare: decode on start
@@ -4024,10 +4071,16 @@ impl AppState {
                         // `/play-sound` diagnostic — see `resolve_sound`.
                         let played = resolve_sound(&self.disk_sounds, self.sound_blorb.as_ref(), n)
                             .and_then(|(bytes, kind, _)| {
-                                sound_kind_to_format(kind).and_then(|fmt| {
+                                sound_kind_to_format(kind).and_then(|format| {
                                     self.audio
-                                        .get_or_insert_with(|| audio::AudioBackend::new(volume))
-                                        .play_sample(bytes, fmt, ev.volume, ev.repeats)
+                                        .get_or_insert_with(|| crate::host::sound::default_sound_sink(volume))
+                                        .play(crate::host::sound::SampleStart {
+                                            resource: u32::from(n),
+                                            bytes,
+                                            format,
+                                            level: crate::host::sound::SampleLevel::ZVolume(ev.volume),
+                                            repeats: ev.repeats,
+                                        })
                                 })
                             });
                         if let Some(id) = played {
@@ -4065,16 +4118,24 @@ impl AppState {
                     // Playing on a busy channel stops the old sound first; the
                     // replaced sound fires no notify.
                     if let Some(old) = self.glulx_channels.remove(&chan) {
-                        if let Some(backend) = self.audio.as_mut() { backend.stop(old); }
+                        if let Some(sink) = self.audio.as_mut() { sink.stop(old); }
                         self.glulx_sound_notify.remove(&old);
                     }
                     let Some(reps) = glk_repeats_to_audio(repeats) else { continue };
                     if let Some(blorb) = &self.sound_blorb {
                         if let Some((bytes, kind)) = blorb.sound(snd) {
-                            if let Some(fmt) = sound_kind_to_format(kind) {
+                            if let Some(format) = sound_kind_to_format(kind) {
                                 let gain = glk_volume_to_gain(vol);
-                                let backend = self.audio.get_or_insert_with(|| audio::AudioBackend::new(volume));
-                                if let Some(id) = backend.play_sample_gain(bytes, fmt, gain, reps) {
+                                let sink = self
+                                    .audio
+                                    .get_or_insert_with(|| crate::host::sound::default_sound_sink(volume));
+                                if let Some(id) = sink.play(crate::host::sound::SampleStart {
+                                    resource: snd,
+                                    bytes,
+                                    format,
+                                    level: crate::host::sound::SampleLevel::Gain(gain),
+                                    repeats: reps,
+                                }) {
                                     self.glulx_channels.insert(chan, id);
                                     // A fresh sound starts at the channel's snapshot
                                     // volume; cancel any ramp left over from a prior
@@ -4089,7 +4150,7 @@ impl AppState {
                                     // not "empty", so no finish-notify fires until it
                                     // is unpaused and actually plays out.
                                     if paused {
-                                        if let Some(backend) = self.audio.as_mut() { backend.pause(id); }
+                                        if let Some(sink) = self.audio.as_mut() { sink.pause(id); }
                                     }
                                 }
                             }
@@ -4098,13 +4159,13 @@ impl AppState {
                 }
                 SchannelOp::Stop { chan } => {
                     if let Some(id) = self.glulx_channels.remove(&chan) {
-                        if let Some(backend) = self.audio.as_mut() { backend.stop(id); }
+                        if let Some(sink) = self.audio.as_mut() { sink.stop(id); }
                         self.glulx_sound_notify.remove(&id);
                     }
                 }
                 SchannelOp::Destroy { chan } => {
                     if let Some(id) = self.glulx_channels.remove(&chan) {
-                        if let Some(backend) = self.audio.as_mut() { backend.stop(id); }
+                        if let Some(sink) = self.audio.as_mut() { sink.stop(id); }
                         self.glulx_sound_notify.remove(&id);
                     }
                     // A destroyed channel can never complete a pending ramp.
@@ -4115,7 +4176,7 @@ impl AppState {
                 SchannelOp::SetVolume { chan, vol } => {
                     let gain = glk_volume_to_gain(vol);
                     if let Some(&id) = self.glulx_channels.get(&chan) {
-                        if let Some(backend) = self.audio.as_mut() { backend.set_sample_gain(id, gain); }
+                        if let Some(sink) = self.audio.as_mut() { sink.set_gain(id, gain); }
                     }
                     // A plain set_volume is an immediate change; it interrupts any
                     // in-progress ramp (whose notify is then dropped, per spec §8.3).
@@ -4125,12 +4186,12 @@ impl AppState {
                 }
                 SchannelOp::Pause { chan } => {
                     if let Some(&id) = self.glulx_channels.get(&chan) {
-                        if let Some(backend) = self.audio.as_mut() { backend.pause(id); }
+                        if let Some(sink) = self.audio.as_mut() { sink.pause(id); }
                     }
                 }
                 SchannelOp::Unpause { chan } => {
                     if let Some(&id) = self.glulx_channels.get(&chan) {
-                        if let Some(backend) = self.audio.as_mut() { backend.unpause(id); }
+                        if let Some(sink) = self.audio.as_mut() { sink.unpause(id); }
                     }
                 }
                 SchannelOp::SetVolumeExt { chan, vol, duration_ms, notify } => {
@@ -4142,7 +4203,7 @@ impl AppState {
                     if duration_ms == 0 {
                         // Immediate change: jump the sink and current gain to target.
                         if let Some(&id) = self.glulx_channels.get(&chan) {
-                            if let Some(backend) = self.audio.as_mut() { backend.set_sample_gain(id, target); }
+                            if let Some(sink) = self.audio.as_mut() { sink.set_gain(id, target); }
                         }
                         self.glulx_gain.insert(chan, target);
                     } else {
@@ -4202,7 +4263,7 @@ impl AppState {
             self.glulx_gain.insert(chan, gain);
             if let Some(&id) = self.glulx_channels.get(&chan) {
                 if let Some(b) = self.audio.as_mut() {
-                    b.set_sample_gain(id, gain);
+                    b.set_gain(id, gain);
                 }
             }
             if elapsed >= ramp.duration_ms {
@@ -4230,6 +4291,39 @@ impl AppState {
         // Same funnel, for the sixel scroll-settle debounce (SQ-1198): every real
         // scroll motion — wheel, page, drag-autoscroll — restarts the window.
         self.sixel_scroll_motion_at = Some(Instant::now());
+    }
+
+    /// Arm (or replace) the transcript's smooth-scroll animation for new output
+    /// arriving while the reader was already at the bottom (SQ-1595), easing
+    /// over `config.animation.follow_ms` rather than `scroll_ms`. Sets the
+    /// logical target immediately, exactly like [`Self::scroll_transcript_to`],
+    /// but the displayed offset starts from `from` — the pre-turn bottom's
+    /// equivalent offset now that the transcript has grown — rather than from
+    /// the current display, and this deliberately does NOT touch
+    /// `scrollbar_shown_at` / `sixel_scroll_motion_at`: this is autoscroll
+    /// follow, not a reader-initiated scroll, and the scrollbar must not flash
+    /// on every turn of new text (see `scrollbar_shown_at`'s own docs).
+    pub fn arm_transcript_follow_ease(&mut self, from: u16, target: u16) {
+        self.transcript_scroll = target;
+        let anim = &self.config.animation;
+        self.scroll_anim = ScrollAnim::over(from as usize, target as usize, anim.enabled, anim.follow_ms, anim.easing);
+    }
+
+    /// Snap the transcript's displayed scroll offset to its animation's target
+    /// and drop the animation, right now — regardless of whether its tween has
+    /// finished. No-op if none is in flight. Returns `true` iff one was.
+    ///
+    /// Used two ways: the run loop's own natural finish still checks `done()`
+    /// itself before calling this (so a still-tweening anim is left alone), and
+    /// the cancellation hook that ends an in-flight follow-ease the moment the
+    /// player acts calls it unconditionally (SQ-1595) — a keypress or mouse
+    /// event outranks paced output, the same principle `settle_picture_pacing`
+    /// applies to the v6 picture pacer. Both share this one finalize path
+    /// rather than forking a second copy of it.
+    pub fn finalize_transcript_scroll_anim_now(&mut self) -> bool {
+        let Some(a) = self.scroll_anim.take() else { return false };
+        self.transcript_scroll = a.target() as u16;
+        true
     }
 
     /// How long the transcript viewport is considered "in motion" after the last
@@ -4592,19 +4686,20 @@ impl AppState {
     /// Borrow the live map's routed render model for `layer`. The routing in
     /// `render_layer` is the dominant map cost, so it is kept OFF the main thread
     /// (SQ-0379): the very first model is built synchronously (small, at game
-    /// start), but every later rebuild — triggered by a `graph_gen` change —
+    /// start), but every later rebuild — triggered by a `struct_gen` change —
     /// happens on a background worker while this keeps returning the last-ready
     /// model. Only the current-room highlight and labels are refreshed here, live
     /// and cheaply, so the highlight follows the player with no re-route (SQ-0378).
     ///
     /// Only the live map uses this — replay and tidy-animation graphs are not
-    /// tracked by `graph_gen`, so their models are built fresh each frame. (SQ-0305)
+    /// tracked by `struct_gen`, so their models are built fresh each frame. (SQ-0305,
+    /// SQ-1544)
     pub fn cached_map_render(
         &self,
         layer: LayerId,
         graph: &mapper::graph::MapGraph,
     ) -> std::cell::Ref<'_, mapper::render::RenderMap> {
-        let gen = self.graph_gen;
+        let gen = graph.struct_gen();
         let fresh = matches!(self.map_render.borrow().as_ref(), Some(c) if c.gen == gen && c.layer == layer);
         if !fresh {
             // No routing ever runs on the main thread (SQ-0379). If there is no
@@ -4655,8 +4750,8 @@ impl AppState {
     /// matrix and there is no map to route (SQ-0671).
     ///
     /// This is the churn the player saw as a cycling map pane: [`AppState::cached_map_render`]
-    /// re-routes whenever `graph_gen` moves, and every arriving tidy result bumps that generation,
-    /// so a background job for ANY layer spawned a render worker whose in-flight pulse restyled
+    /// re-routes whenever `struct_gen` moves, and every arriving tidy result bumps that
+    /// generation, so a background job for ANY layer spawned a render worker whose in-flight pulse restyled
     /// the border of a pane drawing a table it never touched. Asking for no model at all is what
     /// makes the matrix independent of the layout pipeline, rather than merely ignoring its
     /// output.
@@ -4699,9 +4794,14 @@ impl AppState {
 
     /// Poll the background map-render worker: if it has finished, install its
     /// model as the new last-ready render (when its generation still matches) or
-    /// discard it as stale (a fresh job then spawns on the next draw). Returns
-    /// true when a completed job was handled (the caller should redraw). (SQ-0379)
-    pub fn poll_render_job(&mut self) -> bool {
+    /// discard it as stale (a fresh job then spawns on the next draw). `graph` is
+    /// the LIVE graph the job's captured generation is checked against — the same
+    /// object `spawn_render_job` was called with, never a freshly loaded one (a
+    /// wholesale replacement goes through [`AppState::invalidate_map_render`]
+    /// instead, which drops this job outright rather than let a stale result race a
+    /// coincidentally-matching generation on the new object). Returns true when a
+    /// completed job was handled (the caller should redraw). (SQ-0379, SQ-1544)
+    pub fn poll_render_job(&mut self, graph: &mapper::graph::MapGraph) -> bool {
         let done = self
             .render_job
             .borrow()
@@ -4713,7 +4813,7 @@ impl AppState {
         let job = self.render_job.borrow_mut().take().expect("checked above");
         match job.handle.join() {
             Ok(rm) => {
-                if job.gen == self.graph_gen {
+                if job.gen == graph.struct_gen() {
                     if self.config.trace.map {
                         let steps = self.render_steps_snapshot();
                         write_map_trace(&self.config.user_dir, &steps, true);
@@ -5168,13 +5268,27 @@ impl AppState {
         }
     }
 
-    /// Bump the graph generation, invalidating the map render memo. Call after ANY
-    /// mutation of the mapper graph or its layout/labels — rename/notes/relabel/nudge,
-    /// tidy applies, room reassignment (restore/import/reset). The map render memo is
-    /// keyed on this (`cached_map_render`), so a missed bump paints a STALE MAP.
-    /// Double-bumping is harmless (`wrapping_add`); a missing bump is a wrong map. (SQ-0305)
-    pub fn bump_graph_gen(&mut self) {
-        self.graph_gen = self.graph_gen.wrapping_add(1);
+    /// Force the live map's render memo to rebuild from scratch on the next draw, and
+    /// drop any in-flight background map job (tidy/anim/render worker) rather than let
+    /// it land later (SQ-1544).
+    ///
+    /// Call whenever the mapper's graph OBJECT is replaced wholesale — a restore, a
+    /// resume, an imported map, `/reset map` — rather than edited in place. In-place
+    /// edits need no call here at all: `cached_map_render` reads
+    /// [`mapper::mapper::Mapper::struct_gen`] straight off the live graph, and that
+    /// counter already bumps itself for exactly the mutations that change what the map
+    /// draws (SQ-1540). But `struct_gen` is scoped to ONE graph object's lifetime — a
+    /// freshly loaded map starts back at generation 0 (see its own doc comment) — so a
+    /// generation number alone cannot tell a genuinely unchanged map apart from a
+    /// stale cache or in-flight job whose captured generation happens to match the
+    /// new object's by coincidence after the swap. An unconditional clear sidesteps
+    /// that question entirely instead of risking the collision.
+    pub fn invalidate_map_render(&mut self) {
+        *self.map_render.borrow_mut() = None;
+        *self.map_derived.borrow_mut() = None;
+        *self.render_job.borrow_mut() = None;
+        self.tidy_job = None;
+        self.anim_build_job = None;
     }
 
     /// Split `text` on `'\n'` and append each line to the transcript with the given kind tag.
@@ -5289,6 +5403,13 @@ impl AppState {
         // the words on screen would otherwise stay lit against a world that had
         // moved on.
         self.reveal = None;
+        // Same reasoning, for the same shape of fact (SQ-1552): the structured
+        // offer describes the assist line the PREVIOUS turn printed, and a new
+        // turn starting is what makes it stale.
+        self.assist_offer = None;
+        // Same again, for the intro line's own signal (SQ-1557): it describes a
+        // call the previous turn made, and is stale the moment this one starts.
+        self.assist_intro_line = None;
     }
 
     pub fn push_assist(&mut self, assist: &crate::assist::Assist) {
@@ -5298,16 +5419,51 @@ impl AppState {
         if !self.config.guidance {
             return;
         }
+        // Reset for THIS call, mirroring `assist_offer` below: a call that
+        // doesn't print the intro (already shown) must say so, not carry a
+        // stale line number from whichever earlier call last set it.
+        self.assist_intro_line = None;
         if !self.assist_preamble_shown {
             self.assist_preamble_shown = true;
             let intro = self.colors.theme.get(crate::assist::AssistTone::Help.selector()).style;
             let line = crate::assist::preamble(self.symbols.assist_gutter);
+            // Capture where the line will land BEFORE pushing it, not
+            // `len() - 1` after: in inline-prompt mode (`command_bar = false`)
+            // `push_transcript_internal_styled` INSERTS above the trailing
+            // game `>` prompt rather than appending (SQ-0270), so the prompt
+            // — not the intro — ends up last, and `len() - 1` afterward names
+            // the wrong line (SQ-1587). Nothing mutates `self` between this
+            // call and the one below, so it agrees with the index
+            // `push_transcript_internal_styled`'s own `insert_above_prompt_at()`
+            // call computes internally.
+            let intro_at = self.insert_above_prompt_at().unwrap_or(self.transcript.len());
             self.push_transcript_internal_styled(&line, TranscriptKind::Assist, intro);
+            self.assist_intro_line = Some(intro_at);
         }
         let style = self.colors.theme.get(assist.tone().selector()).style;
         for line in assist.lines() {
             self.push_transcript_internal_styled(&line, TranscriptKind::Assist, style);
         }
+        // The structured half of THIS line (SQ-1552) — what the turn's own
+        // assist said, not the once-per-session chrome above it. The intro's
+        // own structured half lives in `assist_intro_line` (SQ-1557), set
+        // above, and is not folded in here so this stays "the last real
+        // assist", exactly as before.
+        self.assist_offer = Some(assist.offer());
+    }
+
+    /// The structured [`crate::assist::OfferKind::Intro`] offer for the
+    /// intro line THIS call to [`push_assist`](Self::push_assist) printed, if
+    /// any (SQ-1557) — the same shape as [`Self::assist_offer`], derived from
+    /// [`Self::assist_intro_line`] so a host reads one type either way rather
+    /// than a bare line number for this signal and a full [`crate::assist::Offer`]
+    /// for the other.
+    pub fn assist_intro_offer(&self) -> Option<crate::assist::Offer> {
+        self.assist_intro_line.map(|_| crate::assist::Offer {
+            kind: crate::assist::OfferKind::Intro,
+            word: None,
+            picks: Vec::new(),
+        })
     }
 
     /// Surface an app-internal `[…]` bracketed notice as a top-right toast
@@ -6065,8 +6221,7 @@ mod tests {
         use crate::session::SchannelOp;
         let mut state = AppState::default();
         state.config.enable_sound = true;
-        audio::disable_output_for_tests(); // silent backend: no real device to open/tear down
-        state.audio = Some(audio::AudioBackend::new(50));
+        state.audio = Some(crate::host::sound::default_sound_sink(50)); // silent in tests: no device
         // Seed the channel's current gain (as a prior play/set_volume would).
         state.glulx_gain.insert(1, 1.0);
         // A ramped set_volume_ext installs a ramp from the current gain to target
@@ -6105,8 +6260,7 @@ mod tests {
         use crate::session::SchannelOp;
         let mut state = AppState::default();
         state.config.enable_sound = true;
-        audio::disable_output_for_tests(); // silent backend: no real device to open/tear down
-        state.audio = Some(audio::AudioBackend::new(50));
+        state.audio = Some(crate::host::sound::default_sound_sink(50)); // silent in tests: no device
         // A ramped set_volume_ext with a nonzero notify schedules a pending
         // volume-notify keyed by channel (no live sound needed).
         state.play_glulx_sound_ops(&[SchannelOp::SetVolumeExt { chan: 1, vol: 0x8000, duration_ms: 1000, notify: 7 }]);
@@ -6134,7 +6288,7 @@ mod tests {
             pixels: std::sync::Arc::new(image::RgbaImage::new(4, 4)),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
-            rule: None, link: 0,
+            rule: None, link: 0, resource: None,
         };
         let elems = vec![
             TranscriptElem::Text { text: "a".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0, false)] },
@@ -6577,7 +6731,7 @@ mod tests {
             pixels: std::sync::Arc::new(image::RgbaImage::new(4, 4)),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
-            rule: None, link: 0,
+            rule: None, link: 0, resource: None,
         };
         st.push_transcript_image(dummy);
         st.push_transcript("world");
@@ -6654,7 +6808,7 @@ mod tests {
             pixels: std::sync::Arc::new(image::RgbaImage::new(4, 4)),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None, margin_px: None,
-            rule: None, link: 0,
+            rule: None, link: 0, resource: None,
         };
         s.push_transcript_image(dummy); // transcript_images[0] = Some, len 1
         s.push_transcript("a\nb"); // grow to len 3
@@ -6904,6 +7058,71 @@ mod tests {
         let a = s.scroll_anim.as_ref().expect("animation armed when enabled");
         assert_eq!(a.from, 3, "from = previous displayed offset");
         assert_eq!(a.target(), 8, "to = new target");
+    }
+
+    // ── Transcript follow-ease (SQ-1595) ─────────────────────────────────────
+
+    /// `ScrollAnim::over` is what the follow-ease uses instead of `to` — same
+    /// enabled/zero-duration instant-path rules, but the caller supplies its own
+    /// duration rather than reading `cfg.scroll_ms`.
+    #[test]
+    fn scroll_anim_over_honors_enabled_and_zero_duration() {
+        use crate::anim::Easing;
+        assert!(ScrollAnim::over(0, 10, false, 200, Easing::EaseOut).is_none(), "disabled arms nothing");
+        assert!(ScrollAnim::over(0, 10, true, 0, Easing::EaseOut).is_none(), "0ms arms nothing");
+        let a = ScrollAnim::over(5, 10, true, 200, Easing::EaseOut).expect("armed");
+        assert_eq!(a.from, 5);
+        assert_eq!(a.target(), 10);
+    }
+
+    /// `arm_transcript_follow_ease` sets the logical target immediately (same
+    /// contract as `scroll_transcript_to`) but starts the display from the
+    /// caller's `from`, not from the current displayed offset, and it must use
+    /// `follow_ms` — a value nothing else on `AppState` reads — not `scroll_ms`.
+    #[test]
+    fn arm_transcript_follow_ease_uses_follow_ms_not_scroll_ms() {
+        let mut s = AppState::default();
+        s.config.animation.scroll_ms = 999_000; // if this were used, done() would never be true
+        s.config.animation.follow_ms = 1; // 1ms: settles almost immediately
+        s.transcript_scroll = 0;
+        s.arm_transcript_follow_ease(30, 12);
+        assert_eq!(s.transcript_scroll, 12, "logical target set immediately");
+        let a = s.scroll_anim.as_ref().expect("follow-ease armed");
+        assert_eq!(a.from, 30, "display starts from the pre-growth equivalent offset, not 0");
+        assert_eq!(a.target(), 12);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(a.done(), "a 1ms follow_ms tween must have settled by now — proves follow_ms drove it, not the 999s scroll_ms");
+    }
+
+    /// `enabled = false` makes the follow-ease instant too, exactly like
+    /// `scroll_transcript_to`.
+    #[test]
+    fn arm_transcript_follow_ease_instant_when_disabled() {
+        let mut s = AppState::default();
+        s.config.animation.enabled = false;
+        s.arm_transcript_follow_ease(30, 12);
+        assert_eq!(s.transcript_scroll, 12);
+        assert!(s.scroll_anim.is_none(), "disabled = instant, no animation");
+    }
+
+    /// The cancellation hook's underlying finalize: it must work regardless of
+    /// whether the tween has finished — that is the whole point (ending one
+    /// EARLY) — and it is the same path the run loop's natural on-`done()`
+    /// finalize reuses (see `main.rs`'s run loop, SQ-1595).
+    #[test]
+    fn finalize_transcript_scroll_anim_now_ends_an_in_flight_tween_early() {
+        let mut s = AppState::default();
+        s.config.animation.follow_ms = 999_000; // long enough that it is still mid-flight
+        s.arm_transcript_follow_ease(30, 12);
+        assert!(!s.scroll_anim.as_ref().unwrap().done(), "premise: still mid-tween");
+        assert_ne!(s.effective_transcript_scroll(), 12, "premise: display has not caught up yet");
+
+        assert!(s.finalize_transcript_scroll_anim_now(), "an animation was in flight to finalize");
+        assert!(s.scroll_anim.is_none(), "the animation is cleared");
+        assert_eq!(s.transcript_scroll, 12, "snapped straight to the target, not reverted");
+        assert_eq!(s.effective_transcript_scroll(), 12, "the display reads settled immediately");
+
+        assert!(!s.finalize_transcript_scroll_anim_now(), "nothing left to finalize");
     }
 
     // ── Story-pane scrollbar auto-hide (SQ-0782) ─────────────────────────────
@@ -7483,7 +7702,7 @@ mod tests {
     }
 
     /// Wait for the in-flight render worker to finish, then install it.
-    fn drain_render_job(s: &mut AppState) {
+    fn drain_render_job(s: &mut AppState, graph: &MapGraph) {
         while s
             .render_job
             .borrow()
@@ -7492,11 +7711,11 @@ mod tests {
         {
             std::thread::yield_now();
         }
-        s.poll_render_job();
+        s.poll_render_job(graph);
     }
 
     /// SQ-0391, flipped by SQ-0666: a direction that goes NOWHERE adds no room and no
-    /// connection, so `graph_gen` deliberately does not bump for it (SQ-0378 keeps a plain step
+    /// connection, so `struct_gen` deliberately does not bump for it (SQ-0378 keeps a plain step
     /// from re-routing the whole map). The untried-exits OVERLAY was memoised on that generation
     /// and needed a hand-written refresh to notice a foiled move; the matrix view that replaced
     /// it reads the graph directly on every frame and so cannot go stale at all. Same fact, same
@@ -7511,16 +7730,16 @@ mod tests {
         m.observe(1, "Hall", None);
         let mut s = AppState::default();
         let _ = s.cached_map_render(0, &m.graph);
-        drain_render_job(&mut s);
+        drain_render_job(&mut s, &m.graph);
 
         assert_eq!(classify(&m.graph, 1, Direction::N), MatrixCell::Untried, "north starts `·`");
 
         let (gen, rooms, conns) =
-            (s.graph_gen, m.graph.rooms().count(), m.graph.connections().len());
+            (m.graph.struct_gen(), m.graph.rooms().count(), m.graph.connections().len());
         m.observe(1, "Hall", Some(Direction::N)); // typed, went nowhere
         assert_eq!(m.graph.rooms().count(), rooms, "a foiled move adds no room");
         assert_eq!(m.graph.connections().len(), conns, "and no connection");
-        assert_eq!(s.graph_gen, gen, "so the map memo is NOT invalidated");
+        assert_eq!(m.graph.struct_gen(), gen, "so the map memo is NOT invalidated");
 
         assert_eq!(
             classify(&m.graph, 1, Direction::N),
@@ -7547,7 +7766,7 @@ mod tests {
             assert_eq!(rm.rooms.len(), 0, "empty placeholder while the first route runs");
         }
         assert!(s.render_job.borrow().is_some(), "even the first build is off-thread");
-        drain_render_job(&mut s);
+        drain_render_job(&mut s, &g);
         {
             let rm = s.cached_map_render(0, &g);
             assert_eq!(rm.rooms.len(), 1, "routed model served once it lands");
@@ -7556,17 +7775,16 @@ mod tests {
         let _ = s.cached_map_render(0, &g);
         assert!(s.render_job.borrow().is_none());
 
-        // A geometry change (new room + gen bump): re-route OFF-thread, the STALE
-        // model (still 1 room) served meanwhile.
+        // A geometry change (new room, which bumps struct_gen on its own): re-route
+        // OFF-thread, the STALE model (still 1 room) served meanwhile.
         g.upsert_room(2, "B".into());
         g.set_pos(2, (1, 0));
-        s.graph_gen = s.graph_gen.wrapping_add(1);
         {
             let rm = s.cached_map_render(0, &g);
             assert_eq!(rm.rooms.len(), 1, "last-ready model served while routing");
         }
         assert!(s.render_job.borrow().is_some(), "a stale model re-routes off-thread");
-        drain_render_job(&mut s);
+        drain_render_job(&mut s, &g);
         {
             let rm = s.cached_map_render(0, &g);
             assert_eq!(rm.rooms.len(), 2, "the freshly routed model is now served");
@@ -7606,7 +7824,7 @@ mod tests {
         }
 
         // The routed model lands at the SAME (gen, layer): the cache must drop.
-        drain_render_job(&mut s);
+        drain_render_job(&mut s, &g);
         assert!(
             s.map_derived.borrow().is_none(),
             "installing the routed model drops the placeholder's tables"
@@ -7624,7 +7842,7 @@ mod tests {
     }
 
     /// SQ-0378: a step between already-placed rooms changes the current-room
-    /// highlight but not the routed geometry, so `graph_gen` does not bump. The
+    /// highlight but not the routed geometry, so `struct_gen` does not bump. The
     /// cache must follow the player WITHOUT re-routing (no worker spawns).
     #[test]
     fn cached_map_render_refreshes_current_without_rerouting() {
@@ -7639,14 +7857,14 @@ mod tests {
 
         // Build + install the initial model.
         let _ = s.cached_map_render(0, &g);
-        drain_render_job(&mut s);
+        drain_render_job(&mut s, &g);
         {
             let rm = s.cached_map_render(0, &g);
             assert!(rm.rooms.iter().find(|r| r.id == 1).unwrap().is_current);
             assert!(!rm.rooms.iter().find(|r| r.id == 2).unwrap().is_current);
         }
 
-        // Move the player to room 2 WITHOUT bumping graph_gen.
+        // Move the player to room 2 WITHOUT bumping struct_gen (set_current never does).
         g.set_current(2);
         {
             let rm = s.cached_map_render(0, &g);
@@ -7659,6 +7877,52 @@ mod tests {
         assert!(
             s.render_job.borrow().is_none(),
             "a current-room change must NOT spawn a re-route worker"
+        );
+    }
+
+    /// SQ-1544: `invalidate_map_render`'s own doc comment says a generation-number
+    /// comparison alone cannot be trusted across a wholesale graph swap, because a
+    /// brand-new `MapGraph`'s `struct_gen` starts back at 0 and can coincidentally
+    /// equal a stale cache entry's `gen`. This forces exactly that collision — not a
+    /// contrived mismatch — and checks the fresh graph is routed anyway.
+    #[test]
+    fn invalidate_map_render_defeats_a_generation_collision_after_a_wholesale_graph_swap() {
+        use mapper::graph::MapGraph;
+
+        let mut s = AppState::default();
+        // Poison the cache with a routed model standing in for the previous game's
+        // stale map — a room the fresh graph below can never contain.
+        *s.map_render.borrow_mut() = Some(MapRenderCache {
+            gen: 0,
+            layer: 0,
+            rm: {
+                let mut poisoned = MapGraph::new();
+                poisoned.upsert_room(1, "Stale Room".into());
+                poisoned.set_pos(1, (0, 0));
+                mapper::render::render(&poisoned)
+            },
+        });
+
+        let fresh = MapGraph::new();
+        assert_eq!(
+            fresh.struct_gen(),
+            0,
+            "fixture: the collision this test forces (gen 0 == gen 0) is real, not assumed"
+        );
+
+        // Without invalidation, `cached_map_render`'s `c.gen == gen` freshness check
+        // would treat the poisoned entry as still fresh for this "new" graph and
+        // serve "Stale Room" straight through with no re-route.
+        s.invalidate_map_render();
+        let rm = s.cached_map_render(0, &fresh);
+        assert!(
+            rm.rooms.is_empty(),
+            "the fresh empty-placeholder model must be served, not the poisoned cache: {:?}",
+            rm.rooms.iter().map(|r| &r.label).collect::<Vec<_>>()
+        );
+        assert!(
+            s.render_job.borrow().is_some(),
+            "a real re-route must be spawned for the new graph, not skipped as already \"fresh\""
         );
     }
 

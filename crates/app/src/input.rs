@@ -34,7 +34,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use mapper::direction::Direction;
 use mapper::mapper::Mapper;
 
-use crate::complete::suggest;
 use crate::keymap::{Context, KeySpec};
 use crate::state::{AppState, Focus, TextEntryDialog, TextEntryKind};
 
@@ -2100,7 +2099,7 @@ pub fn open_command_band(state: &mut AppState, mapper: &mut Mapper, open: bool) 
         }
         let mut band = crate::state::CommandBandState::new(
             verbs,
-            state.config.command_band.resolve_quick(),
+            state.config.command_band.resolve_quick_for(&state.game_dir),
         );
         // The band opens reading whatever is ALREADY on the prompt (SQ-0676): its
         // phrase state follows the typed line, so a half-typed `take ` must light
@@ -2421,8 +2420,10 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                 MapView::Drawn => MapView::Matrix,
                 MapView::Matrix => MapView::Drawn,
             });
+            // `set_layer_view` bumps `Mapper::struct_gen` itself when the choice actually
+            // changes (SQ-1544), which `cached_map_render` reads directly — no separate
+            // invalidation needed.
             mapper.graph.set_layer_view(layer, Some(next));
-            state.bump_graph_gen(); // the pane draws something else entirely (SQ-0305)
             let label = match next {
                 MapView::Drawn => "drawn",
                 MapView::Matrix => "matrix",
@@ -2433,8 +2434,9 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             use mapper::layer::MapView;
             let layer = state.active_layer(&mapper.graph);
             let maze = !mapper.graph.layer_is_maze(layer);
+            // `set_layer_maze` bumps `Mapper::struct_gen` itself (SQ-1544) — see the comment on
+            // the `ViewMap` arm above.
             mapper.graph.set_layer_maze(layer, maze);
-            state.bump_graph_gen();
             // Flagging a maze is how most players will ever reach the matrix, and the flag alone
             // takes them there: it moves the layer's DEFAULT view. Nothing is written to the
             // layer's explicit choice, so an earlier `/view-map` still wins, and unflagging puts
@@ -2468,7 +2470,7 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                     return;
                 }
                 let mut g = mapper.graph.clone();
-                let gen = state.graph_gen;
+                let gen = mapper.graph.struct_gen();
                 let total = mapper.graph.rooms_in_layer(layer).len() + 8;
                 let progress = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let progress_clone = std::sync::Arc::clone(&progress);
@@ -2517,7 +2519,7 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             if state.anim_build_job.is_none() && state.tidy_anim.is_none() {
                 let layer = state.active_layer(&mapper.graph);
                 let mut g = mapper.graph.clone();
-                let gen = state.graph_gen;
+                let gen = mapper.graph.struct_gen();
                 // Estimate the final frame count from the layer's room count (one placement
                 // frame per room dominates), plus headroom for the fixed layout/cleanup stages.
                 // Only an estimate — the real total isn't known until the build finishes.
@@ -2612,7 +2614,7 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             if !state.config.enable_sound {
                 state.reset_sound_sidecars();
             } else if state.audio.is_none() {
-                state.audio = Some(audio::AudioBackend::new(state.config.volume));
+                state.audio = Some(crate::host::sound::default_sound_sink(state.config.volume));
             }
             // Sync the running Glulx VM's Sound gestalt (applied by the event loop).
             state.pending_vm_sound = Some(state.config.enable_sound);
@@ -2685,8 +2687,8 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                 if let Some(conn) =
                     mapper.graph.connections().iter().find(|c| c.origin == id).cloned()
                 {
+                    // `delete_connection` bumps `Mapper::struct_gen` itself (SQ-1544).
                     mapper.delete_connection(conn.origin, conn.dir);
-                    state.bump_graph_gen(); // edge removed → invalidate map memo (SQ-0305)
                 }
             }
         }
@@ -3491,83 +3493,12 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
         }
 
         Action::ConfigSave => {
-            if let Some(cs) = state.overlays.config_screen.take() {
-                state.config = clone_config(&cs.working);
-                // The config screen edits the GLOBAL honor default; keep the
-                // SQ-0318 base in sync so a later reload_style doesn't revert it
-                // (a per-game override, if any, still wins on the next reload).
-                state.honor_game_colours_base = state.config.honor_game_colours;
-                // SQ-0860: the base alone is not enough when a one-run source is
-                // holding this key, because `reload_style` only falls back to the
-                // base when nothing per-story is speaking. Editing the row calls
-                // `one_run.release` (see `one_run_key_for_row`), so a missing pin
-                // on a key that had one IS the deliberate edit — end the holds that
-                // live on `AppState` too, or the next style reload recomputes the
-                // user's own choice straight back off. Untouched rows keep their
-                // pin, so saving some unrelated setting changes nothing here.
-                if !state.config.one_run.holds(crate::config::keys::HONOR_GAME_COLOURS) {
-                    state.game_colours_cli = None;
-                    state.artwork_declines_colours = false;
-                }
-                if let Some(b) = state.audio.as_mut() {
-                    b.set_volume(state.config.volume);
-                } else if state.config.enable_sound {
-                    state.audio = Some(audio::AudioBackend::new(state.config.volume));
-                }
-                if !state.config.enable_sound {
-                    state.reset_sound_sidecars();
-                }
-                // Sync the running Glulx VM's Sound gestalt (applied by the event loop).
-                state.pending_vm_sound = Some(state.config.enable_sound);
-                // Reconcile the style file-watcher live (the run loop owns it).
-                state.pending_watch_style = Some(state.config.watch_style);
-                // SQ-1161: two settings are mirrored onto `AppState` at boot and
-                // read from THERE by render — `startup.rs` seeds both and the
-                // toggle keys drive the mirror, not the config. Saving the row
-                // without lowering it wrote config.toml and changed nothing on
-                // screen until the next launch, which is exactly the silent
-                // half-application the screen's contract forbids.
-                state.show_status_bar = state.config.show_status_bar;
-                state.show_room_numbers = state.config.show_room_numbers;
-                // SQ-1161: and four more keys keep a `_base` on `AppState` — the
-                // GLOBAL default a per-story source overrides for one launch, and
-                // what `/set-guidance auto` (and its siblings) fall back to. The
-                // honour row's base is lowered above for the same reason; without
-                // these, saving the row moved the live value and left `auto`
-                // pointing at the value the session started with.
-                //
-                // Only when nothing per-story is pinning the key: a pin means the
-                // row was NOT edited (editing releases it, above), so `working`
-                // still holds someone else's value for this run and lowering it
-                // would turn one game's choice into everyone's (SQ-0807).
-                if !state.config.one_run.holds(crate::config::keys::GUIDANCE) {
-                    state.guidance_base = state.config.guidance;
-                }
-                if !state.config.one_run.holds(crate::config::keys::RETURN_PROBE) {
-                    state.return_probe_base = state.config.return_probe;
-                }
-                if !state.config.one_run.holds(crate::config::keys::V6_PIXEL_LOCK) {
-                    state.v6_pixel_lock_base = state.config.v6_pixel_lock;
-                }
-                if !state.config.one_run.holds(crate::config::keys::V6_RENDER) {
-                    state.v6_render_base = state.config.v6_render;
-                }
-                // Re-resolving the live look is caller-handled, and deliberately
-                // runs AFTER `write_config_file` (SQ-1161). It used to happen here
-                // as a bare global `load_style` + `resolve`, which dropped the
-                // per-game style overlay and the garglk overlay from the live look
-                // and never recomputed `state.period_look` — so saving the
-                // `period_look` row did nothing until something else happened to
-                // reload the style. `reload::reload_style` is the ONE place the
-                // theme is built and fixes all three, but it also recomputes
-                // `honor_game_colours` from this story's sidecar and re-PINS it,
-                // and `ConfigDoc::put` skips a pinned key: run here, it would
-                // silently drop the honour row's edit from the file it was just
-                // asked to write. Ordering is the whole fix — the file first, then
-                // the story's own overrides back over the top of the live look.
-                // The style-file write + config repoint is caller-handled
-                // (main.rs snapshots working before this runs).
-            }
+            // The whole of Save's `AppState` half lives in `host::settings::apply`
+            // (SQ-1559) so a non-terminal host runs the same bookkeeping. Writing
+            // config.toml and re-resolving the live look run AFTER it, in
+            // `host::settings::commit` — caller-handled (main.rs), so a test that
+            // drives this action writes nothing to disk.
+            config_save(state);
         }
 
         Action::ConfigCancel => {
@@ -3919,21 +3850,13 @@ pub(crate) fn slash_suggestions(body_token: &str, names: &[String], limit: usize
 /// Lengths are counted in CHARS, not bytes. The byte arithmetic this replaces would panic outright
 /// on a multi-byte partial word: `String::truncate` rejects a non-char boundary, and subtracting a
 /// byte length from a byte length lands on one as soon as the word holds anything non-ASCII.
+///
+/// A thin wrapper over [`crate::complete::apply_completion_to_line`] (SQ-1549), the pure twin a
+/// host with no `AppState` of its own can call directly.
 fn apply_completion(state: &mut AppState, completion: &str) {
     let prefix = state.config.command_prefix;
-    // Slash-command suggestions hold the bare name (no prefix). When completing the first token of
-    // a slash command, rebuild the line as prefix + name so the leading prefix survives.
-    let is_slash_name = state.input.value.starts_with(prefix)
-        && !state.input.value[prefix.len_utf8()..].contains(' ');
-    if is_slash_name {
-        state.input.clear();
-        state.input.insert(prefix);
-    } else {
-        let keep = state.input.char_len() - state.current_partial().chars().count();
-        state.input.truncate_chars(keep);
-        state.input.end();
-    }
-    state.input.insert_str(completion);
+    let new_line = crate::complete::apply_completion_to_line(&state.input.value, prefix, completion);
+    state.input.set(new_line, true);
 }
 
 /// Recompute `state.suggestions` from `state.dict_words`, the story's own words
@@ -3944,51 +3867,20 @@ fn apply_completion(state: &mut AppState, completion: &str) {
 /// When the input starts with `state.config.command_prefix`, completes the
 /// first token after the prefix from `slash::slash_names()` instead of the
 /// dictionary.
+///
+/// A thin wrapper over [`crate::complete::completion_candidates`] (SQ-1549), the pure twin a
+/// host with no `AppState` of its own can call directly.
 pub(crate) fn recompute_suggestions(state: &mut AppState) {
-    const SUGGESTION_LIMIT: usize = 6;
-    let prefix = state.config.command_prefix;
-    // Check if the whole input starts with the command prefix.
-    if state.input.value.starts_with(prefix) {
-        // Extract the body (everything after the prefix).
-        let body = &state.input.value[prefix.len_utf8()..];
-        // Complete only the first token (before any space).
-        let first_token = body.split_whitespace().next().unwrap_or("");
-        // Only offer completions while the user is still on the first token
-        // (no space yet in the body, or trailing chars still form the first word).
-        let body_has_space = body.contains(' ');
-        if body_has_space {
-            // Command name already chosen; no further name completions.
-            state.suggestions.clear();
-            return;
-        }
-        let names = crate::slash::slash_names();
-        state.suggestions = slash_suggestions(first_token, &names, SUGGESTION_LIMIT);
-        return;
-    }
-    let partial = state.current_partial().to_owned();
-    if partial.is_empty() {
-        state.suggestions.clear();
-        return;
-    }
-    // Three tiers, best first (SQ-1042): the words for the things that are
-    // ACTUALLY HERE, then the words the story has just printed, then the flat
-    // dictionary. `suggest` ranks its second argument above its first, so the
-    // scope pass runs against no dictionary at all and the prose pass fills
-    // whatever room is left — a player typing `lan` in Zork I's Living Room
-    // wants the lantern in front of them before the four hundred words the
-    // story also knows.
-    let mut hits = suggest(&[], &state.scope_words, &partial, SUGGESTION_LIMIT);
-    if hits.len() < SUGGESTION_LIMIT {
-        for w in suggest(&state.dict_words, &state.seen_words, &partial, SUGGESTION_LIMIT) {
-            if !hits.iter().any(|h| h.eq_ignore_ascii_case(&w)) {
-                hits.push(w);
-            }
-            if hits.len() == SUGGESTION_LIMIT {
-                break;
-            }
-        }
-    }
-    state.suggestions = hits;
+    let slash_names = crate::slash::slash_names();
+    state.suggestions = crate::complete::completion_candidates(
+        &state.input.value,
+        state.input.char_len(),
+        state.config.command_prefix,
+        &slash_names,
+        &state.dict_words,
+        &state.seen_words,
+        &state.scope_words,
+    );
 }
 
 // ── Bracketed paste (SQ-0653) ─────────────────────────────────────────────────
@@ -4112,8 +4004,9 @@ pub fn apply_paste(state: &mut AppState, text: &str) -> bool {
 
 /// Apply a submitted text-entry dialog. Byte-identical to the retired
 /// `apply_prompt`, per kind (SQ-0307):
-///   - map-edit kinds mutate the mapper and bump `graph_gen` so the edit shows
-///     this frame instead of waiting for the next turn (the Wave-1 choke);
+///   - map-edit kinds mutate the mapper, which bumps `Mapper::struct_gen` itself
+///     for a real change (SQ-1544) so the edit shows this frame instead of
+///     waiting for the next turn (the Wave-1 choke);
 ///   - `ConfigEditPath` writes the config-screen working copy;
 ///   - `CreateFile` flag-hops the chosen filename (empty → cancel) to the run
 ///     loop's `resolve_filename_request`.
@@ -4128,22 +4021,18 @@ pub fn apply_text_entry(dlg: TextEntryDialog, state: &mut AppState, mapper: &mut
         TextEntryKind::RenameRoom(id) => {
             let label = if value.is_empty() { None } else { Some(value) };
             mapper.rename_room(id, label);
-            state.bump_graph_gen(); // a graph-mutating edit was applied (SQ-0305)
         }
         TextEntryKind::EditNotes(id) => {
             mapper.set_notes(id, value);
-            state.bump_graph_gen();
         }
         TextEntryKind::RelabelEdge(id, old_dir) => {
             // Parse the user's input as a direction name.
             if let Some(new_dir) = mapper::direction::parse_direction(&value) {
                 mapper.relabel_edge(id, old_dir, new_dir);
             }
-            state.bump_graph_gen();
         }
         TextEntryKind::RenameLayer(id) => {
             mapper.graph.set_layer_name(id, value);
-            state.bump_graph_gen();
         }
         TextEntryKind::ConfigEditPath { field } => {
             if let Some(cs) = &mut state.overlays.config_screen {
@@ -4290,7 +4179,12 @@ fn parse_move_region_arg(
 
 /// Why the rooms to move could not be settled — a refusal that belongs to the SEAM, not to the
 /// destination (SQ-0439).
-enum SeamRefusal {
+///
+/// `pub` since SQ-1551: a host embedding `AppState` without the terminal UI offers its own
+/// "Move to another layer…" action and needs [`choose_region`]'s own refusals to explain why a
+/// move can't happen, rather than reinventing them.
+#[derive(Debug)]
+pub enum SeamRefusal {
     /// The seam was named and the region walk turned it down; the pair is the passage tried.
     Region(mapper::layer::RegionRefusal, Option<(mapper::graph::RoomId, Direction)>),
     /// Several passages lead into the room and each cuts a different map. Nothing to auto-pick
@@ -4320,7 +4214,11 @@ enum SeamRefusal {
 /// direction first — so the command a tier-3 refusal suggests means what the list said it meant —
 /// falling back to the passage of that direction OUT of the room, which is the only way to name a
 /// one-way exit.
-fn choose_region(
+///
+/// `pub` since SQ-1551: a host without the TUI's "move-region" command still needs "which rooms
+/// would a move take from here" for its own layer-editing UI, and reimplementing this ordering
+/// against `mapper`'s public API can silently drift from what the TUI actually does.
+pub fn choose_region(
     graph: &mapper::graph::MapGraph,
     room: mapper::graph::RoomId,
     dir: Option<Direction>,
@@ -4357,7 +4255,10 @@ fn choose_region(
 /// Mirrors [`mapper::layer::move_region`]'s own refusals rather than inventing a second rule: a new
 /// layer is only a rename when the region is its whole layer, and Main may be moved out of but
 /// never emptied.
-fn move_targets(
+///
+/// `pub` since SQ-1551: a host's "Move to another layer…" action needs the same destination list
+/// the TUI offers, from `mapper`'s public API alone.
+pub fn move_targets(
     graph: &mapper::graph::MapGraph,
     region: &mapper::layer::Region,
 ) -> Vec<mapper::layer::MoveTarget> {
@@ -4466,7 +4367,7 @@ fn perform_move(
     let moved = region.rooms.len();
     match mapper::layer::move_region(&mut mapper.graph, region, target) {
         Ok(landed) => {
-            state.bump_graph_gen(); // rooms changed layer → invalidate the render memo (SQ-0305)
+            // `move_region` bumps `Mapper::struct_gen` itself (SQ-1544).
             // A seam the player did not name was chosen FOR them, so say which passage was cut —
             // otherwise a bare move silently picks a boundary and the map simply changes shape.
             if let Some((from, d)) = cut {
@@ -4606,10 +4507,17 @@ pub fn open_layer_suggestion(
         // The seam is the way IN, and the region is the maze side of it.
         Trigger::Name => (
             "This looks like a maze.".to_string(),
-            vec![
-                format!("{} calls itself a maze.", room_label(graph, suggestion.region.anchor)),
-                "Separating it also flags the layer as a maze.".to_string(),
-            ],
+            {
+                let mut body =
+                    vec![format!("{} calls itself a maze.", room_label(graph, suggestion.region.anchor))];
+                // Read from `suggestion_sets_maze_flag` rather than stated as a bare fact: that is
+                // also what `accept_layer_suggestion` consults to decide whether to actually set
+                // the flag (SQ-1551), so this sentence cannot promise something accepting won't do.
+                if suggestion_sets_maze_flag(suggestion.trigger) {
+                    body.push("Separating it also flags the layer as a maze.".to_string());
+                }
+                body
+            },
         ),
     };
     let options = dest_options(graph, &suggestion.destinations);
@@ -4708,7 +4616,7 @@ fn open_dest_prompt(
 /// seam across two layers, which silences it by construction.
 pub fn apply_region_prompt(state: &mut AppState, mapper: &mut Mapper, act: crate::state::RegionPromptAct) {
     use crate::state::{RegionOption, RegionPromptAct as A, RegionPromptKind as K};
-    use mapper::suggest::{SeamDecision, Trigger};
+    use mapper::suggest::SeamDecision;
     let Some(prompt) = state.overlays.region_prompt.take() else { return };
     let chosen = prompt.chosen().cloned();
     match (&prompt.kind, act) {
@@ -4726,13 +4634,11 @@ pub fn apply_region_prompt(state: &mut AppState, mapper: &mut Mapper, act: crate
         (_, A::Defer | A::Never | A::NeverForStory) => {}
         (K::Suggest { trigger, region, .. }, A::Accept) => {
             let Some(RegionOption::Dest { target, .. }) = chosen else { return };
-            if let Some(landed) = perform_move(state, mapper, region, None, target) {
-                // The player confirmed it is a maze by accepting a prompt that said so. A
-                // structural suggestion sets nothing — a cellar is not a maze.
-                if *trigger == Trigger::Name {
-                    mapper.graph.set_layer_maze(landed, true);
-                }
-            }
+            // The player confirmed it is a maze by accepting a prompt that said so. A structural
+            // suggestion sets nothing — a cellar is not a maze. `suggestion_sets_maze_flag` is the
+            // one place that rule lives, so the prompt's own "flags it as a maze" line (built in
+            // `open_layer_suggestion`) cannot say something this accept doesn't actually do.
+            accept_layer_suggestion(state, mapper, region, target, suggestion_sets_maze_flag(*trigger));
         }
         (K::PickSeam { room, dest }, A::Accept) => {
             let Some(RegionOption::Seam { from, dir, .. }) = chosen else { return };
@@ -4754,6 +4660,40 @@ pub fn apply_region_prompt(state: &mut AppState, mapper: &mut Mapper, act: crate
             perform_move(state, mapper, region, *cut, target);
         }
     }
+}
+
+/// Whether accepting a layer suggestion with this trigger sets the maze flag on the layer the
+/// rooms land on (SQ-1551) — the player confirmed it is a maze by accepting a prompt that said so,
+/// and a structural suggestion (no such claim) sets nothing.
+///
+/// This is the one place that rule lives: [`accept_layer_suggestion`]'s own maze-flag step reads
+/// it, and so does [`open_layer_suggestion`]'s "Separating it also flags the layer as a maze"
+/// line, so the sentence a host or the TUI shows before accepting can never promise something the
+/// accept itself doesn't do.
+pub fn suggestion_sets_maze_flag(trigger: mapper::suggest::Trigger) -> bool {
+    trigger == mapper::suggest::Trigger::Name
+}
+
+/// Accept a layer suggestion: move the region, and — only when `set_maze_flag` says so — flag the
+/// layer it landed on as a maze (SQ-1551).
+///
+/// Split out of what was a single bundled step in [`apply_region_prompt`] so a host that does not
+/// use maze flags (and shows a suggested layer in its own matrix view instead of a maze view) can
+/// accept the very same suggestion without the flag, rather than reimplementing the move to skip
+/// one side effect. The TUI's own accept path is unchanged: it always calls this with
+/// `set_maze_flag = suggestion_sets_maze_flag(trigger)`.
+pub fn accept_layer_suggestion(
+    state: &mut AppState,
+    mapper: &mut Mapper,
+    region: &mapper::layer::Region,
+    target: mapper::layer::MoveTarget,
+    set_maze_flag: bool,
+) -> Option<mapper::layer::LayerId> {
+    let landed = perform_move(state, mapper, region, None, target)?;
+    if set_maze_flag {
+        mapper.graph.set_layer_maze(landed, true);
+    }
+    Some(landed)
 }
 
 /// Say which of the several quite different reasons the REGION could not be computed (SQ-0360).
@@ -4944,6 +4884,15 @@ fn nearest_room(
 
 /// Number of rows in the config screen — derived from the row list so it cannot drift.
 pub(crate) const CONFIG_ROW_COUNT: usize = crate::render::config_screen::CONFIG_ROWS.len();
+
+/// Save the open settings screen's working copy into the running session's
+/// state (`Action::ConfigSave`): close the screen and hand the working copy to
+/// [`crate::host::settings::apply`]. `None` when no settings screen was open.
+/// The caller runs [`crate::host::settings::commit`] with the result.
+pub fn config_save(state: &mut AppState) -> Option<crate::host::settings::Applied> {
+    let cs = state.overlays.config_screen.take()?;
+    Some(crate::host::settings::apply(state, cs.working, None))
+}
 
 /// Clone a Config (Config derives Clone, this is a convenience wrapper for tests).
 pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config {
@@ -5579,14 +5528,16 @@ mod tests {
         }
     }
 
-    // ── Map-memo invalidation: production paths bump graph_gen (SQ-0305) ──────────
-    // The map render model is memoized on (graph_gen, viewed_layer). Any graph edit
-    // that reaches the live path with an unchanged graph_gen paints a STALE MAP, so
-    // each edit path must bump. These drive the real apply_action code, not a manual
-    // bump, so a regression that drops a bump fails here.
+    // ── Map-memo invalidation: production paths bump Mapper::struct_gen (SQ-1544) ─
+    // The map render model is memoized on (struct_gen, viewed_layer) — see
+    // `AppState::cached_map_render`, which reads `MapGraph::struct_gen` straight off
+    // the live graph. Any graph edit that reaches the live path with an unchanged
+    // struct_gen paints a STALE MAP, so each edit path must actually mutate the
+    // graph. These drive the real apply_action/apply_text_entry code, not a manual
+    // bump, so a regression that drops the underlying mutation fails here.
 
     #[test]
-    fn rename_room_prompt_submit_bumps_graph_gen() {
+    fn rename_room_prompt_submit_bumps_struct_gen() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
         m.observe(1, "Old Name", None);
@@ -5595,15 +5546,15 @@ mod tests {
             crate::state::TextEntryKind::RenameRoom(1),
             "New Name",
         );
-        let before = s.graph_gen;
+        let before = m.struct_gen();
         apply_text_entry(dlg, &mut s, &mut m);
         assert_eq!(m.graph.room(1).unwrap().label_override.as_deref(), Some("New Name"),
             "rename actually applied");
-        assert_ne!(s.graph_gen, before, "renaming a room must invalidate the map memo");
+        assert_ne!(m.struct_gen(), before, "renaming a room must invalidate the map memo");
     }
 
     #[test]
-    fn delete_connection_bumps_graph_gen() {
+    fn delete_connection_bumps_struct_gen() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
         m.observe(1, "A", None);
@@ -5611,10 +5562,10 @@ mod tests {
         assert!(m.graph.connections().iter().any(|c| c.origin == 1),
             "fixture must have an outgoing edge from room 1");
         s.select_room(Some(1));
-        let before = s.graph_gen;
+        let before = m.struct_gen();
         apply_action(Action::DeleteSelectedConnection, &mut s, &mut m);
         assert!(!m.graph.connections().iter().any(|c| c.origin == 1), "edge actually deleted");
-        assert_ne!(s.graph_gen, before, "deleting a connection must invalidate the map memo");
+        assert_ne!(m.struct_gen(), before, "deleting a connection must invalidate the map memo");
     }
 
     #[test]
@@ -5918,6 +5869,7 @@ mod tests {
         // Regression: launching with enable_sound = false never constructs an
         // AudioBackend (see main.rs), so flipping the config flag alone leaves
         // state.audio == None forever. ToggleSound must build the backend too.
+        #[cfg(feature = "playback")]
         audio::disable_output_for_tests(); // ToggleSound builds a real backend; keep it silent
         let mut s = AppState::default();
         s.config.enable_sound = false;
@@ -6049,6 +6001,7 @@ mod tests {
     /// read that as "still the flag's" and refuse to save the user's actual choice.
     #[test]
     fn editing_a_settings_row_promotes_a_one_run_value_to_a_persisted_one() {
+        #[cfg(feature = "playback")]
         audio::disable_output_for_tests();
         let dir = std::env::temp_dir().join(format!("bm-row-promote-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
